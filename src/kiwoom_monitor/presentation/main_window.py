@@ -936,7 +936,6 @@ class MainWindow(QMainWindow):
         self._nxt_eligibility_worker: NxtEligibilityWorker | None = None
         self._new_high_worker: NewHighWorker | None = None
         self._ranking_worker: RankingWorker | None = None
-        self._ranking_priority_pending = False
         self._partial_ranking_retry_count = 0
         self._resizing_columns = False
         self._restoring_columns = False
@@ -1395,10 +1394,6 @@ class MainWindow(QMainWindow):
             return
         if self._ranking_worker is not None and self._ranking_worker.isRunning():
             return
-        # 순위는 화면과 실시간 구독의 출발점이다. 분봉/기본정보 등의 긴 후순위
-        # 조회가 같은 REST 연결을 점유하고 있으면 다음 순위 조회가 수십 초 밀린다.
-        self._ranking_priority_pending = True
-        self._yield_secondary_workers_for_ranking()
         self._refresh_button.setEnabled(False)
         self._set_api_status("API: 연결 중…", "#B36B00")
         self.statusBar().showMessage("순위와 신고가를 조회하는 중입니다…")
@@ -1411,7 +1406,6 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_ranking_failed(self, message: str) -> None:
-        self._ranking_priority_pending = False
         logger.warning("순위 조회에 실패했습니다: %s", message)
         self._set_api_status("API: 오류", "#C00000")
         self.statusBar().showMessage("조회에 실패했습니다. 네트워크와 API 설정을 확인하세요.")
@@ -1429,7 +1423,6 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(1_500, self._refresh_rankings)
             return
         self._partial_ranking_retry_count = 0
-        self._ranking_priority_pending = False
 
         self._table.setRowCount(len(stocks))
         self._set_api_status("API: 연결됨", "#008000")
@@ -1602,26 +1595,8 @@ class MainWindow(QMainWindow):
 
     def _start_secondary_loading(self, codes: tuple[str, ...]) -> None:
         """Start non-realtime API work in the defined priority order."""
-        if self._ranking_priority_pending:
-            return
         if not self._start_minute_history_loading(codes):
             self._start_daily_high_phase(codes)
-
-    def _yield_secondary_workers_for_ranking(self) -> None:
-        """Let the next ranking request use the shared REST client first.
-
-        A worker checks its interruption flag between symbols, so at most the
-        current request finishes before the ranking worker can proceed.
-        """
-        for worker in (
-            self._minute_history_worker,
-            self._daily_high_worker,
-            self._fundamentals_worker,
-            self._nxt_eligibility_worker,
-            self._new_high_worker,
-        ):
-            if worker is not None and worker.isRunning():
-                worker.requestInterruption()
 
     def _start_daily_high_phase(self, codes: tuple[str, ...]) -> None:
         if not self._start_daily_high_loading(codes):
