@@ -43,7 +43,8 @@ def main() -> None:
     daily_high_worker_factory = None
     nxt_eligibility_worker_factory = None
     try:
-        local_api = paths.data_dir / "api.env"
+        app_root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
+        local_api = app_root / "data" / "api.env"
         settings = LocalApiConfig(local_api).load()
         if not settings.app_key or not settings.secret_key:
             raise ValueError("API 키가 아직 설정되지 않았습니다.")
@@ -84,7 +85,6 @@ def main() -> None:
         columns=ColumnSettingsRepository(paths.database_path),
         stock_lookup=StockRepository(paths.database_path),
         theme_store=DatabaseThemeRepository(paths.database_path),
-        data_dir=paths.data_dir,
     )
     window.show()
     sys.exit(app.exec())

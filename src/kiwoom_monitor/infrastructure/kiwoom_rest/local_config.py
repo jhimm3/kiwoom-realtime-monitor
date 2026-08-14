@@ -3,33 +3,23 @@ from __future__ import annotations
 import base64
 import ctypes
 import json
-import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
+from ctypes import wintypes
 
 from .settings import KiwoomSettings
 
 
-_KEYCHAIN_MARKER = "KIWOOM_CONFIG_KEYCHAIN=1"
-_KEYCHAIN_SERVICE = "kiwoom-realtime-monitor"
-_KEYCHAIN_ACCOUNT = "api-profiles"
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+_kernel32.LocalFree.restype = ctypes.c_void_p
 
 
-if sys.platform == "win32":
-    from ctypes import wintypes
-
-    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-    _kernel32.LocalFree.restype = ctypes.c_void_p
-
-    class _DataBlob(ctypes.Structure):
-        _fields_ = (("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte)))
+class _DataBlob(ctypes.Structure):
+    _fields_ = (("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte)))
 
 
 def _protect(data: bytes) -> bytes:
-    if sys.platform != "win32":
-        raise RuntimeError("Windows 전용 암호화 함수입니다.")
     buffer = ctypes.create_string_buffer(data)
     source = _DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
     result = _DataBlob()
@@ -42,8 +32,6 @@ def _protect(data: bytes) -> bytes:
 
 
 def _unprotect(data: bytes) -> bytes:
-    if sys.platform != "win32":
-        raise RuntimeError("Windows 전용 암호화 함수입니다.")
     buffer = ctypes.create_string_buffer(data)
     source = _DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
     result = _DataBlob()
@@ -72,11 +60,7 @@ class LocalApiConfig:
         if not self._path.exists():
             return ApiProfiles()
         raw = self._path.read_text(encoding="utf-8").strip()
-        if raw == _KEYCHAIN_MARKER:
-            return self._load_from_keychain()
         if raw.startswith("KIWOOM_CONFIG_ENCRYPTED="):
-            if sys.platform != "win32":
-                raise ValueError("Windows에서 만든 API 설정입니다. macOS에서 API 키를 다시 입력해 주세요.")
             values = json.loads(_unprotect(base64.b64decode(raw.split("=", 1)[1])).decode("utf-8"))
             if "mock_app_key" in values:
                 return ApiProfiles(**values)
@@ -106,38 +90,5 @@ class LocalApiConfig:
     def save_profiles(self, profiles: ApiProfiles) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(profiles.__dict__, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if sys.platform == "darwin":
-            self._save_to_keychain(payload.decode("utf-8"))
-            self._path.write_text(f"{_KEYCHAIN_MARKER}\n", encoding="utf-8")
-            return
         encrypted = base64.b64encode(_protect(payload)).decode("ascii")
         self._path.write_text(f"KIWOOM_CONFIG_ENCRYPTED={encrypted}\n", encoding="utf-8")
-
-    @staticmethod
-    def _save_to_keychain(payload: str) -> None:
-        result = subprocess.run(
-            ["security", "add-generic-password", "-U", "-a", _KEYCHAIN_ACCOUNT, "-s", _KEYCHAIN_SERVICE, "-w", payload],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise ValueError("macOS 키체인에 API 설정을 저장하지 못했습니다.")
-
-    @staticmethod
-    def _load_from_keychain() -> ApiProfiles:
-        if sys.platform != "darwin":
-            raise ValueError("macOS 키체인 설정은 macOS에서만 열 수 있습니다.")
-        result = subprocess.run(
-            ["security", "find-generic-password", "-a", _KEYCHAIN_ACCOUNT, "-s", _KEYCHAIN_SERVICE, "-w"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise ValueError("macOS 키체인에서 API 설정을 찾지 못했습니다. API 키를 다시 입력해 주세요.")
-        try:
-            values = json.loads(result.stdout)
-            return ApiProfiles(**values)
-        except (json.JSONDecodeError, TypeError) as error:
-            raise ValueError("macOS 키체인 API 설정 형식이 올바르지 않습니다.") from error
