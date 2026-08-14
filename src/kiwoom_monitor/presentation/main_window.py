@@ -43,6 +43,8 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker import RealtimeTr
 from kiwoom_monitor.infrastructure.kiwoom_rest.minute_history_worker import MinuteHistoryWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.fundamentals_worker import FundamentalsWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.new_high_worker import NewHighWorker
+from kiwoom_monitor.infrastructure.kiwoom_rest.daily_high_worker import DailyHighWorker
+from kiwoom_monitor.application.daily_high_service import DailyHighTargets
 from kiwoom_monitor.application.trade_strength import StockFundamentals, trade_strength_percent
 from kiwoom_monitor.infrastructure.excel.theme_repository import ThemeRepository
 from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSetting, ColumnSettingsRepository
@@ -82,10 +84,16 @@ class SettingsDialog(QDialog):
         self._near_high=QLineEdit(settings.get("near_high_threshold_percent"))
         self._theme_separators=QLineEdit(settings.get("theme_custom_separators"))
         self._theme_separators.setPlaceholderText("기본 , / | ; 외에 추가할 문자")
+        self._font_size=QLineEdit(settings.get("ui_font_size")); self._font_size.setPlaceholderText("0: 자동")
+        self._row_height=QLineEdit(settings.get("ui_row_height")); self._row_height.setPlaceholderText("0: 자동")
+        self._badge_font_size=QLineEdit(settings.get("theme_badge_font_size")); self._badge_font_size.setPlaceholderText("0: 자동")
+        self._badge_padding=QLineEdit(settings.get("theme_badge_padding"))
         self._near_high_enabled=QCheckBox("신고가 근접 강조 사용")
         self._near_high_enabled.setChecked(settings.get("near_high_alert_enabled") == "1")
         self._strength_icons=QCheckBox("거래강도 단계 아이콘 표시")
         self._strength_icons.setChecked(settings.get("strength_show_icon") == "1")
+        self._high_distance_period=QComboBox(); self._high_distance_period.addItem("5일 신고가", "5"); self._high_distance_period.addItem("20일 신고가", "20"); self._high_distance_period.addItem("250일 신고가(52주 근사)", "250")
+        saved_period=settings.get("high_distance_period"); self._high_distance_period.setCurrentIndex(("5", "20", "250").index(saved_period) if saved_period in ("5", "20", "250") else 2)
 
         layout = QFormLayout(self)
         layout.addRow("화면 갱신 주기(초)", self._refresh_interval)
@@ -93,8 +101,13 @@ class SettingsDialog(QDialog):
         layout.addRow("관심 기준(%)", self._interest); layout.addRow("주의 기준(%)", self._caution); layout.addRow("불 기준(%)", self._fire)
         layout.addRow("신고가 근접 기준(%)", self._near_high)
         layout.addRow("추가 테마 구분자", self._theme_separators)
+        layout.addRow("표 글자 크기(0: 자동)", self._font_size)
+        layout.addRow("표 행 높이(0: 자동)", self._row_height)
+        layout.addRow("테마 배지 글자 크기(0: 자동)", self._badge_font_size)
+        layout.addRow("테마 배지 여백", self._badge_padding)
         layout.addRow(self._near_high_enabled)
         layout.addRow(self._strength_icons)
+        layout.addRow("신고가 거리 기준", self._high_distance_period)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
@@ -117,13 +130,23 @@ class SettingsDialog(QDialog):
         if interest < 0 or caution < interest or fire < caution or near_high < 0:
             QMessageBox.warning(self, "입력 확인", "강도 기준은 관심 ≤ 주의 ≤ 불 순서의 0 이상 숫자로 입력하세요.")
             return
+        try:
+            font_size, row_height, badge_font_size, badge_padding = (int(field.text()) for field in (self._font_size, self._row_height, self._badge_font_size, self._badge_padding))
+        except ValueError:
+            QMessageBox.warning(self, "입력 확인", "화면 크기 설정은 0 이상의 정수로 입력하세요.")
+            return
+        if not (0 <= font_size <= 30 and 0 <= row_height <= 100 and 0 <= badge_font_size <= 30 and 0 <= badge_padding <= 20):
+            QMessageBox.warning(self, "입력 확인", "화면 크기 설정 범위를 확인하세요.")
+            return
         self._settings.set("refresh_interval_seconds", str(interval))
         self._settings.set("ui_mode", str(self._ui_mode.currentData()))
         self._settings.set("strength_interest", str(interest)); self._settings.set("strength_caution", str(caution)); self._settings.set("strength_fire", str(fire))
         self._settings.set("near_high_threshold_percent", str(near_high))
         self._settings.set("theme_custom_separators", self._theme_separators.text().strip())
+        self._settings.set("ui_font_size", str(font_size)); self._settings.set("ui_row_height", str(row_height)); self._settings.set("theme_badge_font_size", str(badge_font_size)); self._settings.set("theme_badge_padding", str(badge_padding))
         self._settings.set("near_high_alert_enabled", "1" if self._near_high_enabled.isChecked() else "0")
         self._settings.set("strength_show_icon", "1" if self._strength_icons.isChecked() else "0")
+        self._settings.set("high_distance_period", str(self._high_distance_period.currentData()))
         self.accept()
 
 
@@ -281,6 +304,7 @@ class MainWindow(QMainWindow):
         columns: ColumnSettingsRepository | None = None,
         stock_lookup: object | None = None,
         theme_store: object | None = None,
+        daily_high_worker_factory: Callable[[tuple[str, ...]], DailyHighWorker] | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -288,7 +312,9 @@ class MainWindow(QMainWindow):
         self._realtime_worker_factory = realtime_worker_factory
         self._minute_history_worker_factory = minute_history_worker_factory
         self._fundamentals_worker_factory = fundamentals_worker_factory
+        self._daily_high_worker_factory = daily_high_worker_factory
         self._fundamentals: dict[str, StockFundamentals] = {}
+        self._daily_highs: dict[str, DailyHighTargets] = {}
         self._themes = themes or {}
         self._columns = columns
         self._stock_lookup = stock_lookup
@@ -297,6 +323,7 @@ class MainWindow(QMainWindow):
         self._realtime_codes: tuple[str, ...] = ()
         self._minute_history_worker: MinuteHistoryWorker | None = None
         self._fundamentals_worker: FundamentalsWorker | None = None
+        self._daily_high_worker: DailyHighWorker | None = None
         self._new_high_worker: NewHighWorker | None = None
         self._initial_new_high_refresh_started = False
         self._row_by_code: dict[str, int] = {}
@@ -361,6 +388,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(content)
         layout.addWidget(self._table)
         self.setCentralWidget(content)
+        self._apply_table_visuals()
         message = "새로고침으로 키움 REST 조회를 시작합니다." if ranking_loader else "상단 API 설정에서 키를 입력해 연결할 수 있습니다."
         self.statusBar().showMessage(message)
         if ranking_loader is not None:
@@ -375,6 +403,9 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             interval = self._settings.get("refresh_interval_seconds")
             self._ranking_timer.start(int(interval) * 1000)
+            self._apply_table_visuals()
+            for code in self._row_by_code:
+                self._render_high_distance(code)
             self.statusBar().showMessage(f"기본 설정 저장 완료 · 갱신 주기 {interval}초")
 
     def _open_theme_manager(self) -> None:
@@ -608,6 +639,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"조회 완료 · {len(stocks)}개 종목 · 실시간 체결 데이터 연결 중")
         self._start_realtime_subscription(tuple(stock.code for stock in stocks))
         self._start_fundamentals_loading(tuple(stock.code for stock in stocks))
+        self._start_daily_high_loading(tuple(stock.code for stock in stocks))
         self._start_minute_history_loading(tuple(stock.code for stock in stocks))
         if not self._initial_new_high_refresh_started:
             self._initial_new_high_refresh_started = True
@@ -620,7 +652,9 @@ class MainWindow(QMainWindow):
         for theme in self._themes.get("".join(name.split()), "").split(","):
             if theme.strip():
                 color = self._theme_store.color_for_stock_theme(code, theme.strip()) if self._theme_store else "#DCE6F1"
-                badge = QPushButton(theme.strip()); badge.setStyleSheet(f"background:{color}; color:{text_color(color)}; border-radius:5px; padding:2px 5px;")
+                badge_size = int(self._settings.get("theme_badge_font_size")); padding = int(self._settings.get("theme_badge_padding"))
+                font_style = f"font-size:{badge_size}px;" if badge_size else ""
+                badge = QPushButton(theme.strip()); badge.setStyleSheet(f"background:{color}; color:{text_color(color)}; border-radius:5px; padding:{padding}px {padding + 3}px; {font_style}")
                 badge.clicked.connect(lambda _, value=theme.strip(), stock_code=code: self._edit_badge_color(stock_code, value))
                 layout.addWidget(badge)
         layout.addStretch(); return widget
@@ -730,10 +764,31 @@ class MainWindow(QMainWindow):
         row = self._row_by_code.get(code)
         fundamentals = self._fundamentals.get(code)
         current_price = self._current_prices.get(code)
-        if row is None or fundamentals is None or current_price is None or not fundamentals.high_250_price:
+        if row is None or fundamentals is None or current_price is None:
             return
-        distance = max(0.0, (fundamentals.high_250_price - current_price) / fundamentals.high_250_price * 100)
+        period = self._settings.get("high_distance_period")
+        daily = self._daily_highs.get(code)
+        target = daily.high_5_price if daily and period == "5" else daily.high_20_price if daily and period == "20" else fundamentals.high_250_price
+        if not target:
+            return
+        distance = max(0.0, (target - current_price) / target * 100)
         self._table.setItem(row, 14, QTableWidgetItem(f"{distance:.2f}%"))
+
+    def _start_daily_high_loading(self, codes: tuple[str, ...]) -> None:
+        if self._daily_high_worker_factory is None or (self._daily_high_worker is not None and self._daily_high_worker.isRunning()):
+            return
+        missing = tuple(code for code in codes if code not in self._daily_highs)
+        if not missing:
+            return
+        worker = self._daily_high_worker_factory(missing)
+        worker.received.connect(self._on_daily_high_received)
+        self._daily_high_worker = worker
+        worker.start()
+
+    def _on_daily_high_received(self, code: str, targets: object) -> None:
+        if isinstance(targets, DailyHighTargets):
+            self._daily_highs[code] = targets
+            self._render_high_distance(code)
 
     def _render_trade_values(self, code: str) -> None:
         row = self._row_by_code.get(code)
@@ -779,14 +834,26 @@ class MainWindow(QMainWindow):
             self._minute_history_worker.stop()
         if self._fundamentals_worker is not None:
             self._fundamentals_worker.stop()
+        if self._daily_high_worker is not None:
+            self._daily_high_worker.stop()
         if self._new_high_worker is not None:
             self._new_high_worker.stop()
         event.accept()
 
+    def _apply_table_visuals(self) -> None:
+        if not hasattr(self, "_table"):
+            return
+        font_size = int(self._settings.get("ui_font_size"))
+        row_height = int(self._settings.get("ui_row_height"))
+        if font_size:
+            font = self._table.font(); font.setPointSize(font_size); self._table.setFont(font)
+        elif self._settings.get("ui_mode") == "responsive":
+            font = self._table.font(); font.setPointSize(max(9, min(13, self.width() // 130))); self._table.setFont(font)
+        if row_height:
+            self._table.verticalHeader().setDefaultSectionSize(row_height)
+        elif self._settings.get("ui_mode") == "responsive":
+            self._table.verticalHeader().setDefaultSectionSize(self._table.font().pointSize() * 2 + 10)
+
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        if self._settings.get("ui_mode") != "responsive":
-            return
-        size = max(9, min(13, self.width() // 130))
-        font = self._table.font(); font.setPointSize(size); self._table.setFont(font)
-        self._table.verticalHeader().setDefaultSectionSize(size * 2 + 10)
+        self._apply_table_visuals()

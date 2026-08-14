@@ -11,6 +11,7 @@ DEFAULT_SETTINGS = {
     "ui_mode": "responsive",
     "strength_interest": "0.5", "strength_caution": "1.0", "strength_fire": "2.0", "strength_show_icon": "1",
     "near_high_threshold_percent": "1.0", "near_high_alert_enabled": "1", "theme_custom_separators": "",
+    "ui_font_size": "0", "ui_row_height": "0", "theme_badge_font_size": "0", "theme_badge_padding": "2", "high_distance_period": "250",
 }
 
 DEFAULT_COLUMNS = (
