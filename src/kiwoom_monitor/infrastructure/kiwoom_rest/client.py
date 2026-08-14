@@ -6,6 +6,7 @@ import json
 import time
 from threading import RLock
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -42,6 +43,13 @@ class KiwoomRestClient:
         self._request_lock = RLock()
         self._token: str | None = None
         self._expires_at: datetime | None = None
+        self._server_time: datetime | None = None
+        self._server_time_at: float | None = None
+
+    def server_now(self) -> datetime:
+        if self._server_time is None or self._server_time_at is None:
+            return (datetime.now(UTC) + timedelta(hours=9)).replace(tzinfo=None)
+        return (self._server_time + timedelta(seconds=time.monotonic() - self._server_time_at)).replace(tzinfo=None)
 
     def request(self, api_id: str, path: str, body: JsonObject) -> JsonObject:
         with self._request_lock:
@@ -104,6 +112,8 @@ class KiwoomRestClient:
         for attempt in range(4):
             try:
                 with self._opener(request, timeout=15) as response:
+                    headers = getattr(response, "headers", {})
+                    self._update_server_time(headers.get("Date") if hasattr(headers, "get") else None)
                     payload = json.loads(response.read().decode("utf-8"))
                 break
             except HTTPError as error:
@@ -111,13 +121,25 @@ class KiwoomRestClient:
                     time.sleep(5 * (attempt + 1))
                     continue
                 raise KiwoomApiError(f"키움 API 서버 오류: HTTP {error.code}") from error
-            except URLError as error:
-                raise KiwoomApiError("키움 API 서버에 연결할 수 없습니다.") from error
-            except TimeoutError as error:
-                raise KiwoomApiError("키움 API 응답 시간이 초과되었습니다.") from error
+            except (URLError, TimeoutError, ConnectionError, OSError) as error:
+                # WinError 10054처럼 서버가 keep-alive 연결을 먼저 끊는
+                # 경우는 일시적인 통신 오류다. 새 연결로 짧게 재시도한다.
+                if attempt < 3:
+                    time.sleep(attempt + 1)
+                    continue
+                raise KiwoomApiError("키움 API 서버 연결이 반복해서 끊겼습니다. 잠시 후 다시 시도하세요.") from error
         if not isinstance(payload, dict):
             raise KiwoomApiError("키움 API 응답 형식이 올바르지 않습니다.")
         return payload
+
+    def _update_server_time(self, value: object) -> None:
+        if not isinstance(value, str) or not value:
+            return
+        try:
+            self._server_time = parsedate_to_datetime(value).astimezone(UTC) + timedelta(hours=9)
+            self._server_time_at = time.monotonic()
+        except (TypeError, ValueError, IndexError):
+            return
 
     def _wait_for_request_slot(self) -> None:
         """짧은 간격을 두어 서버의 순간 호출 제한을 피한다."""

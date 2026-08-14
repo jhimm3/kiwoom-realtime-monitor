@@ -10,6 +10,11 @@ from ctypes import wintypes
 from .settings import KiwoomSettings
 
 
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+_kernel32.LocalFree.restype = ctypes.c_void_p
+
+
 class _DataBlob(ctypes.Structure):
     _fields_ = (("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte)))
 
@@ -23,7 +28,7 @@ def _protect(data: bytes) -> bytes:
     try:
         return ctypes.string_at(result.pbData, result.cbData)
     finally:
-        ctypes.windll.kernel32.LocalFree(result.pbData)
+        _kernel32.LocalFree(ctypes.cast(result.pbData, ctypes.c_void_p))
 
 
 def _unprotect(data: bytes) -> bytes:
@@ -35,7 +40,7 @@ def _unprotect(data: bytes) -> bytes:
     try:
         return ctypes.string_at(result.pbData, result.cbData)
     finally:
-        ctypes.windll.kernel32.LocalFree(result.pbData)
+        _kernel32.LocalFree(ctypes.cast(result.pbData, ctypes.c_void_p))
 
 
 @dataclass(frozen=True)

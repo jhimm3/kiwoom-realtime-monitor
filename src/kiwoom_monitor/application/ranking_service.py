@@ -19,18 +19,39 @@ class RankingService:
     """ka00198 Top 20에 ka10016 신고가 상태를 결합한다."""
 
     NEW_HIGH_PERIODS = (5, 20, 250)
+    EXPECTED_STOCKS = 20
     STOCK_INFO_PATH = "/api/dostk/stkinfo"
 
-    def __init__(self, client: RestClient, high_cache_seconds: float = 60.0, stocks: StockWriter | None = None) -> None:
+    def __init__(self, client: RestClient, high_cache_seconds: float = 60.0, stocks: StockWriter | None = None, query_type: str = "5") -> None:
         self._client = client
         self._high_cache_seconds = high_cache_seconds
         self._new_high_cache: dict[int, set[str]] = {}
         self._new_high_cached_at = 0.0
         self._stocks = stocks
+        self._query_type = query_type if query_type in {"1", "2", "3", "4", "5"} else "5"
+
+    def set_query_type(self, query_type: str) -> None:
+        if query_type not in {"1", "2", "3", "4", "5"}:
+            raise ValueError("순위 조회 기준이 올바르지 않습니다.")
+        self._query_type = query_type
+
+    def server_now(self) -> object | None:
+        provider = getattr(self._client, "server_now", None)
+        return provider() if callable(provider) else None
 
     def load_top_stocks(self) -> tuple[RankedStock, ...]:
         new_high_codes = self._new_high_cache or {period: set() for period in self.NEW_HIGH_PERIODS}
-        response = self._client.request("ka00198", self.STOCK_INFO_PATH, {"qry_tp": "1"})
+        response: dict[str, Any] = {}
+        # 간헐적으로 ka00198이 일부 순위만 반환한다. 정상 응답(20개)을
+        # 우선 사용하도록 짧게 재시도하고, 끝까지 부분 응답이면 UI가
+        # 기존 순위표를 유지하도록 그대로 반환한다.
+        for attempt in range(3):
+            response = self._client.request("ka00198", self.STOCK_INFO_PATH, {"qry_tp": self._query_type})
+            records = response.get("item_inq_rank", [])
+            if isinstance(records, list) and len(records) >= self.EXPECTED_STOCKS:
+                break
+            if attempt < 2:
+                time.sleep(0.4)
         records = response.get("item_inq_rank", [])
         if not isinstance(records, list):
             raise ValueError("ka00198의 item_inq_rank 형식이 올바르지 않습니다.")

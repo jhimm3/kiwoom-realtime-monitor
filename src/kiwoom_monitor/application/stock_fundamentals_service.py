@@ -19,10 +19,14 @@ class StockFundamentalsService:
     def load(self, code: str) -> StockFundamentals:
         row = self._client.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": code})
         try:
+            high_250 = next(
+                (value for key in ("250hgst", "250hgst_pric", "high_250_price") if (value := _positive_int(row.get(key))) is not None),
+                None,
+            )
             return StockFundamentals(
                 float(str(row["mac"]).replace(",", "")),
                 float(str(row["dstr_rt"]).replace(",", "")),
-                _positive_int(row.get("250hgst")),
+                high_250,
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"{code}의 시가총액 또는 유통비율 값이 올바르지 않습니다.") from error

@@ -13,6 +13,9 @@ class SettingsRepositoryTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             self.assertEqual(database.settings.get("refresh_interval_seconds"), "30")
+            self.assertEqual(database.settings.get("ui_mode"), "responsive")
+            self.assertEqual(database.settings.get("theme_custom_separators"), "")
+            self.assertEqual(database.settings.get("window_width"), "1160")
 
             database.settings.set("refresh_interval_seconds", "60")
             self.assertEqual(database.settings.get("refresh_interval_seconds"), "60")

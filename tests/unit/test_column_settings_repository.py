@@ -11,3 +11,6 @@ class ColumnSettingsRepositoryTests(unittest.TestCase):
             saved = list(repository.list()); saved[0] = ColumnSetting(saved[0].name, False, 2, 123); repository.save(tuple(saved))
             restored = next(item for item in repository.list() if item.name == saved[0].name)
             self.assertFalse(restored.visible); self.assertEqual(123, restored.width)
+            repository.reset()
+            restored = next(item for item in repository.list() if item.name == saved[0].name)
+            self.assertTrue(restored.visible); self.assertEqual(60, restored.width); self.assertEqual(0, restored.position)

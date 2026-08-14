@@ -9,7 +9,10 @@ class ThemeRepository:
         return {self._key(name): themes.strip() for name, themes in self.load_rows() if self._key(name) and themes.strip()}
 
     def load_rows(self) -> tuple[tuple[str, str], ...]:
-        if not self._path.exists(): return ()
+        return self.load_header_and_rows()[1]
+
+    def load_header_and_rows(self) -> tuple[tuple[str, str], tuple[tuple[str, str], ...]]:
+        if not self._path.exists(): return (("", ""), ())
         with zipfile.ZipFile(self._path) as book:
             shared = self._shared_strings(book)
             root = ElementTree.fromstring(book.read("xl/worksheets/sheet1.xml"))
@@ -20,11 +23,11 @@ class ThemeRepository:
             elif cell.attrib.get("t") == "inlineStr": value = "".join(cell.itertext())
             row = re.sub(r"\D", "", ref); col = re.sub(r"\d", "", ref)
             rows.setdefault(row, {})[col] = value
-        return tuple(
+        values = tuple(
             (row.get("A", ""), row.get("B", ""))
             for number, row in sorted(rows.items(), key=lambda item: int(item[0] or 0))
-            if number != "1"
         )
+        return (values[0] if values else ("", ""), values[1:])
     @staticmethod
     def _key(name: str) -> str: return re.sub(r"\s+", "", name).strip()
     @staticmethod

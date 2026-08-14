@@ -49,9 +49,9 @@ def _code(entry: dict[str, Any]) -> str:
     for field in ("item", "stk_cd", "code"):
         value = entry.get(field)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return value.strip().removesuffix("_NX").removesuffix("_AL")
         if isinstance(value, list) and value and isinstance(value[0], str):
-            return value[0].strip()
+            return value[0].strip().removesuffix("_NX").removesuffix("_AL")
     return ""
 
 

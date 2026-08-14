@@ -8,6 +8,10 @@ class SettingsRepository:
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
 
+    @property
+    def database_path(self) -> Path:
+        return self._database_path
+
     def get(self, key: str) -> str:
         connection = sqlite3.connect(self._database_path)
         try:

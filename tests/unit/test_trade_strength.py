@@ -19,3 +19,8 @@ class TradeStrengthTests(unittest.TestCase):
         self.assertEqual("0.50% 👀", strength_badge(0.5))
         self.assertEqual("1.00% ⚠️", strength_badge(1.0))
         self.assertEqual("2.00% 🔥", strength_badge(2.0))
+
+    def test_uses_configured_strength_icons(self) -> None:
+        self.assertEqual("0.50% A", strength_badge(0.5, icons=("A", "B", "C")))
+        self.assertEqual("1.00% B", strength_badge(1.0, icons=("A", "B", "C")))
+        self.assertEqual("2.00% C", strength_badge(2.0, icons=("A", "B", "C")))

@@ -28,5 +28,9 @@ class RealtimeParserTests(unittest.TestCase):
         self.assertEqual(72000, ticks[0].high_price)
         self.assertEqual(1.23, ticks[0].change_rate)
 
+    def test_normalizes_nxt_code_to_base_stock_code(self) -> None:
+        ticks = parse_trade_ticks({"trnm": "REAL", "data": [{"type": "0B", "item": "005930_NX", "values": {"10": "70000"}}]})
+        self.assertEqual("005930", ticks[0].code)
+
     def test_ignores_non_trade_messages(self) -> None:
         self.assertEqual((), parse_trade_ticks({"trnm": "PING"}))

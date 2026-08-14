@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from collections.abc import Callable
 
 from PySide6.QtCore import QThread, Signal
 
@@ -14,17 +15,18 @@ class MinuteHistoryWorker(QThread):
     status_changed = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, service: MinuteChartService, codes: tuple[str, ...]) -> None:
+    def __init__(self, service: MinuteChartService, codes: tuple[str, ...], now_provider: Callable[[], datetime] | None = None) -> None:
         super().__init__()
         self._service = service
         self._codes = codes
+        self._now_provider = now_provider or datetime.now
 
     def run(self) -> None:
         for index, code in enumerate(self._codes, start=1):
             if self.isInterruptionRequested():
                 return
             try:
-                bars = self._service.load_today(code, datetime.now())
+                bars = self._service.load_today(code, self._now_provider())
             except Exception as error:
                 self.failed.emit(f"{code} 분봉 보완 실패: {error}")
                 continue
@@ -32,6 +34,6 @@ class MinuteHistoryWorker(QThread):
             self.status_changed.emit(f"분봉 보완 중 · {index}/{len(self._codes)}종목")
         self.status_changed.emit("분봉 보완 완료")
 
-    def stop(self) -> None:
+    def stop(self, timeout_ms: int = 3000) -> bool:
         self.requestInterruption()
-        self.wait()
+        return self.wait(timeout_ms)

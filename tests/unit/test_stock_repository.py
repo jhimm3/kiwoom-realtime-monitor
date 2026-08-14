@@ -19,3 +19,15 @@ class StockRepositoryTests(unittest.TestCase):
             stocks.update_fundamentals("005930", 4_000_000, 75.0)
 
             self.assertEqual("005930", stocks.find_code_by_name("삼성 전자"))
+
+    def test_loads_saved_fundamentals_without_api_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            stocks = StockRepository(database_path)
+            stocks.upsert("005930", "삼성전자")
+            stocks.update_fundamentals("005930", 2_000_000, 55.5, 72_000)
+            saved = stocks.load_fundamentals(("005930",))
+            self.assertEqual(2_000_000, saved["005930"].market_cap_eok)
+            self.assertEqual(55.5, saved["005930"].float_ratio_percent)
+            self.assertEqual(72_000, saved["005930"].high_250_price)

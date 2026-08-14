@@ -26,3 +26,16 @@ class ColumnSettingsRepository:
             con.commit()
         finally:
             con.close()
+
+    def reset(self) -> None:
+        from kiwoom_monitor.infrastructure.persistence.database import DEFAULT_COLUMNS
+
+        con = sqlite3.connect(self._database_path)
+        try:
+            con.executemany(
+                "UPDATE column_settings SET visible=?, position=?, width=? WHERE column_name=?",
+                [(visible, position, width, name) for name, visible, position, width in DEFAULT_COLUMNS],
+            )
+            con.commit()
+        finally:
+            con.close()

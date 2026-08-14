@@ -1,5 +1,3 @@
-"""신고가 목록 조회가 화면을 멈추지 않도록 별도 작업에서 실행한다."""
-
 from __future__ import annotations
 
 from typing import Protocol
@@ -7,26 +5,26 @@ from typing import Protocol
 from PySide6.QtCore import QThread, Signal
 
 
-class NewHighLoader(Protocol):
-    def refresh_new_highs(self) -> None: ...
+class RankingLoader(Protocol):
+    def load_top_stocks(self) -> tuple[object, ...]: ...
 
 
-class NewHighWorker(QThread):
-    completed = Signal()
+class RankingWorker(QThread):
+    completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, loader: NewHighLoader) -> None:
+    def __init__(self, loader: RankingLoader) -> None:
         super().__init__()
         self._loader = loader
 
     def run(self) -> None:
         try:
-            self._loader.refresh_new_highs()
+            stocks = self._loader.load_top_stocks()
         except Exception as error:
             self.failed.emit(str(error))
             return
         if not self.isInterruptionRequested():
-            self.completed.emit()
+            self.completed.emit(stocks)
 
     def stop(self, timeout_ms: int = 3000) -> bool:
         self.requestInterruption()
