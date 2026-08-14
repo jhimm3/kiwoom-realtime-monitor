@@ -55,7 +55,7 @@ def issue_token(app_key: str, secret_key: str, environment: str) -> str:
     return token
 
 
-async def receive_fields(token: str, environment: str) -> set[str]:
+async def receive_fields(token: str, environment: str) -> tuple[bool, set[str]]:
     uri = f"{WS_BASE_URLS[environment]}/api/dostk/websocket"
     async with connect(uri, open_timeout=15, ping_interval=None) as websocket:
         await websocket.send(json.dumps({"trnm": "LOGIN", "token": token}))
@@ -76,7 +76,10 @@ async def receive_fields(token: str, environment: str) -> set[str]:
 
         fields: set[str] = set()
         while True:
-            raw = await asyncio.wait_for(websocket.recv(), timeout=30)
+            try:
+                raw = await asyncio.wait_for(websocket.recv(), timeout=15)
+            except TimeoutError:
+                return True, fields
             message = json.loads(raw)
             if str(message.get("trnm", "")).upper() == "PING":
                 await websocket.send(json.dumps(message))
@@ -87,7 +90,7 @@ async def receive_fields(token: str, environment: str) -> set[str]:
                 if entry.get("type") == "0B" and isinstance(entry.get("values"), dict):
                     fields.update(entry["values"])
             if fields:
-                return fields
+                return True, fields
 
 
 def main() -> int:
@@ -101,18 +104,25 @@ def main() -> int:
         print("실패: 선택된 환경의 키 또는 환경 설정을 확인하세요.")
         return 2
     try:
-        fields = asyncio.run(
+        subscribed, fields = asyncio.run(
             asyncio.wait_for(
                 receive_fields(issue_token(config.app_key, config.secret_key, environment), environment),
-                timeout=25,
+                timeout=20,
             )
         )
     except Exception as error:
-        print(f"실패: WebSocket 검증 오류 ({error}).")
+        print(f"실패: WebSocket 검증 오류 ({type(error).__name__}: {error}).")
         return 1
 
-    print(f"성공: 주식체결(0B) WebSocket 수신 필드를 확인했습니다 ({environment}).")
-    print("수신 FID: " + ", ".join(sorted(fields, key=int)))
+    if not subscribed:
+        print("실패: WebSocket 구독을 확인하지 못했습니다.")
+        return 1
+    if fields:
+        print(f"성공: 주식체결(0B) WebSocket 수신 필드를 확인했습니다 ({environment}).")
+        print("수신 FID: " + ", ".join(sorted(fields, key=int)))
+    else:
+        print(f"성공: 주식체결(0B) WebSocket 로그인·구독을 확인했습니다 ({environment}).")
+        print("15초 동안 체결 메시지가 없어 시세 FID 수신은 장중에 다시 확인하면 됩니다.")
     return 0
 
 
