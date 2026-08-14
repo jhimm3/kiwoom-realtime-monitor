@@ -1473,7 +1473,7 @@ class MainWindow(QMainWindow):
             self._render_high_distance(stock.code)
         self.statusBar().showMessage(f"조회 완료 · {len(stocks)}개 종목 · 실시간 체결 데이터 연결 중")
         self._start_realtime_subscription(codes)
-        QTimer.singleShot(5_000, lambda: self._start_secondary_loading(codes))
+        QTimer.singleShot(5_000, lambda: self._start_realtime_followups(codes))
         self._schedule_next_ranking_refresh()
         # 분봉·기본정보 40건 동시 보완은 모의 API 제한을 쉽게 초과하므로,
         # 안정적인 순위 조회가 확인된 뒤 사용자가 따로 실행하는 방식으로 제공한다.
@@ -1565,10 +1565,17 @@ class MainWindow(QMainWindow):
         worker.trade_received.connect(self._on_trade_tick)
         worker.status_changed.connect(self.statusBar().showMessage)
         worker.connection_failed.connect(self._on_realtime_failure)
-        worker.subscription_ready.connect(lambda: self._start_secondary_loading(codes))
+        worker.subscription_ready.connect(lambda: self._start_realtime_followups(codes))
         self._realtime_worker = worker
         self._realtime_codes = codes
         worker.start()
+
+    def _start_realtime_followups(self, codes: tuple[str, ...]) -> None:
+        """Begin the visible NXT marker lookup before long background backfills."""
+        if self._closing:
+            return
+        self._start_nxt_eligibility_loading(codes)
+        self._start_secondary_loading(codes)
 
     def _on_trade_tick(self, tick: TradeTick) -> None:
         row = self._row_by_code.get(tick.code)
