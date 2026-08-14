@@ -370,9 +370,9 @@ class SettingsDialog(QDialog):
         source, _ = QFileDialog.getOpenFileName(self, "강도 아이콘 이미지 선택", "", "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.gif)")
         if not source:
             return
-        root = self._api_path.parent.parent if self._api_path is not None else Path(__file__).resolve().parents[3]
+        root = self._api_path.parent if self._api_path is not None else self._settings.database_path.parent
         suffix = Path(source).suffix.lower() or ".png"
-        destination = root / "data" / "strength_icons" / f"{level}{suffix}"
+        destination = root / "strength_icons" / f"{level}{suffix}"
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
@@ -408,9 +408,9 @@ class SettingsDialog(QDialog):
         source, _ = QFileDialog.getOpenFileName(self, "신고가 아이콘 이미지 선택", "", "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.gif)")
         if not source:
             return
-        root = self._api_path.parent.parent if self._api_path is not None else Path(__file__).resolve().parents[3]
+        root = self._api_path.parent if self._api_path is not None else self._settings.database_path.parent
         suffix = Path(source).suffix.lower() or ".png"
-        destination = root / "data" / "near_high_icons" / f"{level}{suffix}"
+        destination = root / "near_high_icons" / f"{level}{suffix}"
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
@@ -443,9 +443,9 @@ class SettingsDialog(QDialog):
         source, _ = QFileDialog.getOpenFileName(self, "신고가 알림 소리 선택", "", "소리 파일 (*.wav *.mp3 *.ogg *.m4a)")
         if not source:
             return
-        root = self._api_path.parent.parent if self._api_path is not None else Path(__file__).resolve().parents[3]
+        root = self._api_path.parent if self._api_path is not None else self._settings.database_path.parent
         suffix = Path(source).suffix.lower() or ".wav"
-        destination = root / "data" / "near_high_sounds" / f"{level}{suffix}"
+        destination = root / "near_high_sounds" / f"{level}{suffix}"
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
@@ -913,6 +913,7 @@ class MainWindow(QMainWindow):
         theme_store: object | None = None,
         daily_high_worker_factory: Callable[[tuple[str, ...]], DailyHighWorker] | None = None,
         nxt_eligibility_worker_factory: Callable[[tuple[str, ...]], NxtEligibilityWorker] | None = None,
+        data_dir: Path | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -928,6 +929,7 @@ class MainWindow(QMainWindow):
         self._columns = columns
         self._stock_lookup = stock_lookup
         self._theme_store = theme_store
+        self._data_dir = data_dir or settings.database_path.parent
         self._realtime_worker: RealtimeTradeWorker | None = None
         self._realtime_codes: tuple[str, ...] = ()
         self._minute_history_worker: MinuteHistoryWorker | None = None
@@ -1146,10 +1148,14 @@ class MainWindow(QMainWindow):
             self._themes = self._theme_store.all_by_name()
             self._refresh_rankings()
 
-    @staticmethod
-    def _api_config_path() -> Path:
-        root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[3]
-        return root / "data" / "api.env"
+    def _api_config_path(self) -> Path:
+        return self._data_dir / "api.env"
+
+    def _data_asset_path(self, stored: str) -> Path:
+        path = self._data_dir / stored
+        if path.is_file() or not stored.replace("\\", "/").startswith("data/"):
+            return path
+        return self._data_dir.parent / stored
 
     def _restore_environment_selector(self) -> None:
         path = self._api_config_path()
@@ -1743,14 +1749,14 @@ class MainWindow(QMainWindow):
         stored = self._settings.get(f"near_high_icon_{level}_image").strip()
         if not stored:
             return None
-        path = self._api_config_path().parent.parent / stored
+        path = self._data_asset_path(stored)
         return path if path.is_file() else None
 
     def _play_near_high_sound(self, level: str) -> None:
         if self._settings.get("near_high_sound_enabled") != "1":
             return
         stored = self._settings.get(f"near_high_sound_{level}").strip()
-        path = self._api_config_path().parent.parent / stored if stored else None
+        path = self._data_asset_path(stored) if stored else None
         if path is None or not path.is_file():
             return
         player_pair = self._near_high_sound_players.get(level)
@@ -1885,7 +1891,7 @@ class MainWindow(QMainWindow):
         stored = self._settings.get(f"strength_icon_{level}_image").strip()
         if not stored:
             return None
-        path = self._api_config_path().parent.parent / stored
+        path = self._data_asset_path(stored)
         return path if path.is_file() else None
 
     def _start_fundamentals_loading(self, codes: tuple[str, ...]) -> bool:

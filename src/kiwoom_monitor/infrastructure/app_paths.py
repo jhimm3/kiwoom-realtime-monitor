@@ -14,7 +14,7 @@ class AppPaths:
     @classmethod
     def for_current_user(cls) -> "AppPaths":
         app_root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[3]
-        base_dir = app_root / "data"
+        base_dir = (Path.home() / "Library" / "Application Support" / "kiwoom-monitor") if getattr(sys, "frozen", False) and sys.platform == "darwin" else app_root / "data"
         log_dir = base_dir / "logs"
         base_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
