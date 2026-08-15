@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QInputDialog,
+    QTextEdit,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -72,6 +73,7 @@ from kiwoom_monitor.domain.strength_level import strength_badge
 from kiwoom_monitor.application.theme_matching import MatchedThemeRow, match_theme_rows
 from kiwoom_monitor.application.theme_preview import preview_theme_changes
 from kiwoom_monitor.application.minute_trade_value import MinuteTradeValueAggregator
+from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import PaddleThemeOcr
 
 
 class RankingLoader(Protocol):
@@ -736,6 +738,41 @@ class ThemePreviewDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class ImageThemeRowsDialog(QDialog):
+    def __init__(self, rows: tuple[object, ...], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("이미지 테마 OCR 수정")
+        self.resize(680, 520)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("OCR 결과를 수정하세요. 행 추가·삭제도 가능하며, 다음 화면에서 기존 테마와 비교합니다."))
+        self.table = QTableWidget(len(rows), 2)
+        self.table.setHorizontalHeaderLabels(("종목명", "테마"))
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        for index, row in enumerate(rows):
+            self.table.setItem(index, 0, QTableWidgetItem(str(getattr(row, "name", ""))))
+            self.table.setItem(index, 1, QTableWidgetItem(str(getattr(row, "themes", ""))))
+        layout.addWidget(self.table)
+        actions = QHBoxLayout()
+        add = QPushButton("행 추가")
+        remove = QPushButton("선택 행 삭제")
+        add.clicked.connect(lambda: self.table.insertRow(self.table.rowCount()))
+        remove.clicked.connect(lambda: self.table.removeRow(self.table.currentRow()) if self.table.currentRow() >= 0 else None)
+        actions.addWidget(add); actions.addWidget(remove); actions.addStretch()
+        layout.addLayout(actions)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def rows(self) -> tuple[tuple[str, str], ...]:
+        values = []
+        for index in range(self.table.rowCount()):
+            name = self.table.item(index, 0)
+            themes = self.table.item(index, 1)
+            if name and name.text().strip() and themes and themes.text().strip():
+                values.append((name.text().strip(), themes.text().strip()))
+        return tuple(values)
+
+
 class ThemeEditDialog(QDialog):
     """테마를 배지 형태로 바로 추가·삭제하는 편집창."""
 
@@ -830,8 +867,8 @@ class ThemeColorDialog(QDialog):
     def stock_only(self) -> bool: return self._stock_only.isChecked()
 
 class ThemeManagerDialog(QDialog):
-    def __init__(self, repository: object, settings: SettingsRepository, on_excel_update: Callable[[], None] | None = None, parent: QWidget | None = None) -> None:
-        super().__init__(parent); self._repository=repository; self._settings=settings; self._separators=",/|;" + settings.get("theme_custom_separators"); self._on_excel_update=on_excel_update; self.setWindowTitle("종목/테마 관리"); self.resize(560,420)
+    def __init__(self, repository: object, settings: SettingsRepository, on_excel_update: Callable[[], None] | None = None, on_image_update: Callable[[], None] | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent); self._repository=repository; self._settings=settings; self._separators=",/|;" + settings.get("theme_custom_separators"); self._on_excel_update=on_excel_update; self._on_image_update=on_image_update; self.setWindowTitle("종목/테마 관리"); self.resize(560,420)
         self._search=QLineEdit(); self._search.setPlaceholderText("종목명 검색"); self._table=QTableWidget(0,2); self._table.setHorizontalHeaderLabels(("종목명","테마"))
         self._custom_separators = QLineEdit(settings.get("theme_custom_separators")); self._custom_separators.setPlaceholderText("기본 , / | ; 외에 사용할 구분 문자")
         self._add=QPushButton("신규 종목 테마 추가"); layout=QVBoxLayout(self); layout.addWidget(self._search); layout.addWidget(self._table); layout.addWidget(QLabel("추가 테마 구분자")); layout.addWidget(self._custom_separators); layout.addWidget(self._add)
@@ -840,6 +877,10 @@ class ThemeManagerDialog(QDialog):
             excel = QPushButton("Excel 테마 업데이트")
             excel.clicked.connect(self._on_excel_update)
             layout.addWidget(excel)
+        if self._on_image_update is not None:
+            image = QPushButton("이미지 테마 업데이트")
+            image.clicked.connect(self._on_image_update)
+            layout.addWidget(image)
         self._color = QPushButton("테마 색상 변경")
         layout.addWidget(self._color)
         self._color.clicked.connect(self._edit_theme_color)
@@ -1066,7 +1107,7 @@ class MainWindow(QMainWindow):
 
     def _open_theme_manager(self) -> None:
         if self._theme_store is not None:
-            ThemeManagerDialog(self._theme_store, self._settings, self._select_excel, self).exec()
+            ThemeManagerDialog(self._theme_store, self._settings, self._select_excel, self._select_theme_image, self).exec()
 
     def _set_api_status(self, text: str, color: str) -> None:
         self._api_status.setText(text)
@@ -1202,6 +1243,36 @@ class MainWindow(QMainWindow):
             self.close()
         else:
             self.statusBar().showMessage("API 설정이 저장되었습니다. 앱을 다시 열면 적용됩니다.")
+
+    def _select_theme_image(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "테마 이미지 선택", "", "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if not path:
+            return
+        try:
+            rows = PaddleThemeOcr().extract_rows(Path(path))
+        except Exception as error:
+            QMessageBox.warning(self, "이미지 OCR 실패", str(error))
+            return
+        dialog = ImageThemeRowsDialog(rows, self)
+        if dialog.exec():
+            separators = ",/|;" + self._settings.get("theme_custom_separators")
+            imported, errors = validate_theme_rows(dialog.rows(), separators)
+            if errors:
+                QMessageBox.warning(self, "이미지 테마 확인", "\n".join(errors))
+                return
+            matched, unmatched = match_theme_rows(imported, self._stock_lookup) if self._stock_lookup else ((), imported)
+            resolved, cancelled = self._resolve_unmatched_theme_rows(unmatched)
+            if cancelled:
+                return
+            changes = preview_theme_changes(matched + resolved, self._theme_store) if self._theme_store else ()
+            preview = ThemePreviewDialog(changes, len(unmatched) - len(resolved), self)
+            if preview.exec() and self._theme_store:
+                for change in changes:
+                    if change.status != "변경 없음":
+                        self._theme_store.replace_for_stock(change.code, change.after)
+                self._themes = self._theme_store.all_by_name()
+                self._refresh_rankings()
+            self.statusBar().showMessage(f"이미지 테마 결과 · {len(changes)}개 확인 · 적용은 최종 확인 후에만 수행됩니다")
 
     def _select_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "테마 Excel 선택", "", "Excel 파일 (*.xlsx)")
