@@ -871,7 +871,8 @@ class ThemeManagerDialog(QDialog):
         super().__init__(parent); self._repository=repository; self._settings=settings; self._separators=",/|;" + settings.get("theme_custom_separators"); self._on_excel_update=on_excel_update; self._on_image_update=on_image_update; self.setWindowTitle("종목/테마 관리"); self.resize(560,420)
         self._search=QLineEdit(); self._search.setPlaceholderText("종목명 검색"); self._table=QTableWidget(0,2); self._table.setHorizontalHeaderLabels(("종목명","테마"))
         self._custom_separators = QLineEdit(settings.get("theme_custom_separators")); self._custom_separators.setPlaceholderText("기본 , / | ; 외에 사용할 구분 문자")
-        self._add=QPushButton("신규 종목 테마 추가"); layout=QVBoxLayout(self); layout.addWidget(self._search); layout.addWidget(self._table); layout.addWidget(QLabel("추가 테마 구분자")); layout.addWidget(self._custom_separators); layout.addWidget(self._add)
+        self._import_exclusions = QLineEdit(settings.get("theme_import_exclusions")); self._import_exclusions.setPlaceholderText("예: 개별이슈, 단순뉴스")
+        self._add=QPushButton("신규 종목 테마 추가"); layout=QVBoxLayout(self); layout.addWidget(self._search); layout.addWidget(self._table); layout.addWidget(QLabel("추가 테마 구분자")); layout.addWidget(self._custom_separators); layout.addWidget(QLabel("이미지/Excel 업데이트 제외 테마")); layout.addWidget(self._import_exclusions); layout.addWidget(self._add)
         self._add.clicked.connect(self._add_new)
         if self._on_excel_update is not None:
             excel = QPushButton("Excel 테마 업데이트")
@@ -884,12 +885,14 @@ class ThemeManagerDialog(QDialog):
         self._color = QPushButton("테마 색상 변경")
         layout.addWidget(self._color)
         self._color.clicked.connect(self._edit_theme_color)
-        self._custom_separators.editingFinished.connect(self._save_custom_separators)
+        self._custom_separators.editingFinished.connect(self._save_custom_separators); self._import_exclusions.editingFinished.connect(self._save_import_exclusions)
         self._search.textChanged.connect(self._reload); self._table.cellDoubleClicked.connect(self._edit); self._rows=(); self._reload()
     def _save_custom_separators(self) -> None:
         value = self._custom_separators.text().strip()
         self._settings.set("theme_custom_separators", value)
         self._separators = ",/|;" + value
+    def _save_import_exclusions(self) -> None:
+        self._settings.set("theme_import_exclusions", self._import_exclusions.text().strip())
     def _reload(self) -> None:
         self._rows=self._repository.search(self._search.text()); self._table.setRowCount(len(self._rows))
         for index,(_,name,themes) in enumerate(self._rows):
@@ -1256,7 +1259,7 @@ class MainWindow(QMainWindow):
         dialog = ImageThemeRowsDialog(rows, self)
         if dialog.exec():
             separators = ",/|;" + self._settings.get("theme_custom_separators")
-            imported, errors = validate_theme_rows(dialog.rows(), separators)
+            imported, errors = validate_theme_rows(self._filter_import_exclusions(dialog.rows(), separators), separators)
             if errors:
                 QMessageBox.warning(self, "이미지 테마 확인", "\n".join(errors))
                 return
@@ -1280,7 +1283,7 @@ class MainWindow(QMainWindow):
             try:
                 source = ExcelThemeRepository(Path(path)); header, raw_rows = source.load_header_and_rows()
                 separators = ",/|;" + self._settings.get("theme_custom_separators")
-                rows, errors = validate_theme_rows(raw_rows, separators)
+                rows, errors = validate_theme_rows(self._filter_import_exclusions(raw_rows, separators), separators)
                 errors = validate_theme_header(header) + errors
             except Exception as error:
                 self.statusBar().showMessage(f"Excel 읽기 실패: {error}")
@@ -1304,6 +1307,17 @@ class MainWindow(QMainWindow):
                     self._refresh_rankings()
                 unchanged = sum(change.status == "변경 없음" for change in changes)
                 self.statusBar().showMessage(f"Excel 결과 · 전체 {len(raw_rows)} · 변경 없음 {unchanged} · 신규 {new} · 테마 변경 {changed} · 오류/제외 {len(unmatched) - len(resolved)}")
+
+    def _filter_import_exclusions(self, rows: tuple[tuple[str, str], ...], separators: str) -> tuple[tuple[str, str], ...]:
+        excluded = set(parse_themes(self._settings.get("theme_import_exclusions"), separators))
+        if not excluded:
+            return rows
+        filtered: list[tuple[str, str]] = []
+        for name, value in rows:
+            themes = tuple(theme for theme in parse_themes(value, separators) if theme not in excluded)
+            if themes:
+                filtered.append((name, "/".join(themes)))
+        return tuple(filtered)
 
     def _resolve_unmatched_theme_rows(self, rows: tuple[object, ...]) -> tuple[tuple[MatchedThemeRow, ...], bool]:
         if not rows or self._stock_lookup is None:

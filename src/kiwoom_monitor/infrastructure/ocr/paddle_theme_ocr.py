@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -23,6 +24,9 @@ class PaddleThemeOcr:
             raise ValueError("선택한 이미지 파일을 찾을 수 없습니다.")
         if self._ocr is None:
             try:
+                # PaddleOCR 3.x의 기본 공식 모델 원본은 Hugging Face다. 일부
+                # 환경에서 BOS가 선택되면 한국어 모델을 찾지 못하는 경우가 있다.
+                os.environ["PADDLE_PDX_MODEL_SOURCE"] = "huggingface"
                 from paddleocr import PaddleOCR
             except ImportError as error:
                 raise ValueError("PaddleOCR 구성요소가 없습니다. 프로젝트 의존성을 설치해 주세요.") from error

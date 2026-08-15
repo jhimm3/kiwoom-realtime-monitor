@@ -19,7 +19,7 @@ DEFAULT_SETTINGS = {
     "strength_show_icon": "1",
     "strength_icon_interest": "👀", "strength_icon_caution": "⚠️", "strength_icon_fire": "🔥",
     "strength_icon_interest_image": "", "strength_icon_caution_image": "", "strength_icon_fire_image": "",
-    "near_high_interest_percent": "5.0", "near_high_caution_percent": "3.0", "near_high_fire_percent": "1.0", "near_high_row_alert_level": "fire", "near_high_alert_enabled": "1", "theme_custom_separators": "",
+    "near_high_interest_percent": "5.0", "near_high_caution_percent": "3.0", "near_high_fire_percent": "1.0", "near_high_row_alert_level": "fire", "near_high_alert_enabled": "1", "theme_custom_separators": "", "theme_import_exclusions": "개별이슈",
     "near_high_show_icon": "1", "near_high_icon_interest": "🔎", "near_high_icon_caution": "⚠️", "near_high_icon_fire": "🔥",
     "near_high_icon_interest_image": "", "near_high_icon_caution_image": "", "near_high_icon_fire_image": "",
     "near_high_sound_enabled": "0", "near_high_sound_interest": "", "near_high_sound_caution": "", "near_high_sound_fire": "",
