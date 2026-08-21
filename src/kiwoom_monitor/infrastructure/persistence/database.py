@@ -9,7 +9,6 @@ from kiwoom_monitor.infrastructure.persistence.settings_repository import Settin
 DEFAULT_SETTINGS = {
     "refresh_interval_seconds": "30",
     "rank_query_type": "5",
-    "kiwoom_time_adjustment_seconds": "0.0",
     "rank_row_odd_color": "#FFFFFF",
     "rank_row_even_color": "#F2F2F2",
     "rank_changed_row_color": "#E2F0D9",

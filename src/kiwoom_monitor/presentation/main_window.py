@@ -193,15 +193,6 @@ class SettingsDialog(QDialog):
         self._rank_query_type.addItem("당일 누적", "4")
         saved_rank_query = settings.get("rank_query_type")
         self._rank_query_type.setCurrentIndex(("5", "1", "2", "3", "4").index(saved_rank_query) if saved_rank_query in {"1", "2", "3", "4", "5"} else 0)
-        self._kiwoom_time_adjustment = QDoubleSpinBox()
-        self._kiwoom_time_adjustment.setRange(-10.0, 10.0)
-        self._kiwoom_time_adjustment.setSingleStep(0.01)
-        self._kiwoom_time_adjustment.setDecimals(2)
-        self._kiwoom_time_adjustment.setSuffix("초")
-        try:
-            self._kiwoom_time_adjustment.setValue(float(settings.get("kiwoom_time_adjustment_seconds")))
-        except ValueError:
-            self._kiwoom_time_adjustment.setValue(0.0)
         self._rank_row_colors = {
             "odd": settings.get("rank_row_odd_color"),
             "even": settings.get("rank_row_even_color"),
@@ -376,7 +367,6 @@ class SettingsDialog(QDialog):
 
         ui_tab = QWidget(); ui_form = QFormLayout(ui_tab)
         ui_form.addRow("화면 모드", self._ui_mode)
-        ui_form.addRow("순위 요청 보정 (+: 늦춤)", self._kiwoom_time_adjustment)
         ui_form.addRow(self._section_separator())
         ui_form.addRow(self._section_title("순위 행 표시"))
         ui_form.addRow("홀수 순위 배경", self._rank_row_color_buttons["odd"])
@@ -484,7 +474,6 @@ class SettingsDialog(QDialog):
 
     def _reset_ui_settings(self) -> None:
         self._rank_query_type.setCurrentIndex(("5", "1", "2", "3", "4").index(DEFAULT_SETTINGS["rank_query_type"]))
-        self._kiwoom_time_adjustment.setValue(float(DEFAULT_SETTINGS["kiwoom_time_adjustment_seconds"]))
         for key in self._rank_row_colors:
             self._rank_row_colors[key] = DEFAULT_SETTINGS[f"rank_row_{key}_color"] if key != "changed" else DEFAULT_SETTINGS["rank_changed_row_color"]
             self._update_rank_row_color_button(key)
@@ -723,7 +712,6 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "입력 확인", "화면 크기 설정 범위를 확인하세요.")
             return
         self._settings.set("rank_query_type", str(self._rank_query_type.currentData()))
-        self._settings.set("kiwoom_time_adjustment_seconds", f"{self._kiwoom_time_adjustment.value():.2f}")
         self._settings.set("rank_row_odd_color", self._rank_row_colors["odd"])
         self._settings.set("rank_row_even_color", self._rank_row_colors["even"])
         self._settings.set("rank_changed_row_color", self._rank_row_colors["changed"])
@@ -2178,27 +2166,8 @@ class MainWindow(QMainWindow):
             self._ranking_request_due = True
             logger.warning("순위 기준 시각 %s: 이전 순위 조회가 진행 중이라 완료 직후 재조회합니다.", now.strftime("%H:%M:%S"))
             return
-        logger.info(
-            "순위 기준 시각 %s (순위 요청 보정 %+.2f초): 순위 조회를 시작합니다.",
-            now.strftime("%H:%M:%S"),
-            self._kiwoom_time_adjustment_seconds(),
-        )
+        logger.info("순위 기준 시각 %s: 순위 조회를 시작합니다.", now.strftime("%H:%M:%S"))
         self._refresh_rankings()
-
-    def _is_ranking_boundary(self, now: datetime) -> bool:
-        # 타이머는 사용자가 지정한 순위 요청 보정 뒤에 깨어난다. 경계 판정은
-        # 그 보정값을 다시 뺀 원래 순위 기준 시각으로 해야 회차를 건너뛰지 않는다.
-        now = now - timedelta(seconds=self._kiwoom_time_adjustment_seconds())
-        query_type = self._settings.get("rank_query_type")
-        if query_type in {"5", "4"}:
-            return now.second in {0, 30}
-        if query_type == "1":
-            return now.second == 0
-        if query_type == "2":
-            return now.second == 0 and now.minute % 10 == 0
-        if query_type == "3":
-            return now.second == 0 and now.minute == 0
-        return False
 
     def _prepare_ranking_refresh(self) -> None:
         """순위 기준 시각 직전에 저우선순위 REST 보완 요청을 양보시킨다."""
@@ -2235,27 +2204,17 @@ class MainWindow(QMainWindow):
             next_time = base.replace(second=30) if base.second < 30 else (base + timedelta(minutes=1)).replace(second=0)
         # 키움 API 시간은 그대로 사용한다. 순위 응답의 스냅샷 반영 시점만
         # 사용자가 설정한 값으로 미세 조정한다.
-        request_time = next_time + timedelta(
-            milliseconds=250,
-            seconds=self._kiwoom_time_adjustment_seconds(),
-        )
+        request_time = next_time + timedelta(milliseconds=250)
         delay_ms = max(100, round((request_time - now).total_seconds() * 1000))
         self._ranking_timer.start(delay_ms)
         # 현재 진행 중인 HTTP 요청은 강제로 끊지 않는다. 다음 보완 요청만
         # 막을 수 있도록 기준 시각 2.5초 전에 준비를 시작한다.
         self._ranking_preparation_timer.start(max(100, delay_ms - 2_500))
         logger.info(
-            "다음 순위 조회 예약: %s + 0.25초 (기준 %s · 순위 요청 보정 %+.2f초)",
+            "다음 순위 조회 예약: %s + 0.25초 (기준 %s)",
             next_time.strftime("%H:%M:%S"),
             query_type,
-            self._kiwoom_time_adjustment_seconds(),
         )
-
-    def _kiwoom_time_adjustment_seconds(self) -> float:
-        try:
-            return float(self._settings.get("kiwoom_time_adjustment_seconds"))
-        except (TypeError, ValueError):
-            return 0.0
 
     def _ranking_now(self) -> datetime:
         provider = getattr(self._ranking_loader, "server_now", None)
