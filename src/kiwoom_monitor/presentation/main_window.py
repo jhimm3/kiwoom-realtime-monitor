@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import sys
 import time
 from html import escape
@@ -12,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from PySide6.QtGui import QCloseEvent, QResizeEvent, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPolygon, QPalette
-from PySide6.QtCore import QEvent, QProcess, QThread, QTimer, QUrl, QSize, QPoint
+from PySide6.QtCore import QEvent, QEventLoop, QProcess, QThread, QTimer, QUrl, QSize, QPoint
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -51,6 +50,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
 from kiwoom_monitor.infrastructure.persistence.database import DEFAULT_SETTINGS
@@ -413,7 +413,7 @@ class SettingsDialog(QDialog):
         high_form.addRow(self._section_separator())
         high_form.addRow(self._section_title("신고가 알림 소리"))
         high_form.addRow(self._near_high_sounds)
-        high_form.addRow(QLabel("소리 파일: 신고가에 가까워져 더 높은 단계에 새로 진입할 때만 재생됩니다. WAV·MP3 권장"))
+        high_form.addRow(QLabel("소리 파일: WAV·MP3·OGG·M4A, 파일당 5MB·30초 이하. 신고가에 가까워져 더 높은 단계에 새로 진입할 때만 재생됩니다."))
         for level, label in (("interest", "관심"), ("caution", "주의"), ("fire", "불")):
             high_form.addRow(f"{label} 소리", self._near_high_sound_row(level))
         high_reset = QPushButton("이 탭 초기화")
@@ -636,12 +636,10 @@ class SettingsDialog(QDialog):
         if not source:
             return
         root = self._api_path.parent.parent if self._api_path is not None else Path(__file__).resolve().parents[3]
-        suffix = Path(source).suffix.lower() or ".png"
-        destination = root / "data" / "strength_icons" / f"{level}{suffix}"
+        destination = root / "data" / "strength_icons" / f"{level}.png"
         try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-        except OSError as error:
+            self._store_icon_image(Path(source), destination)
+        except (OSError, ValueError, UnidentifiedImageError) as error:
             QMessageBox.warning(self, "이미지 저장", f"아이콘 이미지를 저장하지 못했습니다.\n{error}")
             return
         self._strength_icon_images[level] = str(destination.relative_to(root))
@@ -674,12 +672,10 @@ class SettingsDialog(QDialog):
         if not source:
             return
         root = self._api_path.parent.parent if self._api_path is not None else Path(__file__).resolve().parents[3]
-        suffix = Path(source).suffix.lower() or ".png"
-        destination = root / "data" / "near_high_icons" / f"{level}{suffix}"
+        destination = root / "data" / "near_high_icons" / f"{level}.png"
         try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-        except OSError as error:
+            self._store_icon_image(Path(source), destination)
+        except (OSError, ValueError, UnidentifiedImageError) as error:
             QMessageBox.warning(self, "이미지 저장", f"아이콘 이미지를 저장하지 못했습니다.\n{error}")
             return
         self._near_high_icon_images[level] = str(destination.relative_to(root))
@@ -708,12 +704,23 @@ class SettingsDialog(QDialog):
         source, _ = QFileDialog.getOpenFileName(self, "신고가 알림 소리 선택", "", "소리 파일 (*.wav *.mp3 *.ogg *.m4a)")
         if not source:
             return
+        source_path = Path(source)
+        max_bytes = 5 * 1024 * 1024
+        try:
+            if source_path.stat().st_size > max_bytes:
+                raise ValueError("소리 파일은 5MB 이하만 사용할 수 있습니다.")
+            duration_ms = self._audio_duration_ms(source_path)
+            if duration_ms > 30_000:
+                raise ValueError("소리 길이는 30초 이하만 사용할 수 있습니다.")
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "소리 선택", str(error))
+            return
         root = self._api_path.parent.parent if self._api_path is not None else Path(__file__).resolve().parents[3]
-        suffix = Path(source).suffix.lower() or ".wav"
+        suffix = source_path.suffix.lower() or ".wav"
         destination = root / "data" / "near_high_sounds" / f"{level}{suffix}"
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+            destination.write_bytes(source_path.read_bytes())
         except OSError as error:
             QMessageBox.warning(self, "소리 저장", f"소리 파일을 저장하지 못했습니다.\n{error}")
             return
@@ -728,6 +735,57 @@ class SettingsDialog(QDialog):
     def _update_near_high_sound_label(self, level: str) -> None:
         value = self._near_high_sound_paths[level]
         self._near_high_sound_labels[level].setText(Path(value).name if value else "선택 안 함")
+
+    @staticmethod
+    def _store_icon_image(source: Path, destination: Path) -> None:
+        """아이콘은 PNG로 표준화하고 축소·압축한 2MB 이하 복사본만 보관한다."""
+        if source.stat().st_size > 50 * 1024 * 1024:
+            raise ValueError("원본 이미지는 50MB 이하만 사용할 수 있습니다.")
+        with Image.open(source) as opened:
+            if opened.width * opened.height > 100_000_000:
+                raise ValueError("이미지 해상도가 너무 큽니다.")
+            image = ImageOps.exif_transpose(opened)
+            if image.mode not in {"RGB", "RGBA"}:
+                image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+            else:
+                image = image.copy()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(".tmp.png")
+        try:
+            for dimension in (512, 384, 256, 192, 128, 96, 64, 48, 32):
+                candidate = image.copy()
+                candidate.thumbnail((dimension, dimension), Image.Resampling.LANCZOS)
+                candidate.save(temporary, format="PNG", optimize=True)
+                if temporary.stat().st_size <= 2 * 1024 * 1024:
+                    temporary.replace(destination)
+                    return
+            raise ValueError("압축 후에도 아이콘이 2MB를 초과합니다.")
+        finally:
+            if temporary.exists():
+                temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _audio_duration_ms(source: Path) -> int:
+        """Qt 미디어 백엔드로 지원 형식의 길이를 확인한다."""
+        player = QMediaPlayer()
+        loop = QEventLoop()
+        timeout = QTimer()
+        timeout.setSingleShot(True)
+        timeout.timeout.connect(loop.quit)
+        player.durationChanged.connect(lambda duration: loop.quit() if duration > 0 else None)
+        player.mediaStatusChanged.connect(
+            lambda status: loop.quit()
+            if status == QMediaPlayer.MediaStatus.InvalidMedia
+            else None
+        )
+        player.setSource(QUrl.fromLocalFile(str(source)))
+        timeout.start(3_000)
+        loop.exec()
+        duration = player.duration()
+        player.setSource(QUrl())
+        if duration <= 0:
+            raise ValueError("소리 길이를 확인할 수 없습니다. 지원되는 WAV·MP3·OGG·M4A 파일을 선택하세요.")
+        return duration
 
     @staticmethod
     def _section_separator() -> QFrame:
