@@ -14,6 +14,8 @@ logs/
 # Python 캐시와 검사 결과
 __pycache__/
 *.py[cod]
+node_modules/
+*.inspect.ndjson
 .venv/
 *.egg-info/
 .pytest_cache/

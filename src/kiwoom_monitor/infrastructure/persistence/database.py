@@ -9,23 +9,38 @@ from kiwoom_monitor.infrastructure.persistence.settings_repository import Settin
 DEFAULT_SETTINGS = {
     "refresh_interval_seconds": "30",
     "rank_query_type": "5",
+    "kiwoom_time_adjustment_seconds": "0.0",
+    "rank_row_odd_color": "#FFFFFF",
+    "rank_row_even_color": "#F2F2F2",
+    "rank_changed_row_color": "#E2F0D9",
+    "rank_changed_highlight_seconds": "2.00",
+    "rank_changed_highlight_enabled": "1",
     "ui_mode": "responsive",
     "strength_1m_interest": "0.5", "strength_1m_caution": "1.0", "strength_1m_fire": "2.0",
     "strength_5m_interest": "2.5", "strength_5m_caution": "5.0", "strength_5m_fire": "10.0",
     "strength_60m_interest": "30.0", "strength_60m_caution": "60.0", "strength_60m_fire": "120.0",
     "strength_day_interest": "195.0", "strength_day_caution": "390.0", "strength_day_fire": "780.0",
     "strength_display_mode": "live",
+    "trade_display_1m_mode": "live", "trade_display_5m_mode": "live", "trade_display_60m_mode": "live", "trade_display_day_mode": "live",
     "trade_value_1m_alert_eok": "0", "trade_value_5m_alert_eok": "0", "trade_value_60m_alert_eok": "0", "trade_value_day_alert_eok": "0",
     "strength_show_icon": "1",
     "strength_icon_interest": "👀", "strength_icon_caution": "⚠️", "strength_icon_fire": "🔥",
     "strength_icon_interest_image": "", "strength_icon_caution_image": "", "strength_icon_fire_image": "",
-    "near_high_interest_percent": "5.0", "near_high_caution_percent": "3.0", "near_high_fire_percent": "1.0", "near_high_row_alert_level": "fire", "near_high_alert_enabled": "1", "theme_custom_separators": "", "theme_import_exclusions": "개별이슈",
+    "near_high_interest_percent": "5.0", "near_high_caution_percent": "3.0", "near_high_fire_percent": "1.0", "near_high_row_alert_level": "fire", "near_high_alert_enabled": "1", "theme_custom_separators": "", "theme_import_exclusions": "",
     "near_high_show_icon": "1", "near_high_icon_interest": "🔎", "near_high_icon_caution": "⚠️", "near_high_icon_fire": "🔥",
     "near_high_icon_interest_image": "", "near_high_icon_caution_image": "", "near_high_icon_fire_image": "",
     "near_high_sound_enabled": "0", "near_high_sound_interest": "", "near_high_sound_caution": "", "near_high_sound_fire": "",
     "ui_font_size": "0", "ui_row_height": "0", "theme_badge_font_size": "0", "theme_badge_padding": "2", "high_distance_period": "250", "window_width": "1160", "window_height": "720",
     "decimal_change_rate": "2", "decimal_trade_value": "2", "decimal_strength": "2", "decimal_high_distance": "2",
     "show_server_clock": "1",
+    "theme_trade_summary_enabled": "1",
+    "theme_trade_summary_period": "day",
+    "theme_trade_summary_excluded_stocks": "",
+    "theme_trade_summary_excluded_enabled": "1",
+    "theme_image_import_dir": "",
+    "theme_excel_import_dir": "",
+    "krx_stock_catalog_date": "",
+    "krx_stock_catalog_format_version": "3",
 }
 
 DEFAULT_COLUMNS = (
@@ -37,6 +52,7 @@ DEFAULT_COLUMNS = (
     ("current_price", 1, 5, 110),
     ("trade_value_1m", 0, 6, 100), ("trade_value_5m", 0, 7, 100), ("trade_value_60m", 0, 8, 100), ("trade_value_day", 0, 9, 100),
     ("strength_5m", 0, 10, 100), ("strength_60m", 0, 11, 100), ("strength_day", 0, 12, 100), ("new_high_price", 1, 13, 130), ("high_distance", 0, 14, 100),
+    ("market_cap", 1, 15, 110),
 )
 
 
@@ -69,6 +85,8 @@ class Database:
             connection.executescript("""
             CREATE TABLE IF NOT EXISTS themes (theme_id INTEGER PRIMARY KEY, theme_name TEXT NOT NULL UNIQUE, default_color TEXT NOT NULL DEFAULT '#DCE6F1');
             CREATE TABLE IF NOT EXISTS stock_themes (stock_code TEXT NOT NULL, theme_id INTEGER NOT NULL, custom_color TEXT, PRIMARY KEY(stock_code, theme_id), FOREIGN KEY(stock_code) REFERENCES stocks(code), FOREIGN KEY(theme_id) REFERENCES themes(theme_id));
+            CREATE TABLE IF NOT EXISTS new_high_snapshot (period INTEGER NOT NULL, stock_code TEXT NOT NULL, PRIMARY KEY(period, stock_code), FOREIGN KEY(stock_code) REFERENCES stocks(code));
+            CREATE TABLE IF NOT EXISTS new_high_snapshot_meta (period INTEGER PRIMARY KEY, checked_at TEXT NOT NULL);
             """)
             connection.commit()
         finally:

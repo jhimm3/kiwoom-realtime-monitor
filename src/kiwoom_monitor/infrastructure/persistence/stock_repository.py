@@ -1,5 +1,6 @@
 from __future__ import annotations
 import sqlite3
+from difflib import get_close_matches
 from pathlib import Path
 
 from kiwoom_monitor.application.trade_strength import StockFundamentals
@@ -13,6 +14,19 @@ class StockRepository:
             con.commit()
         finally:
             con.close()
+    def upsert_many(self, stocks: tuple[tuple[str, str, str], ...]) -> None:
+        if not stocks:
+            return
+        con = sqlite3.connect(self._path)
+        try:
+            con.executemany(
+                "INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) "
+                "ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, updated_at=CURRENT_TIMESTAMP",
+                stocks,
+            )
+            con.commit()
+        finally:
+            con.close()
     def find_code_by_name(self, name: str) -> str | None:
         con = sqlite3.connect(self._path)
         try:
@@ -21,6 +35,22 @@ class StockRepository:
         finally:
             con.close()
         return str(row[0]) if row else None
+    def find_stock_candidates(self, name: str, limit: int = 8) -> tuple[tuple[str, str], ...]:
+        query = name.strip()
+        if not query:
+            return ()
+        con = sqlite3.connect(self._path)
+        try:
+            rows = con.execute("SELECT code, name FROM stocks WHERE name LIKE ? ORDER BY name LIMIT ?", (f"%{query}%", limit)).fetchall()
+            if len(rows) < limit:
+                all_rows = con.execute("SELECT code, name FROM stocks ORDER BY name").fetchall()
+                used = {str(code) for code, _ in rows}
+                names = [str(stock_name) for _, stock_name in all_rows]
+                similar = set(get_close_matches(query, names, n=limit, cutoff=0.35))
+                rows += [row for row in all_rows if str(row[1]) in similar and str(row[0]) not in used]
+        finally:
+            con.close()
+        return tuple((str(code), str(stock_name)) for code, stock_name in rows[:limit])
     def save_alias(self, alias: str, stock_code: str) -> None:
         con = sqlite3.connect(self._path)
         try:
@@ -31,10 +61,16 @@ class StockRepository:
     def update_fundamentals(self, code: str, market_cap: float, float_ratio: float, high_250_price: int | None = None) -> None:
         con = sqlite3.connect(self._path)
         try:
-            con.execute(
-                "UPDATE stocks SET market_cap=?, float_ratio=?, circulating_market_cap=?, high_250_price=?, fundamentals_updated_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE code=?",
-                (market_cap, float_ratio, market_cap * float_ratio / 100, high_250_price, code),
-            )
+            row = con.execute("SELECT market_cap, float_ratio, high_250_price FROM stocks WHERE code=?", (code,)).fetchone()
+            changed = row is None or row[0] != market_cap or row[1] != float_ratio or row[2] != high_250_price
+            if changed:
+                con.execute(
+                    "UPDATE stocks SET market_cap=?, float_ratio=?, circulating_market_cap=?, high_250_price=?, fundamentals_updated_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE code=?",
+                    (market_cap, float_ratio, market_cap * float_ratio / 100, high_250_price, code),
+                )
+            else:
+                # 값은 보존하고, 다음 날 재조회하지 않도록 확인 시각만 갱신한다.
+                con.execute("UPDATE stocks SET fundamentals_updated_at=CURRENT_TIMESTAMP WHERE code=?", (code,))
             con.commit()
         finally:
             con.close()
@@ -71,7 +107,44 @@ class StockRepository:
     def update_nxt_enabled(self, code: str, enabled: bool, today: str) -> None:
         con = sqlite3.connect(self._path)
         try:
-            con.execute("UPDATE stocks SET nxt_enabled=?, nxt_checked_at=?, updated_at=CURRENT_TIMESTAMP WHERE code=?", (int(enabled), today, code))
+            row = con.execute("SELECT nxt_enabled FROM stocks WHERE code=?", (code,)).fetchone()
+            if row is None or row[0] is None or bool(row[0]) != enabled:
+                con.execute("UPDATE stocks SET nxt_enabled=?, nxt_checked_at=?, updated_at=CURRENT_TIMESTAMP WHERE code=?", (int(enabled), today, code))
+            else:
+                # NXT 가능 여부 값은 그대로 두고 오늘 확인했다는 정보만 남긴다.
+                con.execute("UPDATE stocks SET nxt_checked_at=? WHERE code=?", (today, code))
+            con.commit()
+        finally:
+            con.close()
+
+    def load_new_highs(self, periods: tuple[int, ...]) -> dict[int, set[str]]:
+        if not periods:
+            return {}
+        placeholders = ",".join("?" for _ in periods)
+        con = sqlite3.connect(self._path)
+        try:
+            rows = con.execute(f"SELECT period, stock_code FROM new_high_snapshot WHERE period IN ({placeholders})", periods).fetchall()
+        finally:
+            con.close()
+        result = {period: set() for period in periods}
+        for period, code in rows:
+            result.setdefault(int(period), set()).add(str(code))
+        return result
+
+    def update_new_highs(self, values: dict[int, set[str]], checked_at: str) -> None:
+        """신고가 구성 종목이 바뀐 경우에만 추가·삭제하고 확인 시각은 항상 갱신한다."""
+        con = sqlite3.connect(self._path)
+        try:
+            for period, current_values in values.items():
+                existing = {str(row[0]) for row in con.execute("SELECT stock_code FROM new_high_snapshot WHERE period=?", (period,))}
+                for code in existing - current_values:
+                    con.execute("DELETE FROM new_high_snapshot WHERE period=? AND stock_code=?", (period, code))
+                for code in current_values - existing:
+                    con.execute("INSERT OR IGNORE INTO new_high_snapshot(period, stock_code) VALUES (?, ?)", (period, code))
+                con.execute(
+                    "INSERT INTO new_high_snapshot_meta(period, checked_at) VALUES (?, ?) ON CONFLICT(period) DO UPDATE SET checked_at=excluded.checked_at",
+                    (period, checked_at),
+                )
             con.commit()
         finally:
             con.close()

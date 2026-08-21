@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
 
@@ -87,6 +87,20 @@ class MinuteTradeValueAggregator:
         current_minute = now.replace(second=0, microsecond=0)
         completed = [bar for bar in self._bars.get(code, ()) if bar.minute.date() == now.date() and bar.minute < current_minute]
         return sum(bar.trade_value_eok for bar in completed[-minutes:])
+
+    def bucket_trade_value_eok(self, code: str, minutes: int, now: datetime, *, previous: bool = False) -> float:
+        """시각 경계에 맞춘 현재/직전 N분봉 거래대금을 반환한다.
+
+        예: 10:07의 5분은 10:05~10:09, 직전 5분은 10:00~10:04이다.
+        """
+        if minutes <= 0:
+            raise ValueError("minutes must be positive")
+        current_minute = now.replace(second=0, microsecond=0)
+        start = current_minute - timedelta(minutes=current_minute.minute % minutes)
+        if previous:
+            start -= timedelta(minutes=minutes)
+        end = start + timedelta(minutes=minutes)
+        return sum(bar.trade_value_eok for bar in self._bars.get(code, ()) if start <= bar.minute < end)
 
     def seed(self, code: str, bars: tuple[MinuteOhlcv, ...], now: datetime | None = None) -> None:
         """REST로 받은 과거 1분봉을 시간순으로 넣어 접속 전 누락분을 보완한다."""
