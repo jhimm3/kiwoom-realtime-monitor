@@ -7,8 +7,6 @@ import json
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, time as clock_time, timedelta
-from email.utils import parsedate_to_datetime
-from urllib.request import Request, urlopen
 
 from PySide6.QtCore import QThread, Signal
 from websockets.asyncio.client import connect
@@ -37,32 +35,6 @@ def market_session(now: datetime, environment: str) -> str | None:
 def korea_now() -> datetime:
     """Windows에 별도 tzdata가 없어도 항상 한국 표준시를 계산한다."""
     return datetime.now(UTC) + timedelta(hours=9)
-
-
-class GoogleClock:
-    """Google 응답의 Date 헤더를 기준으로 한국 시간을 유지한다."""
-
-    def __init__(self, opener: Callable[..., object] = urlopen, monotonic: Callable[[], float] = time.monotonic) -> None:
-        self._opener = opener
-        self._monotonic = monotonic
-        self._base_time: datetime | None = None
-        self._saved_at: float | None = None
-
-    def korea_now(self) -> datetime:
-        now = self._monotonic()
-        if self._base_time is None or self._saved_at is None or now - self._saved_at >= 300:
-            try:
-                request = Request("https://www.google.com/generate_204", method="HEAD")
-                with self._opener(request, timeout=3) as response:
-                    header = response.headers.get("Date")
-                if header:
-                    self._base_time = parsedate_to_datetime(header).astimezone(UTC) + timedelta(hours=9)
-                    self._saved_at = now
-            except Exception:
-                return korea_now()
-        if self._base_time is None or self._saved_at is None:
-            return korea_now()
-        return self._base_time + timedelta(seconds=self._monotonic() - self._saved_at)
 
 
 class RealtimeTradeWorker(QThread):

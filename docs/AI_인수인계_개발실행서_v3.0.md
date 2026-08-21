@@ -285,7 +285,7 @@ NXT 여부를 아직 모르거나 조회 실패한 종목은 안전하게 NXT �
 - 기본 작업 브랜치는 `codex/monitor-core-implementation`이다.
 - 커밋 전 `git status --short`, `git diff --check`, 관련 단위 테스트를 확인한다.
 - 명시된 소스·문서만 `git add -- <경로>`로 올린다. `git add .` 또는 `git add -A`를 쓰지 않는다.
-- 제외: `.env`, `data/`, 로그, SQLite, OCR 모델 파일, `node_modules/`, 개인 업로드 이미지/Excel, API 키.
+- 제외: `data/`, 로그, SQLite, OCR 모델 파일, `node_modules/`, 개인 업로드 이미지/Excel, API 키.
 - 현재 예시 파일 [테마 입력 템플릿](../테마_입력_템플릿.xlsx)은 저장소에 포함한다.
 
 ## 12. 후속 범위
