@@ -88,6 +88,9 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
+APP_VERSION = "1.0.0"
+APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
+
 
 class ClickableLabel(QLabel):
     """클릭 동작을 지원하는 안내/요약 라벨."""
@@ -511,6 +514,15 @@ class SettingsDialog(QDialog):
             restore_button = QPushButton("설정 백업 불러오기")
             restore_button.clicked.connect(self._backup_importer)
             manage_form.addRow("설정 복원", restore_button)
+        manage_form.addRow(self._section_separator())
+        app_info = QLabel(
+            f"키움 실시간 종목 모니터 {APP_VERSION}\n"
+            f"{APP_COPYRIGHT}\n"
+            "이 프로그램은 여러 오픈소스 소프트웨어를 기반으로 제작되었습니다."
+        )
+        app_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        app_info.setStyleSheet("color: #667085; padding: 14px 4px 4px;")
+        manage_form.addRow(app_info)
         tabs.addTab(manage_tab, "관리")
         layout.addWidget(tabs)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -1916,6 +1928,9 @@ class MainWindow(QMainWindow):
         settings_button = QPushButton("기본 설정")
         settings_button.clicked.connect(self._open_settings)
         toolbar.addWidget(settings_button)
+        version_label = QLabel(f"버전 {APP_VERSION}")
+        version_label.setStyleSheet("color: #667085; padding-left: 6px;")
+        toolbar.addWidget(version_label)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
