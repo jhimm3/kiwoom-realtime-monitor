@@ -557,7 +557,7 @@ class SettingsDialog(QDialog):
             self._update_near_high_icon_image_label(level)
         self._near_high_sounds.setChecked(DEFAULT_SETTINGS["near_high_sound_enabled"] == "1")
         for level in self._near_high_sound_paths:
-            self._near_high_sound_paths[level] = ""
+            self._near_high_sound_paths[level] = DEFAULT_SETTINGS[f"near_high_sound_{level}"]
             self._update_near_high_sound_label(level)
         self._near_high_enabled.setChecked(DEFAULT_SETTINGS["near_high_alert_enabled"] == "1")
 
