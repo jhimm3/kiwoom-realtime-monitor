@@ -265,6 +265,13 @@ class SettingsDialog(QDialog):
         self._theme_trade_summary_excluded_stocks.setPlaceholderText("예: 삼성전자, SK하이닉스 (종목명 또는 코드)")
         self._theme_trade_summary_excluded_enabled = QCheckBox("제외 종목 반영 테마 거래대금 표시")
         self._theme_trade_summary_excluded_enabled.setChecked(settings.get("theme_trade_summary_excluded_enabled") == "1")
+        self._market_cap_highlight_fields = {
+            "low": QLineEdit(settings.get("market_cap_highlight_low_eok")),
+            "middle": QLineEdit(settings.get("market_cap_highlight_middle_eok")),
+            "high": QLineEdit(settings.get("market_cap_highlight_high_eok")),
+        }
+        for field in self._market_cap_highlight_fields.values():
+            field.setPlaceholderText("0: 해당 단계 끔 · 10,000억 = 1조")
         self._decimal_fields = {
             "change_rate": QComboBox(), "trade_value": QComboBox(),
             "strength": QComboBox(), "high_distance": QComboBox(),
@@ -365,39 +372,49 @@ class SettingsDialog(QDialog):
         high_form.addRow(high_reset)
         tabs.addTab(high_tab, "신고가")
 
-        ui_tab = QWidget(); ui_form = QFormLayout(ui_tab)
-        ui_form.addRow("화면 모드", self._ui_mode)
-        ui_form.addRow(self._section_separator())
-        ui_form.addRow(self._section_title("순위 행 표시"))
-        ui_form.addRow("홀수 순위 배경", self._rank_row_color_buttons["odd"])
-        ui_form.addRow("짝수 순위 배경", self._rank_row_color_buttons["even"])
-        ui_form.addRow("순위 변동 행 배경", self._rank_row_color_buttons["changed"])
-        ui_form.addRow(self._rank_changed_highlight_enabled)
-        ui_form.addRow("순위 변동 표시 시간", self._rank_changed_highlight_seconds)
-        ui_form.addRow(self._section_separator())
-        ui_form.addRow(self._section_title("고정 UI : 표 크기 및 테마 표시"))
-        ui_form.addRow("표 글자 크기(0: 자동)", self._font_size)
-        ui_form.addRow("행 높이(0: 자동)", self._row_height)
-        ui_form.addRow("테마 배지 글자 크기(0: 자동)", self._badge_font_size)
-        ui_form.addRow("테마 배지 여백", self._badge_padding)
-        ui_form.addRow(self._section_separator())
-        ui_form.addRow(self._section_title("상위 테마 거래대금"))
-        ui_form.addRow(self._theme_trade_summary_enabled)
-        ui_form.addRow(self._theme_trade_summary_excluded_enabled)
-        ui_form.addRow("테마 거래대금 기준", self._theme_trade_summary_period)
-        ui_form.addRow("제외 종목 목록", self._theme_trade_exclusion_row())
-        ui_form.addRow(self._section_separator())
-        ui_form.addRow(self._section_title("소수점 표시"))
-        ui_form.addRow("등락률 소수점", self._decimal_fields["change_rate"])
-        ui_form.addRow("거래대금 소수점", self._decimal_fields["trade_value"])
-        ui_form.addRow("거래강도 소수점", self._decimal_fields["strength"])
-        ui_form.addRow("신고가% 소수점", self._decimal_fields["high_distance"])
-        ui_form.addRow(self._section_separator())
-        ui_form.addRow(self._show_server_clock)
-        ui_reset = QPushButton("이 탭 초기화")
-        ui_reset.clicked.connect(self._reset_ui_settings)
-        ui_form.addRow(ui_reset)
-        tabs.addTab(ui_tab, "화면 설정")
+        layout_tab = QWidget(); layout_form = QFormLayout(layout_tab)
+        layout_form.addRow("화면 모드", self._ui_mode)
+        layout_form.addRow(self._section_separator())
+        layout_form.addRow(self._section_title("순위 행 표시"))
+        layout_form.addRow("홀수 순위 배경", self._rank_row_color_buttons["odd"])
+        layout_form.addRow("짝수 순위 배경", self._rank_row_color_buttons["even"])
+        layout_form.addRow("순위 변동 행 배경", self._rank_row_color_buttons["changed"])
+        layout_form.addRow(self._rank_changed_highlight_enabled)
+        layout_form.addRow("순위 변동 표시 시간", self._rank_changed_highlight_seconds)
+        layout_form.addRow(self._section_separator())
+        layout_form.addRow(self._section_title("고정 UI : 표 크기 및 테마 표시"))
+        layout_form.addRow("표 글자 크기(0: 자동)", self._font_size)
+        layout_form.addRow("행 높이(0: 자동)", self._row_height)
+        layout_form.addRow("테마 배지 글자 크기(0: 자동)", self._badge_font_size)
+        layout_form.addRow("테마 배지 여백", self._badge_padding)
+        layout_reset = QPushButton("이 탭 초기화")
+        layout_reset.clicked.connect(self._reset_ui_layout_settings)
+        layout_form.addRow(layout_reset)
+        tabs.addTab(layout_tab, "화면 구성")
+
+        display_tab = QWidget(); display_form = QFormLayout(display_tab)
+        display_form.addRow(self._section_title("상위 테마 거래대금"))
+        display_form.addRow(self._theme_trade_summary_enabled)
+        display_form.addRow(self._theme_trade_summary_excluded_enabled)
+        display_form.addRow("테마 거래대금 기준", self._theme_trade_summary_period)
+        display_form.addRow("제외 종목 목록", self._theme_trade_exclusion_row())
+        display_form.addRow(self._section_separator())
+        display_form.addRow(self._section_title("소수점 표시"))
+        display_form.addRow("등락률 소수점", self._decimal_fields["change_rate"])
+        display_form.addRow("거래대금 소수점", self._decimal_fields["trade_value"])
+        display_form.addRow("거래강도 소수점", self._decimal_fields["strength"])
+        display_form.addRow("신고가% 소수점", self._decimal_fields["high_distance"])
+        display_form.addRow(self._section_separator())
+        display_form.addRow(self._section_title("시가총액 표시"))
+        display_form.addRow("1단계 기준(억, 파랑)", self._market_cap_highlight_fields["low"])
+        display_form.addRow("2단계 기준(억, 주황)", self._market_cap_highlight_fields["middle"])
+        display_form.addRow("3단계 기준(억, 빨강)", self._market_cap_highlight_fields["high"])
+        display_form.addRow(self._section_separator())
+        display_form.addRow(self._show_server_clock)
+        display_reset = QPushButton("이 탭 초기화")
+        display_reset.clicked.connect(self._reset_ui_display_settings)
+        display_form.addRow(display_reset)
+        tabs.addTab(display_tab, "표시 형식")
 
         if self._column_manager_panel_factory is not None:
             columns_tab = self._column_manager_panel_factory(tabs)
@@ -472,8 +489,7 @@ class SettingsDialog(QDialog):
             self._update_near_high_sound_label(level)
         self._near_high_enabled.setChecked(DEFAULT_SETTINGS["near_high_alert_enabled"] == "1")
 
-    def _reset_ui_settings(self) -> None:
-        self._rank_query_type.setCurrentIndex(("5", "1", "2", "3", "4").index(DEFAULT_SETTINGS["rank_query_type"]))
+    def _reset_ui_layout_settings(self) -> None:
         for key in self._rank_row_colors:
             self._rank_row_colors[key] = DEFAULT_SETTINGS[f"rank_row_{key}_color"] if key != "changed" else DEFAULT_SETTINGS["rank_changed_row_color"]
             self._update_rank_row_color_button(key)
@@ -484,6 +500,10 @@ class SettingsDialog(QDialog):
         self._row_height.setText(DEFAULT_SETTINGS["ui_row_height"])
         self._badge_font_size.setText(DEFAULT_SETTINGS["theme_badge_font_size"])
         self._badge_padding.setText(DEFAULT_SETTINGS["theme_badge_padding"])
+
+    def _reset_ui_display_settings(self) -> None:
+        for level, field in self._market_cap_highlight_fields.items():
+            field.setText(DEFAULT_SETTINGS[f"market_cap_highlight_{level}_eok"])
         self._show_server_clock.setChecked(DEFAULT_SETTINGS["show_server_clock"] == "1")
         self._theme_trade_summary_enabled.setChecked(DEFAULT_SETTINGS["theme_trade_summary_enabled"] == "1")
         self._theme_trade_summary_period.setCurrentIndex(("1m", "5m", "60m", "day").index(DEFAULT_SETTINGS["theme_trade_summary_period"]))
@@ -705,10 +725,15 @@ class SettingsDialog(QDialog):
             return
         try:
             font_size, row_height, badge_font_size, badge_padding = (int(field.text()) for field in (self._font_size, self._row_height, self._badge_font_size, self._badge_padding))
+            market_cap_highlights = {
+                level: float(field.text() or "0")
+                for level, field in self._market_cap_highlight_fields.items()
+            }
         except ValueError:
-            QMessageBox.warning(self, "입력 확인", "화면 크기 설정은 0 이상의 정수로 입력하세요.")
+            QMessageBox.warning(self, "입력 확인", "화면 크기 설정과 시가총액 강조 기준을 확인하세요.")
             return
-        if not (0 <= font_size <= 30 and 0 <= row_height <= 100 and 0 <= badge_font_size <= 30 and 0 <= badge_padding <= 20):
+        market_cap_active_thresholds = [market_cap_highlights[level] for level in ("low", "middle", "high") if market_cap_highlights[level] > 0]
+        if not (0 <= font_size <= 30 and 0 <= row_height <= 100 and 0 <= badge_font_size <= 30 and 0 <= badge_padding <= 20 and all(value >= 0 for value in market_cap_highlights.values()) and market_cap_active_thresholds == sorted(market_cap_active_thresholds)):
             QMessageBox.warning(self, "입력 확인", "화면 크기 설정 범위를 확인하세요.")
             return
         self._settings.set("rank_query_type", str(self._rank_query_type.currentData()))
@@ -735,6 +760,8 @@ class SettingsDialog(QDialog):
         for level, value in self._near_high_sound_paths.items():
             self._settings.set(f"near_high_sound_{level}", value)
         self._settings.set("ui_font_size", str(font_size)); self._settings.set("ui_row_height", str(row_height)); self._settings.set("theme_badge_font_size", str(badge_font_size)); self._settings.set("theme_badge_padding", str(badge_padding))
+        for level, value in market_cap_highlights.items():
+            self._settings.set(f"market_cap_highlight_{level}_eok", str(value))
         for key, field in self._decimal_fields.items():
             self._settings.set(f"decimal_{key}", field.currentText())
         self._settings.set("near_high_alert_enabled", "1" if self._near_high_enabled.isChecked() else "0")
@@ -1487,7 +1514,6 @@ class NxtMarkerDelegate(QStyledItemDelegate):
         painter.drawPolygon(QPolygon((QPoint(rect.right(), rect.bottom()), QPoint(rect.right() - size, rect.bottom()), QPoint(rect.right(), rect.bottom() - size))))
         painter.restore()
 
-
 class MainWindow(QMainWindow):
     COLUMNS = (("rank","순위"),("stock","종목"),("themes","테마"),("change_rate","등락률"),("strength_1m","1분강도"),("current_price","현재가"),("trade_value_1m","1분(억)"),("trade_value_5m","5분(억)"),("trade_value_60m","60분(억)"),("trade_value_day","1일(억)"),("strength_5m","5분강도"),("strength_60m","60분강도"),("strength_day","1일강도"),("new_high_price","신고가"),("high_distance","신고가%"),("market_cap","시가총액"))
     HEADERS = tuple(label for _, label in COLUMNS)
@@ -1689,6 +1715,7 @@ class MainWindow(QMainWindow):
                 self._render_new_high_price(code)
                 self._render_high_distance(code)
                 self._render_trade_values(code)
+                self._render_market_cap(code)
             self.statusBar().showMessage("기본 설정 저장 완료")
             if dialog.api_changed:
                 self._restart_for_api_settings()
@@ -3114,13 +3141,27 @@ class MainWindow(QMainWindow):
         fundamentals = self._fundamentals.get(code)
         if row is None or fundamentals is None:
             return
-        item = QTableWidgetItem(self._format_trade_value_eok(fundamentals.market_cap_eok, 0))
+        item = QTableWidgetItem(self._format_market_cap_eok(fundamentals.market_cap_eok))
         item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        item.setForeground(QColor(self._trade_value_color(fundamentals.market_cap_eok)))
-        font = item.font()
-        font.setBold(True)
-        item.setFont(font)
+        item.setForeground(QColor(self._market_cap_highlight_color(fundamentals.market_cap_eok)))
+        item.setBackground(self._row_background_color(code, row))
         self._table.setItem(row, 15, item)
+
+    def _market_cap_highlight_color(self, market_cap_eok: float) -> str:
+        """시가총액 구간별 전체 글자색을 반환한다."""
+        for level, color in (("high", "#C00000"), ("middle", "#C55A11"), ("low", "#1F4E79")):
+            try:
+                threshold = max(0.0, float(self._settings.get(f"market_cap_highlight_{level}_eok")))
+            except (TypeError, ValueError):
+                threshold = 0.0
+            if threshold > 0 and market_cap_eok >= threshold:
+                return color
+        return "#333333"
+
+    def _format_market_cap_eok(self, value: float) -> str:
+        """시가총액은 조·억 경계를 눈에 띄게 구분해 표시한다."""
+        text = self._format_trade_value_eok(value, 0)
+        return text.replace("조", "조 · ", 1) if "조" in text and text.endswith("억") else text
 
     def _on_fundamentals_completed(self) -> None:
         codes = getattr(self, "_pending_secondary_codes", ())
