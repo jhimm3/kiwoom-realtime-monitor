@@ -32,10 +32,18 @@
 | OCR | PaddleOCR + PaddlePaddle 3.2.2 + Pillow |
 | 테스트 | `unittest` |
 
+`pyproject.toml`에는 직접 의존성의 검증된 정확한 버전을 기록한다. 새 PC에서 같은 OCR 환경을 재현할 때는 `requirements.lock.txt`를 사용한다. 현재 검증 조합은 **PaddleOCR 3.7.0 + PaddlePaddle 3.2.2 + PaddleX 3.7.2 + NumPy 2.3.5**다. PaddleX 3.7.2는 NumPy 2.4 미만이 필요하므로 NumPy를 임의로 최신 버전으로 올리지 않는다.
+
 개발 실행:
 
 ```powershell
 .\.venv\Scripts\python.exe -m kiwoom_monitor
+```
+
+새 환경 의존성 설치:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
 ```
 
 검증:
