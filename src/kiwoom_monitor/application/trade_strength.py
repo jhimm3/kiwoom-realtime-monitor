@@ -10,6 +10,7 @@ class StockFundamentals:
     market_cap_eok: float
     float_ratio_percent: float
     high_250_price: int | None = None
+    current_price: int | None = None
 
     @property
     def float_market_cap_eok(self) -> float:

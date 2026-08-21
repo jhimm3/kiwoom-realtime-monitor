@@ -5,22 +5,23 @@ import re
 from .theme_parser import parse_themes
 
 
-def parse_theme_text(value: str, separators: str = ",/|;") -> tuple[tuple[str, str], ...]:
+def parse_theme_text(value: str, separators: str = ",/|;", heading_marker: str = "🔥") -> tuple[tuple[str, str], ...]:
     """Convert a pasted themed-stock note into ``(stock name, themes)`` rows.
 
-    A flame line starts a new main theme.  Lines beginning with ``#`` are
+    A configured heading-marker line starts a new main theme.  Lines beginning with ``#`` are
     treated as a sub-list of that same main theme; their label is intentionally
     not added as a separate theme.
     """
     collected: dict[str, tuple[str, list[str]]] = {}
     active_themes: tuple[str, ...] = ()
+    marker = heading_marker.strip() or "🔥"
 
     for raw_line in value.splitlines():
         line = raw_line.replace("\u200b", " ").strip()
         if not line or set(line) <= {"-", "_", "="}:
             continue
-        if line.startswith("🔥"):
-            active_themes = parse_themes(line.lstrip("🔥").strip(" :"), separators)
+        if line.startswith(marker):
+            active_themes = parse_themes(line[len(marker):].strip(" :"), separators)
             continue
         if not active_themes or line.startswith(("✳", "※", "*")):
             continue
@@ -34,7 +35,7 @@ def parse_theme_text(value: str, separators: str = ",/|;") -> tuple[tuple[str, s
         line = re.sub(r"\s+등(?:\s|$).*", "", line)
         for token in re.split(r"[,，/;|]", line):
             name = token.strip().strip("·•-–—")
-            if not name or name.startswith(("#", "🔥")) or ":" in name:
+            if not name or name.startswith(("#", marker)) or ":" in name:
                 continue
             key = name.casefold()
             if key not in collected:

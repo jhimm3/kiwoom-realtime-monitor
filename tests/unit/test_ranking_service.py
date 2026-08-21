@@ -10,8 +10,8 @@ class FakeClient:
         if api_id == "ka00198":
             return {
                 "item_inq_rank": [
-                    {"bigd_rank": "1", "stk_cd": "005930", "stk_nm": "삼성전자", "base_comp_chgr": "1.25"},
-                    {"bigd_rank": "2", "stk_cd": "000660", "stk_nm": "SK하이닉스", "base_comp_chgr": "-0.50"},
+                    {"bigd_rank": "1", "stk_cd": "005930", "stk_nm": "삼성전자", "base_comp_chgr": "1.25", "past_curr_prc": "+72000"},
+                    {"bigd_rank": "2", "stk_cd": "000660", "stk_nm": "SK하이닉스", "base_comp_chgr": "-0.50", "cur_prc": "-260000"},
                 ]
             }
         period = body["dt"]
@@ -29,3 +29,5 @@ class RankingServiceTests(unittest.TestCase):
         self.assertEqual(frozenset({5, 20}), stocks[0].new_high_periods)
         self.assertEqual("5일, 20일", stocks[0].new_high_label)
         self.assertEqual(frozenset({20, 250}), stocks[1].new_high_periods)
+        self.assertEqual(72_000, stocks[0].current_price)
+        self.assertEqual(260_000, stocks[1].current_price)

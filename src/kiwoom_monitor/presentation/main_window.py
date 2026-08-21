@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Protocol
 
-from PySide6.QtGui import QCloseEvent, QResizeEvent, QColor, QDesktopServices, QIcon, QPainter, QPolygon, QPalette
+from PySide6.QtGui import QCloseEvent, QResizeEvent, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPolygon, QPalette
 from PySide6.QtCore import QEvent, QProcess, QThread, QTimer, QUrl, QSize, QPoint
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -240,6 +240,8 @@ class SettingsDialog(QDialog):
             period: QLineEdit(settings.get(f"trade_value_{period}_alert_eok"))
             for period, _ in periods
         }
+        self._trade_value_alert_enabled = QCheckBox("거래대금 강조 사용")
+        self._trade_value_alert_enabled.setChecked(settings.get("trade_value_alert_enabled") == "1")
         self._near_high_fields = {level: QLineEdit(settings.get(f"near_high_{level}_percent")) for level in ("interest", "caution", "fire")}
         self._near_high_row_alert_level = QComboBox()
         self._near_high_row_alert_level.addItem("관심", "interest")
@@ -264,6 +266,8 @@ class SettingsDialog(QDialog):
         self._theme_separators.setPlaceholderText("기본 , / | ; 외에 추가할 문자")
         self._font_size=QLineEdit(settings.get("ui_font_size")); self._font_size.setPlaceholderText("0: 자동")
         self._row_height=QLineEdit(settings.get("ui_row_height")); self._row_height.setPlaceholderText("0: 자동")
+        self._theme_badge_enabled = QCheckBox("테마 배지 표시")
+        self._theme_badge_enabled.setChecked(settings.get("theme_badge_enabled") == "1")
         self._badge_font_size=QLineEdit(settings.get("theme_badge_font_size")); self._badge_font_size.setPlaceholderText("0: 자동")
         self._badge_padding=QLineEdit(settings.get("theme_badge_padding"))
         self._show_server_clock = QCheckBox("오른쪽 하단 시간 표시")
@@ -286,6 +290,26 @@ class SettingsDialog(QDialog):
         }
         for field in self._market_cap_highlight_fields.values():
             field.setPlaceholderText("0: 해당 단계 끔 · 10,000억 = 1조")
+        self._market_cap_highlight_enabled = QCheckBox("시가총액 강조 사용")
+        self._market_cap_highlight_enabled.setChecked(settings.get("market_cap_highlight_enabled") == "1")
+        self._market_cap_highlight_badge_enabled = QCheckBox("시가총액 강조 배지 표시")
+        self._market_cap_highlight_badge_enabled.setChecked(settings.get("market_cap_highlight_badge_enabled") == "1")
+        self._market_cap_highlight_colors = {
+            level: settings.get(f"market_cap_highlight_{level}_color")
+            for level in ("low", "middle", "high")
+        }
+        self._market_cap_highlight_color_buttons = {
+            level: self._market_cap_highlight_color_button(level)
+            for level in self._market_cap_highlight_colors
+        }
+        self._market_cap_highlight_badge_colors = {
+            level: settings.get(f"market_cap_highlight_{level}_badge_color")
+            for level in ("low", "middle", "high")
+        }
+        self._market_cap_highlight_badge_color_buttons = {
+            level: self._market_cap_highlight_badge_color_button(level)
+            for level in self._market_cap_highlight_badge_colors
+        }
         self._decimal_fields = {
             "change_rate": QComboBox(), "trade_value": QComboBox(),
             "strength": QComboBox(), "high_distance": QComboBox(),
@@ -350,17 +374,21 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
 
         strength_tab = QWidget(); strength_form = QFormLayout(strength_tab)
+        strength_form.addRow(self._section_title("거래대금 강조"))
+        strength_form.addRow(self._trade_value_alert_enabled)
+        strength_form.addRow(QLabel("거래대금 빨간 강조 기준(억원, 0: 끔)"))
+        for period, label in self._strength_period_labels.items():
+            strength_form.addRow(f"{label}(억)", self._trade_value_alert_fields[period])
+        strength_form.addRow(self._section_separator())
+        strength_form.addRow(self._section_title("거래강도 기준"))
         strength_form.addRow(QLabel("기간별 거래대금 차이를 반영해 각각 기준을 적용합니다. (%)"))
         strength_form.addRow(QLabel("각 거래대금 제목을 눌러 해당 기간의 거래대금·거래강도를 실시간/직전 완료 구간으로 전환합니다."))
         for period, label in self._strength_period_labels.items():
             interest, caution, fire = self._strength_fields[period]
             strength_form.addRow(f"{label} 관심 / 주의 / 불", self._strength_row(interest, caution, fire))
         strength_form.addRow(self._section_separator())
-        strength_form.addRow(QLabel("거래대금 빨간 강조 기준(억원, 0: 끔)"))
-        for period, label in self._strength_period_labels.items():
-            strength_form.addRow(f"{label}(억)", self._trade_value_alert_fields[period])
+        strength_form.addRow(self._section_title("강도 아이콘"))
         strength_form.addRow(self._strength_icons)
-        strength_form.addRow(self._section_separator())
         strength_form.addRow(QLabel("단계 아이콘: 문자를 바꾸거나 이미지 파일을 선택할 수 있습니다. 권장: 투명 PNG, 정사각형 32×32 또는 64×64"))
         for level, label in (("interest", "관심"), ("caution", "주의"), ("fire", "불")):
             strength_form.addRow(f"{label} 아이콘", self._strength_icon_row(level))
@@ -370,17 +398,22 @@ class SettingsDialog(QDialog):
         tabs.addTab(strength_tab, "거래강도")
 
         high_tab = QWidget(); high_form = QFormLayout(high_tab)
+        high_form.addRow(self._section_title("신고가 기준 및 강조"))
+        high_form.addRow(self._near_high_enabled)
         high_form.addRow(QLabel("신고가와 신고가%에 함께 적용됩니다."))
         high_form.addRow("신고가 기준", self._high_distance_period)
         high_form.addRow("신고가 근접 관심 / 주의 / 불(%)", self._strength_row(self._near_high_fields["interest"], self._near_high_fields["caution"], self._near_high_fields["fire"]))
         high_form.addRow("전체 행 빨간 강조 단계", self._near_high_row_alert_level)
-        high_form.addRow(self._near_high_enabled)
+        high_form.addRow(self._section_separator())
+        high_form.addRow(self._section_title("신고가 아이콘"))
         high_form.addRow(self._near_high_icons)
         high_form.addRow(QLabel("근접 아이콘: 문자를 바꾸거나 이미지 파일을 선택할 수 있습니다. 권장: 투명 PNG, 정사각형 32×32 또는 64×64"))
         for level, label in (("interest", "관심"), ("caution", "주의"), ("fire", "불")):
             high_form.addRow(f"{label} 아이콘", self._near_high_icon_row(level))
+        high_form.addRow(self._section_separator())
+        high_form.addRow(self._section_title("신고가 알림 소리"))
         high_form.addRow(self._near_high_sounds)
-        high_form.addRow(QLabel("소리 파일: 해당 단계에 새로 진입할 때 한 번만 재생됩니다. WAV·MP3 권장"))
+        high_form.addRow(QLabel("소리 파일: 신고가에 가까워져 더 높은 단계에 새로 진입할 때만 재생됩니다. WAV·MP3 권장"))
         for level, label in (("interest", "관심"), ("caution", "주의"), ("fire", "불")):
             high_form.addRow(f"{label} 소리", self._near_high_sound_row(level))
         high_reset = QPushButton("이 탭 초기화")
@@ -389,20 +422,22 @@ class SettingsDialog(QDialog):
         tabs.addTab(high_tab, "신고가")
 
         layout_tab = QWidget(); layout_form = QFormLayout(layout_tab)
+        layout_form.addRow(self._section_title("화면 모드"))
         layout_form.addRow("화면 모드", self._ui_mode)
         layout_form.addRow(self._section_separator())
-        layout_form.addRow(self._section_title("순위 행 표시"))
-        layout_form.addRow("홀수 순위 배경", self._rank_row_color_buttons["odd"])
-        layout_form.addRow("짝수 순위 배경", self._rank_row_color_buttons["even"])
-        layout_form.addRow("순위 변동 행 배경", self._rank_row_color_buttons["changed"])
-        layout_form.addRow(self._rank_changed_highlight_enabled)
-        layout_form.addRow("순위 변동 표시 시간", self._rank_changed_highlight_seconds)
-        layout_form.addRow(self._section_separator())
         layout_form.addRow(self._section_title("고정 UI : 표 크기 및 테마 표시"))
+        layout_form.addRow(self._theme_badge_enabled)
         layout_form.addRow("표 글자 크기(0: 자동)", self._font_size)
         layout_form.addRow("행 높이(0: 자동)", self._row_height)
         layout_form.addRow("테마 배지 글자 크기(0: 자동)", self._badge_font_size)
         layout_form.addRow("테마 배지 여백", self._badge_padding)
+        layout_form.addRow(self._section_separator())
+        layout_form.addRow(self._section_title("순위 행 표시"))
+        layout_form.addRow(self._rank_changed_highlight_enabled)
+        layout_form.addRow("홀수 순위 배경", self._rank_row_color_buttons["odd"])
+        layout_form.addRow("짝수 순위 배경", self._rank_row_color_buttons["even"])
+        layout_form.addRow("순위 변동 행 배경", self._rank_row_color_buttons["changed"])
+        layout_form.addRow("순위 변동 표시 시간", self._rank_changed_highlight_seconds)
         layout_reset = QPushButton("이 탭 초기화")
         layout_reset.clicked.connect(self._reset_ui_layout_settings)
         layout_form.addRow(layout_reset)
@@ -421,11 +456,14 @@ class SettingsDialog(QDialog):
         display_form.addRow("거래강도 소수점", self._decimal_fields["strength"])
         display_form.addRow("신고가% 소수점", self._decimal_fields["high_distance"])
         display_form.addRow(self._section_separator())
-        display_form.addRow(self._section_title("시가총액 표시"))
-        display_form.addRow("1단계 기준(억, 파랑)", self._market_cap_highlight_fields["low"])
-        display_form.addRow("2단계 기준(억, 주황)", self._market_cap_highlight_fields["middle"])
-        display_form.addRow("3단계 기준(억, 빨강)", self._market_cap_highlight_fields["high"])
+        display_form.addRow(self._section_title("시가총액 강조 단계"))
+        display_form.addRow(self._market_cap_highlight_enabled)
+        display_form.addRow(self._market_cap_highlight_badge_enabled)
+        display_form.addRow("1단계 기준(억)", self._market_cap_highlight_row("low"))
+        display_form.addRow("2단계 기준(억)", self._market_cap_highlight_row("middle"))
+        display_form.addRow("3단계 기준(억)", self._market_cap_highlight_row("high"))
         display_form.addRow(self._section_separator())
+        display_form.addRow(self._section_title("오른쪽 하단 시각"))
         display_form.addRow(self._show_server_clock)
         display_reset = QPushButton("이 탭 초기화")
         display_reset.clicked.connect(self._reset_ui_display_settings)
@@ -450,6 +488,7 @@ class SettingsDialog(QDialog):
             tabs.addTab(theme_tab, "종목/테마")
 
         manage_tab = QWidget(); manage_form = QFormLayout(manage_tab)
+        manage_form.addRow(self._section_title("연결 및 기록"))
         if self._api_path is not None:
             api_button = QPushButton("API 설정")
             api_button.clicked.connect(self._open_api_settings)
@@ -462,6 +501,8 @@ class SettingsDialog(QDialog):
             theme_button = QPushButton("종목/테마 관리")
             theme_button.clicked.connect(self._theme_manager_opener)
             manage_form.addRow("종목/테마", theme_button)
+        manage_form.addRow(self._section_separator())
+        manage_form.addRow(self._section_title("설정 백업 및 복원"))
         if self._backup_exporter is not None:
             backup_button = QPushButton("설정 백업 저장")
             backup_button.clicked.connect(self._backup_exporter)
@@ -484,6 +525,7 @@ class SettingsDialog(QDialog):
             for level, field in zip(("interest", "caution", "fire"), fields):
                 field.setText(DEFAULT_SETTINGS[f"strength_{period}_{level}"])
             self._trade_value_alert_fields[period].setText(DEFAULT_SETTINGS[f"trade_value_{period}_alert_eok"])
+        self._trade_value_alert_enabled.setChecked(DEFAULT_SETTINGS["trade_value_alert_enabled"] == "1")
         self._strength_icons.setChecked(DEFAULT_SETTINGS["strength_show_icon"] == "1")
         self._strength_display_mode.setCurrentIndex(1 if DEFAULT_SETTINGS["strength_display_mode"] == "completed" else 0)
         for level, field in self._strength_icon_fields.items():
@@ -516,12 +558,19 @@ class SettingsDialog(QDialog):
         self._ui_mode.setCurrentIndex(0 if DEFAULT_SETTINGS["ui_mode"] == "responsive" else 1)
         self._font_size.setText(DEFAULT_SETTINGS["ui_font_size"])
         self._row_height.setText(DEFAULT_SETTINGS["ui_row_height"])
+        self._theme_badge_enabled.setChecked(DEFAULT_SETTINGS["theme_badge_enabled"] == "1")
         self._badge_font_size.setText(DEFAULT_SETTINGS["theme_badge_font_size"])
         self._badge_padding.setText(DEFAULT_SETTINGS["theme_badge_padding"])
 
     def _reset_ui_display_settings(self) -> None:
         for level, field in self._market_cap_highlight_fields.items():
             field.setText(DEFAULT_SETTINGS[f"market_cap_highlight_{level}_eok"])
+            self._market_cap_highlight_colors[level] = DEFAULT_SETTINGS[f"market_cap_highlight_{level}_color"]
+            self._update_market_cap_highlight_color_button(level)
+            self._market_cap_highlight_badge_colors[level] = DEFAULT_SETTINGS[f"market_cap_highlight_{level}_badge_color"]
+            self._update_market_cap_highlight_badge_color_button(level)
+        self._market_cap_highlight_enabled.setChecked(DEFAULT_SETTINGS["market_cap_highlight_enabled"] == "1")
+        self._market_cap_highlight_badge_enabled.setChecked(DEFAULT_SETTINGS["market_cap_highlight_badge_enabled"] == "1")
         self._show_server_clock.setChecked(DEFAULT_SETTINGS["show_server_clock"] == "1")
         self._theme_trade_summary_enabled.setChecked(DEFAULT_SETTINGS["theme_trade_summary_enabled"] == "1")
         self._theme_trade_summary_period.setCurrentIndex(("1m", "5m", "60m", "day").index(DEFAULT_SETTINGS["theme_trade_summary_period"]))
@@ -719,6 +768,65 @@ class SettingsDialog(QDialog):
             self._rank_row_colors[key] = color.name().upper()
             self._update_rank_row_color_button(key)
 
+    def _market_cap_highlight_row(self, level: str) -> QWidget:
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self._market_cap_highlight_fields[level])
+        layout.addWidget(self._market_cap_highlight_color_buttons[level])
+        layout.addWidget(self._market_cap_highlight_badge_color_buttons[level])
+        layout.addStretch()
+        return widget
+
+    def _market_cap_highlight_color_button(self, level: str) -> QPushButton:
+        button = QPushButton()
+        button.clicked.connect(lambda: self._choose_market_cap_highlight_color(level))
+        self._update_market_cap_highlight_color_button(level, button)
+        return button
+
+    def _update_market_cap_highlight_color_button(self, level: str, button: QPushButton | None = None) -> None:
+        target = button or self._market_cap_highlight_color_buttons.get(level)
+        if target is None:
+            return
+        color = self._market_cap_highlight_colors.get(level, "#333333")
+        target.setText(f"글자색 {color}")
+        target.setStyleSheet(f"color:{color}; background:#FFFFFF; border:1px solid {color}; padding:4px 10px;")
+
+    def _choose_market_cap_highlight_color(self, level: str) -> None:
+        color = QColorDialog.getColor(
+            QColor(self._market_cap_highlight_colors.get(level, "#333333")),
+            self,
+            "시가총액 강조 글자색 선택",
+        )
+        if color.isValid():
+            self._market_cap_highlight_colors[level] = color.name().upper()
+            self._update_market_cap_highlight_color_button(level)
+
+    def _market_cap_highlight_badge_color_button(self, level: str) -> QPushButton:
+        button = QPushButton()
+        button.clicked.connect(lambda: self._choose_market_cap_highlight_badge_color(level))
+        self._update_market_cap_highlight_badge_color_button(level, button)
+        return button
+
+    def _update_market_cap_highlight_badge_color_button(self, level: str, button: QPushButton | None = None) -> None:
+        target = button or self._market_cap_highlight_badge_color_buttons.get(level)
+        if target is None:
+            return
+        color = self._market_cap_highlight_badge_colors.get(level, "#FFFFFF")
+        target.setText(f"배지색 {color}")
+        target.setStyleSheet(f"background:{color}; color:{text_color(color)}; border:1px solid #999; padding:4px 10px;")
+
+    def _choose_market_cap_highlight_badge_color(self, level: str) -> None:
+        color = QColorDialog.getColor(
+            QColor(self._market_cap_highlight_badge_colors.get(level, "#FFFFFF")),
+            self,
+            "시가총액 강조 배지색 선택",
+        )
+        if color.isValid():
+            self._market_cap_highlight_badge_colors[level] = color.name().upper()
+            self._update_market_cap_highlight_badge_color_button(level)
+
     def _open_api_settings(self) -> None:
         if self._api_path is None:
             return
@@ -767,6 +875,7 @@ class SettingsDialog(QDialog):
             self._settings.set(f"strength_{period}_fire", str(fire))
         for period, value in trade_value_alerts.items():
             self._settings.set(f"trade_value_{period}_alert_eok", str(value))
+        self._settings.set("trade_value_alert_enabled", "1" if self._trade_value_alert_enabled.isChecked() else "0")
         for level, value in zip(("interest", "caution", "fire"), near_high_thresholds):
             self._settings.set(f"near_high_{level}_percent", str(value))
         self._settings.set("near_high_row_alert_level", str(self._near_high_row_alert_level.currentData()))
@@ -777,9 +886,13 @@ class SettingsDialog(QDialog):
         self._settings.set("near_high_sound_enabled", "1" if self._near_high_sounds.isChecked() else "0")
         for level, value in self._near_high_sound_paths.items():
             self._settings.set(f"near_high_sound_{level}", value)
-        self._settings.set("ui_font_size", str(font_size)); self._settings.set("ui_row_height", str(row_height)); self._settings.set("theme_badge_font_size", str(badge_font_size)); self._settings.set("theme_badge_padding", str(badge_padding))
+        self._settings.set("ui_font_size", str(font_size)); self._settings.set("ui_row_height", str(row_height)); self._settings.set("theme_badge_enabled", "1" if self._theme_badge_enabled.isChecked() else "0"); self._settings.set("theme_badge_font_size", str(badge_font_size)); self._settings.set("theme_badge_padding", str(badge_padding))
         for level, value in market_cap_highlights.items():
             self._settings.set(f"market_cap_highlight_{level}_eok", str(value))
+            self._settings.set(f"market_cap_highlight_{level}_color", self._market_cap_highlight_colors[level])
+            self._settings.set(f"market_cap_highlight_{level}_badge_color", self._market_cap_highlight_badge_colors[level])
+        self._settings.set("market_cap_highlight_enabled", "1" if self._market_cap_highlight_enabled.isChecked() else "0")
+        self._settings.set("market_cap_highlight_badge_enabled", "1" if self._market_cap_highlight_badge_enabled.isChecked() else "0")
         for key, field in self._decimal_fields.items():
             self._settings.set(f"decimal_{key}", field.currentText())
         self._settings.set("near_high_alert_enabled", "1" if self._near_high_enabled.isChecked() else "0")
@@ -1091,10 +1204,12 @@ class ImageThemeRowsDialog(QDialog):
         self.setWindowTitle("이미지 테마 OCR 수정")
         self.resize(680, 520)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("OCR 결과를 수정하세요. 행 추가·삭제도 가능하며, 다음 화면에서 기존 테마와 비교합니다."))
+        layout.addWidget(QLabel("OCR 결과를 수정하세요. 행 추가·삭제가 가능하며, Excel의 종목명·테마 두 열을 복사해 Ctrl+V로 한 번에 붙여넣을 수 있습니다."))
         self.table = QTableWidget(len(rows), 2)
         self.table.setHorizontalHeaderLabels(("종목명", "테마"))
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.installEventFilter(self)
+        self.table.viewport().installEventFilter(self)
         for index, row in enumerate(rows):
             self.table.setItem(index, 0, QTableWidgetItem(str(getattr(row, "name", ""))))
             self.table.setItem(index, 1, QTableWidgetItem(str(getattr(row, "themes", ""))))
@@ -1110,6 +1225,29 @@ class ImageThemeRowsDialog(QDialog):
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def eventFilter(self, watched: object, event: object) -> bool:
+        if watched in (self.table, self.table.viewport()) and getattr(event, "type", lambda: None)() == QEvent.Type.KeyPress:
+            if getattr(event, "matches", lambda _: False)(QKeySequence.StandardKey.Paste):
+                self._paste_rows_from_clipboard()
+                return True
+        return super().eventFilter(watched, event)  # type: ignore[arg-type]
+
+    def _paste_rows_from_clipboard(self) -> None:
+        text = QApplication.clipboard().text().strip()
+        if not text:
+            return
+        start_row = max(0, self.table.currentRow())
+        for offset, line in enumerate(text.splitlines()):
+            values = [value.strip() for value in line.split("\t")]
+            if not any(values):
+                continue
+            row = start_row + offset
+            while row >= self.table.rowCount():
+                self.table.insertRow(self.table.rowCount())
+            self.table.setItem(row, 0, QTableWidgetItem(values[0] if values else ""))
+            self.table.setItem(row, 1, QTableWidgetItem(values[1] if len(values) > 1 else ""))
+        self.table.setCurrentCell(start_row, 0)
+
     def rows(self) -> tuple[tuple[str, str], ...]:
         values = []
         for index in range(self.table.rowCount()):
@@ -1121,20 +1259,56 @@ class ImageThemeRowsDialog(QDialog):
 
 
 class TextThemeImportDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, settings: SettingsRepository, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._settings = settings
         self.setWindowTitle("텍스트 테마 업데이트")
         self.resize(720, 520)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("테마/종목 목록을 그대로 붙여넣으세요. 🔥 뒤 제목을 테마로 적용하고, #소분류 이름은 별도 테마로 추가하지 않습니다."))
+        rules = QFormLayout()
+        self._heading_marker = QLineEdit(settings.get("theme_text_heading_marker"))
+        self._heading_marker.setPlaceholderText("기본: 🔥 · 예: ⭐ 또는 테마:")
+        rules.addRow("텍스트 테마 시작 표시", self._heading_marker)
+        layout.addLayout(rules)
         self._text = QTextEdit()
-        self._text.setPlaceholderText("예:\n🔥반도체/MLCC\nSK하이닉스, 삼성전자\n#HBM: ISC, 티엘비")
+        self._update_placeholder()
+        self._heading_marker.textChanged.connect(self._save_heading_marker)
         layout.addWidget(self._text)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("미리보기")
+        example_button = buttons.addButton("예시 넣기", QDialogButtonBox.ButtonRole.ActionRole)
+        example_button.clicked.connect(self._insert_example)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _save_heading_marker(self, value: str) -> None:
+        self._settings.set("theme_text_heading_marker", value.strip() or "🔥")
+        self._update_placeholder()
+
+    def _update_placeholder(self) -> None:
+        marker = self._heading_marker.text().strip() or "🔥"
+        self._text.setPlaceholderText(
+            "예:\n"
+            f"{marker}반도체\n"
+            "삼성전자, SK하이닉스, 네패스\n\n"
+            f"{marker}바이오\n"
+            "삼양바이오팜, 나이벡, 에스티팜\n\n"
+            f"{marker}스테이블코인\n"
+            "SK증권, 다날, 카카오페이"
+        )
+
+    def _insert_example(self) -> None:
+        marker = self._heading_marker.text().strip() or "🔥"
+        self._text.setPlainText(
+            f"{marker}반도체\n"
+            "삼성전자, SK하이닉스, 네패스\n\n"
+            f"{marker}바이오\n"
+            "삼양바이오팜, 나이벡, 에스티팜\n\n"
+            f"{marker}스테이블코인\n"
+            "SK증권, 다날, 카카오페이"
+        )
 
     @property
     def text(self) -> str:
@@ -1330,34 +1504,56 @@ class ThemeManagerDialog(QDialog):
     def __init__(self, repository: object, settings: SettingsRepository, on_excel_update: Callable[[], None] | None = None, on_image_update: Callable[[], None] | None = None, on_catalog_sync: Callable[[], None] | None = None, parent: QWidget | None = None, on_themes_changed: Callable[[], None] | None = None) -> None:
         super().__init__(parent); self._repository=repository; self._settings=settings; self._separators=",/|;" + settings.get("theme_custom_separators"); self._on_excel_update=on_excel_update; self._on_image_update=on_image_update; self._on_themes_changed=on_themes_changed; self.setWindowTitle("종목/테마 관리"); self.resize(560,420)
         self._search=QLineEdit(); self._search.setPlaceholderText("종목명 검색"); self._table=QTableWidget(0,2); self._table.setHorizontalHeaderLabels(("종목명","테마"))
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self._table.setColumnWidth(0, int(settings.get("theme_manager_stock_column_width")))
+        self._table.setColumnWidth(1, int(settings.get("theme_manager_theme_column_width")))
+        header.sectionResized.connect(self._save_table_column_width)
         self._custom_separators = QLineEdit(settings.get("theme_custom_separators")); self._custom_separators.setPlaceholderText("기본 , / | ; 외에 사용할 구분 문자")
         self._import_exclusions = QLineEdit(settings.get("theme_import_exclusions")); self._import_exclusions.setPlaceholderText("예: 개별이슈, 단순뉴스")
-        self._add=QPushButton("신규 종목 테마 추가"); self._text_import = QPushButton("텍스트 테마 업데이트"); layout=QVBoxLayout(self); layout.addWidget(self._search); layout.addWidget(self._table)
+        self._add=QPushButton("신규 종목 테마 추가"); self._text_import = QPushButton("텍스트 테마 업데이트")
+        layout = QVBoxLayout(self)
+        tabs = QTabWidget()
+        stock_tab = QWidget(); stock_layout = QVBoxLayout(stock_tab)
+        theme_tab = QWidget(); theme_layout = QVBoxLayout(theme_tab)
+        stock_layout.addWidget(SettingsDialog._section_title("등록 종목/테마")); stock_layout.addWidget(self._search); stock_layout.addWidget(self._table)
         if on_catalog_sync is not None:
             last = settings.get("krx_stock_catalog_date")
             sync = QPushButton("상장종목 목록 동기화")
             sync.clicked.connect(on_catalog_sync)
-            layout.addWidget(sync)
-            layout.addWidget(QLabel(f"마지막 동기화: {last or '없음'}"))
-        layout.addWidget(QLabel("추가 테마 구분자"))
-        layout.addWidget(self._custom_separators)
-        layout.addWidget(QLabel("이미지/Excel/텍스트 업데이트 제외 테마"))
-        layout.addWidget(self._import_exclusions)
-        layout.addWidget(self._add)
-        layout.addWidget(self._text_import)
+            stock_layout.addWidget(SettingsDialog._section_separator())
+            stock_layout.addWidget(SettingsDialog._section_title("상장목록 동기화"))
+            stock_layout.addWidget(sync)
+            stock_layout.addWidget(QLabel(f"마지막 동기화: {last or '없음'}"))
+        stock_layout.addStretch()
         self._add.clicked.connect(self._add_new); self._text_import.clicked.connect(self._import_text)
+        theme_layout.addWidget(SettingsDialog._section_title("공통 입력 규칙"))
+        theme_layout.addWidget(QLabel("추가 테마 구분자"))
+        theme_layout.addWidget(self._custom_separators)
+        theme_layout.addWidget(QLabel("이미지/Excel/텍스트 업데이트 제외 테마"))
+        theme_layout.addWidget(self._import_exclusions)
+        theme_layout.addWidget(SettingsDialog._section_separator())
+        theme_layout.addWidget(SettingsDialog._section_title("테마 입력 및 갱신"))
+        theme_layout.addWidget(self._add)
+        theme_layout.addWidget(self._text_import)
         if self._on_excel_update is not None:
             excel = QPushButton("Excel 테마 업데이트")
             excel.clicked.connect(self._on_excel_update)
-            layout.addWidget(excel)
+            theme_layout.addWidget(excel)
         if self._on_image_update is not None:
             image = QPushButton("이미지 테마 업데이트")
             image.clicked.connect(self._on_image_update)
-            layout.addWidget(image)
+            theme_layout.addWidget(image)
+        theme_layout.addWidget(SettingsDialog._section_separator())
+        theme_layout.addWidget(SettingsDialog._section_title("테마 일괄 관리"))
         self._bulk_edit = QPushButton("테마 일괄 수정")
         self._clear_all = QPushButton("전체 테마 초기화")
-        layout.addWidget(self._bulk_edit)
-        layout.addWidget(self._clear_all)
+        theme_layout.addWidget(self._bulk_edit)
+        theme_layout.addWidget(self._clear_all)
+        theme_layout.addStretch()
+        tabs.addTab(theme_tab, "테마")
+        tabs.addTab(stock_tab, "종목")
+        layout.addWidget(tabs)
         self._bulk_edit.clicked.connect(self._rename_theme)
         self._clear_all.clicked.connect(self._clear_all_themes)
         self._custom_separators.textChanged.connect(lambda _: self._save_custom_separators())
@@ -1369,6 +1565,11 @@ class ThemeManagerDialog(QDialog):
         self._separators = ",/|;" + value
     def _save_import_exclusions(self) -> None:
         self._settings.set("theme_import_exclusions", self._import_exclusions.text().strip())
+    def _save_table_column_width(self, logical_index: int, _old_width: int, new_width: int) -> None:
+        if logical_index == 0:
+            self._settings.set("theme_manager_stock_column_width", str(new_width))
+        elif logical_index == 1:
+            self._settings.set("theme_manager_theme_column_width", str(new_width))
     def _filter_import_exclusions(self, rows: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
         excluded = {theme_key(theme) for theme in parse_themes(self._settings.get("theme_import_exclusions"), self._separators)}
         if not excluded:
@@ -1402,12 +1603,14 @@ class ThemeManagerDialog(QDialog):
         return
 
     def _import_text(self) -> None:
-        dialog = TextThemeImportDialog(self)
+        dialog = TextThemeImportDialog(self._settings, self)
         if not dialog.exec():
             return
-        rows = parse_theme_text(dialog.text, self._separators)
+        self._separators = ",/|;" + self._settings.get("theme_custom_separators")
+        marker = self._settings.get("theme_text_heading_marker")
+        rows = parse_theme_text(dialog.text, self._separators, marker)
         if not rows:
-            QMessageBox.information(self, "텍스트 확인", "🔥 테마 제목 아래에서 종목명을 찾지 못했습니다. 텍스트 내용을 확인하세요.")
+            QMessageBox.information(self, "텍스트 확인", f"{marker} 테마 제목 아래에서 종목명을 찾지 못했습니다. 텍스트 내용을 확인하세요.")
             return
         self._apply_import_rows(rows)
 
@@ -1574,6 +1777,7 @@ class MainWindow(QMainWindow):
         self._daily_highs: dict[str, DailyHighTargets] = {}
         self._previous_day_trade_values: dict[str, float] = {}
         self._themes = themes or {}
+        self._pending_price_cache: dict[str, int] = {}
         self._columns = columns
         self._stock_lookup = stock_lookup
         self._theme_store = theme_store
@@ -1585,6 +1789,11 @@ class MainWindow(QMainWindow):
         self._nxt_eligibility_worker: NxtEligibilityWorker | None = None
         self._new_high_worker: NewHighWorker | None = None
         self._ranking_worker: RankingWorker | None = None
+        self._settings_dialog: SettingsDialog | None = None
+        self._deferred_ranking_stocks: tuple[object, ...] | None = None
+        self._deferred_ranking_flush_scheduled = False
+        self._table_update_deferred = False
+        self._table_update_flush_scheduled = False
         self._partial_ranking_retry_count = 0
         self._initial_ranking_size_adjusted = False
         self._ranking_request_due = False
@@ -1709,6 +1918,10 @@ class MainWindow(QMainWindow):
         self._theme_trade_summary_timer.setSingleShot(True)
         self._theme_trade_summary_timer.setInterval(200)
         self._theme_trade_summary_timer.timeout.connect(self._refresh_theme_trade_summary)
+        self._price_cache_timer = QTimer(self)
+        self._price_cache_timer.setSingleShot(True)
+        self._price_cache_timer.setInterval(1_000)
+        self._price_cache_timer.timeout.connect(self._save_current_price_cache)
         self.setCentralWidget(content)
         self._apply_table_visuals()
         message = "새로고침으로 키움 REST 조회를 시작합니다." if ranking_loader else "상단 API 설정에서 키를 입력해 연결할 수 있습니다."
@@ -1721,6 +1934,10 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._open_api_settings)
 
     def _open_settings(self) -> None:
+        if self._settings_dialog is not None and self._settings_dialog.isVisible():
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+            return
         dialog = SettingsDialog(
             self._settings,
             self._api_config_path(),
@@ -1734,28 +1951,41 @@ class MainWindow(QMainWindow):
             column_manager_panel_factory=lambda parent: ColumnManagerDialog(self._columns, self.COLUMNS, self._table, parent, embedded=True, on_applied=self._apply_column_settings) if self._columns is not None else QWidget(parent),
             stock_lookup=self._stock_lookup,
         )
-        if dialog.exec():
-            if self._ranking_loader is not None and hasattr(self._ranking_loader, "set_query_type"):
-                self._ranking_loader.set_query_type(self._settings.get("rank_query_type"))
-            saved_rank_query = self._settings.get("rank_query_type")
-            self._rank_query_selector.setCurrentIndex(("5", "1", "2", "3", "4").index(saved_rank_query) if saved_rank_query in {"1", "2", "3", "4", "5"} else 0)
-            self._schedule_next_ranking_refresh()
-            self._apply_table_visuals()
-            self._update_clock_label()
-            self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1")
-            for code in self._row_by_code:
+        # 기본 설정은 메인 표를 막지 않는 별도 창으로 연다. 따라서 순위 갱신은
+        # 설정 창이 열려 있어도 즉시 표에 반영된다.
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.finished.connect(lambda result, source=dialog: self._on_settings_closed(source, result))
+        self._settings_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_settings_closed(self, dialog: SettingsDialog, result: int) -> None:
+        if self._settings_dialog is dialog:
+            self._settings_dialog = None
+        if result != QDialog.DialogCode.Accepted:
+            return
+        if self._ranking_loader is not None and hasattr(self._ranking_loader, "set_query_type"):
+            self._ranking_loader.set_query_type(self._settings.get("rank_query_type"))
+        saved_rank_query = self._settings.get("rank_query_type")
+        self._rank_query_selector.setCurrentIndex(("5", "1", "2", "3", "4").index(saved_rank_query) if saved_rank_query in {"1", "2", "3", "4", "5"} else 0)
+        self._schedule_next_ranking_refresh()
+        self._apply_table_visuals()
+        self._update_clock_label()
+        self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1")
+        for code in self._row_by_code:
+            self._apply_near_high_background(code)
+            current_price = self._current_prices.get(code)
+            if current_price is not None:
+                self._set_near_high_level(code, current_price, play_sound=False)
                 self._apply_near_high_background(code)
-                current_price = self._current_prices.get(code)
-                if current_price is not None:
-                    self._set_near_high_level(code, current_price, play_sound=False)
-                    self._apply_near_high_background(code)
-                self._render_new_high_price(code)
-                self._render_high_distance(code)
-                self._render_trade_values(code)
-                self._render_market_cap(code)
-            self.statusBar().showMessage("기본 설정 저장 완료")
-            if dialog.api_changed:
-                self._restart_for_api_settings()
+            self._render_new_high_price(code)
+            self._render_high_distance(code)
+            self._render_trade_values(code)
+            self._render_market_cap(code)
+        self.statusBar().showMessage("기본 설정 저장 완료")
+        if dialog.api_changed:
+            self._restart_for_api_settings()
 
     def _on_themes_changed(self) -> None:
         if self._theme_store is not None:
@@ -2337,6 +2567,14 @@ class MainWindow(QMainWindow):
             else:
                 self._schedule_next_ranking_refresh()
             return
+        # 설정·테마·입력 창을 조작하는 중에는 표 전체를 다시 만들지 않는다.
+        # 최신 결과 하나만 보관하고 창이 닫힌 뒤 반영해 입력 끊김을 막는다.
+        if QApplication.activeModalWidget() is not None:
+            self._deferred_ranking_stocks = stocks
+            self._set_api_status("API: 연결됨", "#008000")
+            self._schedule_next_ranking_refresh()
+            self._schedule_deferred_ranking_flush()
+            return
         self._partial_ranking_retry_count = 0
         new_rank_by_code = {
             str(getattr(stock, "code", "")): int(getattr(stock, "rank", 0) or 0)
@@ -2382,6 +2620,8 @@ class MainWindow(QMainWindow):
                     theme_frequency[key] = theme_frequency.get(key, 0) + 1
         self._visible_theme_frequency = theme_frequency
         codes = tuple(stock.code for stock in stocks)
+        if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_last_prices"):
+            self._current_prices.update(self._stock_lookup.load_last_prices(codes))
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_fundamentals"):
             self._fundamentals.update(self._stock_lookup.load_fundamentals(codes))
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_nxt_enabled"):
@@ -2389,10 +2629,15 @@ class MainWindow(QMainWindow):
             self._nxt_checked_codes.update(saved_nxt)
             self._nxt_enabled_codes.update(code for code, enabled in saved_nxt.items() if enabled)
             self._nxt_enabled_codes.difference_update(code for code, enabled in saved_nxt.items() if not enabled)
+        use_ranking_price = self._is_after_hours_data_pause()
         for row, stock in enumerate(stocks):
             self._row_by_code[stock.code] = row
             self._ranked_stock_names[stock.code] = stock.name
             self._new_high_periods[stock.code] = frozenset(getattr(stock, "new_high_periods", ()))
+            ranking_price = getattr(stock, "current_price", None)
+            if use_ranking_price and isinstance(ranking_price, int) and ranking_price > 0:
+                self._current_prices[stock.code] = ranking_price
+                self._pending_price_cache[stock.code] = ranking_price
             values = (
                 str(stock.rank),
                 stock.name,
@@ -2420,6 +2665,8 @@ class MainWindow(QMainWindow):
             if stock.code in self._nxt_enabled_codes:
                 self._table.item(row, 1).setToolTip("NXT 거래 가능")
             self._table.setCellWidget(row, 2, self._theme_badges(stock.code, stock.name))
+        if self._pending_price_cache and not self._price_cache_timer.isActive():
+            self._price_cache_timer.start()
         for stock in stocks:
             current_price = self._current_prices.get(stock.code)
             row = self._row_by_code[stock.code]
@@ -2442,11 +2689,65 @@ class MainWindow(QMainWindow):
         # 분봉·기본정보 40건 동시 보완은 모의 API 제한을 쉽게 초과하므로,
         # 안정적인 순위 조회가 확인된 뒤 사용자가 따로 실행하는 방식으로 제공한다.
 
+    def _schedule_deferred_ranking_flush(self) -> None:
+        if self._deferred_ranking_flush_scheduled:
+            return
+        self._deferred_ranking_flush_scheduled = True
+        QTimer.singleShot(150, self._flush_deferred_ranking)
+
+    def _flush_deferred_ranking(self) -> None:
+        self._deferred_ranking_flush_scheduled = False
+        if self._closing or self._deferred_ranking_stocks is None:
+            return
+        if QApplication.activeModalWidget() is not None:
+            self._schedule_deferred_ranking_flush()
+            return
+        stocks = self._deferred_ranking_stocks
+        self._deferred_ranking_stocks = None
+        self._on_ranking_loaded(stocks)
+
+    def _defer_table_update_while_modal(self) -> bool:
+        """설정/입력 창을 조작하는 동안에는 메인 표 렌더링을 미룬다."""
+        if QApplication.activeModalWidget() is None:
+            return False
+        self._table_update_deferred = True
+        if not self._table_update_flush_scheduled:
+            self._table_update_flush_scheduled = True
+            QTimer.singleShot(150, self._flush_deferred_table_updates)
+        return True
+
+    def _flush_deferred_table_updates(self) -> None:
+        self._table_update_flush_scheduled = False
+        if self._closing or not self._table_update_deferred:
+            return
+        if QApplication.activeModalWidget() is not None:
+            self._defer_table_update_while_modal()
+            return
+        self._table_update_deferred = False
+        for code in tuple(self._row_by_code):
+            current_price = self._current_prices.get(code)
+            if current_price is not None:
+                row = self._row_by_code[code]
+                self._table.setItem(row, 5, QTableWidgetItem(f"{current_price:,}"))
+                self._set_near_high_level(code, current_price, play_sound=False)
+            self._render_new_high_price(code)
+            self._render_high_distance(code)
+            self._render_trade_values(code)
+            self._render_market_cap(code)
+            self._apply_near_high_background(code)
+        self._table.viewport().update()
+
     def _theme_badges(self, code: str, name: str) -> QWidget:
         widget = QWidget(); layout = QHBoxLayout(widget); layout.setContentsMargins(2, 2, 2, 2); layout.setSpacing(3)
         themes = [(index, theme.strip()) for index, theme in enumerate(self._themes.get("".join(name.split()), "").split(",")) if theme.strip()]
         frequency = getattr(self, "_visible_theme_frequency", {})
         themes.sort(key=lambda item: (-frequency.get(item[1].casefold(), 0), item[0]))
+        if self._settings.get("theme_badge_enabled") != "1":
+            label = QLabel(", ".join(theme for _, theme in themes) or "-")
+            label.setStyleSheet("padding: 2px;")
+            layout.addWidget(label)
+            layout.addStretch()
+            return widget
         for _, theme in themes:
             if theme:
                 color = self._theme_store.color_for_stock_theme(code, theme) if self._theme_store else "#DCE6F1"
@@ -2638,6 +2939,9 @@ class MainWindow(QMainWindow):
         if row is None or tick.current_price is None:
             return
         self._current_prices[tick.code] = tick.current_price
+        self._pending_price_cache[tick.code] = tick.current_price
+        if not self._price_cache_timer.isActive():
+            self._price_cache_timer.start()
         if tick.high_price and tick.high_price > 0:
             self._today_high_prices[tick.code] = tick.high_price
             if tick.current_price >= tick.high_price:
@@ -2657,6 +2961,11 @@ class MainWindow(QMainWindow):
     def _flush_trade_tick_updates(self) -> None:
         pending = tuple(self._pending_trade_ticks.values())
         self._pending_trade_ticks.clear()
+        if self._defer_table_update_while_modal():
+            for tick in pending:
+                if tick.current_price is not None:
+                    self._set_near_high_level(tick.code, tick.current_price)
+            return
         for tick in pending:
             row = self._row_by_code.get(tick.code)
             if row is None or tick.current_price is None:
@@ -2670,6 +2979,15 @@ class MainWindow(QMainWindow):
             self._apply_near_high_background(tick.code)
             self._render_high_distance(tick.code)
             self._render_trade_values(tick.code, live_only=tick.code not in self._minute_history_codes)
+
+    def _save_current_price_cache(self) -> None:
+        """체결마다 저장하지 않고 짧게 묶어 마지막 현재가만 보존한다."""
+        if not self._pending_price_cache:
+            return
+        prices = self._pending_price_cache
+        self._pending_price_cache = {}
+        if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_last_prices"):
+            self._stock_lookup.update_last_prices(prices)
 
     def _start_secondary_loading(self, codes: tuple[str, ...]) -> None:
         """Start non-realtime API work in the defined priority order."""
@@ -2748,6 +3066,8 @@ class MainWindow(QMainWindow):
             return
         self._minute_aggregator.seed(code, bars, self._ranking_now())
         self._minute_history_codes.add(code)
+        if self._defer_table_update_while_modal():
+            return
         self._apply_near_high_background(code)
         self._render_trade_values(code)
 
@@ -2782,6 +3102,8 @@ class MainWindow(QMainWindow):
             self._nxt_enabled_codes.discard(code)
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_nxt_enabled"):
             self._stock_lookup.update_nxt_enabled(code, enabled, self._ranking_now().strftime("%Y-%m-%d"))
+        if self._defer_table_update_while_modal():
+            return
         row = self._row_by_code.get(code)
         if row is None:
             return
@@ -2842,7 +3164,10 @@ class MainWindow(QMainWindow):
             self._near_high_levels[code] = level
         else:
             self._near_high_levels.pop(code, None)
-        if play_sound and level and level != previous:
+        # 신고가에 가까워지는 방향(관심 → 주의 → 불)으로만 알린다.
+        # 멀어지는 방향(불 → 주의, 주의 → 관심, 관심 → 해제)에서는 재생하지 않는다.
+        severity = {"": 0, "interest": 1, "caution": 2, "fire": 3}
+        if play_sound and level and severity[level] > severity.get(previous, 0):
             self._play_near_high_sound(level)
 
     def _near_high_icon_image_path(self, level: str) -> Path | None:
@@ -2897,6 +3222,8 @@ class MainWindow(QMainWindow):
             self._daily_highs[code] = targets
             if targets.previous_day_trade_value_eok is not None:
                 self._previous_day_trade_values[code] = targets.previous_day_trade_value_eok
+            if self._defer_table_update_while_modal():
+                return
             self._render_new_high_price(code)
             self._render_high_distance(code)
             self._render_trade_values(code)
@@ -2927,7 +3254,7 @@ class MainWindow(QMainWindow):
         for column, period, value in visible_values:
             item = QTableWidgetItem(f"{value:.{self._decimal_places('trade_value')}f}")
             threshold = float(self._settings.get(f"trade_value_{period}_alert_eok"))
-            is_alert = threshold > 0 and value >= threshold
+            is_alert = self._settings.get("trade_value_alert_enabled") == "1" and threshold > 0 and value >= threshold
             row = self._row_by_code.get(code, 0)
             item.setBackground(
                 QColor("#F4CCCC") if is_alert and code not in self._near_high_codes
@@ -3149,13 +3476,13 @@ class MainWindow(QMainWindow):
         path = self._api_config_path().parent.parent / stored
         return path if path.is_file() else None
 
-    def _start_fundamentals_loading(self, codes: tuple[str, ...]) -> bool:
+    def _start_fundamentals_loading(self, codes: tuple[str, ...], *, force: bool = False) -> bool:
         if self._closing or self._ranking_priority_preparing or self._fundamentals_worker_factory is None:
             return False
         if self._fundamentals_worker is not None and self._fundamentals_worker.isRunning():
             return True
-        missing_codes = tuple(code for code in codes if code not in self._fundamentals)
-        if self._stock_lookup is not None and hasattr(self._stock_lookup, "fundamentals_to_refresh"):
+        missing_codes = codes if force else tuple(code for code in codes if code not in self._fundamentals)
+        if not force and self._stock_lookup is not None and hasattr(self._stock_lookup, "fundamentals_to_refresh"):
             missing_codes = tuple(self._stock_lookup.fundamentals_to_refresh(codes, self._ranking_now().strftime("%Y-%m-%d")))
         if not missing_codes:
             return False
@@ -3176,11 +3503,22 @@ class MainWindow(QMainWindow):
     def _on_fundamentals_received(self, code: str, fundamentals: object) -> None:
         if isinstance(fundamentals, StockFundamentals):
             self._fundamentals[code] = fundamentals
+            if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_fundamentals"):
+                self._stock_lookup.update_fundamentals(code, fundamentals.market_cap_eok, fundamentals.float_ratio_percent, fundamentals.high_250_price)
+            if fundamentals.current_price is not None:
+                self._current_prices[code] = fundamentals.current_price
+                self._pending_price_cache[code] = fundamentals.current_price
+                if not self._price_cache_timer.isActive():
+                    self._price_cache_timer.start()
+            if self._defer_table_update_while_modal():
+                return
+            if fundamentals.current_price is not None:
+                row = self._row_by_code.get(code)
+                if row is not None:
+                    self._table.setItem(row, 5, QTableWidgetItem(f"{fundamentals.current_price:,}"))
             self._render_market_cap(code)
             self._render_new_high_price(code)
             self._render_high_distance(code)
-            if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_fundamentals"):
-                self._stock_lookup.update_fundamentals(code, fundamentals.market_cap_eok, fundamentals.float_ratio_percent, fundamentals.high_250_price)
             self._render_trade_values(code)
 
     def _render_market_cap(self, code: str) -> None:
@@ -3188,22 +3526,42 @@ class MainWindow(QMainWindow):
         fundamentals = self._fundamentals.get(code)
         if row is None or fundamentals is None:
             return
+        level = self._market_cap_highlight_level(fundamentals.market_cap_eok)
         item = QTableWidgetItem(self._format_market_cap_eok(fundamentals.market_cap_eok))
         item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         item.setForeground(QColor(self._market_cap_highlight_color(fundamentals.market_cap_eok)))
         item.setBackground(self._row_background_color(code, row))
         self._table.setItem(row, 15, item)
+        self._table.removeCellWidget(row, 15)
+        if level is not None and self._settings.get("market_cap_highlight_badge_enabled") == "1":
+            badge = QLabel(item.text())
+            badge.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            badge_color = self._settings.get(f"market_cap_highlight_{level}_badge_color")
+            text = self._settings.get(f"market_cap_highlight_{level}_color")
+            badge.setStyleSheet(f"background:{badge_color}; color:{text}; border-radius:5px; padding:2px 6px;")
+            container = QWidget()
+            layout = QHBoxLayout(container)
+            layout.setContentsMargins(3, 2, 3, 2)
+            layout.addStretch()
+            layout.addWidget(badge)
+            self._table.setCellWidget(row, 15, container)
 
-    def _market_cap_highlight_color(self, market_cap_eok: float) -> str:
-        """시가총액 구간별 전체 글자색을 반환한다."""
-        for level, color in (("high", "#C00000"), ("middle", "#C55A11"), ("low", "#0070C0")):
+    def _market_cap_highlight_level(self, market_cap_eok: float) -> str | None:
+        if self._settings.get("market_cap_highlight_enabled") != "1":
+            return None
+        for level in ("high", "middle", "low"):
             try:
                 threshold = max(0.0, float(self._settings.get(f"market_cap_highlight_{level}_eok")))
             except (TypeError, ValueError):
                 threshold = 0.0
             if threshold > 0 and market_cap_eok >= threshold:
-                return color
-        return "#333333"
+                return level
+        return None
+
+    def _market_cap_highlight_color(self, market_cap_eok: float) -> str:
+        """시가총액 구간별 전체 글자색을 반환한다."""
+        level = self._market_cap_highlight_level(market_cap_eok)
+        return self._settings.get(f"market_cap_highlight_{level}_color") if level else "#333333"
 
     def _format_market_cap_eok(self, value: float) -> str:
         """시가총액은 조·억 경계를 눈에 띄게 구분해 표시한다."""
@@ -3234,6 +3592,8 @@ class MainWindow(QMainWindow):
             self._ranking_preparation_timer.stop()
             self._clock_timer.stop()
             self._theme_trade_summary_timer.stop()
+            self._price_cache_timer.stop()
+            self._save_current_price_cache()
             if hasattr(self, "_trade_tick_flush_timer"):
                 self._trade_tick_flush_timer.stop()
             for player, _ in self._near_high_sound_players.values():

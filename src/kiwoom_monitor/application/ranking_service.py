@@ -38,6 +38,7 @@ class RankingService:
         self._new_high_cached_at = 0.0
         self._stocks = stocks
         self._query_type = query_type if query_type in {"1", "2", "3", "4", "5"} else "5"
+        self._missing_current_price_logged: set[str] = set()
 
     def set_query_type(self, query_type: str) -> None:
         if query_type not in {"1", "2", "3", "4", "5"}:
@@ -108,6 +109,15 @@ class RankingService:
                 continue
             stock_rows.append((code, name, ""))
             periods = frozenset(period for period, codes in new_high_codes.items() if code in codes)
+            current_price = self._ranking_current_price(record)
+            if current_price is None and code not in self._missing_current_price_logged:
+                self._missing_current_price_logged.add(code)
+                price_fields = {
+                    key: record.get(key)
+                    for key in record
+                    if "pr" in key.casefold() or "price" in key.casefold()
+                }
+                logger.warning("ka00198 현재가 누락: %s(%s) · 가격 관련 응답=%s", name, code, price_fields)
             stocks.append(
                 RankedStock(
                     rank=self._to_int(record.get("bigd_rank"), fallback=len(stocks) + 1),
@@ -115,6 +125,7 @@ class RankingService:
                     name=name,
                     change_rate=str(record.get("base_comp_chgr", "-")).strip() or "-",
                     new_high_periods=periods,
+                    current_price=current_price,
                 )
             )
         if self._stocks is not None:
@@ -207,3 +218,20 @@ class RankingService:
             return int(str(value))
         except (TypeError, ValueError):
             return fallback
+
+    @staticmethod
+    def _to_price(value: object) -> int | None:
+        try:
+            price = abs(int(str(value).strip().replace(",", "")))
+        except (TypeError, ValueError):
+            return None
+        return price if price > 0 else None
+
+    @classmethod
+    def _ranking_current_price(cls, record: dict[str, Any]) -> int | None:
+        # ka00198 문서상 cur_prc를 우선 사용한다. 서버 버전·시장 구분에 따라
+        # 동일 의미의 필드명이 다르게 올 수 있어 호환 필드도 함께 처리한다.
+        for key in ("cur_prc", "past_curr_prc", "now_pric", "current_price", "cur_price", "close_pric"):
+            if (price := cls._to_price(record.get(key))) is not None:
+                return price
+        return None

@@ -27,6 +27,10 @@ class StockFundamentalsService:
             raw_float_ratio = row.get("dstr_rt")
             # 키움이 유통비율을 빈 값으로 보내는 종목은 전체 시가총액(100%)을 기준으로 계산한다.
             float_ratio = 100.0 if raw_float_ratio is None or not str(raw_float_ratio).strip() else float(str(raw_float_ratio).replace(",", ""))
-            return StockFundamentals(market_cap, float_ratio, high_250)
+            current_price = next(
+                (value for key in ("cur_prc", "current_price", "stck_prpr") if (value := _positive_int(row.get(key))) is not None),
+                None,
+            )
+            return StockFundamentals(market_cap, float_ratio, high_250, current_price)
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"{code}의 시가총액 또는 유통비율 값이 올바르지 않습니다.") from error

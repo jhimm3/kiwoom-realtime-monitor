@@ -117,6 +117,36 @@ class StockRepository:
         finally:
             con.close()
 
+    def load_last_prices(self, codes: tuple[str, ...]) -> dict[str, int]:
+        """마지막 실시간 체결가를 불러와 장 종료 뒤에도 현재가로 표시한다."""
+        if not codes:
+            return {}
+        placeholders = ",".join("?" for _ in codes)
+        con = sqlite3.connect(self._path)
+        try:
+            rows = con.execute(
+                f"SELECT code, last_price FROM stocks WHERE code IN ({placeholders}) AND last_price IS NOT NULL",
+                codes,
+            ).fetchall()
+        finally:
+            con.close()
+        return {str(code): int(price) for code, price in rows if price is not None and int(price) > 0}
+
+    def update_last_prices(self, prices: dict[str, int]) -> None:
+        """실시간 체결로 받은 마지막 현재가를 묶어서 저장한다."""
+        values = tuple((int(price), code) for code, price in prices.items() if code and int(price) > 0)
+        if not values:
+            return
+        con = sqlite3.connect(self._path)
+        try:
+            con.executemany(
+                "UPDATE stocks SET last_price=?, last_price_updated_at=CURRENT_TIMESTAMP WHERE code=?",
+                values,
+            )
+            con.commit()
+        finally:
+            con.close()
+
     def load_new_highs(self, periods: tuple[int, ...]) -> dict[int, set[str]]:
         if not periods:
             return {}
