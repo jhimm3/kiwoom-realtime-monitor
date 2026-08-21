@@ -3149,7 +3149,7 @@ class MainWindow(QMainWindow):
 
     def _market_cap_highlight_color(self, market_cap_eok: float) -> str:
         """시가총액 구간별 전체 글자색을 반환한다."""
-        for level, color in (("high", "#C00000"), ("middle", "#C55A11"), ("low", "#1F4E79")):
+        for level, color in (("high", "#C00000"), ("middle", "#C55A11"), ("low", "#0070C0")):
             try:
                 threshold = max(0.0, float(self._settings.get(f"market_cap_highlight_{level}_eok")))
             except (TypeError, ValueError):
