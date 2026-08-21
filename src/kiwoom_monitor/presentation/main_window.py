@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from PySide6.QtGui import QCloseEvent, QResizeEvent, QColor, QDesktopServices, QIcon, QPainter, QPolygon, QPalette
-from PySide6.QtCore import QProcess, QThread, QTimer, QUrl, QSize, QPoint
+from PySide6.QtCore import QEvent, QProcess, QThread, QTimer, QUrl, QSize, QPoint
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -87,6 +87,20 @@ class RankingLoader(Protocol):
 
 
 logger = logging.getLogger(__name__)
+
+
+class ClickableLabel(QLabel):
+    """클릭 동작을 지원하는 안내/요약 라벨."""
+
+    def __init__(self, on_click: Callable[[], None], text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._on_click = on_click
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event: object) -> None:
+        if getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton:
+            self._on_click()
+        super().mouseReleaseEvent(event)  # type: ignore[arg-type]
 
 
 def choose_similar_stock(parent: QWidget, lookup: object, name: str) -> tuple[str, str] | None:
@@ -323,6 +337,8 @@ class SettingsDialog(QDialog):
             theme_button.clicked.connect(self._theme_manager_opener)
             layout.addRow("종목/테마", theme_button)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("설정 저장")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
@@ -457,6 +473,8 @@ class SettingsDialog(QDialog):
         tabs.addTab(manage_tab, "관리")
         layout.addWidget(tabs)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("설정 저장")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -789,11 +807,12 @@ class ColumnManagerDialog(QDialog):
         self._table = table
         self._embedded = embedded
         self._on_applied = on_applied
+        self._bulk_editing = False
         self.setWindowTitle("필드 편집")
         self.resize(360, 440)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("체크하면 표시합니다. 항목을 위아래로 드래그해 순서를 바꿀 수 있습니다."))
+        layout.addWidget(QLabel("체크·전체 표시·순서 변경은 즉시 표에 반영됩니다. 항목을 위아래로 드래그해 순서를 바꿀 수 있습니다."))
         self._list = QListWidget()
         self._list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         header = table.horizontalHeader()
@@ -804,6 +823,9 @@ class ColumnManagerDialog(QDialog):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked if not table.isColumnHidden(logical) else Qt.CheckState.Unchecked)
             self._list.addItem(item)
+        if embedded:
+            self._list.itemChanged.connect(lambda _item: self._save_if_embedded())
+            self._list.model().rowsMoved.connect(lambda *_args: self._save_if_embedded())
         layout.addWidget(self._list)
 
         tools = QHBoxLayout()
@@ -819,19 +841,21 @@ class ColumnManagerDialog(QDialog):
             tools.addWidget(button)
         layout.addLayout(tools)
 
-        button_flags = QDialogButtonBox.StandardButton.Save
         if not embedded:
-            button_flags |= QDialogButtonBox.StandardButton.Cancel
-        buttons = QDialogButtonBox(button_flags)
-        buttons.accepted.connect(self._save)
-        if not embedded:
-            buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+            buttons = QDialogButtonBox()
+            apply = buttons.addButton("적용", QDialogButtonBox.ButtonRole.ApplyRole)
+            apply.clicked.connect(self._save)
+            cancel = buttons.addButton("취소", QDialogButtonBox.ButtonRole.RejectRole)
+            cancel.clicked.connect(self.reject)
+            layout.addWidget(buttons)
 
     def _set_all_checked(self, checked: bool) -> None:
         state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self._bulk_editing = True
         for row in range(self._list.count()):
             self._list.item(row).setCheckState(state)
+        self._bulk_editing = False
+        self._save_if_embedded()
 
     def _move_current(self, offset: int) -> None:
         row = self._list.currentRow()
@@ -841,6 +865,11 @@ class ColumnManagerDialog(QDialog):
         item = self._list.takeItem(row)
         self._list.insertItem(target, item)
         self._list.setCurrentRow(target)
+        self._save_if_embedded()
+
+    def _save_if_embedded(self) -> None:
+        if self._embedded and not self._bulk_editing:
+            self._save()
 
     def _save(self) -> None:
         settings: list[ColumnSetting] = []
@@ -1557,6 +1586,7 @@ class MainWindow(QMainWindow):
         self._new_high_worker: NewHighWorker | None = None
         self._ranking_worker: RankingWorker | None = None
         self._partial_ranking_retry_count = 0
+        self._initial_ranking_size_adjusted = False
         self._ranking_request_due = False
         self._last_ranking_signature: tuple[tuple[object, object, object], ...] = ()
         self._last_rank_by_code: dict[str, int] = {}
@@ -1602,9 +1632,12 @@ class MainWindow(QMainWindow):
         self._update_clock_label()
         self.setWindowTitle("키움 실시간 종목 모니터")
         self.resize(int(self._settings.get("window_width")), int(self._settings.get("window_height")))
+        self.setMinimumWidth(320)
 
         toolbar = QToolBar("도구")
+        toolbar.setObjectName("main_tools_toolbar")
         toolbar.setMovable(False)
+        toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self._refresh_button = QPushButton("새로고침")
         self._refresh_button.clicked.connect(self._refresh_rankings)
         self._refresh_button.setEnabled(ranking_loader is not None)
@@ -1653,6 +1686,8 @@ class MainWindow(QMainWindow):
         self._table.horizontalHeader().sectionMoved.connect(lambda *_: self._save_columns())
         self._table.horizontalHeader().sectionResized.connect(self._on_column_resized)
         self._table.horizontalHeader().sectionClicked.connect(self._toggle_trade_display_mode)
+        # 표의 오른쪽/아래 빈 공간을 더블 클릭하면 창을 표 크기에 맞춘다.
+        self._table.viewport().installEventFilter(self)
         self._update_trade_display_headers()
         self._restore_columns()
         self._table.setItem(0, 1, QTableWidgetItem("새로고침을 눌러 순위를 조회하세요."))
@@ -1660,12 +1695,14 @@ class MainWindow(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.addWidget(self._table)
-        self._theme_trade_summary = QLabel("상위 테마 거래대금: 순위 조회 후 표시됩니다.")
+        self._theme_trade_summary = ClickableLabel(self._cycle_theme_trade_summary_period, "상위 테마 거래대금: 순위 조회 후 표시됩니다.")
         self._theme_trade_summary.setStyleSheet("padding: 5px 8px; color: #333; background: #F5F7FA; border: 1px solid #D9E2F3;")
+        self._theme_trade_summary.setToolTip("클릭하면 1분 · 5분 · 60분 · 1일 기준으로 전환합니다.")
         self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1")
         layout.addWidget(self._theme_trade_summary)
-        self._theme_trade_excluded_summary = QLabel()
+        self._theme_trade_excluded_summary = ClickableLabel(self._cycle_theme_trade_summary_period)
         self._theme_trade_excluded_summary.setStyleSheet("padding: 5px 8px; color: #333; background: #F8F3FF; border: 1px solid #D8C8EE;")
+        self._theme_trade_excluded_summary.setToolTip("클릭하면 1분 · 5분 · 60분 · 1일 기준으로 전환합니다.")
         self._theme_trade_excluded_summary.setVisible(False)
         layout.addWidget(self._theme_trade_excluded_summary)
         self._theme_trade_summary_timer = QTimer(self)
@@ -2395,6 +2432,7 @@ class MainWindow(QMainWindow):
         for code in self._row_by_code:
             self._apply_row_background(code)
         self._apply_table_visuals()
+        self._ensure_initial_ranking_rows_visible()
         self._start_rank_changed_highlights()
         self.statusBar().showMessage(f"조회 완료 · {len(stocks)}개 종목 · {'순위 변동 없음' if unchanged else '순위 변동 반영'} · 실시간 체결 데이터 연결 중")
         self._schedule_theme_trade_summary()
@@ -2935,6 +2973,15 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_theme_trade_summary_timer") and not self._theme_trade_summary_timer.isActive():
             self._theme_trade_summary_timer.start()
 
+    def _cycle_theme_trade_summary_period(self) -> None:
+        periods = ("1m", "5m", "60m", "day")
+        current = self._settings.get("theme_trade_summary_period")
+        next_period = periods[(periods.index(current) + 1) % len(periods)] if current in periods else periods[0]
+        self._settings.set("theme_trade_summary_period", next_period)
+        self._refresh_theme_trade_summary()
+        period_labels = {"1m": "1분", "5m": "5분", "60m": "60분", "day": "1일"}
+        self.statusBar().showMessage(f"상위 테마 거래대금 기준: {period_labels[next_period]}")
+
     def _refresh_theme_trade_summary(self) -> None:
         if self._settings.get("theme_trade_summary_enabled") != "1":
             self._theme_trade_summary.setVisible(False)
@@ -3258,7 +3305,53 @@ class MainWindow(QMainWindow):
         icon_size = max(14, min(32, self._table.verticalHeader().defaultSectionSize() - 6))
         self._table.setIconSize(QSize(icon_size, icon_size))
 
+    def _ensure_initial_ranking_rows_visible(self) -> None:
+        """첫 정상 순위 수신 시 상위 20개 행이 한 화면에 들어오게 한다."""
+        if self._initial_ranking_size_adjusted or self._table.rowCount() < 20:
+            return
+        required_height = self._table.rowCount() * self._table.verticalHeader().defaultSectionSize()
+        shortfall = required_height - self._table.viewport().height()
+        if shortfall > 0:
+            current_width = self.width()
+            self.resize(current_width, self.height() + shortfall)
+            QTimer.singleShot(0, lambda: self.resize(current_width, self.height()))
+        self._initial_ranking_size_adjusted = True
+
+    def createPopupMenu(self) -> QMenu | None:
+        """도구 모음 숨김 메뉴를 제공하지 않는다."""
+        return None
+
+    def eventFilter(self, watched: object, event: object) -> bool:
+        if watched is self._table.viewport() and getattr(event, "type", lambda: None)() == QEvent.Type.MouseButtonDblClick:
+            position = getattr(event, "position", lambda: None)()
+            if position is not None:
+                point = position.toPoint()
+                # 실제 셀이 아닌 오른쪽 또는 마지막 행 아래의 빈 공간에서만 동작한다.
+                if self._table.itemAt(point) is None:
+                    self._fit_window_to_table_contents()
+                    return True
+        return super().eventFilter(watched, event)  # type: ignore[arg-type]
+
+    def _fit_window_to_table_contents(self) -> None:
+        """표 내용만큼 창 크기를 맞춰 빈 공간과 불필요한 스크롤을 정리한다."""
+        header_width = self._table.horizontalHeader().length()
+        desired_table_width = header_width + self._table.verticalHeader().width() + self._table.frameWidth() * 2
+        desired_table_height = (
+            self._table.horizontalHeader().height()
+            + sum(self._table.rowHeight(row) for row in range(self._table.rowCount()))
+            + self._table.frameWidth() * 2
+        )
+        target_width = self.width() + desired_table_width - self._table.width()
+        target_height = self.height() + desired_table_height - self._table.height()
+        self.resize(max(self.minimumWidth(), target_width), max(self.minimumHeight(), target_height))
+
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
+        # 수동으로 열 폭을 조정한 뒤 30초 동안은 창을 어떻게 조절해도
+        # 행 높이·열 너비를 모두 유지한다.
+        if time.monotonic() < self._manual_column_resize_until:
+            return
+        # 유예 시간이 지난 뒤에는 반응형 행 높이를 다시 계산한다.
         self._apply_table_visuals()
-        QTimer.singleShot(0, self._resize_columns_proportionally)
+        if event.size().width() != event.oldSize().width():
+            QTimer.singleShot(0, self._resize_columns_proportionally)
