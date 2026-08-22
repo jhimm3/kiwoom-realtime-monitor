@@ -10,7 +10,7 @@ from html import escape
 from dataclasses import replace
 from pathlib import Path
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -74,6 +74,8 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.nxt_eligibility_worker import Nxt
 from kiwoom_monitor.application.daily_high_service import DailyHighTargets
 from kiwoom_monitor.application.trade_strength import StockFundamentals, trade_strength_percent
 from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSetting, ColumnSettingsRepository
+from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
 from kiwoom_monitor.infrastructure.persistence.settings_backup import SettingsBackupError, SettingsBackupService
 from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupError, ThemeBackupService
 from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncError, GoogleDriveSyncService
@@ -87,7 +89,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomApiError, KiwoomRest
 from kiwoom_monitor.domain.strength_level import strength_badge
 from kiwoom_monitor.application.theme_matching import MatchedThemeRow, match_theme_rows
 from kiwoom_monitor.application.theme_preview import preview_theme_changes
-from kiwoom_monitor.application.minute_trade_value import MinuteTradeValueAggregator
+from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv, MinuteTradeValueAggregator
 from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import ImageThemeOcrWorker
 from kiwoom_monitor.infrastructure.krx.stock_catalog_worker import KrxStockCatalogWorker
 
@@ -98,7 +100,8 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.6"
+APP_VERSION = "1.1.7"
+APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 
 
@@ -309,6 +312,8 @@ class SettingsDialog(QDialog):
         self._google_drive_auto_upload.setChecked(settings.get("google_drive_auto_upload") == "1")
         self._google_drive_auto_upload_on_exit = QCheckBox("종료 시 자동 업로드 시도 (종료가 늦어질 수 있음)")
         self._google_drive_auto_upload_on_exit.setChecked(settings.get("google_drive_auto_upload_on_exit") == "1")
+        self._auto_update_check = QCheckBox("앱 시작 시 업데이트 자동 확인")
+        self._auto_update_check.setChecked(settings.get("auto_update_check") == "1")
         self._google_drive_sync_target = QComboBox()
         self._google_drive_sync_target.addItem("설정과 테마", "both")
         self._google_drive_sync_target.addItem("설정만", "settings")
@@ -694,9 +699,16 @@ class SettingsDialog(QDialog):
         info_tab = QWidget()
         info_layout = QVBoxLayout(info_tab)
         info_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        if self._update_checker is not None:
+            info_layout.addWidget(self._section_title("업데이트"))
+            update_check = QPushButton("업데이트 확인")
+            update_check.clicked.connect(self._update_checker)
+            info_layout.addWidget(update_check, alignment=Qt.AlignmentFlag.AlignHCenter)
+            info_layout.addWidget(self._auto_update_check, alignment=Qt.AlignmentFlag.AlignHCenter)
+            info_layout.addWidget(self._section_separator())
         info_layout.addWidget(self._section_title("프로그램 정보"))
         app_info = QLabel(
-            f"키움 실시간 종목 모니터 {APP_VERSION}\n"
+            f"{APP_DISPLAY_NAME} {APP_VERSION}\n"
             f"{APP_COPYRIGHT}\n"
             "이 프로그램은 여러 오픈소스 소프트웨어를 기반으로 제작되었습니다."
         )
@@ -704,10 +716,6 @@ class SettingsDialog(QDialog):
         app_info.setWordWrap(False)
         app_info.setStyleSheet("color: #667085; padding: 18px 8px;")
         info_layout.addWidget(app_info)
-        if self._update_checker is not None:
-            update_check = QPushButton("업데이트 확인")
-            update_check.clicked.connect(self._update_checker)
-            info_layout.addWidget(update_check, alignment=Qt.AlignmentFlag.AlignHCenter)
         info_layout.addStretch()
         info_tab.setMinimumSize(0, 0)
         tabs.addTab(info_tab, "프로그램 정보")
@@ -1204,6 +1212,7 @@ class SettingsDialog(QDialog):
         self._settings.set("google_drive_auto_upload", "1" if self._google_drive_auto_upload.isChecked() else "0")
         self._settings.set("google_drive_auto_upload_on_exit", "1" if self._google_drive_auto_upload_on_exit.isChecked() else "0")
         self._settings.set("google_drive_sync_target", str(self._google_drive_sync_target.currentData()))
+        self._settings.set("auto_update_check", "1" if self._auto_update_check.isChecked() else "0")
         self._settings.set("high_distance_period", str(self._high_distance_period.currentData()))
         self.accept()
 
@@ -2058,6 +2067,8 @@ class MainWindow(QMainWindow):
         minute_history_worker_factory: Callable[[tuple[str, ...]], MinuteHistoryWorker] | None = None,
         fundamentals_worker_factory: Callable[[tuple[str, ...]], FundamentalsWorker] | None = None,
         minute_aggregator: MinuteTradeValueAggregator | None = None,
+        minute_bar_repository: MinuteBarRepository | None = None,
+        daily_bar_repository: DailyBarRepository | None = None,
         themes: dict[str, str] | None = None,
         columns: ColumnSettingsRepository | None = None,
         stock_lookup: object | None = None,
@@ -2079,6 +2090,7 @@ class MainWindow(QMainWindow):
         self._fundamentals: dict[str, StockFundamentals] = {}
         self._daily_highs: dict[str, DailyHighTargets] = {}
         self._previous_day_trade_values: dict[str, float] = {}
+        self._daily_high_cache_date: date | None = None
         self._themes = themes or {}
         self._pending_price_cache: dict[str, int] = {}
         self._columns = columns
@@ -2143,6 +2155,19 @@ class MainWindow(QMainWindow):
         self._new_high_periods: dict[str, frozenset[int]] = {}
         self._minute_history_codes: set[str] = set()
         self._minute_aggregator = minute_aggregator or MinuteTradeValueAggregator()
+        self._minute_bar_repository = minute_bar_repository
+        self._daily_bar_repository = daily_bar_repository
+        self._minute_bar_storage_date: date | None = None
+        self._pending_minute_bars: dict[tuple[str, datetime], MinuteOhlcv] = {}
+        self._minute_bar_save_timer = QTimer(self)
+        self._minute_bar_save_timer.setSingleShot(True)
+        self._minute_bar_save_timer.setInterval(1_000)
+        self._minute_bar_save_timer.timeout.connect(self._flush_pending_minute_bars)
+        self._pending_daily_trade_comparisons: dict[str, tuple[tuple[str, float], ...]] = {}
+        self._daily_trade_comparison_timer = QTimer(self)
+        self._daily_trade_comparison_timer.setSingleShot(True)
+        self._daily_trade_comparison_timer.setInterval(500)
+        self._daily_trade_comparison_timer.timeout.connect(self._flush_daily_trade_comparisons)
         self._ranking_timer = QTimer(self)
         self._ranking_timer.setSingleShot(True)
         self._ranking_timer.timeout.connect(self._on_ranking_timer)
@@ -2165,7 +2190,7 @@ class MainWindow(QMainWindow):
         self._window_geometry_save_timer.setSingleShot(True)
         self._window_geometry_save_timer.setInterval(350)
         self._window_geometry_save_timer.timeout.connect(self._save_window_geometry)
-        self.setWindowTitle("키움 실시간 종목 모니터")
+        self.setWindowTitle(APP_DISPLAY_NAME)
         self.resize(int(self._settings.get("window_width")), int(self._settings.get("window_height")))
         self.setMinimumWidth(320)
 
@@ -2272,6 +2297,10 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._resume_pending_google_drive_upload)
         else:
             QTimer.singleShot(0, self._open_api_settings)
+        # 앱을 먼저 표시한 뒤에만 백그라운드 업데이트 확인을 시작한다.
+        # 개발 실행은 GitHub 릴리즈를 갱신하지 않으므로 설치본에서만 동작한다.
+        if getattr(sys, "frozen", False) and self._settings.get("auto_update_check") == "1":
+            QTimer.singleShot(1_200, lambda: self._check_for_updates(silent=True))
 
     def _open_settings(self) -> None:
         if self._settings_dialog is not None and self._settings_dialog.isVisible():
@@ -2309,14 +2338,14 @@ class MainWindow(QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
 
-    def _check_for_updates(self) -> None:
+    def _check_for_updates(self, silent: bool = False) -> None:
         if self._update_check_worker is not None and self._update_check_worker.isRunning():
             self.statusBar().showMessage("업데이트 정보를 확인하고 있습니다…")
             return
         worker = UpdateCheckWorker(self)
         self._update_check_worker = worker
-        worker.completed.connect(self._on_update_check_completed)
-        worker.failed.connect(self._on_update_check_failed)
+        worker.completed.connect(lambda version, url, release_url: self._on_update_check_completed(version, url, release_url, silent=silent))
+        worker.failed.connect(lambda message: self._on_update_check_failed(message, silent=silent))
         worker.finished.connect(lambda: setattr(self, "_update_check_worker", None))
         self.statusBar().showMessage("업데이트 정보를 확인하고 있습니다…")
         worker.start()
@@ -2328,10 +2357,11 @@ class MainWindow(QMainWindow):
         except ValueError:
             return ()
 
-    def _on_update_check_completed(self, version: str, update_url: str, release_url: str) -> None:
+    def _on_update_check_completed(self, version: str, update_url: str, release_url: str, silent: bool = False) -> None:
         if self._version_tuple(version) <= self._version_tuple(APP_VERSION):
             self.statusBar().showMessage("현재 최신 버전을 사용하고 있습니다.", 4_000)
-            QMessageBox.information(self, "앱 업데이트", f"현재 최신 버전입니다.\n\n현재 버전: {APP_VERSION}")
+            if not silent:
+                QMessageBox.information(self, "앱 업데이트", f"현재 최신 버전입니다.\n\n현재 버전: {APP_VERSION}")
             return
         if not update_url:
             answer = QMessageBox.question(
@@ -2435,10 +2465,11 @@ class MainWindow(QMainWindow):
         logger.warning("업데이트 다운로드 실패: %s", message)
         QMessageBox.information(self, "앱 업데이트", "업데이트 파일을 내려받지 못했습니다. 잠시 후 다시 시도하세요.")
 
-    def _on_update_check_failed(self, message: str) -> None:
+    def _on_update_check_failed(self, message: str, silent: bool = False) -> None:
         logger.info("업데이트 확인 실패: %s", message)
         self.statusBar().showMessage("업데이트 정보를 확인하지 못했습니다.", 5_000)
-        QMessageBox.information(self, "앱 업데이트", "업데이트 정보를 확인하지 못했습니다.\n네트워크 연결 또는 GitHub 릴리즈 공개 상태를 확인하세요.")
+        if not silent:
+            QMessageBox.information(self, "앱 업데이트", "업데이트 정보를 확인하지 못했습니다.\n네트워크 연결 또는 GitHub 릴리즈 공개 상태를 확인하세요.")
 
     def _on_settings_closed(self, dialog: SettingsDialog, result: int) -> None:
         if self._settings_dialog is dialog:
@@ -3776,6 +3807,50 @@ class MainWindow(QMainWindow):
             return
         self._start_secondary_loading(codes)
 
+    def _ensure_today_minute_bar_storage(self, now: datetime) -> None:
+        """날짜가 바뀌면 메모리를 비우고, DB에서는 30일보다 오래된 분봉만 정리한다."""
+        today = now.date()
+        if self._minute_bar_storage_date == today:
+            return
+        self._flush_pending_minute_bars()
+        self._minute_aggregator.discard_before(today)
+        self._minute_history_codes.clear()
+        if self._minute_bar_repository is not None:
+            try:
+                self._minute_bar_repository.purge_before(today - timedelta(days=30))
+            except Exception as error:
+                logger.warning("오래된 분봉 DB 정리 실패: %s", error)
+        self._minute_bar_storage_date = today
+
+    def _flush_pending_minute_bars(self) -> None:
+        """실시간 체결을 1초 단위로 묶어 SQLite에 저장한다."""
+        if not self._pending_minute_bars:
+            return
+        pending, self._pending_minute_bars = self._pending_minute_bars, {}
+        if self._minute_bar_repository is None:
+            return
+        grouped: dict[str, list[MinuteOhlcv]] = {}
+        for (code, _), bar in pending.items():
+            grouped.setdefault(code, []).append(bar)
+        try:
+            self._minute_bar_repository.upsert_many(
+                {code: tuple(bars) for code, bars in grouped.items()}
+            )
+        except Exception as error:
+            logger.warning("실시간 분봉 DB 저장 실패: %s", error)
+
+    def _flush_daily_trade_comparisons(self) -> None:
+        """이미 받은 ka10081 일봉값을 재사용해 개발 확인용 CSV를 갱신한다."""
+        pending, self._pending_daily_trade_comparisons = self._pending_daily_trade_comparisons, {}
+        if not pending or self._minute_bar_repository is None:
+            return
+        try:
+            count = self._minute_bar_repository.update_comparison_reports(pending, self._ranking_now().date())
+            if count:
+                logger.info("분봉·일봉 거래대금 비교 CSV 갱신: %s건", count)
+        except Exception as error:
+            logger.warning("분봉·일봉 거래대금 비교 CSV 저장 실패: %s", error)
+
     def _on_trade_tick(self, tick: TradeTick) -> None:
         row = self._row_by_code.get(tick.code)
         if row is None or tick.current_price is None:
@@ -3789,7 +3864,12 @@ class MainWindow(QMainWindow):
             if tick.current_price >= tick.high_price:
                 self._today_high_codes.add(tick.code)
         observed_at = self._ranking_now()
-        self._minute_aggregator.ingest(tick, observed_at)
+        self._ensure_today_minute_bar_storage(observed_at)
+        bar = self._minute_aggregator.ingest(tick, observed_at)
+        if bar is not None:
+            self._pending_minute_bars[(tick.code, bar.minute)] = bar
+            if not self._minute_bar_save_timer.isActive():
+                self._minute_bar_save_timer.start()
         if not hasattr(self, "_pending_trade_ticks"):
             self._pending_trade_ticks: dict[str, TradeTick] = {}
             self._trade_tick_flush_timer = QTimer(self)
@@ -3835,6 +3915,7 @@ class MainWindow(QMainWindow):
         """Start non-realtime API work in the defined priority order."""
         if self._ranking_priority_preparing:
             return
+        self._load_cached_daily_highs(codes)
         if self._is_after_hours_data_pause():
             # 20:05~07:55에는 움직이지 않는 분봉·신고가 데이터를 다시
             # 조회하지 않는다. 기본정보 → NXT → 상장종목 동기화만 허용한다.
@@ -3908,7 +3989,15 @@ class MainWindow(QMainWindow):
     def _on_history_received(self, code: str, bars: object) -> None:
         if not isinstance(bars, tuple):
             return
-        self._minute_aggregator.seed(code, bars, self._ranking_now())
+        now = self._ranking_now()
+        self._ensure_today_minute_bar_storage(now)
+        self._minute_aggregator.seed(code, bars, now)
+        if self._minute_bar_repository is not None:
+            try:
+                self._minute_bar_repository.upsert_bars(code, bars)
+                self._minute_bar_repository.record_history_sync(code, now.date(), now, len(bars))
+            except Exception as error:
+                logger.warning("분봉 보완 DB 저장 실패 (%s): %s", code, error)
         self._minute_history_codes.add(code)
         if self._defer_table_update_while_modal():
             return
@@ -4052,7 +4141,13 @@ class MainWindow(QMainWindow):
     def _start_daily_high_loading(self, codes: tuple[str, ...]) -> bool:
         if self._closing or self._ranking_priority_preparing or self._daily_high_worker_factory is None or (self._daily_high_worker is not None and self._daily_high_worker.isRunning()):
             return self._daily_high_worker is not None and self._daily_high_worker.isRunning()
-        missing = tuple(code for code in codes if code not in self._daily_highs)
+        today = self._ranking_now().date()
+        if self._daily_high_cache_date != today:
+            # 전날 저장값을 먼저 표시한 상태에서 그날의 ka10081 결과로 교체한다.
+            # 여기서 비우면 앱 시작 때 직전 1일 값이 다시 빈칸으로 돌아간다.
+            self._daily_high_cache_date = today
+        refreshed = self._daily_bar_repository.refreshed_today(codes, today) if self._daily_bar_repository is not None else set()
+        missing = tuple(code for code in codes if code not in self._daily_highs or code not in refreshed)
         if not missing:
             return False
         worker = self._daily_high_worker_factory(missing)
@@ -4071,13 +4166,40 @@ class MainWindow(QMainWindow):
     def _on_daily_high_received(self, code: str, targets: object) -> None:
         if isinstance(targets, DailyHighTargets):
             self._daily_highs[code] = targets
+            if self._daily_bar_repository is not None:
+                try:
+                    self._daily_bar_repository.upsert_targets(code, targets, self._ranking_now().date())
+                except Exception as error:
+                    logger.warning("일봉 캐시 저장 실패 (%s): %s", code, error)
             if targets.previous_day_trade_value_eok is not None:
                 self._previous_day_trade_values[code] = targets.previous_day_trade_value_eok
+            if targets.daily_trade_values_eok:
+                self._pending_daily_trade_comparisons[code] = targets.daily_trade_values_eok
+                if not self._daily_trade_comparison_timer.isActive():
+                    self._daily_trade_comparison_timer.start()
             if self._defer_table_update_while_modal():
                 return
             self._render_new_high_price(code)
             self._render_high_distance(code)
             self._render_trade_values(code)
+
+    def _load_cached_daily_highs(self, codes: tuple[str, ...]) -> None:
+        """장외에도 최근 저장 일봉으로 직전 1일·신고가를 즉시 표시한다."""
+        if self._daily_bar_repository is None:
+            return
+        try:
+            cached = self._daily_bar_repository.load_targets(tuple(code for code in codes if code not in self._daily_highs))
+        except Exception as error:
+            logger.warning("일봉 캐시 조회 실패: %s", error)
+            return
+        for code, targets in cached.items():
+            self._daily_highs[code] = targets
+            if targets.previous_day_trade_value_eok is not None:
+                self._previous_day_trade_values[code] = targets.previous_day_trade_value_eok
+            if self._row_by_code.get(code) is not None and not self._defer_table_update_while_modal():
+                self._render_new_high_price(code)
+                self._render_high_distance(code)
+                self._render_trade_values(code)
 
     def _render_trade_values(self, code: str, *, live_only: bool = False) -> None:
         row = self._row_by_code.get(code)
@@ -4172,38 +4294,46 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"상위 테마 거래대금 기준: {period_labels[next_period]}")
 
     def _refresh_theme_trade_summary(self) -> None:
-        if self._settings.get("theme_trade_summary_enabled") != "1":
+        show_summary = self._settings.get("theme_trade_summary_enabled") == "1"
+        show_excluded_summary = self._settings.get("theme_trade_summary_excluded_enabled") == "1"
+        if not show_summary and not show_excluded_summary:
             self._theme_trade_summary.setVisible(False)
             self._theme_trade_excluded_summary.setVisible(False)
             return
-        self._theme_trade_summary.setVisible(True)
+        self._theme_trade_summary.setVisible(show_summary)
+        self._theme_trade_excluded_summary.setVisible(show_excluded_summary)
         if not self._ranked_stock_names:
-            self._theme_trade_summary.setText("상위 테마 거래대금: 순위 조회 후 표시됩니다.")
-            self._theme_trade_excluded_summary.setVisible(False)
+            if show_summary:
+                self._theme_trade_summary.setText("상위 테마 거래대금: 순위 조회 후 표시됩니다.")
+            if show_excluded_summary:
+                self._theme_trade_excluded_summary.setText("제외 종목 반영 상위 테마 거래대금: 순위 조회 후 표시됩니다.")
             return
-        totals: dict[str, tuple[str, float]] = {}
         now = self._ranking_now()
         period = self._settings.get("theme_trade_summary_period")
         period_labels = {"1m": "1분", "5m": "5분", "60m": "60분", "day": "1일"}
         period = period if period in period_labels else "day"
         minutes = {"1m": 1, "5m": 5, "60m": 60}
-        for code, name in self._ranked_stock_names.items():
-            value = self._minute_aggregator.today_trade_value_eok(code, now) if period == "day" else self._minute_aggregator.bucket_trade_value_eok(code, minutes[period], now)
-            for theme in parse_themes(self._themes.get("".join(name.split()), ""), ","):
-                key = theme.casefold()
-                display, previous = totals.get(key, (theme, 0.0))
-                totals[key] = (display, previous + value)
-        top = sorted(totals.values(), key=lambda item: item[1], reverse=True)[:3]
-        if not top:
-            self._theme_trade_summary.setText("상위 테마 거래대금: 테마가 지정된 종목이 없습니다.")
-            return
         digits = self._decimal_places("trade_value")
-        values = self._theme_trade_summary_values(top, digits)
-        self._theme_trade_summary.setText(f"상위 테마 거래대금 (실시간 조회 상위 20종목 · {period_labels[period]}): {values}")
+        if show_summary:
+            totals: dict[str, tuple[str, float]] = {}
+            for code, name in self._ranked_stock_names.items():
+                value = self._minute_aggregator.today_trade_value_eok(code, now) if period == "day" else self._minute_aggregator.bucket_trade_value_eok(code, minutes[period], now)
+                for theme in parse_themes(self._themes.get("".join(name.split()), ""), ","):
+                    key = theme.casefold()
+                    display, previous = totals.get(key, (theme, 0.0))
+                    totals[key] = (display, previous + value)
+            top = sorted(totals.values(), key=lambda item: item[1], reverse=True)[:3]
+            if not top:
+                self._theme_trade_summary.setText("상위 테마 거래대금: 테마가 지정된 종목이 없습니다.")
+            else:
+                values = self._theme_trade_summary_values(top, digits)
+                self._theme_trade_summary.setText(f"상위 테마 거래대금 (실시간 조회 상위 20종목 · {period_labels[period]}): {values}")
         excluded_names = parse_themes(self._settings.get("theme_trade_summary_excluded_stocks"), ",/|;")
         excluded = {"".join(value.split()).casefold() for value in excluded_names}
-        if not excluded or self._settings.get("theme_trade_summary_excluded_enabled") != "1":
-            self._theme_trade_excluded_summary.setVisible(False)
+        if not show_excluded_summary:
+            return
+        if not excluded:
+            self._theme_trade_excluded_summary.setText("제외 종목 반영 상위 테마 거래대금: 제외 종목 목록을 입력하세요.")
             return
         excluded_totals: dict[str, tuple[str, float]] = {}
         for code, name in self._ranked_stock_names.items():
@@ -4458,6 +4588,10 @@ class MainWindow(QMainWindow):
             self._price_cache_timer.stop()
             self._google_drive_debounce.stop()
             self._save_current_price_cache()
+            self._minute_bar_save_timer.stop()
+            self._flush_pending_minute_bars()
+            self._daily_trade_comparison_timer.stop()
+            self._flush_daily_trade_comparisons()
             if hasattr(self, "_trade_tick_flush_timer"):
                 self._trade_tick_flush_timer.stop()
             for player, _ in self._near_high_sound_players.values():

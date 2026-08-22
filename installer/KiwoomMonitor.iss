@@ -1,5 +1,5 @@
-#define AppName "키움 실시간 종목 모니터"
-#define AppVersion "1.1.6"
+#define AppName "키움 실시간 모니터"
+#define AppVersion "1.1.7"
 #define AppPublisher "크니"
 #define AppExeName "KiwoomMonitor.exe"
 
@@ -8,11 +8,14 @@ AppId={{3B79D124-E394-4F72-AD44-9133D9AEAD3C}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
+AppPublisherURL=https://github.com/jhimm3
+AppSupportURL=https://github.com/jhimm3/kiwoom-realtime-monitor/issues
+AppUpdatesURL=https://github.com/jhimm3/kiwoom-realtime-monitor/releases
 DefaultDirName={autopf}\KiwoomMonitor
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist\installer
-OutputBaseFilename=KiwoomMonitor-Setup-1.1.6
+OutputBaseFilename=KiwoomMonitor-Setup-1.1.7
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -21,6 +24,12 @@ PrivilegesRequired=admin
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\{#AppExeName}
 ArchitecturesInstallIn64BitMode=x64
+VersionInfoCompany={#AppPublisher}
+VersionInfoDescription={#AppName}
+VersionInfoProductName={#AppName}
+VersionInfoProductVersion={#AppVersion}
+VersionInfoVersion={#AppVersion}.0
+VersionInfoCopyright=Copyright 2026 크니. All rights reserved.
 
 [Languages]
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
@@ -32,8 +41,8 @@ Name: "desktopicon"; Description: "바탕 화면에 바로가기 만들기"; Fla
 Source: "..\dist\KiwoomMonitor\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\{#AppExeName}"; IconIndex: 0
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\{#AppExeName}"; IconIndex: 0; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{#AppName} 실행"; Flags: nowait postinstall skipifsilent

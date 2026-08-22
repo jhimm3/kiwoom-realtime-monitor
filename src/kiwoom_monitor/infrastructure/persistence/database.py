@@ -55,6 +55,7 @@ DEFAULT_SETTINGS = {
     "google_drive_auto_upload": "1",
     "google_drive_auto_upload_on_exit": "0",
     "google_drive_sync_target": "both",
+    "auto_update_check": "0",
     "google_drive_unsynced_changes": "0",
     "google_drive_local_changed_at": "",
     "google_drive_last_upload_success_at": "",
@@ -113,6 +114,37 @@ class Database:
             CREATE TABLE IF NOT EXISTS stock_themes (stock_code TEXT NOT NULL, theme_id INTEGER NOT NULL, custom_color TEXT, PRIMARY KEY(stock_code, theme_id), FOREIGN KEY(stock_code) REFERENCES stocks(code), FOREIGN KEY(theme_id) REFERENCES themes(theme_id));
             CREATE TABLE IF NOT EXISTS new_high_snapshot (period INTEGER NOT NULL, stock_code TEXT NOT NULL, PRIMARY KEY(period, stock_code), FOREIGN KEY(stock_code) REFERENCES stocks(code));
             CREATE TABLE IF NOT EXISTS new_high_snapshot_meta (period INTEGER PRIMARY KEY, checked_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS minute_bars (
+                trade_date TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                minute TEXT NOT NULL,
+                open_price INTEGER NOT NULL,
+                high_price INTEGER NOT NULL,
+                low_price INTEGER NOT NULL,
+                close_price INTEGER NOT NULL,
+                volume INTEGER NOT NULL,
+                PRIMARY KEY(trade_date, stock_code, minute)
+            );
+            CREATE INDEX IF NOT EXISTS idx_minute_bars_date_code ON minute_bars(trade_date, stock_code);
+            CREATE TABLE IF NOT EXISTS minute_history_sync_log (
+                trade_date TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                bar_count INTEGER NOT NULL,
+                PRIMARY KEY(trade_date, stock_code)
+            );
+            CREATE TABLE IF NOT EXISTS daily_bars (
+                stock_code TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                high_price INTEGER NOT NULL,
+                trade_value_eok REAL,
+                PRIMARY KEY(stock_code, trade_date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_daily_bars_code_date ON daily_bars(stock_code, trade_date);
+            CREATE TABLE IF NOT EXISTS daily_bar_sync_log (
+                stock_code TEXT PRIMARY KEY,
+                synced_on TEXT NOT NULL
+            );
             """)
             connection.commit()
         finally:

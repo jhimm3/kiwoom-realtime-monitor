@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
 
@@ -27,7 +27,7 @@ class MinuteOhlcv:
 class MinuteTradeValueAggregator:
     """현재 접속 뒤 수신한 체결을 종목별 1분봉으로 집계한다."""
 
-    def __init__(self, max_minutes: int = 390) -> None:
+    def __init__(self, max_minutes: int = 730) -> None:
         self._max_minutes = max_minutes
         self._bars: dict[str, deque[MinuteOhlcv]] = defaultdict(lambda: deque(maxlen=max_minutes))
         self._last_cumulative_volume: dict[str, int] = {}
@@ -130,6 +130,21 @@ class MinuteTradeValueAggregator:
         """당일 누적 중 현재 진행 분봉만 제외한 거래대금이다."""
         current_minute = now.replace(second=0, microsecond=0)
         return sum(bar.trade_value_eok for bar in self._bars.get(code, ()) if bar.minute.date() == now.date() and bar.minute < current_minute)
+
+    def discard_before(self, today: date) -> None:
+        """날짜가 바뀌면 전날 분봉과 누적 거래량 상태를 비운다."""
+        self._bars = defaultdict(
+            lambda: deque(maxlen=self._max_minutes),
+            {
+                code: deque(
+                    (bar for bar in bars if bar.minute.date() >= today),
+                    maxlen=self._max_minutes,
+                )
+                for code, bars in self._bars.items()
+                if any(bar.minute.date() >= today for bar in bars)
+            },
+        )
+        self._last_cumulative_volume.clear()
 
 
 def _trade_minute(tick: TradeTick, observed_at: datetime) -> datetime:

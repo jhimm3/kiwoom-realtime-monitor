@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtGui import QIcon
@@ -26,8 +27,10 @@ from kiwoom_monitor.application.nxt_eligibility_service import NxtEligibilitySer
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
 from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSettingsRepository
 from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository as DatabaseThemeRepository
+from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
 from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncService
-from kiwoom_monitor.presentation.main_window import MainWindow
+from kiwoom_monitor.presentation.main_window import APP_DISPLAY_NAME, MainWindow
 
 
 def _application_icon_path() -> Path:
@@ -45,6 +48,10 @@ def main() -> None:
 
     database = Database(paths.database_path)
     database.initialize()
+    minute_bar_repository = MinuteBarRepository(paths.database_path)
+    minute_bar_repository.purge_before(datetime.now().date() - timedelta(days=30))
+    daily_bar_repository = DailyBarRepository(paths.database_path)
+    daily_bar_repository.purge_before(datetime.now().date() - timedelta(days=30))
     google_drive_sync = GoogleDriveSyncService(paths.database_path)
     local_changed_at = database.settings.get("google_drive_local_changed_at")
     last_upload_at = database.settings.get("google_drive_last_upload_success_at")
@@ -81,7 +88,7 @@ def main() -> None:
         logging.getLogger(__name__).warning("키움 REST 설정을 불러오지 못했습니다: %s", error)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("키움 실시간 모니터")
+    app.setApplicationName(APP_DISPLAY_NAME)
     app.setWindowIcon(QIcon(str(_application_icon_path())))
     reported_errors: set[str] = set()
 
@@ -104,6 +111,8 @@ def main() -> None:
         daily_high_worker_factory=api_runtime.get("daily_high_worker_factory"),
         nxt_eligibility_worker_factory=api_runtime.get("nxt_eligibility_worker_factory"),
         minute_aggregator=MinuteTradeValueAggregator(),
+        minute_bar_repository=minute_bar_repository,
+        daily_bar_repository=daily_bar_repository,
         themes=themes,
         columns=ColumnSettingsRepository(paths.database_path),
         stock_lookup=StockRepository(paths.database_path),
