@@ -1,5 +1,5 @@
 #define AppName "키움 실시간 종목 모니터"
-#define AppVersion "1.1.2"
+#define AppVersion "1.1.3"
 #define AppPublisher "크니"
 #define AppExeName "KiwoomMonitor.exe"
 
@@ -12,7 +12,7 @@ DefaultDirName={autopf}\KiwoomMonitor
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist\installer
-OutputBaseFilename=KiwoomMonitor-Setup-1.1.2
+OutputBaseFilename=KiwoomMonitor-Setup-1.1.3
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -41,12 +41,20 @@ var
   RemovePersonalData: Boolean;
 
 function InitializeUninstall(): Boolean;
+var
+  Choice: Integer;
 begin
-  RemovePersonalData :=
-    MsgBox('프로그램과 개인 데이터까지 모두 삭제할까요?' + #13#10 + #13#10 +
-      '예: API 키, 테마 DB, 설정, 로그를 포함해 %LocalAppData%\\KiwoomMonitor 폴더도 제거합니다.' + #13#10 +
-      '아니오: 프로그램만 삭제하고 개인 데이터는 보관합니다.',
-      mbConfirmation, MB_YESNO) = IDYES;
+  Choice := MsgBox('프로그램과 개인 데이터까지 모두 삭제할까요?' + #13#10 + #13#10 +
+    '예: API 키, 테마 DB, 설정, 로그를 포함해 %LocalAppData%\\KiwoomMonitor 폴더도 제거합니다.' + #13#10 +
+    '아니오: 프로그램만 삭제하고 개인 데이터는 보관합니다.' + #13#10 +
+    '취소: 프로그램 제거를 취소합니다.',
+    mbConfirmation, MB_YESNOCANCEL);
+  if Choice = IDCANCEL then
+  begin
+    Result := False;
+    exit;
+  end;
+  RemovePersonalData := Choice = IDYES;
   Result := True;
 end;
 
