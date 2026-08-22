@@ -28,7 +28,8 @@ class GoogleDriveSyncService:
     LOCAL_ONLY_SETTINGS = frozenset({
         "window_width",
         "window_height",
-        "google_drive_auto_download",
+        "settings_dialog_width",
+        "settings_dialog_height",
         "google_drive_unsynced_changes",
         "google_drive_local_changed_at",
         "google_drive_last_upload_success_at",

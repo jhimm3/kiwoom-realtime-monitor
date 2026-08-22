@@ -67,8 +67,6 @@
 │  ├─ unit/                      # 도메인 계산, 테마 파싱, 저장소 단위 테스트
 │  ├─ contract/                  # 저장된 키움 API 응답을 쓰는 변환 계약 테스트
 │  └─ integration/               # SQLite·Excel·API 모의 연동 테스트
-├─ resources/                    # 아이콘, 기본 테마 팔레트 등 정적 자원
-├─ scripts/                      # 개발용 DB 초기화·계약 응답 정규화 (향후)
 ├─ data/                         # 실행 중 생성되는 SQLite/로그; Git 제외 대상
 └─ pyproject.toml                # 의존성·품질도구·빌드 설정 (Phase 1에서 작성)
 ```

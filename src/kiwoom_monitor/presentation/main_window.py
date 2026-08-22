@@ -10,7 +10,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from PySide6.QtGui import QCloseEvent, QResizeEvent, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPolygon, QPalette
+from PySide6.QtGui import QCloseEvent, QResizeEvent, QShowEvent, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPolygon, QPalette
 from PySide6.QtCore import QEvent, QEventLoop, QProcess, QThread, QTimer, QUrl, QSize, QPoint, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QToolBar,
+    QLayout,
     QVBoxLayout,
     QWidget,
 )
@@ -65,7 +66,6 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.daily_high_worker import DailyHig
 from kiwoom_monitor.infrastructure.kiwoom_rest.nxt_eligibility_worker import NxtEligibilityWorker
 from kiwoom_monitor.application.daily_high_service import DailyHighTargets
 from kiwoom_monitor.application.trade_strength import StockFundamentals, trade_strength_percent
-from kiwoom_monitor.infrastructure.excel.theme_repository import ThemeRepository
 from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSetting, ColumnSettingsRepository
 from kiwoom_monitor.infrastructure.persistence.settings_backup import SettingsBackupError, SettingsBackupService
 from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupError, ThemeBackupService
@@ -91,7 +91,7 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 
 
@@ -254,6 +254,10 @@ class SettingsDialog(QDialog):
         self._google_drive_auto_upload.toggled.connect(self.refresh_drive_status)
         self._google_drive_auto_upload_on_exit.toggled.connect(self.refresh_drive_status)
         self.api_changed = False
+        self._dialog_size_save_timer = QTimer(self)
+        self._dialog_size_save_timer.setSingleShot(True)
+        self._dialog_size_save_timer.setInterval(350)
+        self._dialog_size_save_timer.timeout.connect(self._save_dialog_size)
         self.setWindowTitle("기본 설정")
 
         self._rank_query_type = QComboBox()
@@ -425,9 +429,15 @@ class SettingsDialog(QDialog):
         layout.addRow(buttons)
 
     def _build_grouped_layout(self) -> None:
-        has_embedded_manager = self._theme_manager_panel_factory is not None or self._column_manager_panel_factory is not None
-        self.resize(760 if has_embedded_manager else 520, 650 if has_embedded_manager else 500)
+        self.resize(self._dialog_dimension("settings_dialog_width", 680), self._dialog_dimension("settings_dialog_height", 650))
         layout = QVBoxLayout(self)
+        # 탭 중 가장 넓은 설정 행이 창의 최소 크기를 강제하지 않게 한다.
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        # Qt가 모든 탭의 내용 크기를 합쳐 944×617 정도의 "권장 최소 크기"를
+        # 만들면, Windows에서는 테두리를 잡는 즉시 창이 그 크기까지 튀어
+        # 버린다. 실제로 허용할 최소 크기를 명시해 사용자가 원하는 높이까지
+        # 자연스럽게 조절할 수 있게 한다.
+        self.setMinimumSize(480, 360)
         tabs = QTabWidget()
 
         strength_tab = QWidget(); strength_form = QFormLayout(strength_tab)
@@ -545,6 +555,9 @@ class SettingsDialog(QDialog):
             tabs.addTab(theme_tab, "종목/테마")
 
         manage_tab = QWidget(); manage_form = QFormLayout(manage_tab)
+        # 이 두 탭은 별도 창을 키우지 않고, 현재 기본설정 창 안에서만
+        # 배치되어야 한다. QFormLayout의 내용 기반 최소 크기 전파를 끈다.
+        manage_form.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         manage_form.addRow(self._section_title("연결 및 기록"))
         if self._api_path is not None:
             api_button = QPushButton("API 설정")
@@ -579,9 +592,11 @@ class SettingsDialog(QDialog):
         if self._drive_connector is not None:
             manage_form.addRow(self._section_separator())
             manage_form.addRow(self._section_title("Google Drive 동기화"))
-            manage_form.addRow(QLabel("테마·일반 설정·표 구성만 내 드라이브의 ‘키움 실시간 모니터’ 폴더에 동기화합니다. 로컬 변경 시각이 마지막 업로드 성공 시각보다 최근이면, 시작 자동 다운로드는 건너뛰어 로컬 변경을 보호합니다."))
+            manage_form.addRow(QLabel("테마와 일반 설정을 내 드라이브의 ‘키움 실시간 모니터’ 폴더에 동기화합니다."))
             status = QLabel()
-            status.setWordWrap(True)
+            # 상태 문구가 바뀔 때 줄바꿈 높이까지 다시 계산하면 창 높이가
+            # 튀는 원인이 된다. 상태는 한 줄로 표시한다.
+            status.setWordWrap(False)
             self._drive_status_label = status
             self.refresh_drive_status()
             if self._drive_client_importer is not None:
@@ -608,10 +623,12 @@ class SettingsDialog(QDialog):
                 disconnect = QPushButton("연결 해제")
                 disconnect.clicked.connect(self._drive_disconnector)
                 manage_form.addRow("계정", disconnect)
+        manage_tab.setMinimumSize(0, 0)
         tabs.addTab(manage_tab, "관리")
 
         info_tab = QWidget()
         info_layout = QVBoxLayout(info_tab)
+        info_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         info_layout.addWidget(self._section_title("프로그램 정보"))
         app_info = QLabel(
             f"키움 실시간 종목 모니터 {APP_VERSION}\n"
@@ -619,10 +636,11 @@ class SettingsDialog(QDialog):
             "이 프로그램은 여러 오픈소스 소프트웨어를 기반으로 제작되었습니다."
         )
         app_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        app_info.setWordWrap(True)
+        app_info.setWordWrap(False)
         app_info.setStyleSheet("color: #667085; padding: 18px 8px;")
         info_layout.addWidget(app_info)
         info_layout.addStretch()
+        info_tab.setMinimumSize(0, 0)
         tabs.addTab(info_tab, "프로그램 정보")
         layout.addWidget(tabs)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -631,6 +649,29 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def minimumSizeHint(self) -> QSize:
+        """탭의 긴 내용이 Windows 창 크기 제한으로 전파되는 것을 막는다."""
+        return QSize(480, 360)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "_dialog_size_save_timer"):
+            self._dialog_size_save_timer.start()
+
+    def done(self, result: int) -> None:
+        self._save_dialog_size()
+        super().done(result)
+
+    def _save_dialog_size(self) -> None:
+        self._settings.set("settings_dialog_width", str(self.width()))
+        self._settings.set("settings_dialog_height", str(self.height()))
+
+    def _dialog_dimension(self, key: str, default: int) -> int:
+        try:
+            return max(400, min(1600, int(self._settings.get(key))))
+        except (TypeError, ValueError):
+            return default
 
     def refresh_drive_status(self) -> None:
         if self._drive_status_label is not None:
@@ -2010,6 +2051,7 @@ class MainWindow(QMainWindow):
         self._ranking_priority_preparing = False
         self._resizing_columns = False
         self._restoring_columns = False
+        self._column_auto_fit_ready = False
         self._manual_column_resize_until = 0.0
         self._initial_new_high_refresh_started = False
         self._initial_nxt_codes: tuple[str, ...] = ()
@@ -2045,6 +2087,10 @@ class MainWindow(QMainWindow):
         self._clock_timer.timeout.connect(self._update_clock_label)
         self._clock_timer.start(1000)
         self._update_clock_label()
+        self._window_geometry_save_timer = QTimer(self)
+        self._window_geometry_save_timer.setSingleShot(True)
+        self._window_geometry_save_timer.setInterval(350)
+        self._window_geometry_save_timer.timeout.connect(self._save_window_geometry)
         self.setWindowTitle("키움 실시간 종목 모니터")
         self.resize(int(self._settings.get("window_width")), int(self._settings.get("window_height")))
         self.setMinimumWidth(320)
@@ -2451,8 +2497,10 @@ class MainWindow(QMainWindow):
         self._settings.clear_cache()
         if self._theme_store is not None:
             self._themes = self._theme_store.all_by_name()
-        if self._columns is not None:
-            self._restore_columns()
+        layout_changed = self._restore_columns() if self._columns is not None else False
+        if layout_changed:
+            self._table.updateGeometry()
+            QTimer.singleShot(0, self._resize_columns_proportionally)
         if self._ranking_loader is not None and hasattr(self._ranking_loader, "set_query_type"):
             self._ranking_loader.set_query_type(self._settings.get("rank_query_type"))
         saved_rank_query = self._settings.get("rank_query_type")
@@ -2512,9 +2560,9 @@ class MainWindow(QMainWindow):
             self._apply_column_settings()
 
     def _apply_column_settings(self) -> None:
-        self._restore_columns()
-        self._table.updateGeometry()
-        QTimer.singleShot(0, self._resize_columns_proportionally)
+        if self._restore_columns():
+            self._table.updateGeometry()
+            QTimer.singleShot(0, self._resize_columns_proportionally)
         self.statusBar().showMessage("필드 편집을 적용했습니다.")
 
     def _open_alert_settings(self) -> None:
@@ -2881,10 +2929,12 @@ class MainWindow(QMainWindow):
                     return (), True
         return tuple(resolved), False
 
-    def _restore_columns(self) -> None:
-        if self._columns is None: return
+    def _restore_columns(self) -> bool:
+        if self._columns is None:
+            return False
         saved = {s.name: s for s in self._columns.list()}
         header = self._table.horizontalHeader()
+        before = tuple((not self._table.isColumnHidden(logical), header.visualIndex(logical)) for logical, _ in enumerate(self.COLUMNS))
         self._restoring_columns = True
         try:
             for logical, (name, _) in enumerate(self.COLUMNS):
@@ -2898,6 +2948,8 @@ class MainWindow(QMainWindow):
                     header.moveSection(header.visualIndex(logical), target)
         finally:
             self._restoring_columns = False
+        after = tuple((not self._table.isColumnHidden(logical), header.visualIndex(logical)) for logical, _ in enumerate(self.COLUMNS))
+        return before != after
 
     def _save_columns(self) -> None:
         if self._columns is None: return
@@ -2911,7 +2963,7 @@ class MainWindow(QMainWindow):
             self._save_columns()
 
     def _resize_columns_proportionally(self) -> None:
-        if self._settings.get("ui_mode") != "responsive" or time.monotonic() < self._manual_column_resize_until or not hasattr(self, "_table"):
+        if not self._column_auto_fit_ready or self._settings.get("ui_mode") != "responsive" or time.monotonic() < self._manual_column_resize_until or not hasattr(self, "_table"):
             return
         table = self._table
         visible = [index for index in range(table.columnCount()) if not table.isColumnHidden(index)]
@@ -2930,6 +2982,10 @@ class MainWindow(QMainWindow):
                 table.setColumnWidth(index, width)
         finally:
             self._resizing_columns = False
+
+    def _enable_initial_column_auto_fit(self) -> None:
+        """초기 복원 완료 뒤부터 실제 창 크기 변경에만 자동 맞춤을 허용한다."""
+        self._column_auto_fit_ready = True
 
     def _show_column_menu(self, point: object) -> None:
         menu = QMenu(self)
@@ -2971,7 +3027,6 @@ class MainWindow(QMainWindow):
         self._columns.reset()
         self._manual_column_resize_until = 0.0
         self._restore_columns()
-        QTimer.singleShot(0, self._resize_columns_proportionally)
         self.statusBar().showMessage("컬럼 표시, 순서, 폭을 기본값으로 초기화했습니다.")
 
     def _on_ranking_timer(self) -> None:
@@ -4112,8 +4167,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self._closing:
             self._closing = True
-            self._settings.set("window_width", str(self.width()))
-            self._settings.set("window_height", str(self.height()))
+            self._window_geometry_save_timer.stop()
+            self._save_window_geometry()
+            self._save_columns()
             self._ranking_timer.stop()
             self._rank_changed_highlight_timer.stop()
             self._realtime_session_timer.stop()
@@ -4250,6 +4306,8 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
+        if hasattr(self, "_window_geometry_save_timer"):
+            self._window_geometry_save_timer.start()
         # 수동으로 열 폭을 조정한 뒤 30초 동안은 창을 어떻게 조절해도
         # 행 높이·열 너비를 모두 유지한다.
         if time.monotonic() < self._manual_column_resize_until:
@@ -4258,3 +4316,15 @@ class MainWindow(QMainWindow):
         self._apply_table_visuals()
         if event.size().width() != event.oldSize().width():
             QTimer.singleShot(0, self._resize_columns_proportionally)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        # show 과정에서 예약된 자동 맞춤은 아직 막혀 있다. 모두 끝난 뒤부터
+        # 실제 사용자의 창 크기 변경에만 자동 맞춤을 허용한다.
+        if not self._column_auto_fit_ready:
+            QTimer.singleShot(0, self._enable_initial_column_auto_fit)
+
+    def _save_window_geometry(self) -> None:
+        """창 크기는 Drive와 무관하게 현재 컴퓨터에 즉시 보관한다."""
+        self._settings.set("window_width", str(self.width()))
+        self._settings.set("window_height", str(self.height()))

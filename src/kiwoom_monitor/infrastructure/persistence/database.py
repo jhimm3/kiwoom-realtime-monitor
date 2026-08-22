@@ -29,7 +29,7 @@ DEFAULT_SETTINGS = {
     "near_high_show_icon": "1", "near_high_icon_interest": "🔎", "near_high_icon_caution": "⚠️", "near_high_icon_fire": "🔥",
     "near_high_icon_interest_image": "", "near_high_icon_caution_image": "", "near_high_icon_fire_image": "",
     "near_high_sound_enabled": "1", "near_high_sound_interest": "data/near_high_sounds/interest.mp3", "near_high_sound_caution": "data/near_high_sounds/caution.mp3", "near_high_sound_fire": "data/near_high_sounds/fire.mp3",
-    "ui_font_size": "0", "ui_row_height": "0", "theme_badge_enabled": "1", "theme_badge_font_size": "0", "theme_badge_padding": "2", "high_distance_period": "250", "window_width": "1160", "window_height": "720",
+    "ui_font_size": "0", "ui_row_height": "0", "theme_badge_enabled": "1", "theme_badge_font_size": "0", "theme_badge_padding": "2", "high_distance_period": "250", "window_width": "1160", "window_height": "720", "settings_dialog_width": "680", "settings_dialog_height": "650",
     "decimal_change_rate": "2", "decimal_trade_value": "2", "decimal_strength": "2", "decimal_high_distance": "2",
     "market_cap_highlight_low_eok": "10000",
     "market_cap_highlight_middle_eok": "50000",

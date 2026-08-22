@@ -87,7 +87,7 @@ class SettingsBackupService:
                 assets.append({"path": stored, "content": b64encode(source.read_bytes()).decode("ascii")})
         return assets
 
-    def import_from(self, path: Path, include_settings: bool = True, include_themes: bool = True, excluded_setting_keys: frozenset[str] = frozenset(), include_column_widths: bool = True) -> None:
+    def import_from(self, path: Path, include_settings: bool = True, include_themes: bool = True, excluded_setting_keys: frozenset[str] = frozenset(), include_column_widths: bool = True, include_column_layout: bool = True) -> None:
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
@@ -117,7 +117,7 @@ class SettingsBackupService:
                     connection.executemany("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [(key, str(value)) for key, value in settings.items() if key in DEFAULT_SETTINGS and key not in excluded_setting_keys])
                     if include_column_widths:
                         connection.executemany("UPDATE column_settings SET visible = ?, position = ?, width = ? WHERE column_name = ?", [(int(bool(item.get("visible"))), int(item.get("position", 0)), max(20, int(item.get("width", 100))), str(item["name"])) for item in imported_columns])
-                    else:
+                    elif include_column_layout:
                         connection.executemany("UPDATE column_settings SET visible = ?, position = ? WHERE column_name = ?", [(int(bool(item.get("visible"))), int(item.get("position", 0)), str(item["name"])) for item in imported_columns])
                 if include_themes:
                     for item in (stock_catalog if isinstance(stock_catalog, list) else ()):

@@ -9,6 +9,14 @@ from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDr
 
 
 class GoogleDriveSyncServiceTest(unittest.TestCase):
+    def test_only_machine_specific_settings_are_excluded_from_drive_sync(self) -> None:
+        self.assertIn("window_width", GoogleDriveSyncService.LOCAL_ONLY_SETTINGS)
+        self.assertIn("window_height", GoogleDriveSyncService.LOCAL_ONLY_SETTINGS)
+        self.assertNotIn("google_drive_auto_download", GoogleDriveSyncService.LOCAL_ONLY_SETTINGS)
+        self.assertNotIn("google_drive_auto_upload", GoogleDriveSyncService.LOCAL_ONLY_SETTINGS)
+        self.assertNotIn("google_drive_auto_upload_on_exit", GoogleDriveSyncService.LOCAL_ONLY_SETTINGS)
+        self.assertNotIn("google_drive_sync_target", GoogleDriveSyncService.LOCAL_ONLY_SETTINGS)
+
     def test_imports_only_desktop_oauth_client_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
