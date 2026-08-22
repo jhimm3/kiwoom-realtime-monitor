@@ -31,14 +31,10 @@ class SettingsBackupServiceTest(unittest.TestCase):
 
             connection = sqlite3.connect(database_path)
             try:
-                connection.execute("UPDATE settings SET value = '1' WHERE key = 'decimal_strength'")
-                connection.execute("DELETE FROM stock_themes")
-                connection.execute("DELETE FROM themes")
-                connection.execute("DELETE FROM stock_aliases")
+                connection.execute("UPDATE column_settings SET visible = 0, position = 9, width = 333 WHERE column_name = 'stock'")
                 connection.commit()
             finally:
                 connection.close()
-
             service.import_from(backup_path)
 
             connection = sqlite3.connect(database_path)
@@ -46,5 +42,28 @@ class SettingsBackupServiceTest(unittest.TestCase):
                 self.assertEqual(('3',), connection.execute("SELECT value FROM settings WHERE key = 'decimal_strength'").fetchone())
                 self.assertEqual(('반도체', '#123456'), connection.execute("SELECT theme_name, default_color FROM themes").fetchone())
                 self.assertEqual(('삼전', '005930'), connection.execute("SELECT alias, stock_code FROM stock_aliases").fetchone())
+            finally:
+                connection.close()
+
+    def test_import_syncs_column_layout_but_keeps_local_widths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.db"
+            Database(database_path).initialize()
+            backup_path = Path(directory) / "settings.json"
+            service = SettingsBackupService(database_path)
+            service.export_to(backup_path)
+
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute("UPDATE column_settings SET visible = 0, position = 9, width = 333 WHERE column_name = 'stock'")
+                connection.commit()
+            finally:
+                connection.close()
+
+            service.import_from(backup_path, include_column_widths=False)
+
+            connection = sqlite3.connect(database_path)
+            try:
+                self.assertEqual((1, 1, 333), connection.execute("SELECT visible, position, width FROM column_settings WHERE column_name = 'stock'").fetchone())
             finally:
                 connection.close()

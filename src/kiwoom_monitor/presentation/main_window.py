@@ -10,7 +10,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from PySide6.QtGui import QCloseEvent, QResizeEvent, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPolygon, QPalette
+from PySide6.QtGui import QCloseEvent, QResizeEvent, QShowEvent, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPolygon, QPalette
 from PySide6.QtCore import QEvent, QEventLoop, QProcess, QThread, QTimer, QUrl, QSize, QPoint, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -2010,6 +2010,7 @@ class MainWindow(QMainWindow):
         self._ranking_priority_preparing = False
         self._resizing_columns = False
         self._restoring_columns = False
+        self._column_auto_fit_ready = False
         self._manual_column_resize_until = 0.0
         self._initial_new_high_refresh_started = False
         self._initial_nxt_codes: tuple[str, ...] = ()
@@ -2045,6 +2046,10 @@ class MainWindow(QMainWindow):
         self._clock_timer.timeout.connect(self._update_clock_label)
         self._clock_timer.start(1000)
         self._update_clock_label()
+        self._window_geometry_save_timer = QTimer(self)
+        self._window_geometry_save_timer.setSingleShot(True)
+        self._window_geometry_save_timer.setInterval(350)
+        self._window_geometry_save_timer.timeout.connect(self._save_window_geometry)
         self.setWindowTitle("키움 실시간 종목 모니터")
         self.resize(int(self._settings.get("window_width")), int(self._settings.get("window_height")))
         self.setMinimumWidth(320)
@@ -2451,8 +2456,10 @@ class MainWindow(QMainWindow):
         self._settings.clear_cache()
         if self._theme_store is not None:
             self._themes = self._theme_store.all_by_name()
-        if self._columns is not None:
-            self._restore_columns()
+        layout_changed = self._restore_columns() if self._columns is not None else False
+        if layout_changed:
+            self._table.updateGeometry()
+            QTimer.singleShot(0, self._resize_columns_proportionally)
         if self._ranking_loader is not None and hasattr(self._ranking_loader, "set_query_type"):
             self._ranking_loader.set_query_type(self._settings.get("rank_query_type"))
         saved_rank_query = self._settings.get("rank_query_type")
@@ -2512,9 +2519,9 @@ class MainWindow(QMainWindow):
             self._apply_column_settings()
 
     def _apply_column_settings(self) -> None:
-        self._restore_columns()
-        self._table.updateGeometry()
-        QTimer.singleShot(0, self._resize_columns_proportionally)
+        if self._restore_columns():
+            self._table.updateGeometry()
+            QTimer.singleShot(0, self._resize_columns_proportionally)
         self.statusBar().showMessage("필드 편집을 적용했습니다.")
 
     def _open_alert_settings(self) -> None:
@@ -2881,10 +2888,12 @@ class MainWindow(QMainWindow):
                     return (), True
         return tuple(resolved), False
 
-    def _restore_columns(self) -> None:
-        if self._columns is None: return
+    def _restore_columns(self) -> bool:
+        if self._columns is None:
+            return False
         saved = {s.name: s for s in self._columns.list()}
         header = self._table.horizontalHeader()
+        before = tuple((not self._table.isColumnHidden(logical), header.visualIndex(logical)) for logical, _ in enumerate(self.COLUMNS))
         self._restoring_columns = True
         try:
             for logical, (name, _) in enumerate(self.COLUMNS):
@@ -2898,6 +2907,8 @@ class MainWindow(QMainWindow):
                     header.moveSection(header.visualIndex(logical), target)
         finally:
             self._restoring_columns = False
+        after = tuple((not self._table.isColumnHidden(logical), header.visualIndex(logical)) for logical, _ in enumerate(self.COLUMNS))
+        return before != after
 
     def _save_columns(self) -> None:
         if self._columns is None: return
@@ -2911,7 +2922,7 @@ class MainWindow(QMainWindow):
             self._save_columns()
 
     def _resize_columns_proportionally(self) -> None:
-        if self._settings.get("ui_mode") != "responsive" or time.monotonic() < self._manual_column_resize_until or not hasattr(self, "_table"):
+        if not self._column_auto_fit_ready or self._settings.get("ui_mode") != "responsive" or time.monotonic() < self._manual_column_resize_until or not hasattr(self, "_table"):
             return
         table = self._table
         visible = [index for index in range(table.columnCount()) if not table.isColumnHidden(index)]
@@ -2930,6 +2941,10 @@ class MainWindow(QMainWindow):
                 table.setColumnWidth(index, width)
         finally:
             self._resizing_columns = False
+
+    def _enable_initial_column_auto_fit(self) -> None:
+        """초기 복원 완료 뒤부터 실제 창 크기 변경에만 자동 맞춤을 허용한다."""
+        self._column_auto_fit_ready = True
 
     def _show_column_menu(self, point: object) -> None:
         menu = QMenu(self)
@@ -2971,7 +2986,6 @@ class MainWindow(QMainWindow):
         self._columns.reset()
         self._manual_column_resize_until = 0.0
         self._restore_columns()
-        QTimer.singleShot(0, self._resize_columns_proportionally)
         self.statusBar().showMessage("컬럼 표시, 순서, 폭을 기본값으로 초기화했습니다.")
 
     def _on_ranking_timer(self) -> None:
@@ -4112,8 +4126,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self._closing:
             self._closing = True
-            self._settings.set("window_width", str(self.width()))
-            self._settings.set("window_height", str(self.height()))
+            self._window_geometry_save_timer.stop()
+            self._save_window_geometry()
+            self._save_columns()
             self._ranking_timer.stop()
             self._rank_changed_highlight_timer.stop()
             self._realtime_session_timer.stop()
@@ -4250,6 +4265,8 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
+        if hasattr(self, "_window_geometry_save_timer"):
+            self._window_geometry_save_timer.start()
         # 수동으로 열 폭을 조정한 뒤 30초 동안은 창을 어떻게 조절해도
         # 행 높이·열 너비를 모두 유지한다.
         if time.monotonic() < self._manual_column_resize_until:
@@ -4258,3 +4275,15 @@ class MainWindow(QMainWindow):
         self._apply_table_visuals()
         if event.size().width() != event.oldSize().width():
             QTimer.singleShot(0, self._resize_columns_proportionally)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        # show 과정에서 예약된 자동 맞춤은 아직 막혀 있다. 모두 끝난 뒤부터
+        # 실제 사용자의 창 크기 변경에만 자동 맞춤을 허용한다.
+        if not self._column_auto_fit_ready:
+            QTimer.singleShot(0, self._enable_initial_column_auto_fit)
+
+    def _save_window_geometry(self) -> None:
+        """창 크기는 Drive와 무관하게 현재 컴퓨터에 즉시 보관한다."""
+        self._settings.set("window_width", str(self.width()))
+        self._settings.set("window_height", str(self.height()))
