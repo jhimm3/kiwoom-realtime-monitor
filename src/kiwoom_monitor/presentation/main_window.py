@@ -98,7 +98,7 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 
 
@@ -2382,33 +2382,46 @@ class MainWindow(QMainWindow):
     def _apply_downloaded_update(self, archive_path: str) -> None:
         app_root = Path(sys.executable).resolve().parent
         script = AppPaths.for_current_user().data_dir.parent / "updates" / "apply_update.ps1"
+        log_path = script.with_name("apply_update.log")
         escaped_archive = archive_path.replace("'", "''")
         escaped_root = str(app_root).replace("'", "''")
         escaped_exe = str(app_root / Path(sys.executable).name).replace("'", "''")
+        escaped_log = str(log_path).replace("'", "''")
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
             f"$processId = {os.getpid()}\n"
             f"$archive = '{escaped_archive}'\n$target = '{escaped_root}'\n$exe = '{escaped_exe}'\n"
+            f"$log = '{escaped_log}'\n"
             "$staging = Join-Path (Split-Path $archive) 'staging'\n"
-            "Wait-Process -Id $processId -ErrorAction SilentlyContinue\n"
-            "Add-Type -AssemblyName PresentationFramework; Add-Type -AssemblyName System.Windows.Forms\n"
-            "$window = New-Object Windows.Window; $window.Title = '키움 실시간 모니터 업데이트'; $window.Width = 420; $window.Height = 145; $window.ResizeMode = 'NoResize'; $window.WindowStartupLocation = 'CenterScreen'\n"
-            "$panel = New-Object Windows.Controls.StackPanel; $panel.Margin = '22'; $status = New-Object Windows.Controls.TextBlock; $status.Text = '업데이트를 적용하고 있습니다…'; $bar = New-Object Windows.Controls.ProgressBar; $bar.Height = 20; $bar.Margin = '0,14,0,0'; $bar.Minimum = 0; $bar.Maximum = 100; $panel.Children.Add($status) | Out-Null; $panel.Children.Add($bar) | Out-Null; $window.Content = $panel; $window.Show() | Out-Null\n"
-            "Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue\n"
-            "Expand-Archive -Path $archive -DestinationPath $staging -Force\n"
-            "$manifest = Get-Content (Join-Path $staging 'update_manifest.json') -Raw | ConvertFrom-Json\n"
-            "$total = ($manifest.changed | ForEach-Object { (Get-Item (Join-Path $staging $_)).Length } | Measure-Object -Sum).Sum; $done = 0\n"
-            "foreach ($file in $manifest.changed) { $source = Join-Path $staging $file; $destination = Join-Path $target $file; $status.Text = '파일을 교체하고 있습니다…'; New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null; Copy-Item $source $destination -Force; $done += (Get-Item $source).Length; $bar.Value = [Math]::Min(100, [Math]::Round(100 * $done / [Math]::Max(1,$total))); [Windows.Forms.Application]::DoEvents() }\n"
-            "foreach ($file in $manifest.deleted) { Remove-Item (Join-Path $target $file) -Force -ErrorAction SilentlyContinue }\n"
-            "Remove-Item $archive -Force -ErrorAction SilentlyContinue\n"
-            "Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue\n"
-            "Start-Process -FilePath $exe\n"
-            "$window.Close()\n"
-            "Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue\n",
-            encoding="utf-8",
+            "function Write-UpdateLog([string]$message) { ('{0:yyyy-MM-dd HH:mm:ss} {1}' -f (Get-Date), $message) | Add-Content -Path $log -Encoding UTF8 }\n"
+            "Write-UpdateLog '업데이트 도우미 프로세스 시작'\n"
+            "try {\n"
+            "  Add-Type -AssemblyName PresentationFramework; Add-Type -AssemblyName System.Windows.Forms\n"
+            "  $window = New-Object Windows.Window; $window.Title = '키움 실시간 모니터 업데이트'; $window.Width = 420; $window.Height = 145; $window.ResizeMode = 'NoResize'; $window.WindowStartupLocation = 'CenterScreen'\n"
+            "  $panel = New-Object Windows.Controls.StackPanel; $panel.Margin = '22'; $status = New-Object Windows.Controls.TextBlock; $status.Text = '앱 종료를 기다리고 있습니다…'; $bar = New-Object Windows.Controls.ProgressBar; $bar.Height = 20; $bar.Margin = '0,14,0,0'; $bar.Minimum = 0; $bar.Maximum = 100; $panel.Children.Add($status) | Out-Null; $panel.Children.Add($bar) | Out-Null; $window.Content = $panel; $window.Show() | Out-Null; [Windows.Forms.Application]::DoEvents()\n"
+            "  while (Get-Process -Id $processId -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 100; [Windows.Forms.Application]::DoEvents() }\n"
+            "  Write-UpdateLog '앱 종료 확인'\n"
+            "  $status.Text = '업데이트 파일을 준비하고 있습니다…'; [Windows.Forms.Application]::DoEvents()\n"
+            "  Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue\n"
+            "  Expand-Archive -Path $archive -DestinationPath $staging -Force\n"
+            "  Write-UpdateLog '압축 해제 완료'\n"
+            "  $manifest = Get-Content (Join-Path $staging 'update_manifest.json') -Raw | ConvertFrom-Json\n"
+            "  $total = ($manifest.changed | ForEach-Object { (Get-Item (Join-Path $staging $_)).Length } | Measure-Object -Sum).Sum; $done = 0\n"
+            "  foreach ($file in $manifest.changed) { $source = Join-Path $staging $file; $destination = Join-Path $target $file; $status.Text = '파일을 교체하고 있습니다…'; New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null; Copy-Item $source $destination -Force; Write-UpdateLog ('교체 완료: ' + $file); $done += (Get-Item $source).Length; $bar.Value = [Math]::Min(100, [Math]::Round(100 * $done / [Math]::Max(1,$total))); [Windows.Forms.Application]::DoEvents() }\n"
+            "  foreach ($file in $manifest.deleted) { Remove-Item (Join-Path $target $file) -Force -ErrorAction SilentlyContinue; Write-UpdateLog ('삭제 처리: ' + $file) }\n"
+            "  $status.Text = '업데이트를 마무리하고 있습니다…'; $bar.Value = 100; [Windows.Forms.Application]::DoEvents()\n"
+            "  Remove-Item $archive -Force -ErrorAction SilentlyContinue\n"
+            "  Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue\n"
+            "  Write-UpdateLog '업데이트 완료, 앱 재실행'\n"
+            "  Start-Process -FilePath $exe\n"
+            "  $window.Close(); Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
+            "} catch { $message = '업데이트에 실패했습니다. ' + $_.Exception.Message; Write-UpdateLog $message; $status.Text = $message; [Windows.Forms.Application]::DoEvents(); [Windows.Forms.MessageBox]::Show($message, '키움 실시간 모니터 업데이트') | Out-Null }\n",
+            # Windows PowerShell 5.1은 BOM 없는 UTF-8 스크립트의 한글을 현재
+            # 시스템 코드 페이지로 해석한다. 업데이트 도우미는 반드시 BOM을 넣는다.
+            encoding="utf-8-sig",
         )
         try:
-            arguments = f'-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{script}"'
+            arguments = f'-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "{script}"'
             result = ctypes.windll.shell32.ShellExecuteW(None, "runas", "powershell.exe", arguments, None, 0)
             if result <= 32:
                 raise OSError(f"Windows 권한 확인이 취소되었거나 시작에 실패했습니다. ({result})")
