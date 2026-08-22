@@ -1,4 +1,4 @@
-"""Google Drive appDataFolder 기반 설정·테마 동기화."""
+"""Google Drive 일반 폴더 기반 설정·테마 동기화."""
 
 from __future__ import annotations
 
@@ -18,10 +18,13 @@ class GoogleDriveSyncError(RuntimeError):
 
 
 class GoogleDriveSyncService:
-    """개인 Drive의 앱 전용 숨김 폴더에 하나의 동기화 문서를 저장한다."""
+    """개인 Drive의 사용자 표시 폴더에 하나의 동기화 문서를 저장한다."""
 
-    SCOPES = ("https://www.googleapis.com/auth/drive.appdata",)
-    REMOTE_NAME = "kiwoom-monitor-sync-v1.json"
+    SCOPES = ("https://www.googleapis.com/auth/drive.file",)
+    FOLDER_NAME = "키움 실시간 모니터"
+    LEGACY_REMOTE_NAME = "kiwoom-monitor-sync-v1.json"
+    SETTINGS_REMOTE_NAME = "kiwoom-monitor-settings-v1.json"
+    THEMES_REMOTE_NAME = "kiwoom-monitor-themes-v1.json"
 
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
@@ -51,48 +54,54 @@ class GoogleDriveSyncService:
     def disconnect(self) -> None:
         self._token_path.unlink(missing_ok=True)
 
-    def upload(self, interactive: bool = False) -> str:
+    def upload(self, interactive: bool = False, target: str = "both") -> str:
         service = self._drive_service(interactive)
-        with tempfile.TemporaryDirectory(prefix="kiwoom_drive_") as directory:
-            source = Path(directory) / self.REMOTE_NAME
-            SettingsBackupService(self._database_path).export_to(source)
-            content = source.read_bytes()
-        media = self._media_upload(content)
-        existing = self._find_remote_file(service)
+        folder_id = self._ensure_sync_folder(service)
+        files = self._selected_files(target)
         try:
-            if existing:
-                service.files().update(fileId=existing, media_body=media, fields="id,modifiedTime").execute()
-            else:
-                service.files().create(
-                    body={"name": self.REMOTE_NAME, "parents": ["appDataFolder"]},
-                    media_body=media,
-                    fields="id,modifiedTime",
-                ).execute()
+            with tempfile.TemporaryDirectory(prefix="kiwoom_drive_") as directory:
+                for name, include_settings, include_themes in files:
+                    source = Path(directory) / name
+                    SettingsBackupService(self._database_path).export_to(source, include_settings, include_themes)
+                    existing = self._find_remote_file(service, folder_id, name)
+                    media = self._media_upload(source.read_bytes())
+                    if existing:
+                        service.files().update(fileId=existing, media_body=media, fields="id,modifiedTime").execute()
+                    else:
+                        service.files().create(body={"name": name, "parents": [folder_id]}, media_body=media, fields="id,modifiedTime").execute()
         except Exception as error:
             raise GoogleDriveSyncError(f"Google Drive 업로드에 실패했습니다: {error}") from error
-        return "Google Drive에 설정·테마를 업로드했습니다."
+        return f"Google Drive에 {self._target_label(target)}을(를) 업로드했습니다."
 
-    def download(self, interactive: bool = False) -> str:
+    def download(self, interactive: bool = False, target: str = "both") -> str:
         service = self._drive_service(interactive)
-        file_id = self._find_remote_file(service)
-        if not file_id:
+        folder_id = self._find_sync_folder(service)
+        files = self._selected_files(target)
+        remote_files = [(name, self._find_remote_file(service, folder_id, name) if folder_id else None, include_settings, include_themes) for name, include_settings, include_themes in files]
+        # 분리 저장 전의 단일 파일도 한 번은 읽어 기존 업로드를 잃지 않는다.
+        if folder_id and not any(file_id for _, file_id, _, _ in remote_files):
+            legacy_id = self._find_remote_file(service, folder_id, self.LEGACY_REMOTE_NAME)
+            if legacy_id:
+                remote_files = [(self.LEGACY_REMOTE_NAME, legacy_id, include_settings, include_themes) for _, include_settings, include_themes in files]
+        if not any(file_id for _, file_id, _, _ in remote_files):
             return "Google Drive에 아직 동기화된 설정이 없습니다."
         try:
             from googleapiclient.http import MediaIoBaseDownload
-
-            request = service.files().get_media(fileId=file_id)
-            buffer = BytesIO()
-            downloader = MediaIoBaseDownload(buffer, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
             with tempfile.TemporaryDirectory(prefix="kiwoom_drive_") as directory:
-                source = Path(directory) / self.REMOTE_NAME
-                source.write_bytes(buffer.getvalue())
-                SettingsBackupService(self._database_path).import_from(source)
+                for name, file_id, include_settings, include_themes in remote_files:
+                    if not file_id:
+                        continue
+                    buffer = BytesIO()
+                    downloader = MediaIoBaseDownload(buffer, service.files().get_media(fileId=file_id))
+                    done = False
+                    while not done:
+                        _, done = downloader.next_chunk()
+                    source = Path(directory) / name
+                    source.write_bytes(buffer.getvalue())
+                    SettingsBackupService(self._database_path).import_from(source, include_settings, include_themes)
         except Exception as error:
             raise GoogleDriveSyncError(f"Google Drive 다운로드에 실패했습니다: {error}") from error
-        return "Google Drive 설정·테마를 다운로드했습니다. 프로그램을 다시 시작하면 모두 적용됩니다."
+        return f"Google Drive {self._target_label(target)}을(를) 다운로드했습니다. 프로그램을 다시 시작하면 모두 적용됩니다."
 
     def _drive_service(self, interactive: bool):
         if not self.configured:
@@ -109,6 +118,8 @@ class GoogleDriveSyncService:
             try:
                 raw = _unprotect(base64.b64decode(self._token_path.read_text(encoding="utf-8")))
                 credentials = Credentials.from_authorized_user_info(json.loads(raw.decode("utf-8")), self.SCOPES)
+                if not credentials.has_scopes(self.SCOPES):
+                    credentials = None
             except Exception:
                 self._token_path.unlink(missing_ok=True)
         if credentials and credentials.expired and credentials.refresh_token:
@@ -130,11 +141,39 @@ class GoogleDriveSyncService:
             raise GoogleDriveSyncError("Google 로그인 정보를 안전하게 저장하지 못했습니다.") from error
         return build("drive", "v3", credentials=credentials, cache_discovery=False)
 
-    def _find_remote_file(self, service: object) -> str | None:
+    def _find_sync_folder(self, service: object) -> str | None:
         try:
             response = service.files().list(
-                spaces="appDataFolder",
-                q=f"name = '{self.REMOTE_NAME}' and trashed = false",
+                spaces="drive",
+                q=f"name = '{self.FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+                fields="files(id,modifiedTime)",
+                pageSize=10,
+            ).execute()
+        except Exception as error:
+            raise GoogleDriveSyncError(f"Google Drive 폴더 목록을 읽지 못했습니다: {error}") from error
+        files = response.get("files", [])
+        if not files:
+            return None
+        return str(max(files, key=lambda item: str(item.get("modifiedTime", ""))).get("id"))
+
+    def _ensure_sync_folder(self, service: object) -> str:
+        folder_id = self._find_sync_folder(service)
+        if folder_id:
+            return folder_id
+        try:
+            created = service.files().create(
+                body={"name": self.FOLDER_NAME, "mimeType": "application/vnd.google-apps.folder"},
+                fields="id",
+            ).execute()
+            return str(created["id"])
+        except Exception as error:
+            raise GoogleDriveSyncError(f"Google Drive 동기화 폴더를 만들지 못했습니다: {error}") from error
+
+    def _find_remote_file(self, service: object, folder_id: str, name: str) -> str | None:
+        try:
+            response = service.files().list(
+                spaces="drive",
+                q=f"name = '{name}' and '{folder_id}' in parents and trashed = false",
                 fields="files(id,modifiedTime)",
                 pageSize=10,
             ).execute()
@@ -144,6 +183,17 @@ class GoogleDriveSyncService:
         if not files:
             return None
         return str(max(files, key=lambda item: str(item.get("modifiedTime", ""))).get("id"))
+
+    def _selected_files(self, target: str) -> tuple[tuple[str, bool, bool], ...]:
+        if target == "settings":
+            return ((self.SETTINGS_REMOTE_NAME, True, False),)
+        if target == "themes":
+            return ((self.THEMES_REMOTE_NAME, False, True),)
+        return ((self.SETTINGS_REMOTE_NAME, True, False), (self.THEMES_REMOTE_NAME, False, True))
+
+    @staticmethod
+    def _target_label(target: str) -> str:
+        return {"settings": "설정", "themes": "테마", "both": "설정과 테마"}.get(target, "설정과 테마")
 
     @staticmethod
     def _media_upload(content: bytes):

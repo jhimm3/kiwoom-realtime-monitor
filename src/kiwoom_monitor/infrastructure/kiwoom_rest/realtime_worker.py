@@ -57,7 +57,7 @@ class RealtimeTradeWorker(QThread):
             session = market_session(self._now_provider(), self._environment)
             if session is None:
                 self.status_changed.emit("실시간 체결 대기: 현재는 KRX/NXT 거래 시간이 아닙니다")
-                time.sleep(15)
+                self._wait_or_stop(15)
                 continue
             try:
                 asyncio.run(self._receive(session))
@@ -66,7 +66,13 @@ class RealtimeTradeWorker(QThread):
             except Exception as error:
                 self.connection_failed.emit(str(error))
             if not self.isInterruptionRequested():
-                time.sleep(3)
+                self._wait_or_stop(3)
+
+    def _wait_or_stop(self, seconds: float) -> None:
+        """긴 재시도 대기 중에도 종료 요청을 즉시 반영한다."""
+        deadline = time.monotonic() + seconds
+        while not self.isInterruptionRequested() and time.monotonic() < deadline:
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
     async def _receive(self, session: str) -> None:
         if not self._codes:

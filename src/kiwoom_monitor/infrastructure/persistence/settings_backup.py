@@ -23,7 +23,7 @@ class SettingsBackupService:
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
 
-    def export_to(self, path: Path) -> None:
+    def export_to(self, path: Path, include_settings: bool = True, include_themes: bool = True) -> None:
         connection = sqlite3.connect(self._database_path)
         try:
             settings = dict(connection.execute("SELECT key, value FROM settings").fetchall())
@@ -55,18 +55,15 @@ class SettingsBackupService:
             ]
         finally:
             connection.close()
-        document = {
+        document: dict[str, Any] = {
             "format": self.FORMAT,
             "version": self.VERSION,
             "created_at": datetime.now().isoformat(timespec="seconds"),
-            "settings": settings,
-            "columns": columns,
-            "themes": themes,
-            "stock_themes": stock_themes,
-            "aliases": aliases,
-            "stock_catalog": stock_catalog,
-            "assets": self._export_assets(settings),
         }
+        if include_settings:
+            document.update({"settings": settings, "columns": columns, "assets": self._export_assets(settings)})
+        if include_themes:
+            document.update({"themes": themes, "stock_themes": stock_themes, "aliases": aliases, "stock_catalog": stock_catalog})
         path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _export_assets(self, settings: dict[str, str]) -> list[dict[str, str]]:
@@ -85,18 +82,18 @@ class SettingsBackupService:
                 assets.append({"path": stored, "content": b64encode(source.read_bytes()).decode("ascii")})
         return assets
 
-    def import_from(self, path: Path) -> None:
+    def import_from(self, path: Path, include_settings: bool = True, include_themes: bool = True) -> None:
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise SettingsBackupError("설정 백업 파일을 읽을 수 없습니다.") from error
         if not isinstance(document, dict) or document.get("format") != self.FORMAT or document.get("version") not in {1, self.VERSION}:
             raise SettingsBackupError("이 프로그램에서 만든 설정 백업 파일이 아닙니다.")
-        settings = document.get("settings")
-        columns = document.get("columns")
-        themes = document.get("themes")
-        stock_themes = document.get("stock_themes")
-        aliases = document.get("aliases")
+        settings = document.get("settings", {})
+        columns = document.get("columns", [])
+        themes = document.get("themes", [])
+        stock_themes = document.get("stock_themes", [])
+        aliases = document.get("aliases", [])
         stock_catalog = document.get("stock_catalog", [])
         assets = document.get("assets", [])
         if not all(isinstance(value, list) for value in (columns, themes, stock_themes, aliases)) or not isinstance(settings, dict):
@@ -111,60 +108,35 @@ class SettingsBackupService:
         try:
             connection.execute("PRAGMA foreign_keys = ON")
             with connection:
-                connection.executemany(
-                    "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    [(key, str(value)) for key, value in settings.items() if key in DEFAULT_SETTINGS],
-                )
-                for item in (stock_catalog if isinstance(stock_catalog, list) else ()):
-                    if not isinstance(item, dict):
-                        continue
-                    code, name, market = str(item.get("code", "")).upper(), str(item.get("name", "")).strip(), str(item.get("market", "")).strip()
-                    if len(code) == 6 and code.isalnum() and name:
-                        connection.execute(
-                            "INSERT INTO stocks(code, name, market) VALUES (?, ?, ?) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, updated_at=CURRENT_TIMESTAMP",
-                            (code, name, market),
-                        )
-                connection.executemany(
-                    "UPDATE column_settings SET visible = ?, position = ?, width = ? WHERE column_name = ?",
-                    [
-                        (int(bool(item.get("visible"))), int(item.get("position", 0)), max(20, int(item.get("width", 100))), str(item["name"]))
-                        for item in imported_columns
-                    ],
-                )
-                connection.execute("DELETE FROM stock_themes")
-                connection.execute("DELETE FROM themes")
-                for item in themes:
-                    if not isinstance(item, dict) or not str(item.get("name", "")).strip():
-                        continue
-                    connection.execute(
-                        "INSERT INTO themes(theme_name, default_color) VALUES (?, ?)",
-                        (str(item["name"]).strip(), str(item.get("color") or "#DCE6F1")),
-                    )
-                stock_codes = {code for (code,) in connection.execute("SELECT code FROM stocks")}
-                for item in stock_themes:
-                    if not isinstance(item, dict):
-                        continue
-                    code, theme = str(item.get("code", "")), str(item.get("theme", "")).strip()
-                    if code not in stock_codes or not theme:
-                        continue
-                    row = connection.execute("SELECT theme_id FROM themes WHERE theme_name = ?", (theme,)).fetchone()
-                    if row:
-                        connection.execute(
-                            "INSERT INTO stock_themes(stock_code, theme_id, custom_color) VALUES (?, ?, ?)",
-                            (code, row[0], item.get("color") or None),
-                        )
-                connection.execute("DELETE FROM stock_aliases")
-                for item in aliases:
-                    if not isinstance(item, dict):
-                        continue
-                    alias, code = str(item.get("alias", "")).strip(), str(item.get("code", ""))
-                    if alias and code in stock_codes:
-                        connection.execute("INSERT INTO stock_aliases(alias, stock_code) VALUES (?, ?)", (alias, code))
+                if include_settings:
+                    connection.executemany("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [(key, str(value)) for key, value in settings.items() if key in DEFAULT_SETTINGS])
+                    connection.executemany("UPDATE column_settings SET visible = ?, position = ?, width = ? WHERE column_name = ?", [(int(bool(item.get("visible"))), int(item.get("position", 0)), max(20, int(item.get("width", 100))), str(item["name"])) for item in imported_columns])
+                if include_themes:
+                    for item in (stock_catalog if isinstance(stock_catalog, list) else ()):
+                        if not isinstance(item, dict): continue
+                        code, name, market = str(item.get("code", "")).upper(), str(item.get("name", "")).strip(), str(item.get("market", "")).strip()
+                        if len(code) == 6 and code.isalnum() and name: connection.execute("INSERT INTO stocks(code, name, market) VALUES (?, ?, ?) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, updated_at=CURRENT_TIMESTAMP", (code, name, market))
+                    connection.execute("DELETE FROM stock_themes"); connection.execute("DELETE FROM themes")
+                    for item in themes:
+                        if isinstance(item, dict) and str(item.get("name", "")).strip(): connection.execute("INSERT INTO themes(theme_name, default_color) VALUES (?, ?)", (str(item["name"]).strip(), str(item.get("color") or "#DCE6F1")))
+                    stock_codes = {code for (code,) in connection.execute("SELECT code FROM stocks")}
+                    for item in stock_themes:
+                        if not isinstance(item, dict): continue
+                        code, theme = str(item.get("code", "")), str(item.get("theme", "")).strip()
+                        if code not in stock_codes or not theme: continue
+                        row = connection.execute("SELECT theme_id FROM themes WHERE theme_name = ?", (theme,)).fetchone()
+                        if row: connection.execute("INSERT INTO stock_themes(stock_code, theme_id, custom_color) VALUES (?, ?, ?)", (code, row[0], item.get("color") or None))
+                    connection.execute("DELETE FROM stock_aliases")
+                    for item in aliases:
+                        if isinstance(item, dict):
+                            alias, code = str(item.get("alias", "")).strip(), str(item.get("code", ""))
+                            if alias and code in stock_codes: connection.execute("INSERT INTO stock_aliases(alias, stock_code) VALUES (?, ?)", (alias, code))
         except (sqlite3.Error, TypeError, ValueError) as error:
             raise SettingsBackupError("설정 백업 파일을 적용할 수 없습니다.") from error
         finally:
             connection.close()
-        self._import_assets(assets)
+        if include_settings:
+            self._import_assets(assets)
 
     def _import_assets(self, assets: Any) -> None:
         if not isinstance(assets, list):

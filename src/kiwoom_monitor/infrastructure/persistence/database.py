@@ -53,6 +53,9 @@ DEFAULT_SETTINGS = {
     "theme_manager_theme_column_width": "330",
     "google_drive_auto_download": "1",
     "google_drive_auto_upload": "1",
+    "google_drive_auto_upload_on_exit": "0",
+    "google_drive_sync_target": "both",
+    "google_drive_sync_target": "both",
     "krx_stock_catalog_date": "",
     "krx_stock_catalog_format_version": "3",
 }
