@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Kiwoom Realtime Monitor - desktop stock ranking, theme, and trading-strength monitor.">
+  <title>Kiwoom Realtime Monitor</title>
+  <style>
+    :root { color-scheme: light; --ink:#172033; --muted:#5c667a; --line:#dde3ed; --brand:#1769aa; --soft:#f4f8fc; }
+    * { box-sizing:border-box; } body { margin:0; font:16px/1.7 system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); background:#fff; }
+    main { max-width:820px; margin:0 auto; padding:72px 24px; } h1 { font-size:clamp(2rem, 6vw, 3.4rem); line-height:1.18; margin:0 0 18px; }
+    h2 { margin-top:48px; font-size:1.35rem; } p { color:var(--muted); } .lead { max-width:650px; font-size:1.15rem; }
+    .card { border:1px solid var(--line); border-radius:14px; background:var(--soft); padding:22px 24px; margin-top:28px; }
+    ul { padding-left:22px; } a { color:var(--brand); font-weight:650; text-underline-offset:3px; }
+    footer { margin-top:64px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:.9rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <p><a href="../index.html">한국어</a></p>
+    <h1>Kiwoom Realtime Monitor</h1>
+    <p class="lead">A desktop application that displays leading Korean stocks, themes, trading value, and trading strength in one place using the Kiwoom REST API and real-time trade data.</p>
+
+    <div class="card">
+      <strong>Google Drive synchronization</strong>
+      <p>Only when a user chooses to enable it, the app backs up and restores settings and theme data to that user's Google Drive. The connection is made only after the user signs in to Google and grants consent.</p>
+      <a href="privacy.html">Read the Privacy Policy</a>
+    </div>
+
+    <h2>Key features</h2>
+    <ul>
+      <li>Real-time ranking view for the top 20 stocks through Kiwoom</li>
+      <li>Theme and stock management, plus text, spreadsheet, and image-OCR theme updates</li>
+      <li>Minute, hourly, and daily trading value and strength, with high-price proximity alerts</li>
+      <li>Optional Google Drive backup and restore for settings and themes</li>
+    </ul>
+
+    <h2>Data handling principles</h2>
+    <p>API keys and Google sign-in tokens are stored locally on the user's computer in encrypted form. Even when Google Drive synchronization is enabled, the app does not upload API keys, sign-in tokens, or log files to Google Drive. The app does not send data to an external service or share it with third parties without the user's consent.</p>
+
+    <h2>Support and source code</h2>
+    <p>Please use the <a href="https://github.com/jhimm3/kiwoom-realtime-monitor">GitHub repository</a> and its Issues page for support.</p>
+
+    <footer>© 2026 크니. All rights reserved.</footer>
+  </main>
+</body>
+</html>

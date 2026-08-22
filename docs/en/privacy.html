@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Privacy Policy for Kiwoom Realtime Monitor">
+  <title>Privacy Policy | Kiwoom Realtime Monitor</title>
+  <style>
+    :root { --ink:#172033; --muted:#5c667a; --line:#dde3ed; --brand:#1769aa; }
+    * { box-sizing:border-box; } body { margin:0; font:16px/1.75 system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); background:#fff; }
+    main { max-width:820px; margin:0 auto; padding:56px 24px 80px; } h1 { font-size:2rem; margin:0 0 8px; }
+    h2 { margin:40px 0 10px; font-size:1.25rem; } p, li { color:var(--muted); }
+    a { color:var(--brand); font-weight:650; text-underline-offset:3px; } .date { margin-top:0; font-size:.95rem; }
+    footer { margin-top:56px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:.9rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <a href="index.html">← Kiwoom Realtime Monitor</a> · <a href="../privacy.html">한국어</a>
+    <h1>Privacy Policy</h1>
+    <p class="date">Effective date: August 22, 2026</p>
+
+    <h2>1. Overview</h2>
+    <p>Kiwoom Realtime Monitor (the “App”) provides stock monitoring and optional Google Drive synchronization using only data entered or selected by the user. The App does not collect user data through a developer-operated server.</p>
+
+    <h2>2. Data processed by the App</h2>
+    <ul>
+      <li>Kiwoom API settings entered by the user are stored locally on the user's computer in encrypted form.</li>
+      <li>Stocks, themes, and application settings entered or updated by the user are stored in a local database on the user's computer.</li>
+      <li>Only when the user connects and enables Google Drive synchronization, the App reads or writes settings and theme backup files in the user's Google Drive.</li>
+      <li>Google OAuth access and refresh tokens are stored locally on the user's computer in encrypted form.</li>
+    </ul>
+
+    <h2>3. Google Drive scope and purpose</h2>
+    <p>The App requests only the <code>https://www.googleapis.com/auth/drive.file</code> scope. This scope is limited to files created by the App or files the user explicitly shares with the App. The App uses this permission only to create, read, and update the <strong>Kiwoom Realtime Monitor</strong> folder and its settings and theme backup files.</p>
+    <p>The App does not browse all files in Google Drive or read or change ordinary files that were not created for or shared with the App.</p>
+
+    <h2>4. Data not uploaded to Google Drive</h2>
+    <p>Kiwoom API keys, Google OAuth tokens, program logs, and local window size and column width preferences are not included in Google Drive synchronization.</p>
+
+    <h2>5. Third-party sharing and transfers</h2>
+    <p>The App developer does not collect, sell, or share user data. When Google Drive synchronization is used, only the selected settings and theme data are transferred to the user's own Google Drive. Kiwoom API communication takes place directly between the App and Kiwoom's API servers using the credentials entered by the user.</p>
+
+    <h2>6. User choices and deletion</h2>
+    <p>Google Drive synchronization is optional. Users can disconnect Google Drive or disable automatic upload and download at any time in the App. Disconnecting removes the locally stored OAuth token from that computer. Backup files already stored in Google Drive can be deleted directly by the user in Google Drive.</p>
+
+    <h2>7. Security</h2>
+    <p>The App uses operating-system encryption facilities to protect locally stored API keys and OAuth tokens. Users remain responsible for the security of their computer, Google Account, and backup files.</p>
+
+    <h2>8. Contact</h2>
+    <p>For questions about this Privacy Policy or data handling, please use <a href="https://github.com/jhimm3/kiwoom-realtime-monitor/issues">GitHub Issues</a>.</p>
+
+    <footer>This policy may be updated when features or applicable requirements change.</footer>
+  </main>
+</body>
+</html>
