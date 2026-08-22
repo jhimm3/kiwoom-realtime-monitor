@@ -1,0 +1,73 @@
+키움 실시간 종목 모니터
+Copyright 2026 크니. All rights reserved.
+
+제3자 소프트웨어 고지
+===================
+
+이 프로그램은 아래 오픈소스 소프트웨어를 사용합니다. 각 구성요소의 저작권 및
+라이선스 고지는 해당 라이선스의 조건에 따라 유지됩니다.
+
+PySide6 / Qt for Python 6.11.1
+------------------------------
+Copyright (C) The Qt Company Ltd. and other contributors.
+License: GNU Lesser General Public License v3.0 (LGPL-3.0) 또는 GNU General
+Public License v3.0 (GPL-3.0), 또는 Qt Commercial License.
+Project: https://doc.qt.io/qtforpython/
+License: https://www.gnu.org/licenses/lgpl-3.0.html
+
+이 프로그램은 PySide6의 LGPL 사용 조건을 준수하는 방식으로 사용합니다. PySide6를
+포함하여 배포하는 경우에는 해당 라이선스 원문 및 필요한 제3자 고지를 함께 제공해야
+합니다.
+
+PaddleOCR 3.7.0 / PaddlePaddle 3.2.2 / PaddleX 3.7.2
+-----------------------------------------------------
+Copyright (c) PaddlePaddle Authors.
+License: Apache License 2.0.
+Projects: https://github.com/PaddlePaddle/PaddleOCR
+          https://github.com/PaddlePaddle/Paddle
+          https://github.com/PaddlePaddle/PaddleX
+License: https://www.apache.org/licenses/LICENSE-2.0
+
+Pillow 12.3.0
+--------------
+Copyright (c) Pillow Contributors.
+License: MIT-CMU / HPND 계열.
+Project: https://github.com/python-pillow/Pillow
+License: https://github.com/python-pillow/Pillow/blob/main/LICENSE
+
+websockets 16.1.1
+-----------------
+Copyright (c) websockets contributors.
+License: BSD License.
+Project: https://github.com/python-websockets/websockets
+License: https://github.com/python-websockets/websockets/blob/main/LICENSE
+
+그 밖의 간접 의존성
+-------------------
+OCR·이미지 처리·네트워크 기능을 위해 NumPy, OpenCV, pandas, requests, aiohttp,
+Hugging Face Hub, ModelScope 등 각 프로젝트의 의존성이 함께 설치될 수 있습니다.
+배포 시에는 실제 포함한 패키지와 버전에 맞춰 각 패키지의 LICENSE / NOTICE 파일을
+함께 제공해야 합니다. 정확한 버전 목록은 requirements.lock.txt를 기준으로 합니다.
+
+OCR 모델
+--------
+OCR 모델은 사용자가 최초 실행 시 별도로 내려받거나 data/ocr_models에 직접 설치할 수
+있습니다. 모델을 앱에 함께 배포하는 경우에는 해당 모델 저장소의 모델 카드와 LICENSE를
+별도로 확인하고 포함해야 합니다.
+
+기본 신고가 알림 음성
+----------------------
+data/near_high_sounds의 interest.mp3, caution.mp3, fire.mp3는 TTSMaker
+(https://ttsmaker.com/ko)로 생성한 음성입니다. TTSMaker는 생성된 오디오에 대해
+상업적 사용을 허용하며, 별도 수수료·추가 허가·출처 표기가 필요하지 않다고 안내합니다.
+확인일: 2026-08-21.
+
+이 고지는 TTSMaker의 일반 제공 음성으로 생성한 현재 기본 파일에만 적용됩니다. 사용자가
+다른 음성 또는 타인의 목소리와 유사한 음성을 추가할 때에는 별도로 권리와 사용 조건을
+확인해야 합니다.
+
+사용자 추가 파일
+----------------
+사용자가 선택한 아이콘·알림 소리·테마 입력 이미지·Excel 파일의 저작권 및 상업 이용
+권한은 해당 파일을 제공한 사용자에게 있습니다. 본 프로그램은 이를 자동으로 검증하지
+않습니다.

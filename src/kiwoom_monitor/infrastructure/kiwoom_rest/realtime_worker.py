@@ -7,8 +7,6 @@ import json
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, time as clock_time, timedelta
-from email.utils import parsedate_to_datetime
-from urllib.request import Request, urlopen
 
 from PySide6.QtCore import QThread, Signal
 from websockets.asyncio.client import connect
@@ -39,32 +37,6 @@ def korea_now() -> datetime:
     return datetime.now(UTC) + timedelta(hours=9)
 
 
-class GoogleClock:
-    """Google 응답의 Date 헤더를 기준으로 한국 시간을 유지한다."""
-
-    def __init__(self, opener: Callable[..., object] = urlopen, monotonic: Callable[[], float] = time.monotonic) -> None:
-        self._opener = opener
-        self._monotonic = monotonic
-        self._base_time: datetime | None = None
-        self._saved_at: float | None = None
-
-    def korea_now(self) -> datetime:
-        now = self._monotonic()
-        if self._base_time is None or self._saved_at is None or now - self._saved_at >= 300:
-            try:
-                request = Request("https://www.google.com/generate_204", method="HEAD")
-                with self._opener(request, timeout=3) as response:
-                    header = response.headers.get("Date")
-                if header:
-                    self._base_time = parsedate_to_datetime(header).astimezone(UTC) + timedelta(hours=9)
-                    self._saved_at = now
-            except Exception:
-                return korea_now()
-        if self._base_time is None or self._saved_at is None:
-            return korea_now()
-        return self._base_time + timedelta(seconds=self._monotonic() - self._saved_at)
-
-
 class RealtimeTradeWorker(QThread):
     """로그인·구독·PING 응답을 처리하고 체결 틱을 Qt 신호로 전달한다."""
 
@@ -85,7 +57,7 @@ class RealtimeTradeWorker(QThread):
             session = market_session(self._now_provider(), self._environment)
             if session is None:
                 self.status_changed.emit("실시간 체결 대기: 현재는 KRX/NXT 거래 시간이 아닙니다")
-                time.sleep(15)
+                self._wait_or_stop(15)
                 continue
             try:
                 asyncio.run(self._receive(session))
@@ -94,7 +66,13 @@ class RealtimeTradeWorker(QThread):
             except Exception as error:
                 self.connection_failed.emit(str(error))
             if not self.isInterruptionRequested():
-                time.sleep(3)
+                self._wait_or_stop(3)
+
+    def _wait_or_stop(self, seconds: float) -> None:
+        """긴 재시도 대기 중에도 종료 요청을 즉시 반영한다."""
+        deadline = time.monotonic() + seconds
+        while not self.isInterruptionRequested() and time.monotonic() < deadline:
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
     async def _receive(self, session: str) -> None:
         if not self._codes:

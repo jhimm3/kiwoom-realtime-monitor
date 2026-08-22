@@ -1,4 +1,4 @@
-"""로컬 .env에서만 키움 API 연결 정보를 읽는다."""
+"""키움 API 연결 정보 모델과 이전 설정 파일 호환 처리를 제공한다."""
 
 from __future__ import annotations
 

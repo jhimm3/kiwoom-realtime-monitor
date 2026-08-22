@@ -14,6 +14,7 @@ class RestClient(Protocol):
 class DailyHighTargets:
     high_5_price: int | None
     high_20_price: int | None
+    previous_day_trade_value_eok: float | None = None
 
 
 class DailyHighService:
@@ -25,12 +26,13 @@ class DailyHighService:
         records = response.get("stk_ddwkmm", [])
         if not isinstance(records, list):
             raise ValueError("ka10005 일봉 목록 형식이 올바르지 않습니다.")
-        bars = sorted(
-            ((str(row.get("date", "")).strip(), _price(row.get("high_pric"))) for row in records if isinstance(row, dict)),
+        daily_rows = sorted(
+            ((str(row.get("date", "")).strip(), row) for row in records if isinstance(row, dict)),
             key=lambda value: value[0], reverse=True,
         )
-        prices = [price for _, price in bars if price is not None]
-        return DailyHighTargets(_highest(prices[:5]), _highest(prices[:20]))
+        prices = [price for _, row in daily_rows if (price := _price(row.get("high_pric"))) is not None]
+        previous_trade_value = _daily_trade_value(daily_rows[1][1]) if len(daily_rows) > 1 else None
+        return DailyHighTargets(_highest(prices[:5]), _highest(prices[:20]), previous_trade_value)
 
 
 def _price(value: object) -> int | None:
@@ -43,3 +45,11 @@ def _price(value: object) -> int | None:
 
 def _highest(prices: list[int]) -> int | None:
     return max(prices) if prices else None
+
+
+def _daily_trade_value(row: dict[str, Any]) -> float | None:
+    values = tuple(_price(row.get(key)) for key in ("open_pric", "high_pric", "low_pric", "cur_prc", "trde_qty"))
+    if any(value is None for value in values):
+        return None
+    open_price, high_price, low_price, close_price, volume = values
+    return volume * (high_price + open_price + low_price + close_price) / 4 / 100_000_000
