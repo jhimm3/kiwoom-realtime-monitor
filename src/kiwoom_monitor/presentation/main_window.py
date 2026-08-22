@@ -354,7 +354,7 @@ class SettingsDialog(QDialog):
         try:
             self._rank_changed_highlight_seconds.setValue(float(settings.get("rank_changed_highlight_seconds")))
         except ValueError:
-            self._rank_changed_highlight_seconds.setValue(2.0)
+            self._rank_changed_highlight_seconds.setValue(0.0)
         self._rank_changed_highlight_enabled = QCheckBox("순위 변동 행 강조 사용")
         self._rank_changed_highlight_enabled.setChecked(settings.get("rank_changed_highlight_enabled") == "1")
         self._ui_mode = QComboBox()
