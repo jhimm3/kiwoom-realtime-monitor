@@ -26,6 +26,7 @@ from kiwoom_monitor.infrastructure.excel.theme_repository import ThemeRepository
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
 from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSettingsRepository
 from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository as DatabaseThemeRepository
+from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncService
 from kiwoom_monitor.presentation.main_window import MainWindow
 
 
@@ -85,6 +86,7 @@ def main() -> None:
         columns=ColumnSettingsRepository(paths.database_path),
         stock_lookup=StockRepository(paths.database_path),
         theme_store=DatabaseThemeRepository(paths.database_path),
+        google_drive_sync=GoogleDriveSyncService(paths.database_path),
     )
     window.show()
     sys.exit(app.exec())

@@ -34,3 +34,5 @@ dist/
 .vscode/
 Thumbs.db
 .DS_Store
+data/google_drive_client.json
+data/google_drive_token.dat

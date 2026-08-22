@@ -51,6 +51,8 @@ DEFAULT_SETTINGS = {
     "theme_excel_import_dir": "",
     "theme_manager_stock_column_width": "170",
     "theme_manager_theme_column_width": "330",
+    "google_drive_auto_download": "1",
+    "google_drive_auto_upload": "1",
     "krx_stock_catalog_date": "",
     "krx_stock_catalog_format_version": "3",
 }

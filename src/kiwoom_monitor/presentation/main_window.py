@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from PySide6.QtGui import QCloseEvent, QResizeEvent, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPolygon, QPalette
-from PySide6.QtCore import QEvent, QEventLoop, QProcess, QThread, QTimer, QUrl, QSize, QPoint
+from PySide6.QtCore import QEvent, QEventLoop, QProcess, QThread, QTimer, QUrl, QSize, QPoint, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -67,6 +67,8 @@ from kiwoom_monitor.application.trade_strength import StockFundamentals, trade_s
 from kiwoom_monitor.infrastructure.excel.theme_repository import ThemeRepository
 from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSetting, ColumnSettingsRepository
 from kiwoom_monitor.infrastructure.persistence.settings_backup import SettingsBackupError, SettingsBackupService
+from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupError, ThemeBackupService
+from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncError, GoogleDriveSyncService
 from kiwoom_monitor.infrastructure.excel.theme_repository import ThemeRepository as ExcelThemeRepository
 from kiwoom_monitor.domain.theme_import import validate_theme_header, validate_theme_rows
 from kiwoom_monitor.domain.theme_parser import parse_themes, theme_key
@@ -88,7 +90,7 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 
 
@@ -104,6 +106,28 @@ class ClickableLabel(QLabel):
         if getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton:
             self._on_click()
         super().mouseReleaseEvent(event)  # type: ignore[arg-type]
+
+
+class GoogleDriveSyncWorker(QThread):
+    """Drive 통신만 별도 스레드에서 실행해 표·설정 창을 멈추지 않는다."""
+
+    completed = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, service: GoogleDriveSyncService, operation: str, interactive: bool = False, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._service = service
+        self._operation = operation
+        self._interactive = interactive
+
+    def run(self) -> None:
+        try:
+            if self.isInterruptionRequested():
+                return
+            action = self._service.upload if self._operation == "upload" else self._service.download
+            self.completed.emit(action(interactive=self._interactive))
+        except GoogleDriveSyncError as error:
+            self.failed.emit(str(error))
 
 
 def choose_similar_stock(parent: QWidget, lookup: object, name: str) -> tuple[str, str] | None:
@@ -187,7 +211,7 @@ def choose_similar_stock(parent: QWidget, lookup: object, name: str) -> tuple[tu
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None) -> None:
+    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
         self._api_path = api_path
@@ -199,6 +223,18 @@ class SettingsDialog(QDialog):
         self._theme_manager_panel_factory = theme_manager_panel_factory
         self._column_manager_panel_factory = column_manager_panel_factory
         self._stock_lookup = stock_lookup
+        self._drive_connector = drive_connector
+        self._drive_downloader = drive_downloader
+        self._drive_uploader = drive_uploader
+        self._drive_disconnector = drive_disconnector
+        self._drive_status = drive_status
+        self._theme_backup_exporter = theme_backup_exporter
+        self._theme_backup_importer = theme_backup_importer
+        self._drive_status_label: QLabel | None = None
+        self._google_drive_auto_download = QCheckBox("앱 시작 시 자동 다운로드")
+        self._google_drive_auto_download.setChecked(settings.get("google_drive_auto_download") == "1")
+        self._google_drive_auto_upload = QCheckBox("변경 후·종료 시 자동 업로드")
+        self._google_drive_auto_upload.setChecked(settings.get("google_drive_auto_upload") == "1")
         self.api_changed = False
         self.setWindowTitle("기본 설정")
 
@@ -514,6 +550,40 @@ class SettingsDialog(QDialog):
             restore_button = QPushButton("설정 백업 불러오기")
             restore_button.clicked.connect(self._backup_importer)
             manage_form.addRow("설정 복원", restore_button)
+        if self._theme_backup_exporter is not None:
+            theme_backup_button = QPushButton("테마 DB 저장")
+            theme_backup_button.clicked.connect(self._theme_backup_exporter)
+            manage_form.addRow("테마 DB", theme_backup_button)
+        if self._theme_backup_importer is not None:
+            theme_restore_button = QPushButton("테마 DB 불러오기")
+            theme_restore_button.clicked.connect(self._theme_backup_importer)
+            manage_form.addRow("테마 DB 복원", theme_restore_button)
+        if self._drive_connector is not None:
+            manage_form.addRow(self._section_separator())
+            manage_form.addRow(self._section_title("Google Drive 동기화"))
+            manage_form.addRow(QLabel("연결을 누르면 Google 로그인 창이 열립니다. 테마·일반 설정·표 구성만 개인 Google Drive 숨김 폴더에 동기화합니다."))
+            status = QLabel()
+            status.setWordWrap(True)
+            self._drive_status_label = status
+            self.refresh_drive_status()
+            connect = QPushButton("Google Drive 연결")
+            connect.clicked.connect(self._drive_connector)
+            manage_form.addRow("연결", connect)
+            manage_form.addRow("상태", status)
+            manage_form.addRow("자동 동기화", self._google_drive_auto_download)
+            manage_form.addRow("", self._google_drive_auto_upload)
+            if self._drive_downloader is not None:
+                download = QPushButton("지금 다운로드")
+                download.clicked.connect(self._drive_downloader)
+                manage_form.addRow("가져오기", download)
+            if self._drive_uploader is not None:
+                upload = QPushButton("지금 업로드")
+                upload.clicked.connect(self._drive_uploader)
+                manage_form.addRow("보내기", upload)
+            if self._drive_disconnector is not None:
+                disconnect = QPushButton("연결 해제")
+                disconnect.clicked.connect(self._drive_disconnector)
+                manage_form.addRow("계정", disconnect)
         manage_form.addRow(self._section_separator())
         app_info = QLabel(
             f"키움 실시간 종목 모니터 {APP_VERSION}\n"
@@ -531,6 +601,10 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def refresh_drive_status(self) -> None:
+        if self._drive_status_label is not None:
+            self._drive_status_label.setText(self._drive_status() if self._drive_status is not None else "연결되지 않음")
 
     def _reset_strength_settings(self) -> None:
         for period, fields in self._strength_fields.items():
@@ -976,6 +1050,8 @@ class SettingsDialog(QDialog):
         self._settings.set("theme_trade_summary_period", str(self._theme_trade_summary_period.currentData()))
         self._settings.set("theme_trade_summary_excluded_stocks", self._theme_trade_summary_excluded_stocks.text().strip())
         self._settings.set("theme_trade_summary_excluded_enabled", "1" if self._theme_trade_summary_excluded_enabled.isChecked() else "0")
+        self._settings.set("google_drive_auto_download", "1" if self._google_drive_auto_download.isChecked() else "0")
+        self._settings.set("google_drive_auto_upload", "1" if self._google_drive_auto_upload.isChecked() else "0")
         self._settings.set("high_distance_period", str(self._high_distance_period.currentData()))
         self.accept()
 
@@ -1834,6 +1910,7 @@ class MainWindow(QMainWindow):
         theme_store: object | None = None,
         daily_high_worker_factory: Callable[[tuple[str, ...]], DailyHighWorker] | None = None,
         nxt_eligibility_worker_factory: Callable[[tuple[str, ...]], NxtEligibilityWorker] | None = None,
+        google_drive_sync: GoogleDriveSyncService | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -1851,6 +1928,15 @@ class MainWindow(QMainWindow):
         self._columns = columns
         self._stock_lookup = stock_lookup
         self._theme_store = theme_store
+        self._google_drive_sync = google_drive_sync
+        self._google_drive_worker: GoogleDriveSyncWorker | None = None
+        self._google_drive_operation = ""
+        self._google_drive_close_pending = False
+        self._google_drive_dirty = False
+        self._google_drive_debounce = QTimer(self)
+        self._google_drive_debounce.setSingleShot(True)
+        self._google_drive_debounce.setInterval(1_500)
+        self._google_drive_debounce.timeout.connect(lambda: self._start_google_drive_sync("upload"))
         self._realtime_worker: RealtimeTradeWorker | None = None
         self._realtime_codes: tuple[str, ...] = ()
         self._minute_history_worker: MinuteHistoryWorker | None = None
@@ -2005,6 +2091,8 @@ class MainWindow(QMainWindow):
             self._schedule_realtime_session_refresh()
         else:
             QTimer.singleShot(0, self._open_api_settings)
+        if self._google_drive_sync is not None and self._google_drive_sync.connected and self._settings.get("google_drive_auto_download") == "1":
+            QTimer.singleShot(1_000, lambda: self._start_google_drive_sync("download"))
 
     def _open_settings(self) -> None:
         if self._settings_dialog is not None and self._settings_dialog.isVisible():
@@ -2023,6 +2111,13 @@ class MainWindow(QMainWindow):
             lambda parent: ThemeManagerDialog(self._theme_store, self._settings, self._select_excel, self._select_theme_image, self._sync_krx_stock_catalog, parent, self._on_themes_changed) if self._theme_store is not None else QWidget(parent),
             column_manager_panel_factory=lambda parent: ColumnManagerDialog(self._columns, self.COLUMNS, self._table, parent, embedded=True, on_applied=self._apply_column_settings) if self._columns is not None else QWidget(parent),
             stock_lookup=self._stock_lookup,
+            drive_connector=self._connect_google_drive,
+            drive_downloader=lambda: self._start_google_drive_sync("download"),
+            drive_uploader=lambda: self._start_google_drive_sync("upload"),
+            drive_disconnector=self._disconnect_google_drive,
+            drive_status=self._google_drive_status,
+            theme_backup_exporter=self._export_theme_backup,
+            theme_backup_importer=self._import_theme_backup,
         )
         # 기본 설정은 메인 표를 막지 않는 별도 창으로 연다. 따라서 순위 갱신은
         # 설정 창이 열려 있어도 즉시 표에 반영된다.
@@ -2057,6 +2152,7 @@ class MainWindow(QMainWindow):
             self._render_trade_values(code)
             self._render_market_cap(code)
         self.statusBar().showMessage("기본 설정 저장 완료")
+        self._schedule_google_drive_upload()
         if dialog.api_changed:
             self._restart_for_api_settings()
 
@@ -2064,6 +2160,78 @@ class MainWindow(QMainWindow):
         if self._theme_store is not None:
             self._themes = self._theme_store.all_by_name()
         self._refresh_rankings()
+        self._schedule_google_drive_upload()
+
+    def _google_drive_status(self) -> str:
+        if self._google_drive_sync is None:
+            return "이 기능을 사용할 수 없습니다."
+        if self._google_drive_sync.connected:
+            return "연결됨 · 시작 시 다운로드, 설정·테마 변경 후 및 종료 시 업로드"
+        if self._google_drive_sync.configured:
+            return "연결되지 않음 · Google Drive 연결을 누르면 로그인합니다."
+        return "Google Drive 연결 구성을 준비하는 중입니다."
+
+    def _connect_google_drive(self) -> None:
+        if self._google_drive_sync is None or not self._google_drive_sync.configured:
+            QMessageBox.warning(self, "Google Drive 연결", "Google Drive 연결 구성이 아직 포함되지 않았습니다. 프로그램을 다시 설치하거나 관리자에게 문의하세요.")
+            return
+        self._start_google_drive_sync("download", interactive=True, allow_connect=True)
+
+    def _disconnect_google_drive(self) -> None:
+        if self._google_drive_sync is None:
+            return
+        self._google_drive_sync.disconnect()
+        self._refresh_google_drive_status()
+        self.statusBar().showMessage("Google Drive 계정 연결을 해제했습니다. 기존 Drive 파일은 그대로 유지됩니다.")
+
+    def _schedule_google_drive_upload(self) -> None:
+        if self._google_drive_sync is not None and self._google_drive_sync.connected and self._settings.get("google_drive_auto_upload") == "1" and not self._closing:
+            self._google_drive_dirty = True
+            self._google_drive_debounce.start()
+
+    def _start_google_drive_sync(self, operation: str, interactive: bool = False, close_after: bool = False, allow_connect: bool = False) -> None:
+        service = self._google_drive_sync
+        if service is None or not service.configured:
+            return
+        if not service.connected and not allow_connect:
+            self.statusBar().showMessage("Google Drive를 먼저 연결하세요.")
+            return
+        if self._google_drive_worker is not None and self._google_drive_worker.isRunning():
+            if close_after:
+                self._google_drive_close_pending = True
+            return
+        worker = GoogleDriveSyncWorker(service, operation, interactive, self)
+        self._google_drive_worker = worker
+        self._google_drive_operation = operation
+        worker.completed.connect(self._on_google_drive_sync_completed)
+        worker.failed.connect(self._on_google_drive_sync_failed)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        if close_after:
+            self._google_drive_close_pending = True
+        self.statusBar().showMessage("Google Drive 동기화 중…")
+
+    def _on_google_drive_sync_completed(self, message: str) -> None:
+        self.statusBar().showMessage(message)
+        operation = self._google_drive_operation
+        self._google_drive_worker = None
+        self._google_drive_operation = ""
+        if operation == "upload":
+            self._google_drive_dirty = False
+        self._refresh_google_drive_status()
+        if self._google_drive_close_pending and operation != "upload":
+            self._start_google_drive_sync("upload", close_after=True)
+
+    def _on_google_drive_sync_failed(self, message: str) -> None:
+        logger.warning("Google Drive 동기화 실패: %s", message)
+        self.statusBar().showMessage(f"Google Drive 동기화 실패: {message}")
+        self._google_drive_worker = None
+        self._google_drive_operation = ""
+        self._refresh_google_drive_status()
+
+    def _refresh_google_drive_status(self) -> None:
+        if self._settings_dialog is not None:
+            self._settings_dialog.refresh_drive_status()
 
     def _change_rank_query_type(self) -> None:
         query_type = str(self._rank_query_selector.currentData())
@@ -2149,6 +2317,33 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "설정 복원", str(error))
             return
         QMessageBox.information(self, "설정 복원", "설정을 복원했습니다. 프로그램을 다시 시작하면 적용됩니다.")
+
+    def _export_theme_backup(self) -> None:
+        default_name = f"키움_모니터_테마DB_{datetime.now():%Y%m%d}.json"
+        path, _ = QFileDialog.getSaveFileName(self, "테마 DB 저장", str(Path.home() / "Documents" / default_name), "테마 DB 백업 (*.json)")
+        if not path:
+            return
+        target = Path(path).with_suffix(".json")
+        try:
+            ThemeBackupService(self._settings.database_path).export_to(target)
+        except OSError as error:
+            QMessageBox.warning(self, "테마 DB 저장", f"테마 DB 백업을 저장하지 못했습니다.\n{error}")
+            return
+        QMessageBox.information(self, "테마 DB 저장", "테마·종목 연결·테마 색·별칭·등록 종목을 저장했습니다.\n일반 설정, 필드 구성, API 키, 로그는 포함하지 않았습니다.")
+
+    def _import_theme_backup(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "테마 DB 불러오기", "", "테마 DB 백업 (*.json)")
+        if not path:
+            return
+        if QMessageBox.question(self, "테마 DB 불러오기", "현재 테마·종목 연결·테마 색·별칭을 백업 내용으로 바꿉니다. 일반 설정은 바뀌지 않습니다. 계속할까요?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            ThemeBackupService(self._settings.database_path).import_from(Path(path))
+        except ThemeBackupError as error:
+            QMessageBox.warning(self, "테마 DB 불러오기", str(error))
+            return
+        self._on_themes_changed()
+        QMessageBox.information(self, "테마 DB 불러오기", "테마 DB를 불러왔습니다.")
 
     def _on_background_failure(self, message: str) -> None:
         logger.warning("백그라운드 작업 실패: %s", message)
@@ -3666,6 +3861,7 @@ class MainWindow(QMainWindow):
             self._clock_timer.stop()
             self._theme_trade_summary_timer.stop()
             self._price_cache_timer.stop()
+            self._google_drive_debounce.stop()
             self._save_current_price_cache()
             if hasattr(self, "_trade_tick_flush_timer"):
                 self._trade_tick_flush_timer.stop()
@@ -3673,6 +3869,8 @@ class MainWindow(QMainWindow):
                 player.stop()
             self._refresh_button.setEnabled(False)
             self.statusBar().showMessage("종료 중: 실행 중인 작업을 일시 중지하고 있습니다…")
+            if self._google_drive_sync is not None and self._google_drive_sync.connected and self._settings.get("google_drive_auto_upload") == "1" and (self._google_drive_dirty or self._google_drive_debounce.isActive()):
+                self._start_google_drive_sync("upload", close_after=True)
             self._request_worker_stop()
             QTimer.singleShot(100, self._finish_shutdown)
             event.ignore()
@@ -3693,6 +3891,7 @@ class MainWindow(QMainWindow):
             self._ranking_worker,
             getattr(self, "_image_theme_ocr_worker", None),
             getattr(self, "_krx_stock_catalog_worker", None),
+            self._google_drive_worker,
         )
 
     def _running_workers(self) -> tuple[QThread, ...]:
