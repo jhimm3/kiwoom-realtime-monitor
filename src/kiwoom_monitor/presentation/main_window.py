@@ -1980,7 +1980,9 @@ class MainWindow(QMainWindow):
         self._google_drive_close_pending = False
         self._google_drive_dirty = self._has_newer_local_google_drive_changes()
         self._google_drive_first_backup_pending = False
-        self._initial_ranking_waits_for_google_drive = initial_google_drive_download
+        # Drive 수정 시각 확인/다운로드는 순위 표 표시를 막지 않는다. 시작 시에는
+        # 항상 로컬 데이터로 즉시 순위를 조회하고, Drive 결과는 완료되는 즉시 반영한다.
+        self._initial_ranking_waits_for_google_drive = False
         self._google_drive_debounce = QTimer(self)
         self._google_drive_debounce.setSingleShot(True)
         self._google_drive_debounce.setInterval(1_500)
@@ -2143,7 +2145,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
         if ranking_loader is not None:
             if initial_google_drive_download:
-                self.statusBar().showMessage("Google Drive 변경 시각을 확인하는 중입니다…")
+                self._start_initial_ranking()
                 QTimer.singleShot(0, lambda: self._start_google_drive_sync("metadata"))
             else:
                 self._start_initial_ranking()
