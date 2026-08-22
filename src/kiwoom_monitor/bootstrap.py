@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sys
 import logging
+from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from kiwoom_monitor.infrastructure.app_paths import AppPaths
@@ -26,6 +28,15 @@ from kiwoom_monitor.infrastructure.persistence.column_settings_repository import
 from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository as DatabaseThemeRepository
 from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncService
 from kiwoom_monitor.presentation.main_window import MainWindow
+
+
+def _application_icon_path() -> Path:
+    """실행 환경에 맞는 공통 프로그램 아이콘 위치를 반환한다."""
+    if getattr(sys, "frozen", False):
+        # PyInstaller 폴더형 배포에서는 포함 데이터가 _internal 아래에 놓인다.
+        bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+        return bundle_root / "resources" / "app_icon.png"
+    return Path(__file__).resolve().parents[2] / "resources" / "app_icon.png"
 
 
 def main() -> None:
@@ -71,6 +82,7 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setApplicationName("키움 실시간 모니터")
+    app.setWindowIcon(QIcon(str(_application_icon_path())))
     reported_errors: set[str] = set()
 
     def report_unhandled_error(error_type: type[BaseException], error: BaseException, traceback: object) -> None:

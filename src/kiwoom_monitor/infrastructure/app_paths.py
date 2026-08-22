@@ -21,7 +21,16 @@ class AppPaths:
         ``%LocalAppData%\\KiwoomMonitor\\data``에 보관한다. 개발 폴더 또는
         이전 설치본의 data 폴더에 있던 개인 데이터는 최초 한 번만 옮긴다.
         """
-        app_root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[3]
+        frozen = getattr(sys, "frozen", False)
+        app_root = Path(sys.executable).resolve().parent if frozen else Path(__file__).resolve().parents[3]
+        if not frozen:
+            # 개발 실행은 프로젝트의 data를 그대로 사용한다. 설치본 테스트를 위해
+            # LocalAppData를 지워도 개발 API·테마 설정이 영향을 받지 않는다.
+            base_dir = app_root / "data"
+            log_dir = base_dir / "logs"
+            base_dir.mkdir(parents=True, exist_ok=True)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            return cls(base_dir, log_dir, base_dir / "monitor.sqlite3")
         local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
         base_dir = local_app_data / "KiwoomMonitor" / "data"
         log_dir = base_dir / "logs"

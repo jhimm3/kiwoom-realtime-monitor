@@ -98,7 +98,7 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 
 
