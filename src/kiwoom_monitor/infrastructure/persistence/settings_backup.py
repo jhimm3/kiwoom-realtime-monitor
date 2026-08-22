@@ -23,12 +23,17 @@ class SettingsBackupService:
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
 
-    def export_to(self, path: Path, include_settings: bool = True, include_themes: bool = True) -> None:
+    def export_to(self, path: Path, include_settings: bool = True, include_themes: bool = True, excluded_setting_keys: frozenset[str] = frozenset(), include_column_widths: bool = True) -> None:
         connection = sqlite3.connect(self._database_path)
         try:
-            settings = dict(connection.execute("SELECT key, value FROM settings").fetchall())
+            settings = {key: value for key, value in connection.execute("SELECT key, value FROM settings").fetchall() if key not in excluded_setting_keys}
             columns = [
-                {"name": name, "visible": bool(visible), "position": position, "width": width}
+                {
+                    "name": name,
+                    "visible": bool(visible),
+                    "position": position,
+                    **({"width": width} if include_column_widths else {}),
+                }
                 for name, visible, position, width in connection.execute(
                     "SELECT column_name, visible, position, width FROM column_settings ORDER BY position"
                 )
@@ -82,7 +87,7 @@ class SettingsBackupService:
                 assets.append({"path": stored, "content": b64encode(source.read_bytes()).decode("ascii")})
         return assets
 
-    def import_from(self, path: Path, include_settings: bool = True, include_themes: bool = True) -> None:
+    def import_from(self, path: Path, include_settings: bool = True, include_themes: bool = True, excluded_setting_keys: frozenset[str] = frozenset(), include_column_widths: bool = True) -> None:
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
@@ -109,8 +114,11 @@ class SettingsBackupService:
             connection.execute("PRAGMA foreign_keys = ON")
             with connection:
                 if include_settings:
-                    connection.executemany("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [(key, str(value)) for key, value in settings.items() if key in DEFAULT_SETTINGS])
-                    connection.executemany("UPDATE column_settings SET visible = ?, position = ?, width = ? WHERE column_name = ?", [(int(bool(item.get("visible"))), int(item.get("position", 0)), max(20, int(item.get("width", 100))), str(item["name"])) for item in imported_columns])
+                    connection.executemany("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [(key, str(value)) for key, value in settings.items() if key in DEFAULT_SETTINGS and key not in excluded_setting_keys])
+                    if include_column_widths:
+                        connection.executemany("UPDATE column_settings SET visible = ?, position = ?, width = ? WHERE column_name = ?", [(int(bool(item.get("visible"))), int(item.get("position", 0)), max(20, int(item.get("width", 100))), str(item["name"])) for item in imported_columns])
+                    else:
+                        connection.executemany("UPDATE column_settings SET visible = ?, position = ? WHERE column_name = ?", [(int(bool(item.get("visible"))), int(item.get("position", 0)), str(item["name"])) for item in imported_columns])
                 if include_themes:
                     for item in (stock_catalog if isinstance(stock_catalog, list) else ()):
                         if not isinstance(item, dict): continue

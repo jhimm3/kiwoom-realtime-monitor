@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
     QStyledItemDelegate,
     QDoubleSpinBox,
+    QStackedLayout,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -598,16 +599,22 @@ class SettingsDialog(QDialog):
                 disconnect = QPushButton("연결 해제")
                 disconnect.clicked.connect(self._drive_disconnector)
                 manage_form.addRow("계정", disconnect)
-        manage_form.addRow(self._section_separator())
+        tabs.addTab(manage_tab, "관리")
+
+        info_tab = QWidget()
+        info_layout = QVBoxLayout(info_tab)
+        info_layout.addWidget(self._section_title("프로그램 정보"))
         app_info = QLabel(
             f"키움 실시간 종목 모니터 {APP_VERSION}\n"
             f"{APP_COPYRIGHT}\n"
             "이 프로그램은 여러 오픈소스 소프트웨어를 기반으로 제작되었습니다."
         )
         app_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        app_info.setStyleSheet("color: #667085; padding: 14px 4px 4px;")
-        manage_form.addRow(app_info)
-        tabs.addTab(manage_tab, "관리")
+        app_info.setWordWrap(True)
+        app_info.setStyleSheet("color: #667085; padding: 18px 8px;")
+        info_layout.addWidget(app_info)
+        info_layout.addStretch()
+        tabs.addTab(info_tab, "프로그램 정보")
         layout.addWidget(tabs)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("설정 저장")
@@ -1939,6 +1946,7 @@ class MainWindow(QMainWindow):
         daily_high_worker_factory: Callable[[tuple[str, ...]], DailyHighWorker] | None = None,
         nxt_eligibility_worker_factory: Callable[[tuple[str, ...]], NxtEligibilityWorker] | None = None,
         google_drive_sync: GoogleDriveSyncService | None = None,
+        initial_google_drive_download: bool = False,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -1963,6 +1971,7 @@ class MainWindow(QMainWindow):
         self._google_drive_close_pending = False
         self._google_drive_dirty = False
         self._google_drive_first_backup_pending = False
+        self._initial_ranking_waits_for_google_drive = initial_google_drive_download
         self._google_drive_debounce = QTimer(self)
         self._google_drive_debounce.setSingleShot(True)
         self._google_drive_debounce.setInterval(1_500)
@@ -2088,11 +2097,19 @@ class MainWindow(QMainWindow):
         self._table.viewport().installEventFilter(self)
         self._update_trade_display_headers()
         self._restore_columns()
-        self._table.setItem(0, 1, QTableWidgetItem("새로고침을 눌러 순위를 조회하세요."))
+        self._loading_label = QLabel("조회 중입니다…")
+        self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_label.setStyleSheet("color: #667085; font-size: 16px; padding: 24px;")
+        table_area = QWidget()
+        self._table_stack = QStackedLayout(table_area)
+        self._table_stack.setContentsMargins(0, 0, 0, 0)
+        self._table_stack.addWidget(self._loading_label)
+        self._table_stack.addWidget(self._table)
+        self._table_stack.setCurrentWidget(self._loading_label)
 
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.addWidget(self._table)
+        layout.addWidget(table_area, 1)
         self._theme_trade_summary = ClickableLabel(self._cycle_theme_trade_summary_period, "상위 테마 거래대금: 순위 조회 후 표시됩니다.")
         self._theme_trade_summary.setStyleSheet("padding: 5px 8px; color: #333; background: #F5F7FA; border: 1px solid #D9E2F3;")
         self._theme_trade_summary.setToolTip("클릭하면 1분 · 5분 · 60분 · 1일 기준으로 전환합니다.")
@@ -2116,9 +2133,11 @@ class MainWindow(QMainWindow):
         message = "새로고침으로 키움 REST 조회를 시작합니다." if ranking_loader else "상단 API 설정에서 키를 입력해 연결할 수 있습니다."
         self.statusBar().showMessage(message)
         if ranking_loader is not None:
-            QTimer.singleShot(0, self._refresh_rankings)
-            self._schedule_next_ranking_refresh()
-            self._schedule_realtime_session_refresh()
+            if initial_google_drive_download:
+                self.statusBar().showMessage("Google Drive 설정을 불러오는 중입니다. 완료 후 표를 표시합니다…")
+                QTimer.singleShot(0, lambda: self._start_google_drive_sync("download"))
+            else:
+                self._start_initial_ranking()
         else:
             QTimer.singleShot(0, self._open_api_settings)
 
@@ -2189,6 +2208,14 @@ class MainWindow(QMainWindow):
             self._themes = self._theme_store.all_by_name()
         self._refresh_rankings()
         self._schedule_google_drive_upload()
+
+    def _start_initial_ranking(self) -> None:
+        if self._ranking_loader is None:
+            return
+        self._initial_ranking_waits_for_google_drive = False
+        QTimer.singleShot(0, self._refresh_rankings)
+        self._schedule_next_ranking_refresh()
+        self._schedule_realtime_session_refresh()
 
     def _google_drive_status(self) -> str:
         if self._google_drive_sync is None:
@@ -2263,6 +2290,8 @@ class MainWindow(QMainWindow):
             self._google_drive_first_backup_pending = False
             target = {"settings": "설정", "themes": "테마", "both": "설정과 테마"}.get(self._settings.get("google_drive_sync_target"), "설정과 테마")
             QMessageBox.information(self, "첫 Google Drive 백업", f"현재 컴퓨터의 {target}를 Google Drive에 업로드했습니다.")
+            if self._initial_ranking_waits_for_google_drive:
+                self._start_initial_ranking()
         elif show_completion:
             QMessageBox.information(self, "Google Drive 동기화 완료", message)
         if operation == "download" and "아직 동기화된 설정이 없습니다" in message:
@@ -2279,6 +2308,8 @@ class MainWindow(QMainWindow):
                 self._google_drive_dirty = True
                 self._google_drive_first_backup_pending = True
                 self._start_google_drive_sync("upload")
+            elif self._initial_ranking_waits_for_google_drive:
+                self._start_initial_ranking()
             return
         if self._google_drive_close_pending and operation != "upload":
             self._start_google_drive_sync("upload", close_after=True)
@@ -2298,17 +2329,23 @@ class MainWindow(QMainWindow):
         self._apply_table_visuals()
         self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1")
         self._update_clock_label()
-        self._schedule_next_ranking_refresh()
-        self._refresh_rankings()
+        if self._initial_ranking_waits_for_google_drive:
+            self._start_initial_ranking()
+        else:
+            self._schedule_next_ranking_refresh()
+            self._refresh_rankings()
 
     def _on_google_drive_sync_failed(self, message: str) -> None:
         logger.warning("Google Drive 동기화 실패: %s", message)
         self.statusBar().showMessage(f"Google Drive 동기화 실패: {message}")
+        operation = self._google_drive_operation
         self._google_drive_first_backup_pending = False
         self._google_drive_worker = None
         self._google_drive_operation = ""
         self._google_drive_show_completion = False
         self._refresh_google_drive_status()
+        if operation == "download" and self._initial_ranking_waits_for_google_drive:
+            self._start_initial_ranking()
 
     def _refresh_google_drive_status(self) -> None:
         if self._settings_dialog is not None:
@@ -2960,6 +2997,7 @@ class MainWindow(QMainWindow):
             "이전 순위와 동일" if unchanged else "순위 변동 반영",
         )
 
+        self._table_stack.setCurrentWidget(self._table)
         self._table.setRowCount(len(stocks))
         self._set_api_status("API: 연결됨", "#008000")
         self._row_by_code.clear()

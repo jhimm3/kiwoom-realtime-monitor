@@ -25,6 +25,7 @@ class GoogleDriveSyncService:
     LEGACY_REMOTE_NAME = "kiwoom-monitor-sync-v1.json"
     SETTINGS_REMOTE_NAME = "kiwoom-monitor-settings-v1.json"
     THEMES_REMOTE_NAME = "kiwoom-monitor-themes-v1.json"
+    LOCAL_ONLY_SETTINGS = frozenset({"window_width", "window_height"})
 
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
@@ -62,7 +63,13 @@ class GoogleDriveSyncService:
             with tempfile.TemporaryDirectory(prefix="kiwoom_drive_") as directory:
                 for name, include_settings, include_themes in files:
                     source = Path(directory) / name
-                    SettingsBackupService(self._database_path).export_to(source, include_settings, include_themes)
+                    SettingsBackupService(self._database_path).export_to(
+                        source,
+                        include_settings,
+                        include_themes,
+                        self.LOCAL_ONLY_SETTINGS,
+                        include_column_widths=False,
+                    )
                     existing = self._find_remote_file(service, folder_id, name)
                     media = self._media_upload(source.read_bytes())
                     if existing:
@@ -98,7 +105,13 @@ class GoogleDriveSyncService:
                         _, done = downloader.next_chunk()
                     source = Path(directory) / name
                     source.write_bytes(buffer.getvalue())
-                    SettingsBackupService(self._database_path).import_from(source, include_settings, include_themes)
+                    SettingsBackupService(self._database_path).import_from(
+                        source,
+                        include_settings,
+                        include_themes,
+                        self.LOCAL_ONLY_SETTINGS,
+                        include_column_widths=False,
+                    )
         except Exception as error:
             raise GoogleDriveSyncError(f"Google Drive 다운로드에 실패했습니다: {error}") from error
         return f"Google Drive {self._target_label(target)}을(를) 다운로드했습니다. 프로그램을 다시 시작하면 모두 적용됩니다."
