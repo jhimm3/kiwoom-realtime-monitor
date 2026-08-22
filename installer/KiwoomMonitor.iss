@@ -1,5 +1,5 @@
 #define AppName "키움 실시간 종목 모니터"
-#define AppVersion "1.1.3"
+#define AppVersion "1.1.4"
 #define AppPublisher "크니"
 #define AppExeName "KiwoomMonitor.exe"
 
@@ -12,7 +12,7 @@ DefaultDirName={autopf}\KiwoomMonitor
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist\installer
-OutputBaseFilename=KiwoomMonitor-Setup-1.1.3
+OutputBaseFilename=KiwoomMonitor-Setup-1.1.4
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

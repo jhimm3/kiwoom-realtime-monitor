@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import subprocess
+import ctypes
 import sys
 import time
 from html import escape
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QProgressDialog,
     QMenu,
     QPushButton,
     QRadioButton,
@@ -97,7 +98,7 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 
 
@@ -170,6 +171,7 @@ class UpdateDownloadWorker(QThread):
 
     completed = Signal(str)
     failed = Signal(str)
+    progress = Signal(int)
 
     def __init__(self, url: str, version: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -183,11 +185,16 @@ class UpdateDownloadWorker(QThread):
             destination = folder / f"KiwoomMonitor-Update-{self._version}.zip"
             request = Request(self._url, headers={"User-Agent": "KiwoomMonitor"})
             with urlopen(request, timeout=30) as response, destination.open("wb") as stream:
+                total = int(response.headers.get("Content-Length", "0"))
+                received = 0
                 while block := response.read(1024 * 1024):
                     if self.isInterruptionRequested():
                         destination.unlink(missing_ok=True)
                         return
                     stream.write(block)
+                    received += len(block)
+                    if total:
+                        self.progress.emit(min(100, int(received * 100 / total)))
             self.completed.emit(str(destination))
         except (HTTPError, URLError, TimeoutError, OSError) as error:
             self.failed.emit(str(error))
@@ -2351,11 +2358,26 @@ class MainWindow(QMainWindow):
     def _download_update(self, url: str, version: str) -> None:
         worker = UpdateDownloadWorker(url, version, self)
         self._update_download_worker = worker
+        progress = QProgressDialog("업데이트 파일을 다운로드하고 있습니다…", "취소", 0, 100, self)
+        progress.setWindowTitle("앱 업데이트")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        self._update_progress_dialog = progress
+        progress.canceled.connect(worker.requestInterruption)
+        worker.progress.connect(progress.setValue)
         worker.completed.connect(self._apply_downloaded_update)
         worker.failed.connect(self._on_update_download_failed)
-        worker.finished.connect(lambda: setattr(self, "_update_download_worker", None))
+        worker.finished.connect(self._close_update_progress)
         self.statusBar().showMessage("업데이트 파일을 다운로드하고 있습니다…")
+        progress.show()
         worker.start()
+
+    def _close_update_progress(self) -> None:
+        if getattr(self, "_update_progress_dialog", None) is not None:
+            self._update_progress_dialog.close()
+            self._update_progress_dialog = None
+        self._update_download_worker = None
 
     def _apply_downloaded_update(self, archive_path: str) -> None:
         app_root = Path(sys.executable).resolve().parent
@@ -2369,20 +2391,27 @@ class MainWindow(QMainWindow):
             f"$archive = '{escaped_archive}'\n$target = '{escaped_root}'\n$exe = '{escaped_exe}'\n"
             "$staging = Join-Path (Split-Path $archive) 'staging'\n"
             "Wait-Process -Id $processId -ErrorAction SilentlyContinue\n"
+            "Add-Type -AssemblyName PresentationFramework; Add-Type -AssemblyName System.Windows.Forms\n"
+            "$window = New-Object Windows.Window; $window.Title = '키움 실시간 모니터 업데이트'; $window.Width = 420; $window.Height = 145; $window.ResizeMode = 'NoResize'; $window.WindowStartupLocation = 'CenterScreen'\n"
+            "$panel = New-Object Windows.Controls.StackPanel; $panel.Margin = '22'; $status = New-Object Windows.Controls.TextBlock; $status.Text = '업데이트를 적용하고 있습니다…'; $bar = New-Object Windows.Controls.ProgressBar; $bar.Height = 20; $bar.Margin = '0,14,0,0'; $bar.Minimum = 0; $bar.Maximum = 100; $panel.Children.Add($status) | Out-Null; $panel.Children.Add($bar) | Out-Null; $window.Content = $panel; $window.Show() | Out-Null\n"
             "Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue\n"
             "Expand-Archive -Path $archive -DestinationPath $staging -Force\n"
             "$manifest = Get-Content (Join-Path $staging 'update_manifest.json') -Raw | ConvertFrom-Json\n"
-            "foreach ($file in $manifest.changed) { $source = Join-Path $staging $file; $destination = Join-Path $target $file; New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null; Copy-Item $source $destination -Force }\n"
+            "$total = ($manifest.changed | ForEach-Object { (Get-Item (Join-Path $staging $_)).Length } | Measure-Object -Sum).Sum; $done = 0\n"
+            "foreach ($file in $manifest.changed) { $source = Join-Path $staging $file; $destination = Join-Path $target $file; $status.Text = '파일을 교체하고 있습니다…'; New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null; Copy-Item $source $destination -Force; $done += (Get-Item $source).Length; $bar.Value = [Math]::Min(100, [Math]::Round(100 * $done / [Math]::Max(1,$total))); [Windows.Forms.Application]::DoEvents() }\n"
             "foreach ($file in $manifest.deleted) { Remove-Item (Join-Path $target $file) -Force -ErrorAction SilentlyContinue }\n"
             "Remove-Item $archive -Force -ErrorAction SilentlyContinue\n"
             "Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue\n"
             "Start-Process -FilePath $exe\n"
+            "$window.Close()\n"
             "Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue\n",
             encoding="utf-8",
         )
-        command = f"Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \\\"{script}\\\"' -Verb RunAs"
         try:
-            subprocess.Popen(["powershell.exe", "-NoProfile", "-Command", command])
+            arguments = f'-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{script}"'
+            result = ctypes.windll.shell32.ShellExecuteW(None, "runas", "powershell.exe", arguments, None, 0)
+            if result <= 32:
+                raise OSError(f"Windows 권한 확인이 취소되었거나 시작에 실패했습니다. ({result})")
         except OSError as error:
             QMessageBox.critical(self, "앱 업데이트", f"업데이트 설치를 시작하지 못했습니다.\n{error}")
             return
