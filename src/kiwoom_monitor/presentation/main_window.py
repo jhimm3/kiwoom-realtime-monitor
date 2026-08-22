@@ -213,7 +213,7 @@ def choose_similar_stock(parent: QWidget, lookup: object, name: str) -> tuple[tu
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None) -> None:
+    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None, drive_client_importer: Callable[[], None] | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
         self._api_path = api_path
@@ -230,6 +230,7 @@ class SettingsDialog(QDialog):
         self._drive_uploader = drive_uploader
         self._drive_disconnector = drive_disconnector
         self._drive_status = drive_status
+        self._drive_client_importer = drive_client_importer
         self._theme_backup_exporter = theme_backup_exporter
         self._theme_backup_importer = theme_backup_importer
         self._drive_status_label: QLabel | None = None
@@ -579,6 +580,10 @@ class SettingsDialog(QDialog):
             status.setWordWrap(True)
             self._drive_status_label = status
             self.refresh_drive_status()
+            if self._drive_client_importer is not None:
+                client_file = QPushButton("내 OAuth JSON 연결")
+                client_file.clicked.connect(self._drive_client_importer)
+                manage_form.addRow("OAuth 구성", client_file)
             connect = QPushButton("Google Drive 연결")
             connect.clicked.connect(self._drive_connector)
             manage_form.addRow("연결", connect)
@@ -2163,6 +2168,7 @@ class MainWindow(QMainWindow):
             drive_uploader=lambda: self._start_google_drive_sync("upload", notify_on_success=True),
             drive_disconnector=self._disconnect_google_drive,
             drive_status=self._google_drive_status,
+            drive_client_importer=self._select_google_drive_client,
             theme_backup_exporter=self._export_theme_backup,
             theme_backup_importer=self._import_theme_backup,
         )
@@ -2231,7 +2237,30 @@ class MainWindow(QMainWindow):
             return "연결됨 · " + (", ".join(automatic) if automatic else "수동 동기화")
         if self._google_drive_sync.configured:
             return "연결되지 않음 · Google Drive 연결을 누르면 로그인합니다."
-        return "Google Drive 연결 구성을 준비하는 중입니다."
+        return "OAuth JSON을 연결한 뒤 Google Drive 연결을 누르면 로그인합니다."
+
+    def _select_google_drive_client(self) -> None:
+        if self._google_drive_sync is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Google OAuth JSON 선택",
+            "",
+            "Google OAuth JSON (*.json)",
+        )
+        if not path:
+            return
+        try:
+            self._google_drive_sync.import_client_file(Path(path))
+        except GoogleDriveSyncError as error:
+            QMessageBox.warning(self, "OAuth JSON 연결", str(error))
+            return
+        self._refresh_google_drive_status()
+        QMessageBox.information(
+            self,
+            "OAuth JSON 연결",
+            "이 컴퓨터에 개인 OAuth 구성을 저장했습니다.\n이제 Google Drive 연결을 눌러 본인 계정으로 로그인하세요.",
+        )
 
     def _connect_google_drive(self) -> None:
         if self._google_drive_sync is None or not self._google_drive_sync.configured:
