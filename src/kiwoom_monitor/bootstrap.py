@@ -37,7 +37,17 @@ def main() -> None:
     database = Database(paths.database_path)
     database.initialize()
     google_drive_sync = GoogleDriveSyncService(paths.database_path)
-    initial_google_drive_download = google_drive_sync.connected and database.settings.get("google_drive_auto_download") == "1"
+    local_changed_at = database.settings.get("google_drive_local_changed_at")
+    last_upload_at = database.settings.get("google_drive_last_upload_success_at")
+    local_changes_are_newer = database.settings.get("google_drive_unsynced_changes") == "1" or (
+        bool(local_changed_at) and (not last_upload_at or local_changed_at > last_upload_at)
+    )
+    # 시작 시에는 내용 다운로드 전에 Drive 수정 시각만 먼저 확인한다. 로컬 변경이
+    # 남은 경우에도 원격 변경과 충돌인지 판별해야 하므로 자동 업로드 대상이면 확인한다.
+    initial_google_drive_download = google_drive_sync.connected and (
+        database.settings.get("google_drive_auto_download") == "1"
+        or (local_changes_are_newer and database.settings.get("google_drive_auto_upload") == "1")
+    )
 
     ranking_service = None
     realtime_worker_factory = None

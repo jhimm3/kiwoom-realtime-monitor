@@ -55,7 +55,9 @@ DEFAULT_SETTINGS = {
     "google_drive_auto_upload": "1",
     "google_drive_auto_upload_on_exit": "0",
     "google_drive_sync_target": "both",
-    "google_drive_sync_target": "both",
+    "google_drive_unsynced_changes": "0",
+    "google_drive_local_changed_at": "",
+    "google_drive_last_upload_success_at": "",
     "krx_stock_catalog_date": "",
     "krx_stock_catalog_format_version": "3",
 }

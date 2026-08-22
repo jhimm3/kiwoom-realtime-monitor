@@ -7,7 +7,7 @@ from html import escape
 from dataclasses import replace
 from pathlib import Path
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from PySide6.QtGui import QCloseEvent, QResizeEvent, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPolygon, QPalette
@@ -113,6 +113,7 @@ class GoogleDriveSyncWorker(QThread):
     """Drive 통신만 별도 스레드에서 실행해 표·설정 창을 멈추지 않는다."""
 
     completed = Signal(str)
+    metadata_received = Signal(str)
     failed = Signal(str)
 
     def __init__(self, service: GoogleDriveSyncService, operation: str, target: str, interactive: bool = False, parent: QWidget | None = None) -> None:
@@ -125,6 +126,9 @@ class GoogleDriveSyncWorker(QThread):
     def run(self) -> None:
         try:
             if self.isInterruptionRequested():
+                return
+            if self._operation == "metadata":
+                self.metadata_received.emit(self._service.latest_modified_time(interactive=self._interactive, target=self._target))
                 return
             action = self._service.upload if self._operation == "upload" else self._service.download
             self.completed.emit(action(interactive=self._interactive, target=self._target))
@@ -575,7 +579,7 @@ class SettingsDialog(QDialog):
         if self._drive_connector is not None:
             manage_form.addRow(self._section_separator())
             manage_form.addRow(self._section_title("Google Drive 동기화"))
-            manage_form.addRow(QLabel("연결을 누르면 Google 로그인 창이 열립니다. 테마·일반 설정·표 구성만 내 드라이브의 ‘키움 실시간 모니터’ 폴더에 동기화합니다."))
+            manage_form.addRow(QLabel("테마·일반 설정·표 구성만 내 드라이브의 ‘키움 실시간 모니터’ 폴더에 동기화합니다. 로컬 변경 시각이 마지막 업로드 성공 시각보다 최근이면, 시작 자동 다운로드는 건너뛰어 로컬 변경을 보호합니다."))
             status = QLabel()
             status.setWordWrap(True)
             self._drive_status_label = status
@@ -590,7 +594,7 @@ class SettingsDialog(QDialog):
             manage_form.addRow("상태", status)
             manage_form.addRow("동기화 대상", self._google_drive_sync_target)
             manage_form.addRow("자동 동기화", self._google_drive_auto_download)
-            manage_form.addRow("", self._google_drive_auto_upload)
+            manage_form.addRow("자동 업로드", self._google_drive_auto_upload)
             manage_form.addRow("", self._google_drive_auto_upload_on_exit)
             if self._drive_downloader is not None:
                 download = QPushButton("지금 다운로드")
@@ -1974,7 +1978,7 @@ class MainWindow(QMainWindow):
         self._google_drive_operation = ""
         self._google_drive_show_completion = False
         self._google_drive_close_pending = False
-        self._google_drive_dirty = False
+        self._google_drive_dirty = self._has_newer_local_google_drive_changes()
         self._google_drive_first_backup_pending = False
         self._initial_ranking_waits_for_google_drive = initial_google_drive_download
         self._google_drive_debounce = QTimer(self)
@@ -2139,10 +2143,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
         if ranking_loader is not None:
             if initial_google_drive_download:
-                self.statusBar().showMessage("Google Drive 설정을 불러오는 중입니다. 완료 후 표를 표시합니다…")
-                QTimer.singleShot(0, lambda: self._start_google_drive_sync("download"))
+                self.statusBar().showMessage("Google Drive 변경 시각을 확인하는 중입니다…")
+                QTimer.singleShot(0, lambda: self._start_google_drive_sync("metadata"))
             else:
                 self._start_initial_ranking()
+                QTimer.singleShot(0, self._resume_pending_google_drive_upload)
         else:
             QTimer.singleShot(0, self._open_api_settings)
 
@@ -2278,7 +2283,28 @@ class MainWindow(QMainWindow):
     def _schedule_google_drive_upload(self) -> None:
         if self._google_drive_sync is not None and self._google_drive_sync.connected and self._settings.get("google_drive_auto_upload") == "1" and not self._closing:
             self._google_drive_dirty = True
+            self._settings.set("google_drive_unsynced_changes", "1")
+            self._settings.set("google_drive_local_changed_at", self._google_drive_timestamp_now())
             self._google_drive_debounce.start()
+
+    def _has_newer_local_google_drive_changes(self) -> bool:
+        local_changed_at = self._settings.get("google_drive_local_changed_at")
+        last_upload_at = self._settings.get("google_drive_last_upload_success_at")
+        return self._settings.get("google_drive_unsynced_changes") == "1" or (
+            bool(local_changed_at) and (not last_upload_at or local_changed_at > last_upload_at)
+        )
+
+    def _resume_pending_google_drive_upload(self) -> None:
+        """이전 업로드 실패분만 비동기로 다시 보낸다. 시작 다운로드는 하지 않는다."""
+        if (
+            self._google_drive_dirty
+            and self._google_drive_sync is not None
+            and self._google_drive_sync.connected
+            and self._settings.get("google_drive_auto_upload") == "1"
+            and not self._closing
+        ):
+            self.statusBar().showMessage("이전 Google Drive 업로드 실패분을 다시 업로드합니다…")
+            self._start_google_drive_sync("upload")
 
     def _start_google_drive_sync(self, operation: str, interactive: bool = False, close_after: bool = False, allow_connect: bool = False, notify_on_success: bool = False) -> None:
         service = self._google_drive_sync
@@ -2295,13 +2321,80 @@ class MainWindow(QMainWindow):
         self._google_drive_worker = worker
         self._google_drive_operation = operation
         self._google_drive_show_completion = notify_on_success
-        worker.completed.connect(self._on_google_drive_sync_completed)
+        if operation == "metadata":
+            worker.metadata_received.connect(self._on_google_drive_metadata_received)
+        else:
+            worker.completed.connect(self._on_google_drive_sync_completed)
         worker.failed.connect(self._on_google_drive_sync_failed)
         worker.finished.connect(worker.deleteLater)
         worker.start()
         if close_after:
             self._google_drive_close_pending = True
         self.statusBar().showMessage("Google Drive 동기화 중…")
+
+    @staticmethod
+    def _parse_google_drive_time(value: str) -> datetime | None:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _google_drive_timestamp_now() -> str:
+        return datetime.now().astimezone().astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    def _on_google_drive_metadata_received(self, remote_modified_at: str) -> None:
+        """시작 자동 동기화 전에 Drive와 로컬의 최신 변경을 안전하게 비교한다."""
+        self._google_drive_worker = None
+        self._google_drive_operation = ""
+        self._refresh_google_drive_status()
+        local_changed_at = self._settings.get("google_drive_local_changed_at")
+        last_upload_at = self._settings.get("google_drive_last_upload_success_at")
+        local_dirty = self._has_newer_local_google_drive_changes()
+        remote_time = self._parse_google_drive_time(remote_modified_at)
+        last_upload_time = self._parse_google_drive_time(last_upload_at)
+
+        if remote_time is None:
+            # 최초 연결과 기존 단일 백업 호환 처리는 download()가 담당한다.
+            self._start_google_drive_sync("download")
+            return
+        if local_dirty:
+            remote_is_newer = last_upload_time is None or remote_time > last_upload_time
+            if remote_is_newer:
+                choice = QMessageBox(self)
+                choice.setWindowTitle("Google Drive 동기화 충돌")
+                choice.setIcon(QMessageBox.Icon.Warning)
+                choice.setText("이 컴퓨터와 Google Drive에 모두 더 최근 변경이 있습니다.")
+                choice.setInformativeText("자동으로 덮어쓰지 않았습니다. 사용할 데이터를 선택하세요.")
+                upload = choice.addButton("로컬 업로드", QMessageBox.ButtonRole.AcceptRole)
+                download = choice.addButton("Drive 다운로드", QMessageBox.ButtonRole.DestructiveRole)
+                cancel = choice.addButton("이번에는 로컬 유지", QMessageBox.ButtonRole.RejectRole)
+                choice.exec()
+                if choice.clickedButton() is upload:
+                    self._finish_initial_drive_check()
+                    self._start_google_drive_sync("upload")
+                elif choice.clickedButton() is download:
+                    self._start_google_drive_sync("download")
+                else:
+                    self.statusBar().showMessage("Google Drive 충돌: 이번 실행은 로컬 데이터를 유지합니다.")
+                    self._finish_initial_drive_check()
+                return
+            if self._settings.get("google_drive_auto_upload") == "1":
+                self._finish_initial_drive_check()
+                self._start_google_drive_sync("upload")
+            else:
+                self.statusBar().showMessage("로컬 변경이 있어 Google Drive 자동 다운로드를 건너뛰었습니다.")
+                self._finish_initial_drive_check()
+            return
+
+        if last_upload_time is None or remote_time > last_upload_time:
+            self._start_google_drive_sync("download")
+            return
+        self._finish_initial_drive_check()
+
+    def _finish_initial_drive_check(self) -> None:
+        if self._initial_ranking_waits_for_google_drive:
+            self._start_initial_ranking()
 
     def _on_google_drive_sync_completed(self, message: str) -> None:
         self.statusBar().showMessage(message)
@@ -2312,7 +2405,13 @@ class MainWindow(QMainWindow):
         self._google_drive_show_completion = False
         if operation == "upload":
             self._google_drive_dirty = False
+            self._settings.set("google_drive_unsynced_changes", "0")
+            self._settings.set("google_drive_last_upload_success_at", self._google_drive_timestamp_now())
         elif operation == "download" and "다운로드했습니다" in message:
+            synced_at = self._google_drive_timestamp_now()
+            self._settings.set("google_drive_unsynced_changes", "0")
+            self._settings.set("google_drive_local_changed_at", synced_at)
+            self._settings.set("google_drive_last_upload_success_at", synced_at)
             self._apply_downloaded_google_drive_data()
         self._refresh_google_drive_status()
         if operation == "upload" and self._google_drive_first_backup_pending:
@@ -2335,6 +2434,8 @@ class MainWindow(QMainWindow):
             )
             if answer == QMessageBox.StandardButton.Yes:
                 self._google_drive_dirty = True
+                self._settings.set("google_drive_unsynced_changes", "1")
+                self._settings.set("google_drive_local_changed_at", self._google_drive_timestamp_now())
                 self._google_drive_first_backup_pending = True
                 self._start_google_drive_sync("upload")
             elif self._initial_ranking_waits_for_google_drive:
@@ -2368,12 +2469,15 @@ class MainWindow(QMainWindow):
         logger.warning("Google Drive 동기화 실패: %s", message)
         self.statusBar().showMessage(f"Google Drive 동기화 실패: {message}")
         operation = self._google_drive_operation
+        if operation == "upload":
+            self._google_drive_dirty = True
+            self._settings.set("google_drive_unsynced_changes", "1")
         self._google_drive_first_backup_pending = False
         self._google_drive_worker = None
         self._google_drive_operation = ""
         self._google_drive_show_completion = False
         self._refresh_google_drive_status()
-        if operation == "download" and self._initial_ranking_waits_for_google_drive:
+        if operation in {"download", "metadata"} and self._initial_ranking_waits_for_google_drive:
             self._start_initial_ranking()
 
     def _refresh_google_drive_status(self) -> None:

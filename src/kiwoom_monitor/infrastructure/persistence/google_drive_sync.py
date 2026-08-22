@@ -25,7 +25,14 @@ class GoogleDriveSyncService:
     LEGACY_REMOTE_NAME = "kiwoom-monitor-sync-v1.json"
     SETTINGS_REMOTE_NAME = "kiwoom-monitor-settings-v1.json"
     THEMES_REMOTE_NAME = "kiwoom-monitor-themes-v1.json"
-    LOCAL_ONLY_SETTINGS = frozenset({"window_width", "window_height"})
+    LOCAL_ONLY_SETTINGS = frozenset({
+        "window_width",
+        "window_height",
+        "google_drive_auto_download",
+        "google_drive_unsynced_changes",
+        "google_drive_local_changed_at",
+        "google_drive_last_upload_success_at",
+    })
 
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
@@ -54,6 +61,26 @@ class GoogleDriveSyncService:
 
     def disconnect(self) -> None:
         self._token_path.unlink(missing_ok=True)
+
+    def latest_modified_time(self, interactive: bool = False, target: str = "both") -> str:
+        """선택한 동기화 파일의 최신 수정 시각만 조회한다. 내용은 내려받지 않는다."""
+        service = self._drive_service(interactive)
+        folder_id = self._find_sync_folder(service)
+        if not folder_id:
+            return ""
+        try:
+            modified_times = [
+                str(info.get("modifiedTime", ""))
+                for name, _, _ in self._selected_files(target)
+                if (info := self._find_remote_file_info(service, folder_id, name)) is not None
+            ]
+            if not modified_times:
+                legacy = self._find_remote_file_info(service, folder_id, self.LEGACY_REMOTE_NAME)
+                if legacy is not None:
+                    modified_times.append(str(legacy.get("modifiedTime", "")))
+            return max((value for value in modified_times if value), default="")
+        except Exception as error:
+            raise GoogleDriveSyncError(f"Google Drive 수정 시각을 읽지 못했습니다: {error}") from error
 
     def upload(self, interactive: bool = False, target: str = "both") -> str:
         service = self._drive_service(interactive)
@@ -183,6 +210,11 @@ class GoogleDriveSyncService:
             raise GoogleDriveSyncError(f"Google Drive 동기화 폴더를 만들지 못했습니다: {error}") from error
 
     def _find_remote_file(self, service: object, folder_id: str, name: str) -> str | None:
+        info = self._find_remote_file_info(service, folder_id, name)
+        return str(info.get("id")) if info is not None else None
+
+    @staticmethod
+    def _find_remote_file_info(service: object, folder_id: str, name: str) -> dict[str, object] | None:
         try:
             response = service.files().list(
                 spaces="drive",
@@ -195,7 +227,7 @@ class GoogleDriveSyncService:
         files = response.get("files", [])
         if not files:
             return None
-        return str(max(files, key=lambda item: str(item.get("modifiedTime", ""))).get("id"))
+        return max(files, key=lambda item: str(item.get("modifiedTime", "")))
 
     def _selected_files(self, target: str) -> tuple[tuple[str, bool, bool], ...]:
         if target == "settings":
