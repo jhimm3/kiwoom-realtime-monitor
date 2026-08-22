@@ -1,0 +1,57 @@
+#define AppName "키움 실시간 종목 모니터"
+#define AppVersion "1.1.2"
+#define AppPublisher "크니"
+#define AppExeName "KiwoomMonitor.exe"
+
+[Setup]
+AppId={{3B79D124-E394-4F72-AD44-9133D9AEAD3C}
+AppName={#AppName}
+AppVersion={#AppVersion}
+AppPublisher={#AppPublisher}
+DefaultDirName={autopf}\KiwoomMonitor
+DefaultGroupName={#AppName}
+DisableProgramGroupPage=yes
+OutputDir=..\dist\installer
+OutputBaseFilename=KiwoomMonitor-Setup-1.1.2
+Compression=lzma2
+SolidCompression=yes
+WizardStyle=modern
+PrivilegesRequired=admin
+UninstallDisplayName={#AppName}
+ArchitecturesInstallIn64BitMode=x64
+
+[Languages]
+Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "바탕 화면에 바로가기 만들기"; Flags: unchecked
+
+[Files]
+Source: "..\dist\KiwoomMonitor\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\{#AppExeName}"; Description: "{#AppName} 실행"; Flags: nowait postinstall skipifsilent
+
+[Code]
+var
+  RemovePersonalData: Boolean;
+
+function InitializeUninstall(): Boolean;
+begin
+  RemovePersonalData :=
+    MsgBox('프로그램과 개인 데이터까지 모두 삭제할까요?' + #13#10 + #13#10 +
+      '예: API 키, 테마 DB, 설정, 로그를 포함해 %LocalAppData%\\KiwoomMonitor 폴더도 제거합니다.' + #13#10 +
+      '아니오: 프로그램만 삭제하고 개인 데이터는 보관합니다.',
+      mbConfirmation, MB_YESNO) = IDYES;
+  Result := True;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if (CurUninstallStep = usPostUninstall) and RemovePersonalData then
+    DelTree(ExpandConstant('{localappdata}\\KiwoomMonitor'), True, True, True);
+end;

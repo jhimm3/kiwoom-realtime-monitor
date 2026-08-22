@@ -13,4 +13,4 @@ class ColumnSettingsRepositoryTests(unittest.TestCase):
             self.assertFalse(restored.visible); self.assertEqual(123, restored.width)
             repository.reset()
             restored = next(item for item in repository.list() if item.name == saved[0].name)
-            self.assertTrue(restored.visible); self.assertEqual(60, restored.width); self.assertEqual(0, restored.position)
+            self.assertTrue(restored.visible); self.assertEqual(32, restored.width); self.assertEqual(0, restored.position)

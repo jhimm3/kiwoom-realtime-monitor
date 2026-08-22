@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
@@ -18,7 +19,9 @@ class ImageThemeRow:
 class PaddleThemeOcr:
     """Lazy-load PaddleOCR so the main monitor starts without OCR overhead."""
 
-    _MODEL_ROOT = Path(__file__).resolve().parents[4] / "data" / "ocr_models"
+    # 개발 실행과 PyInstaller 폴더형 배포 모두에서 같은 data 경로를 사용한다.
+    _APP_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[4]
+    _MODEL_ROOT = _APP_ROOT / "data" / "ocr_models"
     _DETECTION_MODEL = _MODEL_ROOT / "PP-OCRv5_mobile_det"
     _KOREAN_RECOGNITION_MODEL = _MODEL_ROOT / "korean_PP-OCRv5_mobile_rec"
 

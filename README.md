@@ -2,9 +2,9 @@
 
 키움 REST·0B 실시간 체결 기반의 상위 20종목 모니터입니다. 순위, 테마 입력·OCR, 기간 거래대금·거래강도, 최고가 근접 알림, NXT 표시, 설정 백업을 구현했습니다.
 
-- 현재 버전: **1.1.1**
+- 현재 버전: **1.1.2**
 - [소개 페이지](docs/index.html) · [개인정보처리방침](docs/privacy.html)
-- [1.1.1 변경 내역](docs/RELEASE_NOTES_v1.1.1.md) · [1.1.0 변경 내역](docs/RELEASE_NOTES_v1.1.0.md)
+- [1.1.2 변경 내역](docs/RELEASE_NOTES_v1.1.2.md) · [1.1.1 변경 내역](docs/RELEASE_NOTES_v1.1.1.md) · [1.1.0 변경 내역](docs/RELEASE_NOTES_v1.1.0.md)
 - [AI 인수인계 개발실행서 v3.0](docs/AI_인수인계_개발실행서_v3.0.md)
 - [REST API 검증 및 프로젝트 설계](docs/REST_API_검증_및_프로젝트_설계.md)
 - [Phase 1 구현 기록](docs/PHASE1_구현_기록.md)
