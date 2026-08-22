@@ -4,6 +4,7 @@ import sys
 import logging
 from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from kiwoom_monitor.infrastructure.app_paths import AppPaths
@@ -29,6 +30,15 @@ from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDr
 from kiwoom_monitor.presentation.main_window import MainWindow
 
 
+def _application_icon_path() -> Path:
+    """실행 환경에 맞는 공통 프로그램 아이콘 위치를 반환한다."""
+    if getattr(sys, "frozen", False):
+        # PyInstaller 폴더형 배포에서는 포함 데이터가 _internal 아래에 놓인다.
+        bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+        return bundle_root / "resources" / "app_icon.png"
+    return Path(__file__).resolve().parents[2] / "resources" / "app_icon.png"
+
+
 def main() -> None:
     paths = AppPaths.for_current_user()
     configure_logging(paths.log_dir)
@@ -48,30 +58,31 @@ def main() -> None:
         or (local_changes_are_newer and database.settings.get("google_drive_auto_upload") == "1")
     )
 
-    ranking_service = None
-    realtime_worker_factory = None
-    minute_history_worker_factory = None
-    fundamentals_worker_factory = None
-    daily_high_worker_factory = None
-    nxt_eligibility_worker_factory = None
-    try:
-        app_root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
-        local_api = app_root / "data" / "api.env"
+    def build_api_runtime() -> dict[str, object]:
+        """현재 저장된 API 설정으로 작업 객체 묶음을 새로 만든다."""
+        local_api = paths.data_dir / "api.env"
         settings = LocalApiConfig(local_api).load()
         if not settings.app_key or not settings.secret_key:
             raise ValueError("API 키가 아직 설정되지 않았습니다.")
         client = KiwoomRestClient(settings)
-        ranking_service = RankingService(client, stocks=StockRepository(paths.database_path), query_type=database.settings.get("rank_query_type"))
-        realtime_worker_factory = lambda codes: RealtimeTradeWorker(client.get_access_token, settings.environment, codes, client.server_now)
-        fundamentals_worker_factory = lambda codes: FundamentalsWorker(StockFundamentalsService(client), codes)
-        daily_high_worker_factory = lambda codes: DailyHighWorker(DailyHighService(client), codes)
-        nxt_eligibility_worker_factory = lambda codes: NxtEligibilityWorker(NxtEligibilityService(client), codes)
-        minute_history_worker_factory = lambda codes: MinuteHistoryWorker(MinuteChartService(client), codes, client.server_now)
+        return {
+            "ranking_loader": RankingService(client, stocks=StockRepository(paths.database_path), query_type=database.settings.get("rank_query_type")),
+            "realtime_worker_factory": lambda codes: RealtimeTradeWorker(client.get_access_token, settings.environment, codes, client.server_now),
+            "minute_history_worker_factory": lambda codes: MinuteHistoryWorker(MinuteChartService(client), codes, client.server_now),
+            "fundamentals_worker_factory": lambda codes: FundamentalsWorker(StockFundamentalsService(client), codes),
+            "daily_high_worker_factory": lambda codes: DailyHighWorker(DailyHighService(client), codes),
+            "nxt_eligibility_worker_factory": lambda codes: NxtEligibilityWorker(NxtEligibilityService(client), codes),
+        }
+
+    api_runtime: dict[str, object] = {}
+    try:
+        api_runtime = build_api_runtime()
     except ValueError as error:
         logging.getLogger(__name__).warning("키움 REST 설정을 불러오지 못했습니다: %s", error)
 
     app = QApplication(sys.argv)
     app.setApplicationName("키움 실시간 모니터")
+    app.setWindowIcon(QIcon(str(_application_icon_path())))
     reported_errors: set[str] = set()
 
     def report_unhandled_error(error_type: type[BaseException], error: BaseException, traceback: object) -> None:
@@ -86,12 +97,12 @@ def main() -> None:
     themes = DatabaseThemeRepository(paths.database_path).all_by_name()
     window = MainWindow(
         settings=database.settings,
-        ranking_loader=ranking_service,
-        realtime_worker_factory=realtime_worker_factory,
-        minute_history_worker_factory=minute_history_worker_factory,
-        fundamentals_worker_factory=fundamentals_worker_factory,
-        daily_high_worker_factory=daily_high_worker_factory,
-        nxt_eligibility_worker_factory=nxt_eligibility_worker_factory,
+        ranking_loader=api_runtime.get("ranking_loader"),
+        realtime_worker_factory=api_runtime.get("realtime_worker_factory"),
+        minute_history_worker_factory=api_runtime.get("minute_history_worker_factory"),
+        fundamentals_worker_factory=api_runtime.get("fundamentals_worker_factory"),
+        daily_high_worker_factory=api_runtime.get("daily_high_worker_factory"),
+        nxt_eligibility_worker_factory=api_runtime.get("nxt_eligibility_worker_factory"),
         minute_aggregator=MinuteTradeValueAggregator(),
         themes=themes,
         columns=ColumnSettingsRepository(paths.database_path),
@@ -99,6 +110,7 @@ def main() -> None:
         theme_store=DatabaseThemeRepository(paths.database_path),
         google_drive_sync=google_drive_sync,
         initial_google_drive_download=initial_google_drive_download,
+        api_runtime_factory=build_api_runtime,
     )
     window.show()
     sys.exit(app.exec())

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
+import ctypes
 import sys
 import time
 from html import escape
@@ -9,9 +12,11 @@ from pathlib import Path
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from PySide6.QtGui import QCloseEvent, QResizeEvent, QShowEvent, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPolygon, QPalette
-from PySide6.QtCore import QEvent, QEventLoop, QProcess, QThread, QTimer, QUrl, QSize, QPoint, Signal
+from PySide6.QtCore import QEvent, QEventLoop, QThread, QTimer, QUrl, QSize, QPoint, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -34,6 +39,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QProgressDialog,
     QMenu,
     QPushButton,
     QRadioButton,
@@ -55,6 +61,7 @@ from PySide6.QtCore import Qt
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+from kiwoom_monitor.infrastructure.app_paths import AppPaths
 from kiwoom_monitor.infrastructure.persistence.database import DEFAULT_SETTINGS
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker import RealtimeTradeWorker
@@ -91,7 +98,7 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.5"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 
 
@@ -133,6 +140,63 @@ class GoogleDriveSyncWorker(QThread):
             action = self._service.upload if self._operation == "upload" else self._service.download
             self.completed.emit(action(interactive=self._interactive, target=self._target))
         except GoogleDriveSyncError as error:
+            self.failed.emit(str(error))
+
+
+class UpdateCheckWorker(QThread):
+    """GitHub Release 확인을 별도 스레드에서 수행한다."""
+
+    completed = Signal(str, str, str)
+    failed = Signal(str)
+
+    RELEASE_API_URL = "https://api.github.com/repos/jhimm3/kiwoom-realtime-monitor/releases/latest"
+
+    def run(self) -> None:
+        try:
+            request = Request(self.RELEASE_API_URL, headers={"Accept": "application/vnd.github+json", "User-Agent": "KiwoomMonitor"})
+            with urlopen(request, timeout=10) as response:
+                document = json.loads(response.read().decode("utf-8"))
+            version = str(document.get("tag_name", "")).strip().lstrip("vV")
+            page_url = str(document.get("html_url", "")).strip()
+            if not version or not page_url:
+                raise ValueError("릴리즈 버전 정보를 찾을 수 없습니다.")
+            update_asset = next((str(asset.get("browser_download_url", "")) for asset in document.get("assets", ()) if str(asset.get("name", "")).startswith("KiwoomMonitor-Update-") and str(asset.get("name", "")).endswith(".zip")), "")
+            self.completed.emit(version, update_asset, page_url)
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
+            self.failed.emit(str(error))
+
+
+class UpdateDownloadWorker(QThread):
+    """부분 업데이트 ZIP을 사용자 임시 데이터 폴더로 내려받는다."""
+
+    completed = Signal(str)
+    failed = Signal(str)
+    progress = Signal(int)
+
+    def __init__(self, url: str, version: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._url = url
+        self._version = version
+
+    def run(self) -> None:
+        try:
+            folder = AppPaths.for_current_user().data_dir.parent / "updates"
+            folder.mkdir(parents=True, exist_ok=True)
+            destination = folder / f"KiwoomMonitor-Update-{self._version}.zip"
+            request = Request(self._url, headers={"User-Agent": "KiwoomMonitor"})
+            with urlopen(request, timeout=30) as response, destination.open("wb") as stream:
+                total = int(response.headers.get("Content-Length", "0"))
+                received = 0
+                while block := response.read(1024 * 1024):
+                    if self.isInterruptionRequested():
+                        destination.unlink(missing_ok=True)
+                        return
+                    stream.write(block)
+                    received += len(block)
+                    if total:
+                        self.progress.emit(min(100, int(received * 100 / total)))
+            self.completed.emit(str(destination))
+        except (HTTPError, URLError, TimeoutError, OSError) as error:
             self.failed.emit(str(error))
 
 
@@ -217,7 +281,7 @@ def choose_similar_stock(parent: QWidget, lookup: object, name: str) -> tuple[tu
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None, drive_client_importer: Callable[[], None] | None = None) -> None:
+    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None, drive_client_importer: Callable[[], None] | None = None, update_checker: Callable[[], None] | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
         self._api_path = api_path
@@ -237,6 +301,7 @@ class SettingsDialog(QDialog):
         self._drive_client_importer = drive_client_importer
         self._theme_backup_exporter = theme_backup_exporter
         self._theme_backup_importer = theme_backup_importer
+        self._update_checker = update_checker
         self._drive_status_label: QLabel | None = None
         self._google_drive_auto_download = QCheckBox("앱 시작 시 자동 다운로드")
         self._google_drive_auto_download.setChecked(settings.get("google_drive_auto_download") == "1")
@@ -639,6 +704,10 @@ class SettingsDialog(QDialog):
         app_info.setWordWrap(False)
         app_info.setStyleSheet("color: #667085; padding: 18px 8px;")
         info_layout.addWidget(app_info)
+        if self._update_checker is not None:
+            update_check = QPushButton("업데이트 확인")
+            update_check.clicked.connect(self._update_checker)
+            info_layout.addWidget(update_check, alignment=Qt.AlignmentFlag.AlignHCenter)
         info_layout.addStretch()
         info_tab.setMinimumSize(0, 0)
         tabs.addTab(info_tab, "프로그램 정보")
@@ -1978,7 +2047,7 @@ class NxtMarkerDelegate(QStyledItemDelegate):
         painter.restore()
 
 class MainWindow(QMainWindow):
-    COLUMNS = (("rank","순위"),("stock","종목"),("themes","테마"),("change_rate","등락률"),("strength_1m","1분강도"),("current_price","현재가"),("trade_value_1m","1분(억)"),("trade_value_5m","5분(억)"),("trade_value_60m","60분(억)"),("trade_value_day","1일(억)"),("strength_5m","5분강도"),("strength_60m","60분강도"),("strength_day","1일강도"),("new_high_price","신고가"),("high_distance","신고가%"),("market_cap","시가총액"))
+    COLUMNS = (("rank","순위"),("stock","종목"),("themes","테마"),("change_rate","등락률"),("strength_1m","1분강도"),("current_price","현재가"),("trade_value_1m","1분"),("trade_value_5m","5분"),("trade_value_60m","60분"),("trade_value_day","1일"),("strength_5m","5분강도"),("strength_60m","60분강도"),("strength_day","1일강도"),("new_high_price","신고가"),("high_distance","신고가%"),("market_cap","시가총액"))
     HEADERS = tuple(label for _, label in COLUMNS)
 
     def __init__(
@@ -1997,6 +2066,7 @@ class MainWindow(QMainWindow):
         nxt_eligibility_worker_factory: Callable[[tuple[str, ...]], NxtEligibilityWorker] | None = None,
         google_drive_sync: GoogleDriveSyncService | None = None,
         initial_google_drive_download: bool = False,
+        api_runtime_factory: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -2015,7 +2085,11 @@ class MainWindow(QMainWindow):
         self._stock_lookup = stock_lookup
         self._theme_store = theme_store
         self._google_drive_sync = google_drive_sync
+        self._api_runtime_factory = api_runtime_factory
+        self._api_reloading = False
         self._google_drive_worker: GoogleDriveSyncWorker | None = None
+        self._update_check_worker: UpdateCheckWorker | None = None
+        self._update_download_worker: UpdateDownloadWorker | None = None
         self._google_drive_operation = ""
         self._google_drive_show_completion = False
         self._google_drive_close_pending = False
@@ -2224,6 +2298,7 @@ class MainWindow(QMainWindow):
             drive_client_importer=self._select_google_drive_client,
             theme_backup_exporter=self._export_theme_backup,
             theme_backup_importer=self._import_theme_backup,
+            update_checker=self._check_for_updates,
         )
         # 기본 설정은 메인 표를 막지 않는 별도 창으로 연다. 따라서 순위 갱신은
         # 설정 창이 열려 있어도 즉시 표에 반영된다.
@@ -2233,6 +2308,124 @@ class MainWindow(QMainWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _check_for_updates(self) -> None:
+        if self._update_check_worker is not None and self._update_check_worker.isRunning():
+            self.statusBar().showMessage("업데이트 정보를 확인하고 있습니다…")
+            return
+        worker = UpdateCheckWorker(self)
+        self._update_check_worker = worker
+        worker.completed.connect(self._on_update_check_completed)
+        worker.failed.connect(self._on_update_check_failed)
+        worker.finished.connect(lambda: setattr(self, "_update_check_worker", None))
+        self.statusBar().showMessage("업데이트 정보를 확인하고 있습니다…")
+        worker.start()
+
+    @staticmethod
+    def _version_tuple(value: str) -> tuple[int, ...]:
+        try:
+            return tuple(int(part) for part in value.split("."))
+        except ValueError:
+            return ()
+
+    def _on_update_check_completed(self, version: str, update_url: str, release_url: str) -> None:
+        if self._version_tuple(version) <= self._version_tuple(APP_VERSION):
+            self.statusBar().showMessage("현재 최신 버전을 사용하고 있습니다.", 4_000)
+            QMessageBox.information(self, "앱 업데이트", f"현재 최신 버전입니다.\n\n현재 버전: {APP_VERSION}")
+            return
+        if not update_url:
+            answer = QMessageBox.question(
+                self,
+                "앱 업데이트",
+                f"새 버전 {version}이 있습니다.\n현재 버전: {APP_VERSION}\n\n부분 업데이트 파일이 아직 준비되지 않았습니다. 릴리즈 페이지를 열까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                QDesktopServices.openUrl(QUrl(release_url))
+            return
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(self, "앱 업데이트", "개발 실행 중에는 자동 업데이트를 적용하지 않습니다.\n설치본에서 자동 업데이트를 사용할 수 있습니다.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "앱 업데이트",
+            f"새 버전 {version}이 있습니다.\n현재 버전: {APP_VERSION}\n\n변경된 파일만 자동으로 다운로드해 설치할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._download_update(update_url, version)
+
+    def _download_update(self, url: str, version: str) -> None:
+        worker = UpdateDownloadWorker(url, version, self)
+        self._update_download_worker = worker
+        progress = QProgressDialog("업데이트 파일을 다운로드하고 있습니다…", "취소", 0, 100, self)
+        progress.setWindowTitle("앱 업데이트")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        self._update_progress_dialog = progress
+        progress.canceled.connect(worker.requestInterruption)
+        worker.progress.connect(progress.setValue)
+        worker.completed.connect(self._apply_downloaded_update)
+        worker.failed.connect(self._on_update_download_failed)
+        worker.finished.connect(self._close_update_progress)
+        self.statusBar().showMessage("업데이트 파일을 다운로드하고 있습니다…")
+        progress.show()
+        worker.start()
+
+    def _close_update_progress(self) -> None:
+        if getattr(self, "_update_progress_dialog", None) is not None:
+            self._update_progress_dialog.close()
+            self._update_progress_dialog = None
+        self._update_download_worker = None
+
+    def _apply_downloaded_update(self, archive_path: str) -> None:
+        app_root = Path(sys.executable).resolve().parent
+        script = AppPaths.for_current_user().data_dir.parent / "updates" / "apply_update.ps1"
+        escaped_archive = archive_path.replace("'", "''")
+        escaped_root = str(app_root).replace("'", "''")
+        escaped_exe = str(app_root / Path(sys.executable).name).replace("'", "''")
+        script.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$processId = {os.getpid()}\n"
+            f"$archive = '{escaped_archive}'\n$target = '{escaped_root}'\n$exe = '{escaped_exe}'\n"
+            "$staging = Join-Path (Split-Path $archive) 'staging'\n"
+            "Wait-Process -Id $processId -ErrorAction SilentlyContinue\n"
+            "Add-Type -AssemblyName PresentationFramework; Add-Type -AssemblyName System.Windows.Forms\n"
+            "$window = New-Object Windows.Window; $window.Title = '키움 실시간 모니터 업데이트'; $window.Width = 420; $window.Height = 145; $window.ResizeMode = 'NoResize'; $window.WindowStartupLocation = 'CenterScreen'\n"
+            "$panel = New-Object Windows.Controls.StackPanel; $panel.Margin = '22'; $status = New-Object Windows.Controls.TextBlock; $status.Text = '업데이트를 적용하고 있습니다…'; $bar = New-Object Windows.Controls.ProgressBar; $bar.Height = 20; $bar.Margin = '0,14,0,0'; $bar.Minimum = 0; $bar.Maximum = 100; $panel.Children.Add($status) | Out-Null; $panel.Children.Add($bar) | Out-Null; $window.Content = $panel; $window.Show() | Out-Null\n"
+            "Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue\n"
+            "Expand-Archive -Path $archive -DestinationPath $staging -Force\n"
+            "$manifest = Get-Content (Join-Path $staging 'update_manifest.json') -Raw | ConvertFrom-Json\n"
+            "$total = ($manifest.changed | ForEach-Object { (Get-Item (Join-Path $staging $_)).Length } | Measure-Object -Sum).Sum; $done = 0\n"
+            "foreach ($file in $manifest.changed) { $source = Join-Path $staging $file; $destination = Join-Path $target $file; $status.Text = '파일을 교체하고 있습니다…'; New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null; Copy-Item $source $destination -Force; $done += (Get-Item $source).Length; $bar.Value = [Math]::Min(100, [Math]::Round(100 * $done / [Math]::Max(1,$total))); [Windows.Forms.Application]::DoEvents() }\n"
+            "foreach ($file in $manifest.deleted) { Remove-Item (Join-Path $target $file) -Force -ErrorAction SilentlyContinue }\n"
+            "Remove-Item $archive -Force -ErrorAction SilentlyContinue\n"
+            "Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue\n"
+            "Start-Process -FilePath $exe\n"
+            "$window.Close()\n"
+            "Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue\n",
+            encoding="utf-8",
+        )
+        try:
+            arguments = f'-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{script}"'
+            result = ctypes.windll.shell32.ShellExecuteW(None, "runas", "powershell.exe", arguments, None, 0)
+            if result <= 32:
+                raise OSError(f"Windows 권한 확인이 취소되었거나 시작에 실패했습니다. ({result})")
+        except OSError as error:
+            QMessageBox.critical(self, "앱 업데이트", f"업데이트 설치를 시작하지 못했습니다.\n{error}")
+            return
+        self.statusBar().showMessage("업데이트 설치를 시작합니다. Windows 권한 확인 후 앱이 다시 열립니다.")
+        QTimer.singleShot(300, self.close)
+
+    def _on_update_download_failed(self, message: str) -> None:
+        logger.warning("업데이트 다운로드 실패: %s", message)
+        QMessageBox.information(self, "앱 업데이트", "업데이트 파일을 내려받지 못했습니다. 잠시 후 다시 시도하세요.")
+
+    def _on_update_check_failed(self, message: str) -> None:
+        logger.info("업데이트 확인 실패: %s", message)
+        self.statusBar().showMessage("업데이트 정보를 확인하지 못했습니다.", 5_000)
+        QMessageBox.information(self, "앱 업데이트", "업데이트 정보를 확인하지 못했습니다.\n네트워크 연결 또는 GitHub 릴리즈 공개 상태를 확인하세요.")
 
     def _on_settings_closed(self, dialog: SettingsDialog, result: int) -> None:
         if self._settings_dialog is dialog:
@@ -2681,8 +2874,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _api_config_path() -> Path:
-        root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[3]
-        return root / "data" / "api.env"
+        return AppPaths.for_current_user().data_dir / "api.env"
 
     def _restore_environment_selector(self) -> None:
         path = self._api_config_path()
@@ -2724,17 +2916,73 @@ class MainWindow(QMainWindow):
             self._restart_for_api_settings()
 
     def _restart_for_api_settings(self) -> None:
-        if QMessageBox.question(
-            self,
-            "API 설정 저장 완료",
-            "설정을 적용하려면 앱을 다시 열어야 합니다. 지금 다시 열까요?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        ) == QMessageBox.StandardButton.Yes:
-            arguments = [] if getattr(sys, "frozen", False) else ["-m", "kiwoom_monitor"]
-            QProcess.startDetached(sys.executable, arguments)
-            self.close()
-        else:
+        """앱을 끄지 않고 새 API 설정으로 연결 작업을 다시 구성한다."""
+        if self._api_runtime_factory is None:
             self.statusBar().showMessage("API 설정이 저장되었습니다. 앱을 다시 열면 적용됩니다.")
+            return
+        if self._api_reloading:
+            return
+        self._api_reloading = True
+        self._ranking_timer.stop()
+        self._ranking_preparation_timer.stop()
+        self._realtime_session_timer.stop()
+        self._ranking_request_due = False
+        # 기존 API 응답이 새 설정의 화면을 다시 덮어쓰지 않도록, 작업 정리
+        # 중에는 후속 보완 조회 연결도 잠시 보류한다.
+        self._ranking_priority_preparing = True
+        for worker in self._api_runtime_workers():
+            worker.requestInterruption()
+        self._set_api_status("API: 설정 적용 중…", "#B36B00")
+        self.statusBar().showMessage("새 API 설정을 적용하는 중입니다…")
+        QTimer.singleShot(50, self._finish_api_runtime_reload)
+
+    def _api_runtime_workers(self) -> tuple[QThread, ...]:
+        return tuple(
+            worker
+            for worker in (
+                self._realtime_worker,
+                self._minute_history_worker,
+                self._fundamentals_worker,
+                self._daily_high_worker,
+                self._nxt_eligibility_worker,
+                self._new_high_worker,
+                self._ranking_worker,
+            )
+            if worker is not None and worker.isRunning()
+        )
+
+    def _finish_api_runtime_reload(self) -> None:
+        if self._closing or not self._api_reloading:
+            return
+        if self._api_runtime_workers():
+            self.statusBar().showMessage("이전 API 작업을 정리하는 중입니다…")
+            QTimer.singleShot(100, self._finish_api_runtime_reload)
+            return
+        try:
+            runtime = self._api_runtime_factory() if self._api_runtime_factory is not None else {}
+            self._ranking_loader = runtime.get("ranking_loader")  # type: ignore[assignment]
+            self._realtime_worker_factory = runtime.get("realtime_worker_factory")  # type: ignore[assignment]
+            self._minute_history_worker_factory = runtime.get("minute_history_worker_factory")  # type: ignore[assignment]
+            self._fundamentals_worker_factory = runtime.get("fundamentals_worker_factory")  # type: ignore[assignment]
+            self._daily_high_worker_factory = runtime.get("daily_high_worker_factory")  # type: ignore[assignment]
+            self._nxt_eligibility_worker_factory = runtime.get("nxt_eligibility_worker_factory")  # type: ignore[assignment]
+        except Exception as error:
+            self._api_reloading = False
+            self._ranking_priority_preparing = False
+            self._set_api_status("API: 오류", "#C00000")
+            QMessageBox.warning(self, "API 설정", f"새 API 설정을 적용하지 못했습니다.\n{error}")
+            return
+
+        self._realtime_codes = ()
+        self._minute_history_codes.clear()
+        self._minute_aggregator = MinuteTradeValueAggregator()
+        self._initial_new_high_refresh_started = False
+        self._initial_nxt_codes = ()
+        self._api_reloading = False
+        self._ranking_priority_preparing = False
+        self._restore_environment_selector()
+        self.statusBar().showMessage("새 API 설정 적용 완료 · 순위를 다시 조회합니다.")
+        self._start_initial_ranking()
 
     def _select_theme_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "테마 이미지 선택", self._settings.get("theme_image_import_dir"), "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)")
@@ -3252,7 +3500,7 @@ class MainWindow(QMainWindow):
             current_price = self._current_prices.get(stock.code)
             row = self._row_by_code[stock.code]
             if current_price is not None:
-                self._table.setItem(row, 5, QTableWidgetItem(f"{current_price:,}"))
+                self._render_current_price(stock.code)
             self._render_trade_values(stock.code)
             self._render_market_cap(stock.code)
             self._render_new_high_price(stock.code)
@@ -3309,7 +3557,7 @@ class MainWindow(QMainWindow):
             current_price = self._current_prices.get(code)
             if current_price is not None:
                 row = self._row_by_code[code]
-                self._table.setItem(row, 5, QTableWidgetItem(f"{current_price:,}"))
+                self._render_current_price(code)
                 self._set_near_high_level(code, current_price, play_sound=False)
             self._render_new_high_price(code)
             self._render_high_distance(code)
@@ -3384,10 +3632,10 @@ class MainWindow(QMainWindow):
 
     def _update_trade_display_headers(self) -> None:
         headers = {
-            "1m": (4, 6, "1분강도", "1분(억)"),
-            "5m": (10, 7, "5분강도", "5분(억)"),
-            "60m": (11, 8, "60분강도", "60분(억)"),
-            "day": (12, 9, "1일강도", "1일(억)"),
+            "1m": (4, 6, "1분강도", "1분"),
+            "5m": (10, 7, "5분강도", "5분"),
+            "60m": (11, 8, "60분강도", "60분"),
+            "day": (12, 9, "1일강도", "1일"),
         }
         for period, (strength_column, trade_column, strength_label, trade_label) in headers.items():
             completed = self._trade_display_mode(period) == "completed"
@@ -3409,7 +3657,7 @@ class MainWindow(QMainWindow):
         self._update_trade_display_headers()
         for code in self._row_by_code:
             self._render_trade_values(code)
-        self.statusBar().showMessage(f"{label}(억)·{label}강도: " + (f"직전 완료 {label}" if completed else f"실시간 진행 중 {label}"))
+        self.statusBar().showMessage(f"{label} 거래대금·{label}강도: " + (f"직전 완료 {label}" if completed else f"실시간 진행 중 {label}"))
 
     def _refresh_new_highs(self) -> None:
         self._start_new_high_refresh()
@@ -3551,7 +3799,7 @@ class MainWindow(QMainWindow):
             row = self._row_by_code.get(tick.code)
             if row is None or tick.current_price is None:
                 continue
-            self._table.setItem(row, 5, QTableWidgetItem(f"{tick.current_price:,}"))
+            self._render_current_price(tick.code)
             if tick.change_rate is not None:
                 self._table.setItem(row, 3, self._change_rate_item(f"{tick.change_rate:+.{self._decimal_places('change_rate')}f}%"))
             if tick.high_price and tick.high_price > 0:
@@ -3705,6 +3953,10 @@ class MainWindow(QMainWindow):
         target = self._selected_high_price(code)
         if not target:
             return
+        # 앱 시작·신고가 데이터 수신 뒤에도 현재가 기준의 근접 단계를 즉시
+        # 계산한다. 설정 창을 열고 저장해야만 강조가 시작되던 문제를 막는다.
+        self._set_near_high_level(code, current_price, play_sound=False)
+        self._apply_near_high_background(code)
         distance = max(0.0, (target - current_price) / target * 100)
         level = self._near_high_levels.get(code, "")
         text = f"{distance:.{self._decimal_places('high_distance')}f}%"
@@ -3739,7 +3991,11 @@ class MainWindow(QMainWindow):
     def _set_near_high_level(self, code: str, current_price: int, *, play_sound: bool = True) -> None:
         previous = self._near_high_levels.get(code, "")
         level = self._near_high_level(code, current_price)
-        if level and level == self._settings.get("near_high_row_alert_level"):
+        severity = {"": 0, "interest": 1, "caution": 2, "fire": 3}
+        selected_level = self._settings.get("near_high_row_alert_level")
+        # 관심을 고르면 관심·주의·불, 주의를 고르면 주의·불 단계 모두 행을
+        # 강조한다. 선택한 단계보다 더 신고가에 근접한 경우는 제외하지 않는다.
+        if level and severity[level] >= severity.get(selected_level, 3):
             self._near_high_codes.add(code)
         else:
             self._near_high_codes.discard(code)
@@ -3749,7 +4005,6 @@ class MainWindow(QMainWindow):
             self._near_high_levels.pop(code, None)
         # 신고가에 가까워지는 방향(관심 → 주의 → 불)으로만 알린다.
         # 멀어지는 방향(불 → 주의, 주의 → 관심, 관심 → 해제)에서는 재생하지 않는다.
-        severity = {"": 0, "interest": 1, "caution": 2, "fire": 3}
         if play_sound and level and severity[level] > severity.get(previous, 0):
             self._play_near_high_sound(level)
 
@@ -3878,6 +4133,17 @@ class MainWindow(QMainWindow):
                 item.setFont(font)
                 self._table.setItem(row, column, item)
         self._schedule_theme_trade_summary()
+
+    def _render_current_price(self, code: str) -> None:
+        """현재가를 갱신해도 신고가·순위 행 강조 배경을 유지한다."""
+        row = self._row_by_code.get(code)
+        current_price = self._current_prices.get(code)
+        if row is None or current_price is None:
+            return
+        item = QTableWidgetItem(f"{current_price:,}")
+        item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        item.setBackground(self._row_background_color(code, row))
+        self._table.setItem(row, 5, item)
 
     def _schedule_theme_trade_summary(self) -> None:
         if hasattr(self, "_theme_trade_summary_timer") and not self._theme_trade_summary_timer.isActive():
@@ -4098,7 +4364,7 @@ class MainWindow(QMainWindow):
             if fundamentals.current_price is not None:
                 row = self._row_by_code.get(code)
                 if row is not None:
-                    self._table.setItem(row, 5, QTableWidgetItem(f"{fundamentals.current_price:,}"))
+                    self._render_current_price(code)
             self._render_market_cap(code)
             self._render_new_high_price(code)
             self._render_high_distance(code)
@@ -4208,6 +4474,8 @@ class MainWindow(QMainWindow):
             getattr(self, "_image_theme_ocr_worker", None),
             getattr(self, "_krx_stock_catalog_worker", None),
             self._google_drive_worker,
+            self._update_check_worker,
+            self._update_download_worker,
         )
 
     def _running_workers(self) -> tuple[QThread, ...]:
@@ -4230,6 +4498,8 @@ class MainWindow(QMainWindow):
                 self._new_high_worker: "신고가 목록",
                 self._ranking_worker: "실시간 순위",
                 self._google_drive_worker: "Google Drive",
+                self._update_check_worker: "업데이트 확인",
+                self._update_download_worker: "업데이트 다운로드",
             }
             labels = [names.get(worker, "백그라운드 작업") for worker in running]
             self.statusBar().showMessage(f"종료 중: {', '.join(labels)} 작업을 중단하는 중입니다…")
