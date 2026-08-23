@@ -53,7 +53,7 @@
 .\.venv\Scripts\python.exe -m unittest discover -s tests -q
 ```
 
-현재 배포 버전은 **1.1.8**이다. Windows 설치본은 PyInstaller 폴더형 빌드와 Inno Setup 설치 파일을 사용한다. 상세 배포 절차는 12절을 따른다.
+현재 배포 버전은 **1.1.8**이다. 1.1.8부터 부분 업데이트 ZIP의 SHA-256 검증을 적용한다. Windows 설치본은 PyInstaller 폴더형 빌드와 Inno Setup 설치 파일을 사용한다. 상세 배포 절차는 12절을 따른다.
 
 ## 4. 프로젝트 구조
 
@@ -330,6 +330,7 @@ NXT 여부를 아직 모르거나 조회 실패한 종목은 안전하게 NXT �
 - 앱이 닫힌 뒤 업데이트 도우미가 ZIP을 풀고 변경 파일을 교체한 뒤 다시 실행한다. 진행 창과 `%LocalAppData%\KiwoomMonitor\data\logs`의 업데이트 로그에서 실패 지점을 확인할 수 있다.
 - 앱 시작 시 업데이트 자동 확인은 기본값이 꺼져 있으며, 프로그램 정보 탭에서 켤 수 있다. 수동 **업데이트 확인**도 제공한다.
 - GitHub 릴리즈 태그는 앱 버전보다 커야 자동 업데이트가 감지된다. **같은 버전(예: 1.1.7)을 덮어쓴 릴리즈는 이미 설치된 동일 버전 앱이 자동 감지하지 않으므로 설치 파일을 수동 실행해야 한다.**
+- `scripts/create_update_package.py`가 생성한 ZIP과 `.zip.sha256`는 항상 함께 Release 자산으로 업로드한다. 해시 검증은 1.1.8 이후 앱에서 적용되므로, 1.1.7 이하에서 1.1.8로의 첫 자동 업데이트에는 기존 방식이 사용된다.
 
 부분 업데이트 ZIP 생성 예시:
 
@@ -341,7 +342,7 @@ NXT 여부를 아직 모르거나 조회 실패한 종목은 안전하게 NXT �
   --output release
 ```
 
-릴리즈 전에는 설치 파일과 ZIP 안에 `api.env`, `google_drive_client.json`, `google_drive_token.dat`, SQLite DB, 로그가 없는지 확인한다. `THIRD_PARTY_LICENSES.txt`와 `licenses/` 원문 고지 폴더가 설치본에 포함되는지 확인한다. 의존성을 바꾼 뒤에는 `scripts/generate_third_party_notices.ps1`를 실행해 고지 묶음을 다시 생성한다. `release/`, `dist/`, `build/`는 Git에 올리지 않고 GitHub Release 자산으로만 올린다.
+릴리즈 전에는 설치 파일과 ZIP 안에 `api.env`, `google_drive_client.json`, `google_drive_token.dat`, SQLite DB, 로그가 없는지 확인한다. `THIRD_PARTY_LICENSES.txt`와 `licenses/` 원문 고지 폴더가 설치본에 포함되는지 확인한다. 의존성을 바꾼 뒤에는 `scripts/generate_third_party_notices.ps1`를 실행해 고지 묶음을 다시 생성한다. ZIP은 `zipfile.testzip()`과 SHA-256 일치 여부까지 확인한다. `release/`, `dist/`, `build/`는 Git에 올리지 않고 GitHub Release 자산으로만 올린다.
 
 ### 12.3 아이콘과 서명
 
