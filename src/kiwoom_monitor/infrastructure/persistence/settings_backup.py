@@ -19,6 +19,15 @@ class SettingsBackupError(ValueError):
 class SettingsBackupService:
     FORMAT = "kiwoom-realtime-monitor-settings"
     VERSION = 2
+    # 백업 파일은 사용자가 고른 아이콘/알림 소리만 포함한다. 복원 시에는
+    # 허용된 폴더와 확장자, 크기를 모두 다시 확인한다.
+    MAX_BACKUP_DOCUMENT_BYTES = 32 * 1024 * 1024
+    MAX_BACKUP_ASSET_TOTAL_BYTES = 20 * 1024 * 1024
+    _ASSET_RULES = (
+        ("data/strength_icons", frozenset({".png"}), 2 * 1024 * 1024),
+        ("data/near_high_icons", frozenset({".png"}), 2 * 1024 * 1024),
+        ("data/near_high_sounds", frozenset({".wav", ".mp3", ".ogg", ".m4a"}), 5 * 1024 * 1024),
+    )
 
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
@@ -81,15 +90,32 @@ class SettingsBackupService:
             settings.get(f"near_high_sound_{level}", "") for level in ("interest", "caution", "fire")
         }
         assets: list[dict[str, str]] = []
+        total_size = 0
         for stored in sorted(value for value in paths if value):
-            source = root / stored
-            if source.is_file() and self._is_asset_path(stored):
+            resolved = self._resolve_asset_path(root, stored)
+            if resolved is None:
+                continue
+            source, maximum_size = resolved
+            try:
+                size = source.stat().st_size
+            except OSError:
+                continue
+            if not source.is_file() or size > maximum_size or total_size + size > self.MAX_BACKUP_ASSET_TOTAL_BYTES:
+                continue
+            try:
                 assets.append({"path": stored, "content": b64encode(source.read_bytes()).decode("ascii")})
+                total_size += size
+            except OSError:
+                continue
         return assets
 
     def import_from(self, path: Path, include_settings: bool = True, include_themes: bool = True, excluded_setting_keys: frozenset[str] = frozenset(), include_column_widths: bool = True, include_column_layout: bool = True) -> None:
         try:
+            if path.stat().st_size > self.MAX_BACKUP_DOCUMENT_BYTES:
+                raise SettingsBackupError("설정 백업 파일이 너무 큽니다.")
             document = json.loads(path.read_text(encoding="utf-8"))
+        except SettingsBackupError:
+            raise
         except (OSError, json.JSONDecodeError) as error:
             raise SettingsBackupError("설정 백업 파일을 읽을 수 없습니다.") from error
         if not isinstance(document, dict) or document.get("format") != self.FORMAT or document.get("version") not in {1, self.VERSION}:
@@ -150,20 +176,44 @@ class SettingsBackupService:
         if not isinstance(assets, list):
             return
         root = self._database_path.parent.parent
+        total_size = 0
         for item in assets:
             if not isinstance(item, dict):
                 continue
             stored, content = str(item.get("path", "")), item.get("content")
-            if not isinstance(content, str) or not self._is_asset_path(stored):
+            resolved = self._resolve_asset_path(root, stored)
+            if not isinstance(content, str) or resolved is None:
+                continue
+            destination, maximum_size = resolved
+            # Base64는 원본보다 약 4/3배 크다. 먼저 길이를 확인해 불필요한
+            # 대용량 디코딩을 막는다.
+            if len(content) > ((maximum_size + 2) // 3) * 4:
                 continue
             try:
-                destination = root / stored
+                data = b64decode(content, validate=True)
+                if len(data) > maximum_size or total_size + len(data) > self.MAX_BACKUP_ASSET_TOTAL_BYTES:
+                    continue
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(b64decode(content, validate=True))
+                destination.write_bytes(data)
+                total_size += len(data)
             except (OSError, ValueError):
                 continue
 
-    @staticmethod
-    def _is_asset_path(stored: str) -> bool:
-        normalized = Path(stored).as_posix()
-        return normalized.startswith(("data/strength_icons/", "data/near_high_icons/", "data/near_high_sounds/"))
+    @classmethod
+    def _resolve_asset_path(cls, root: Path, stored: str) -> tuple[Path, int] | None:
+        """백업 자산의 실제 대상 경로와 허용 크기를 안전하게 반환한다."""
+        relative = Path(stored)
+        if not stored or relative.is_absolute():
+            return None
+        normalized = relative.as_posix()
+        root = root.resolve()
+        candidate = (root / relative).resolve()
+        for directory, extensions, maximum_size in cls._ASSET_RULES:
+            allowed_directory = (root / directory).resolve()
+            try:
+                candidate.relative_to(allowed_directory)
+            except ValueError:
+                continue
+            if normalized.startswith(f"{directory}/") and candidate.suffix.casefold() in extensions:
+                return candidate, maximum_size
+        return None

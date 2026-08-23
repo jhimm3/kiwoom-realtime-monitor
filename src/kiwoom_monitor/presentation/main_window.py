@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import ctypes
+import hashlib
+import re
 import sys
 import time
 from html import escape
@@ -100,9 +102,10 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
+INVESTMENT_NOTICE = "본 앱은 투자 자문이 아니며 시세 지연·오류가 있을 수 있습니다."
 
 
 class ClickableLabel(QLabel):
@@ -149,7 +152,7 @@ class GoogleDriveSyncWorker(QThread):
 class UpdateCheckWorker(QThread):
     """GitHub Release 확인을 별도 스레드에서 수행한다."""
 
-    completed = Signal(str, str, str)
+    completed = Signal(str, str, str, str)
     failed = Signal(str)
 
     RELEASE_API_URL = "https://api.github.com/repos/jhimm3/kiwoom-realtime-monitor/releases/latest"
@@ -163,8 +166,11 @@ class UpdateCheckWorker(QThread):
             page_url = str(document.get("html_url", "")).strip()
             if not version or not page_url:
                 raise ValueError("릴리즈 버전 정보를 찾을 수 없습니다.")
-            update_asset = next((str(asset.get("browser_download_url", "")) for asset in document.get("assets", ()) if str(asset.get("name", "")).startswith("KiwoomMonitor-Update-") and str(asset.get("name", "")).endswith(".zip")), "")
-            self.completed.emit(version, update_asset, page_url)
+            assets = tuple(document.get("assets", ()))
+            update_name = f"KiwoomMonitor-Update-{version}.zip"
+            update_asset = next((str(asset.get("browser_download_url", "")) for asset in assets if str(asset.get("name", "")) == update_name), "")
+            checksum_asset = next((str(asset.get("browser_download_url", "")) for asset in assets if str(asset.get("name", "")) == f"{update_name}.sha256"), "")
+            self.completed.emit(version, update_asset, checksum_asset, page_url)
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
             self.failed.emit(str(error))
 
@@ -176,9 +182,10 @@ class UpdateDownloadWorker(QThread):
     failed = Signal(str)
     progress = Signal(int)
 
-    def __init__(self, url: str, version: str, parent: QWidget | None = None) -> None:
+    def __init__(self, url: str, checksum_url: str, version: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._url = url
+        self._checksum_url = checksum_url
         self._version = version
 
     def run(self) -> None:
@@ -186,20 +193,34 @@ class UpdateDownloadWorker(QThread):
             folder = AppPaths.for_current_user().data_dir.parent / "updates"
             folder.mkdir(parents=True, exist_ok=True)
             destination = folder / f"KiwoomMonitor-Update-{self._version}.zip"
+            temporary = destination.with_suffix(".zip.part")
+            checksum_request = Request(self._checksum_url, headers={"User-Agent": "KiwoomMonitor"})
+            with urlopen(checksum_request, timeout=15) as response:
+                checksum_text = response.read(8 * 1024).decode("utf-8", errors="strict")
+            match = re.fullmatch(r"\s*([0-9a-fA-F]{64})(?:\s+\*?[^\r\n]+)?\s*", checksum_text)
+            if match is None:
+                raise ValueError("업데이트 검증 파일 형식이 올바르지 않습니다.")
+            expected_hash = match.group(1).lower()
             request = Request(self._url, headers={"User-Agent": "KiwoomMonitor"})
-            with urlopen(request, timeout=30) as response, destination.open("wb") as stream:
+            digest = hashlib.sha256()
+            with urlopen(request, timeout=30) as response, temporary.open("wb") as stream:
                 total = int(response.headers.get("Content-Length", "0"))
                 received = 0
                 while block := response.read(1024 * 1024):
                     if self.isInterruptionRequested():
-                        destination.unlink(missing_ok=True)
+                        temporary.unlink(missing_ok=True)
                         return
                     stream.write(block)
+                    digest.update(block)
                     received += len(block)
                     if total:
                         self.progress.emit(min(100, int(received * 100 / total)))
+            if digest.hexdigest() != expected_hash:
+                temporary.unlink(missing_ok=True)
+                raise ValueError("업데이트 파일 검증에 실패했습니다. 파일을 교체하지 않았습니다.")
+            temporary.replace(destination)
             self.completed.emit(str(destination))
-        except (HTTPError, URLError, TimeoutError, OSError) as error:
+        except (HTTPError, URLError, TimeoutError, OSError, UnicodeError, ValueError) as error:
             self.failed.emit(str(error))
 
 
@@ -2186,6 +2207,17 @@ class MainWindow(QMainWindow):
         self._clock_timer.timeout.connect(self._update_clock_label)
         self._clock_timer.start(1000)
         self._update_clock_label()
+        # 일반 상태 메시지를 가리지 않도록 안내문은 일정 시간만 표시한 뒤,
+        # 그 사이 다른 메시지가 없다면 직전 문구로 되돌린다.
+        self._investment_notice_previous_message = ""
+        self._investment_notice_timer = QTimer(self)
+        self._investment_notice_timer.setInterval(15 * 60 * 1_000)
+        self._investment_notice_timer.timeout.connect(self._show_investment_notice)
+        self._investment_notice_timer.start()
+        self._investment_notice_restore_timer = QTimer(self)
+        self._investment_notice_restore_timer.setSingleShot(True)
+        self._investment_notice_restore_timer.setInterval(8_000)
+        self._investment_notice_restore_timer.timeout.connect(self._restore_status_after_investment_notice)
         self._window_geometry_save_timer = QTimer(self)
         self._window_geometry_save_timer.setSingleShot(True)
         self._window_geometry_save_timer.setInterval(350)
@@ -2302,6 +2334,19 @@ class MainWindow(QMainWindow):
         if getattr(sys, "frozen", False) and self._settings.get("auto_update_check") == "1":
             QTimer.singleShot(1_200, lambda: self._check_for_updates(silent=True))
 
+    def _show_investment_notice(self) -> None:
+        """상태 표시줄에 투자 유의 안내를 잠시 보여 준다."""
+        if self._closing:
+            return
+        self._investment_notice_previous_message = self.statusBar().currentMessage()
+        self.statusBar().showMessage(INVESTMENT_NOTICE)
+        self._investment_notice_restore_timer.start()
+
+    def _restore_status_after_investment_notice(self) -> None:
+        """안내 표시 중 새 상태가 없을 때만 이전 문구를 복원한다."""
+        if self.statusBar().currentMessage() == INVESTMENT_NOTICE:
+            self.statusBar().showMessage(self._investment_notice_previous_message)
+
     def _open_settings(self) -> None:
         if self._settings_dialog is not None and self._settings_dialog.isVisible():
             self._settings_dialog.raise_()
@@ -2344,7 +2389,7 @@ class MainWindow(QMainWindow):
             return
         worker = UpdateCheckWorker(self)
         self._update_check_worker = worker
-        worker.completed.connect(lambda version, url, release_url: self._on_update_check_completed(version, url, release_url, silent=silent))
+        worker.completed.connect(lambda version, url, checksum_url, release_url: self._on_update_check_completed(version, url, checksum_url, release_url, silent=silent))
         worker.failed.connect(lambda message: self._on_update_check_failed(message, silent=silent))
         worker.finished.connect(lambda: setattr(self, "_update_check_worker", None))
         self.statusBar().showMessage("업데이트 정보를 확인하고 있습니다…")
@@ -2357,17 +2402,17 @@ class MainWindow(QMainWindow):
         except ValueError:
             return ()
 
-    def _on_update_check_completed(self, version: str, update_url: str, release_url: str, silent: bool = False) -> None:
+    def _on_update_check_completed(self, version: str, update_url: str, checksum_url: str, release_url: str, silent: bool = False) -> None:
         if self._version_tuple(version) <= self._version_tuple(APP_VERSION):
             self.statusBar().showMessage("현재 최신 버전을 사용하고 있습니다.", 4_000)
             if not silent:
                 QMessageBox.information(self, "앱 업데이트", f"현재 최신 버전입니다.\n\n현재 버전: {APP_VERSION}")
             return
-        if not update_url:
+        if not update_url or not checksum_url:
             answer = QMessageBox.question(
                 self,
                 "앱 업데이트",
-                f"새 버전 {version}이 있습니다.\n현재 버전: {APP_VERSION}\n\n부분 업데이트 파일이 아직 준비되지 않았습니다. 릴리즈 페이지를 열까요?",
+                f"새 버전 {version}이 있습니다.\n현재 버전: {APP_VERSION}\n\n검증된 부분 업데이트 파일이 아직 준비되지 않았습니다. 릴리즈 페이지를 열까요?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.Yes:
@@ -2383,10 +2428,10 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer == QMessageBox.StandardButton.Yes:
-            self._download_update(update_url, version)
+            self._download_update(update_url, checksum_url, version)
 
-    def _download_update(self, url: str, version: str) -> None:
-        worker = UpdateDownloadWorker(url, version, self)
+    def _download_update(self, url: str, checksum_url: str, version: str) -> None:
+        worker = UpdateDownloadWorker(url, checksum_url, version, self)
         self._update_download_worker = worker
         progress = QProgressDialog("업데이트 파일을 다운로드하고 있습니다…", "취소", 0, 100, self)
         progress.setWindowTitle("앱 업데이트")
@@ -2463,6 +2508,9 @@ class MainWindow(QMainWindow):
 
     def _on_update_download_failed(self, message: str) -> None:
         logger.warning("업데이트 다운로드 실패: %s", message)
+        if "검증" in message:
+            QMessageBox.warning(self, "앱 업데이트", "업데이트 파일 검증에 실패해 적용하지 않았습니다. 잠시 후 다시 시도하세요.")
+            return
         QMessageBox.information(self, "앱 업데이트", "업데이트 파일을 내려받지 못했습니다. 잠시 후 다시 시도하세요.")
 
     def _on_update_check_failed(self, message: str, silent: bool = False) -> None:
