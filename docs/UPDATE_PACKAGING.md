@@ -3,6 +3,15 @@
 최초 설치는 전체 설치 파일(`KiwoomMonitor-Setup-<버전>.exe`)로 한다. 이후 버전은
 이전 배포 폴더와 새 배포 폴더를 비교하여 바뀐 파일만 ZIP으로 배포한다.
 
+빌드 전에는 먼저 전용 업데이트 도우미 EXE를 만든다. 이 도우미는 사용자 앱에서
+PowerShell 대신 앱 종료 대기·파일 교체·재실행을 수행한다.
+
+```powershell
+.\.venv\Scripts\pyinstaller.exe --clean --noconfirm --onefile --windowed `
+  --name UpdateHelper --distpath resources --workpath build\UpdateHelper `
+  --specpath build\UpdateHelper src\kiwoom_monitor\update_helper.py
+```
+
 ```powershell
 .\.venv\Scripts\python.exe scripts\create_update_package.py `
   --previous release\1.1.1 `

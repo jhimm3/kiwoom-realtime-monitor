@@ -53,7 +53,7 @@
 .\.venv\Scripts\python.exe -m unittest discover -s tests -q
 ```
 
-현재 배포 버전은 **1.1.8**이다. 1.1.8부터 부분 업데이트 ZIP의 SHA-256 검증을 적용한다. Windows 설치본은 PyInstaller 폴더형 빌드와 Inno Setup 설치 파일을 사용한다. 상세 배포 절차는 12절을 따른다.
+현재 배포 버전은 **1.1.9**이다. 1.1.8부터 부분 업데이트 ZIP의 SHA-256 검증을 적용하며, 1.1.9부터 전용 업데이트 도우미 EXE를 사용한다. Windows 설치본은 PyInstaller 폴더형 빌드와 Inno Setup 설치 파일을 사용한다. 상세 배포 절차는 12절을 따른다.
 
 ## 4. 프로젝트 구조
 
@@ -312,9 +312,10 @@ NXT 여부를 아직 모르거나 조회 실패한 종목은 안전하게 NXT �
 
 1. 버전을 `pyproject.toml`, `src/kiwoom_monitor/__init__.py`, `presentation/main_window.py`, `installer/KiwoomMonitor.iss`에서 같은 값으로 맞춘다.
 2. 단위 테스트와 `compileall`을 통과시킨다.
-3. PyInstaller 폴더형 배포본을 만든다.
+3. PowerShell을 대신할 전용 업데이트 도우미 EXE를 만든 뒤, PyInstaller 폴더형 배포본을 만든다.
 
 ```powershell
+.\.venv\Scripts\pyinstaller.exe --clean --noconfirm --onefile --windowed --name UpdateHelper --distpath resources --workpath build\UpdateHelper --specpath build\UpdateHelper src\kiwoom_monitor\update_helper.py
 .\.venv\Scripts\pyinstaller.exe --clean --noconfirm KiwoomMonitor.spec
 & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' installer\KiwoomMonitor.iss
 ```
@@ -327,7 +328,7 @@ NXT 여부를 아직 모르거나 조회 실패한 종목은 안전하게 NXT �
 
 - GitHub 최신 릴리즈의 `KiwoomMonitor-Update-<버전>.zip`과 같은 이름의 `.zip.sha256` 검증 파일을 앱이 내려받는다. SHA-256이 일치할 때만 파일 교체를 시작하며, 검증 파일이 없거나 다르면 자동 업데이트를 적용하지 않는다.
 - ZIP에는 변경 파일과 `update_manifest.json`만 넣는다. OCR 모델처럼 바뀌지 않은 대형 파일은 포함하지 않는다.
-- 앱이 닫힌 뒤 업데이트 도우미가 ZIP을 풀고 변경 파일을 교체한 뒤 다시 실행한다. 진행 창과 `%LocalAppData%\KiwoomMonitor\data\logs`의 업데이트 로그에서 실패 지점을 확인할 수 있다.
+- 앱이 닫힌 뒤 `UpdateHelper.exe`가 ZIP을 풀고 변경 파일을 교체한 뒤 다시 실행한다. 도우미는 ZIP·목록의 경로가 설치 폴더 밖으로 벗어나지 않는지 다시 확인한다. 진행 창과 `%LocalAppData%\KiwoomMonitor\updates\apply_update.log`에서 실패 지점을 확인할 수 있다.
 - 앱 시작 시 업데이트 자동 확인은 기본값이 꺼져 있으며, 프로그램 정보 탭에서 켤 수 있다. 수동 **업데이트 확인**도 제공한다.
 - GitHub 릴리즈 태그는 앱 버전보다 커야 자동 업데이트가 감지된다. **같은 버전(예: 1.1.7)을 덮어쓴 릴리즈는 이미 설치된 동일 버전 앱이 자동 감지하지 않으므로 설치 파일을 수동 실행해야 한다.**
 - `scripts/create_update_package.py`가 생성한 ZIP과 `.zip.sha256`는 항상 함께 Release 자산으로 업로드한다. 해시 검증은 1.1.8 이후 앱에서 적용되므로, 1.1.7 이하에서 1.1.8로의 첫 자동 업데이트에는 기존 방식이 사용된다.
