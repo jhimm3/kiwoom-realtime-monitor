@@ -1,18 +1,22 @@
 # 키움 실시간 종목순위·테마·거래강도 모니터
 
-키움 REST·0B 실시간 체결 기반의 상위 20종목 모니터입니다. 순위, 테마 입력·OCR, 기간 거래대금·거래강도, 최고가 근접 알림, NXT 표시, 설정 백업을 구현했습니다.
+키움 REST·WebSocket `0B` 기반의 Windows 상위 20종목 모니터입니다. 실시간 순위·현재가·기간 거래대금·거래강도와 최고가 근접 알림, NXT 표시, 테마 관리, Google Drive 선택 동기화, 설치·부분 업데이트를 제공합니다.
 
-- 현재 버전: **1.1.3**
+## 현재 버전
+
+- **1.1.7**
+- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.7)
 - [소개 페이지](docs/index.html) · [개인정보처리방침](docs/privacy.html)
-- [1.1.3 변경 내역](docs/RELEASE_NOTES_v1.1.3.md) · [1.1.2 변경 내역](docs/RELEASE_NOTES_v1.1.2.md) · [1.1.1 변경 내역](docs/RELEASE_NOTES_v1.1.1.md) · [1.1.0 변경 내역](docs/RELEASE_NOTES_v1.1.0.md)
-- [AI 인수인계 개발실행서 v3.0](docs/AI_인수인계_개발실행서_v3.0.md)
-- [REST API 검증 및 프로젝트 설계](docs/REST_API_검증_및_프로젝트_설계.md)
-- [Phase 1 구현 기록](docs/PHASE1_구현_기록.md)
-- [Phase 2 REST 연결 기록](docs/PHASE2_REST_연결_기록.md)
-- [Phase 3 순위·신고가 결합 기록](docs/PHASE3_순위_신고가_결합_기록.md)
-- [Phase 4 화면 새로고침 기록](docs/PHASE4_화면_새로고침_기록.md)
-- [Phase 5 WebSocket 기반 기록](docs/PHASE5_WEBSOCKET_기반_기록.md)
-- [Phase 6 분당 거래대금 기록](docs/PHASE6_분당_거래대금_기록.md)
-- [Phase 7 REST 분봉 보완 기록](docs/PHASE7_REST_분봉_보완_기록.md)
-- [Phase 8 거래대금 화면 기록](docs/PHASE8_거래대금_화면_기록.md)
-- [Phase 9 거래강도 기반 기록](docs/PHASE9_거래강도_기반_기록.md)
+
+## 변경 내역
+
+- [1.1.7](docs/RELEASE_NOTES_v1.1.7.md) — `ka10081` 일봉 직접 거래대금·30일 캐시, 순위 변동 표시 시간 기본값 0초
+- [1.1.6](docs/RELEASE_NOTES_v1.1.6.md) — 자동 업데이트 도우미 안정화
+- [1.1.5](docs/RELEASE_NOTES_v1.1.5.md) · [1.1.4](docs/RELEASE_NOTES_v1.1.4.md) — 업데이트·아이콘 개선
+- [1.1.3](docs/RELEASE_NOTES_v1.1.3.md) · [1.1.2](docs/RELEASE_NOTES_v1.1.2.md) · [1.1.1](docs/RELEASE_NOTES_v1.1.1.md) · [1.1.0](docs/RELEASE_NOTES_v1.1.0.md)
+
+## 개발 문서
+
+- [AI 인수인계 개발실행서 v3.3](docs/AI_인수인계_개발실행서_v3.0.md) — 현재 구조·설정·API·빌드·배포의 기준 문서
+- [기술 명세서](docs/키움_실시간_모니터_기술명세서_v2.0.md)
+- [OCR 모델 직접 설치](docs/OCR_모델_직접_설치.md)
