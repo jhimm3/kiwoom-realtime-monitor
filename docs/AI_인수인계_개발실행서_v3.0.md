@@ -1,6 +1,6 @@
-# 키움 실시간 모니터 — AI 인수인계 개발실행서 v3.2
+# 키움 실시간 모니터 — AI 인수인계 개발실행서 v3.3
 
-> 기준일: 2026-08-21  
+> 기준일: 2026-08-23
 > 대상: 이 저장소를 새로 받은 개발자 또는 AI  
 > 목표: 기존 동작을 깨지 않고 기능을 재현·수정·확장한다.
 
@@ -53,7 +53,7 @@
 .\.venv\Scripts\python.exe -m unittest discover -s tests -q
 ```
 
-현재는 PyInstaller 실행 파일 제작을 하지 않는다. 기능과 장중 API 동작을 먼저 검증한다.
+현재 배포 버전은 **1.1.7**이다. Windows 설치본은 PyInstaller 폴더형 빌드와 Inno Setup 설치 파일을 사용한다. 상세 배포 절차는 12절을 따른다.
 
 ## 4. 프로젝트 구조
 
@@ -71,6 +71,8 @@ src/kiwoom_monitor/
 ├─ infrastructure/
 │  ├─ kiwoom_rest/                      # REST 클라이언트와 QThread Worker
 │  ├─ persistence/                      # SQLite, 설정, 테마, 백업
+│  │  ├─ minute_bar_repository.py        # 분봉 이력·월별 개발 비교 CSV
+│  │  └─ daily_bar_repository.py         # ka10081 일봉·전일 거래대금 30일 캐시
 │  ├─ krx/                              # 전체 상장종목 동기화 Worker
 │  ├─ ocr/                              # PaddleOCR 이미지 테마 추출
 │  ├─ excel/                            # Excel 테마 읽기
@@ -86,7 +88,7 @@ src/kiwoom_monitor/
 
 ### 5.1 경로
 
-개발 실행 시 프로젝트 폴더 아래에 다음이 생성된다.
+개발 실행 시에는 프로젝트 폴더 아래에, 설치본은 `%LocalAppData%\KiwoomMonitor\data`에 다음 개인 데이터가 생성된다. 설치 폴더(`Program Files`)에는 개인 데이터·로그를 쓰지 않는다.
 
 ```text
 data/
@@ -112,6 +114,8 @@ data/
 | `stocks` | 종목코드·명칭·기본정보·NXT 일간 캐시 |
 | `stock_aliases` | 입력 종목명의 별칭 |
 | `themes`, `stock_themes` | 테마·기본색·종목별 색·연결 |
+| `minute_bars`, `minute_history_sync_log` | 당일 1분봉 이력·분봉 보완 시각, 30일 보관 |
+| `daily_bars`, `daily_bar_sync_log` | `ka10081` 일봉 고가·직접 거래대금, 30일 보관 |
 | 신고가 스냅샷 테이블 | `ka10016` 결과와 확인 시각 |
 
 설정 백업 JSON에는 설정·열·테마·색·별칭을 넣는다. API 키·로그·실시간 체결·분봉 캐시는 넣지 않는다.
@@ -188,6 +192,7 @@ NXT 여부를 아직 모르거나 조회 실패한 종목은 안전하게 NXT �
 - 0B 당일 고가가 더 높으면 표시 값에 반영
 - 화면의 `신고가`는 선택한 기간의 **최고가 가격**이다. `신고가%`는 현재가와 그 가격의 거리다.
 - 값이 없을 때는 신고가 근접 강조·알림을 하지 않는다.
+- `ka10081` 응답의 직접 거래대금 `trde_prica`는 전일 거래대금과 분봉 합계 비교 기준으로 사용한다. 종목별 최근 30개 일봉을 SQLite에 보관하고, 앱 시작 시 저장값을 먼저 표시한 뒤 장중에 당일 미갱신 종목만 다시 조회한다.
 
 ## 8. UI와 설정의 핵심 동작
 
@@ -220,7 +225,7 @@ NXT 여부를 아직 모르거나 조회 실패한 종목은 안전하게 NXT �
 - 반응형 UI는 창 너비에 맞춰 열 폭을, 창 높이와 행 수에 맞춰 행 높이를 조정한다. 수동 글자/행 높이는 우선한다.
 - 표의 오른쪽 또는 마지막 행 아래 빈 공간을 더블클릭하면 창 크기를 현재 표 내용에 맞춘다. 실제 셀을 더블클릭했을 때는 이 동작을 하지 않는다.
 - 첫 정상 순위 수신 때는 상위 20개 행이 보이도록 세로 크기를 한 번 보정한다.
-- 순위 변동은 설정 시간 동안 연초록 행 강조를 적용한다. 신고가 근접 빨강 강조가 우선한다.
+- 순위 변동은 설정 시간 동안 연초록 행 강조를 적용한다. 신고가 근접 빨강 강조가 우선한다. **기본 표시 시간은 0.00초**이며, 새 설치 또는 화면 구성 탭 초기화 때 이 값이 적용된다.
 - 마우스 호버·선택은 셀 배경을 덮지 않고 셀 왼쪽의 작은 시스템 파란 배지로 표시한다. 같은 셀을 다시 누르면 선택이 해제된다.
 - 등락률은 상승 빨강/하락 파랑이다. 종목 오른쪽 아래 빨간 삼각형은 NXT 가능 표시다.
 - 시가총액은 `63조 · 7,000억`처럼 조·억을 읽기 쉽게 구분하되 단위 글자만 따로 강조하지 않는다. 전체 글자색은 설정한 구간에 따라 1단계 파랑, 2단계 주황, 3단계 빨강으로 표시한다. 기본 기준은 1조(10,000억)·5조(50,000억)·10조(100,000억)이며, 각 기준을 `0`으로 설정하면 그 단계는 끈다.
@@ -301,9 +306,70 @@ NXT 여부를 아직 모르거나 조회 실패한 종목은 안전하게 NXT �
 - 제외: `data/`, 로그, SQLite, OCR 모델 파일, `node_modules/`, 개인 업로드 이미지/Excel, API 키, Google OAuth JSON·로그인 토큰.
 - 현재 예시 파일 [테마 입력 템플릿](../테마_입력_템플릿.xlsx)은 저장소에 포함한다.
 
-## 12. 후속 범위
+## 12. Windows 빌드·설치·자동 업데이트
 
-- 실행 파일/설치 파일 제작은 장중 실측 검증 후 별도 진행한다.
+### 12.1 최초 설치 파일
+
+1. 버전을 `pyproject.toml`, `src/kiwoom_monitor/__init__.py`, `presentation/main_window.py`, `installer/KiwoomMonitor.iss`에서 같은 값으로 맞춘다.
+2. 단위 테스트와 `compileall`을 통과시킨다.
+3. PyInstaller 폴더형 배포본을 만든다.
+
+```powershell
+.\.venv\Scripts\pyinstaller.exe --clean --noconfirm KiwoomMonitor.spec
+& 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' installer\KiwoomMonitor.iss
+```
+
+4. 생성물은 `dist/KiwoomMonitor/`와 `dist/installer/KiwoomMonitor-Setup-<버전>.exe`다.
+5. 설치 위치는 기본적으로 `C:\Program Files\KiwoomMonitor`이다. 사용자의 API 키·테마·설정·로그는 `%LocalAppData%\KiwoomMonitor\data`에 보관한다.
+6. 제거 프로그램은 **예 / 아니오 / 취소**를 제공한다. 예를 누르면 `%LocalAppData%\KiwoomMonitor`도 삭제하고, 아니오는 프로그램 본체만 삭제하며, 취소는 제거 자체를 중단한다.
+
+### 12.2 부분 업데이트
+
+- GitHub 최신 릴리즈의 `KiwoomMonitor-Update-<버전>.zip`을 앱이 내려받는다.
+- ZIP에는 변경 파일과 `update_manifest.json`만 넣는다. OCR 모델처럼 바뀌지 않은 대형 파일은 포함하지 않는다.
+- 앱이 닫힌 뒤 업데이트 도우미가 ZIP을 풀고 변경 파일을 교체한 뒤 다시 실행한다. 진행 창과 `%LocalAppData%\KiwoomMonitor\data\logs`의 업데이트 로그에서 실패 지점을 확인할 수 있다.
+- 앱 시작 시 업데이트 자동 확인은 기본값이 꺼져 있으며, 프로그램 정보 탭에서 켤 수 있다. 수동 **업데이트 확인**도 제공한다.
+- GitHub 릴리즈 태그는 앱 버전보다 커야 자동 업데이트가 감지된다. **같은 버전(예: 1.1.7)을 덮어쓴 릴리즈는 이미 설치된 동일 버전 앱이 자동 감지하지 않으므로 설치 파일을 수동 실행해야 한다.**
+
+부분 업데이트 ZIP 생성 예시:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\create_update_package.py `
+  --previous release\<이전버전> `
+  --current dist\KiwoomMonitor `
+  --version <새버전> `
+  --output release
+```
+
+릴리즈 전에는 설치 파일과 ZIP 안에 `api.env`, `google_drive_client.json`, `google_drive_token.dat`, SQLite DB, 로그가 없는지 확인한다. `release/`, `dist/`, `build/`는 Git에 올리지 않고 GitHub Release 자산으로만 올린다.
+
+### 12.3 아이콘과 서명
+
+- 설치·바로가기·창 아이콘은 `resources/app_icon.ico`와 PyInstaller 실행 파일 내부 아이콘을 사용한다.
+- 현재 설치 파일은 코드 서명이 없으므로 Windows SmartScreen에서 `알 수 없는 게시자` 경고가 뜰 수 있다. 무료로 완전히 없애는 방법은 없으며, 배포 규모가 커질 때 코드 서명 인증서를 검토한다.
+
+### 12.4 GitHub Pages
+
+- 개인정보처리방침과 안내 페이지는 `docs/privacy.html`, `docs/index.html`에 있다.
+- GitHub Pages를 쓸 때는 저장소 `Settings → Pages → Deploy from a branch → codex/monitor-core-implementation → /docs`로 설정한다.
+- 예상 주소는 `https://jhimm3.github.io/kiwoom-realtime-monitor/`이다. 공개 웹페이지이므로 API 키·OAuth 파일·개인 데이터는 절대 넣지 않는다.
+
+## 13. 현재 배포 기준과 후속 범위
+
+### 13.1 1.1.7 기준 완료 항목
+
+- 실시간 순위·0B 체결·분봉 보완·분/5분/60분/1일 거래대금과 강도 표시
+- `ka10081` 직접 거래대금 기반 일봉 30일 캐시 및 분봉 비교 CSV
+- 최고가·신고가 근접 강조·아이콘·사용자 음성 알림
+- 테마 수동/Excel/OCR/텍스트 입력과 편집 가능한 미리보기, 제외 테마·별칭·상장종목 동기화
+- Google Drive 선택 동기화, 수동 테마 DB 백업/복원
+- 필드 편집·표 색/강조·창 크기와 열 폭의 로컬 저장
+- Windows 설치·제거·부분 자동 업데이트·릴리즈 자산 배포
+
+### 13.2 아직 별도 검증할 범위
+
+- 장중 실측으로 영웅문과 1/5/60분·당일 거래대금 및 강도 차이를 확인한다.
+- 장 시작 전부터 장 종료까지 실행한 경우의 분봉 비교 CSV를 30일 이상 누적 검토한다.
 - macOS 배포는 REST 호환성·PaddleOCR 배포 크기·키 저장 방식을 별도 검증한 뒤 진행한다.
 - 상장 후 전체 기간 최고가는 제공하지 않는다.
 - 주문·계좌·조건검색은 현재 제품 범위 밖이다.
