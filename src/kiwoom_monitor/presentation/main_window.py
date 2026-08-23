@@ -103,6 +103,7 @@ logger = logging.getLogger(__name__)
 APP_VERSION = "1.1.7"
 APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
+INVESTMENT_NOTICE = "본 앱은 투자 자문이 아니며 시세 지연·오류가 있을 수 있습니다."
 
 
 class ClickableLabel(QLabel):
@@ -2186,6 +2187,17 @@ class MainWindow(QMainWindow):
         self._clock_timer.timeout.connect(self._update_clock_label)
         self._clock_timer.start(1000)
         self._update_clock_label()
+        # 일반 상태 메시지를 가리지 않도록 안내문은 일정 시간만 표시한 뒤,
+        # 그 사이 다른 메시지가 없다면 직전 문구로 되돌린다.
+        self._investment_notice_previous_message = ""
+        self._investment_notice_timer = QTimer(self)
+        self._investment_notice_timer.setInterval(15 * 60 * 1_000)
+        self._investment_notice_timer.timeout.connect(self._show_investment_notice)
+        self._investment_notice_timer.start()
+        self._investment_notice_restore_timer = QTimer(self)
+        self._investment_notice_restore_timer.setSingleShot(True)
+        self._investment_notice_restore_timer.setInterval(8_000)
+        self._investment_notice_restore_timer.timeout.connect(self._restore_status_after_investment_notice)
         self._window_geometry_save_timer = QTimer(self)
         self._window_geometry_save_timer.setSingleShot(True)
         self._window_geometry_save_timer.setInterval(350)
@@ -2301,6 +2313,19 @@ class MainWindow(QMainWindow):
         # 개발 실행은 GitHub 릴리즈를 갱신하지 않으므로 설치본에서만 동작한다.
         if getattr(sys, "frozen", False) and self._settings.get("auto_update_check") == "1":
             QTimer.singleShot(1_200, lambda: self._check_for_updates(silent=True))
+
+    def _show_investment_notice(self) -> None:
+        """상태 표시줄에 투자 유의 안내를 잠시 보여 준다."""
+        if self._closing:
+            return
+        self._investment_notice_previous_message = self.statusBar().currentMessage()
+        self.statusBar().showMessage(INVESTMENT_NOTICE)
+        self._investment_notice_restore_timer.start()
+
+    def _restore_status_after_investment_notice(self) -> None:
+        """안내 표시 중 새 상태가 없을 때만 이전 문구를 복원한다."""
+        if self.statusBar().currentMessage() == INVESTMENT_NOTICE:
+            self.statusBar().showMessage(self._investment_notice_previous_message)
 
     def _open_settings(self) -> None:
         if self._settings_dialog is not None and self._settings_dialog.isVisible():
