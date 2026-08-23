@@ -30,6 +30,7 @@ dist/
 release/
 pyinstaller-build.log
 *.spec
+resources/UpdateHelper.exe
 
 # 편집기·운영체제 파일
 .idea/
