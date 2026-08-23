@@ -4,12 +4,13 @@
 
 ## 현재 버전
 
-- **1.1.7**
+- **1.1.8**
 - [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.8)
 - [소개 페이지](docs/index.html) · [개인정보처리방침](docs/privacy.html)
 
 ## 변경 내역
 
+- [1.1.8](docs/RELEASE_NOTES_v1.1.8.md) — 부분 자동 업데이트 SHA-256 검증, 설정 백업 첨부파일 복원 안전성 강화, 설치본 제3자 고지 포함
 - [1.1.7](docs/RELEASE_NOTES_v1.1.7.md) — `ka10081` 일봉 직접 거래대금·30일 캐시, 순위 변동 표시 시간 기본값 0초
 - [1.1.6](docs/RELEASE_NOTES_v1.1.6.md) — 자동 업데이트 도우미 안정화
 - [1.1.5](docs/RELEASE_NOTES_v1.1.5.md) · [1.1.4](docs/RELEASE_NOTES_v1.1.4.md) — 업데이트·아이콘 개선
