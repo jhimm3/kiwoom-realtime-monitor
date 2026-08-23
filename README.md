@@ -20,3 +20,7 @@
 - [AI 인수인계 개발실행서 v3.3](docs/AI_인수인계_개발실행서_v3.3.md) — 현재 구조·설정·API·빌드·배포의 기준 문서
 - [기술 명세서](docs/키움_실시간_모니터_기술명세서_v2.0.md)
 - [OCR 모델 직접 설치](docs/OCR_모델_직접_설치.md)
+
+## 저작권 및 제3자 고지
+
+앱 자체는 `Copyright 2026 크니. All rights reserved.`로 보호됩니다. 포함 라이브러리·OCR 모델·알림 음성·설치 도구에 대한 고지는 [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt)를 참조하세요.
