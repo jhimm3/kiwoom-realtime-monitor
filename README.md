@@ -5,7 +5,7 @@
 ## 현재 버전
 
 - **1.1.7**
-- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.7)
+- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.8)
 - [소개 페이지](docs/index.html) · [개인정보처리방침](docs/privacy.html)
 
 ## 변경 내역

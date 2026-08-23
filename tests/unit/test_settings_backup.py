@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from base64 import b64encode
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
@@ -35,6 +36,14 @@ class SettingsBackupServiceTest(unittest.TestCase):
                 connection.commit()
             finally:
                 connection.close()
+
+            service.import_from(backup_path, include_column_widths=False)
+
+            connection = sqlite3.connect(database_path)
+            try:
+                self.assertEqual((1, 1, 333), connection.execute("SELECT visible, position, width FROM column_settings WHERE column_name = 'stock'").fetchone())
+            finally:
+                connection.close()
             service.import_from(backup_path)
 
             connection = sqlite3.connect(database_path)
@@ -60,10 +69,24 @@ class SettingsBackupServiceTest(unittest.TestCase):
             finally:
                 connection.close()
 
-            service.import_from(backup_path, include_column_widths=False)
+    def test_asset_import_rejects_path_escape_and_oversized_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database_path = root / "data" / "monitor.db"
+            database_path.parent.mkdir()
+            Database(database_path).initialize()
+            service = SettingsBackupService(database_path)
 
-            connection = sqlite3.connect(database_path)
-            try:
-                self.assertEqual((1, 1, 333), connection.execute("SELECT visible, position, width FROM column_settings WHERE column_name = 'stock'").fetchone())
-            finally:
-                connection.close()
+            valid = b"valid icon"
+            service._import_assets([
+                {"path": "data/near_high_icons/interest.png", "content": b64encode(valid).decode("ascii")},
+                {"path": "data/near_high_sounds/../../../outside.txt", "content": b64encode(b"bad").decode("ascii")},
+                {
+                    "path": "data/strength_icons/fire.png",
+                    "content": b64encode(b"x" * (2 * 1024 * 1024 + 1)).decode("ascii"),
+                },
+            ])
+
+            self.assertEqual(valid, (root / "data" / "near_high_icons" / "interest.png").read_bytes())
+            self.assertFalse((root / "outside.txt").exists())
+            self.assertFalse((root / "data" / "strength_icons" / "fire.png").exists())

@@ -37,7 +37,7 @@ class MainWindowTest(unittest.TestCase):
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
 
-            self.assertEqual(window.windowTitle(), "키움 실시간 종목 모니터")
+            self.assertEqual(window.windowTitle(), "키움 실시간 모니터 (테스트)")
             table = window.centralWidget().findChild(type(window._table))
             self.assertEqual(table.columnCount(), 16)
             self.assertFalse(table.horizontalHeader().stretchLastSection())

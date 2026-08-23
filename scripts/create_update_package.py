@@ -56,7 +56,10 @@ def main() -> None:
             for file in staging.rglob("*"):
                 if file.is_file():
                     archive.write(file, file.relative_to(staging).as_posix())
+    checksum_path = output.with_suffix(".zip.sha256")
+    checksum_path.write_text(f"{sha256(output)}  {output.name}\n", encoding="ascii")
     print(output)
+    print(checksum_path)
     print(f"변경 {len(changed)}개, 삭제 {len(deleted)}개")
 
 
