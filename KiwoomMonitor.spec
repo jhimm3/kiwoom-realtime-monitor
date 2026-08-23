@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_dynamic_libs
 
-datas = [('data/near_high_sounds', 'data/near_high_sounds'), ('data/ocr_models/PP-OCRv5_mobile_det', 'data/ocr_models/PP-OCRv5_mobile_det'), ('data/ocr_models/korean_PP-OCRv5_mobile_rec', 'data/ocr_models/korean_PP-OCRv5_mobile_rec'), ('resources/app_icon.png', 'resources'), ('THIRD_PARTY_LICENSES.txt', '.')]
+datas = [('data/near_high_sounds', 'data/near_high_sounds'), ('data/ocr_models/PP-OCRv5_mobile_det', 'data/ocr_models/PP-OCRv5_mobile_det'), ('data/ocr_models/korean_PP-OCRv5_mobile_rec', 'data/ocr_models/korean_PP-OCRv5_mobile_rec'), ('resources/app_icon.png', 'resources'), ('THIRD_PARTY_LICENSES.txt', '.'), ('licenses', 'licenses')]
 binaries = []
 datas += collect_data_files('paddle')
 binaries += collect_dynamic_libs('paddle')

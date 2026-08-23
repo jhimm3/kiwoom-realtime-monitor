@@ -23,4 +23,4 @@
 
 ## 저작권 및 제3자 고지
 
-앱 자체는 `Copyright 2026 크니. All rights reserved.`로 보호됩니다. 포함 라이브러리·OCR 모델·알림 음성·설치 도구에 대한 고지는 [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt)를 참조하세요.
+앱 자체는 `Copyright 2026 크니. All rights reserved.`로 보호됩니다. 포함 라이브러리·OCR 모델·알림 음성·설치 도구에 대한 고지는 [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt)를 참조하세요. 설치본에는 패키지별 원문 고지 파일을 담은 `licenses/` 폴더도 함께 포함됩니다.

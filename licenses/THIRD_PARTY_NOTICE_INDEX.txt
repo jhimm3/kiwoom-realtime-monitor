@@ -1,0 +1,379 @@
+키움 실시간 종목 모니터 - 제3자 라이선스 원문 묶음
+생성 기준: requirements.lock.txt 및 현재 .venv 설치 환경
+생성 시각: 2026-08-23 09:58:38 +09:00
+
+이 폴더는 설치본에 포함된 런타임 의존성의 원본 LICENSE / NOTICE / COPYING / AUTHORS 파일을 가능한 한 그대로 복사합니다.
+패키지 메타데이터에 원문 파일이 없는 항목은 아래 누락 목록에 남습니다. 배포 전 해당 프로젝트의 라이선스를 별도로 확인하십시오.
+
+## aiohappyeyeballs 2.7.1
+Declared license: PSF-2.0
+Original notice file: third_party/aiohappyeyeballs-2.7.1/licenses\LICENSE
+
+## aiohttp 3.14.3
+Declared license: Apache-2.0 AND MIT
+Original notice file: third_party/aiohttp-3.14.3/licenses\LICENSE.txt
+Original notice file: third_party/aiohttp-3.14.3/licenses\vendor\llhttp\LICENSE
+
+## aiosignal 1.4.0
+Declared license: Apache 2.0
+Original notice file: third_party/aiosignal-1.4.0/licenses\LICENSE
+
+## aistudio_sdk 0.3.9
+Declared license: Apache-2.0
+Original notice file: third_party/aistudio_sdk-0.3.9/licenses\LICENSE
+
+## annotated-types 0.8.0
+Declared license: not declared in METADATA
+Original notice file: third_party/annotated-types-0.8.0/licenses\LICENSE
+
+## anyio 4.14.2
+Declared license: not declared in METADATA
+Original notice file: third_party/anyio-4.14.2/licenses\LICENSE
+
+## attrs 26.1.0
+Declared license: not declared in METADATA
+Original notice file: third_party/attrs-26.1.0/licenses\LICENSE
+
+## bce-python-sdk 0.9.76
+Declared license: Apache License 2.0
+License text: third_party/bce-python-sdk-0.9.76/LICENSE (standard Apache-2.0 text; this installed distribution did not ship a separate file)
+
+## cachetools 6.2.6
+Declared license: not declared in METADATA
+Original notice file: third_party/cachetools-6.2.6/licenses\LICENSE
+
+## certifi 2026.7.22
+Declared license: MPL-2.0
+Original notice file: third_party/certifi-2026.7.22/licenses\LICENSE
+
+## chardet 7.6.0
+Declared license: not declared in METADATA
+Original notice file: third_party/chardet-7.6.0/licenses\LICENSE
+
+## charset-normalizer 3.5.0
+Declared license: MIT
+Original notice file: third_party/charset-normalizer-3.5.0/licenses\LICENSE
+
+## click 8.4.2
+Declared license: not declared in METADATA
+Original notice file: third_party/click-8.4.2/licenses\LICENSE.txt
+
+## colorama 0.4.6
+Declared license: not declared in METADATA
+Original notice file: third_party/colorama-0.4.6/licenses\LICENSE.txt
+
+## colorlog 6.12.0
+Declared license: MIT License
+Original notice file: third_party/colorlog-6.12.0/licenses\LICENSE
+
+## crc32c 2.8
+Declared license: LGPL-2.1-or-later
+Original notice file: third_party/crc32c-2.8/licenses\AUTHORS.google-crc32c
+Original notice file: third_party/crc32c-2.8/licenses\LICENSE
+Original notice file: third_party/crc32c-2.8/licenses\LICENSE.google-crc32c
+Original notice file: third_party/crc32c-2.8/licenses\LICENSE.slice-by-8
+
+## filelock 3.32.3
+Declared license: not declared in METADATA
+Original notice file: third_party/filelock-3.32.3/licenses\LICENSE
+
+## frozenlist 1.8.0
+Declared license: Apache-2.0
+Original notice file: third_party/frozenlist-1.8.0/licenses\LICENSE
+
+## fsspec 2026.7.0
+Declared license: not declared in METADATA
+Original notice file: third_party/fsspec-2026.7.0/licenses\LICENSE
+
+## future 1.0.0
+Declared license: MIT
+Original notice file: third_party/future-1.0.0/LICENSE.txt
+
+## google-api-core 2.34.0
+Declared license: Apache 2.0
+Original notice file: third_party/google-api-core-2.34.0/licenses\LICENSE
+
+## google-api-python-client 2.187.0
+Declared license: Apache 2.0
+Original notice file: third_party/google-api-python-client-2.187.0/licenses\LICENSE
+
+## google-auth 2.41.1
+Declared license: Apache 2.0
+Original notice file: third_party/google-auth-2.41.1/licenses\LICENSE
+
+## google-auth-httplib2 0.4.1
+Declared license: Apache 2.0
+Original notice file: third_party/google-auth-httplib2-0.4.1/licenses\LICENSE
+
+## google-auth-oauthlib 1.2.3
+Declared license: Apache 2.0
+Original notice file: third_party/google-auth-oauthlib-1.2.3/licenses\LICENSE
+
+## googleapis-common-protos 1.75.1
+Declared license: Apache 2.0
+Original notice file: third_party/googleapis-common-protos-1.75.1/licenses\LICENSE
+
+## h11 0.16.0
+Declared license: MIT
+Original notice file: third_party/h11-0.16.0/licenses\LICENSE.txt
+
+## hf-xet 1.6.0
+Declared license: not declared in METADATA
+Original notice file: third_party/hf-xet-1.6.0/licenses\LICENSE
+
+## httpcore 1.0.9
+Declared license: not declared in METADATA
+Original notice file: third_party/httpcore-1.0.9/licenses\LICENSE.md
+
+## httplib2 0.32.0
+Declared license: MIT
+Original notice file: third_party/httplib2-0.32.0/licenses\LICENSE
+
+## httpx 0.28.1
+Declared license: BSD-3-Clause
+Original notice file: third_party/httpx-0.28.1/licenses\LICENSE.md
+
+## huggingface_hub 1.27.0
+Declared license: Apache-2.0
+Original notice file: third_party/huggingface_hub-1.27.0/licenses\LICENSE
+
+## idna 3.18
+Declared license: not declared in METADATA
+Original notice file: third_party/idna-3.18/licenses\LICENSE.md
+
+## imagesize 2.0.0
+Declared license: MIT
+Original notice file: third_party/imagesize-2.0.0/licenses\LICENSE.rst
+
+## modelscope 1.39.1
+Declared license: not declared in METADATA
+Original notice file: third_party/modelscope-1.39.1/licenses\LICENSE
+
+## modelscope-hub 0.2.0
+Declared license: Apache-2.0
+Original notice file: third_party/modelscope-hub-0.2.0/licenses\LICENSE
+
+## multidict 6.7.1
+Declared license: Apache License 2.0
+Original notice file: third_party/multidict-6.7.1/licenses\LICENSE
+
+## networkx 3.6.1
+Declared license: not declared in METADATA
+Original notice file: third_party/networkx-3.6.1/licenses\LICENSE.txt
+
+## numpy 2.3.5
+Declared license: Copyright (c) 2005-2025, NumPy Developers.
+Original notice file: third_party/numpy-2.3.5/LICENSE.txt
+
+## oauthlib 3.3.1
+Declared license: BSD-3-Clause
+Original notice file: third_party/oauthlib-3.3.1/licenses\LICENSE
+
+## opencv-contrib-python 4.10.0.84
+Declared license: Apache 2.0
+Original notice file: third_party/opencv-contrib-python-4.10.0.84/LICENSE-3RD-PARTY.txt
+Original notice file: third_party/opencv-contrib-python-4.10.0.84/LICENSE.txt
+
+## opt-einsum 3.3.0
+Declared license: MIT
+Original notice file: third_party/opt-einsum-3.3.0/LICENSE
+
+## packaging 26.3
+Declared license: not declared in METADATA
+Original notice file: third_party/packaging-26.3/licenses\LICENSE
+Original notice file: third_party/packaging-26.3/licenses\LICENSE.APACHE
+Original notice file: third_party/packaging-26.3/licenses\LICENSE.BSD
+
+## paddleocr 3.7.0
+Declared license: Apache License 2.0
+Original notice file: third_party/paddleocr-3.7.0/LICENSE
+
+## paddlepaddle 3.2.2
+Declared license: Apache Software License
+Original notice file: third_party/paddlepaddle-3.2.2/LICENSE
+
+## paddlex 3.7.2
+Declared license: Apache-2.0
+Original notice file: third_party/paddlex-3.7.2/licenses\LICENSE
+
+## pandas 3.0.5
+Declared license: BSD 3-Clause License
+Original notice file: third_party/pandas-3.0.5/LICENSE
+
+## pillow 12.3.0
+Declared license: not declared in METADATA
+Original notice file: third_party/pillow-12.3.0/licenses\LICENSE
+
+## prettytable 3.18.0
+Declared license: not declared in METADATA
+Original notice file: third_party/prettytable-3.18.0/licenses\LICENSE
+
+## propcache 0.5.2
+Declared license: Apache-2.0
+Original notice file: third_party/propcache-0.5.2/licenses\LICENSE
+Original notice file: third_party/propcache-0.5.2/licenses\NOTICE
+
+## proto-plus 1.28.3
+Declared license: Apache 2.0
+Original notice file: third_party/proto-plus-1.28.3/licenses\LICENSE
+
+## protobuf 7.35.1
+Declared license: 3-Clause BSD License
+Original notice file: third_party/protobuf-7.35.1/LICENSE
+
+## psutil 7.2.2
+Declared license: BSD-3-Clause
+Original notice file: third_party/psutil-7.2.2/LICENSE
+
+## py-cpuinfo 9.0.0
+Declared license: MIT
+Original notice file: third_party/py-cpuinfo-9.0.0/LICENSE
+
+## pyasn1 0.6.4
+Declared license: BSD-2-Clause
+Original notice file: third_party/pyasn1-0.6.4/licenses\LICENSE.rst
+
+## pyasn1_modules 0.4.2
+Declared license: BSD
+Original notice file: third_party/pyasn1_modules-0.4.2/licenses\LICENSE.txt
+
+## pyclipper 1.4.0
+Declared license: MIT
+Original notice file: third_party/pyclipper-1.4.0/licenses\LICENSE
+
+## pycryptodome 3.23.0
+Declared license: BSD, Public Domain
+Original notice file: third_party/pycryptodome-3.23.0/AUTHORS.rst
+Original notice file: third_party/pycryptodome-3.23.0/LICENSE.rst
+
+## pydantic 2.13.4
+Declared license: not declared in METADATA
+Original notice file: third_party/pydantic-2.13.4/licenses\LICENSE
+
+## pydantic_core 2.46.4
+Declared license: not declared in METADATA
+Original notice file: third_party/pydantic_core-2.46.4/licenses\LICENSE
+
+## pyparsing 3.3.2
+Declared license: not declared in METADATA
+Original notice file: third_party/pyparsing-3.3.2/licenses\LICENSE
+
+## pypdfium2 5.13.0
+Declared license: BSD-3-Clause, Apache-2.0, dependency licenses
+Original notice file: third_party/pypdfium2-5.13.0/licenses\LICENSES\Apache-2.0.txt
+Original notice file: third_party/pypdfium2-5.13.0/licenses\LICENSES\BSD-3-Clause.txt
+Original notice file: third_party/pypdfium2-5.13.0/licenses\LICENSES\CC-BY-4.0.txt
+
+## PySide6 6.11.1
+Declared license: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+Original notice file: third_party/PySide6-6.11.1/licenses\LicenseRef-Qt-Commercial.txt
+
+## PySide6_Addons 6.11.1
+Declared license: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+Original notice file: third_party/PySide6_Addons-6.11.1/licenses\LicenseRef-Qt-Commercial.txt
+
+## PySide6_Essentials 6.11.1
+Declared license: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+Original notice file: third_party/PySide6_Essentials-6.11.1/licenses\LicenseRef-Qt-Commercial.txt
+
+## python-bidi 0.6.11
+Declared license: not declared in METADATA
+Original notice file: third_party/python-bidi-0.6.11/licenses\AUTHORS.rst
+Original notice file: third_party/python-bidi-0.6.11/licenses\COPYING
+Original notice file: third_party/python-bidi-0.6.11/licenses\COPYING.LESSER
+Original notice file: third_party/python-bidi-0.6.11/licenses\LICENSE-THIRD-PARTY.yml
+
+## python-dateutil 2.9.0.post0
+Declared license: Dual License
+Original notice file: third_party/python-dateutil-2.9.0.post0/LICENSE
+
+## PyYAML 6.0.2
+Declared license: MIT
+Original notice file: third_party/PyYAML-6.0.2/LICENSE
+
+## requests 2.34.2
+Declared license: Apache-2.0
+Original notice file: third_party/requests-2.34.2/licenses\LICENSE
+Original notice file: third_party/requests-2.34.2/licenses\NOTICE
+
+## requests-oauthlib 2.0.0
+Declared license: ISC
+Original notice file: third_party/requests-oauthlib-2.0.0/LICENSE
+
+## ruamel.yaml 0.19.1
+Declared license: MIT
+Original notice file: third_party/ruamel.yaml-0.19.1/licenses\LICENSE
+
+## safetensors 0.8.0
+Declared license: not declared in METADATA
+Original notice file: third_party/safetensors-0.8.0/licenses\LICENSE
+
+## setuptools 84.0.0
+Declared license: not declared in METADATA
+Original notice file: third_party/setuptools-84.0.0/licenses\LICENSE
+
+## shapely 2.1.2
+Declared license: BSD 3-Clause
+Original notice file: third_party/shapely-2.1.2/licenses\LICENSE_GEOS
+Original notice file: third_party/shapely-2.1.2/licenses\LICENSE_win32
+Original notice file: third_party/shapely-2.1.2/licenses\LICENSE.txt
+
+## shiboken6 6.11.1
+Declared license: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+Original notice file: third_party/shiboken6-6.11.1/licenses\LicenseRef-Qt-Commercial.txt
+
+## six 1.17.0
+Declared license: MIT
+Original notice file: third_party/six-1.17.0/LICENSE
+
+## tqdm 4.70.0
+Declared license: MPL-2.0 AND MIT
+Original notice file: third_party/tqdm-4.70.0/licenses\LICENCE
+
+## typing_extensions 4.16.0
+Declared license: not declared in METADATA
+Original notice file: third_party/typing_extensions-4.16.0/licenses\LICENSE
+
+## typing-inspection 0.4.4
+Declared license: not declared in METADATA
+Original notice file: third_party/typing-inspection-0.4.4/licenses\LICENSE
+
+## tzdata 2026.3
+Declared license: Apache-2.0
+Original notice file: third_party/tzdata-2026.3/licenses\LICENSE
+Original notice file: third_party/tzdata-2026.3/licenses\licenses\LICENSE_APACHE
+
+## ujson 5.13.0
+Declared license: not declared in METADATA
+Original notice file: third_party/ujson-5.13.0/licenses\LICENSE.txt
+
+## uritemplate 4.2.0
+Declared license: BSD 3-Clause OR Apache-2.0
+Original notice file: third_party/uritemplate-4.2.0/licenses\LICENSE
+
+## urllib3 2.7.0
+Declared license: not declared in METADATA
+Original notice file: third_party/urllib3-2.7.0/licenses\LICENSE.txt
+
+## wcwidth 0.8.2
+Declared license: not declared in METADATA
+Original notice file: third_party/wcwidth-0.8.2/licenses\LICENSE
+
+## websockets 16.1.1
+Declared license: not declared in METADATA
+Original notice file: third_party/websockets-16.1.1/licenses\LICENSE
+
+## yarl 1.24.5
+Declared license: Apache-2.0
+Original notice file: third_party/yarl-1.24.5/licenses\LICENSE
+Original notice file: third_party/yarl-1.24.5/licenses\NOTICE
+
+## Qt for Python / PySide6 추가 고지
+PySide6, PySide6_Addons, PySide6_Essentials, shiboken6은 LGPL-3.0-only 또는 GPL/상용 라이선스 선택지로 배포된다.
+LGPL-3.0 전문: GNU_LGPL-3.0.txt
+
+## 현재 환경에서 찾지 못한 잠금 패키지
+없음
+
+## 원문 파일이 제공되지 않은 설치 패키지
+없음

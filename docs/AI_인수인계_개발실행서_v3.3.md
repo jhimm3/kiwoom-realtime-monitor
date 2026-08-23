@@ -341,7 +341,7 @@ NXT 여부를 아직 모르거나 조회 실패한 종목은 안전하게 NXT �
   --output release
 ```
 
-릴리즈 전에는 설치 파일과 ZIP 안에 `api.env`, `google_drive_client.json`, `google_drive_token.dat`, SQLite DB, 로그가 없는지 확인한다. `THIRD_PARTY_LICENSES.txt`는 설치본 루트에 포함되는지 확인한다. `release/`, `dist/`, `build/`는 Git에 올리지 않고 GitHub Release 자산으로만 올린다.
+릴리즈 전에는 설치 파일과 ZIP 안에 `api.env`, `google_drive_client.json`, `google_drive_token.dat`, SQLite DB, 로그가 없는지 확인한다. `THIRD_PARTY_LICENSES.txt`와 `licenses/` 원문 고지 폴더가 설치본에 포함되는지 확인한다. 의존성을 바꾼 뒤에는 `scripts/generate_third_party_notices.ps1`를 실행해 고지 묶음을 다시 생성한다. `release/`, `dist/`, `build/`는 Git에 올리지 않고 GitHub Release 자산으로만 올린다.
 
 ### 12.3 아이콘과 서명
 

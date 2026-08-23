@@ -5,7 +5,9 @@ Copyright 2026 크니. All rights reserved.
 ===================
 
 이 프로그램은 아래 오픈소스 소프트웨어를 사용합니다. 각 구성요소의 저작권 및
-라이선스 고지는 해당 라이선스의 조건에 따라 유지됩니다.
+라이선스 고지는 해당 라이선스의 조건에 따라 유지됩니다. 설치본의
+`licenses/THIRD_PARTY_NOTICE_INDEX.txt` 및 `licenses/third_party/`에는 현재 설치 환경에서
+수집한 원본 LICENSE / NOTICE 파일을 함께 제공합니다.
 
 PySide6 / Qt for Python 6.11.1
 ------------------------------
@@ -68,6 +70,7 @@ OCR 모델
 Model cards: https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det
              https://huggingface.co/PaddlePaddle/korean_PP-OCRv5_mobile_rec
 License: https://www.apache.org/licenses/LICENSE-2.0
+설치본에는 각 모델의 원본 안내문도 `licenses/models/`에 함께 제공합니다.
 
 그 밖의 포함 의존성
 --------------------
