@@ -341,12 +341,13 @@ NXT 여부를 아직 모르거나 조회 실패한 종목은 안전하게 NXT �
   --output release
 ```
 
-릴리즈 전에는 설치 파일과 ZIP 안에 `api.env`, `google_drive_client.json`, `google_drive_token.dat`, SQLite DB, 로그가 없는지 확인한다. `release/`, `dist/`, `build/`는 Git에 올리지 않고 GitHub Release 자산으로만 올린다.
+릴리즈 전에는 설치 파일과 ZIP 안에 `api.env`, `google_drive_client.json`, `google_drive_token.dat`, SQLite DB, 로그가 없는지 확인한다. `THIRD_PARTY_LICENSES.txt`는 설치본 루트에 포함되는지 확인한다. `release/`, `dist/`, `build/`는 Git에 올리지 않고 GitHub Release 자산으로만 올린다.
 
 ### 12.3 아이콘과 서명
 
 - 설치·바로가기·창 아이콘은 `resources/app_icon.ico`와 PyInstaller 실행 파일 내부 아이콘을 사용한다.
 - 현재 설치 파일은 코드 서명이 없으므로 Windows SmartScreen에서 `알 수 없는 게시자` 경고가 뜰 수 있다. 무료로 완전히 없애는 방법은 없으며, 배포 규모가 커질 때 코드 서명 인증서를 검토한다.
+- Inno Setup은 설치 파일 제작 도구이며, 현재 앱의 저작권은 `Copyright 2026 크니. All rights reserved.`로 유지한다. Inno Setup 원 저작자를 이 프로그램의 저작자로 표시하지 않는다. 제3자 고지 파일을 설치본에 포함한다.
 
 ### 12.4 GitHub Pages
 
