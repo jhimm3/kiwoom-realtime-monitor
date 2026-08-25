@@ -4114,9 +4114,22 @@ class MainWindow(QMainWindow):
                 # 장외에는 불필요한 보완 조회를 쉬지만, 사용자가 역사적 기준을
                 # 직접 선택한 경우에는 필요한 연봉 조회를 바로 시작한다.
                 self._start_historical_high_loading(tuple(self._row_by_code))
-            for code in self._row_by_code:
-                self._render_new_high_price(code)
-                self._render_high_distance(code)
+            # 신고가 기준이 바뀌면 근접 단계에 따른 행 전체 배경도 달라진다.
+            # 종목마다 중간 상태를 화면에 내보내면 거래대금 강조 배경이 잠깐
+            # 지워졌다가 돌아와 깜빡여 보이므로, 화면 출력만 보류한 채 최종
+            # 상태까지 만든 뒤 한 번에 표시한다. 실시간 수신·계산은 계속된다.
+            self._table.setUpdatesEnabled(False)
+            try:
+                for code in self._row_by_code:
+                    self._render_new_high_price(code)
+                    self._render_high_distance(code)
+                # 행 전체 배경 갱신이 덮은 거래대금 고유 강조를 마지막에
+                # 복원한다. 강도 글자색·굵기·아이콘도 같은 최종 상태로 맞춘다.
+                for code in self._row_by_code:
+                    self._render_trade_values(code)
+            finally:
+                self._table.setUpdatesEnabled(True)
+                self._table.viewport().update()
             self.statusBar().showMessage(f"신고가 기준: {self._table.horizontalHeaderItem(13).text()}")
             return
         self._toggle_trade_display_mode(logical_index)

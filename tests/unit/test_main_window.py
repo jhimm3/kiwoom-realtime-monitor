@@ -70,6 +70,21 @@ class MainWindowTest(unittest.TestCase):
             self.assertEqual("250", database.settings.get("high_distance_period"))
             window.close()
 
+    def test_high_header_reenables_table_updates_after_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings, FakeRankingLoader())
+            window._refresh_rankings()
+            window._ranking_worker.wait()
+            QApplication.processEvents()
+
+            window._toggle_table_header_mode(13)
+
+            self.assertTrue(window._table.updatesEnabled())
+            self.assertEqual("historical", database.settings.get("high_distance_period"))
+            window.close()
+
     def test_high_cycle_periods_keep_fixed_order_and_recover_empty_value(self) -> None:
         self.assertEqual(("20", "historical"), selected_high_cycle_periods("historical,20"))
         self.assertEqual(("5", "20", "250", "historical"), selected_high_cycle_periods(""))
