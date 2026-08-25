@@ -262,6 +262,10 @@ class ThemeRepository:
                 connection.execute("DELETE FROM profile_stock_themes WHERE profile_id=? AND theme_name=?", (profile_id, before))
                 connection.execute("DELETE FROM profile_themes WHERE profile_id=? AND theme_name=?", (profile_id, before))
             else:
+                # profile_stock_themes가 profile_themes의 복합 키를 참조한다.
+                # 부모/자식 이름을 한 문장으로 동시에 바꿀 수 없으므로 커밋
+                # 시점까지 FK 검사를 미뤄 두 UPDATE를 하나의 거래로 처리한다.
+                connection.execute("PRAGMA defer_foreign_keys = ON")
                 connection.execute("UPDATE profile_themes SET theme_name=? WHERE profile_id=? AND theme_name=?", (after, profile_id, before))
                 connection.execute("UPDATE profile_stock_themes SET theme_name=? WHERE profile_id=? AND theme_name=?", (after, profile_id, before))
             connection.commit()

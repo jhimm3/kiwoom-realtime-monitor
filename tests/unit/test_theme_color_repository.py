@@ -52,6 +52,19 @@ class ThemeColorRepositoryTests(unittest.TestCase):
             self.assertEqual(("집",), repository.list_profiles())
             self.assertEqual(("반도체",), repository.themes_for_stock("005930"))
 
+    def test_renames_theme_without_breaking_stock_foreign_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            StockRepository(path).upsert("005930", "삼성전자")
+            repository = ThemeRepository(path)
+            repository.replace_for_stock("005930", ("동신장비",))
+
+            repository.rename_theme("동신장비", "통신장비")
+
+            self.assertEqual(("통신장비",), repository.themes_for_stock("005930"))
+            self.assertIn(("통신장비", repository.color_for_theme("통신장비")), repository.list_themes())
+
     def test_does_not_recreate_deleted_default_profile_on_next_start(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
