@@ -1,0 +1,113 @@
+키움 실시간 종목 모니터
+Copyright 2026 크니. All rights reserved.
+
+제3자 소프트웨어 고지
+===================
+
+이 프로그램은 아래 오픈소스 소프트웨어를 사용합니다. 각 구성요소의 저작권 및
+라이선스 고지는 해당 라이선스의 조건에 따라 유지됩니다. 설치본의
+`licenses/THIRD_PARTY_NOTICE_INDEX.txt` 및 `licenses/third_party/`에는 현재 설치 환경에서
+수집한 원본 LICENSE / NOTICE 파일을 함께 제공합니다.
+
+PySide6 / Qt for Python 6.11.1
+------------------------------
+Copyright (C) The Qt Company Ltd. and other contributors.
+License: GNU Lesser General Public License v3.0 (LGPL-3.0) 또는 GNU General
+Public License v3.0 (GPL-3.0), 또는 Qt Commercial License.
+Project: https://doc.qt.io/qtforpython/
+License: https://www.gnu.org/licenses/lgpl-3.0.html
+
+이 프로그램은 PySide6의 LGPL 사용 조건을 준수하는 방식으로 사용합니다. PySide6를
+포함하여 배포하는 경우에는 해당 라이선스 원문 및 필요한 제3자 고지를 함께 제공해야
+합니다.
+
+PaddleOCR 3.7.0 / PaddlePaddle 3.2.2 / PaddleX 3.7.2
+-----------------------------------------------------
+Copyright (c) PaddlePaddle Authors.
+License: Apache License 2.0.
+Projects: https://github.com/PaddlePaddle/PaddleOCR
+          https://github.com/PaddlePaddle/Paddle
+          https://github.com/PaddlePaddle/PaddleX
+License: https://www.apache.org/licenses/LICENSE-2.0
+
+Pillow 12.3.0
+--------------
+Copyright (c) Pillow Contributors.
+License: MIT-CMU / HPND 계열.
+Project: https://github.com/python-pillow/Pillow
+License: https://github.com/python-pillow/Pillow/blob/main/LICENSE
+
+websockets 16.1.1
+-----------------
+Copyright (c) websockets contributors.
+License: BSD License.
+Project: https://github.com/python-websockets/websockets
+License: https://github.com/python-websockets/websockets/blob/main/LICENSE
+
+Google Drive 클라이언트 라이브러리
+-----------------------------------
+google-api-python-client 2.187.0, google-auth 2.41.1,
+google-auth-oauthlib 1.2.3, google-auth-httplib2 0.4.1,
+google-api-core 2.34.0, googleapis-common-protos 1.75.1
+
+License: Apache License 2.0.
+Projects: https://github.com/googleapis/google-api-python-client-python
+          https://github.com/googleapis/google-auth-library-python-oauthlib
+License: https://www.apache.org/licenses/LICENSE-2.0
+
+이 앱은 Google Drive 동기화에 `https://www.googleapis.com/auth/drive.file` 범위만
+요청한다. 앱이 만든 설정·테마 백업 파일에만 접근하며, 전체 Drive 파일 접근 권한은
+요청하지 않는다. Google Drive API 이용에는 별도의 Google API 및 Drive API 약관이
+적용된다.
+
+OCR 모델
+--------
+현재 Windows 설치본에는 아래 Apache License 2.0 모델이 포함된다.
+
+- PP-OCRv5_mobile_det (텍스트 검출)
+- korean_PP-OCRv5_mobile_rec (한국어 텍스트 인식)
+
+Model cards: https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det
+             https://huggingface.co/PaddlePaddle/korean_PP-OCRv5_mobile_rec
+License: https://www.apache.org/licenses/LICENSE-2.0
+설치본에는 각 모델의 원본 안내문도 `licenses/models/`에 함께 제공합니다.
+
+그 밖의 포함 의존성
+--------------------
+OCR·이미지 처리·네트워크 기능을 위해 NumPy, OpenCV, pandas, requests, aiohttp,
+Hugging Face Hub, ModelScope, PyCryptodome 등 의존성이 함께 포함될 수 있다.
+정확한 버전 목록은 `requirements.lock.txt`를 기준으로 하며, 해당 패키지의 LICENSE /
+NOTICE 파일은 각 패키지의 라이선스 조건에 따라 유지된다.
+
+PyInstaller
+-----------
+이 프로그램의 Windows 실행 파일은 PyInstaller 6.22.2로 제작했다. PyInstaller는
+GPL-2.0 + 예외 조항을 사용하며, 예외 조항에 따라 이 프로그램 자체는 GPL이 아니다.
+PyInstaller를 수정해 배포하지 않는 한 별도 고지나 소스 공개 의무는 없다.
+Project: https://pyinstaller.org/
+
+Inno Setup
+----------
+이 프로그램의 Windows 설치 파일은 Inno Setup 6.7.3으로 제작했다.
+Copyright (C) 1997-2026 Jordan Russell. Portions Copyright (C) 2000-2026
+Martijn Laan. Inno Setup은 상업적 애플리케이션을 포함한 목적에 사용할 수 있으며,
+원 저작자를 이 프로그램의 저작자로 표시하지 않는다.
+Project: https://jrsoftware.org/isinfo.php
+
+기본 신고가 알림 음성
+----------------------
+data/near_high_sounds의 interest.mp3, caution.mp3, fire.mp3는 TTSMaker
+(https://ttsmaker.com/ko)로 생성한 음성입니다. TTSMaker는 생성 음성에 대해 비독점적,
+취소 불가, 전 세계적·영구적인 상업 이용 권한을 안내합니다. 이는 음성 자체의 저작권
+소유권 이전을 뜻하지 않으며, 사용자는 제3자 권리를 침해하지 않도록 책임을 집니다.
+확인일: 2026-08-23.
+
+이 고지는 TTSMaker의 일반 제공 음성으로 생성한 현재 기본 파일에만 적용됩니다. 사용자가
+다른 음성 또는 타인의 목소리와 유사한 음성을 추가할 때에는 별도로 권리와 사용 조건을
+확인해야 합니다.
+
+사용자 추가 파일
+----------------
+사용자가 선택한 아이콘·알림 소리·테마 입력 이미지·Excel 파일의 저작권 및 상업 이용
+권한은 해당 파일을 제공한 사용자에게 있습니다. 본 프로그램은 이를 자동으로 검증하지
+않습니다.

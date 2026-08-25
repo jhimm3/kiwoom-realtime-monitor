@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="키움 실시간 종목순위·테마·거래강도 모니터 소개">
+  <title>키움 실시간 모니터</title>
+  <style>
+    :root { color-scheme: light; --ink:#172033; --muted:#5c667a; --line:#dde3ed; --brand:#1769aa; --soft:#f4f8fc; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:16px/1.7 system-ui, -apple-system, "Malgun Gothic", sans-serif; color:var(--ink); background:#fff; }
+    main { max-width:820px; margin:0 auto; padding:72px 24px; }
+    h1 { font-size:clamp(2rem, 6vw, 3.4rem); line-height:1.18; margin:0 0 18px; }
+    h2 { margin-top:48px; font-size:1.35rem; }
+    p { color:var(--muted); }
+    .lead { max-width:650px; font-size:1.15rem; }
+    .card { border:1px solid var(--line); border-radius:14px; background:var(--soft); padding:22px 24px; margin-top:28px; }
+    ul { padding-left:22px; }
+    a { color:var(--brand); font-weight:650; text-underline-offset:3px; }
+    footer { margin-top:64px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:.9rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>키움 실시간 모니터</h1>
+    <p class="lead">키움 REST API와 실시간 체결 데이터를 활용해 상위 종목의 순위, 테마, 거래대금과 거래강도를 한 화면에서 확인하는 데스크톱 프로그램입니다.</p>
+
+    <div class="card">
+      <strong>Google Drive 동기화</strong>
+      <p>사용자가 선택한 경우에만 설정과 테마 데이터를 사용자의 Google Drive에 백업·복원합니다. Google Drive 연결은 사용자의 Google 계정 로그인과 명시적 동의 후에만 이루어집니다.</p>
+      <a href="privacy.html">개인정보처리방침 보기</a> · <a href="en/index.html" lang="en">English</a>
+    </div>
+
+    <h2>주요 기능</h2>
+    <ul>
+      <li>키움 실시간 상위 20종목 순위 조회와 체결 기반 표시</li>
+      <li>테마·종목 관리, 텍스트·엑셀·이미지 OCR 기반 테마 업데이트</li>
+      <li>분·시간·일 거래대금 및 거래강도, 최고가 근접 알림</li>
+      <li>Google Drive를 이용한 선택적 설정·테마 백업과 복원</li>
+    </ul>
+
+    <h2>데이터 처리 원칙</h2>
+    <p>API 키와 Google 로그인 토큰은 사용자 컴퓨터에 암호화하여 저장합니다. Google Drive 동기화를 켠 경우에도 API 키, 로그인 토큰, 로그 파일은 Drive에 업로드하지 않습니다. 앱은 사용자의 동의 없이 외부 서버로 데이터를 전송하거나 제3자에게 판매·공유하지 않습니다.</p>
+
+    <h2>문의 및 소스 코드</h2>
+    <p><a href="https://github.com/jhimm3/kiwoom-realtime-monitor">GitHub 저장소</a>의 Issues를 통해 문의할 수 있습니다.</p>
+
+    <footer>© 2026 크니. All rights reserved.</footer>
+  </main>
+</body>
+</html>

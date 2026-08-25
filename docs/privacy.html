@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="키움 실시간 모니터 개인정보처리방침">
+  <title>개인정보처리방침 | 키움 실시간 모니터</title>
+  <style>
+    :root { --ink:#172033; --muted:#5c667a; --line:#dde3ed; --brand:#1769aa; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:16px/1.75 system-ui, -apple-system, "Malgun Gothic", sans-serif; color:var(--ink); background:#fff; }
+    main { max-width:820px; margin:0 auto; padding:56px 24px 80px; }
+    h1 { font-size:2rem; margin:0 0 8px; }
+    h2 { margin:40px 0 10px; font-size:1.25rem; }
+    p, li { color:var(--muted); }
+    a { color:var(--brand); font-weight:650; text-underline-offset:3px; }
+    .date { margin-top:0; font-size:.95rem; }
+    footer { margin-top:56px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:.9rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <a href="index.html">← 키움 실시간 모니터</a> · <a href="en/privacy.html" lang="en">English</a>
+    <h1>개인정보처리방침</h1>
+    <p class="date">시행일: 2026년 8월 22일</p>
+
+    <h2>1. 개요</h2>
+    <p>키움 실시간 모니터(이하 “앱”)는 사용자가 직접 입력하거나 선택한 데이터만 사용하여 종목 모니터링과 선택적 Google Drive 동기화 기능을 제공합니다. 앱은 별도의 운영 서버로 사용자 데이터를 수집하지 않습니다.</p>
+
+    <h2>2. 처리하는 데이터</h2>
+    <ul>
+      <li>사용자가 입력한 키움 API 설정은 사용자 컴퓨터에 암호화하여 저장됩니다.</li>
+      <li>사용자가 등록하거나 업데이트한 종목·테마와 앱 설정은 사용자 컴퓨터의 로컬 데이터베이스에 저장됩니다.</li>
+      <li>Google Drive 동기화를 사용자가 직접 연결하고 켠 경우에만 설정 및 테마 백업 파일을 사용자의 Google Drive에 저장하거나 읽습니다.</li>
+      <li>Google OAuth 접근·갱신 토큰은 사용자 컴퓨터에 암호화하여 저장됩니다.</li>
+    </ul>
+
+    <h2>3. Google Drive 접근 범위와 이용 목적</h2>
+    <p>앱은 <code>https://www.googleapis.com/auth/drive.file</code> 범위만 요청합니다. 이 권한은 앱이 생성하거나 사용자가 앱과 공유한 파일에 한정됩니다. 앱은 Google Drive에서 <strong>키움 실시간 모니터</strong> 폴더와 그 안의 설정·테마 백업 파일을 생성·조회·수정하는 목적으로만 이 권한을 사용합니다.</p>
+    <p>앱은 전체 Google Drive 파일을 탐색하거나, 사용자가 만들지 않은 일반 파일을 읽거나 수정하지 않습니다.</p>
+
+    <h2>4. Drive에 업로드하지 않는 데이터</h2>
+    <p>키움 API 키, Google OAuth 토큰, 프로그램 로그, 개별 컴퓨터의 창 크기와 열 너비는 Google Drive 동기화 대상에 포함하지 않습니다.</p>
+
+    <h2>5. 제3자 제공 및 외부 전송</h2>
+    <p>앱 개발자는 사용자의 데이터를 수집·판매·공유하지 않습니다. Google Drive 동기화를 사용한 경우, 사용자가 선택한 설정과 테마 데이터만 사용자의 Google 계정에 연결된 Google Drive로 전송됩니다. 키움 API 통신은 사용자가 입력한 키움 API 자격 증명을 사용하여 키움 API 서버와 직접 이루어집니다.</p>
+
+    <h2>6. 사용자 선택과 삭제</h2>
+    <p>Google Drive 동기화는 선택 기능이며 언제든 앱에서 연결을 해제하거나 자동 업로드·다운로드를 끌 수 있습니다. 연결 해제는 이 컴퓨터에 저장된 OAuth 토큰을 제거하며, 이미 Google Drive에 저장된 백업 파일은 사용자가 Google Drive에서 직접 삭제할 수 있습니다.</p>
+
+    <h2>7. 보안</h2>
+    <p>앱은 운영체제의 암호화 기능을 사용하여 로컬의 API 키와 OAuth 토큰을 보호합니다. 다만 사용자는 본인의 컴퓨터·Google 계정 보안과 백업 파일 관리에 유의해야 합니다.</p>
+
+    <h2>8. 문의</h2>
+    <p>개인정보처리방침 또는 데이터 처리에 관한 문의는 <a href="https://github.com/jhimm3/kiwoom-realtime-monitor/issues">GitHub Issues</a>를 이용해 주세요.</p>
+
+    <footer>본 방침은 기능 또는 관련 법령의 변경에 따라 수정될 수 있습니다.</footer>
+  </main>
+</body>
+</html>

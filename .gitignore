@@ -1,5 +1,6 @@
 # 비밀값: 실제 값은 이 파일들과 별도로 관리합니다.
 .env
+data/api.env
 .env.*
 !.env.example
 
@@ -13,6 +14,10 @@ logs/
 # Python 캐시와 검사 결과
 __pycache__/
 *.py[cod]
+node_modules/
+*.inspect.ndjson
+.venv/
+*.egg-info/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -22,10 +27,15 @@ htmlcov/
 # 패키징 산출물
 build/
 dist/
+release/
+pyinstaller-build.log
 *.spec
+resources/UpdateHelper.exe
 
 # 편집기·운영체제 파일
 .idea/
 .vscode/
 Thumbs.db
 .DS_Store
+data/google_drive_client.json
+data/google_drive_token.dat
