@@ -1584,9 +1584,16 @@ class ThemePreviewDialog(QDialog):
 
 
 class ImageThemeRowsDialog(QDialog):
-    def __init__(self, rows: tuple[object, ...], parent: QWidget | None = None, settings: SettingsRepository | None = None) -> None:
+    def __init__(
+        self,
+        rows: tuple[object, ...],
+        parent: QWidget | None = None,
+        settings: SettingsRepository | None = None,
+        settings_prefix: str = "theme_image_import",
+    ) -> None:
         super().__init__(parent)
         self._settings = settings
+        self._settings_prefix = settings_prefix
         self.setWindowTitle("이미지 테마 OCR 수정")
         self.resize(680, 520)
         layout = QVBoxLayout(self)
@@ -1597,9 +1604,9 @@ class ImageThemeRowsDialog(QDialog):
         layout.addWidget(self._validation_message)
         if settings is not None:
             rules = QFormLayout()
-            self._custom_separators = QLineEdit(settings.get("theme_image_import_custom_separators"))
+            self._custom_separators = QLineEdit(settings.get(f"{settings_prefix}_custom_separators"))
             self._custom_separators.setPlaceholderText("기본 , / | ; 외에 추가할 구분 문자")
-            self._import_exclusions = QLineEdit(settings.get("theme_image_import_exclusions"))
+            self._import_exclusions = QLineEdit(settings.get(f"{settings_prefix}_exclusions"))
             self._import_exclusions.setPlaceholderText("예: 개별이슈, 공시")
             rules.addRow("추가 구분자", self._custom_separators)
             rules.addRow("제외 테마", self._import_exclusions)
@@ -1610,8 +1617,10 @@ class ImageThemeRowsDialog(QDialog):
         self.table.installEventFilter(self)
         self.table.viewport().installEventFilter(self)
         for index, row in enumerate(rows):
-            self.table.setItem(index, 0, QTableWidgetItem(str(getattr(row, "name", ""))))
-            self.table.setItem(index, 1, QTableWidgetItem(str(getattr(row, "themes", ""))))
+            name = row[0] if isinstance(row, tuple) and len(row) >= 1 else getattr(row, "name", "")
+            themes = row[1] if isinstance(row, tuple) and len(row) >= 2 else getattr(row, "themes", "")
+            self.table.setItem(index, 0, QTableWidgetItem(str(name)))
+            self.table.setItem(index, 1, QTableWidgetItem(str(themes)))
         layout.addWidget(self.table)
         actions = QHBoxLayout()
         add = QPushButton("행 추가")
@@ -1646,8 +1655,8 @@ class ImageThemeRowsDialog(QDialog):
         if not duplicates:
             self._validation_message.clear()
             if self._settings is not None:
-                self._settings.set("theme_image_import_custom_separators", self._custom_separators.text().strip())
-                self._settings.set("theme_image_import_exclusions", self._import_exclusions.text().strip())
+                self._settings.set(f"{self._settings_prefix}_custom_separators", self._custom_separators.text().strip())
+                self._settings.set(f"{self._settings_prefix}_exclusions", self._import_exclusions.text().strip())
             self.accept()
             return
         for first_row, duplicate_row, _ in duplicates:
@@ -1746,8 +1755,14 @@ class TextThemeImportDialog(QDialog):
         layout.addWidget(QLabel("테마/종목 목록을 그대로 붙여넣으세요. 🔥 뒤 제목을 테마로 적용하고, #소분류 이름은 별도 테마로 추가하지 않습니다."))
         rules = QFormLayout()
         self._heading_marker = QLineEdit(settings.get("theme_text_heading_marker"))
+        self._custom_separators = QLineEdit(settings.get("theme_text_import_custom_separators"))
+        self._custom_separators.setPlaceholderText("기본 , / | ; 외에 추가할 구분 문자")
+        self._import_exclusions = QLineEdit(settings.get("theme_text_import_exclusions"))
+        self._import_exclusions.setPlaceholderText("예: 개별이슈, 공시")
         self._heading_marker.setPlaceholderText("기본: 🔥 · 예: ⭐ 또는 테마:")
         rules.addRow("텍스트 테마 시작 표시", self._heading_marker)
+        rules.addRow("추가 구분자", self._custom_separators)
+        rules.addRow("제외 테마", self._import_exclusions)
         layout.addLayout(rules)
         self._text = QTextEdit()
         self._update_placeholder()
@@ -1757,13 +1772,19 @@ class TextThemeImportDialog(QDialog):
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("미리보기")
         example_button = buttons.addButton("예시 넣기", QDialogButtonBox.ButtonRole.ActionRole)
         example_button.clicked.connect(self._insert_example)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._save_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
     def _save_heading_marker(self, value: str) -> None:
         self._settings.set("theme_text_heading_marker", value.strip() or "🔥")
         self._update_placeholder()
+
+    def _save_and_accept(self) -> None:
+        self._save_heading_marker(self._heading_marker.text())
+        self._settings.set("theme_text_import_custom_separators", self._custom_separators.text().strip())
+        self._settings.set("theme_text_import_exclusions", self._import_exclusions.text().strip())
+        self.accept()
 
     def _update_placeholder(self) -> None:
         marker = self._heading_marker.text().strip() or "🔥"
@@ -2127,13 +2148,18 @@ class ThemeManagerDialog(QDialog):
             self._settings.set("theme_manager_stock_column_width", str(new_width))
         elif logical_index == 1:
             self._settings.set("theme_manager_theme_column_width", str(new_width))
-    def _filter_import_exclusions(self, rows: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
-        excluded = {theme_key(theme) for theme in parse_themes(self._settings.get("theme_import_exclusions"), self._separators)}
+    def _filter_import_exclusions(
+        self,
+        rows: tuple[tuple[str, str], ...],
+        separators: str,
+        setting_key: str,
+    ) -> tuple[tuple[str, str], ...]:
+        excluded = {theme_key(theme) for theme in parse_themes(self._settings.get(setting_key), separators)}
         if not excluded:
             return rows
         filtered: list[tuple[str, str]] = []
         for name, value in rows:
-            themes = tuple(theme for theme in parse_themes(value, self._separators) if theme_key(theme) not in excluded)
+            themes = tuple(theme for theme in parse_themes(value, separators) if theme_key(theme) not in excluded)
             if themes:
                 filtered.append((name, "/".join(themes)))
         return tuple(filtered)
@@ -2149,30 +2175,34 @@ class ThemeManagerDialog(QDialog):
             self._reload()
             self._notify_themes_changed()
     def _add_new(self) -> None:
-        dialog = ImageThemeRowsDialog((), self)
+        dialog = ImageThemeRowsDialog((), self, self._settings, "theme_new_import")
         dialog.setWindowTitle("신규 종목 테마 추가")
         labels = dialog.findChildren(QLabel)
         if labels:
             labels[0].setText("종목명과 테마를 여러 행으로 입력하세요. 행 추가·삭제가 가능하며, 적용 전 기존 테마와 비교합니다.")
         if not dialog.exec():
             return
-        self._apply_import_rows(dialog.rows())
+        separators = ",/|;" + self._settings.get("theme_new_import_custom_separators")
+        self._apply_import_rows(dialog.rows(), separators, "theme_new_import_exclusions")
         return
 
     def _import_text(self) -> None:
         dialog = TextThemeImportDialog(self._settings, self)
         if not dialog.exec():
             return
-        self._separators = ",/|;" + self._settings.get("theme_custom_separators")
+        separators = ",/|;" + self._settings.get("theme_text_import_custom_separators")
         marker = self._settings.get("theme_text_heading_marker")
-        rows = parse_theme_text(dialog.text, self._separators, marker)
+        rows = parse_theme_text(dialog.text, separators, marker)
         if not rows:
             QMessageBox.information(self, "텍스트 확인", f"{marker} 테마 제목 아래에서 종목명을 찾지 못했습니다. 텍스트 내용을 확인하세요.")
             return
-        self._apply_import_rows(rows)
+        self._apply_import_rows(rows, separators, "theme_text_import_exclusions")
 
-    def _apply_import_rows(self, raw_rows: tuple[tuple[str, str], ...]) -> None:
-        valid, errors = validate_theme_rows(self._filter_import_exclusions(raw_rows), self._separators)
+    def _apply_import_rows(self, raw_rows: tuple[tuple[str, str], ...], separators: str, exclusion_setting_key: str) -> None:
+        valid, errors = validate_theme_rows(
+            self._filter_import_exclusions(raw_rows, separators, exclusion_setting_key),
+            separators,
+        )
         if not valid and not errors:
             QMessageBox.information(self, "입력 확인", "추가할 종목과 테마를 한 행 이상 입력하세요.")
             return
@@ -2191,9 +2221,9 @@ class ThemeManagerDialog(QDialog):
             QMessageBox.warning(self, "종목 매칭 실패", f"종목 DB에서 찾을 수 없습니다.\n{names}")
             return
         changes = preview_theme_changes(matched, self._repository)
-        preview = ThemePreviewDialog(changes, skipped, self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_import_exclusions"), self._separators)))
+        preview = ThemePreviewDialog(changes, skipped, self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get(exclusion_setting_key), separators)))
         if preview.exec():
-            changes = preview.changes(self._separators)
+            changes = preview.changes(separators)
             applied = sum(change.status != "변경 없음" for change in changes)
             for change in changes:
                 if change.status != "변경 없음":
@@ -3476,12 +3506,25 @@ class MainWindow(QMainWindow):
             self._settings.set("theme_excel_import_dir", str(Path(path).parent))
             try:
                 source = ExcelThemeRepository(Path(path)); header, raw_rows = source.load_header_and_rows()
-                separators = ",/|;" + self._settings.get("theme_custom_separators")
-                rows, errors = validate_theme_rows(self._filter_import_exclusions(raw_rows, separators), separators)
-                errors = validate_theme_header(header) + errors
+                errors = validate_theme_header(header)
             except Exception as error:
                 self.statusBar().showMessage(f"Excel 읽기 실패: {error}")
                 return
+            if errors:
+                QMessageBox.warning(self, "Excel 검증 오류", "\n".join(errors))
+                return
+            editor = ImageThemeRowsDialog(raw_rows, self, self._settings, "theme_excel_import")
+            editor.setWindowTitle("Excel 테마 수정")
+            labels = editor.findChildren(QLabel)
+            if labels:
+                labels[0].setText("Excel에서 읽은 종목명과 테마를 수정하세요. 구분자와 제외 테마는 Excel 업데이트에만 저장됩니다.")
+            if not editor.exec():
+                return
+            separators = ",/|;" + self._settings.get("theme_excel_import_custom_separators")
+            rows, errors = validate_theme_rows(
+                self._filter_import_exclusions(editor.rows(), separators, "theme_excel_import_exclusions"),
+                separators,
+            )
             self.statusBar().showMessage(f"Excel 검증 완료 · 유효 {len(rows)}건 · 오류 {len(errors)}건")
             if errors:
                 QMessageBox.warning(self, "Excel 검증 오류", "\n".join(errors))
@@ -3493,7 +3536,7 @@ class MainWindow(QMainWindow):
                 matched = matched + resolved
                 changes = preview_theme_changes(matched, self._theme_store) if self._theme_store else ()
                 changed = sum(change.status == "테마 변경" for change in changes); new = sum(change.status == "신규" for change in changes)
-                preview = ThemePreviewDialog(changes, len(unmatched), self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_import_exclusions"), separators)))
+                preview = ThemePreviewDialog(changes, len(unmatched), self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_excel_import_exclusions"), separators)))
                 if preview.exec() and self._theme_store:
                     changes = preview.changes(separators)
                     applied = sum(change.status != "변경 없음" for change in changes)

@@ -17,6 +17,12 @@ class SettingsRepositoryTest(unittest.TestCase):
             self.assertEqual(database.settings.get("theme_custom_separators"), "")
             self.assertEqual(database.settings.get("theme_image_import_custom_separators"), "")
             self.assertEqual(database.settings.get("theme_image_import_exclusions"), "")
+            self.assertEqual(database.settings.get("theme_new_import_custom_separators"), "")
+            self.assertEqual(database.settings.get("theme_new_import_exclusions"), "")
+            self.assertEqual(database.settings.get("theme_text_import_custom_separators"), "")
+            self.assertEqual(database.settings.get("theme_text_import_exclusions"), "")
+            self.assertEqual(database.settings.get("theme_excel_import_custom_separators"), "")
+            self.assertEqual(database.settings.get("theme_excel_import_exclusions"), "")
             self.assertEqual(database.settings.get("window_width"), "1160")
 
             database.settings.set("refresh_interval_seconds", "60")
