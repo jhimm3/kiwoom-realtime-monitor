@@ -108,7 +108,16 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.12"
+HIGH_PERIODS = ("5", "20", "250", "historical")
+
+
+def selected_high_cycle_periods(value: str) -> tuple[str, ...]:
+    """저장된 선택값을 고정된 신고가 순서로 정리한다."""
+    selected = {item.strip() for item in value.split(",")}
+    periods = tuple(period for period in HIGH_PERIODS if period in selected)
+    return periods or HIGH_PERIODS
+
+APP_VERSION = "1.1.13"
 APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 INVESTMENT_NOTICE = "본 앱은 투자 자문이 아니며 시세 지연·오류가 있을 수 있습니다."
@@ -493,7 +502,13 @@ class SettingsDialog(QDialog):
         self._strength_display_mode.addItem("직전 완료 구간", "completed")
         self._strength_display_mode.setCurrentIndex(1 if settings.get("strength_display_mode") == "completed" else 0)
         self._high_distance_period=QComboBox(); self._high_distance_period.addItem("5일 신고가", "5"); self._high_distance_period.addItem("20일 신고가", "20"); self._high_distance_period.addItem("250일 신고가(52주 근사)", "250"); self._high_distance_period.addItem("역사적 신고가(85년 이후)", "historical")
-        saved_period=settings.get("high_distance_period"); self._high_distance_period.setCurrentIndex(("5", "20", "250", "historical").index(saved_period) if saved_period in ("5", "20", "250", "historical") else 2)
+        saved_period=settings.get("high_distance_period"); self._high_distance_period.setCurrentIndex(HIGH_PERIODS.index(saved_period) if saved_period in HIGH_PERIODS else 2)
+        cycle_periods = selected_high_cycle_periods(settings.get("high_header_cycle_periods"))
+        self._high_header_cycle_checks = {}
+        for period, label in zip(HIGH_PERIODS, ("5일", "20일", "250일", "역사적")):
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(period in cycle_periods)
+            self._high_header_cycle_checks[period] = checkbox
 
         self._build_grouped_layout()
         return
@@ -570,6 +585,12 @@ class SettingsDialog(QDialog):
         high_form.addRow(self._near_high_enabled)
         high_form.addRow(QLabel("신고가와 신고가%에 함께 적용됩니다."))
         high_form.addRow("신고가 기준", self._high_distance_period)
+        cycle_row = QHBoxLayout()
+        for checkbox in self._high_header_cycle_checks.values():
+            cycle_row.addWidget(checkbox)
+        cycle_row.addStretch()
+        high_form.addRow("헤더 클릭 순환", cycle_row)
+        high_form.addRow(QLabel("선택한 신고가만 5일 → 20일 → 250일 → 역사적 순서로 전환됩니다."))
         high_form.addRow("신고가 근접 관심 / 주의 / 불(%)", self._strength_row(self._near_high_fields["interest"], self._near_high_fields["caution"], self._near_high_fields["fire"]))
         high_form.addRow("전체 행 빨간 강조 단계", self._near_high_row_alert_level)
         high_form.addRow(self._section_separator())
@@ -821,7 +842,10 @@ class SettingsDialog(QDialog):
             self._update_strength_icon_image_label(level)
 
     def _reset_high_settings(self) -> None:
-        self._high_distance_period.setCurrentIndex(("5", "20", "250").index(DEFAULT_SETTINGS["high_distance_period"]))
+        self._high_distance_period.setCurrentIndex(HIGH_PERIODS.index(DEFAULT_SETTINGS["high_distance_period"]))
+        default_cycle = selected_high_cycle_periods(DEFAULT_SETTINGS["high_header_cycle_periods"])
+        for period, checkbox in self._high_header_cycle_checks.items():
+            checkbox.setChecked(period in default_cycle)
         for level, field in self._near_high_fields.items():
             field.setText(DEFAULT_SETTINGS[f"near_high_{level}_percent"])
         self._near_high_row_alert_level.setCurrentIndex(("interest", "caution", "fire").index(DEFAULT_SETTINGS["near_high_row_alert_level"]))
@@ -1209,6 +1233,10 @@ class SettingsDialog(QDialog):
         if not (0 <= font_size <= 30 and valid_row_height and 0 <= badge_font_size <= 30 and 0 <= badge_padding <= 20 and all(value >= 0 for value in market_cap_highlights.values()) and market_cap_active_thresholds == sorted(market_cap_active_thresholds)):
             QMessageBox.warning(self, "입력 확인", "표 행 높이는 0(자동) 또는 12~100으로 입력하세요.")
             return
+        cycle_periods = tuple(period for period in HIGH_PERIODS if self._high_header_cycle_checks[period].isChecked())
+        if not cycle_periods:
+            QMessageBox.warning(self, "입력 확인", "헤더 클릭 순환 신고가를 하나 이상 선택하세요.")
+            return
         self._settings.set("rank_query_type", str(self._rank_query_type.currentData()))
         self._settings.set("rank_row_odd_color", self._rank_row_colors["odd"])
         self._settings.set("rank_row_even_color", self._rank_row_colors["even"])
@@ -1259,7 +1287,11 @@ class SettingsDialog(QDialog):
         self._settings.set("google_drive_auto_upload_on_exit", "1" if self._google_drive_auto_upload_on_exit.isChecked() else "0")
         self._settings.set("google_drive_sync_target", str(self._google_drive_sync_target.currentData()))
         self._settings.set("auto_update_check", "1" if self._auto_update_check.isChecked() else "0")
-        self._settings.set("high_distance_period", str(self._high_distance_period.currentData()))
+        current_high_period = str(self._high_distance_period.currentData())
+        if current_high_period not in cycle_periods:
+            current_high_period = cycle_periods[0]
+        self._settings.set("high_header_cycle_periods", ",".join(cycle_periods))
+        self._settings.set("high_distance_period", current_high_period)
         self.accept()
 
 
@@ -4070,12 +4102,12 @@ class MainWindow(QMainWindow):
 
     def _toggle_table_header_mode(self, logical_index: int) -> None:
         if logical_index == 13:
-            periods = ("5", "20", "250", "historical")
+            periods = selected_high_cycle_periods(self._settings.get("high_header_cycle_periods"))
             current = self._settings.get("high_distance_period")
             try:
                 next_period = periods[(periods.index(current) + 1) % len(periods)]
             except ValueError:
-                next_period = "250"
+                next_period = periods[0]
             self._settings.set("high_distance_period", next_period)
             self._update_high_display_headers()
             if next_period == "historical":
@@ -4660,7 +4692,7 @@ class MainWindow(QMainWindow):
             return False
         if self._historical_high_worker is not None and self._historical_high_worker.isRunning():
             return True
-        refresh_basis = self._settings.get("historical_high_adjusted_basis_version") != "1"
+        refresh_basis = self._settings.get("historical_high_adjusted_basis_version") != "2"
         today = self._ranking_now().strftime("%Y-%m-%d")
         checked_today = (
             self._stock_lookup.historical_high_checked_today(codes, today)
@@ -4692,7 +4724,8 @@ class MainWindow(QMainWindow):
         self._historical_high_refresh_received.add(code)
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_historical_high_price"):
             self._stock_lookup.update_historical_high_price(
-                code, target.price, target.first_year, target.last_year, self._ranking_now().strftime("%Y-%m-%d")
+                code, target.price, target.first_year, target.last_year, self._ranking_now().strftime("%Y-%m-%d"),
+                occurred_on=target.occurred_on, evidence=target.evidence,
             )
         if self._defer_table_update_while_modal():
             return
@@ -4702,7 +4735,7 @@ class MainWindow(QMainWindow):
     def _on_historical_high_worker_finished(self) -> None:
         if self._historical_high_refresh_expected:
             if self._historical_high_refresh_expected <= self._historical_high_refresh_received:
-                self._settings.set("historical_high_adjusted_basis_version", "1")
+                self._settings.set("historical_high_adjusted_basis_version", "2")
             self._historical_high_refresh_expected.clear()
             self._historical_high_refresh_received.clear()
 

@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
-from kiwoom_monitor.presentation.main_window import MainWindow
+from kiwoom_monitor.presentation.main_window import MainWindow, selected_high_cycle_periods
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
 
 
@@ -55,6 +55,24 @@ class MainWindowTest(unittest.TestCase):
             QApplication.processEvents()
             self.assertEqual("71,000", table.item(0, 5).text())
             window.close()
+
+    def test_high_header_cycles_only_selected_periods(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "monitor.sqlite3")
+            database.initialize()
+            database.settings.set("high_header_cycle_periods", "250,historical")
+            database.settings.set("high_distance_period", "250")
+            window = MainWindow(database.settings, FakeRankingLoader())
+
+            window._toggle_table_header_mode(13)
+            self.assertEqual("historical", database.settings.get("high_distance_period"))
+            window._toggle_table_header_mode(13)
+            self.assertEqual("250", database.settings.get("high_distance_period"))
+            window.close()
+
+    def test_high_cycle_periods_keep_fixed_order_and_recover_empty_value(self) -> None:
+        self.assertEqual(("20", "historical"), selected_high_cycle_periods("historical,20"))
+        self.assertEqual(("5", "20", "250", "historical"), selected_high_cycle_periods(""))
 
 
 if __name__ == "__main__":

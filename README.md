@@ -4,12 +4,13 @@
 
 ## 현재 버전
 
-- **1.1.12**
-- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.12)
+- **1.1.13**
+- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.13)
 - [소개 페이지](docs/index.html) · [개인정보처리방침](docs/privacy.html)
 
 ## 변경 내역
 
+- [1.1.13](docs/RELEASE_NOTES_v1.1.13.md) — 역사적 신고가 수정주가 정밀 보정·증분 조회, 신고가 헤더 선택 순환
 - [1.1.12](docs/RELEASE_NOTES_v1.1.12.md) — 수정주가 기준 5·20·250일·1985년 이후 역사적 신고가
 - [1.1.11](docs/RELEASE_NOTES_v1.1.11.md) — 64비트 Windows 자동 업데이트 도우미 핸들 오류 수정
 - [1.1.10](docs/RELEASE_NOTES_v1.1.10.md) — KRX+NXT 합산 최고가·직전 거래대금·분봉 보완, 최근 730개 분봉 연속조회

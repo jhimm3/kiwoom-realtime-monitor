@@ -99,7 +99,11 @@ def main() -> None:
                 DailyHighService(client, include_nxt=True), codes
             ),
             "historical_high_worker_factory": lambda codes: HistoricalHighWorker(
-                HistoricalHighService(client, include_nxt=True), codes
+                HistoricalHighService(
+                    client, include_nxt=True,
+                    cache_loader=StockRepository(paths.database_path).load_historical_high_cache,
+                    high_250_loader=StockRepository(paths.database_path).load_high_250_price,
+                ), codes
             ),
             "nxt_eligibility_worker_factory": lambda codes: NxtEligibilityWorker(NxtEligibilityService(client), codes),
         }

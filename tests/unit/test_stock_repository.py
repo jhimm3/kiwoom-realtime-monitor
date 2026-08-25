@@ -6,9 +6,35 @@ from pathlib import Path
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+from kiwoom_monitor.application.historical_high_service import HistoricalHighEvidence
 
 
 class StockRepositoryTests(unittest.TestCase):
+    def test_saves_historical_high_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            stocks = StockRepository(database_path)
+            stocks.upsert("003350", "한국화장품제조")
+            stocks.update_historical_high_price(
+                "003350", 17_000, 1978, 2026, "2026-08-25", occurred_on="20260501",
+                evidence=(HistoricalHighEvidence("month", "20260501", 17_000),),
+            )
+            import sqlite3
+            connection = sqlite3.connect(database_path)
+            try:
+                saved = connection.execute("SELECT historical_high_price,historical_high_occurred_on FROM stocks WHERE code='003350'").fetchone()
+                evidence = connection.execute("SELECT period,trade_date,high_price FROM historical_high_evidence WHERE stock_code='003350'").fetchone()
+            finally:
+                connection.close()
+            self.assertEqual((17_000, "20260501"), saved)
+            self.assertEqual(("month", "20260501", 17_000), evidence)
+            cache = stocks.load_historical_high_cache("003350")
+            self.assertIsNotNone(cache)
+            assert cache is not None
+            self.assertEqual(17_000, cache.target.price)
+            self.assertEqual("2026-08-25", cache.checked_on)
+
     def test_resolves_saved_excel_alias(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "monitor.sqlite3"
@@ -32,3 +58,4 @@ class StockRepositoryTests(unittest.TestCase):
             self.assertEqual(55.5, saved["005930"].float_ratio_percent)
             self.assertEqual(72_000, saved["005930"].high_250_price)
             self.assertEqual(4_424_699_000, saved["005930"].float_shares)
+            self.assertEqual(72_000, stocks.load_high_250_price("005930"))

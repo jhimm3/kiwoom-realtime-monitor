@@ -29,7 +29,7 @@ DEFAULT_SETTINGS = {
     "near_high_show_icon": "1", "near_high_icon_interest": "🔎", "near_high_icon_caution": "⚠️", "near_high_icon_fire": "🔥",
     "near_high_icon_interest_image": "", "near_high_icon_caution_image": "", "near_high_icon_fire_image": "",
     "near_high_sound_enabled": "1", "near_high_sound_cooldown_seconds": "0", "near_high_sound_interest": "data/near_high_sounds/interest.mp3", "near_high_sound_caution": "data/near_high_sounds/caution.mp3", "near_high_sound_fire": "data/near_high_sounds/fire.mp3",
-    "ui_font_size": "0", "ui_row_height": "0", "theme_badge_enabled": "1", "theme_badge_font_size": "0", "theme_badge_padding": "2", "high_distance_period": "250", "window_width": "1160", "window_height": "720", "settings_dialog_width": "680", "settings_dialog_height": "650",
+    "ui_font_size": "0", "ui_row_height": "0", "theme_badge_enabled": "1", "theme_badge_font_size": "0", "theme_badge_padding": "2", "high_distance_period": "250", "high_header_cycle_periods": "5,20,250,historical", "window_width": "1160", "window_height": "720", "settings_dialog_width": "680", "settings_dialog_height": "650",
     "decimal_change_rate": "2", "decimal_trade_value": "2", "decimal_strength": "4", "decimal_high_distance": "2",
     "market_cap_highlight_low_eok": "10000",
     "market_cap_highlight_middle_eok": "50000",
@@ -152,6 +152,18 @@ class Database:
                 stock_code TEXT PRIMARY KEY,
                 synced_on TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS historical_high_evidence (
+                stock_code TEXT NOT NULL,
+                period TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                high_price INTEGER NOT NULL,
+                adjustment_types TEXT NOT NULL DEFAULT '',
+                adjustment_rate TEXT NOT NULL DEFAULT '',
+                adjustment_event TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(stock_code, period, trade_date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_historical_high_evidence_code_date
+                ON historical_high_evidence(stock_code, trade_date);
             """)
             self._initialize_theme_profiles(connection)
             self._add_daily_bar_columns(connection)
@@ -187,9 +199,10 @@ class Database:
     @staticmethod
     def _add_stock_columns(connection: sqlite3.Connection) -> None:
         existing = {str(row[1]) for row in connection.execute("PRAGMA table_info(stocks)")}
-        for name in ("market_cap", "float_ratio", "float_shares", "circulating_market_cap", "high_250_price", "historical_high_price", "historical_high_first_year", "historical_high_last_year", "historical_high_updated_at", "historical_high_checked_on", "fundamentals_updated_at", "nxt_enabled", "nxt_checked_at", "last_price", "last_price_updated_at"):
+        for name in ("market_cap", "float_ratio", "float_shares", "circulating_market_cap", "high_250_price", "historical_high_price", "historical_high_first_year", "historical_high_last_year", "historical_high_occurred_on", "historical_high_updated_at", "historical_high_checked_on", "fundamentals_updated_at", "nxt_enabled", "nxt_checked_at", "last_price", "last_price_updated_at"):
             if name not in existing:
-                connection.execute(f"ALTER TABLE stocks ADD COLUMN {name} REAL")
+                column_type = "TEXT" if name.endswith(("_on", "_at")) else "REAL"
+                connection.execute(f"ALTER TABLE stocks ADD COLUMN {name} {column_type}")
 
     @staticmethod
     def _add_daily_bar_columns(connection: sqlite3.Connection) -> None:

@@ -1,5 +1,5 @@
 #define AppName "키움 실시간 모니터"
-#define AppVersion "1.1.12"
+#define AppVersion "1.1.13"
 #define AppPublisher "크니"
 #define AppExeName "KiwoomMonitor.exe"
 #ifndef DistDir
@@ -18,7 +18,7 @@ DefaultDirName={autopf}\KiwoomMonitor
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist\installer
-OutputBaseFilename=KiwoomMonitor-Setup-1.1.12
+OutputBaseFilename=KiwoomMonitor-Setup-1.1.13
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

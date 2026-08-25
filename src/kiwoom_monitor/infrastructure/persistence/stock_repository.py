@@ -4,6 +4,7 @@ from difflib import get_close_matches
 from pathlib import Path
 
 from kiwoom_monitor.application.trade_strength import StockFundamentals
+from kiwoom_monitor.application.historical_high_service import HistoricalHighCache, HistoricalHighEvidence, HistoricalHighTarget
 
 class StockRepository:
     def __init__(self, path: Path) -> None: self._path = path
@@ -97,15 +98,23 @@ class StockRepository:
         finally:
             con.close()
 
-    def update_historical_high_price(self, code: str, price: int | None, first_year: int | None, last_year: int | None, checked_on: str) -> None:
-        """ka10094 수정주가 연봉으로 계산한 역사적 신고가를 보관한다."""
+    def update_historical_high_price(self, code: str, price: int | None, first_year: int | None, last_year: int | None, checked_on: str, *, occurred_on: str | None = None, evidence: tuple[object, ...] = ()) -> None:
+        """정밀 계산한 역사적 신고가와 계산 근거 봉을 함께 보관한다."""
         if not code or price is None or price <= 0:
             return
         con = sqlite3.connect(self._path)
         try:
             con.execute(
-                "UPDATE stocks SET historical_high_price=?, historical_high_first_year=?, historical_high_last_year=?, historical_high_checked_on=?, historical_high_updated_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE code=?",
-                (price, first_year, last_year, checked_on, code),
+                "UPDATE stocks SET historical_high_price=?, historical_high_first_year=?, historical_high_last_year=?, historical_high_occurred_on=?, historical_high_checked_on=?, historical_high_updated_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE code=?",
+                (price, first_year, last_year, occurred_on, checked_on, code),
+            )
+            con.execute("DELETE FROM historical_high_evidence WHERE stock_code=?", (code,))
+            con.executemany(
+                "INSERT OR REPLACE INTO historical_high_evidence(stock_code,period,trade_date,high_price,adjustment_types,adjustment_rate,adjustment_event) VALUES(?,?,?,?,?,?,?)",
+                tuple(
+                    (code, str(getattr(item, "period")), str(getattr(item, "trade_date")), int(getattr(item, "high_price")), str(getattr(item, "adjustment_types", "")), str(getattr(item, "adjustment_rate", "")), str(getattr(item, "adjustment_event", "")))
+                    for item in evidence
+                ),
             )
             con.commit()
         finally:
@@ -124,6 +133,33 @@ class StockRepository:
         finally:
             con.close()
         return {str(code): int(price) for code, price in rows if price is not None and int(price) > 0}
+
+    def load_historical_high_cache(self, code: str) -> HistoricalHighCache | None:
+        con = sqlite3.connect(self._path)
+        try:
+            row = con.execute(
+                "SELECT historical_high_price,historical_high_first_year,historical_high_last_year,historical_high_occurred_on,historical_high_checked_on FROM stocks WHERE code=?",
+                (code,),
+            ).fetchone()
+            evidence_rows = con.execute(
+                "SELECT period,trade_date,high_price,adjustment_types,adjustment_rate,adjustment_event FROM historical_high_evidence WHERE stock_code=? ORDER BY trade_date",
+                (code,),
+            ).fetchall()
+        finally:
+            con.close()
+        if row is None or row[0] is None or not row[4] or not evidence_rows:
+            return None
+        evidence = tuple(HistoricalHighEvidence(str(period), str(day), int(high), str(types), str(rate), str(event)) for period, day, high, types, rate, event in evidence_rows)
+        target = HistoricalHighTarget(int(row[0]), int(row[1]) if row[1] else None, int(row[2]) if row[2] else None, str(row[3]) if row[3] else None, evidence)
+        return HistoricalHighCache(target, str(row[4]))
+
+    def load_high_250_price(self, code: str) -> int | None:
+        con = sqlite3.connect(self._path)
+        try:
+            row = con.execute("SELECT high_250_price FROM stocks WHERE code=?", (code,)).fetchone()
+        finally:
+            con.close()
+        return int(row[0]) if row is not None and row[0] is not None and int(row[0]) > 0 else None
 
     def historical_high_checked_today(self, codes: tuple[str, ...], checked_on: str) -> set[str]:
         if not codes:
