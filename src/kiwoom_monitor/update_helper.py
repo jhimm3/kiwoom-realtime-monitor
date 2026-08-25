@@ -18,6 +18,9 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from tkinter import Tk, ttk, messagebox
 
+if os.name == "nt":
+    from ctypes import wintypes
+
 
 class UpdateError(RuntimeError):
     """안전하게 적용할 수 없는 업데이트 패키지다."""
@@ -79,16 +82,30 @@ def _inside(path: Path, root: Path) -> bool:
 def _wait_for_process(process_id: int, progress: UpdateProgress) -> None:
     progress.show("앱 종료를 기다리고 있습니다…", 0)
     if os.name == "nt":
+        # ctypes 기본 반환형은 32비트 int다. 64비트 Windows의 HANDLE을 그대로
+        # 받지 않으면 상위 비트가 잘려 WaitForSingleObject에서 WinError 6이 난다.
         synchronize = 0x00100000
         wait_timeout = 0x00000102
-        handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, process_id)
+        wait_failed = 0xFFFFFFFF
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(synchronize, False, process_id)
         if handle:
             try:
-                while ctypes.windll.kernel32.WaitForSingleObject(handle, 100) == wait_timeout:
+                while True:
+                    result = kernel32.WaitForSingleObject(handle, 100)
+                    if result != wait_timeout:
+                        if result == wait_failed:
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        return
                     progress.show("앱 종료를 기다리고 있습니다…", 0)
-                return
             finally:
-                ctypes.windll.kernel32.CloseHandle(handle)
+                kernel32.CloseHandle(handle)
     while True:
         try:
             os.kill(process_id, 0)

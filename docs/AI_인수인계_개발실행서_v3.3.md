@@ -53,7 +53,7 @@
 .\.venv\Scripts\python.exe -m unittest discover -s tests -q
 ```
 
-현재 배포 버전은 **1.1.10**이다. 1.1.8부터 부분 업데이트 ZIP의 SHA-256 검증을 적용하며, 1.1.9부터 전용 업데이트 도우미 EXE를 사용한다. Windows 설치본은 PyInstaller 폴더형 빌드와 Inno Setup 설치 파일을 사용한다. 상세 배포 절차는 12절을 따른다.
+현재 배포 버전은 **1.1.11**이다. 1.1.8부터 부분 업데이트 ZIP의 SHA-256 검증을 적용하며, 1.1.9부터 전용 업데이트 도우미 EXE를 사용한다. 1.1.11부터는 64비트 Windows HANDLE 형식을 명시해 업데이트 도우미의 앱 종료 대기를 안전하게 처리한다. Windows 설치본은 PyInstaller 폴더형 빌드와 Inno Setup 설치 파일을 사용한다. 상세 배포 절차는 12절을 따른다.
 
 ## 4. 프로젝트 구조
 

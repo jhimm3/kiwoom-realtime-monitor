@@ -106,7 +106,7 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.10"
+APP_VERSION = "1.1.11"
 APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 INVESTMENT_NOTICE = "본 앱은 투자 자문이 아니며 시세 지연·오류가 있을 수 있습니다."
