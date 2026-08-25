@@ -2008,8 +2008,6 @@ class ThemeManagerDialog(QDialog):
         self._table.setColumnWidth(0, int(settings.get("theme_manager_stock_column_width")))
         self._table.setColumnWidth(1, int(settings.get("theme_manager_theme_column_width")))
         header.sectionResized.connect(self._save_table_column_width)
-        self._custom_separators = QLineEdit(settings.get("theme_custom_separators")); self._custom_separators.setPlaceholderText("기본 , / | ; 외에 사용할 구분 문자")
-        self._import_exclusions = QLineEdit(settings.get("theme_import_exclusions")); self._import_exclusions.setPlaceholderText("예: 개별이슈, 단순뉴스")
         self._add=QPushButton("신규 종목 테마 추가"); self._text_import = QPushButton("텍스트 테마 업데이트")
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -2041,12 +2039,6 @@ class ThemeManagerDialog(QDialog):
         theme_layout.addWidget(QLabel("프로필마다 종목 테마와 테마 색상을 별도로 관리합니다."))
         theme_layout.addLayout(profile_row)
         theme_layout.addWidget(SettingsDialog._section_separator())
-        theme_layout.addWidget(SettingsDialog._section_title("공통 입력 규칙"))
-        theme_layout.addWidget(QLabel("추가 테마 구분자"))
-        theme_layout.addWidget(self._custom_separators)
-        theme_layout.addWidget(QLabel("이미지/Excel/텍스트 업데이트 제외 테마"))
-        theme_layout.addWidget(self._import_exclusions)
-        theme_layout.addWidget(SettingsDialog._section_separator())
         theme_layout.addWidget(SettingsDialog._section_title("테마 입력 및 갱신"))
         theme_layout.addWidget(self._add)
         theme_layout.addWidget(self._text_import)
@@ -2075,8 +2067,6 @@ class ThemeManagerDialog(QDialog):
         self._copy_theme_profile.clicked.connect(lambda: self._create_theme_profile(copy_current=True))
         self._rename_theme_profile.clicked.connect(self._rename_current_theme_profile)
         self._delete_theme_profile.clicked.connect(self._delete_current_theme_profile)
-        self._custom_separators.textChanged.connect(lambda _: self._save_custom_separators())
-        self._import_exclusions.textChanged.connect(lambda _: self._save_import_exclusions())
         self._search.textChanged.connect(self._reload); self._table.cellDoubleClicked.connect(self._edit); self._rows=()
         self._refresh_theme_profiles(); self._reload()
     def _refresh_theme_profiles(self) -> None:
@@ -2131,12 +2121,6 @@ class ThemeManagerDialog(QDialog):
         self._settings.set("theme_active_profile", renamed)
         self._refresh_theme_profiles()
         self._theme_profile.setCurrentText(renamed)
-    def _save_custom_separators(self) -> None:
-        value = self._custom_separators.text().strip()
-        self._settings.set("theme_custom_separators", value)
-        self._separators = ",/|;" + value
-    def _save_import_exclusions(self) -> None:
-        self._settings.set("theme_import_exclusions", self._import_exclusions.text().strip())
     def _start_image_update(self) -> None:
         if self._on_image_update is None:
             return

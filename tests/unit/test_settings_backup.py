@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -53,6 +54,47 @@ class SettingsBackupServiceTest(unittest.TestCase):
                 self.assertEqual(('삼전', '005930'), connection.execute("SELECT alias, stock_code FROM stock_aliases").fetchone())
             finally:
                 connection.close()
+
+    def test_export_and_import_preserve_all_per_import_theme_rules(self) -> None:
+        keys = {
+            "theme_new_import_custom_separators": "·",
+            "theme_new_import_exclusions": "신규제외",
+            "theme_text_import_custom_separators": "+",
+            "theme_text_import_exclusions": "텍스트제외",
+            "theme_excel_import_custom_separators": "#",
+            "theme_excel_import_exclusions": "엑셀제외",
+            "theme_image_import_custom_separators": "=",
+            "theme_image_import_exclusions": "OCR제외",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.db"
+            Database(database_path).initialize()
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.executemany("UPDATE settings SET value=? WHERE key=?", [(value, key) for key, value in keys.items()])
+                connection.commit()
+            finally:
+                connection.close()
+            backup_path = Path(directory) / "settings.json"
+            service = SettingsBackupService(database_path)
+            service.export_to(backup_path, include_themes=False)
+            exported = json.loads(backup_path.read_text(encoding="utf-8"))["settings"]
+            self.assertEqual(keys, {key: exported[key] for key in keys})
+
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.executemany("UPDATE settings SET value='' WHERE key=?", [(key,) for key in keys])
+                connection.commit()
+            finally:
+                connection.close()
+            service.import_from(backup_path, include_themes=False)
+            connection = sqlite3.connect(database_path)
+            try:
+                placeholders = ",".join("?" for _ in keys)
+                restored = dict(connection.execute(f"SELECT key, value FROM settings WHERE key IN ({placeholders})", tuple(keys)))
+            finally:
+                connection.close()
+            self.assertEqual(keys, restored)
 
     def test_import_syncs_column_layout_but_keeps_local_widths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

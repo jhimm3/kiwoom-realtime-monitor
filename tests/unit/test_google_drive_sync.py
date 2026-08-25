@@ -16,6 +16,9 @@ class GoogleDriveSyncServiceTest(unittest.TestCase):
         self.assertNotIn("google_drive_auto_upload", GoogleDriveSyncService.LOCAL_ONLY_SETTINGS)
         self.assertNotIn("google_drive_auto_upload_on_exit", GoogleDriveSyncService.LOCAL_ONLY_SETTINGS)
         self.assertNotIn("google_drive_sync_target", GoogleDriveSyncService.LOCAL_ONLY_SETTINGS)
+        for prefix in ("theme_new_import", "theme_text_import", "theme_excel_import", "theme_image_import"):
+            self.assertNotIn(f"{prefix}_custom_separators", GoogleDriveSyncService.LOCAL_ONLY_SETTINGS)
+            self.assertNotIn(f"{prefix}_exclusions", GoogleDriveSyncService.LOCAL_ONLY_SETTINGS)
 
     def test_imports_only_desktop_oauth_client_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
