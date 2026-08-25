@@ -59,6 +59,45 @@ class ThemeImageLayoutTests(unittest.TestCase):
             (_row("셀리드", "코로나/바이오"),),
         )
 
+    def test_both_prefers_badges_over_noisy_theme_column_ocr(self) -> None:
+        tokens = (
+            _OcrToken("종목명", 100, 20),
+            _OcrToken("테마", 320, 20),
+            _OcrToken("이유", 650, 20),
+            _OcrToken("셀리드", 100, 60),
+            _OcrToken("84,221백만", 320, 60),
+            _OcrToken("코로나", 420, 60, True),
+        )
+
+        self.assertEqual(_theme_rows_from_tokens(tokens, "both"), (_row("셀리드", "코로나"),))
+
+    def test_badges_work_when_theme_and_reason_headers_are_missed(self) -> None:
+        tokens = (
+            _OcrToken("종목명", 100, 20),
+            _OcrToken("셀리드", 100, 60),
+            _OcrToken("코로나", 420, 60, True),
+        )
+
+        self.assertEqual(_theme_rows_from_tokens(tokens, "both"), (_row("셀리드", "코로나"),))
+
+    def test_accepts_common_name_header_ocr_error(self) -> None:
+        tokens = (
+            _OcrToken("종목망", 100, 20),
+            _OcrToken("셀리드", 100, 60),
+            _OcrToken("코로나", 420, 60, True),
+        )
+
+        self.assertEqual(_theme_rows_from_tokens(tokens, "both"), (_row("셀리드", "코로나"),))
+
+    def test_infers_left_name_column_when_header_row_is_absent(self) -> None:
+        tokens = (
+            _OcrToken("애프터 마켓", 40, 10),
+            _OcrToken("효성", 20, 40),
+            _OcrToken("개별이슈", 300, 40, True),
+        )
+
+        self.assertEqual(_theme_rows_from_tokens(tokens, "both"), (_row("효성", "개별이슈"),))
+
     def test_finds_pastel_badge_but_not_colored_reason_text(self) -> None:
         image = Image.new("RGB", (500, 100), "white")
         draw = ImageDraw.Draw(image)
@@ -73,6 +112,12 @@ class ThemeImageLayoutTests(unittest.TestCase):
 
         self.assertEqual(((210, 40, 261, 63),), _badge_regions(image, 180))
 
+    def test_finds_long_two_line_badge(self) -> None:
+        image = Image.new("RGB", (600, 140), "white")
+        ImageDraw.Draw(image).rounded_rectangle((210, 40, 390, 84), radius=9, fill=(246, 238, 255))
+
+        self.assertEqual(((210, 40, 391, 85),), _badge_regions(image, 180))
+
     def test_merges_split_text_only_inside_each_badge(self) -> None:
         tokens = (
             _OcrToken("제약·", 325, 50),
@@ -84,6 +129,23 @@ class ThemeImageLayoutTests(unittest.TestCase):
         self.assertEqual(
             (_OcrToken("제약·바이오", 350.0, 50.0, True),),
             _merge_badge_tokens(tokens, ((300, 40, 400, 60),)),
+        )
+
+    def test_corrects_single_a_badge_to_ai(self) -> None:
+        self.assertEqual(
+            (_OcrToken("AI", 225.0, 50.0, True),),
+            _merge_badge_tokens((_OcrToken("A", 225, 50),), ((210, 40, 240, 60),)),
+        )
+
+    def test_merges_wrapped_badge_top_line_first(self) -> None:
+        tokens = (
+            _OcrToken("건설", 325, 65),
+            _OcrToken("호남반도체/", 350, 50),
+        )
+
+        self.assertEqual(
+            (_OcrToken("호남반도체/건설", 350.0, 55.0, True),),
+            _merge_badge_tokens(tokens, ((300, 40, 400, 70),)),
         )
 
 

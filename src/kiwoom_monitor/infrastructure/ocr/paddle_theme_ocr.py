@@ -38,14 +38,17 @@ def _badge_regions(image: Image.Image, minimum_x: int = 0) -> tuple[tuple[int, i
     # 배지 배경은 흰색에 가까운 저채도 파스텔이다. 빨강·파랑 설명 글자는
     # 어두운 픽셀이므로 제외하고, 머리글의 큰 보라색 면은 크기에서 제외한다.
     chroma = maximum - minimum
-    pastel = (chroma >= 5) & (minimum >= 220)
-    neutral_badge = (chroma <= 3) & (minimum >= 240) & (maximum <= 250)
+    pastel = (chroma >= 3) & (minimum >= 220)
+    neutral_badge = (chroma <= 3) & (minimum >= 238) & (maximum <= 254)
     mask = (pastel | neutral_badge).astype("uint8") * 255
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3)))
     _, _, stats, _ = cv2.connectedComponentsWithStats(mask)
     regions: list[tuple[int, int, int, int]] = []
     for left, top, width, height, area in stats[1:]:
-        if left < minimum_x or not (25 <= width <= 130 and 15 <= height <= 32):
+        # 긴 복합 테마명과 두 줄로 접힌 배지도 하나의 배지로 취급한다.
+        # 이유 열의 시작점 이후만 검사하므로 허용 폭을 넓혀도 설명 문장까지
+        # 잡힐 가능성은 낮다.
+        if left < minimum_x or not (18 <= width <= 220 and 15 <= height <= 52):
             continue
         if area / max(1, width * height) < 0.35:
             continue
@@ -59,13 +62,19 @@ def _merge_badge_tokens(tokens: tuple[_OcrToken, ...], regions: tuple[tuple[int,
     for left, top, right, bottom in regions:
         parts = sorted(
             (token for token in tokens if left - 4 <= token.x <= right + 4 and top - 4 <= token.y <= bottom + 4),
-            key=lambda token: token.x,
+            key=lambda token: (round((token.y - top) / 10), token.x),
         )
         if any(len(part.text.strip()) >= 2 for part in parts):
             # 배지 바로 뒤 설명의 첫 글자나 둥근 테두리를 한 글자로 잘못
             # 인식한 조각은 정상적인 배지명이 함께 있을 때 제외한다.
             parts = [part for part in parts if len(part.text.strip()) >= 2]
-        text = "".join(part.text.strip() for part in parts if part.text.strip())
+        text = "".join("AI" if part.text.strip() == "A" else part.text.strip() for part in parts if part.text.strip())
+        if text.startswith("A/"):
+            text = "AI/" + text[2:]
+        if text == "A":
+            # 작은 라틴 문자 I를 배경 무늬로 놓치는 경우가 반복된다. 배지
+            # 하나 전체가 A로만 읽힌 때에 한해 국내 테마명 AI로 보정한다.
+            text = "AI"
         if text:
             output.append(_OcrToken(text, (left + right) / 2, (top + bottom) / 2, True))
     return tuple(output)
@@ -73,6 +82,12 @@ def _merge_badge_tokens(tokens: tuple[_OcrToken, ...], regions: tuple[tuple[int,
 
 def _normalized_header(value: str) -> str:
     return value.replace(" ", "").replace("\n", "")
+
+
+def _is_name_header(value: str) -> bool:
+    """Accept the common OCR substitution '종목망' as the stock-name header."""
+    normalized = _normalized_header(value)
+    return normalized == "종목명" or (normalized.startswith("종목") and len(normalized) == 3)
 
 
 @contextmanager
@@ -102,11 +117,24 @@ def _theme_rows_from_tokens(tokens: tuple[_OcrToken, ...], mode: str, theme_head
     headers = {
         _normalized_header(token.text): token.x
         for token in tokens
-        if _normalized_header(token.text) in {"종목명", normalized_theme_header, "이유"}
+        if _normalized_header(token.text) in {normalized_theme_header, "이유"}
     }
+    name_header = next((token for token in tokens if _is_name_header(token.text)), None)
+    if name_header is not None:
+        headers["종목명"] = name_header.x
     name_x = headers.get("종목명")
+    badge_tokens_present = any(token.has_badge_background for token in tokens)
+    if name_x is None and badge_tokens_present and tokens:
+        # 일부 애프터마켓 표는 열 머리글 없이 바로 데이터가 시작한다. 배지가
+        # 명확히 검출된 때에만 가장 왼쪽 텍스트 열을 종목명 열로 안전하게 추정한다.
+        name_x = min(token.x for token in tokens if not token.has_badge_background)
     if name_x is None:
         raise ValueError("이미지에서 '종목명' 열을 찾지 못했습니다.")
+    if mode == "both" and badge_tokens_present:
+        # 색상 배지를 분리해서 다시 읽은 경우에는 이것이 가장 신뢰할 수 있는
+        # 테마 원본이다. 일반 열 OCR까지 합치면 거래대금이나 이유 문장 조각이
+        # 테마로 섞이므로 배지 결과만 사용한다.
+        return _theme_rows_from_tokens(tokens, "reason_badges", theme_header)
     if mode == "both":
         rows: list[ImageThemeRow] = []
         if normalized_theme_header and normalized_theme_header in headers:
@@ -123,10 +151,13 @@ def _theme_rows_from_tokens(tokens: tuple[_OcrToken, ...], mode: str, theme_head
         raise ValueError("테마 열 제목을 입력하거나 '색상 배지 읽기' 방식을 선택하세요.")
     if mode == "theme_column" and normalized_theme_header not in headers:
         raise ValueError(f"이미지에서 '{theme_header}' 열을 찾지 못했습니다. 열 제목을 수정하거나 '색상 배지 읽기' 방식을 선택해 보세요.")
-    if mode == "reason_badges" and "이유" not in headers:
+    if mode == "reason_badges" and "이유" not in headers and not badge_tokens_present:
         raise ValueError("이미지에서 '이유' 열을 찾지 못했습니다. '테마 열' 방식을 선택해 보세요.")
 
-    ignored_headers = {"종목명", normalized_theme_header, "등락률", "거래대금", "거래대금(백만)", "이유"}
+    ignored_headers = {
+        "종목명", "종목망", normalized_theme_header, "등락률", "거래대금", "거래대금(백만)", "이유",
+        "장중상승", "장중하락", "시간외상승", "시간외하락",
+    }
     grouped: dict[int, list[_OcrToken]] = {}
     for token in tokens:
         if _normalized_header(token.text) in ignored_headers:
@@ -334,8 +365,22 @@ class PaddleThemeOcr:
                         ))
                 # 기존 전체 이미지 OCR의 배지 판정은 사용하지 않는다. 분리된
                 # 사각형 안에서 읽힌 글자만 배지로 표시한다.
-                tokens = [_OcrToken(token.text, token.x, token.y, False) for token in tokens]
-                tokens.extend(_merge_badge_tokens(tuple(badge_tokens), regions))
+                # 분리 OCR이 매우 옅은 배지 경계를 놓칠 수 있다. 전체 OCR에서도
+                # 배경색이 확인됐고 짧게 읽힌 토큰은 안전한 보조 결과로 보존한다.
+                # 배지와 이유 문장이 통째로 합쳐진 긴 토큰은 제외한다.
+                merged_badges = _merge_badge_tokens(tuple(badge_tokens), regions)
+                tokens = [
+                    _OcrToken(
+                        token.text,
+                        token.x,
+                        token.y,
+                        token.has_badge_background
+                        and len(token.text.strip()) <= 15
+                        and all(abs(token.y - badge.y) > 10 for badge in merged_badges),
+                    )
+                    for token in tokens
+                ]
+                tokens.extend(merged_badges)
         return _theme_rows_from_tokens(tuple(tokens), mode, theme_header)
 
 
