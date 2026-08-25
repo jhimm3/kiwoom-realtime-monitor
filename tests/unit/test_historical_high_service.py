@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import date
 
 from kiwoom_monitor.application.historical_high_service import HistoricalHighCache, HistoricalHighEvidence, HistoricalHighService, HistoricalHighTarget
 
@@ -126,3 +127,21 @@ class HistoricalHighServiceTests(unittest.TestCase):
 
         self.assertEqual(5_960, target.price)
         self.assertEqual(["ka10094", "ka10083"], client.calls)
+
+    def test_refines_old_year_using_today_as_adjustment_base(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.bodies: list[tuple[str, dict[str, object]]] = []
+
+            def request_with_continuation(self, api_id: str, path: str, body: dict[str, object], *, cont_yn: str = "N", next_key: str = "") -> tuple[dict[str, object], bool, str]:
+                self.bodies.append((api_id, body))
+                if api_id == "ka10094":
+                    return {"stk_yr_pole_chart_qry": [{"dt": "20240000", "high_pric": "17880"}]}, False, ""
+                return {"stk_mth_pole_chart_qry": [{"dt": "20241002", "high_pric": "17880"}]}, False, ""
+
+        client = Client()
+        target = HistoricalHighService(client).load("003350")
+
+        self.assertEqual(17_880, target.price)
+        monthly_body = next(body for api_id, body in client.bodies if api_id == "ka10083")
+        self.assertEqual(date.today().strftime("%Y%m%d"), monthly_body["base_dt"])

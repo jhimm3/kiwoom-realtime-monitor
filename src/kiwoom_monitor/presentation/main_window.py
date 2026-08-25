@@ -4705,7 +4705,7 @@ class MainWindow(QMainWindow):
             return False
         if self._historical_high_worker is not None and self._historical_high_worker.isRunning():
             return True
-        refresh_basis = self._settings.get("historical_high_adjusted_basis_version") != "2"
+        refresh_basis = self._settings.get("historical_high_adjusted_basis_version") != "3"
         today = self._ranking_now().strftime("%Y-%m-%d")
         checked_today = (
             self._stock_lookup.historical_high_checked_today(codes, today)
@@ -4748,7 +4748,7 @@ class MainWindow(QMainWindow):
     def _on_historical_high_worker_finished(self) -> None:
         if self._historical_high_refresh_expected:
             if self._historical_high_refresh_expected <= self._historical_high_refresh_received:
-                self._settings.set("historical_high_adjusted_basis_version", "2")
+                self._settings.set("historical_high_adjusted_basis_version", "3")
             self._historical_high_refresh_expected.clear()
             self._historical_high_refresh_received.clear()
 

@@ -83,14 +83,16 @@ class HistoricalHighService:
             return HistoricalHighTarget(winner.high_price, min(years), max(years), winner.trade_date, tuple(evidence))
         monthly: list[dict[str, Any]] = []
         for year in sorted(year for year in years_to_refine if len(year) == 4 and year.isdigit()):
-            base_date = today if year == today[:4] else f"{year}1231"
-            rows = self._load_rows("ka10083", "stk_mth_pole_chart_qry", code, base_date, prefix=year)
+            # 과거 연말을 기준일로 쓰면 그 이후 액면분할·병합이 반영되지 않은
+            # 당시 가격이 반환된다. 항상 오늘 기준 수정주가로 과거까지 거슬러
+            # 조회한 뒤 필요한 연도만 고른다.
+            rows = self._load_rows("ka10083", "stk_mth_pole_chart_qry", code, today, prefix=year)
             monthly.extend(row for row in rows if year != checked[:4] or _date_text(row)[:6] >= since_month)
         evidence = list(cache.target.evidence)
         for month_row in sorted(monthly, key=_date_text):
             month = _date_text(month_row)[:6]
             if _has_adjustment(month_row):
-                daily = self._load_rows("ka10081", "stk_dt_pole_chart_qry", code, _month_end(month), prefix=month)
+                daily = self._load_rows("ka10081", "stk_dt_pole_chart_qry", code, today, prefix=month)
                 new_event_rows = [row for row in daily if _has_adjustment(row) and _date_text(row) > checked]
                 if new_event_rows:
                     for event_row in sorted(new_event_rows, key=_date_text):
@@ -146,7 +148,8 @@ class HistoricalHighService:
         return [item for items in evidence_by_year.values() for item in items]
 
     def _refine_year(self, code: str, year: str, fallback: dict[str, Any], high_250: int | None = None) -> list[HistoricalHighEvidence]:
-        monthly = self._load_rows("ka10083", "stk_mth_pole_chart_qry", code, f"{year}1231", prefix=year)
+        today = date.today().strftime("%Y%m%d")
+        monthly = self._load_rows("ka10083", "stk_mth_pole_chart_qry", code, today, prefix=year)
         if not monthly:
             item = _evidence("year", fallback)
             return [item] if item is not None else []
@@ -160,7 +163,7 @@ class HistoricalHighService:
                 if (item := _evidence("month", month_row)) is not None:
                     evidence.append(item)
                 continue
-            daily = self._load_rows("ka10081", "stk_dt_pole_chart_qry", code, _month_end(month), prefix=month)
+            daily = self._load_rows("ka10081", "stk_dt_pole_chart_qry", code, today, prefix=month)
             detailed = [item for day_row in daily if (item := _evidence("day", day_row)) is not None]
             if detailed:
                 evidence.extend(detailed)

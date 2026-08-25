@@ -101,7 +101,13 @@ def main() -> None:
             "historical_high_worker_factory": lambda codes: HistoricalHighWorker(
                 HistoricalHighService(
                     client, include_nxt=True,
-                    cache_loader=StockRepository(paths.database_path).load_historical_high_cache,
+                    # 계산 기준이 바뀐 릴리즈에서는 기존 근거를 사용하지 않고
+                    # 전 종목을 오늘 기준 수정주가로 한 번 다시 계산한다.
+                    cache_loader=lambda code: (
+                        StockRepository(paths.database_path).load_historical_high_cache(code)
+                        if database.settings.get("historical_high_adjusted_basis_version") == "3"
+                        else None
+                    ),
                     high_250_loader=StockRepository(paths.database_path).load_high_250_price,
                 ), codes
             ),
