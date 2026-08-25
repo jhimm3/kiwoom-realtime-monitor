@@ -315,13 +315,18 @@ NXT 여부를 아직 모르거나 조회 실패한 종목은 안전하게 NXT �
 
 1. 버전을 `pyproject.toml`, `src/kiwoom_monitor/__init__.py`, `presentation/main_window.py`, `installer/KiwoomMonitor.iss`에서 같은 값으로 맞춘다.
 2. 단위 테스트와 `compileall`을 통과시킨다.
-3. PowerShell을 대신할 전용 업데이트 도우미 EXE를 만든 뒤, PyInstaller 폴더형 배포본을 만든다.
+3. 검증된 `resources/UpdateHelper.exe`를 재사용하고 PyInstaller 폴더형 앱 배포본을 만든다. 업데이트 도우미는 파일이 없거나 `src/kiwoom_monitor/update_helper.py`·Python·PyInstaller·도우미 의존성·서명 설정이 변경된 경우에만 다시 빌드한다.
 
 ```powershell
-.\.venv\Scripts\pyinstaller.exe --clean --noconfirm --onefile --windowed --name UpdateHelper --distpath resources --workpath build\UpdateHelper --specpath build\UpdateHelper src\kiwoom_monitor\update_helper.py
+# UpdateHelper.exe 재빌드가 필요한 경우에만 실행
+.\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm --onefile --windowed --name UpdateHelper --distpath resources --workpath build\UpdateHelper --specpath build\UpdateHelper src\kiwoom_monitor\update_helper.py
+
+# 일반 릴리즈에서는 기존 UpdateHelper.exe를 포함해 앱만 빌드
 .\.venv\Scripts\pyinstaller.exe --clean --noconfirm KiwoomMonitor.spec
 & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' installer\KiwoomMonitor.iss
 ```
+
+도우미를 재빌드하지 않은 릴리즈에서는 새 배포 폴더의 `_internal/update_helper/UpdateHelper.exe` 해시가 직전 검증본과 같은지 확인한다. 앱 기능만 바뀐 경우 도우미를 다시 만드는 것은 필수 절차가 아니다.
 
 4. 생성물은 `dist/KiwoomMonitor/`와 `dist/installer/KiwoomMonitor-Setup-<버전>.exe`다.
 5. 설치 위치는 기본적으로 `C:\Program Files\KiwoomMonitor`이다. 사용자의 API 키·테마·설정·로그는 `%LocalAppData%\KiwoomMonitor\data`에 보관한다.
