@@ -4,7 +4,13 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import _OcrToken, _badge_regions, _merge_badge_tokens, _theme_rows_from_tokens
+from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import (
+    _OcrToken,
+    _badge_regions,
+    _merge_badge_tokens,
+    _normalized_badge_text,
+    _theme_rows_from_tokens,
+)
 
 
 class ThemeImageLayoutTests(unittest.TestCase):
@@ -147,6 +153,10 @@ class ThemeImageLayoutTests(unittest.TestCase):
             (_OcrToken("호남반도체/건설", 350.0, 55.0, True),),
             _merge_badge_tokens(tokens, ((300, 40, 400, 70),)),
         )
+
+    def test_corrects_repeated_korean_badge_ocr_substitutions(self) -> None:
+        self.assertEqual("통신장비/광통신", _normalized_badge_text("동신장비/광동신"))
+        self.assertEqual("광트랜시버/전력설비", _normalized_badge_text("광트랜시베/전력실비"))
 
 
 def _row(name: str, themes: str):

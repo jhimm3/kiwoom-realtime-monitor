@@ -75,6 +75,7 @@ def _merge_badge_tokens(tokens: tuple[_OcrToken, ...], regions: tuple[tuple[int,
             # 작은 라틴 문자 I를 배경 무늬로 놓치는 경우가 반복된다. 배지
             # 하나 전체가 A로만 읽힌 때에 한해 국내 테마명 AI로 보정한다.
             text = "AI"
+        text = _normalized_badge_text(text)
         if text:
             output.append(_OcrToken(text, (left + right) / 2, (top + bottom) / 2, True))
     return tuple(output)
@@ -82,6 +83,21 @@ def _merge_badge_tokens(tokens: tuple[_OcrToken, ...], regions: tuple[tuple[int,
 
 def _normalized_header(value: str) -> str:
     return value.replace(" ", "").replace("\n", "")
+
+
+def _normalized_badge_text(value: str) -> str:
+    """Correct stable Korean OCR substitutions seen repeatedly in theme badges."""
+    replacements = {
+        "동신장비": "통신장비",
+        "광동신": "광통신",
+        "광동": "광통신",
+        "광트랜시비": "광트랜시버",
+        "광트랜시베": "광트랜시버",
+        "전력실비": "전력설비",
+        "건실": "건설",
+        "A데이터센터": "AI데이터센터",
+    }
+    return "/".join("AI" if part == "A" else replacements.get(part, part) for part in value.split("/"))
 
 
 def _is_name_header(value: str) -> bool:
@@ -188,8 +204,9 @@ def _theme_rows_from_tokens(tokens: tuple[_OcrToken, ...], mode: str, theme_head
         nearest = min(range(len(anchors)), key=lambda index: abs(anchors[index][1] - token.y), default=None)
         if nearest is None or abs(anchors[nearest][1] - token.y) > 42:
             continue
-        if token.text not in themes_by_name[nearest]:
-            themes_by_name[nearest].append(token.text)
+        theme_text = _normalized_badge_text(token.text)
+        if theme_text not in themes_by_name[nearest]:
+            themes_by_name[nearest].append(theme_text)
     return tuple(
         ImageThemeRow(name, "/".join(themes_by_name[index]))
         for index, (name, _) in enumerate(anchors)
