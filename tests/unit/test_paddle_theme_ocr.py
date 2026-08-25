@@ -159,6 +159,11 @@ class ThemeImageLayoutTests(unittest.TestCase):
         self.assertEqual("통신장비/광통신", _normalized_badge_text("동신장비/광동신"))
         self.assertEqual("광트랜시버/전력설비", _normalized_badge_text("광트랜시베/전력실비"))
 
+    def test_corrects_additional_user_reported_badge_substitutions(self) -> None:
+        self.assertEqual("개별이슈/로봇AI", _normalized_badge_text("개벌이슈/로봇시"))
+        self.assertEqual("바이오/제약/탈중국", _normalized_badge_text("바이외제약/달중국"))
+        self.assertEqual("AI제조/통신", _normalized_badge_text("시제조/동신"))
+
     def test_merges_same_stock_from_multiple_images(self) -> None:
         self.assertEqual(
             (_row("심텍", "반도체/AI PCB"),),

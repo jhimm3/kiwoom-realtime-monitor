@@ -88,6 +88,13 @@ def _normalized_header(value: str) -> str:
 def _normalized_badge_text(value: str) -> str:
     """Correct stable Korean OCR substitutions seen repeatedly in theme badges."""
     replacements = {
+        "개벌이슈": "개별이슈",
+        "로봇시": "로봇AI",
+        "바이외제약": "바이오/제약",
+        "바이오외제약": "바이오/제약",
+        "달중국": "탈중국",
+        "시제조": "AI제조",
+        "동신": "통신",
         "동신장비": "통신장비",
         "광동신": "광통신",
         "광동": "광통신",

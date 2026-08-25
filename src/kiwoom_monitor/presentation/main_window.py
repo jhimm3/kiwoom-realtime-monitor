@@ -1584,8 +1584,9 @@ class ThemePreviewDialog(QDialog):
 
 
 class ImageThemeRowsDialog(QDialog):
-    def __init__(self, rows: tuple[object, ...], parent: QWidget | None = None) -> None:
+    def __init__(self, rows: tuple[object, ...], parent: QWidget | None = None, settings: SettingsRepository | None = None) -> None:
         super().__init__(parent)
+        self._settings = settings
         self.setWindowTitle("이미지 테마 OCR 수정")
         self.resize(680, 520)
         layout = QVBoxLayout(self)
@@ -1594,6 +1595,15 @@ class ImageThemeRowsDialog(QDialog):
         self._validation_message.setStyleSheet("color: #C00000;")
         self._validation_message.setWordWrap(True)
         layout.addWidget(self._validation_message)
+        if settings is not None:
+            rules = QFormLayout()
+            self._custom_separators = QLineEdit(settings.get("theme_custom_separators"))
+            self._custom_separators.setPlaceholderText("기본 , / | ; 외에 추가할 구분 문자")
+            self._import_exclusions = QLineEdit(settings.get("theme_import_exclusions"))
+            self._import_exclusions.setPlaceholderText("예: 개별이슈, 공시")
+            rules.addRow("추가 구분자", self._custom_separators)
+            rules.addRow("제외 테마", self._import_exclusions)
+            layout.addLayout(rules)
         self.table = QTableWidget(len(rows), 2)
         self.table.setHorizontalHeaderLabels(("종목명", "테마"))
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -1635,6 +1645,9 @@ class ImageThemeRowsDialog(QDialog):
                 seen[key] = row
         if not duplicates:
             self._validation_message.clear()
+            if self._settings is not None:
+                self._settings.set("theme_custom_separators", self._custom_separators.text().strip())
+                self._settings.set("theme_import_exclusions", self._import_exclusions.text().strip())
             self.accept()
             return
         for first_row, duplicate_row, _ in duplicates:
@@ -3427,7 +3440,7 @@ class MainWindow(QMainWindow):
     def _show_image_theme_rows(self, rows: object) -> None:
         if not isinstance(rows, tuple):
             return
-        dialog = ImageThemeRowsDialog(rows, self)
+        dialog = ImageThemeRowsDialog(rows, self, self._settings)
         if dialog.exec():
             separators = ",/|;" + self._settings.get("theme_custom_separators")
             imported, errors = validate_theme_rows(self._filter_import_exclusions(dialog.rows(), separators), separators)
