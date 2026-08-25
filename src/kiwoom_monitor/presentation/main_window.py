@@ -117,10 +117,55 @@ def selected_high_cycle_periods(value: str) -> tuple[str, ...]:
     periods = tuple(period for period in HIGH_PERIODS if period in selected)
     return periods or HIGH_PERIODS
 
-APP_VERSION = "1.1.14"
+APP_VERSION = "1.1.15"
 APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 INVESTMENT_NOTICE = "본 앱은 투자 자문이 아니며 시세 지연·오류가 있을 수 있습니다."
+
+
+class StockNameChangeReviewDialog(QDialog):
+    """상호변경 후보를 사용자가 한 번 확인한 뒤 별칭으로 적용한다."""
+
+    def __init__(self, changes: tuple[tuple[str, str, str, str], ...], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("종목명 변경 확인")
+        self.resize(700, min(620, 190 + len(changes) * 34))
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "같은 종목코드에서 이름이 변경된 항목입니다.\n"
+            "체크한 항목만 과거 종목명을 현재 종목에 연결합니다. 체크를 해제하면 연결하지 않습니다."
+        ))
+        self._table = QTableWidget(len(changes), 5)
+        self._table.setHorizontalHeaderLabels(("적용", "종목코드", "이전 이름", "현재 이름", "자료"))
+        self._changes = changes
+        for row, (code, old_name, new_name, source) in enumerate(changes):
+            selected = QTableWidgetItem()
+            selected.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            selected.setCheckState(Qt.CheckState.Checked)
+            self._table.setItem(row, 0, selected)
+            for column, value in enumerate((code, old_name, new_name, source), start=1):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self._table.setItem(row, column, item)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self._table)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("확인 결과 저장")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("나중에 확인")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def decisions(self) -> dict[tuple[str, str], bool]:
+        return {
+            (code, old_name): self._table.item(row, 0).checkState() == Qt.CheckState.Checked
+            for row, (code, old_name, _new_name, _source) in enumerate(self._changes)
+        }
 
 
 class ClickableLabel(QLabel):
@@ -255,15 +300,28 @@ def choose_similar_stock(parent: QWidget, lookup: object, name: str) -> tuple[st
 
 
 class SimilarStockDialog(QDialog):
-    def __init__(self, lookup: object, original_name: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        lookup: object,
+        original_name: str,
+        themes: tuple[str, ...] = (),
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._lookup = lookup
         self._original_name = original_name
         self.cancelled_all = False
         self.setWindowTitle("비슷한 종목 선택")
-        self.resize(420, 360)
+        self.resize(460, 390)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"'{original_name}'와 같은 종목명이 없습니다.\n전체 상장종목에서 검색하거나 후보를 선택하세요."))
+        theme_text = ", ".join(themes) if themes else "확인할 테마 없음"
+        guide = QLabel(
+            f"입력된 종목명: {original_name}\n"
+            f"이 종목이 있던 테마: {theme_text}\n\n"
+            "같은 종목명이 없습니다. 전체 상장종목에서 검색하거나 후보를 선택하세요."
+        )
+        guide.setWordWrap(True)
+        layout.addWidget(guide)
         self._search = QLineEdit(original_name)
         self._search.setPlaceholderText("종목명 검색")
         layout.addWidget(self._search)
@@ -308,11 +366,41 @@ class SimilarStockDialog(QDialog):
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
 
-def choose_similar_stock(parent: QWidget, lookup: object, name: str) -> tuple[tuple[str, str] | None, bool]:
-    dialog = SimilarStockDialog(lookup, name, parent)
+def choose_similar_stock(
+    parent: QWidget,
+    lookup: object,
+    name: str,
+    themes: tuple[str, ...] = (),
+) -> tuple[tuple[str, str] | None, bool]:
+    dialog = SimilarStockDialog(lookup, name, themes, parent)
     if dialog.exec():
         return dialog.selected, False
     return None, dialog.cancelled_all
+
+
+def confirm_pending_name_change(
+    parent: QWidget,
+    lookup: object,
+    original_name: str,
+    themes: tuple[str, ...] = (),
+) -> tuple[tuple[str, str] | None, bool]:
+    """확인 대기 중인 과거 종목명은 일반 유사 검색보다 먼저 안내한다."""
+    finder = getattr(lookup, "pending_name_change", None)
+    reviewer = getattr(lookup, "review_name_changes", None)
+    change = finder(original_name) if callable(finder) else None
+    if change is None or not callable(reviewer):
+        return None, False
+    code, old_name, new_name, source = change
+    approved = QMessageBox.question(
+        parent,
+        "종목명 변경 확인",
+        f"'{old_name}'은(는) 종목명이 변경된 것으로 확인됩니다.\n\n"
+        f"이전 이름: {old_name}\n현재 이름: {new_name}\n종목코드: {code}\n자료: {source}\n"
+        f"입력된 테마: {', '.join(themes) or '없음'}\n\n'{new_name}' 종목으로 적용할까요?",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+    ) == QMessageBox.StandardButton.Yes
+    reviewer({(code, old_name): approved})
+    return ((code, new_name) if approved else None), True
 
 
 class SettingsDialog(QDialog):
@@ -1752,7 +1840,7 @@ class TextThemeImportDialog(QDialog):
         self.setWindowTitle("텍스트 테마 업데이트")
         self.resize(720, 520)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("테마/종목 목록을 그대로 붙여넣으세요. 🔥 뒤 제목을 테마로 적용하고, #소분류 이름은 별도 테마로 추가하지 않습니다."))
+        layout.addWidget(QLabel("테마/종목 목록을 그대로 붙여넣으세요. 🔥 뒤 제목을 대분류 테마로 적용합니다."))
         rules = QFormLayout()
         self._heading_marker = QLineEdit(settings.get("theme_text_heading_marker"))
         self._custom_separators = QLineEdit(settings.get("theme_text_import_custom_separators"))
@@ -1764,6 +1852,10 @@ class TextThemeImportDialog(QDialog):
         rules.addRow("추가 구분자", self._custom_separators)
         rules.addRow("제외 테마", self._import_exclusions)
         layout.addLayout(rules)
+        self._include_subcategories = QCheckBox("# 소분류도 별도 테마로 추가")
+        self._include_subcategories.setChecked(settings.get("theme_text_include_subcategories") == "1")
+        layout.addWidget(self._include_subcategories)
+        layout.addWidget(QLabel("선택하면 #mRNA 같은 소분류 종목에 대분류와 mRNA 테마를 함께 적용합니다."))
         self._text = QTextEdit()
         self._update_placeholder()
         self._heading_marker.textChanged.connect(self._save_heading_marker)
@@ -1784,6 +1876,7 @@ class TextThemeImportDialog(QDialog):
         self._save_heading_marker(self._heading_marker.text())
         self._settings.set("theme_text_import_custom_separators", self._custom_separators.text().strip())
         self._settings.set("theme_text_import_exclusions", self._import_exclusions.text().strip())
+        self._settings.set("theme_text_include_subcategories", "1" if self._include_subcategories.isChecked() else "0")
         self.accept()
 
     def _update_placeholder(self) -> None:
@@ -1812,6 +1905,10 @@ class TextThemeImportDialog(QDialog):
     @property
     def text(self) -> str:
         return self._text.toPlainText()
+
+    @property
+    def include_subcategories(self) -> bool:
+        return self._include_subcategories.isChecked()
 
 
 class ThemeEditDialog(QDialog):
@@ -1973,7 +2070,12 @@ class ThemeBulkEditDialog(QDialog):
         self.setWindowTitle("테마 일괄 수정 미리보기")
         self.resize(600, 500)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("새 테마명 칸에서 수정할 테마만 바꾸세요. 같은 이름으로 바꾸면 하나의 테마로 합쳐지며, 비우면 모든 종목에서 삭제됩니다."))
+        guide = QLabel(
+            "새 테마명에 쉼표(,), 슬래시(/), 세로줄(|), 세미콜론(;)을 넣으면 여러 테마로 나뉩니다.\n"
+            "예: 해운이란 → 해운/이란   ·   같은 이름은 합쳐지고, 비우면 모든 종목에서 삭제됩니다."
+        )
+        guide.setWordWrap(True)
+        layout.addWidget(guide)
         self._table = QTableWidget(len(themes), 2)
         self._table.setHorizontalHeaderLabels(("기존 테마", "새 테마명"))
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -2176,7 +2278,7 @@ class ThemeManagerDialog(QDialog):
             return
         separators = ",/|;" + self._settings.get("theme_text_import_custom_separators")
         marker = self._settings.get("theme_text_heading_marker")
-        rows = parse_theme_text(dialog.text, separators, marker)
+        rows = parse_theme_text(dialog.text, separators, marker, dialog.include_subcategories)
         if not rows:
             QMessageBox.information(self, "텍스트 확인", f"{marker} 테마 제목 아래에서 종목명을 찾지 못했습니다. 텍스트 내용을 확인하세요.")
             return
@@ -2220,7 +2322,45 @@ class ThemeManagerDialog(QDialog):
         resolved: list[MatchedThemeRow] = []
         for row in rows:
             original_name = str(getattr(row, "name", ""))
-            candidate, cancelled = choose_similar_stock(self, self._repository, original_name)
+            themes = tuple(getattr(row, "themes", ()))
+            renamed, handled = confirm_pending_name_change(self, self._repository, original_name, themes)
+            if handled:
+                if renamed is not None:
+                    code, current_name = renamed
+                    resolved.append(MatchedThemeRow(code, current_name, themes))
+                continue
+            split_finder = getattr(self._repository, "find_concatenated_stocks", None)
+            split = split_finder(original_name) if callable(split_finder) else ()
+            if split:
+                labels = " + ".join(name for _, name in split)
+                if QMessageBox.question(
+                    self,
+                    "붙어 있는 종목명 확인",
+                    f"'{original_name}'을(를) 다음 종목들로 나눌 수 있습니다.\n\n{labels}\n\n이대로 나눌까요?",
+                ) == QMessageBox.StandardButton.Yes:
+                    resolved.extend(MatchedThemeRow(code, name, themes) for code, name in split)
+                    continue
+            partial_finder = getattr(self._repository, "find_partial_concatenated_stocks", None)
+            known, fragments = partial_finder(original_name) if callable(partial_finder) else ((), ())
+            if known and fragments:
+                known_labels = " + ".join(name for _, name in known)
+                fragment_labels = ", ".join(fragments)
+                if QMessageBox.question(
+                    self,
+                    "붙어 있는 종목명 일부 확인",
+                    f"'{original_name}'에서 다음 종목은 확인됐습니다.\n\n{known_labels}\n\n"
+                    f"남은 이름만 다시 찾습니다: {fragment_labels}\n\n계속할까요?",
+                ) == QMessageBox.StandardButton.Yes:
+                    resolved.extend(MatchedThemeRow(code, name, themes) for code, name in known)
+                    for fragment in fragments:
+                        candidate, cancelled = choose_similar_stock(self, self._repository, fragment, themes)
+                        if cancelled:
+                            return (), True
+                        if candidate:
+                            code, selected_name = candidate
+                            resolved.append(MatchedThemeRow(code, selected_name, themes))
+                    continue
+            candidate, cancelled = choose_similar_stock(self, self._repository, original_name, themes)
             if candidate:
                 code, selected_name = candidate
                 resolved.append(MatchedThemeRow(code, selected_name, tuple(getattr(row, "themes", ()))))
@@ -2267,13 +2407,19 @@ class ThemeManagerDialog(QDialog):
         dialog = ThemeBulkEditDialog(tuple(names), self)
         if not dialog.exec() or not dialog.changes:
             return
-        preview = "\n".join(f"{before} → {after or '삭제'}" for before, after in dialog.changes)
+        parsed_changes = tuple((before, parse_themes(after, ",/|;")) for before, after in dialog.changes)
+        preview = "\n".join(
+            f"{before} → {' + '.join(targets) if targets else '삭제'}"
+            for before, targets in parsed_changes
+        )
         if QMessageBox.question(self, "테마 일괄 수정", f"다음 변경을 모든 종목에 적용합니다.\n\n{preview}\n\n계속할까요?") != QMessageBox.StandardButton.Yes:
             return
-        for before, after in dialog.changes:
+        for before, targets in parsed_changes:
             try:
-                if after:
-                    self._repository.rename_theme(before, after)
+                if len(targets) > 1:
+                    self._repository.split_theme(before, targets)
+                elif targets:
+                    self._repository.rename_theme(before, targets[0])
                 else:
                     self._repository.delete_themes((before,))
             except ValueError as error:
@@ -3406,8 +3552,10 @@ class MainWindow(QMainWindow):
         worker.setParent(self)
         def completed(count: int, cached: bool) -> None:
             self.statusBar().showMessage("KRX 상장종목 목록 확인 완료" if cached else f"KRX 상장종목 {count:,}개 갱신 완료")
+            self._review_pending_stock_name_changes()
             continuation()
         worker.completed.connect(completed)
+        worker.history_failed.connect(lambda message: logger.warning("KIND 상호변경 이력 동기화 실패: %s", message))
         worker.failed.connect(lambda message: (QMessageBox.warning(self, "KRX 상장종목 목록", f"전체 목록을 갱신하지 못했습니다.\n저장된 목록으로 계속합니다.\n\n{message}"), continuation()))
         self._krx_stock_catalog_worker = worker
         self.statusBar().showMessage("KRX 전체 상장종목 목록을 확인하고 있습니다.")
@@ -3418,7 +3566,11 @@ class MainWindow(QMainWindow):
             return
         worker = KrxStockCatalogWorker(self._stock_lookup, self._settings)
         worker.setParent(self)
-        worker.completed.connect(lambda count, cached: QMessageBox.information(self, "상장종목 목록 동기화", f"동기화 완료\n성공 날짜: {self._settings.get('krx_stock_catalog_date')}\n{'오늘 이미 받은 목록입니다.' if cached else f'{count:,}개 종목을 갱신했습니다.'}"))
+        def completed(count: int, cached: bool) -> None:
+            QMessageBox.information(self, "상장종목 목록 동기화", f"동기화 완료\n성공 날짜: {self._settings.get('krx_stock_catalog_date')}\n{'오늘 이미 받은 목록입니다.' if cached else f'{count:,}개 종목을 갱신했습니다.'}")
+            self._review_pending_stock_name_changes()
+        worker.completed.connect(completed)
+        worker.history_failed.connect(lambda message: QMessageBox.warning(self, "상호변경 이력 동기화", f"상장종목 목록은 갱신됐지만 KIND 상호변경 이력은 받지 못했습니다.\n\n{message}"))
         worker.failed.connect(lambda message: QMessageBox.warning(self, "상장종목 목록 동기화 실패", message))
         self._krx_stock_catalog_worker = worker
         self.statusBar().showMessage("KRX 전체 상장종목 목록을 동기화하고 있습니다.")
@@ -3437,12 +3589,29 @@ class MainWindow(QMainWindow):
             return
         worker = KrxStockCatalogWorker(self._stock_lookup, self._settings)
         worker.setParent(self)
-        worker.completed.connect(lambda count, _cached: self.statusBar().showMessage(f"KRX 상장종목 {count:,}개 자동 동기화 완료"))
+        def completed(count: int, _cached: bool) -> None:
+            self.statusBar().showMessage(f"KRX 상장종목 {count:,}개 자동 동기화 완료")
+            self._review_pending_stock_name_changes()
+        worker.completed.connect(completed)
+        worker.history_failed.connect(lambda message: logger.warning("KIND 상호변경 이력 자동 동기화 실패: %s", message))
         worker.failed.connect(lambda message: logger.warning("KRX 상장종목 자동 동기화 실패: %s", message))
         worker.finished.connect(lambda: None if self._is_after_hours_data_pause() else self._start_historical_high_loading(tuple(self._row_by_code)))
         self._krx_stock_catalog_worker = worker
         self.statusBar().showMessage("최하위 작업: KRX 전체 상장종목 목록 동기화 중")
         worker.start()
+
+    def _review_pending_stock_name_changes(self) -> None:
+        lookup = self._stock_lookup
+        if lookup is None or not hasattr(lookup, "pending_name_changes") or not hasattr(lookup, "review_name_changes"):
+            return
+        changes = lookup.pending_name_changes()
+        if not changes:
+            return
+        dialog = StockNameChangeReviewDialog(changes, self)
+        if dialog.exec():
+            lookup.review_name_changes(dialog.decisions())
+            approved = sum(dialog.decisions().values())
+            self.statusBar().showMessage(f"종목명 변경 확인 완료: {approved:,}개 과거 이름 연결")
 
     def _warn_slow_image_ocr(self, worker: ImageThemeOcrWorker) -> None:
         if worker is not getattr(self, "_image_theme_ocr_worker", None) or not worker.isRunning():
@@ -3554,11 +3723,51 @@ class MainWindow(QMainWindow):
         resolved: list[MatchedThemeRow] = []
         for row in rows:
             original_name = str(getattr(row, "name", ""))
+            themes = tuple(getattr(row, "themes", ()))
+            renamed, handled = confirm_pending_name_change(self, self._stock_lookup, original_name, themes)
+            if handled:
+                if renamed is not None:
+                    code, current_name = renamed
+                    resolved.append(MatchedThemeRow(code, current_name, themes))
+                continue
+            split_finder = getattr(self._stock_lookup, "find_concatenated_stocks", None)
+            split = split_finder(original_name) if callable(split_finder) else ()
+            if split:
+                labels = " + ".join(name for _, name in split)
+                if QMessageBox.question(
+                    self,
+                    "붙어 있는 종목명 확인",
+                    f"{source_label}의 '{original_name}'을(를) 다음 종목들로 나눌 수 있습니다.\n\n"
+                    f"{labels}\n\n이대로 나눌까요?",
+                ) == QMessageBox.StandardButton.Yes:
+                    resolved.extend(MatchedThemeRow(code, name, themes) for code, name in split)
+                    continue
+            partial_finder = getattr(self._stock_lookup, "find_partial_concatenated_stocks", None)
+            known, fragments = partial_finder(original_name) if callable(partial_finder) else ((), ())
+            if known and fragments:
+                known_labels = " + ".join(name for _, name in known)
+                fragment_labels = ", ".join(fragments)
+                if QMessageBox.question(
+                    self,
+                    "붙어 있는 종목명 일부 확인",
+                    f"{source_label}의 '{original_name}'에서 다음 종목은 확인됐습니다.\n\n{known_labels}\n\n"
+                    f"남은 이름만 다시 찾습니다: {fragment_labels}\n\n계속할까요?",
+                ) == QMessageBox.StandardButton.Yes:
+                    resolved.extend(MatchedThemeRow(code, name, themes) for code, name in known)
+                    for fragment in fragments:
+                        candidate, cancelled = choose_similar_stock(self, self._stock_lookup, fragment, themes)
+                        if cancelled:
+                            return (), True
+                        if candidate:
+                            code, selected_name = candidate
+                            resolved.append(MatchedThemeRow(code, selected_name, themes))
+                    continue
             while True:
                 name, ok = QInputDialog.getText(
                     self,
                     "키움 종목명 확인",
                     f"{source_label}에서 읽은 '{original_name}' 종목명이 현재 키움 종목 목록에 없습니다.\n"
+                    f"이 종목이 있던 테마: {', '.join(themes) or '없음'}\n"
                     "OCR 오인식이거나 키움의 실제 표기와 다른 이름일 수 있습니다.\n"
                     "키움에 표시되는 정확한 종목명으로 수정하세요. 비워 두면 이번 업데이트에서 제외합니다.",
                     text=original_name,
@@ -3574,7 +3783,7 @@ class MainWindow(QMainWindow):
                         self._stock_lookup.save_alias(original_name, code)
                     resolved.append(MatchedThemeRow(code, name, tuple(getattr(row, "themes", ()))))
                     break
-                candidate, cancelled = choose_similar_stock(self, self._stock_lookup, name)
+                candidate, cancelled = choose_similar_stock(self, self._stock_lookup, name, themes)
                 if candidate:
                     code, selected_name = candidate
                     if original_name != selected_name and hasattr(self._stock_lookup, "save_alias"):

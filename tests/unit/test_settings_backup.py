@@ -61,6 +61,7 @@ class SettingsBackupServiceTest(unittest.TestCase):
             "theme_new_import_exclusions": "신규제외",
             "theme_text_import_custom_separators": "+",
             "theme_text_import_exclusions": "텍스트제외",
+            "theme_text_include_subcategories": "1",
             "theme_excel_import_custom_separators": "#",
             "theme_excel_import_exclusions": "엑셀제외",
             "theme_image_import_custom_separators": "=",

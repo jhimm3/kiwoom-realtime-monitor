@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+from kiwoom_monitor.infrastructure.persistence.stock_aliases import seed_known_stock_aliases
 
 
 DEFAULT_SETTINGS = {
@@ -56,6 +57,7 @@ DEFAULT_SETTINGS = {
     "theme_new_import_exclusions": "",
     "theme_text_import_custom_separators": "",
     "theme_text_import_exclusions": "",
+    "theme_text_include_subcategories": "0",
     "theme_excel_import_custom_separators": "",
     "theme_excel_import_exclusions": "",
     "theme_active_profile": "기본 테마",
@@ -73,6 +75,7 @@ DEFAULT_SETTINGS = {
     "google_drive_last_upload_success_at": "",
     "krx_stock_catalog_date": "",
     "krx_stock_catalog_format_version": "3",
+    "kind_name_history_sync_date": "",
     "daily_high_adjusted_basis_version": "0",
     "historical_high_adjusted_basis_version": "0",
 }
@@ -123,6 +126,22 @@ class Database:
             connection.execute("CREATE TABLE IF NOT EXISTS stocks (code TEXT PRIMARY KEY, name TEXT NOT NULL, market TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
             self._add_stock_columns(connection)
             connection.execute("CREATE TABLE IF NOT EXISTS stock_aliases (alias TEXT PRIMARY KEY, stock_code TEXT NOT NULL, FOREIGN KEY(stock_code) REFERENCES stocks(code))")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS stock_name_history ("
+                "stock_code TEXT NOT NULL, old_name TEXT NOT NULL, new_name TEXT NOT NULL, "
+                "changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, source TEXT NOT NULL DEFAULT 'KRX', "
+                "decision TEXT NOT NULL DEFAULT 'pending', "
+                "PRIMARY KEY(stock_code, old_name), FOREIGN KEY(stock_code) REFERENCES stocks(code))"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS kind_name_disclosures ("
+                "acpt_no TEXT PRIMARY KEY, stock_code TEXT NOT NULL, current_name TEXT NOT NULL, "
+                "disclosed_on TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending')"
+            )
+            name_history_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(stock_name_history)")}
+            if "decision" not in name_history_columns:
+                connection.execute("ALTER TABLE stock_name_history ADD COLUMN decision TEXT NOT NULL DEFAULT 'pending'")
+            seed_known_stock_aliases(connection)
             connection.executescript("""
             CREATE TABLE IF NOT EXISTS themes (theme_id INTEGER PRIMARY KEY, theme_name TEXT NOT NULL UNIQUE, default_color TEXT NOT NULL DEFAULT '#DCE6F1');
             CREATE TABLE IF NOT EXISTS stock_themes (stock_code TEXT NOT NULL, theme_id INTEGER NOT NULL, custom_color TEXT, PRIMARY KEY(stock_code, theme_id), FOREIGN KEY(stock_code) REFERENCES stocks(code), FOREIGN KEY(theme_id) REFERENCES themes(theme_id));

@@ -21,6 +21,7 @@ class SettingsRepositoryTest(unittest.TestCase):
             self.assertEqual(database.settings.get("theme_new_import_exclusions"), "")
             self.assertEqual(database.settings.get("theme_text_import_custom_separators"), "")
             self.assertEqual(database.settings.get("theme_text_import_exclusions"), "")
+            self.assertEqual(database.settings.get("theme_text_include_subcategories"), "0")
             self.assertEqual(database.settings.get("theme_excel_import_custom_separators"), "")
             self.assertEqual(database.settings.get("theme_excel_import_exclusions"), "")
             self.assertEqual(database.settings.get("window_width"), "1160")

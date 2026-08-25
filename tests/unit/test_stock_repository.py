@@ -10,6 +10,67 @@ from kiwoom_monitor.application.historical_high_service import HistoricalHighEvi
 
 
 class StockRepositoryTests(unittest.TestCase):
+    def test_matches_neontech_former_name_to_current_stock_code(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            repository = StockRepository(database_path)
+
+            repository.upsert("306620", "지아이에스", "코스닥")
+
+            self.assertIsNone(repository.find_code_by_name("네온테크"))
+            repository.review_name_changes({("306620", "네온테크"): True})
+            self.assertEqual("306620", repository.find_code_by_name("네온테크"))
+
+    def test_catalog_rename_requires_review_before_becoming_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            repository = StockRepository(database_path)
+            repository.upsert("123456", "예전회사", "코스닥")
+
+            repository.upsert_many((("123456", "새회사", "코스닥"),))
+
+            self.assertIsNone(repository.find_code_by_name("예전회사"))
+            self.assertEqual("123456", repository.find_code_by_name("새회사"))
+            self.assertEqual((("123456", "예전회사", "새회사", "KRX"),), repository.pending_name_changes())
+            repository.review_name_changes({("123456", "예전회사"): True})
+            self.assertEqual("123456", repository.find_code_by_name("예전회사"))
+            import sqlite3
+            connection = sqlite3.connect(database_path)
+            try:
+                history = connection.execute(
+                    "SELECT old_name,new_name,source,decision FROM stock_name_history WHERE stock_code='123456'"
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertEqual(("예전회사", "새회사", "KRX", "approved"), history)
+
+    def test_rejected_catalog_rename_does_not_become_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            repository = StockRepository(database_path)
+            repository.upsert("123456", "예전회사", "코스닥")
+            repository.upsert("123456", "새회사", "코스닥")
+            repository.review_name_changes({("123456", "예전회사"): False})
+
+            self.assertIsNone(repository.find_code_by_name("예전회사"))
+            self.assertEqual((), repository.pending_name_changes())
+
+    def test_known_former_names_are_seeded_when_current_codes_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            repository = StockRepository(database_path)
+            repository.upsert_many((("030200", "케이티", "코스피"), ("150900", "파수AI", "코스닥")))
+
+            self.assertIsNone(repository.find_code_by_name("KT"))
+            self.assertIsNone(repository.find_code_by_name("파수"))
+            repository.review_name_changes({("030200", "KT"): True, ("150900", "파수"): True})
+            self.assertEqual("030200", repository.find_code_by_name("KT"))
+            self.assertEqual("150900", repository.find_code_by_name("파수"))
+
     def test_saves_historical_high_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "monitor.sqlite3"
