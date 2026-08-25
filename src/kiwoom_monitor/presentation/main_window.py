@@ -1597,9 +1597,9 @@ class ImageThemeRowsDialog(QDialog):
         layout.addWidget(self._validation_message)
         if settings is not None:
             rules = QFormLayout()
-            self._custom_separators = QLineEdit(settings.get("theme_custom_separators"))
+            self._custom_separators = QLineEdit(settings.get("theme_image_import_custom_separators"))
             self._custom_separators.setPlaceholderText("기본 , / | ; 외에 추가할 구분 문자")
-            self._import_exclusions = QLineEdit(settings.get("theme_import_exclusions"))
+            self._import_exclusions = QLineEdit(settings.get("theme_image_import_exclusions"))
             self._import_exclusions.setPlaceholderText("예: 개별이슈, 공시")
             rules.addRow("추가 구분자", self._custom_separators)
             rules.addRow("제외 테마", self._import_exclusions)
@@ -1646,8 +1646,8 @@ class ImageThemeRowsDialog(QDialog):
         if not duplicates:
             self._validation_message.clear()
             if self._settings is not None:
-                self._settings.set("theme_custom_separators", self._custom_separators.text().strip())
-                self._settings.set("theme_import_exclusions", self._import_exclusions.text().strip())
+                self._settings.set("theme_image_import_custom_separators", self._custom_separators.text().strip())
+                self._settings.set("theme_image_import_exclusions", self._import_exclusions.text().strip())
             self.accept()
             return
         for first_row, duplicate_row, _ in duplicates:
@@ -3442,8 +3442,11 @@ class MainWindow(QMainWindow):
             return
         dialog = ImageThemeRowsDialog(rows, self, self._settings)
         if dialog.exec():
-            separators = ",/|;" + self._settings.get("theme_custom_separators")
-            imported, errors = validate_theme_rows(self._filter_import_exclusions(dialog.rows(), separators), separators)
+            separators = ",/|;" + self._settings.get("theme_image_import_custom_separators")
+            imported, errors = validate_theme_rows(
+                self._filter_import_exclusions(dialog.rows(), separators, "theme_image_import_exclusions"),
+                separators,
+            )
             if errors:
                 QMessageBox.warning(self, "이미지 테마 확인", "\n".join(errors))
                 return
@@ -3452,7 +3455,7 @@ class MainWindow(QMainWindow):
             if cancelled:
                 return
             changes = preview_theme_changes(matched + resolved, self._theme_store) if self._theme_store else ()
-            preview = ThemePreviewDialog(changes, len(unmatched) - len(resolved), self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_import_exclusions"), separators)))
+            preview = ThemePreviewDialog(changes, len(unmatched) - len(resolved), self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_image_import_exclusions"), separators)))
             if preview.exec() and self._theme_store:
                 changes = preview.changes(separators)
                 applied = sum(change.status != "변경 없음" for change in changes)
@@ -3502,8 +3505,13 @@ class MainWindow(QMainWindow):
                 unchanged = sum(change.status == "변경 없음" for change in changes)
                 self.statusBar().showMessage(f"Excel 결과 · 전체 {len(raw_rows)} · 변경 없음 {unchanged} · 신규 {new} · 테마 변경 {changed} · 오류/제외 {len(unmatched) - len(resolved)}")
 
-    def _filter_import_exclusions(self, rows: tuple[tuple[str, str], ...], separators: str) -> tuple[tuple[str, str], ...]:
-        excluded = {theme_key(theme) for theme in parse_themes(self._settings.get("theme_import_exclusions"), separators)}
+    def _filter_import_exclusions(
+        self,
+        rows: tuple[tuple[str, str], ...],
+        separators: str,
+        setting_key: str = "theme_import_exclusions",
+    ) -> tuple[tuple[str, str], ...]:
+        excluded = {theme_key(theme) for theme in parse_themes(self._settings.get(setting_key), separators)}
         if not excluded:
             return rows
         filtered: list[tuple[str, str]] = []

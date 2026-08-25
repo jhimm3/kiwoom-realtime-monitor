@@ -50,6 +50,8 @@ DEFAULT_SETTINGS = {
     "theme_image_import_dir": "",
     "theme_image_import_mode": "theme_column",
     "theme_image_import_theme_header": "테마",
+    "theme_image_import_custom_separators": "",
+    "theme_image_import_exclusions": "",
     "theme_active_profile": "기본 테마",
     "theme_profiles_initialized": "0",
     "theme_excel_import_dir": "",

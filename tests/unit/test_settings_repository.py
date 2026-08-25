@@ -15,6 +15,8 @@ class SettingsRepositoryTest(unittest.TestCase):
             self.assertEqual(database.settings.get("refresh_interval_seconds"), "30")
             self.assertEqual(database.settings.get("ui_mode"), "responsive")
             self.assertEqual(database.settings.get("theme_custom_separators"), "")
+            self.assertEqual(database.settings.get("theme_image_import_custom_separators"), "")
+            self.assertEqual(database.settings.get("theme_image_import_exclusions"), "")
             self.assertEqual(database.settings.get("window_width"), "1160")
 
             database.settings.set("refresh_interval_seconds", "60")
