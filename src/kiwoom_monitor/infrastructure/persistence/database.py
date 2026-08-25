@@ -28,7 +28,7 @@ DEFAULT_SETTINGS = {
     "near_high_interest_percent": "15.0", "near_high_caution_percent": "10.0", "near_high_fire_percent": "5.0", "near_high_row_alert_level": "interest", "near_high_alert_enabled": "1", "theme_custom_separators": "", "theme_text_heading_marker": "🔥", "theme_import_exclusions": "",
     "near_high_show_icon": "1", "near_high_icon_interest": "🔎", "near_high_icon_caution": "⚠️", "near_high_icon_fire": "🔥",
     "near_high_icon_interest_image": "", "near_high_icon_caution_image": "", "near_high_icon_fire_image": "",
-    "near_high_sound_enabled": "1", "near_high_sound_interest": "data/near_high_sounds/interest.mp3", "near_high_sound_caution": "data/near_high_sounds/caution.mp3", "near_high_sound_fire": "data/near_high_sounds/fire.mp3",
+    "near_high_sound_enabled": "1", "near_high_sound_cooldown_seconds": "0", "near_high_sound_interest": "data/near_high_sounds/interest.mp3", "near_high_sound_caution": "data/near_high_sounds/caution.mp3", "near_high_sound_fire": "data/near_high_sounds/fire.mp3",
     "ui_font_size": "0", "ui_row_height": "0", "theme_badge_enabled": "1", "theme_badge_font_size": "0", "theme_badge_padding": "2", "high_distance_period": "250", "window_width": "1160", "window_height": "720", "settings_dialog_width": "680", "settings_dialog_height": "650",
     "decimal_change_rate": "2", "decimal_trade_value": "2", "decimal_strength": "4", "decimal_high_distance": "2",
     "market_cap_highlight_low_eok": "10000",
@@ -48,6 +48,10 @@ DEFAULT_SETTINGS = {
     "theme_trade_summary_excluded_stocks": "",
     "theme_trade_summary_excluded_enabled": "1",
     "theme_image_import_dir": "",
+    "theme_image_import_mode": "theme_column",
+    "theme_image_import_theme_header": "테마",
+    "theme_active_profile": "기본 테마",
+    "theme_profiles_initialized": "0",
     "theme_excel_import_dir": "",
     "theme_manager_stock_column_width": "170",
     "theme_manager_theme_column_width": "330",
@@ -138,6 +142,7 @@ class Database:
                 trade_date TEXT NOT NULL,
                 high_price INTEGER NOT NULL,
                 trade_value_eok REAL,
+                close_price INTEGER,
                 PRIMARY KEY(stock_code, trade_date)
             );
             CREATE INDEX IF NOT EXISTS idx_daily_bars_code_date ON daily_bars(stock_code, trade_date);
@@ -146,6 +151,8 @@ class Database:
                 synced_on TEXT NOT NULL
             );
             """)
+            self._initialize_theme_profiles(connection)
+            self._add_daily_bar_columns(connection)
             connection.commit()
         finally:
             connection.close()
@@ -178,6 +185,47 @@ class Database:
     @staticmethod
     def _add_stock_columns(connection: sqlite3.Connection) -> None:
         existing = {str(row[1]) for row in connection.execute("PRAGMA table_info(stocks)")}
-        for name in ("market_cap", "float_ratio", "circulating_market_cap", "high_250_price", "fundamentals_updated_at", "nxt_enabled", "nxt_checked_at", "last_price", "last_price_updated_at"):
+        for name in ("market_cap", "float_ratio", "float_shares", "circulating_market_cap", "high_250_price", "fundamentals_updated_at", "nxt_enabled", "nxt_checked_at", "last_price", "last_price_updated_at"):
             if name not in existing:
                 connection.execute(f"ALTER TABLE stocks ADD COLUMN {name} REAL")
+
+    @staticmethod
+    def _add_daily_bar_columns(connection: sqlite3.Connection) -> None:
+        existing = {str(row[1]) for row in connection.execute("PRAGMA table_info(daily_bars)")}
+        if "close_price" not in existing:
+            connection.execute("ALTER TABLE daily_bars ADD COLUMN close_price INTEGER")
+
+    @staticmethod
+    def _initialize_theme_profiles(connection: sqlite3.Connection) -> None:
+        """Keep each theme set separate while retaining the shared stock catalog."""
+        connection.executescript("""
+            CREATE TABLE IF NOT EXISTS theme_profiles (
+                profile_id INTEGER PRIMARY KEY,
+                profile_name TEXT NOT NULL COLLATE NOCASE UNIQUE
+            );
+            CREATE TABLE IF NOT EXISTS profile_themes (
+                profile_id INTEGER NOT NULL,
+                theme_name TEXT NOT NULL COLLATE NOCASE,
+                default_color TEXT NOT NULL DEFAULT '#DCE6F1',
+                PRIMARY KEY(profile_id, theme_name),
+                FOREIGN KEY(profile_id) REFERENCES theme_profiles(profile_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS profile_stock_themes (
+                profile_id INTEGER NOT NULL,
+                stock_code TEXT NOT NULL,
+                theme_name TEXT NOT NULL COLLATE NOCASE,
+                custom_color TEXT,
+                PRIMARY KEY(profile_id, stock_code, theme_name),
+                FOREIGN KEY(profile_id, theme_name) REFERENCES profile_themes(profile_id, theme_name) ON DELETE CASCADE
+            );
+        """)
+        initialized = connection.execute("SELECT value FROM settings WHERE key='theme_profiles_initialized'").fetchone()
+        if initialized and str(initialized[0]) == "1":
+            return
+        connection.execute("INSERT OR IGNORE INTO theme_profiles(profile_name) VALUES ('기본 테마')")
+        default_id = connection.execute("SELECT profile_id FROM theme_profiles WHERE profile_name='기본 테마'").fetchone()[0]
+        for name, color in connection.execute("SELECT theme_name, default_color FROM themes"):
+            connection.execute("INSERT OR IGNORE INTO profile_themes(profile_id, theme_name, default_color) VALUES (?, ?, ?)", (default_id, name, color))
+        for code, name, color in connection.execute("SELECT st.stock_code, t.theme_name, st.custom_color FROM stock_themes st JOIN themes t ON t.theme_id=st.theme_id"):
+            connection.execute("INSERT OR IGNORE INTO profile_stock_themes(profile_id, stock_code, theme_name, custom_color) VALUES (?, ?, ?, ?)", (default_id, code, name, color))
+        connection.execute("UPDATE settings SET value='1' WHERE key='theme_profiles_initialized'")

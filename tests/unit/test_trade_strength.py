@@ -15,6 +15,14 @@ class TradeStrengthTests(unittest.TestCase):
     def test_returns_none_without_floating_market_cap(self) -> None:
         self.assertIsNone(trade_strength_percent(10, StockFundamentals(100, 0)))
 
+    def test_prefers_verified_float_shares_and_current_price(self) -> None:
+        fundamentals = StockFundamentals(1_000, 40, float_shares=200_000_000)
+        self.assertEqual(2.5, trade_strength_percent(10, fundamentals, current_price=200))
+
+    def test_uses_realtime_market_cap_before_rest_cache_when_shares_are_missing(self) -> None:
+        fundamentals = StockFundamentals(1_000, 40)
+        self.assertEqual(1.25, trade_strength_percent(10, fundamentals, market_cap_eok=2_000))
+
     def test_marks_interest_caution_and_fire_levels(self) -> None:
         self.assertEqual("0.50% 👀", strength_badge(0.5))
         self.assertEqual("1.00% ⚠️", strength_badge(1.0))

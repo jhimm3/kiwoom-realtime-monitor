@@ -12,6 +12,25 @@ def tick(price: int, volume: int, trade_time: str = "101500") -> TradeTick:
 
 
 class MinuteTradeValueTests(unittest.TestCase):
+    def test_uses_cumulative_trade_value_delta_when_available(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 8, 14, 10, 0, 1)
+
+        # 0B 14는 백만원 단위다. 최초 1,000은 기준점이고 1,250으로
+        # 증가한 250만 원만 이 분봉의 거래대금으로 반영한다.
+        aggregator.ingest(TradeTick("005930", 100, None, 1_000, 10, None, "100001"), now)
+        aggregator.ingest(TradeTick("005930", 120, None, 1_250, 20, None, "100002"), now)
+
+        self.assertAlmostEqual(2.5, aggregator.bucket_trade_value_eok("005930", 1, now))
+
+    def test_does_not_add_first_cumulative_trade_value_after_connecting(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 8, 14, 10, 0, 1)
+
+        aggregator.ingest(TradeTick("005930", 100, None, 50_000, 10, None, "100001"), now)
+
+        self.assertEqual(0.0, aggregator.bucket_trade_value_eok("005930", 1, now))
+
     def test_uses_hero_formula_for_one_minute(self) -> None:
         aggregator = MinuteTradeValueAggregator()
         at = datetime(2026, 8, 14, 10, 15, 10)

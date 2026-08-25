@@ -132,38 +132,58 @@ def _read_manifest(staging: Path) -> tuple[list[Path], list[Path]]:
     return changed_paths, deleted_paths
 
 
-def apply_update(wait_pid: int, archive_path: Path, target_root: Path, executable: Path, log_path: Path) -> None:
+def apply_archives(archive_paths: tuple[Path, ...], target_root: Path, progress: UpdateProgress | None = None, log_path: Path | None = None) -> None:
+    """검증된 ZIP 여러 개를 오래된 버전부터 차례로 적용한다.
+
+    화면 없이 호출할 수 있어 임시 폴더 테스트에서도 실제 파일 교체 로직을 검증한다.
+    """
+    if not archive_paths or not target_root.is_dir():
+        raise UpdateError("업데이트 대상 경로를 확인할 수 없습니다.")
+    for index, archive_path in enumerate(archive_paths, start=1):
+        if not archive_path.is_file():
+            raise UpdateError("업데이트 파일을 찾을 수 없습니다.")
+        staging = archive_path.parent / f"staging-{os.getpid()}-{index}"
+        try:
+            if progress is not None:
+                progress.show(f"업데이트 {index}/{len(archive_paths)} 파일을 준비하고 있습니다…", int(5 + 90 * (index - 1) / len(archive_paths)))
+            _extract_archive(archive_path, staging)
+            changed, deleted = _read_manifest(staging)
+            total_size = sum((staging / item).stat().st_size for item in changed)
+            copied_size = 0
+            for relative in changed:
+                source, destination = staging / relative, target_root / relative
+                if not _inside(destination, target_root):
+                    raise UpdateError("허용되지 않은 교체 대상 경로입니다.")
+                if progress is not None:
+                    within_archive = copied_size / max(1, total_size)
+                    progress.show(f"업데이트 {index}/{len(archive_paths)} 파일을 교체하고 있습니다…", int(5 + 90 * ((index - 1 + within_archive) / len(archive_paths))))
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                copied_size += source.stat().st_size
+                if log_path is not None:
+                    _write_log(log_path, f"{index}/{len(archive_paths)} 교체 완료: {relative.as_posix()}")
+            for relative in deleted:
+                destination = target_root / relative
+                if not _inside(destination, target_root):
+                    raise UpdateError("허용되지 않은 삭제 대상 경로입니다.")
+                destination.unlink(missing_ok=True)
+                if log_path is not None:
+                    _write_log(log_path, f"{index}/{len(archive_paths)} 삭제 처리: {relative.as_posix()}")
+            archive_path.unlink(missing_ok=True)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def apply_update(wait_pid: int, archive_paths: tuple[Path, ...], target_root: Path, executable: Path, log_path: Path) -> None:
     progress = UpdateProgress()
-    staging = archive_path.parent / f"staging-{os.getpid()}"
     try:
-        _write_log(log_path, "업데이트 도우미 시작")
-        if not archive_path.is_file() or not target_root.is_dir() or not _inside(executable, target_root):
+        _write_log(log_path, f"업데이트 도우미 시작 ({len(archive_paths)}개)")
+        if not _inside(executable, target_root):
             raise UpdateError("업데이트 대상 경로를 확인할 수 없습니다.")
         _wait_for_process(wait_pid, progress)
         _write_log(log_path, "앱 종료 확인")
-        progress.show("업데이트 파일을 준비하고 있습니다…", 5)
-        _extract_archive(archive_path, staging)
-        changed, deleted = _read_manifest(staging)
-        total_size = sum((staging / item).stat().st_size for item in changed)
-        copied_size = 0
-        for relative in changed:
-            source, destination = staging / relative, target_root / relative
-            if not _inside(destination, target_root):
-                raise UpdateError("허용되지 않은 교체 대상 경로입니다.")
-            progress.show("파일을 교체하고 있습니다…", 5 + int(90 * copied_size / max(1, total_size)))
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            copied_size += source.stat().st_size
-            _write_log(log_path, f"교체 완료: {relative.as_posix()}")
-        for relative in deleted:
-            destination = target_root / relative
-            if not _inside(destination, target_root):
-                raise UpdateError("허용되지 않은 삭제 대상 경로입니다.")
-            destination.unlink(missing_ok=True)
-            _write_log(log_path, f"삭제 처리: {relative.as_posix()}")
+        apply_archives(archive_paths, target_root, progress, log_path)
         progress.show("업데이트를 마무리하고 있습니다…", 100)
-        archive_path.unlink(missing_ok=True)
-        shutil.rmtree(staging, ignore_errors=True)
         _write_log(log_path, "업데이트 완료, 앱 재실행")
         subprocess.Popen([str(executable)], cwd=str(target_root))
         time.sleep(0.4)
@@ -173,20 +193,18 @@ def apply_update(wait_pid: int, archive_path: Path, target_root: Path, executabl
         progress.show(f"업데이트에 실패했습니다. {error}", 0)
         messagebox.showerror("키움 실시간 모니터 업데이트", f"업데이트에 실패했습니다.\n{error}")
         raise
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--wait-pid", required=True, type=int)
-    parser.add_argument("--archive", required=True, type=Path)
+    parser.add_argument("--archive", required=True, action="append", type=Path)
     parser.add_argument("--target", required=True, type=Path)
     parser.add_argument("--exe", required=True, type=Path)
     parser.add_argument("--log", required=True, type=Path)
     args = parser.parse_args()
     try:
-        apply_update(args.wait_pid, args.archive, args.target, args.exe, args.log)
+        apply_update(args.wait_pid, tuple(args.archive), args.target, args.exe, args.log)
     except Exception:
         return 1
     return 0

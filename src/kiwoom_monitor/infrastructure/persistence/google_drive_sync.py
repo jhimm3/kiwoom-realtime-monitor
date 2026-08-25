@@ -142,7 +142,7 @@ class GoogleDriveSyncService:
                     )
         except Exception as error:
             raise GoogleDriveSyncError(f"Google Drive 다운로드에 실패했습니다: {error}") from error
-        return f"Google Drive {self._target_label(target)}을(를) 다운로드했습니다. 프로그램을 다시 시작하면 모두 적용됩니다."
+        return f"Google Drive {self._target_label(target)}을(를) 다운로드하고 바로 적용했습니다."
 
     def _drive_service(self, interactive: bool):
         if not self.configured:

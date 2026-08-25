@@ -56,6 +56,7 @@ class KiwoomRestClient:
         self._expires_at: datetime | None = None
         self._server_time: datetime | None = None
         self._server_time_at: float | None = None
+        self._last_response_headers: dict[str, str] = {}
 
     def server_now(self) -> datetime:
         if self._server_time is None or self._server_time_at is None:
@@ -77,33 +78,49 @@ class KiwoomRestClient:
         with self._request_lock:
             return self._request_unlocked(api_id, path, body)
 
-    def _request_unlocked(self, api_id: str, path: str, body: JsonObject) -> JsonObject:
+    def request_with_continuation(
+        self, api_id: str, path: str, body: JsonObject, *, cont_yn: str = "N", next_key: str = ""
+    ) -> tuple[JsonObject, bool, str]:
+        """연속조회 응답과 다음 페이지 정보를 함께 반환한다."""
+        with self._request_lock:
+            response = self._request_unlocked(api_id, path, body, cont_yn=cont_yn, next_key=next_key)
+            headers = self._last_response_headers
+        has_next = headers.get("cont-yn", "N").upper() == "Y"
+        return response, has_next, headers.get("next-key", "")
+
+    def _request_unlocked(
+        self, api_id: str, path: str, body: JsonObject, *, cont_yn: str = "N", next_key: str = ""
+    ) -> JsonObject:
         """API-ID를 포함해 인증된 POST 요청을 보낸다."""
         if not api_id:
             raise ValueError("api_id is required")
         if not path.startswith("/"):
             raise ValueError("path must start with '/'")
-        response = self._authenticated_post(api_id, path, body)
+        response = self._authenticated_post(api_id, path, body, cont_yn=cont_yn, next_key=next_key)
         return_code = response.get("return_code")
         # 서버가 만료·무효 토큰을 돌려주는 경우에는 메모리 토큰을 버리고
         # 한 번만 새 토큰으로 재요청한다. 순위 갱신이 토큰 오류로 멈추지 않는다.
         if self._is_invalid_token(return_code, response.get("return_msg")):
             self._token = None
             self._expires_at = None
-            response = self._authenticated_post(api_id, path, body)
+            response = self._authenticated_post(api_id, path, body, cont_yn=cont_yn, next_key=next_key)
             return_code = response.get("return_code")
         if return_code not in (None, 0, "0"):
             message = str(response.get("return_msg", "알 수 없는 오류")).replace("\n", " ")
             raise KiwoomApiError(f"키움 API 오류 ({api_id}): {return_code} {message}")
         return response
 
-    def _authenticated_post(self, api_id: str, path: str, body: JsonObject) -> JsonObject:
+    def _authenticated_post(
+        self, api_id: str, path: str, body: JsonObject, *, cont_yn: str = "N", next_key: str = ""
+    ) -> JsonObject:
         return self._post(
             path,
             body,
             {
                 "authorization": f"Bearer {self._get_token()}",
                 "api-id": api_id,
+                "cont-yn": cont_yn,
+                "next-key": next_key,
             },
         )
 
@@ -150,6 +167,10 @@ class KiwoomRestClient:
             try:
                 with self._opener(request, timeout=15) as response:
                     headers = getattr(response, "headers", {})
+                    self._last_response_headers = {
+                        str(key).lower(): str(value)
+                        for key, value in (headers.items() if hasattr(headers, "items") else ())
+                    }
                     self._update_server_time(headers.get("Date") if hasattr(headers, "get") else None)
                     payload = json.loads(response.read().decode("utf-8"))
                 break

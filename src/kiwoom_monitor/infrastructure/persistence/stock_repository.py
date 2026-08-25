@@ -58,15 +58,22 @@ class StockRepository:
             con.commit()
         finally:
             con.close()
-    def update_fundamentals(self, code: str, market_cap: float, float_ratio: float, high_250_price: int | None = None) -> None:
+    def update_fundamentals(
+        self,
+        code: str,
+        market_cap: float,
+        float_ratio: float,
+        high_250_price: int | None = None,
+        float_shares: int | None = None,
+    ) -> None:
         con = sqlite3.connect(self._path)
         try:
-            row = con.execute("SELECT market_cap, float_ratio, high_250_price FROM stocks WHERE code=?", (code,)).fetchone()
-            changed = row is None or row[0] != market_cap or row[1] != float_ratio or row[2] != high_250_price
+            row = con.execute("SELECT market_cap, float_ratio, high_250_price, float_shares FROM stocks WHERE code=?", (code,)).fetchone()
+            changed = row is None or row[0] != market_cap or row[1] != float_ratio or row[2] != high_250_price or row[3] != float_shares
             if changed:
                 con.execute(
-                    "UPDATE stocks SET market_cap=?, float_ratio=?, circulating_market_cap=?, high_250_price=?, fundamentals_updated_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE code=?",
-                    (market_cap, float_ratio, market_cap * float_ratio / 100, high_250_price, code),
+                    "UPDATE stocks SET market_cap=?, float_ratio=?, float_shares=?, circulating_market_cap=?, high_250_price=?, fundamentals_updated_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE code=?",
+                    (market_cap, float_ratio, float_shares, market_cap * float_ratio / 100, high_250_price, code),
                 )
             else:
                 # 값은 보존하고, 다음 날 재조회하지 않도록 확인 시각만 갱신한다.
@@ -82,14 +89,14 @@ class StockRepository:
         con = sqlite3.connect(self._path)
         try:
             rows = con.execute(
-                f"SELECT code, market_cap, float_ratio, high_250_price FROM stocks WHERE code IN ({placeholders}) AND market_cap IS NOT NULL AND float_ratio IS NOT NULL",
+                f"SELECT code, market_cap, float_ratio, high_250_price, float_shares FROM stocks WHERE code IN ({placeholders}) AND market_cap IS NOT NULL AND float_ratio IS NOT NULL",
                 codes,
             ).fetchall()
         finally:
             con.close()
         return {
-            str(code): StockFundamentals(float(market_cap), float(float_ratio), int(high_price) if high_price else None)
-            for code, market_cap, float_ratio, high_price in rows
+            str(code): StockFundamentals(float(market_cap), float(float_ratio), int(high_price) if high_price else None, int(float_shares) if float_shares else None)
+            for code, market_cap, float_ratio, high_price, float_shares in rows
             if float(market_cap) > 0 and float(float_ratio) >= 0
         }
 

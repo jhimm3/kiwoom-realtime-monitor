@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import logging
+import ctypes
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -42,7 +43,20 @@ def _application_icon_path() -> Path:
     return Path(__file__).resolve().parents[2] / "resources" / "app_icon.png"
 
 
+def _set_taskbar_app_id() -> None:
+    """Keep the development/test app separate from the installed app on Windows."""
+    if sys.platform != "win32":
+        return
+    app_id = "Kuni.KiwoomRealtimeMonitor" if getattr(sys, "frozen", False) else "Kuni.KiwoomRealtimeMonitor.Test"
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except (AttributeError, OSError):
+        # 작업 표시줄 분류 실패는 프로그램 실행에 영향을 주지 않는다.
+        pass
+
+
 def main() -> None:
+    _set_taskbar_app_id()
     paths = AppPaths.for_current_user()
     configure_logging(paths.log_dir)
 
@@ -75,9 +89,13 @@ def main() -> None:
         return {
             "ranking_loader": RankingService(client, stocks=StockRepository(paths.database_path), query_type=database.settings.get("rank_query_type")),
             "realtime_worker_factory": lambda codes: RealtimeTradeWorker(client.get_access_token, settings.environment, codes, client.server_now),
-            "minute_history_worker_factory": lambda codes: MinuteHistoryWorker(MinuteChartService(client), codes, client.server_now),
+            "minute_history_worker_factory": lambda codes: MinuteHistoryWorker(
+                MinuteChartService(client, include_nxt=True), codes, client.server_now
+            ),
             "fundamentals_worker_factory": lambda codes: FundamentalsWorker(StockFundamentalsService(client), codes),
-            "daily_high_worker_factory": lambda codes: DailyHighWorker(DailyHighService(client), codes),
+            "daily_high_worker_factory": lambda codes: DailyHighWorker(
+                DailyHighService(client, include_nxt=True), codes
+            ),
             "nxt_eligibility_worker_factory": lambda codes: NxtEligibilityWorker(NxtEligibilityService(client), codes),
         }
 
@@ -101,7 +119,8 @@ def main() -> None:
         QMessageBox.critical(None, "프로그램 오류", f"처리 중 오류가 발생했습니다.\n{error}\n\n로그 열기에서 자세한 내용을 확인할 수 있습니다.")
 
     sys.excepthook = report_unhandled_error
-    themes = DatabaseThemeRepository(paths.database_path).all_by_name()
+    theme_store = DatabaseThemeRepository(paths.database_path, database.settings.get("theme_active_profile"))
+    themes = theme_store.all_by_name()
     window = MainWindow(
         settings=database.settings,
         ranking_loader=api_runtime.get("ranking_loader"),
@@ -116,7 +135,7 @@ def main() -> None:
         themes=themes,
         columns=ColumnSettingsRepository(paths.database_path),
         stock_lookup=StockRepository(paths.database_path),
-        theme_store=DatabaseThemeRepository(paths.database_path),
+        theme_store=theme_store,
         google_drive_sync=google_drive_sync,
         initial_google_drive_download=initial_google_drive_download,
         api_runtime_factory=build_api_runtime,

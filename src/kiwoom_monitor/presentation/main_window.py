@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
     QStyledItemDelegate,
     QDoubleSpinBox,
+    QSpinBox,
     QStackedLayout,
     QTableWidget,
     QTableWidgetItem,
@@ -96,6 +97,7 @@ from kiwoom_monitor.application.theme_preview import preview_theme_changes
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv, MinuteTradeValueAggregator
 from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import ImageThemeOcrWorker
 from kiwoom_monitor.infrastructure.krx.stock_catalog_worker import KrxStockCatalogWorker
+from kiwoom_monitor.infrastructure.update_planner import UpdatePlan, UpdateStep, build_update_plan
 
 
 class RankingLoader(Protocol):
@@ -104,7 +106,7 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.9"
+APP_VERSION = "1.1.10"
 APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 INVESTMENT_NOTICE = "본 앱은 투자 자문이 아니며 시세 지연·오류가 있을 수 있습니다."
@@ -154,74 +156,70 @@ class GoogleDriveSyncWorker(QThread):
 class UpdateCheckWorker(QThread):
     """GitHub Release 확인을 별도 스레드에서 수행한다."""
 
-    completed = Signal(str, str, str, str)
+    completed = Signal(object)
     failed = Signal(str)
 
-    RELEASE_API_URL = "https://api.github.com/repos/jhimm3/kiwoom-realtime-monitor/releases/latest"
+    RELEASES_API_URL = "https://api.github.com/repos/jhimm3/kiwoom-realtime-monitor/releases?per_page=100"
 
     def run(self) -> None:
         try:
-            request = Request(self.RELEASE_API_URL, headers={"Accept": "application/vnd.github+json", "User-Agent": "KiwoomMonitor"})
+            request = Request(self.RELEASES_API_URL, headers={"Accept": "application/vnd.github+json", "User-Agent": "KiwoomMonitor"})
             with urlopen(request, timeout=10) as response:
-                document = json.loads(response.read().decode("utf-8"))
-            version = str(document.get("tag_name", "")).strip().lstrip("vV")
-            page_url = str(document.get("html_url", "")).strip()
-            if not version or not page_url:
-                raise ValueError("릴리즈 버전 정보를 찾을 수 없습니다.")
-            assets = tuple(document.get("assets", ()))
-            update_name = f"KiwoomMonitor-Update-{version}.zip"
-            update_asset = next((str(asset.get("browser_download_url", "")) for asset in assets if str(asset.get("name", "")) == update_name), "")
-            checksum_asset = next((str(asset.get("browser_download_url", "")) for asset in assets if str(asset.get("name", "")) == f"{update_name}.sha256"), "")
-            self.completed.emit(version, update_asset, checksum_asset, page_url)
+                documents = json.loads(response.read().decode("utf-8"))
+            if not isinstance(documents, list):
+                raise ValueError("릴리즈 목록 형식이 올바르지 않습니다.")
+            self.completed.emit(build_update_plan(APP_VERSION, documents))
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
             self.failed.emit(str(error))
 
 
 class UpdateDownloadWorker(QThread):
-    """부분 업데이트 ZIP을 사용자 임시 데이터 폴더로 내려받는다."""
+    """여러 개의 부분 업데이트 ZIP을 검증 후 순서대로 내려받는다."""
 
-    completed = Signal(str)
+    completed = Signal(object)
     failed = Signal(str)
     progress = Signal(int)
 
-    def __init__(self, url: str, checksum_url: str, version: str, parent: QWidget | None = None) -> None:
+    def __init__(self, steps: tuple[UpdateStep, ...], parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._url = url
-        self._checksum_url = checksum_url
-        self._version = version
+        self._steps = steps
 
     def run(self) -> None:
         try:
             folder = AppPaths.for_current_user().data_dir.parent / "updates"
             folder.mkdir(parents=True, exist_ok=True)
-            destination = folder / f"KiwoomMonitor-Update-{self._version}.zip"
-            temporary = destination.with_suffix(".zip.part")
-            checksum_request = Request(self._checksum_url, headers={"User-Agent": "KiwoomMonitor"})
-            with urlopen(checksum_request, timeout=15) as response:
-                checksum_text = response.read(8 * 1024).decode("utf-8", errors="strict")
-            match = re.fullmatch(r"\s*([0-9a-fA-F]{64})(?:\s+\*?[^\r\n]+)?\s*", checksum_text)
-            if match is None:
-                raise ValueError("업데이트 검증 파일 형식이 올바르지 않습니다.")
-            expected_hash = match.group(1).lower()
-            request = Request(self._url, headers={"User-Agent": "KiwoomMonitor"})
-            digest = hashlib.sha256()
-            with urlopen(request, timeout=30) as response, temporary.open("wb") as stream:
-                total = int(response.headers.get("Content-Length", "0"))
-                received = 0
-                while block := response.read(1024 * 1024):
-                    if self.isInterruptionRequested():
-                        temporary.unlink(missing_ok=True)
-                        return
-                    stream.write(block)
-                    digest.update(block)
-                    received += len(block)
-                    if total:
-                        self.progress.emit(min(100, int(received * 100 / total)))
-            if digest.hexdigest() != expected_hash:
-                temporary.unlink(missing_ok=True)
-                raise ValueError("업데이트 파일 검증에 실패했습니다. 파일을 교체하지 않았습니다.")
-            temporary.replace(destination)
-            self.completed.emit(str(destination))
+            planned_size = sum(max(1, step.size) for step in self._steps)
+            completed_size = 0
+            archives: list[str] = []
+            for step in self._steps:
+                destination = folder / f"KiwoomMonitor-Update-{step.version}.zip"
+                temporary = destination.with_suffix(".zip.part")
+                checksum_request = Request(step.checksum_url, headers={"User-Agent": "KiwoomMonitor"})
+                with urlopen(checksum_request, timeout=15) as response:
+                    checksum_text = response.read(8 * 1024).decode("utf-8", errors="strict")
+                match = re.fullmatch(r"\s*([0-9a-fA-F]{64})(?:\s+\*?[^\r\n]+)?\s*", checksum_text)
+                if match is None:
+                    raise ValueError("업데이트 검증 파일 형식이 올바르지 않습니다.")
+                request = Request(step.update_url, headers={"User-Agent": "KiwoomMonitor"})
+                digest = hashlib.sha256()
+                with urlopen(request, timeout=30) as response, temporary.open("wb") as stream:
+                    received = 0
+                    while block := response.read(1024 * 1024):
+                        if self.isInterruptionRequested():
+                            temporary.unlink(missing_ok=True)
+                            return
+                        stream.write(block)
+                        digest.update(block)
+                        received += len(block)
+                        self.progress.emit(min(100, int((completed_size + min(received, max(1, step.size))) * 100 / planned_size)))
+                if digest.hexdigest() != match.group(1).lower():
+                    temporary.unlink(missing_ok=True)
+                    raise ValueError("업데이트 파일 검증에 실패했습니다. 파일을 교체하지 않았습니다.")
+                temporary.replace(destination)
+                archives.append(str(destination))
+                completed_size += max(1, step.size)
+                self.progress.emit(min(100, int(completed_size * 100 / planned_size)))
+            self.completed.emit(tuple(archives))
         except (HTTPError, URLError, TimeoutError, OSError, UnicodeError, ValueError) as error:
             self.failed.emit(str(error))
 
@@ -412,6 +410,14 @@ class SettingsDialog(QDialog):
             self._update_near_high_icon_image_label(level)
         self._near_high_sounds = QCheckBox("신고가 근접 단계 소리 사용")
         self._near_high_sounds.setChecked(settings.get("near_high_sound_enabled") == "1")
+        self._near_high_sound_cooldown = QSpinBox()
+        self._near_high_sound_cooldown.setRange(0, 600)
+        self._near_high_sound_cooldown.setSuffix("초")
+        self._near_high_sound_cooldown.setToolTip("0초로 설정하면 같은 단계에 다시 진입할 때마다 안내합니다.")
+        try:
+            self._near_high_sound_cooldown.setValue(max(0, int(float(settings.get("near_high_sound_cooldown_seconds")))))
+        except (TypeError, ValueError):
+            self._near_high_sound_cooldown.setValue(int(DEFAULT_SETTINGS["near_high_sound_cooldown_seconds"]))
         self._near_high_sound_paths = {level: settings.get(f"near_high_sound_{level}") for level in ("interest", "caution", "fire")}
         self._near_high_sound_labels = {level: QLabel() for level in ("interest", "caution", "fire")}
         for level in self._near_high_sound_paths:
@@ -574,6 +580,7 @@ class SettingsDialog(QDialog):
         high_form.addRow(self._section_title("신고가 알림 소리"))
         high_form.addRow(self._near_high_sounds)
         high_form.addRow(QLabel("소리 파일: WAV·MP3·OGG·M4A, 파일당 5MB·30초 이하. 신고가에 가까워져 더 높은 단계에 새로 진입할 때만 재생됩니다."))
+        high_form.addRow("같은 단계 재알림 대기 시간", self._near_high_sound_cooldown)
         for level, label in (("interest", "관심"), ("caution", "주의"), ("fire", "불")):
             high_form.addRow(f"{label} 소리", self._near_high_sound_row(level))
         high_reset = QPushButton("이 탭 초기화")
@@ -749,6 +756,7 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self._apply_responsive_font()
 
     def minimumSizeHint(self) -> QSize:
         """탭의 긴 내용이 Windows 창 크기 제한으로 전파되는 것을 막는다."""
@@ -756,8 +764,18 @@ class SettingsDialog(QDialog):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
+        self._apply_responsive_font()
         if hasattr(self, "_dialog_size_save_timer"):
             self._dialog_size_save_timer.start()
+
+    def _apply_responsive_font(self) -> None:
+        """Keep the settings dialog readable while allowing a modest size change on resize."""
+        scale = min(self.width() / 680, self.height() / 650)
+        point_size = max(7, min(14, round(10 * scale)))
+        if getattr(self, "_responsive_font_point_size", None) == point_size:
+            return
+        self._responsive_font_point_size = point_size
+        self.setStyleSheet(f"QWidget {{ font-size: {point_size}pt; }}")
 
     def done(self, result: int) -> None:
         self._save_dialog_size()
@@ -811,6 +829,7 @@ class SettingsDialog(QDialog):
             self._near_high_icon_images[level] = ""
             self._update_near_high_icon_image_label(level)
         self._near_high_sounds.setChecked(DEFAULT_SETTINGS["near_high_sound_enabled"] == "1")
+        self._near_high_sound_cooldown.setValue(int(DEFAULT_SETTINGS["near_high_sound_cooldown_seconds"]))
         for level in self._near_high_sound_paths:
             self._near_high_sound_paths[level] = DEFAULT_SETTINGS[f"near_high_sound_{level}"]
             self._update_near_high_sound_label(level)
@@ -1184,8 +1203,9 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "입력 확인", "화면 크기 설정과 시가총액 강조 기준을 확인하세요.")
             return
         market_cap_active_thresholds = [market_cap_highlights[level] for level in ("low", "middle", "high") if market_cap_highlights[level] > 0]
-        if not (0 <= font_size <= 30 and 0 <= row_height <= 100 and 0 <= badge_font_size <= 30 and 0 <= badge_padding <= 20 and all(value >= 0 for value in market_cap_highlights.values()) and market_cap_active_thresholds == sorted(market_cap_active_thresholds)):
-            QMessageBox.warning(self, "입력 확인", "화면 크기 설정 범위를 확인하세요.")
+        valid_row_height = row_height == 0 or 12 <= row_height <= 100
+        if not (0 <= font_size <= 30 and valid_row_height and 0 <= badge_font_size <= 30 and 0 <= badge_padding <= 20 and all(value >= 0 for value in market_cap_highlights.values()) and market_cap_active_thresholds == sorted(market_cap_active_thresholds)):
+            QMessageBox.warning(self, "입력 확인", "표 행 높이는 0(자동) 또는 12~100으로 입력하세요.")
             return
         self._settings.set("rank_query_type", str(self._rank_query_type.currentData()))
         self._settings.set("rank_row_odd_color", self._rank_row_colors["odd"])
@@ -1209,6 +1229,7 @@ class SettingsDialog(QDialog):
             self._settings.set(f"near_high_icon_{level}", field.text().strip())
             self._settings.set(f"near_high_icon_{level}_image", self._near_high_icon_images[level])
         self._settings.set("near_high_sound_enabled", "1" if self._near_high_sounds.isChecked() else "0")
+        self._settings.set("near_high_sound_cooldown_seconds", str(self._near_high_sound_cooldown.value()))
         for level, value in self._near_high_sound_paths.items():
             self._settings.set(f"near_high_sound_{level}", value)
         self._settings.set("ui_font_size", str(font_size)); self._settings.set("ui_row_height", str(row_height)); self._settings.set("theme_badge_enabled", "1" if self._theme_badge_enabled.isChecked() else "0"); self._settings.set("theme_badge_font_size", str(badge_font_size)); self._settings.set("theme_badge_padding", str(badge_padding))
@@ -1535,6 +1556,10 @@ class ImageThemeRowsDialog(QDialog):
         self.resize(680, 520)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("OCR 결과를 수정하세요. 행 추가·삭제가 가능하며, Excel의 종목명·테마 두 열을 복사해 Ctrl+V로 한 번에 붙여넣을 수 있습니다."))
+        self._validation_message = QLabel()
+        self._validation_message.setStyleSheet("color: #C00000;")
+        self._validation_message.setWordWrap(True)
+        layout.addWidget(self._validation_message)
         self.table = QTableWidget(len(rows), 2)
         self.table.setHorizontalHeaderLabels(("종목명", "테마"))
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -1552,8 +1577,45 @@ class ImageThemeRowsDialog(QDialog):
         actions.addWidget(add); actions.addWidget(remove); actions.addStretch()
         layout.addLayout(actions)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self._accept_if_valid); buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _accept_if_valid(self) -> None:
+        seen: dict[str, int] = {}
+        duplicates: list[tuple[int, int, str]] = []
+        default_background = self.table.palette().brush(QPalette.ColorRole.Base)
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            theme_item = self.table.item(row, 1)
+            for item in (name_item, theme_item):
+                if item is not None:
+                    item.setBackground(default_background)
+            name = name_item.text().strip() if name_item is not None else ""
+            themes = theme_item.text().strip() if theme_item is not None else ""
+            if not name or not themes:
+                continue
+            key = "".join(name.split()).casefold()
+            if key in seen:
+                duplicates.append((seen[key], row, name))
+            else:
+                seen[key] = row
+        if not duplicates:
+            self._validation_message.clear()
+            self.accept()
+            return
+        for first_row, duplicate_row, _ in duplicates:
+            for row in (first_row, duplicate_row):
+                for column in range(2):
+                    item = self.table.item(row, column)
+                    if item is not None:
+                        item.setBackground(QColor("#FCE4D6"))
+        first_row, duplicate_row, name = duplicates[0]
+        self._validation_message.setText(
+            f"{duplicate_row + 1}행의 종목명 '{name}'이(가) {first_row + 1}행과 중복됩니다. "
+            "한 행으로 합치거나 종목명을 수정한 뒤 다시 미리보기를 누르세요."
+        )
+        self.table.setCurrentCell(duplicate_row, 0)
+        self.table.scrollToItem(self.table.item(duplicate_row, 0))
 
     def eventFilter(self, watched: object, event: object) -> bool:
         if watched in (self.table, self.table.viewport()) and getattr(event, "type", lambda: None)() == QEvent.Type.KeyPress:
@@ -1586,6 +1648,45 @@ class ImageThemeRowsDialog(QDialog):
             if name and name.text().strip() and themes and themes.text().strip():
                 values.append((name.text().strip(), themes.text().strip()))
         return tuple(values)
+
+
+class ImageThemeImportOptionsDialog(QDialog):
+    """Keep image-layout choices close to the action that uses them."""
+
+    def __init__(self, settings: SettingsRepository, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._settings = settings
+        self.setWindowTitle("이미지 테마 업데이트")
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("이미지의 테마가 표시된 방식을 선택한 뒤 이미지를 고르세요."))
+        form = QFormLayout()
+        self._mode = QComboBox()
+        self._mode.addItem("테마 열 읽기", "theme_column")
+        self._mode.addItem("색상 배지 읽기", "reason_badges")
+        self._mode.addItem("테마 열 + 색상 배지 함께 읽기", "both")
+        saved_mode = settings.get("theme_image_import_mode")
+        self._mode.setCurrentIndex({"theme_column": 0, "reason_badges": 1, "both": 2}.get(saved_mode, 0))
+        self._theme_header = QLineEdit(settings.get("theme_image_import_theme_header"))
+        self._theme_header.setPlaceholderText("예: 테마, 관련 테마")
+        form.addRow("이미지 테마 읽기 방식", self._mode)
+        form.addRow("테마 열 제목", self._theme_header)
+        layout.addLayout(form)
+        layout.addWidget(QLabel("색상 배지만 읽는 방식에서는 테마 열 제목을 사용하지 않습니다."))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("이미지 선택")
+        buttons.accepted.connect(self._save_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def mode(self) -> str:
+        return str(self._mode.currentData())
+
+    def _save_and_accept(self) -> None:
+        self._settings.set("theme_image_import_mode", self.mode)
+        self._settings.set("theme_image_import_theme_header", self._theme_header.text().strip())
+        self.accept()
 
 
 class TextThemeImportDialog(QDialog):
@@ -1831,7 +1932,7 @@ class ThemeBulkEditDialog(QDialog):
         return tuple(values)
 
 class ThemeManagerDialog(QDialog):
-    def __init__(self, repository: object, settings: SettingsRepository, on_excel_update: Callable[[], None] | None = None, on_image_update: Callable[[], None] | None = None, on_catalog_sync: Callable[[], None] | None = None, parent: QWidget | None = None, on_themes_changed: Callable[[], None] | None = None) -> None:
+    def __init__(self, repository: object, settings: SettingsRepository, on_excel_update: Callable[[], None] | None = None, on_image_update: Callable[[str], None] | None = None, on_catalog_sync: Callable[[], None] | None = None, parent: QWidget | None = None, on_themes_changed: Callable[[], None] | None = None) -> None:
         super().__init__(parent); self._repository=repository; self._settings=settings; self._separators=",/|;" + settings.get("theme_custom_separators"); self._on_excel_update=on_excel_update; self._on_image_update=on_image_update; self._on_themes_changed=on_themes_changed; self.setWindowTitle("종목/테마 관리"); self.resize(560,420)
         self._search=QLineEdit(); self._search.setPlaceholderText("종목명 검색"); self._table=QTableWidget(0,2); self._table.setHorizontalHeaderLabels(("종목명","테마"))
         header = self._table.horizontalHeader()
@@ -1857,6 +1958,21 @@ class ThemeManagerDialog(QDialog):
             stock_layout.addWidget(QLabel(f"마지막 동기화: {last or '없음'}"))
         stock_layout.addStretch()
         self._add.clicked.connect(self._add_new); self._text_import.clicked.connect(self._import_text)
+        profile_row = QHBoxLayout()
+        self._theme_profile = QComboBox()
+        self._new_theme_profile = QPushButton("새 프로필")
+        self._copy_theme_profile = QPushButton("복제")
+        self._rename_theme_profile = QPushButton("이름 변경")
+        self._delete_theme_profile = QPushButton("삭제")
+        profile_row.addWidget(self._theme_profile, 1)
+        profile_row.addWidget(self._new_theme_profile)
+        profile_row.addWidget(self._copy_theme_profile)
+        profile_row.addWidget(self._rename_theme_profile)
+        profile_row.addWidget(self._delete_theme_profile)
+        theme_layout.addWidget(SettingsDialog._section_title("테마 프로필"))
+        theme_layout.addWidget(QLabel("프로필마다 종목 테마와 테마 색상을 별도로 관리합니다."))
+        theme_layout.addLayout(profile_row)
+        theme_layout.addWidget(SettingsDialog._section_separator())
         theme_layout.addWidget(SettingsDialog._section_title("공통 입력 규칙"))
         theme_layout.addWidget(QLabel("추가 테마 구분자"))
         theme_layout.addWidget(self._custom_separators)
@@ -1872,7 +1988,7 @@ class ThemeManagerDialog(QDialog):
             theme_layout.addWidget(excel)
         if self._on_image_update is not None:
             image = QPushButton("이미지 테마 업데이트")
-            image.clicked.connect(self._on_image_update)
+            image.clicked.connect(self._start_image_update)
             theme_layout.addWidget(image)
         theme_layout.addWidget(SettingsDialog._section_separator())
         theme_layout.addWidget(SettingsDialog._section_title("테마 일괄 관리"))
@@ -1886,15 +2002,79 @@ class ThemeManagerDialog(QDialog):
         layout.addWidget(tabs)
         self._bulk_edit.clicked.connect(self._rename_theme)
         self._clear_all.clicked.connect(self._clear_all_themes)
+        self._theme_profile.currentTextChanged.connect(self._select_theme_profile)
+        self._new_theme_profile.clicked.connect(lambda: self._create_theme_profile(copy_current=False))
+        self._copy_theme_profile.clicked.connect(lambda: self._create_theme_profile(copy_current=True))
+        self._rename_theme_profile.clicked.connect(self._rename_current_theme_profile)
+        self._delete_theme_profile.clicked.connect(self._delete_current_theme_profile)
         self._custom_separators.textChanged.connect(lambda _: self._save_custom_separators())
         self._import_exclusions.textChanged.connect(lambda _: self._save_import_exclusions())
-        self._search.textChanged.connect(self._reload); self._table.cellDoubleClicked.connect(self._edit); self._rows=(); self._reload()
+        self._search.textChanged.connect(self._reload); self._table.cellDoubleClicked.connect(self._edit); self._rows=()
+        self._refresh_theme_profiles(); self._reload()
+    def _refresh_theme_profiles(self) -> None:
+        profiles = self._repository.list_profiles()
+        active = getattr(self._repository, "active_profile", self._settings.get("theme_active_profile"))
+        self._theme_profile.blockSignals(True)
+        self._theme_profile.clear()
+        self._theme_profile.addItems(profiles)
+        self._theme_profile.setCurrentText(active if active in profiles else (profiles[0] if profiles else "기본 테마"))
+        self._theme_profile.blockSignals(False)
+    def _select_theme_profile(self, name: str) -> None:
+        if not name:
+            return
+        self._repository.select_profile(name)
+        self._settings.set("theme_active_profile", name)
+        self._reload()
+        self._notify_themes_changed()
+    def _create_theme_profile(self, copy_current: bool) -> None:
+        title = "현재 테마 복제" if copy_current else "새 테마 프로필"
+        prompt = "새 프로필 이름을 입력하세요." if not copy_current else "현재 테마를 복제할 새 프로필 이름을 입력하세요."
+        name, accepted = QInputDialog.getText(self, title, prompt)
+        if not accepted:
+            return
+        try:
+            created = self._repository.create_profile(name, copy_current=copy_current)
+        except ValueError as error:
+            QMessageBox.warning(self, title, str(error))
+            return
+        self._refresh_theme_profiles()
+        self._theme_profile.setCurrentText(created)
+    def _delete_current_theme_profile(self) -> None:
+        name = self._theme_profile.currentText()
+        if QMessageBox.question(self, "테마 프로필 삭제", f"'{name}' 프로필의 모든 테마를 삭제합니다.\n되돌릴 수 없습니다.\n\n계속할까요?") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._repository.delete_profile(name)
+        except ValueError as error:
+            QMessageBox.warning(self, "테마 프로필 삭제", str(error))
+            return
+        self._refresh_theme_profiles()
+        self._select_theme_profile(self._theme_profile.currentText())
+    def _rename_current_theme_profile(self) -> None:
+        before = self._theme_profile.currentText()
+        after, accepted = QInputDialog.getText(self, "테마 프로필 이름 변경", "새 프로필 이름을 입력하세요.", text=before)
+        if not accepted:
+            return
+        try:
+            renamed = self._repository.rename_profile(before, after)
+        except ValueError as error:
+            QMessageBox.warning(self, "테마 프로필 이름 변경", str(error))
+            return
+        self._settings.set("theme_active_profile", renamed)
+        self._refresh_theme_profiles()
+        self._theme_profile.setCurrentText(renamed)
     def _save_custom_separators(self) -> None:
         value = self._custom_separators.text().strip()
         self._settings.set("theme_custom_separators", value)
         self._separators = ",/|;" + value
     def _save_import_exclusions(self) -> None:
         self._settings.set("theme_import_exclusions", self._import_exclusions.text().strip())
+    def _start_image_update(self) -> None:
+        if self._on_image_update is None:
+            return
+        dialog = ImageThemeImportOptionsDialog(self._settings, self)
+        if dialog.exec():
+            self._on_image_update(dialog.mode)
     def _save_table_column_width(self, logical_index: int, _old_width: int, new_width: int) -> None:
         if logical_index == 0:
             self._settings.set("theme_manager_stock_column_width", str(new_width))
@@ -2113,6 +2293,7 @@ class MainWindow(QMainWindow):
         self._fundamentals: dict[str, StockFundamentals] = {}
         self._daily_highs: dict[str, DailyHighTargets] = {}
         self._previous_day_trade_values: dict[str, float] = {}
+        self._previous_day_close_prices: dict[str, int] = {}
         self._daily_high_cache_date: date | None = None
         self._themes = themes or {}
         self._pending_price_cache: dict[str, int] = {}
@@ -2160,6 +2341,10 @@ class MainWindow(QMainWindow):
         self._ranking_priority_preparing = False
         self._resizing_columns = False
         self._restoring_columns = False
+        self._syncing_row_heights = False
+        self._row_height_dragging = False
+        self._row_height_drag_start_y = 0
+        self._row_height_drag_start_height = 0
         self._column_auto_fit_ready = False
         self._manual_column_resize_until = 0.0
         self._initial_new_high_refresh_started = False
@@ -2168,10 +2353,13 @@ class MainWindow(QMainWindow):
         self._row_by_code: dict[str, int] = {}
         self._ranked_stock_names: dict[str, str] = {}
         self._current_prices: dict[str, int] = {}
+        # 0B FID 311 수신값. 장중 표 시가총액에는 ka10001 캐시보다 우선한다.
+        self._realtime_market_caps: dict[str, float] = {}
         self._today_high_codes: set[str] = set()
         self._today_high_prices: dict[str, int] = {}
         self._near_high_codes: set[str] = set()
         self._near_high_levels: dict[str, str] = {}
+        self._near_high_sound_last_played: dict[tuple[str, str], float] = {}
         self._nxt_checked_codes: set[str] = set()
         self._nxt_enabled_codes: set[str] = set()
         self._near_high_sound_players: dict[str, tuple[QMediaPlayer, QAudioOutput]] = {}
@@ -2268,10 +2456,19 @@ class MainWindow(QMainWindow):
 
         self._table = QTableWidget(1, len(self.HEADERS))
         self._table.setHorizontalHeaderLabels(self.HEADERS)
-        self._table.verticalHeader().setVisible(False)
+        # 행 번호는 표시하지 않는다. 행 높이는 순위 칸 안의 가는 경계선을
+        # 드래그해서 조절한다.
+        vertical_header = self._table.verticalHeader()
+        vertical_header.setVisible(False)
+        vertical_header.setMinimumSectionSize(12)
+        vertical_header.setMaximumSectionSize(100)
+        vertical_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        # 순위 칸의 행 경계에 올렸을 때에도 크기 조절 커서를 보여 준다.
+        self._table.setMouseTracking(True)
+        self._table.viewport().setMouseTracking(True)
         self._table.cellClicked.connect(self._toggle_table_cell_selection)
         self._table.cellDoubleClicked.connect(self._edit_theme_from_main_table)
         self._table.setItemDelegate(NxtMarkerDelegate(self._table))
@@ -2391,49 +2588,63 @@ class MainWindow(QMainWindow):
             return
         worker = UpdateCheckWorker(self)
         self._update_check_worker = worker
-        worker.completed.connect(lambda version, url, checksum_url, release_url: self._on_update_check_completed(version, url, checksum_url, release_url, silent=silent))
+        worker.completed.connect(lambda plan: self._on_update_check_completed(plan, silent=silent))
         worker.failed.connect(lambda message: self._on_update_check_failed(message, silent=silent))
         worker.finished.connect(lambda: setattr(self, "_update_check_worker", None))
         self.statusBar().showMessage("업데이트 정보를 확인하고 있습니다…")
         worker.start()
 
     @staticmethod
-    def _version_tuple(value: str) -> tuple[int, ...]:
-        try:
-            return tuple(int(part) for part in value.split("."))
-        except ValueError:
-            return ()
+    def _format_update_size(size: int) -> str:
+        return f"{size / 1024 / 1024:.1f}MB"
 
-    def _on_update_check_completed(self, version: str, update_url: str, checksum_url: str, release_url: str, silent: bool = False) -> None:
-        if self._version_tuple(version) <= self._version_tuple(APP_VERSION):
+    def _on_update_check_completed(self, plan: UpdatePlan | None, silent: bool = False) -> None:
+        if plan is None:
             self.statusBar().showMessage("현재 최신 버전을 사용하고 있습니다.", 4_000)
             if not silent:
                 QMessageBox.information(self, "앱 업데이트", f"현재 최신 버전입니다.\n\n현재 버전: {APP_VERSION}")
             return
-        if not update_url or not checksum_url:
+        if not plan.can_apply_steps:
             answer = QMessageBox.question(
                 self,
                 "앱 업데이트",
-                f"새 버전 {version}이 있습니다.\n현재 버전: {APP_VERSION}\n\n검증된 부분 업데이트 파일이 아직 준비되지 않았습니다. 릴리즈 페이지를 열까요?",
+                f"새 버전 {plan.latest_version}이 있습니다.\n현재 버전: {APP_VERSION}\n\n중간 버전용 검증된 부분 업데이트 파일이 부족합니다. 전체 설치 파일을 받으세요. 릴리즈 페이지를 열까요?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.Yes:
-                QDesktopServices.openUrl(QUrl(release_url))
+                QDesktopServices.openUrl(QUrl(plan.release_url))
             return
         if not getattr(sys, "frozen", False):
             QMessageBox.information(self, "앱 업데이트", "개발 실행 중에는 자동 업데이트를 적용하지 않습니다.\n설치본에서 자동 업데이트를 사용할 수 있습니다.")
             return
+        if plan.should_use_setup:
+            answer = QMessageBox.question(
+                self,
+                "앱 업데이트",
+                f"새 버전 {plan.latest_version}이 있습니다.\n현재 버전: {APP_VERSION}\n\n"
+                f"부분 업데이트 {len(plan.steps)}개 합계: {self._format_update_size(plan.update_size)}\n"
+                f"전체 설치 파일: {self._format_update_size(plan.setup_size)}\n\n"
+                "전체 설치 파일이 더 작거나 같습니다. 릴리즈 페이지를 열어 설치 파일을 받을까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                QDesktopServices.openUrl(QUrl(plan.release_url))
+            return
+        sequence = " → ".join(step.version for step in plan.steps)
         answer = QMessageBox.question(
             self,
             "앱 업데이트",
-            f"새 버전 {version}이 있습니다.\n현재 버전: {APP_VERSION}\n\n변경된 파일만 자동으로 다운로드해 설치할까요?",
+            f"새 버전 {plan.latest_version}이 있습니다.\n현재 버전: {APP_VERSION}\n\n"
+            f"부분 업데이트 순서: {sequence}\n"
+            f"다운로드 합계: {self._format_update_size(plan.update_size)}\n\n"
+            "변경된 파일만 순서대로 다운로드해 설치할까요?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer == QMessageBox.StandardButton.Yes:
-            self._download_update(update_url, checksum_url, version)
+            self._download_updates(plan.steps)
 
-    def _download_update(self, url: str, checksum_url: str, version: str) -> None:
-        worker = UpdateDownloadWorker(url, checksum_url, version, self)
+    def _download_updates(self, steps: tuple[UpdateStep, ...]) -> None:
+        worker = UpdateDownloadWorker(steps, self)
         self._update_download_worker = worker
         progress = QProgressDialog("업데이트 파일을 다운로드하고 있습니다…", "취소", 0, 100, self)
         progress.setWindowTitle("앱 업데이트")
@@ -2443,7 +2654,7 @@ class MainWindow(QMainWindow):
         self._update_progress_dialog = progress
         progress.canceled.connect(worker.requestInterruption)
         worker.progress.connect(progress.setValue)
-        worker.completed.connect(self._apply_downloaded_update)
+        worker.completed.connect(self._apply_downloaded_updates)
         worker.failed.connect(self._on_update_download_failed)
         worker.finished.connect(self._close_update_progress)
         self.statusBar().showMessage("업데이트 파일을 다운로드하고 있습니다…")
@@ -2456,7 +2667,10 @@ class MainWindow(QMainWindow):
             self._update_progress_dialog = None
         self._update_download_worker = None
 
-    def _apply_downloaded_update(self, archive_path: str) -> None:
+    def _apply_downloaded_updates(self, archive_paths: object) -> None:
+        if not isinstance(archive_paths, (tuple, list)) or not archive_paths:
+            QMessageBox.critical(self, "앱 업데이트", "다운로드한 업데이트 파일을 찾을 수 없습니다.")
+            return
         app_root = Path(sys.executable).resolve().parent
         updates_dir = AppPaths.for_current_user().data_dir.parent / "updates"
         bundled_helper = app_root / "_internal" / "update_helper" / "UpdateHelper.exe"
@@ -2467,13 +2681,15 @@ class MainWindow(QMainWindow):
                 raise OSError("업데이트 도우미를 찾을 수 없습니다. 설치 파일로 다시 설치하세요.")
             updates_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(bundled_helper, helper)
-            arguments = subprocess.list2cmdline([
+            arguments_list = [
                 "--wait-pid", str(os.getpid()),
-                "--archive", archive_path,
                 "--target", str(app_root),
                 "--exe", str(app_root / Path(sys.executable).name),
                 "--log", str(log_path),
-            ])
+            ]
+            for archive_path in archive_paths:
+                arguments_list.extend(("--archive", str(archive_path)))
+            arguments = subprocess.list2cmdline(arguments_list)
             result = ctypes.windll.shell32.ShellExecuteW(None, "runas", str(helper), arguments, None, 0)
             if result <= 32:
                 raise OSError(f"Windows 권한 확인이 취소되었거나 시작에 실패했습니다. ({result})")
@@ -2841,8 +3057,9 @@ class MainWindow(QMainWindow):
         self._api_status.setStyleSheet(f"color: {color}; font-weight: bold;")
 
     def _open_log_file(self) -> None:
-        root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[3]
-        log_dir = root / "data" / "logs"
+        # 설치본의 Program Files는 읽기 전용이다. 로그는 항상 사용자 데이터
+        # 폴더(%LocalAppData%\\KiwoomMonitor\\data\\logs)를 연다.
+        log_dir = AppPaths.for_current_user().log_dir
         log_dir.mkdir(parents=True, exist_ok=True)
         logger.info("사용자가 로그 폴더를 열었습니다: %s", log_dir)
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir))):
@@ -2879,7 +3096,8 @@ class MainWindow(QMainWindow):
         except SettingsBackupError as error:
             QMessageBox.warning(self, "설정 복원", str(error))
             return
-        QMessageBox.information(self, "설정 복원", "설정을 복원했습니다. 프로그램을 다시 시작하면 적용됩니다.")
+        self._apply_downloaded_google_drive_data()
+        QMessageBox.information(self, "설정 복원", "설정을 복원하고 바로 적용했습니다.")
 
     def _export_theme_backup(self) -> None:
         default_name = f"키움_모니터_테마DB_{datetime.now():%Y%m%d}.json"
@@ -2892,21 +3110,27 @@ class MainWindow(QMainWindow):
         except OSError as error:
             QMessageBox.warning(self, "테마 DB 저장", f"테마 DB 백업을 저장하지 못했습니다.\n{error}")
             return
-        QMessageBox.information(self, "테마 DB 저장", "테마·종목 연결·테마 색·별칭·등록 종목을 저장했습니다.\n일반 설정, 필드 구성, API 키, 로그는 포함하지 않았습니다.")
+        QMessageBox.information(self, "테마 DB 저장", "모든 테마 프로필의 테마·종목 연결·테마 색·별칭·등록 종목을 저장했습니다.\n일반 설정, 필드 구성, API 키, 로그는 포함하지 않았습니다.")
 
     def _import_theme_backup(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "테마 DB 불러오기", "", "테마 DB 백업 (*.json)")
         if not path:
             return
-        if QMessageBox.question(self, "테마 DB 불러오기", "현재 테마·종목 연결·테마 색·별칭을 백업 내용으로 바꿉니다. 일반 설정은 바뀌지 않습니다. 계속할까요?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "테마 DB 불러오기", "모든 테마 프로필의 테마·종목 연결·테마 색·별칭을 백업 내용으로 바꿉니다. 일반 설정은 바뀌지 않습니다. 계속할까요?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
             return
         try:
             ThemeBackupService(self._settings.database_path).import_from(Path(path))
         except ThemeBackupError as error:
             QMessageBox.warning(self, "테마 DB 불러오기", str(error))
             return
+        if self._theme_store is not None:
+            profiles = self._theme_store.list_profiles()
+            selected = self._settings.get("theme_active_profile")
+            selected = selected if selected in profiles else profiles[0]
+            self._theme_store.select_profile(selected)
+            self._settings.set("theme_active_profile", selected)
         self._on_themes_changed()
-        QMessageBox.information(self, "테마 DB 불러오기", "테마 DB를 불러왔습니다.")
+        QMessageBox.information(self, "테마 DB 불러오기", "모든 테마 프로필을 불러왔습니다.")
 
     def _on_background_failure(self, message: str) -> None:
         logger.warning("백그라운드 작업 실패: %s", message)
@@ -3053,23 +3277,50 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("새 API 설정 적용 완료 · 순위를 다시 조회합니다.")
         self._start_initial_ranking()
 
-    def _select_theme_image(self) -> None:
+    def _select_theme_image(self, mode: str = "theme_column") -> None:
         path, _ = QFileDialog.getOpenFileName(self, "테마 이미지 선택", self._settings.get("theme_image_import_dir"), "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)")
         if not path:
             return
         self._settings.set("theme_image_import_dir", str(Path(path).parent))
-        self._start_image_theme_ocr(Path(path))
+        theme_header = self._settings.get("theme_image_import_theme_header").strip()
+        self._start_image_theme_ocr(Path(path), mode, theme_header)
 
-    def _start_image_theme_ocr(self, image_path: Path) -> None:
-        worker = ImageThemeOcrWorker(image_path)
+    def _start_image_theme_ocr(self, image_path: Path, mode: str = "theme_column", theme_header: str = "테마") -> None:
+        previous = getattr(self, "_image_theme_ocr_worker", None)
+        if previous is not None and previous.isRunning():
+            QMessageBox.information(self, "이미지 OCR", "이미지 분석이 이미 진행 중입니다.")
+            return
+        worker = ImageThemeOcrWorker(image_path, mode, theme_header)
         worker.setParent(self)
+        progress = QProgressDialog("OCR 엔진을 준비하고 있습니다…", "취소", 0, 0, self)
+        progress.setWindowTitle("이미지 테마 분석")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        self._image_theme_ocr_progress_dialog = progress
+        progress.canceled.connect(worker.requestInterruption)
+        worker.progress.connect(progress.setLabelText)
+        worker.progress.connect(self.statusBar().showMessage)
+        worker.completed.connect(lambda _rows: self._close_image_theme_ocr_progress())
         worker.completed.connect(self._show_image_theme_rows)
-        worker.failed.connect(lambda message: QMessageBox.warning(self, "이미지 OCR 실패", message))
+        worker.failed.connect(self._on_image_theme_ocr_failed)
+        worker.finished.connect(self._close_image_theme_ocr_progress)
         worker.finished.connect(lambda: self.statusBar().showMessage("이미지 OCR 작업 종료"))
         self._image_theme_ocr_worker = worker
         self.statusBar().showMessage("이미지 OCR 모델을 준비하고 있습니다. 첫 실행은 모델 다운로드로 시간이 걸릴 수 있습니다.")
+        progress.show()
         worker.start()
         QTimer.singleShot(60_000, lambda: self._warn_slow_image_ocr(worker))
+
+    def _close_image_theme_ocr_progress(self) -> None:
+        progress = getattr(self, "_image_theme_ocr_progress_dialog", None)
+        if progress is not None:
+            progress.close()
+            self._image_theme_ocr_progress_dialog = None
+
+    def _on_image_theme_ocr_failed(self, message: str) -> None:
+        self._close_image_theme_ocr_progress()
+        QMessageBox.warning(self, "이미지 OCR 실패", message)
 
     def _with_krx_stock_catalog(self, continuation: Callable[[], None]) -> None:
         if self._stock_lookup is None or not hasattr(self._stock_lookup, "upsert_many"):
@@ -3278,6 +3529,46 @@ class MainWindow(QMainWindow):
         if not self._resizing_columns and not self._restoring_columns:
             self._manual_column_resize_until = time.monotonic() + 30.0
             self._save_columns()
+
+    def _apply_uniform_row_height(self, height: int) -> None:
+        """한 행 조절값을 표 전체 행에 적용하고 로컬에 저장한다."""
+        height = max(12, min(100, int(height)))
+        self._syncing_row_heights = True
+        try:
+            header = self._table.verticalHeader()
+            header.setDefaultSectionSize(height)
+            for row in range(self._table.rowCount()):
+                if self._table.rowHeight(row) != height:
+                    self._table.setRowHeight(row, height)
+        finally:
+            self._syncing_row_heights = False
+        self._settings.set("ui_row_height", str(height))
+        self._table.setIconSize(QSize(max(8, min(32, height - 4)), max(8, min(32, height - 4))))
+        # 큰 폭으로 드래그할 때도 테마 배지의 글자·여백이 다음 창 갱신을
+        # 기다리지 않도록 즉시 다시 맞춘다.
+        self._refresh_theme_badges()
+
+    def _rank_row_resize_target(self, point: QPoint) -> bool:
+        """순위 칸의 행 경계 근처인지 판별한다."""
+        if self._table.rowCount() <= 0:
+            return False
+        # 경계선 바로 위·아래 어느 쪽에 마우스가 있어도 인식한다. 실제
+        # 조절은 순위 칸 안에서만 가능하므로 다른 셀 클릭과 겹치지 않는다.
+        for y in (point.y() - 7, point.y(), point.y() + 7):
+            row = self._table.rowAt(max(0, y))
+            if row < 0:
+                continue
+            rect = self._table.visualRect(self._table.model().index(row, 0))
+            if rect.left() <= point.x() <= rect.right() and abs(point.y() - rect.bottom()) <= 7:
+                return True
+        return False
+
+    def _refresh_theme_badges(self) -> None:
+        """현재 행·글자 크기에 맞춰 표시 중인 테마 배지를 다시 만든다."""
+        for code, row in self._row_by_code.items():
+            name = self._ranked_stock_names.get(code)
+            if name:
+                self._table.setCellWidget(row, 2, self._theme_badges(code, name))
 
     def _resize_columns_proportionally(self) -> None:
         if not self._column_auto_fit_ready or self._settings.get("ui_mode") != "responsive" or time.monotonic() < self._manual_column_resize_until or not hasattr(self, "_table"):
@@ -3581,8 +3872,17 @@ class MainWindow(QMainWindow):
         self._start_rank_changed_highlights()
         self.statusBar().showMessage(f"조회 완료 · {len(stocks)}개 종목 · {'순위 변동 없음' if unchanged else '순위 변동 반영'} · 실시간 체결 데이터 연결 중")
         self._schedule_theme_trade_summary()
-        self._start_realtime_subscription(codes)
-        QTimer.singleShot(5_000, lambda: self._start_realtime_followups(codes))
+        # NXT 시간에는 NXT 불가 종목을 함께 ``_NX``로 등록하면 키움이
+        # WebSocket 연결 전체를 종료할 수 있다. 캐시된 가능 여부는 즉시
+        # 사용하고, 아직 확인되지 않은 종목만 먼저 ka10100으로 확인한 뒤
+        # NXT 가능 종목만 구독한다.
+        if self._is_nxt_only_session() and self._start_nxt_eligibility_loading(codes):
+            self.statusBar().showMessage(f"조회 완료 · {len(stocks)}개 종목 · NXT 가능 종목을 확인하는 중입니다…")
+        else:
+            self._start_realtime_subscription(codes)
+            # 정상 구독 직후에는 subscription_ready가 후속 보완을 시작한다.
+            # 연결이 아직 준비되지 않은 경우만을 위한 안전장치다.
+            QTimer.singleShot(5_000, lambda: self._start_realtime_followups(codes))
         self._schedule_next_ranking_refresh()
         # 분봉·기본정보 40건 동시 보완은 모의 API 제한을 쉽게 초과하므로,
         # 안정적인 순위 조회가 확인된 뒤 사용자가 따로 실행하는 방식으로 제공한다.
@@ -3637,6 +3937,7 @@ class MainWindow(QMainWindow):
 
     def _theme_badges(self, code: str, name: str) -> QWidget:
         widget = QWidget(); layout = QHBoxLayout(widget); layout.setContentsMargins(2, 2, 2, 2); layout.setSpacing(3)
+        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         themes = [(index, theme.strip()) for index, theme in enumerate(self._themes.get("".join(name.split()), "").split(",")) if theme.strip()]
         frequency = getattr(self, "_visible_theme_frequency", {})
         themes.sort(key=lambda item: (-frequency.get(item[1].casefold(), 0), item[0]))
@@ -3649,8 +3950,21 @@ class MainWindow(QMainWindow):
         for _, theme in themes:
             if theme:
                 color = self._theme_store.color_for_stock_theme(code, theme) if self._theme_store else "#DCE6F1"
-                badge_size = int(self._settings.get("theme_badge_font_size")); padding = int(self._settings.get("theme_badge_padding"))
-                font_style = f"font-size:{badge_size}px;" if badge_size else ""
+                badge_size = int(self._settings.get("theme_badge_font_size"))
+                padding = int(self._settings.get("theme_badge_padding"))
+                # 0(자동)이면 테마 배지도 표 글자 크기를 따른다. 이전에는
+                # 배지만 Qt 기본 크기에 남아 작은 화면에서 유독 커 보였다.
+                if badge_size <= 0:
+                    badge_size = max(4, self._table.font().pointSize())
+                    # 사용자가 행 높이를 직접 키운 경우에는 배지도 행 안에서
+                    # 자연스럽게 함께 커지게 한다. 자동 행 높이일 때는 표
+                    # 글자 크기만 따라가므로 과도하게 커지지 않는다.
+                    configured_row_height = int(self._settings.get("ui_row_height"))
+                    if configured_row_height:
+                        row = self._row_by_code.get(code, 0)
+                        badge_size = max(badge_size, min(24, max(4, (self._table.rowHeight(row) - 8) // 2)))
+                    padding = min(padding, max(0, (badge_size - 4) // 3))
+                font_style = f"font-size:{badge_size}px;"
                 badge = QPushButton(theme); badge.setStyleSheet(f"background:{color}; color:{text_color(color)}; border-radius:5px; padding:{padding}px {padding + 3}px; {font_style}")
                 badge.clicked.connect(lambda _, value=theme, stock_code=code: self._edit_badge_color(stock_code, value))
                 layout.addWidget(badge)
@@ -3716,7 +4030,12 @@ class MainWindow(QMainWindow):
                 trade_value.setText(f"{trade_label} (직전)" if completed else trade_label)
 
     def _toggle_trade_display_mode(self, logical_index: int) -> None:
-        periods = {6: ("1m", "1분"), 7: ("5m", "5분"), 8: ("60m", "60분"), 9: ("day", "1일")}
+        periods = {
+            4: ("1m", "1분"), 6: ("1m", "1분"),
+            7: ("5m", "5분"), 10: ("5m", "5분"),
+            8: ("60m", "60분"), 11: ("60m", "60분"),
+            9: ("day", "1일"), 12: ("day", "1일"),
+        }
         target = periods.get(logical_index)
         if target is None:
             return
@@ -3794,7 +4113,7 @@ class MainWindow(QMainWindow):
     def _active_realtime_codes(self, codes: tuple[str, ...]) -> tuple[str, ...]:
         now = self._ranking_now()
         minutes = now.hour * 60 + now.minute
-        nxt_open = 7 * 60 + 55 <= minutes < 20 * 60 + 5
+        nxt_open = 8 * 60 <= minutes < 20 * 60
         # 0B의 실제 KRX 구간은 09:00~15:30이다. 이 시간에는 모든 종목을,
         # 그 밖의 NXT 준비·거래 구간에는 NXT 가능·미확인 종목만 구독한다.
         krx_open = 9 * 60 <= minutes < 15 * 60 + 30
@@ -3805,8 +4124,22 @@ class MainWindow(QMainWindow):
         return tuple(
             code
             for code in codes
-            if code not in self._nxt_checked_codes or code in self._nxt_enabled_codes
+            if code in self._nxt_enabled_codes
         )
+
+    def _is_nxt_only_session(self) -> bool:
+        """실전 NXT 시간대인지 판단한다.
+
+        모의투자에는 NXT WebSocket이 없으므로, 그 환경에서는 기존 KRX
+        연결 흐름을 유지한다.
+        """
+        if str(self._environment_selector.currentData()) != "real":
+            return False
+        now = self._ranking_now()
+        if now.weekday() >= 5:
+            return False
+        minutes = now.hour * 60 + now.minute
+        return 8 * 60 <= minutes < 9 * 60 or 15 * 60 + 30 <= minutes < 20 * 60
 
     def _schedule_realtime_session_refresh(self) -> None:
         if self._closing:
@@ -3878,23 +4211,26 @@ class MainWindow(QMainWindow):
 
     def _on_trade_tick(self, tick: TradeTick) -> None:
         row = self._row_by_code.get(tick.code)
-        if row is None or tick.current_price is None:
+        if row is None:
             return
-        self._current_prices[tick.code] = tick.current_price
-        self._pending_price_cache[tick.code] = tick.current_price
-        if not self._price_cache_timer.isActive():
-            self._price_cache_timer.start()
-        if tick.high_price and tick.high_price > 0:
-            self._today_high_prices[tick.code] = tick.high_price
-            if tick.current_price >= tick.high_price:
-                self._today_high_codes.add(tick.code)
-        observed_at = self._ranking_now()
-        self._ensure_today_minute_bar_storage(observed_at)
-        bar = self._minute_aggregator.ingest(tick, observed_at)
-        if bar is not None:
-            self._pending_minute_bars[(tick.code, bar.minute)] = bar
-            if not self._minute_bar_save_timer.isActive():
-                self._minute_bar_save_timer.start()
+        if tick.market_cap_eok is not None and tick.market_cap_eok > 0:
+            self._realtime_market_caps[tick.code] = float(tick.market_cap_eok)
+        if tick.current_price is not None:
+            self._current_prices[tick.code] = tick.current_price
+            self._pending_price_cache[tick.code] = tick.current_price
+            if not self._price_cache_timer.isActive():
+                self._price_cache_timer.start()
+            if tick.high_price and tick.high_price > 0:
+                self._today_high_prices[tick.code] = tick.high_price
+                if tick.current_price >= tick.high_price:
+                    self._today_high_codes.add(tick.code)
+            observed_at = self._ranking_now()
+            self._ensure_today_minute_bar_storage(observed_at)
+            bar = self._minute_aggregator.ingest(tick, observed_at)
+            if bar is not None:
+                self._pending_minute_bars[(tick.code, bar.minute)] = bar
+                if not self._minute_bar_save_timer.isActive():
+                    self._minute_bar_save_timer.start()
         if not hasattr(self, "_pending_trade_ticks"):
             self._pending_trade_ticks: dict[str, TradeTick] = {}
             self._trade_tick_flush_timer = QTimer(self)
@@ -3915,7 +4251,11 @@ class MainWindow(QMainWindow):
             return
         for tick in pending:
             row = self._row_by_code.get(tick.code)
-            if row is None or tick.current_price is None:
+            if row is None:
+                continue
+            if tick.market_cap_eok is not None and tick.market_cap_eok > 0:
+                self._render_market_cap(tick.code)
+            if tick.current_price is None:
                 continue
             self._render_current_price(tick.code)
             if tick.change_rate is not None:
@@ -4048,6 +4388,10 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._on_background_failure)
         worker.finished.connect(self._start_daily_krx_catalog_sync)
         worker.finished.connect(lambda: self._start_realtime_subscription(tuple(self._row_by_code)))
+        # NXT 가능 종목이 하나도 없더라도 후속 보완 작업이 멈추지 않게 한다.
+        # 구독이 성공한 경우에는 subscription_ready에서도 다시 호출되지만,
+        # 각 작업은 실행 중 여부를 확인하므로 중복 요청은 발생하지 않는다.
+        worker.finished.connect(lambda: self._start_realtime_followups(tuple(self._row_by_code)))
         self._nxt_eligibility_worker = worker
         worker.start()
         return True
@@ -4133,7 +4477,7 @@ class MainWindow(QMainWindow):
         # 신고가에 가까워지는 방향(관심 → 주의 → 불)으로만 알린다.
         # 멀어지는 방향(불 → 주의, 주의 → 관심, 관심 → 해제)에서는 재생하지 않는다.
         if play_sound and level and severity[level] > severity.get(previous, 0):
-            self._play_near_high_sound(level)
+            self._play_near_high_sound_for_code(code, level)
 
     def _near_high_icon_image_path(self, level: str) -> Path | None:
         if not level:
@@ -4162,6 +4506,20 @@ class MainWindow(QMainWindow):
             player, _ = player_pair
         player.setSource(QUrl.fromLocalFile(str(path)))
         player.play()
+
+    def _play_near_high_sound_for_code(self, code: str, level: str) -> None:
+        """Play an entered near-high level once per code/level during the cooldown."""
+        key = (code, level)
+        now = time.monotonic()
+        last_played = self._near_high_sound_last_played.get(key)
+        try:
+            cooldown = max(0.0, float(self._settings.get("near_high_sound_cooldown_seconds")))
+        except (TypeError, ValueError):
+            cooldown = float(DEFAULT_SETTINGS["near_high_sound_cooldown_seconds"])
+        if last_played is not None and now - last_played < cooldown:
+            return
+        self._near_high_sound_last_played[key] = now
+        self._play_near_high_sound(level)
 
     def _start_daily_high_loading(self, codes: tuple[str, ...]) -> bool:
         if self._closing or self._ranking_priority_preparing or self._daily_high_worker_factory is None or (self._daily_high_worker is not None and self._daily_high_worker.isRunning()):
@@ -4198,6 +4556,8 @@ class MainWindow(QMainWindow):
                     logger.warning("일봉 캐시 저장 실패 (%s): %s", code, error)
             if targets.previous_day_trade_value_eok is not None:
                 self._previous_day_trade_values[code] = targets.previous_day_trade_value_eok
+            if targets.previous_day_close_price is not None:
+                self._previous_day_close_prices[code] = targets.previous_day_close_price
             if targets.daily_trade_values_eok:
                 self._pending_daily_trade_comparisons[code] = targets.daily_trade_values_eok
                 if not self._daily_trade_comparison_timer.isActive():
@@ -4221,6 +4581,8 @@ class MainWindow(QMainWindow):
             self._daily_highs[code] = targets
             if targets.previous_day_trade_value_eok is not None:
                 self._previous_day_trade_values[code] = targets.previous_day_trade_value_eok
+            if targets.previous_day_close_price is not None:
+                self._previous_day_close_prices[code] = targets.previous_day_close_price
             if self._row_by_code.get(code) is not None and not self._defer_table_update_while_modal():
                 self._render_new_high_price(code)
                 self._render_high_distance(code)
@@ -4268,7 +4630,15 @@ class MainWindow(QMainWindow):
             strength_source = values
             strength_values = zip((4,), ("1m",), strength_source[:1]) if live_only else zip((4, 10, 11, 12), ("1m", "5m", "60m", "day"), strength_source)
             for column, period, value in strength_values:
-                strength = trade_strength_percent(value, fundamentals)
+                previous_day = period == "day" and self._trade_display_mode("day") == "completed"
+                # 유통주식 수와 현재가가 있으면 직접 계산하고, 그렇지 않으면
+                # 장중 0B 시가총액(311)·유통비율, 마지막으로 ka10001 캐시를 쓴다.
+                strength = trade_strength_percent(
+                    value,
+                    fundamentals,
+                    current_price=self._previous_day_close_prices.get(code) if previous_day else self._current_prices.get(code),
+                    market_cap_eok=None if previous_day else self._market_cap_eok(code, fundamentals),
+                )
                 interest = float(self._settings.get(f"strength_{period}_interest"))
                 caution = float(self._settings.get(f"strength_{period}_caution"))
                 fire = float(self._settings.get(f"strength_{period}_fire"))
@@ -4521,18 +4891,9 @@ class MainWindow(QMainWindow):
         if isinstance(fundamentals, StockFundamentals):
             self._fundamentals[code] = fundamentals
             if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_fundamentals"):
-                self._stock_lookup.update_fundamentals(code, fundamentals.market_cap_eok, fundamentals.float_ratio_percent, fundamentals.high_250_price)
-            if fundamentals.current_price is not None:
-                self._current_prices[code] = fundamentals.current_price
-                self._pending_price_cache[code] = fundamentals.current_price
-                if not self._price_cache_timer.isActive():
-                    self._price_cache_timer.start()
+                self._stock_lookup.update_fundamentals(code, fundamentals.market_cap_eok, fundamentals.float_ratio_percent, fundamentals.high_250_price, fundamentals.float_shares)
             if self._defer_table_update_while_modal():
                 return
-            if fundamentals.current_price is not None:
-                row = self._row_by_code.get(code)
-                if row is not None:
-                    self._render_current_price(code)
             self._render_market_cap(code)
             self._render_new_high_price(code)
             self._render_high_distance(code)
@@ -4543,10 +4904,11 @@ class MainWindow(QMainWindow):
         fundamentals = self._fundamentals.get(code)
         if row is None or fundamentals is None:
             return
-        level = self._market_cap_highlight_level(fundamentals.market_cap_eok)
-        item = QTableWidgetItem(self._format_market_cap_eok(fundamentals.market_cap_eok))
+        market_cap_eok = self._market_cap_eok(code, fundamentals)
+        level = self._market_cap_highlight_level(market_cap_eok)
+        item = QTableWidgetItem(self._format_market_cap_eok(market_cap_eok))
         item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        item.setForeground(QColor(self._market_cap_highlight_color(fundamentals.market_cap_eok)))
+        item.setForeground(QColor(self._market_cap_highlight_color(market_cap_eok)))
         item.setBackground(self._row_background_color(code, row))
         self._table.setItem(row, 15, item)
         self._table.removeCellWidget(row, 15)
@@ -4562,6 +4924,10 @@ class MainWindow(QMainWindow):
             layout.addStretch()
             layout.addWidget(badge)
             self._table.setCellWidget(row, 15, container)
+
+    def _market_cap_eok(self, code: str, fundamentals: StockFundamentals) -> float:
+        """장중 0B 시가총액(311)을 우선하고, 없으면 ka10001 캐시를 쓴다."""
+        return self._realtime_market_caps.get(code, fundamentals.market_cap_eok)
 
     def _market_cap_highlight_level(self, market_cap_eok: float) -> str | None:
         if self._settings.get("market_cap_highlight_enabled") != "1":
@@ -4692,7 +5058,9 @@ class MainWindow(QMainWindow):
         if font_size:
             font = self._table.font(); font.setPointSize(font_size); self._table.setFont(font)
         elif self._settings.get("ui_mode") == "responsive":
-            font = self._table.font(); font.setPointSize(max(9, min(13, self.width() // 130))); self._table.setFont(font)
+            # 작은 해상도에서도 표가 과도하게 커지지 않도록 자동 글자
+            # 크기의 하한을 4pt까지 낮춘다.
+            font = self._table.font(); font.setPointSize(max(4, min(13, self.width() // 130))); self._table.setFont(font)
         if row_height:
             self._table.verticalHeader().setDefaultSectionSize(row_height)
         elif self._settings.get("ui_mode") == "responsive":
@@ -4702,9 +5070,11 @@ class MainWindow(QMainWindow):
             available_height = self._table.viewport().height()
             fitted_height = available_height // row_count if available_height > 0 else 0
             fallback_height = self._table.font().pointSize() * 2 + 10
-            self._table.verticalHeader().setDefaultSectionSize(max(22, min(64, fitted_height or fallback_height)))
-        icon_size = max(14, min(32, self._table.verticalHeader().defaultSectionSize() - 6))
+            self._table.verticalHeader().setDefaultSectionSize(max(14, min(64, fitted_height or fallback_height)))
+        icon_size = max(8, min(32, self._table.verticalHeader().defaultSectionSize() - 4))
         self._table.setIconSize(QSize(icon_size, icon_size))
+        # 반응형 표 글자 크기가 변하면 이미 만들어진 테마 배지도 함께 갱신한다.
+        self._refresh_theme_badges()
 
     def _ensure_initial_ranking_rows_visible(self) -> None:
         """첫 정상 순위 수신 시 상위 20개 행이 한 화면에 들어오게 한다."""
@@ -4723,10 +5093,28 @@ class MainWindow(QMainWindow):
         return None
 
     def eventFilter(self, watched: object, event: object) -> bool:
-        if watched is self._table.viewport() and getattr(event, "type", lambda: None)() == QEvent.Type.MouseButtonDblClick:
+        if watched is self._table.viewport():
             position = getattr(event, "position", lambda: None)()
-            if position is not None:
-                point = position.toPoint()
+            point = position.toPoint() if position is not None else None
+            event_type = getattr(event, "type", lambda: None)()
+            if event_type == QEvent.Type.MouseButtonPress and point is not None and getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton and self._rank_row_resize_target(point):
+                self._row_height_dragging = True
+                self._row_height_drag_start_y = point.y()
+                self._row_height_drag_start_height = self._table.verticalHeader().defaultSectionSize()
+                self._table.viewport().setCursor(Qt.CursorShape.SizeVerCursor)
+                return True
+            if event_type == QEvent.Type.MouseMove and point is not None:
+                if self._row_height_dragging:
+                    self._apply_uniform_row_height(self._row_height_drag_start_height + point.y() - self._row_height_drag_start_y)
+                    return True
+                self._table.viewport().setCursor(
+                    Qt.CursorShape.SizeVerCursor if self._rank_row_resize_target(point) else Qt.CursorShape.ArrowCursor
+                )
+            if event_type == QEvent.Type.MouseButtonRelease and self._row_height_dragging:
+                self._row_height_dragging = False
+                self._table.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+                return True
+            if event_type == QEvent.Type.MouseButtonDblClick and point is not None:
                 # 실제 셀이 아닌 오른쪽 또는 마지막 행 아래의 빈 공간에서만 동작한다.
                 if self._table.itemAt(point) is None:
                     self._fit_window_to_table_contents()

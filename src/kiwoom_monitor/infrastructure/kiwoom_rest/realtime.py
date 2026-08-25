@@ -16,6 +16,8 @@ class TradeTick:
     high_price: int | None
     trade_time: str | None
     change_rate: float | None = None
+    # 0B FID 311은 억원 단위 시가총액이다.
+    market_cap_eok: int | None = None
 
 
 def parse_trade_ticks(message: dict[str, Any]) -> tuple[TradeTick, ...]:
@@ -40,6 +42,7 @@ def parse_trade_ticks(message: dict[str, Any]) -> tuple[TradeTick, ...]:
                 high_price=_number(values.get("17"), absolute=True),
                 trade_time=str(values["20"]).strip() if values.get("20") is not None else None,
                 change_rate=_decimal(values.get("12")),
+                market_cap_eok=_number(values.get("311"), absolute=True),
             )
         )
     return tuple(ticks)

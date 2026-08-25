@@ -11,6 +11,12 @@ def _positive_int(value: object) -> int | None:
         return None
     return number if number > 0 else None
 
+
+# ka10001에는 dstr_stk의 단위를 지정하는 별도 필드가 없다. 삼성전자부터
+# 시가총액 358억 종목까지 실제 응답을 검증한 결과 원값 × 1,000이
+# mac × dstr_rt와 일치한다.
+_DSTR_STK_MULTIPLIER = 1_000
+
 class RestClient(Protocol):
     def request(self, api_id: str, path: str, body: dict[str, Any]) -> dict[str, Any]: ...
 
@@ -27,10 +33,8 @@ class StockFundamentalsService:
             raw_float_ratio = row.get("dstr_rt")
             # 키움이 유통비율을 빈 값으로 보내는 종목은 전체 시가총액(100%)을 기준으로 계산한다.
             float_ratio = 100.0 if raw_float_ratio is None or not str(raw_float_ratio).strip() else float(str(raw_float_ratio).replace(",", ""))
-            current_price = next(
-                (value for key in ("cur_prc", "current_price", "stck_prpr") if (value := _positive_int(row.get(key))) is not None),
-                None,
-            )
-            return StockFundamentals(market_cap, float_ratio, high_250, current_price)
+            raw_float_shares = _positive_int(row.get("dstr_stk"))
+            float_shares = raw_float_shares * _DSTR_STK_MULTIPLIER if raw_float_shares is not None else None
+            return StockFundamentals(market_cap, float_ratio, high_250, float_shares)
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"{code}의 시가총액 또는 유통비율 값이 올바르지 않습니다.") from error
