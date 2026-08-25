@@ -163,6 +163,7 @@ class ThemeImageLayoutTests(unittest.TestCase):
         self.assertEqual("개별이슈/로봇AI", _normalized_badge_text("개벌이슈/로봇시"))
         self.assertEqual("바이오/제약/탈중국", _normalized_badge_text("바이외제약/달중국"))
         self.assertEqual("AI제조/통신", _normalized_badge_text("시제조/동신"))
+        self.assertEqual("가상화폐/화장품", _normalized_badge_text("가상화페/회장품"))
 
     def test_merges_same_stock_from_multiple_images(self) -> None:
         self.assertEqual(
