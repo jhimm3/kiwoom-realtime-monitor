@@ -105,7 +105,7 @@ def main() -> None:
                     # 전 종목을 오늘 기준 수정주가로 한 번 다시 계산한다.
                     cache_loader=lambda code: (
                         StockRepository(paths.database_path).load_historical_high_cache(code)
-                        if database.settings.get("historical_high_adjusted_basis_version") == "3"
+                        if database.settings.get("historical_high_adjusted_basis_version") == "4"
                         else None
                     ),
                     high_250_loader=StockRepository(paths.database_path).load_high_250_price,

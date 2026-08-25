@@ -86,13 +86,17 @@ class HistoricalHighService:
             # 과거 연말을 기준일로 쓰면 그 이후 액면분할·병합이 반영되지 않은
             # 당시 가격이 반환된다. 항상 오늘 기준 수정주가로 과거까지 거슬러
             # 조회한 뒤 필요한 연도만 고른다.
-            rows = self._load_rows("ka10083", "stk_mth_pole_chart_qry", code, today, prefix=year)
+            adjusted_rows = self._load_rows("ka10083", "stk_mth_pole_chart_qry", code, today, prefix=year)
+            original_rows = self._load_rows("ka10083", "stk_mth_pole_chart_qry", code, f"{year}1231", prefix=year, adjusted=False)
+            rows = _lower_price_rows(adjusted_rows, original_rows)
             monthly.extend(row for row in rows if year != checked[:4] or _date_text(row)[:6] >= since_month)
         evidence = list(cache.target.evidence)
         for month_row in sorted(monthly, key=_date_text):
             month = _date_text(month_row)[:6]
             if _has_adjustment(month_row):
-                daily = self._load_rows("ka10081", "stk_dt_pole_chart_qry", code, today, prefix=month)
+                adjusted_daily = self._load_rows("ka10081", "stk_dt_pole_chart_qry", code, today, prefix=month)
+                original_daily = self._load_rows("ka10081", "stk_dt_pole_chart_qry", code, _month_end(month), prefix=month, adjusted=False)
+                daily = _lower_price_rows(adjusted_daily, original_daily)
                 new_event_rows = [row for row in daily if _has_adjustment(row) and _date_text(row) > checked]
                 if new_event_rows:
                     for event_row in sorted(new_event_rows, key=_date_text):
@@ -149,7 +153,9 @@ class HistoricalHighService:
 
     def _refine_year(self, code: str, year: str, fallback: dict[str, Any], high_250: int | None = None) -> list[HistoricalHighEvidence]:
         today = date.today().strftime("%Y%m%d")
-        monthly = self._load_rows("ka10083", "stk_mth_pole_chart_qry", code, today, prefix=year)
+        adjusted_monthly = self._load_rows("ka10083", "stk_mth_pole_chart_qry", code, today, prefix=year)
+        original_monthly = self._load_rows("ka10083", "stk_mth_pole_chart_qry", code, f"{year}1231", prefix=year, adjusted=False)
+        monthly = _lower_price_rows(adjusted_monthly, original_monthly)
         if not monthly:
             item = _evidence("year", fallback)
             return [item] if item is not None else []
@@ -163,7 +169,9 @@ class HistoricalHighService:
                 if (item := _evidence("month", month_row)) is not None:
                     evidence.append(item)
                 continue
-            daily = self._load_rows("ka10081", "stk_dt_pole_chart_qry", code, today, prefix=month)
+            adjusted_daily = self._load_rows("ka10081", "stk_dt_pole_chart_qry", code, today, prefix=month)
+            original_daily = self._load_rows("ka10081", "stk_dt_pole_chart_qry", code, _month_end(month), prefix=month, adjusted=False)
+            daily = _lower_price_rows(adjusted_daily, original_daily)
             detailed = [item for day_row in daily if (item := _evidence("day", day_row)) is not None]
             if detailed:
                 evidence.extend(detailed)
@@ -174,12 +182,12 @@ class HistoricalHighService:
         item = _evidence("year", fallback)
         return [item] if item is not None else []
 
-    def _load_rows(self, api_id: str, key: str, code: str, base_date: str, *, prefix: str = "", since: str = "") -> list[dict[str, Any]]:
+    def _load_rows(self, api_id: str, key: str, code: str, base_date: str, *, prefix: str = "", since: str = "", adjusted: bool = True) -> list[dict[str, Any]]:
         values: list[dict[str, Any]] = []
         cont_yn, next_key = "N", ""
         for _ in range(20):
             response, has_next, next_key = self._client.request_with_continuation(
-                api_id, "/api/dostk/chart", {"stk_cd": code, "base_dt": base_date, "upd_stkpc_tp": "1"}, cont_yn=cont_yn, next_key=next_key,
+                api_id, "/api/dostk/chart", {"stk_cd": code, "base_dt": base_date, "upd_stkpc_tp": "1" if adjusted else "0"}, cont_yn=cont_yn, next_key=next_key,
             )
             rows = response.get(key, [])
             if not isinstance(rows, list):
@@ -195,6 +203,26 @@ class HistoricalHighService:
                 break
             cont_yn = "Y"
         return values
+
+
+def _lower_price_rows(adjusted_rows: list[dict[str, Any]], original_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """같은 봉의 현재 수정값과 당시 원값 중 과대 보정되지 않은 값을 쓴다."""
+    originals = {_date_text(row): row for row in original_rows if _date_text(row)}
+    combined: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for adjusted_row in adjusted_rows:
+        trade_date = _date_text(adjusted_row)
+        original_row = originals.get(trade_date)
+        row = dict(adjusted_row)
+        adjusted_high = _price(adjusted_row.get("high_pric"))
+        original_high = _price(original_row.get("high_pric")) if original_row is not None else None
+        if adjusted_high is not None and original_high is not None:
+            row["high_pric"] = str(min(adjusted_high, original_high))
+        combined.append(row)
+        if trade_date:
+            seen.add(trade_date)
+    combined.extend(dict(row) for row in original_rows if _date_text(row) not in seen)
+    return combined
 
 
 def _date_text(row: dict[str, Any]) -> str:
