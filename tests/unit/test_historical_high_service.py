@@ -24,7 +24,7 @@ class HistoricalHighServiceTests(unittest.TestCase):
         self.assertEqual(400, target.price)
         self.assertEqual(1985, target.first_year)
         self.assertEqual(2026, target.last_year)
-        self.assertEqual([("ka10094", "N", ""), ("ka10094", "Y", "older"), ("ka10083", "N", ""), ("ka10083", "Y", "older"), ("ka10083", "N", ""), ("ka10083", "Y", "older")], client.calls)
+        self.assertEqual([("ka10094", "N", ""), ("ka10094", "Y", "older"), ("ka10083", "N", ""), ("ka10083", "Y", "older")], client.calls)
 
     def test_combines_nxt_high_when_it_is_higher(self) -> None:
         class Client:
@@ -61,7 +61,7 @@ class HistoricalHighServiceTests(unittest.TestCase):
 
         self.assertEqual(17000, target.price)
         self.assertEqual("20260501", target.occurred_on)
-        self.assertEqual(["ka10094", "ka10083", "ka10083", "ka10081", "ka10081"], client.calls)
+        self.assertEqual(["ka10094", "ka10083", "ka10081"], client.calls)
         self.assertNotIn(60000, [item.high_price for item in target.evidence])
 
     def test_incremental_split_adjusts_saved_history_and_compares_new_high(self) -> None:
@@ -90,7 +90,7 @@ class HistoricalHighServiceTests(unittest.TestCase):
 
         self.assertEqual(250_000, target.price)
         self.assertEqual("20260220", target.occurred_on)
-        self.assertEqual(["ka10094", "ka10083", "ka10083", "ka10081", "ka10081"], client.calls)
+        self.assertEqual(["ka10094", "ka10083", "ka10081"], client.calls)
         self.assertIn(200_000, [item.high_price for item in target.evidence])
 
     def test_stops_after_yearly_chart_when_250_day_high_is_already_higher(self) -> None:
@@ -126,7 +126,7 @@ class HistoricalHighServiceTests(unittest.TestCase):
         target = HistoricalHighService(client, high_250_loader=lambda code: 5_960).load("047770")
 
         self.assertEqual(5_960, target.price)
-        self.assertEqual(["ka10094", "ka10083", "ka10083"], client.calls)
+        self.assertEqual(["ka10094", "ka10083"], client.calls)
 
     def test_refines_old_year_using_today_as_adjustment_base(self) -> None:
         class Client:
@@ -146,15 +146,14 @@ class HistoricalHighServiceTests(unittest.TestCase):
         monthly_body = next(body for api_id, body in client.bodies if api_id == "ka10083")
         self.assertEqual(date.today().strftime("%Y%m%d"), monthly_body["base_dt"])
 
-    def test_uses_lower_original_price_when_current_adjustment_is_inflated(self) -> None:
+    def test_keeps_current_adjusted_price_after_share_consolidations(self) -> None:
         class Client:
             def request_with_continuation(self, api_id: str, path: str, body: dict[str, object], *, cont_yn: str = "N", next_key: str = "") -> tuple[dict[str, object], bool, str]:
                 if api_id == "ka10094":
                     return {"stk_yr_pole_chart_qry": [{"dt": "20160000", "high_pric": "3450000"}]}, False, ""
-                high = "3450000" if body["upd_stkpc_tp"] == "1" else "6900"
-                return {"stk_mth_pole_chart_qry": [{"dt": "20161104", "high_pric": high}]}, False, ""
+                return {"stk_mth_pole_chart_qry": [{"dt": "20161104", "high_pric": "3450000"}]}, False, ""
 
         target = HistoricalHighService(Client()).load("900300")
 
-        self.assertEqual(6_900, target.price)
+        self.assertEqual(3_450_000, target.price)
         self.assertEqual("20161104", target.occurred_on)
