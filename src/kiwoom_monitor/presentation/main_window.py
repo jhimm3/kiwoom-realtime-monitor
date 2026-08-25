@@ -3327,19 +3327,20 @@ class MainWindow(QMainWindow):
         self._start_initial_ranking()
 
     def _select_theme_image(self, mode: str = "theme_column") -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "테마 이미지 선택", self._settings.get("theme_image_import_dir"), "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)")
-        if not path:
+        paths, _ = QFileDialog.getOpenFileNames(self, "테마 이미지 선택", self._settings.get("theme_image_import_dir"), "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if not paths:
             return
-        self._settings.set("theme_image_import_dir", str(Path(path).parent))
+        image_paths = tuple(Path(path) for path in paths)
+        self._settings.set("theme_image_import_dir", str(image_paths[0].parent))
         theme_header = self._settings.get("theme_image_import_theme_header").strip()
-        self._start_image_theme_ocr(Path(path), mode, theme_header)
+        self._start_image_theme_ocr(image_paths, mode, theme_header)
 
-    def _start_image_theme_ocr(self, image_path: Path, mode: str = "theme_column", theme_header: str = "테마") -> None:
+    def _start_image_theme_ocr(self, image_paths: tuple[Path, ...], mode: str = "theme_column", theme_header: str = "테마") -> None:
         previous = getattr(self, "_image_theme_ocr_worker", None)
         if previous is not None and previous.isRunning():
             QMessageBox.information(self, "이미지 OCR", "이미지 분석이 이미 진행 중입니다.")
             return
-        worker = ImageThemeOcrWorker(image_path, mode, theme_header)
+        worker = ImageThemeOcrWorker(image_paths, mode, theme_header)
         worker.setParent(self)
         progress = QProgressDialog("OCR 엔진을 준비하고 있습니다…", "취소", 0, 0, self)
         progress.setWindowTitle("이미지 테마 분석")
@@ -3356,7 +3357,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._close_image_theme_ocr_progress)
         worker.finished.connect(lambda: self.statusBar().showMessage("이미지 OCR 작업 종료"))
         self._image_theme_ocr_worker = worker
-        self.statusBar().showMessage("이미지 OCR 모델을 준비하고 있습니다. 첫 실행은 모델 다운로드로 시간이 걸릴 수 있습니다.")
+        self.statusBar().showMessage(f"이미지 {len(image_paths)}장의 OCR 모델을 준비하고 있습니다. 첫 실행은 모델 다운로드로 시간이 걸릴 수 있습니다.")
         progress.show()
         worker.start()
         QTimer.singleShot(60_000, lambda: self._warn_slow_image_ocr(worker))

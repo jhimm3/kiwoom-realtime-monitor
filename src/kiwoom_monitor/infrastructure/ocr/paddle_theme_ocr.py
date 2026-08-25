@@ -114,13 +114,14 @@ def _suppress_ocr_child_console_windows():
         return
     original_popen = subprocess.Popen
 
-    def hidden_popen(*args: object, **kwargs: object):
-        # Paddle's model/runtime helpers can launch a short-lived process on
-        # Windows.  Preserve any caller flags while ensuring it has no console.
-        kwargs["creationflags"] = int(kwargs.get("creationflags", 0)) | subprocess.CREATE_NO_WINDOW
-        return original_popen(*args, **kwargs)
+    class HiddenPopen(original_popen):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            # 일부 라이브러리는 subprocess.Popen을 상속하므로 함수로 바꾸면
+            # 초기화가 실패한다. 클래스 형태를 유지하면서 창 숨김 플래그만 더한다.
+            kwargs["creationflags"] = int(kwargs.get("creationflags", 0)) | subprocess.CREATE_NO_WINDOW
+            super().__init__(*args, **kwargs)
 
-    subprocess.Popen = hidden_popen  # type: ignore[assignment]
+    subprocess.Popen = HiddenPopen  # type: ignore[assignment,misc]
     try:
         yield
     finally:
@@ -406,24 +407,35 @@ class ImageThemeOcrWorker(QThread):
     failed = Signal(str)
     progress = Signal(str)
 
-    def __init__(self, image_path: Path, mode: str = "theme_column", theme_header: str = "테마") -> None:
+    def __init__(self, image_paths: Path | tuple[Path, ...], mode: str = "theme_column", theme_header: str = "테마") -> None:
         super().__init__()
-        self._image_path = image_path
+        self._image_paths = (image_paths,) if isinstance(image_paths, Path) else tuple(image_paths)
         self._mode = mode
         self._theme_header = theme_header
 
     def run(self) -> None:
         try:
             with _suppress_ocr_child_console_windows():
+                if not self._image_paths:
+                    raise ValueError("선택한 이미지가 없습니다.")
                 ocr = PaddleThemeOcr()
                 self.progress.emit("OCR 엔진을 준비하고 있습니다…")
                 # extract_rows()가 처음 실행될 때 내부적으로 수행하던 초기 인식 단계를
                 # 분리해, 화면에 현재 단계를 알려 준다.
-                ocr.extract_lines(self._image_path)
+                ocr.extract_lines(self._image_paths[0])
                 if self.isInterruptionRequested():
                     return
-                self.progress.emit("이미지의 테마와 색상 배지를 분석하고 있습니다…")
-                rows = ocr.extract_rows(self._image_path, self._mode, self._theme_header)
+                all_rows: list[ImageThemeRow] = []
+                total = len(self._image_paths)
+                for index, image_path in enumerate(self._image_paths, start=1):
+                    if self.isInterruptionRequested():
+                        return
+                    self.progress.emit(f"이미지 {index}/{total} · {image_path.name}의 테마와 색상 배지를 분석하고 있습니다…")
+                    try:
+                        all_rows.extend(ocr.extract_rows(image_path, self._mode, self._theme_header))
+                    except Exception as error:
+                        raise ValueError(f"{image_path.name}: {error}") from error
+                rows = _merge_theme_rows(all_rows)
         except Exception as error:
             self.failed.emit(str(error))
             return
