@@ -19,7 +19,7 @@ from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from PySide6.QtGui import QCloseEvent, QResizeEvent, QShowEvent, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPolygon, QPalette
+from PySide6.QtGui import QCloseEvent, QResizeEvent, QShowEvent, QColor, QDesktopServices, QFontMetrics, QIcon, QKeySequence, QPainter, QPolygon, QPalette
 from PySide6.QtCore import QEvent, QEventLoop, QThread, QTimer, QUrl, QSize, QPoint, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -75,8 +75,10 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.fundamentals_worker import Fundam
 from kiwoom_monitor.infrastructure.kiwoom_rest.new_high_worker import NewHighWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.ranking_worker import RankingWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.daily_high_worker import DailyHighWorker
+from kiwoom_monitor.infrastructure.kiwoom_rest.historical_high_worker import HistoricalHighWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.nxt_eligibility_worker import NxtEligibilityWorker
 from kiwoom_monitor.application.daily_high_service import DailyHighTargets
+from kiwoom_monitor.application.historical_high_service import HistoricalHighTarget
 from kiwoom_monitor.application.trade_strength import StockFundamentals, trade_strength_percent
 from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSetting, ColumnSettingsRepository
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
@@ -106,7 +108,7 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.11"
+APP_VERSION = "1.1.12"
 APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 INVESTMENT_NOTICE = "본 앱은 투자 자문이 아니며 시세 지연·오류가 있을 수 있습니다."
@@ -490,8 +492,8 @@ class SettingsDialog(QDialog):
         self._strength_display_mode.addItem("실시간 (진행 중 분 포함)", "live")
         self._strength_display_mode.addItem("직전 완료 구간", "completed")
         self._strength_display_mode.setCurrentIndex(1 if settings.get("strength_display_mode") == "completed" else 0)
-        self._high_distance_period=QComboBox(); self._high_distance_period.addItem("5일 신고가", "5"); self._high_distance_period.addItem("20일 신고가", "20"); self._high_distance_period.addItem("250일 신고가(52주 근사)", "250")
-        saved_period=settings.get("high_distance_period"); self._high_distance_period.setCurrentIndex(("5", "20", "250").index(saved_period) if saved_period in ("5", "20", "250") else 2)
+        self._high_distance_period=QComboBox(); self._high_distance_period.addItem("5일 신고가", "5"); self._high_distance_period.addItem("20일 신고가", "20"); self._high_distance_period.addItem("250일 신고가(52주 근사)", "250"); self._high_distance_period.addItem("역사적 신고가(85년 이후)", "historical")
+        saved_period=settings.get("high_distance_period"); self._high_distance_period.setCurrentIndex(("5", "20", "250", "historical").index(saved_period) if saved_period in ("5", "20", "250", "historical") else 2)
 
         self._build_grouped_layout()
         return
@@ -2277,6 +2279,7 @@ class MainWindow(QMainWindow):
         stock_lookup: object | None = None,
         theme_store: object | None = None,
         daily_high_worker_factory: Callable[[tuple[str, ...]], DailyHighWorker] | None = None,
+        historical_high_worker_factory: Callable[[tuple[str, ...]], HistoricalHighWorker] | None = None,
         nxt_eligibility_worker_factory: Callable[[tuple[str, ...]], NxtEligibilityWorker] | None = None,
         google_drive_sync: GoogleDriveSyncService | None = None,
         initial_google_drive_download: bool = False,
@@ -2289,12 +2292,18 @@ class MainWindow(QMainWindow):
         self._minute_history_worker_factory = minute_history_worker_factory
         self._fundamentals_worker_factory = fundamentals_worker_factory
         self._daily_high_worker_factory = daily_high_worker_factory
+        self._historical_high_worker_factory = historical_high_worker_factory
         self._nxt_eligibility_worker_factory = nxt_eligibility_worker_factory
         self._fundamentals: dict[str, StockFundamentals] = {}
         self._daily_highs: dict[str, DailyHighTargets] = {}
+        self._historical_high_prices: dict[str, int] = {}
         self._previous_day_trade_values: dict[str, float] = {}
         self._previous_day_close_prices: dict[str, int] = {}
         self._daily_high_cache_date: date | None = None
+        self._daily_high_basis_refresh_expected: set[str] = set()
+        self._daily_high_basis_refresh_received: set[str] = set()
+        self._historical_high_refresh_expected: set[str] = set()
+        self._historical_high_refresh_received: set[str] = set()
         self._themes = themes or {}
         self._pending_price_cache: dict[str, int] = {}
         self._columns = columns
@@ -2323,6 +2332,7 @@ class MainWindow(QMainWindow):
         self._minute_history_worker: MinuteHistoryWorker | None = None
         self._fundamentals_worker: FundamentalsWorker | None = None
         self._daily_high_worker: DailyHighWorker | None = None
+        self._historical_high_worker: HistoricalHighWorker | None = None
         self._nxt_eligibility_worker: NxtEligibilityWorker | None = None
         self._new_high_worker: NewHighWorker | None = None
         self._ranking_worker: RankingWorker | None = None
@@ -2479,10 +2489,11 @@ class MainWindow(QMainWindow):
         self._table.horizontalHeader().customContextMenuRequested.connect(self._show_column_menu)
         self._table.horizontalHeader().sectionMoved.connect(lambda *_: self._save_columns())
         self._table.horizontalHeader().sectionResized.connect(self._on_column_resized)
-        self._table.horizontalHeader().sectionClicked.connect(self._toggle_trade_display_mode)
+        self._table.horizontalHeader().sectionClicked.connect(self._toggle_table_header_mode)
         # 표의 오른쪽/아래 빈 공간을 더블 클릭하면 창을 표 크기에 맞춘다.
         self._table.viewport().installEventFilter(self)
         self._update_trade_display_headers()
+        self._update_high_display_headers()
         self._restore_columns()
         self._loading_label = QLabel("조회 중입니다…")
         self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2984,6 +2995,10 @@ class MainWindow(QMainWindow):
         saved_rank_query = self._settings.get("rank_query_type")
         self._rank_query_selector.setCurrentIndex(("5", "1", "2", "3", "4").index(saved_rank_query) if saved_rank_query in {"1", "2", "3", "4", "5"} else 0)
         self._update_trade_display_headers()
+        self._update_high_display_headers()
+        for code in self._row_by_code:
+            self._render_new_high_price(code)
+            self._render_high_distance(code)
         self._apply_table_visuals()
         self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1")
         self._update_clock_label()
@@ -3237,6 +3252,7 @@ class MainWindow(QMainWindow):
                 self._minute_history_worker,
                 self._fundamentals_worker,
                 self._daily_high_worker,
+                self._historical_high_worker,
                 self._nxt_eligibility_worker,
                 self._new_high_worker,
                 self._ranking_worker,
@@ -3258,6 +3274,7 @@ class MainWindow(QMainWindow):
             self._minute_history_worker_factory = runtime.get("minute_history_worker_factory")  # type: ignore[assignment]
             self._fundamentals_worker_factory = runtime.get("fundamentals_worker_factory")  # type: ignore[assignment]
             self._daily_high_worker_factory = runtime.get("daily_high_worker_factory")  # type: ignore[assignment]
+            self._historical_high_worker_factory = runtime.get("historical_high_worker_factory")  # type: ignore[assignment]
             self._nxt_eligibility_worker_factory = runtime.get("nxt_eligibility_worker_factory")  # type: ignore[assignment]
         except Exception as error:
             self._api_reloading = False
@@ -3355,11 +3372,14 @@ class MainWindow(QMainWindow):
             return
         today = self._ranking_now().strftime("%Y-%m-%d")
         if self._settings.get("krx_stock_catalog_date").startswith(today):
+            if not self._is_after_hours_data_pause():
+                self._start_historical_high_loading(tuple(self._row_by_code))
             return
         worker = KrxStockCatalogWorker(self._stock_lookup, self._settings)
         worker.setParent(self)
         worker.completed.connect(lambda count, _cached: self.statusBar().showMessage(f"KRX 상장종목 {count:,}개 자동 동기화 완료"))
         worker.failed.connect(lambda message: logger.warning("KRX 상장종목 자동 동기화 실패: %s", message))
+        worker.finished.connect(lambda: None if self._is_after_hours_data_pause() else self._start_historical_high_loading(tuple(self._row_by_code)))
         self._krx_stock_catalog_worker = worker
         self.statusBar().showMessage("최하위 작업: KRX 전체 상장종목 목록 동기화 중")
         worker.start()
@@ -3543,10 +3563,9 @@ class MainWindow(QMainWindow):
         finally:
             self._syncing_row_heights = False
         self._settings.set("ui_row_height", str(height))
-        self._table.setIconSize(QSize(max(8, min(32, height - 4)), max(8, min(32, height - 4))))
-        # 큰 폭으로 드래그할 때도 테마 배지의 글자·여백이 다음 창 갱신을
-        # 기다리지 않도록 즉시 다시 맞춘다.
-        self._refresh_theme_badges()
+        # 행 높이를 직접 드래그한 순간에도 글자·아이콘·테마 배지를 함께
+        # 다시 계산한다. 다음 창 크기 변경까지 기다리지 않는다.
+        self._apply_table_visuals()
 
     def _rank_row_resize_target(self, point: QPoint) -> bool:
         """순위 칸의 행 경계 근처인지 판별한다."""
@@ -3971,7 +3990,12 @@ class MainWindow(QMainWindow):
         layout.addStretch(); return widget
 
     def _new_high_label(self, code: str, label: str) -> str:
-        period = int(self._settings.get("high_distance_period"))
+        period_text = self._settings.get("high_distance_period")
+        if period_text == "historical":
+            target = self._historical_high_prices.get(code)
+            current = self._current_prices.get(code)
+            return "신고가" if target is not None and current is not None and current >= target else "-"
+        period = int(period_text)
         return "신고가" if code in self._today_high_codes or period in self._new_high_periods.get(code, frozenset()) else "-"
 
     def _render_new_high_price(self, code: str) -> None:
@@ -3992,8 +4016,12 @@ class MainWindow(QMainWindow):
             historical = daily.high_5_price if daily else None
         elif period == "20":
             historical = daily.high_20_price if daily else None
+        elif period == "historical":
+            historical = self._historical_high_prices.get(code)
         else:
-            historical = fundamentals.high_250_price if fundamentals else None
+            # ka10081 수정주가 기준 값이 있으면 우선한다. 일봉 캐시에 최근
+            # 30일만 있는 재시작 직후에는 저장된 수정주가 기준 값을 사용한다.
+            historical = daily.high_250_price if daily and daily.high_250_price is not None else (fundamentals.high_250_price if fundamentals else None)
         if historical is None:
             return None
         today_high = self._today_high_prices.get(code)
@@ -4028,6 +4056,38 @@ class MainWindow(QMainWindow):
                 strength.setText(f"{strength_label} (직전)" if completed else strength_label)
             if trade_value is not None:
                 trade_value.setText(f"{trade_label} (직전)" if completed else trade_label)
+
+    def _update_high_display_headers(self) -> None:
+        period = self._settings.get("high_distance_period")
+        labels = {"5": "신고가(5)", "20": "신고가(20)", "250": "신고가(250)", "historical": "신고가(역)"}
+        distance_labels = {"5": "신고가%(5)", "20": "신고가%(20)", "250": "신고가%(250)", "historical": "신고가%(역)"}
+        price_header = self._table.horizontalHeaderItem(13)
+        distance_header = self._table.horizontalHeaderItem(14)
+        if price_header is not None:
+            price_header.setText(labels.get(period, labels["250"]))
+        if distance_header is not None:
+            distance_header.setText(distance_labels.get(period, distance_labels["250"]))
+
+    def _toggle_table_header_mode(self, logical_index: int) -> None:
+        if logical_index == 13:
+            periods = ("5", "20", "250", "historical")
+            current = self._settings.get("high_distance_period")
+            try:
+                next_period = periods[(periods.index(current) + 1) % len(periods)]
+            except ValueError:
+                next_period = "250"
+            self._settings.set("high_distance_period", next_period)
+            self._update_high_display_headers()
+            if next_period == "historical":
+                # 장외에는 불필요한 보완 조회를 쉬지만, 사용자가 역사적 기준을
+                # 직접 선택한 경우에는 필요한 연봉 조회를 바로 시작한다.
+                self._start_historical_high_loading(tuple(self._row_by_code))
+            for code in self._row_by_code:
+                self._render_new_high_price(code)
+                self._render_high_distance(code)
+            self.statusBar().showMessage(f"신고가 기준: {self._table.horizontalHeaderItem(13).text()}")
+            return
+        self._toggle_trade_display_mode(logical_index)
 
     def _toggle_trade_display_mode(self, logical_index: int) -> None:
         periods = {
@@ -4281,6 +4341,7 @@ class MainWindow(QMainWindow):
         if self._ranking_priority_preparing:
             return
         self._load_cached_daily_highs(codes)
+        self._load_cached_historical_highs(codes)
         if self._is_after_hours_data_pause():
             # 20:05~07:55에는 움직이지 않는 분봉·신고가 데이터를 다시
             # 조회하지 않는다. 기본정보 → NXT → 상장종목 동기화만 허용한다.
@@ -4530,9 +4591,15 @@ class MainWindow(QMainWindow):
             # 여기서 비우면 앱 시작 때 직전 1일 값이 다시 빈칸으로 돌아간다.
             self._daily_high_cache_date = today
         refreshed = self._daily_bar_repository.refreshed_today(codes, today) if self._daily_bar_repository is not None else set()
-        missing = tuple(code for code in codes if code not in self._daily_highs or code not in refreshed)
+        # 기존 ka10001 250일 최고가는 권리 조정 전 값이었다. 설치 후 한 번은
+        # 모든 현재 종목을 ka10081 수정주가 기준으로 다시 계산해 교체한다.
+        refresh_adjusted_basis = self._settings.get("daily_high_adjusted_basis_version") != "1"
+        missing = codes if refresh_adjusted_basis else tuple(code for code in codes if code not in self._daily_highs or code not in refreshed)
         if not missing:
             return False
+        if refresh_adjusted_basis:
+            self._daily_high_basis_refresh_expected = set(missing)
+            self._daily_high_basis_refresh_received.clear()
         worker = self._daily_high_worker_factory(missing)
         worker.setParent(self)
         if not isinstance(worker, DailyHighWorker):
@@ -4541,7 +4608,7 @@ class MainWindow(QMainWindow):
             return False
         worker.received.connect(self._on_daily_high_received)
         worker.failed.connect(self._on_background_failure)
-        worker.finished.connect(lambda: self._start_fundamentals_phase(codes))
+        worker.finished.connect(lambda: self._on_daily_high_worker_finished(codes))
         self._daily_high_worker = worker
         worker.start()
         return True
@@ -4549,6 +4616,9 @@ class MainWindow(QMainWindow):
     def _on_daily_high_received(self, code: str, targets: object) -> None:
         if isinstance(targets, DailyHighTargets):
             self._daily_highs[code] = targets
+            self._daily_high_basis_refresh_received.add(code)
+            if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_adjusted_high_250_price"):
+                self._stock_lookup.update_adjusted_high_250_price(code, targets.high_250_price)
             if self._daily_bar_repository is not None:
                 try:
                     self._daily_bar_repository.upsert_targets(code, targets, self._ranking_now().date())
@@ -4567,6 +4637,74 @@ class MainWindow(QMainWindow):
             self._render_new_high_price(code)
             self._render_high_distance(code)
             self._render_trade_values(code)
+
+    def _on_daily_high_worker_finished(self, codes: tuple[str, ...]) -> None:
+        """수정주가 기준 250일 최고가 재계산 완료 여부를 기록한다."""
+        if self._daily_high_basis_refresh_expected:
+            if self._daily_high_basis_refresh_expected <= self._daily_high_basis_refresh_received:
+                self._settings.set("daily_high_adjusted_basis_version", "1")
+            self._daily_high_basis_refresh_expected.clear()
+            self._daily_high_basis_refresh_received.clear()
+        self._start_fundamentals_phase(codes)
+
+    def _load_cached_historical_highs(self, codes: tuple[str, ...]) -> None:
+        if self._stock_lookup is None or not hasattr(self._stock_lookup, "load_historical_high_prices"):
+            return
+        try:
+            self._historical_high_prices.update(self._stock_lookup.load_historical_high_prices(codes))
+        except Exception as error:
+            logger.warning("역사적 신고가 캐시 조회 실패: %s", error)
+
+    def _start_historical_high_loading(self, codes: tuple[str, ...]) -> bool:
+        if self._closing or self._ranking_priority_preparing or self._historical_high_worker_factory is None:
+            return False
+        if self._historical_high_worker is not None and self._historical_high_worker.isRunning():
+            return True
+        refresh_basis = self._settings.get("historical_high_adjusted_basis_version") != "1"
+        today = self._ranking_now().strftime("%Y-%m-%d")
+        checked_today = (
+            self._stock_lookup.historical_high_checked_today(codes, today)
+            if self._stock_lookup is not None and hasattr(self._stock_lookup, "historical_high_checked_today")
+            else set()
+        )
+        missing = codes if refresh_basis else tuple(code for code in codes if code not in checked_today)
+        if not missing:
+            return False
+        if refresh_basis:
+            self._historical_high_refresh_expected = set(missing)
+            self._historical_high_refresh_received.clear()
+        worker = self._historical_high_worker_factory(missing)
+        worker.setParent(self)
+        if not isinstance(worker, HistoricalHighWorker):
+            worker.deleteLater()
+            return False
+        worker.received.connect(self._on_historical_high_received)
+        worker.failed.connect(self._on_background_failure)
+        worker.finished.connect(self._on_historical_high_worker_finished)
+        self._historical_high_worker = worker
+        worker.start()
+        return True
+
+    def _on_historical_high_received(self, code: str, target: object) -> None:
+        if not isinstance(target, HistoricalHighTarget) or target.price is None:
+            return
+        self._historical_high_prices[code] = target.price
+        self._historical_high_refresh_received.add(code)
+        if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_historical_high_price"):
+            self._stock_lookup.update_historical_high_price(
+                code, target.price, target.first_year, target.last_year, self._ranking_now().strftime("%Y-%m-%d")
+            )
+        if self._defer_table_update_while_modal():
+            return
+        self._render_new_high_price(code)
+        self._render_high_distance(code)
+
+    def _on_historical_high_worker_finished(self) -> None:
+        if self._historical_high_refresh_expected:
+            if self._historical_high_refresh_expected <= self._historical_high_refresh_received:
+                self._settings.set("historical_high_adjusted_basis_version", "1")
+            self._historical_high_refresh_expected.clear()
+            self._historical_high_refresh_received.clear()
 
     def _load_cached_daily_highs(self, codes: tuple[str, ...]) -> None:
         """장외에도 최근 저장 일봉으로 직전 1일·신고가를 즉시 표시한다."""
@@ -4891,7 +5029,9 @@ class MainWindow(QMainWindow):
         if isinstance(fundamentals, StockFundamentals):
             self._fundamentals[code] = fundamentals
             if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_fundamentals"):
-                self._stock_lookup.update_fundamentals(code, fundamentals.market_cap_eok, fundamentals.float_ratio_percent, fundamentals.high_250_price, fundamentals.float_shares)
+                # ka10001 원본 250일 고가는 권리 조정 전 가격일 수 있으므로
+                # daily high 작업이 저장한 수정주가 기준 캐시를 덮어쓰지 않는다.
+                self._stock_lookup.update_fundamentals(code, fundamentals.market_cap_eok, fundamentals.float_ratio_percent, None, fundamentals.float_shares)
             if self._defer_table_update_while_modal():
                 return
             self._render_market_cap(code)
@@ -5006,6 +5146,7 @@ class MainWindow(QMainWindow):
             self._minute_history_worker,
             self._fundamentals_worker,
             self._daily_high_worker,
+            self._historical_high_worker,
             self._nxt_eligibility_worker,
             self._new_high_worker,
             self._ranking_worker,
@@ -5032,6 +5173,7 @@ class MainWindow(QMainWindow):
                 self._minute_history_worker: "분봉 보완",
                 self._fundamentals_worker: "기본정보",
                 self._daily_high_worker: "신고가",
+                self._historical_high_worker: "역사적 신고가",
                 self._nxt_eligibility_worker: "NXT 확인",
                 self._new_high_worker: "신고가 목록",
                 self._ranking_worker: "실시간 순위",
@@ -5055,22 +5197,35 @@ class MainWindow(QMainWindow):
         self._table.setAlternatingRowColors(True)
         font_size = int(self._settings.get("ui_font_size"))
         row_height = int(self._settings.get("ui_row_height"))
-        if font_size:
-            font = self._table.font(); font.setPointSize(font_size); self._table.setFont(font)
-        elif self._settings.get("ui_mode") == "responsive":
-            # 작은 해상도에서도 표가 과도하게 커지지 않도록 자동 글자
-            # 크기의 하한을 4pt까지 낮춘다.
-            font = self._table.font(); font.setPointSize(max(4, min(13, self.width() // 130))); self._table.setFont(font)
+        responsive = self._settings.get("ui_mode") == "responsive"
         if row_height:
             self._table.verticalHeader().setDefaultSectionSize(row_height)
-        elif self._settings.get("ui_mode") == "responsive":
-            # 자동 UI는 가로뿐 아니라 창 높이와 현재 표시 행 수에도 맞춘다.
+        elif responsive:
+            # 자동 UI의 행 높이는 창의 세로 공간과 표시 행 수에 맞춘다.
             # 너무 작아져 읽기 어려운 경우와 지나치게 커지는 경우는 제한한다.
             row_count = max(1, self._table.rowCount())
             available_height = self._table.viewport().height()
             fitted_height = available_height // row_count if available_height > 0 else 0
             fallback_height = self._table.font().pointSize() * 2 + 10
             self._table.verticalHeader().setDefaultSectionSize(max(14, min(64, fitted_height or fallback_height)))
+        if font_size:
+            font = self._table.font(); font.setPointSize(font_size); self._table.setFont(font)
+        elif responsive:
+            # 가로 폭에는 반응하지 않는다. 창을 좌우로 조절해도 글자 크기가
+            # 흔들리지 않고, 행 높이를 바꾸거나 세로 크기를 바꿀 때만 따른다.
+            effective_row_height = self._table.verticalHeader().defaultSectionSize()
+            # 추정 비율 대신 실제 글자 높이를 재서, 행 안에서 잘리지 않는
+            # 최대 글자 크기로 맞춘다. 행을 크게 하면 글자도 거의 꽉 차게 커진다.
+            # 글자가 행을 거의 채우되, 잘림을 막을 3px 여백만 남긴다.
+            available_height = max(8, effective_row_height - 3)
+            font = self._table.font()
+            for point_size in range(28, 5, -1):
+                font.setPointSize(point_size)
+                if QFontMetrics(font).height() <= available_height:
+                    break
+            else:
+                font.setPointSize(6)
+            self._table.setFont(font)
         icon_size = max(8, min(32, self._table.verticalHeader().defaultSectionSize() - 4))
         self._table.setIconSize(QSize(icon_size, icon_size))
         # 반응형 표 글자 크기가 변하면 이미 만들어진 테마 배지도 함께 갱신한다.

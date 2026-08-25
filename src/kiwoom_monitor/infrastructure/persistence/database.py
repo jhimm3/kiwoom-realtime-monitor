@@ -65,6 +65,8 @@ DEFAULT_SETTINGS = {
     "google_drive_last_upload_success_at": "",
     "krx_stock_catalog_date": "",
     "krx_stock_catalog_format_version": "3",
+    "daily_high_adjusted_basis_version": "0",
+    "historical_high_adjusted_basis_version": "0",
 }
 
 DEFAULT_COLUMNS = (
@@ -185,7 +187,7 @@ class Database:
     @staticmethod
     def _add_stock_columns(connection: sqlite3.Connection) -> None:
         existing = {str(row[1]) for row in connection.execute("PRAGMA table_info(stocks)")}
-        for name in ("market_cap", "float_ratio", "float_shares", "circulating_market_cap", "high_250_price", "fundamentals_updated_at", "nxt_enabled", "nxt_checked_at", "last_price", "last_price_updated_at"):
+        for name in ("market_cap", "float_ratio", "float_shares", "circulating_market_cap", "high_250_price", "historical_high_price", "historical_high_first_year", "historical_high_last_year", "historical_high_updated_at", "historical_high_checked_on", "fundamentals_updated_at", "nxt_enabled", "nxt_checked_at", "last_price", "last_price_updated_at"):
             if name not in existing:
                 connection.execute(f"ALTER TABLE stocks ADD COLUMN {name} REAL")
 

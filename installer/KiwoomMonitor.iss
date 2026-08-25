@@ -1,7 +1,10 @@
 #define AppName "키움 실시간 모니터"
-#define AppVersion "1.1.11"
+#define AppVersion "1.1.12"
 #define AppPublisher "크니"
 #define AppExeName "KiwoomMonitor.exe"
+#ifndef DistDir
+  #define DistDir "..\\dist\\KiwoomMonitor"
+#endif
 
 [Setup]
 AppId={{3B79D124-E394-4F72-AD44-9133D9AEAD3C}
@@ -15,7 +18,7 @@ DefaultDirName={autopf}\KiwoomMonitor
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist\installer
-OutputBaseFilename=KiwoomMonitor-Setup-1.1.11
+OutputBaseFilename=KiwoomMonitor-Setup-1.1.12
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -38,7 +41,7 @@ Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 Name: "desktopicon"; Description: "바탕 화면에 바로가기 만들기"; Flags: unchecked
 
 [Files]
-Source: "..\dist\KiwoomMonitor\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#DistDir}\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\{#AppExeName}"; IconIndex: 0

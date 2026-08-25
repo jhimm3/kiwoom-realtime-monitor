@@ -23,13 +23,20 @@ class DailyBar:
 class DailyHighTargets:
     high_5_price: int | None
     high_20_price: int | None
+    high_250_price: int | None
     previous_day_trade_value_eok: float | None = None
     previous_day_close_price: int | None = None
     daily_trade_values_eok: tuple[tuple[str, float], ...] = ()
     daily_bars: tuple[DailyBar, ...] = ()
 
     @classmethod
-    def from_daily_bars(cls, bars: tuple[DailyBar, ...], *, as_of: date | None = None) -> "DailyHighTargets":
+    def from_daily_bars(
+        cls,
+        bars: tuple[DailyBar, ...],
+        *,
+        as_of: date | None = None,
+        include_high_250: bool = True,
+    ) -> "DailyHighTargets":
         ordered = tuple(sorted(bars, key=lambda bar: bar.trade_date, reverse=True))
         prices = [bar.high_price for bar in ordered]
         # 장중에는 오늘 일봉 다음의 전일 봉을, 장전·주말·장 종료 뒤에는
@@ -39,8 +46,12 @@ class DailyHighTargets:
         previous_bar = ordered[previous_index] if len(ordered) > previous_index else None
         previous_value = previous_bar.trade_value_eok if previous_bar is not None else None
         previous_close = previous_bar.close_price if previous_bar is not None else None
-        values = tuple((bar.trade_date, bar.trade_value_eok) for bar in ordered if bar.trade_value_eok is not None)
-        return cls(_highest(prices[:5]), _highest(prices[:20]), previous_value, previous_close, values, ordered)
+        # 개발 확인 CSV와 DB 보관은 최근 30일 범위만 사용한다.
+        values = tuple((bar.trade_date, bar.trade_value_eok) for bar in ordered[:30] if bar.trade_value_eok is not None)
+        # ka10001의 250일 최고가는 권리 조정 전 가격일 수 있다. 현재가·차트와
+        # 같은 수정주가 기준은 ka10081 일봉의 최근 250개 고가로 계산한다.
+        high_250 = _highest(prices[:250]) if include_high_250 else None
+        return cls(_highest(prices[:5]), _highest(prices[:20]), high_250, previous_value, previous_close, values, ordered[:30])
 
 
 class DailyHighService:
@@ -52,7 +63,7 @@ class DailyHighService:
         # 영웅문의 KRXNXT 표기와 맞추기 위해 신고가·최고가와 직전 거래대금에
         # NXT 일봉을 함께 반영한다.
         krx_bars = self._load_bars(code)
-        targets = DailyHighTargets.from_daily_bars(krx_bars[:30], as_of=date.today())
+        targets = DailyHighTargets.from_daily_bars(krx_bars, as_of=date.today())
         if not self._include_nxt:
             return targets
 
@@ -61,7 +72,7 @@ class DailyHighService:
         except Exception:
             # NXT 일봉이 없는 종목·일시적 NXT 조회 오류는 KRX 값만으로 표시한다.
             return targets
-        return DailyHighTargets.from_daily_bars(_combine_krx_nxt_bars(krx_bars, nxt_bars)[:30], as_of=date.today())
+        return DailyHighTargets.from_daily_bars(_combine_krx_nxt_bars(krx_bars, nxt_bars), as_of=date.today())
 
     def _load_bars(self, code: str) -> tuple[DailyBar, ...]:
         response = self._client.request(

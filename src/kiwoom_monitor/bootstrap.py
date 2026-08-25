@@ -18,12 +18,14 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker import RealtimeTr
 from kiwoom_monitor.infrastructure.kiwoom_rest.minute_history_worker import MinuteHistoryWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.fundamentals_worker import FundamentalsWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.daily_high_worker import DailyHighWorker
+from kiwoom_monitor.infrastructure.kiwoom_rest.historical_high_worker import HistoricalHighWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.nxt_eligibility_worker import NxtEligibilityWorker
 from kiwoom_monitor.application import RankingService
 from kiwoom_monitor.application.minute_trade_value import MinuteTradeValueAggregator
 from kiwoom_monitor.application.minute_chart_service import MinuteChartService
 from kiwoom_monitor.application.stock_fundamentals_service import StockFundamentalsService
 from kiwoom_monitor.application.daily_high_service import DailyHighService
+from kiwoom_monitor.application.historical_high_service import HistoricalHighService
 from kiwoom_monitor.application.nxt_eligibility_service import NxtEligibilityService
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
 from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSettingsRepository
@@ -96,6 +98,9 @@ def main() -> None:
             "daily_high_worker_factory": lambda codes: DailyHighWorker(
                 DailyHighService(client, include_nxt=True), codes
             ),
+            "historical_high_worker_factory": lambda codes: HistoricalHighWorker(
+                HistoricalHighService(client, include_nxt=True), codes
+            ),
             "nxt_eligibility_worker_factory": lambda codes: NxtEligibilityWorker(NxtEligibilityService(client), codes),
         }
 
@@ -128,6 +133,7 @@ def main() -> None:
         minute_history_worker_factory=api_runtime.get("minute_history_worker_factory"),
         fundamentals_worker_factory=api_runtime.get("fundamentals_worker_factory"),
         daily_high_worker_factory=api_runtime.get("daily_high_worker_factory"),
+        historical_high_worker_factory=api_runtime.get("historical_high_worker_factory"),
         nxt_eligibility_worker_factory=api_runtime.get("nxt_eligibility_worker_factory"),
         minute_aggregator=MinuteTradeValueAggregator(),
         minute_bar_repository=minute_bar_repository,

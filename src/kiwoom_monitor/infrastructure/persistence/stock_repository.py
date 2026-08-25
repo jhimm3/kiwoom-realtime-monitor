@@ -69,11 +69,12 @@ class StockRepository:
         con = sqlite3.connect(self._path)
         try:
             row = con.execute("SELECT market_cap, float_ratio, high_250_price, float_shares FROM stocks WHERE code=?", (code,)).fetchone()
-            changed = row is None or row[0] != market_cap or row[1] != float_ratio or row[2] != high_250_price or row[3] != float_shares
+            saved_high_250_price = high_250_price if high_250_price is not None else (int(row[2]) if row is not None and row[2] else None)
+            changed = row is None or row[0] != market_cap or row[1] != float_ratio or row[2] != saved_high_250_price or row[3] != float_shares
             if changed:
                 con.execute(
                     "UPDATE stocks SET market_cap=?, float_ratio=?, float_shares=?, circulating_market_cap=?, high_250_price=?, fundamentals_updated_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE code=?",
-                    (market_cap, float_ratio, float_shares, market_cap * float_ratio / 100, high_250_price, code),
+                    (market_cap, float_ratio, float_shares, market_cap * float_ratio / 100, saved_high_250_price, code),
                 )
             else:
                 # 값은 보존하고, 다음 날 재조회하지 않도록 확인 시각만 갱신한다.
@@ -81,6 +82,62 @@ class StockRepository:
             con.commit()
         finally:
             con.close()
+
+    def update_adjusted_high_250_price(self, code: str, high_250_price: int | None) -> None:
+        """ka10081 수정주가 기준 250일 최고가를 보관한다."""
+        if not code or high_250_price is None or high_250_price <= 0:
+            return
+        con = sqlite3.connect(self._path)
+        try:
+            con.execute(
+                "UPDATE stocks SET high_250_price=?, updated_at=CURRENT_TIMESTAMP WHERE code=?",
+                (high_250_price, code),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def update_historical_high_price(self, code: str, price: int | None, first_year: int | None, last_year: int | None, checked_on: str) -> None:
+        """ka10094 수정주가 연봉으로 계산한 역사적 신고가를 보관한다."""
+        if not code or price is None or price <= 0:
+            return
+        con = sqlite3.connect(self._path)
+        try:
+            con.execute(
+                "UPDATE stocks SET historical_high_price=?, historical_high_first_year=?, historical_high_last_year=?, historical_high_checked_on=?, historical_high_updated_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE code=?",
+                (price, first_year, last_year, checked_on, code),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def load_historical_high_prices(self, codes: tuple[str, ...]) -> dict[str, int]:
+        if not codes:
+            return {}
+        placeholders = ",".join("?" for _ in codes)
+        con = sqlite3.connect(self._path)
+        try:
+            rows = con.execute(
+                f"SELECT code, historical_high_price FROM stocks WHERE code IN ({placeholders}) AND historical_high_price IS NOT NULL",
+                codes,
+            ).fetchall()
+        finally:
+            con.close()
+        return {str(code): int(price) for code, price in rows if price is not None and int(price) > 0}
+
+    def historical_high_checked_today(self, codes: tuple[str, ...], checked_on: str) -> set[str]:
+        if not codes:
+            return set()
+        placeholders = ",".join("?" for _ in codes)
+        con = sqlite3.connect(self._path)
+        try:
+            rows = con.execute(
+                f"SELECT code FROM stocks WHERE code IN ({placeholders}) AND historical_high_checked_on=?",
+                (*codes, checked_on),
+            ).fetchall()
+        finally:
+            con.close()
+        return {str(code) for (code,) in rows}
 
     def load_fundamentals(self, codes: tuple[str, ...]) -> dict[str, StockFundamentals]:
         if not codes:

@@ -20,6 +20,7 @@ class DailyHighServiceTests(unittest.TestCase):
         targets = DailyHighService(client).load("005930")
         self.assertEqual(125, targets.high_5_price)
         self.assertEqual(125, targets.high_20_price)
+        self.assertEqual(125, targets.high_250_price)
         self.assertEqual("ka10081", client.api_id)
         self.assertEqual("/api/dostk/chart", client.path)
 

@@ -25,6 +25,8 @@ class StockFundamentalsService:
     def load(self, code: str) -> StockFundamentals:
         row = self._client.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": code})
         try:
+            # 원본값은 호환성을 위해 읽어 두되, 화면의 250일 최고가는
+            # 수정주가 기준 ka10081 계산값을 우선한다.
             high_250 = next(
                 (value for key in ("250hgst", "250hgst_pric", "high_250_price") if (value := _positive_int(row.get(key))) is not None),
                 None,

@@ -28,7 +28,12 @@ class DailyBarRepository:
         grouped: dict[str, list[DailyBar]] = {}
         for code, trade_date, high_price, trade_value, close_price in rows:
             grouped.setdefault(str(code), []).append(DailyBar(str(trade_date).replace("-", ""), int(high_price), float(trade_value) if trade_value is not None else None, int(close_price) if close_price else None))
-        return {code: DailyHighTargets.from_daily_bars(tuple(bars[:30]), as_of=date.today()) for code, bars in grouped.items()}
+        # DB에는 직전 거래대금 확인용 최근 30일만 보관한다. 250일 최고가는
+        # ka10081 원본 일봉 전체로 계산한 뒤 stocks 캐시에 별도로 보존한다.
+        return {
+            code: DailyHighTargets.from_daily_bars(tuple(bars[:30]), as_of=date.today(), include_high_250=False)
+            for code, bars in grouped.items()
+        }
 
     def refreshed_today(self, codes: tuple[str, ...], today: date) -> set[str]:
         if not codes:
