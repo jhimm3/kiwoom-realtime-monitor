@@ -323,7 +323,7 @@ NXT 여부를 아직 모르거나 조회 실패한 종목은 안전하게 NXT �
 .\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm --onefile --windowed --name UpdateHelper --distpath resources --workpath build\UpdateHelper --specpath build\UpdateHelper src\kiwoom_monitor\update_helper.py
 
 # 일반 릴리즈에서는 기존 UpdateHelper.exe를 포함해 앱만 빌드
-.\.venv\Scripts\pyinstaller.exe --clean --noconfirm KiwoomMonitor.spec
+.\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm KiwoomMonitor.spec
 & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' installer\KiwoomMonitor.iss
 ```
 
