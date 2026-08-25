@@ -64,7 +64,7 @@ class HistoricalHighServiceTests(unittest.TestCase):
         self.assertEqual(["ka10094", "ka10083", "ka10081"], client.calls)
         self.assertNotIn(60000, [item.high_price for item in target.evidence])
 
-    def test_incremental_split_adjusts_saved_history_and_compares_new_high(self) -> None:
+    def test_incremental_split_discards_old_basis_and_reloads_today_adjusted_history(self) -> None:
         cached = HistoricalHighCache(
             HistoricalHighTarget(1_200_000, 2024, 2025, "20250102", (HistoricalHighEvidence("month", "20250102", 1_200_000),)),
             "2025-08-25",
@@ -90,8 +90,9 @@ class HistoricalHighServiceTests(unittest.TestCase):
 
         self.assertEqual(250_000, target.price)
         self.assertEqual("20260220", target.occurred_on)
-        self.assertEqual(["ka10094", "ka10083", "ka10081"], client.calls)
-        self.assertIn(200_000, [item.high_price for item in target.evidence])
+        self.assertEqual(["ka10094", "ka10083", "ka10081", "ka10094", "ka10083", "ka10081"], client.calls)
+        self.assertNotIn(1_200_000, [item.high_price for item in target.evidence])
+        self.assertNotIn(200_000, [item.high_price for item in target.evidence])
 
     def test_stops_after_yearly_chart_when_250_day_high_is_already_higher(self) -> None:
         class Client:

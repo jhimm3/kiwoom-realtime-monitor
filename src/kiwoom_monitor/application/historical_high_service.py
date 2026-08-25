@@ -51,6 +51,10 @@ class HistoricalHighService:
         cache = self._cache_loader(code) if self._cache_loader is not None else None
         if cache is not None and cache.target.evidence:
             return self._load_incremental(code, cache, high_250)
+        return self._load_fresh(code, high_250)
+
+    def _load_fresh(self, code: str, high_250: int | None) -> HistoricalHighTarget:
+        """오늘 기준 수정주가만으로 계산 근거를 처음부터 다시 만든다."""
         evidence = self._load_market(code, high_250)
         if self._include_nxt:
             try:
@@ -95,10 +99,10 @@ class HistoricalHighService:
                 daily = self._load_rows("ka10081", "stk_dt_pole_chart_qry", code, today, prefix=month)
                 new_event_rows = [row for row in daily if _has_adjustment(row) and _date_text(row) > checked]
                 if new_event_rows:
-                    for event_row in sorted(new_event_rows, key=_date_text):
-                        evidence = _apply_adjustment(evidence, _date_text(event_row), _adjustment_factor(event_row))
-                elif _date_text(month_row)[:8] > checked:
-                    evidence = _apply_adjustment(evidence, _date_text(month_row), _adjustment_factor(month_row))
+                    # 저장된 근거는 이전 조회일의 주식 단위다. 새 권리변동이
+                    # 생기면 수정비율을 직접 곱하지 않고, 키움이 오늘 기준으로
+                    # 보정한 전체 차트를 다시 받아 DB 근거를 통째로 교체한다.
+                    return self._load_fresh(code, high_250)
                 detailed = [item for row in daily if (item := _evidence("day", row)) is not None]
                 evidence.extend(detailed)
             elif (item := _evidence("month", month_row)) is not None:
@@ -209,25 +213,6 @@ def _month_end(month: str) -> str:
 def _has_adjustment(row: dict[str, Any]) -> bool:
     empty = {"", "0", "0.0", "+0.00", "-0.00"}
     return any(str(row.get(key, "")).strip() not in empty for key in ("upd_stkpc_tp", "upd_rt", "upd_stkpc_event"))
-
-
-def _adjustment_factor(row: dict[str, Any]) -> float:
-    try:
-        rate = float(str(row.get("upd_rt", "")).strip().replace(",", ""))
-    except ValueError:
-        return 1.0
-    factor = 1.0 + rate / 100.0
-    return factor if 0 < factor < 10 else 1.0
-
-
-def _apply_adjustment(evidence: list[HistoricalHighEvidence], event_date: str, factor: float) -> list[HistoricalHighEvidence]:
-    if factor == 1.0:
-        return evidence
-    return [
-        HistoricalHighEvidence(item.period, item.trade_date, max(1, round(item.high_price * factor)), item.adjustment_types, item.adjustment_rate, item.adjustment_event)
-        if item.trade_date < event_date else item
-        for item in evidence
-    ]
 
 
 def _evidence(period: str, row: dict[str, Any]) -> HistoricalHighEvidence | None:
