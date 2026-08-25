@@ -27,6 +27,50 @@ class _OcrToken:
     has_badge_background: bool = False
 
 
+def _badge_regions(image: Image.Image, minimum_x: int = 0) -> tuple[tuple[int, int, int, int], ...]:
+    """Find compact pastel badge backgrounds while ignoring colored reason text."""
+    import cv2
+    import numpy as np
+
+    rgb = np.asarray(image.convert("RGB"))
+    maximum = rgb.max(axis=2)
+    minimum = rgb.min(axis=2)
+    # 배지 배경은 흰색에 가까운 저채도 파스텔이다. 빨강·파랑 설명 글자는
+    # 어두운 픽셀이므로 제외하고, 머리글의 큰 보라색 면은 크기에서 제외한다.
+    chroma = maximum - minimum
+    pastel = (chroma >= 5) & (minimum >= 220)
+    neutral_badge = (chroma <= 3) & (minimum >= 240) & (maximum <= 250)
+    mask = (pastel | neutral_badge).astype("uint8") * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3)))
+    _, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+    regions: list[tuple[int, int, int, int]] = []
+    for left, top, width, height, area in stats[1:]:
+        if left < minimum_x or not (25 <= width <= 130 and 15 <= height <= 32):
+            continue
+        if area / max(1, width * height) < 0.35:
+            continue
+        regions.append((int(left), int(top), int(left + width), int(top + height)))
+    return tuple(sorted(regions, key=lambda region: (region[1], region[0])))
+
+
+def _merge_badge_tokens(tokens: tuple[_OcrToken, ...], regions: tuple[tuple[int, int, int, int], ...]) -> tuple[_OcrToken, ...]:
+    """Join OCR fragments that belong to the same colored badge."""
+    output: list[_OcrToken] = []
+    for left, top, right, bottom in regions:
+        parts = sorted(
+            (token for token in tokens if left - 4 <= token.x <= right + 4 and top - 4 <= token.y <= bottom + 4),
+            key=lambda token: token.x,
+        )
+        if any(len(part.text.strip()) >= 2 for part in parts):
+            # 배지 바로 뒤 설명의 첫 글자나 둥근 테두리를 한 글자로 잘못
+            # 인식한 조각은 정상적인 배지명이 함께 있을 때 제외한다.
+            parts = [part for part in parts if len(part.text.strip()) >= 2]
+        text = "".join(part.text.strip() for part in parts if part.text.strip())
+        if text:
+            output.append(_OcrToken(text, (left + right) / 2, (top + bottom) / 2, True))
+    return tuple(output)
+
+
 def _normalized_header(value: str) -> str:
     return value.replace(" ", "").replace("\n", "")
 
@@ -252,6 +296,46 @@ class PaddleThemeOcr:
                 value = str(text).strip()
                 if value:
                     tokens.append(_OcrToken(value, x, y, self._has_badge_background(image, points)))
+        if mode in {"reason_badges", "both"}:
+            name_token = next((token for token in tokens if _normalized_header(token.text) == "종목명"), None)
+            regions = _badge_regions(image, int(name_token.x + 100) if name_token is not None else 0)
+            if regions:
+                # 긴 이유 문장과 배지가 한 OCR 상자로 합쳐져도 설명을 읽지 않도록
+                # 원본 크기를 유지한 채 배지 사각형만 남긴 이미지를 한 번 더 읽는다.
+                import cv2
+                import numpy as np
+
+                original = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+                isolated = np.full_like(original, 255)
+                for left, top, right, bottom in regions:
+                    # 검출된 배지 경계 밖의 설명 첫 글자가 붙지 않도록 배경
+                    # 사각형 안쪽만 남긴다.
+                    y1, y2 = max(0, top), min(original.shape[0], bottom)
+                    x1, x2 = max(0, left), min(original.shape[1], right)
+                    isolated[y1:y2, x1:x2] = original[y1:y2, x1:x2]
+                scale = 2.0
+                isolated = cv2.resize(isolated, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+                badge_tokens: list[_OcrToken] = []
+                for page in self._ocr.predict(isolated):
+                    payload = page.json if hasattr(page, "json") else page
+                    if callable(payload):
+                        payload = payload()
+                    data = payload.get("res", payload) if isinstance(payload, dict) else {}
+                    texts = data.get("rec_texts", ()) if isinstance(data, dict) else ()
+                    polygons = data.get("rec_polys", ()) if isinstance(data, dict) else ()
+                    for text, polygon in zip(texts, polygons):
+                        points = list(polygon)
+                        if not points:
+                            continue
+                        badge_tokens.append(_OcrToken(
+                            str(text).strip(),
+                            sum(float(point[0]) for point in points) / len(points) / scale,
+                            sum(float(point[1]) for point in points) / len(points) / scale,
+                        ))
+                # 기존 전체 이미지 OCR의 배지 판정은 사용하지 않는다. 분리된
+                # 사각형 안에서 읽힌 글자만 배지로 표시한다.
+                tokens = [_OcrToken(token.text, token.x, token.y, False) for token in tokens]
+                tokens.extend(_merge_badge_tokens(tuple(badge_tokens), regions))
         return _theme_rows_from_tokens(tuple(tokens), mode, theme_header)
 
 

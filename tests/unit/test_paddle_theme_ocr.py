@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import _OcrToken, _theme_rows_from_tokens
+from PIL import Image, ImageDraw
+
+from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import _OcrToken, _badge_regions, _merge_badge_tokens, _theme_rows_from_tokens
 
 
 class ThemeImageLayoutTests(unittest.TestCase):
@@ -55,6 +57,33 @@ class ThemeImageLayoutTests(unittest.TestCase):
         self.assertEqual(
             _theme_rows_from_tokens(tokens, "both"),
             (_row("셀리드", "코로나/바이오"),),
+        )
+
+    def test_finds_pastel_badge_but_not_colored_reason_text(self) -> None:
+        image = Image.new("RGB", (500, 100), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((210, 40, 270, 62), radius=9, fill=(246, 238, 255))
+        draw.rectangle((290, 44, 440, 58), fill=(217, 48, 37))
+
+        self.assertEqual(((210, 40, 271, 63),), _badge_regions(image, 180))
+
+    def test_finds_neutral_gray_badge(self) -> None:
+        image = Image.new("RGB", (500, 100), "white")
+        ImageDraw.Draw(image).rounded_rectangle((210, 40, 260, 62), radius=9, fill=(245, 245, 245))
+
+        self.assertEqual(((210, 40, 261, 63),), _badge_regions(image, 180))
+
+    def test_merges_split_text_only_inside_each_badge(self) -> None:
+        tokens = (
+            _OcrToken("제약·", 325, 50),
+            _OcrToken("바이오", 365, 50),
+            _OcrToken("은", 397, 50),
+            _OcrToken("설명 문장", 450, 50),
+        )
+
+        self.assertEqual(
+            (_OcrToken("제약·바이오", 350.0, 50.0, True),),
+            _merge_badge_tokens(tokens, ((300, 40, 400, 60),)),
         )
 
 
