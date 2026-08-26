@@ -4,12 +4,13 @@
 
 ## 현재 버전
 
-- **1.1.14**
-- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.14)
+- **1.1.15**
+- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.15)
 - [소개 페이지](docs/index.html) · [개인정보처리방침](docs/privacy.html)
 
 ## 변경 내역
 
+- [1.1.15](docs/RELEASE_NOTES_v1.1.15.md) — 테마 OCR·텍스트 가져오기 개선, 붙은 종목명 분리, KIND 상호변경 연동
 - [1.1.14](docs/RELEASE_NOTES_v1.1.14.md) — 역사적 신고가 당일 수정주가 기준 통일, 헤더 전환 강조 깜빡임 제거
 - [1.1.13](docs/RELEASE_NOTES_v1.1.13.md) — 역사적 신고가 수정주가 정밀 보정·증분 조회, 신고가 헤더 선택 순환
 - [1.1.12](docs/RELEASE_NOTES_v1.1.12.md) — 수정주가 기준 5·20·250일·1985년 이후 역사적 신고가

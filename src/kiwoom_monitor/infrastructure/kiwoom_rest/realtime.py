@@ -18,6 +18,7 @@ class TradeTick:
     change_rate: float | None = None
     # 0B FID 311은 억원 단위 시가총액이다.
     market_cap_eok: int | None = None
+    market: str = "KRX"
 
 
 def parse_trade_ticks(message: dict[str, Any]) -> tuple[TradeTick, ...]:
@@ -43,6 +44,7 @@ def parse_trade_ticks(message: dict[str, Any]) -> tuple[TradeTick, ...]:
                 trade_time=str(values["20"]).strip() if values.get("20") is not None else None,
                 change_rate=_decimal(values.get("12")),
                 market_cap_eok=_number(values.get("311"), absolute=True),
+                market=_market(entry),
             )
         )
     return tuple(ticks)
@@ -56,6 +58,15 @@ def _code(entry: dict[str, Any]) -> str:
         if isinstance(value, list) and value and isinstance(value[0], str):
             return value[0].strip().removesuffix("_NX").removesuffix("_AL")
     return ""
+
+
+def _market(entry: dict[str, Any]) -> str:
+    for field in ("item", "stk_cd", "code"):
+        value = entry.get(field)
+        raw = value.strip() if isinstance(value, str) else value[0].strip() if isinstance(value, list) and value and isinstance(value[0], str) else ""
+        if raw:
+            return "NXT" if raw.endswith("_NX") else "KRX"
+    return "KRX"
 
 
 def _number(value: object, *, absolute: bool = False) -> int | None:

@@ -4,6 +4,8 @@ import sqlite3
 from difflib import get_close_matches
 from pathlib import Path
 
+from kiwoom_monitor.application.theme_matching import extract_known_stocks_and_unknown_fragments, split_concatenated_stock_name
+
 
 class ThemeRepository:
     """Profile-scoped themes stored alongside the shared stock catalog."""
@@ -139,9 +141,51 @@ class ThemeRepository:
         connection = self._connect()
         try:
             row = connection.execute("SELECT code FROM stocks WHERE name=?", (name,)).fetchone()
+            if row is None:
+                row = connection.execute("SELECT stock_code FROM stock_aliases WHERE alias=?", (name,)).fetchone()
         finally:
             connection.close()
         return str(row[0]) if row else None
+
+    def pending_name_change(self, old_name: str) -> tuple[str, str, str, str] | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT stock_code,old_name,new_name,source FROM stock_name_history "
+                "WHERE old_name=? AND decision='pending'",
+                (old_name.strip(),),
+            ).fetchone()
+        finally:
+            connection.close()
+        return tuple(str(value) for value in row) if row is not None else None  # type: ignore[return-value]
+
+    def review_name_changes(self, decisions: dict[tuple[str, str], bool]) -> None:
+        if not decisions:
+            return
+        connection = self._connect()
+        try:
+            with connection:
+                for (stock_code, old_name), approved in decisions.items():
+                    row = connection.execute(
+                        "SELECT 1 FROM stock_name_history WHERE stock_code=? AND old_name=? AND decision='pending'",
+                        (stock_code, old_name),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    if approved:
+                        owner = connection.execute("SELECT code FROM stocks WHERE name=? AND code<>?", (old_name, stock_code)).fetchone()
+                        if owner is None:
+                            connection.execute(
+                                "INSERT INTO stock_aliases(alias,stock_code) VALUES(?,?) "
+                                "ON CONFLICT(alias) DO UPDATE SET stock_code=excluded.stock_code",
+                                (old_name, stock_code),
+                            )
+                    connection.execute(
+                        "UPDATE stock_name_history SET decision=? WHERE stock_code=? AND old_name=?",
+                        ("approved" if approved else "rejected", stock_code, old_name),
+                    )
+        finally:
+            connection.close()
 
     def find_stock_candidates(self, name: str, limit: int = 8) -> tuple[tuple[str, str], ...]:
         query = name.strip()
@@ -158,6 +202,26 @@ class ThemeRepository:
         finally:
             connection.close()
         return tuple((str(code), str(stock_name)) for code, stock_name in rows[:limit])
+
+    def find_concatenated_stocks(self, name: str) -> tuple[tuple[str, str], ...]:
+        connection = self._connect()
+        try:
+            rows = connection.execute("SELECT code, name FROM stocks ORDER BY LENGTH(name) DESC, name").fetchall()
+        finally:
+            connection.close()
+        return split_concatenated_stock_name(
+            name, tuple((str(code), str(stock_name)) for code, stock_name in rows)
+        )
+
+    def find_partial_concatenated_stocks(self, name: str) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
+        connection = self._connect()
+        try:
+            rows = connection.execute("SELECT code, name FROM stocks ORDER BY LENGTH(name) DESC, name").fetchall()
+        finally:
+            connection.close()
+        return extract_known_stocks_and_unknown_fragments(
+            name, tuple((str(code), str(stock_name)) for code, stock_name in rows)
+        )
 
     def replace_for_stock(self, code: str, themes: tuple[str, ...]) -> None:
         palette = ("#DCE6F1", "#FFF2CC", "#E2F0D9", "#FCE4D6", "#E4DFEC")
@@ -262,8 +326,62 @@ class ThemeRepository:
                 connection.execute("DELETE FROM profile_stock_themes WHERE profile_id=? AND theme_name=?", (profile_id, before))
                 connection.execute("DELETE FROM profile_themes WHERE profile_id=? AND theme_name=?", (profile_id, before))
             else:
+                # profile_stock_themes가 profile_themes의 복합 키를 참조한다.
+                # 부모/자식 이름을 한 문장으로 동시에 바꿀 수 없으므로 커밋
+                # 시점까지 FK 검사를 미뤄 두 UPDATE를 하나의 거래로 처리한다.
+                connection.execute("PRAGMA defer_foreign_keys = ON")
                 connection.execute("UPDATE profile_themes SET theme_name=? WHERE profile_id=? AND theme_name=?", (after, profile_id, before))
                 connection.execute("UPDATE profile_stock_themes SET theme_name=? WHERE profile_id=? AND theme_name=?", (after, profile_id, before))
+            connection.commit()
+        finally:
+            connection.close()
+
+    def split_theme(self, before: str, targets: tuple[str, ...]) -> None:
+        clean_targets: list[str] = []
+        for raw_name in targets:
+            name = raw_name.strip()
+            if name and all(name.casefold() != existing.casefold() for existing in clean_targets):
+                clean_targets.append(name)
+        if not clean_targets:
+            raise ValueError("나눌 새 테마명을 입력하세요.")
+        if len(clean_targets) == 1:
+            self.rename_theme(before, clean_targets[0])
+            return
+
+        connection = self._connect()
+        try:
+            profile_id = self._profile_id(connection)
+            source = connection.execute(
+                "SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? AND theme_name=? COLLATE NOCASE",
+                (profile_id, before),
+            ).fetchone()
+            if source is None:
+                return
+            source_name, source_color = str(source[0]), str(source[1])
+            keep_source = False
+            for target in clean_targets:
+                if target.casefold() == source_name.casefold():
+                    keep_source = True
+                    continue
+                connection.execute(
+                    "INSERT OR IGNORE INTO profile_themes(profile_id, theme_name, default_color) VALUES (?, ?, ?)",
+                    (profile_id, target, source_color),
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO profile_stock_themes(profile_id, stock_code, theme_name, custom_color) "
+                    "SELECT profile_id, stock_code, ?, custom_color FROM profile_stock_themes "
+                    "WHERE profile_id=? AND theme_name=?",
+                    (target, profile_id, source_name),
+                )
+            if not keep_source:
+                connection.execute(
+                    "DELETE FROM profile_stock_themes WHERE profile_id=? AND theme_name=?",
+                    (profile_id, source_name),
+                )
+                connection.execute(
+                    "DELETE FROM profile_themes WHERE profile_id=? AND theme_name=?",
+                    (profile_id, source_name),
+                )
             connection.commit()
         finally:
             connection.close()

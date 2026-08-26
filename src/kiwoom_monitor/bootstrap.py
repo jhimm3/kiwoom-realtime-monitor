@@ -96,7 +96,12 @@ def main() -> None:
             ),
             "fundamentals_worker_factory": lambda codes: FundamentalsWorker(StockFundamentalsService(client), codes),
             "daily_high_worker_factory": lambda codes: DailyHighWorker(
-                DailyHighService(client, include_nxt=True), codes
+                DailyHighService(
+                    client,
+                    include_nxt=True,
+                    cached_high_250_loader=StockRepository(paths.database_path).load_high_250_price,
+                ),
+                codes,
             ),
             "historical_high_worker_factory": lambda codes: HistoricalHighWorker(
                 HistoricalHighService(

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 
 class RestClient(Protocol):
@@ -55,9 +55,16 @@ class DailyHighTargets:
 
 
 class DailyHighService:
-    def __init__(self, client: RestClient, *, include_nxt: bool = False) -> None:
+    def __init__(
+        self,
+        client: RestClient,
+        *,
+        include_nxt: bool = False,
+        cached_high_250_loader: Callable[[str], int | None] | None = None,
+    ) -> None:
         self._client = client
         self._include_nxt = include_nxt
+        self._cached_high_250_loader = cached_high_250_loader
 
     def load(self, code: str) -> DailyHighTargets:
         # 영웅문의 KRXNXT 표기와 맞추기 위해 신고가·최고가와 직전 거래대금에
@@ -70,7 +77,12 @@ class DailyHighService:
         try:
             nxt_bars = self._load_bars(f"{code}_NX")
         except Exception:
-            # NXT 일봉이 없는 종목·일시적 NXT 조회 오류는 KRX 값만으로 표시한다.
+            # NXT 일시 오류 때 KRX 단독값으로 낮추면 화면이 조회할 때마다
+            # 흔들린다. 마지막 정상 KRX+NXT 250일 값을 유지하고, NXT가 다시
+            # 성공했을 때만 오늘 기준 합산값으로 교체한다.
+            cached = self._cached_high_250_loader(code) if self._cached_high_250_loader is not None else None
+            if cached is not None and cached > (targets.high_250_price or 0):
+                return replace(targets, high_250_price=cached)
             return targets
         return DailyHighTargets.from_daily_bars(_combine_krx_nxt_bars(krx_bars, nxt_bars), as_of=date.today())
 

@@ -67,3 +67,32 @@ class DailyHighServiceTests(unittest.TestCase):
         targets = DailyHighService(CombinedMarketClient(), include_nxt=True).load("005930")
         self.assertEqual(200, targets.high_5_price)  # 신고가도 KRX+NXT 최고가 기준
         self.assertEqual(50.0, targets.previous_day_trade_value_eok)  # 30억 + 20억
+
+    def test_keeps_last_combined_250_high_when_nxt_temporarily_fails(self) -> None:
+        class NxtFailureClient:
+            def request(self, api_id: str, path: str, body: dict[str, object]) -> dict[str, object]:
+                if str(body["stk_cd"]).endswith("_NX"):
+                    raise RuntimeError("temporary NXT error")
+                return {"stk_dt_pole_chart_qry": [{"dt": "20260825", "high_pric": "2987000"}]}
+
+        targets = DailyHighService(
+            NxtFailureClient(),
+            include_nxt=True,
+            cached_high_250_loader=lambda code: 3_002_000,
+        ).load("000660")
+
+        self.assertEqual(3_002_000, targets.high_250_price)
+
+    def test_successful_nxt_response_replaces_stale_cached_250_high(self) -> None:
+        class CombinedClient:
+            def request(self, api_id: str, path: str, body: dict[str, object]) -> dict[str, object]:
+                high = "3002000" if str(body["stk_cd"]).endswith("_NX") else "2987000"
+                return {"stk_dt_pole_chart_qry": [{"dt": "20260825", "high_pric": high}]}
+
+        targets = DailyHighService(
+            CombinedClient(),
+            include_nxt=True,
+            cached_high_250_loader=lambda code: 3_100_000,
+        ).load("000660")
+
+        self.assertEqual(3_002_000, targets.high_250_price)

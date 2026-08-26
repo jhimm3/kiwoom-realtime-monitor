@@ -118,3 +118,36 @@ class MinuteTradeValueTests(unittest.TestCase):
         aggregator.ingest(TradeTick("005930", 100, 9_000_000, None, 3, None, "100002"), now)
 
         self.assertEqual(10, aggregator._bars["005930"][-1].volume)
+
+    def test_reset_cumulative_baseline_does_not_move_disconnect_gap_into_current_minute(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 8, 14, 10, 0, 1)
+        aggregator.ingest(TradeTick("005930", 100, None, 1_000, 10, None, "100001"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 1_100, 10, None, "100002"), now)
+
+        aggregator.reset_cumulative_baselines(("005930",))
+        aggregator.ingest(TradeTick("005930", 100, None, 5_100, 10, None, "100102"), now.replace(minute=1))
+
+        self.assertEqual(0.0, aggregator.bucket_trade_value_eok("005930", 1, now.replace(minute=1)))
+
+    def test_first_trade_delta_is_included_when_minute_changes(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 8, 14, 10, 0, 59)
+        aggregator.ingest(TradeTick("005930", 100, None, 100_000, 10, None, "100059"), now)
+
+        aggregator.ingest(
+            TradeTick("005930", 100, None, 100_300, 10, None, "100100"),
+            now.replace(minute=1, second=0),
+        )
+
+        self.assertEqual(3.0, aggregator.bucket_trade_value_eok("005930", 1, now.replace(minute=1, second=0)))
+
+    def test_krx_and_nxt_cumulative_values_use_separate_baselines(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 8, 14, 10, 0, 1)
+        aggregator.ingest(TradeTick("005930", 100, None, 100_000, 10, None, "100001", market="KRX"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 20_000, 10, None, "100001", market="NXT"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 100_300, 10, None, "100002", market="KRX"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 20_200, 10, None, "100002", market="NXT"), now)
+
+        self.assertEqual(5.0, aggregator.bucket_trade_value_eok("005930", 1, now))

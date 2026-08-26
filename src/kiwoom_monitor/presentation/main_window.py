@@ -117,10 +117,55 @@ def selected_high_cycle_periods(value: str) -> tuple[str, ...]:
     periods = tuple(period for period in HIGH_PERIODS if period in selected)
     return periods or HIGH_PERIODS
 
-APP_VERSION = "1.1.14"
+APP_VERSION = "1.1.15"
 APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 INVESTMENT_NOTICE = "본 앱은 투자 자문이 아니며 시세 지연·오류가 있을 수 있습니다."
+
+
+class StockNameChangeReviewDialog(QDialog):
+    """상호변경 후보를 사용자가 한 번 확인한 뒤 별칭으로 적용한다."""
+
+    def __init__(self, changes: tuple[tuple[str, str, str, str], ...], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("종목명 변경 확인")
+        self.resize(700, min(620, 190 + len(changes) * 34))
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "같은 종목코드에서 이름이 변경된 항목입니다.\n"
+            "체크한 항목만 과거 종목명을 현재 종목에 연결합니다. 체크를 해제하면 연결하지 않습니다."
+        ))
+        self._table = QTableWidget(len(changes), 5)
+        self._table.setHorizontalHeaderLabels(("적용", "종목코드", "이전 이름", "현재 이름", "자료"))
+        self._changes = changes
+        for row, (code, old_name, new_name, source) in enumerate(changes):
+            selected = QTableWidgetItem()
+            selected.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            selected.setCheckState(Qt.CheckState.Checked)
+            self._table.setItem(row, 0, selected)
+            for column, value in enumerate((code, old_name, new_name, source), start=1):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self._table.setItem(row, column, item)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self._table)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("확인 결과 저장")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("나중에 확인")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def decisions(self) -> dict[tuple[str, str], bool]:
+        return {
+            (code, old_name): self._table.item(row, 0).checkState() == Qt.CheckState.Checked
+            for row, (code, old_name, _new_name, _source) in enumerate(self._changes)
+        }
 
 
 class ClickableLabel(QLabel):
@@ -255,15 +300,28 @@ def choose_similar_stock(parent: QWidget, lookup: object, name: str) -> tuple[st
 
 
 class SimilarStockDialog(QDialog):
-    def __init__(self, lookup: object, original_name: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        lookup: object,
+        original_name: str,
+        themes: tuple[str, ...] = (),
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._lookup = lookup
         self._original_name = original_name
         self.cancelled_all = False
         self.setWindowTitle("비슷한 종목 선택")
-        self.resize(420, 360)
+        self.resize(460, 390)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"'{original_name}'와 같은 종목명이 없습니다.\n전체 상장종목에서 검색하거나 후보를 선택하세요."))
+        theme_text = ", ".join(themes) if themes else "확인할 테마 없음"
+        guide = QLabel(
+            f"입력된 종목명: {original_name}\n"
+            f"이 종목이 있던 테마: {theme_text}\n\n"
+            "같은 종목명이 없습니다. 전체 상장종목에서 검색하거나 후보를 선택하세요."
+        )
+        guide.setWordWrap(True)
+        layout.addWidget(guide)
         self._search = QLineEdit(original_name)
         self._search.setPlaceholderText("종목명 검색")
         layout.addWidget(self._search)
@@ -308,11 +366,41 @@ class SimilarStockDialog(QDialog):
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
 
-def choose_similar_stock(parent: QWidget, lookup: object, name: str) -> tuple[tuple[str, str] | None, bool]:
-    dialog = SimilarStockDialog(lookup, name, parent)
+def choose_similar_stock(
+    parent: QWidget,
+    lookup: object,
+    name: str,
+    themes: tuple[str, ...] = (),
+) -> tuple[tuple[str, str] | None, bool]:
+    dialog = SimilarStockDialog(lookup, name, themes, parent)
     if dialog.exec():
         return dialog.selected, False
     return None, dialog.cancelled_all
+
+
+def confirm_pending_name_change(
+    parent: QWidget,
+    lookup: object,
+    original_name: str,
+    themes: tuple[str, ...] = (),
+) -> tuple[tuple[str, str] | None, bool]:
+    """확인 대기 중인 과거 종목명은 일반 유사 검색보다 먼저 안내한다."""
+    finder = getattr(lookup, "pending_name_change", None)
+    reviewer = getattr(lookup, "review_name_changes", None)
+    change = finder(original_name) if callable(finder) else None
+    if change is None or not callable(reviewer):
+        return None, False
+    code, old_name, new_name, source = change
+    approved = QMessageBox.question(
+        parent,
+        "종목명 변경 확인",
+        f"'{old_name}'은(는) 종목명이 변경된 것으로 확인됩니다.\n\n"
+        f"이전 이름: {old_name}\n현재 이름: {new_name}\n종목코드: {code}\n자료: {source}\n"
+        f"입력된 테마: {', '.join(themes) or '없음'}\n\n'{new_name}' 종목으로 적용할까요?",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+    ) == QMessageBox.StandardButton.Yes
+    reviewer({(code, old_name): approved})
+    return ((code, new_name) if approved else None), True
 
 
 class SettingsDialog(QDialog):
@@ -1584,8 +1672,16 @@ class ThemePreviewDialog(QDialog):
 
 
 class ImageThemeRowsDialog(QDialog):
-    def __init__(self, rows: tuple[object, ...], parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        rows: tuple[object, ...],
+        parent: QWidget | None = None,
+        settings: SettingsRepository | None = None,
+        settings_prefix: str = "theme_image_import",
+    ) -> None:
         super().__init__(parent)
+        self._settings = settings
+        self._settings_prefix = settings_prefix
         self.setWindowTitle("이미지 테마 OCR 수정")
         self.resize(680, 520)
         layout = QVBoxLayout(self)
@@ -1594,14 +1690,25 @@ class ImageThemeRowsDialog(QDialog):
         self._validation_message.setStyleSheet("color: #C00000;")
         self._validation_message.setWordWrap(True)
         layout.addWidget(self._validation_message)
+        if settings is not None:
+            rules = QFormLayout()
+            self._custom_separators = QLineEdit(settings.get(f"{settings_prefix}_custom_separators"))
+            self._custom_separators.setPlaceholderText("기본 , / | ; 외에 추가할 구분 문자")
+            self._import_exclusions = QLineEdit(settings.get(f"{settings_prefix}_exclusions"))
+            self._import_exclusions.setPlaceholderText("예: 개별이슈, 공시")
+            rules.addRow("추가 구분자", self._custom_separators)
+            rules.addRow("제외 테마", self._import_exclusions)
+            layout.addLayout(rules)
         self.table = QTableWidget(len(rows), 2)
         self.table.setHorizontalHeaderLabels(("종목명", "테마"))
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.installEventFilter(self)
         self.table.viewport().installEventFilter(self)
         for index, row in enumerate(rows):
-            self.table.setItem(index, 0, QTableWidgetItem(str(getattr(row, "name", ""))))
-            self.table.setItem(index, 1, QTableWidgetItem(str(getattr(row, "themes", ""))))
+            name = row[0] if isinstance(row, tuple) and len(row) >= 1 else getattr(row, "name", "")
+            themes = row[1] if isinstance(row, tuple) and len(row) >= 2 else getattr(row, "themes", "")
+            self.table.setItem(index, 0, QTableWidgetItem(str(name)))
+            self.table.setItem(index, 1, QTableWidgetItem(str(themes)))
         layout.addWidget(self.table)
         actions = QHBoxLayout()
         add = QPushButton("행 추가")
@@ -1635,6 +1742,9 @@ class ImageThemeRowsDialog(QDialog):
                 seen[key] = row
         if not duplicates:
             self._validation_message.clear()
+            if self._settings is not None:
+                self._settings.set(f"{self._settings_prefix}_custom_separators", self._custom_separators.text().strip())
+                self._settings.set(f"{self._settings_prefix}_exclusions", self._import_exclusions.text().strip())
             self.accept()
             return
         for first_row, duplicate_row, _ in duplicates:
@@ -1730,12 +1840,22 @@ class TextThemeImportDialog(QDialog):
         self.setWindowTitle("텍스트 테마 업데이트")
         self.resize(720, 520)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("테마/종목 목록을 그대로 붙여넣으세요. 🔥 뒤 제목을 테마로 적용하고, #소분류 이름은 별도 테마로 추가하지 않습니다."))
+        layout.addWidget(QLabel("테마/종목 목록을 그대로 붙여넣으세요. 🔥 뒤 제목을 대분류 테마로 적용합니다."))
         rules = QFormLayout()
         self._heading_marker = QLineEdit(settings.get("theme_text_heading_marker"))
+        self._custom_separators = QLineEdit(settings.get("theme_text_import_custom_separators"))
+        self._custom_separators.setPlaceholderText("기본 , / | ; 외에 추가할 구분 문자")
+        self._import_exclusions = QLineEdit(settings.get("theme_text_import_exclusions"))
+        self._import_exclusions.setPlaceholderText("예: 개별이슈, 공시")
         self._heading_marker.setPlaceholderText("기본: 🔥 · 예: ⭐ 또는 테마:")
         rules.addRow("텍스트 테마 시작 표시", self._heading_marker)
+        rules.addRow("추가 구분자", self._custom_separators)
+        rules.addRow("제외 테마", self._import_exclusions)
         layout.addLayout(rules)
+        self._include_subcategories = QCheckBox("# 소분류도 별도 테마로 추가")
+        self._include_subcategories.setChecked(settings.get("theme_text_include_subcategories") == "1")
+        layout.addWidget(self._include_subcategories)
+        layout.addWidget(QLabel("선택하면 #mRNA 같은 소분류 종목에 대분류와 mRNA 테마를 함께 적용합니다."))
         self._text = QTextEdit()
         self._update_placeholder()
         self._heading_marker.textChanged.connect(self._save_heading_marker)
@@ -1744,13 +1864,20 @@ class TextThemeImportDialog(QDialog):
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("미리보기")
         example_button = buttons.addButton("예시 넣기", QDialogButtonBox.ButtonRole.ActionRole)
         example_button.clicked.connect(self._insert_example)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._save_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
     def _save_heading_marker(self, value: str) -> None:
         self._settings.set("theme_text_heading_marker", value.strip() or "🔥")
         self._update_placeholder()
+
+    def _save_and_accept(self) -> None:
+        self._save_heading_marker(self._heading_marker.text())
+        self._settings.set("theme_text_import_custom_separators", self._custom_separators.text().strip())
+        self._settings.set("theme_text_import_exclusions", self._import_exclusions.text().strip())
+        self._settings.set("theme_text_include_subcategories", "1" if self._include_subcategories.isChecked() else "0")
+        self.accept()
 
     def _update_placeholder(self) -> None:
         marker = self._heading_marker.text().strip() or "🔥"
@@ -1778,6 +1905,10 @@ class TextThemeImportDialog(QDialog):
     @property
     def text(self) -> str:
         return self._text.toPlainText()
+
+    @property
+    def include_subcategories(self) -> bool:
+        return self._include_subcategories.isChecked()
 
 
 class ThemeEditDialog(QDialog):
@@ -1939,7 +2070,12 @@ class ThemeBulkEditDialog(QDialog):
         self.setWindowTitle("테마 일괄 수정 미리보기")
         self.resize(600, 500)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("새 테마명 칸에서 수정할 테마만 바꾸세요. 같은 이름으로 바꾸면 하나의 테마로 합쳐지며, 비우면 모든 종목에서 삭제됩니다."))
+        guide = QLabel(
+            "새 테마명에 쉼표(,), 슬래시(/), 세로줄(|), 세미콜론(;)을 넣으면 여러 테마로 나뉩니다.\n"
+            "예: 해운이란 → 해운/이란   ·   같은 이름은 합쳐지고, 비우면 모든 종목에서 삭제됩니다."
+        )
+        guide.setWordWrap(True)
+        layout.addWidget(guide)
         self._table = QTableWidget(len(themes), 2)
         self._table.setHorizontalHeaderLabels(("기존 테마", "새 테마명"))
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -1974,8 +2110,6 @@ class ThemeManagerDialog(QDialog):
         self._table.setColumnWidth(0, int(settings.get("theme_manager_stock_column_width")))
         self._table.setColumnWidth(1, int(settings.get("theme_manager_theme_column_width")))
         header.sectionResized.connect(self._save_table_column_width)
-        self._custom_separators = QLineEdit(settings.get("theme_custom_separators")); self._custom_separators.setPlaceholderText("기본 , / | ; 외에 사용할 구분 문자")
-        self._import_exclusions = QLineEdit(settings.get("theme_import_exclusions")); self._import_exclusions.setPlaceholderText("예: 개별이슈, 단순뉴스")
         self._add=QPushButton("신규 종목 테마 추가"); self._text_import = QPushButton("텍스트 테마 업데이트")
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -2007,12 +2141,6 @@ class ThemeManagerDialog(QDialog):
         theme_layout.addWidget(QLabel("프로필마다 종목 테마와 테마 색상을 별도로 관리합니다."))
         theme_layout.addLayout(profile_row)
         theme_layout.addWidget(SettingsDialog._section_separator())
-        theme_layout.addWidget(SettingsDialog._section_title("공통 입력 규칙"))
-        theme_layout.addWidget(QLabel("추가 테마 구분자"))
-        theme_layout.addWidget(self._custom_separators)
-        theme_layout.addWidget(QLabel("이미지/Excel/텍스트 업데이트 제외 테마"))
-        theme_layout.addWidget(self._import_exclusions)
-        theme_layout.addWidget(SettingsDialog._section_separator())
         theme_layout.addWidget(SettingsDialog._section_title("테마 입력 및 갱신"))
         theme_layout.addWidget(self._add)
         theme_layout.addWidget(self._text_import)
@@ -2041,8 +2169,6 @@ class ThemeManagerDialog(QDialog):
         self._copy_theme_profile.clicked.connect(lambda: self._create_theme_profile(copy_current=True))
         self._rename_theme_profile.clicked.connect(self._rename_current_theme_profile)
         self._delete_theme_profile.clicked.connect(self._delete_current_theme_profile)
-        self._custom_separators.textChanged.connect(lambda _: self._save_custom_separators())
-        self._import_exclusions.textChanged.connect(lambda _: self._save_import_exclusions())
         self._search.textChanged.connect(self._reload); self._table.cellDoubleClicked.connect(self._edit); self._rows=()
         self._refresh_theme_profiles(); self._reload()
     def _refresh_theme_profiles(self) -> None:
@@ -2097,12 +2223,6 @@ class ThemeManagerDialog(QDialog):
         self._settings.set("theme_active_profile", renamed)
         self._refresh_theme_profiles()
         self._theme_profile.setCurrentText(renamed)
-    def _save_custom_separators(self) -> None:
-        value = self._custom_separators.text().strip()
-        self._settings.set("theme_custom_separators", value)
-        self._separators = ",/|;" + value
-    def _save_import_exclusions(self) -> None:
-        self._settings.set("theme_import_exclusions", self._import_exclusions.text().strip())
     def _start_image_update(self) -> None:
         if self._on_image_update is None:
             return
@@ -2114,13 +2234,18 @@ class ThemeManagerDialog(QDialog):
             self._settings.set("theme_manager_stock_column_width", str(new_width))
         elif logical_index == 1:
             self._settings.set("theme_manager_theme_column_width", str(new_width))
-    def _filter_import_exclusions(self, rows: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
-        excluded = {theme_key(theme) for theme in parse_themes(self._settings.get("theme_import_exclusions"), self._separators)}
+    def _filter_import_exclusions(
+        self,
+        rows: tuple[tuple[str, str], ...],
+        separators: str,
+        setting_key: str,
+    ) -> tuple[tuple[str, str], ...]:
+        excluded = {theme_key(theme) for theme in parse_themes(self._settings.get(setting_key), separators)}
         if not excluded:
             return rows
         filtered: list[tuple[str, str]] = []
         for name, value in rows:
-            themes = tuple(theme for theme in parse_themes(value, self._separators) if theme_key(theme) not in excluded)
+            themes = tuple(theme for theme in parse_themes(value, separators) if theme_key(theme) not in excluded)
             if themes:
                 filtered.append((name, "/".join(themes)))
         return tuple(filtered)
@@ -2136,30 +2261,34 @@ class ThemeManagerDialog(QDialog):
             self._reload()
             self._notify_themes_changed()
     def _add_new(self) -> None:
-        dialog = ImageThemeRowsDialog((), self)
+        dialog = ImageThemeRowsDialog((), self, self._settings, "theme_new_import")
         dialog.setWindowTitle("신규 종목 테마 추가")
         labels = dialog.findChildren(QLabel)
         if labels:
             labels[0].setText("종목명과 테마를 여러 행으로 입력하세요. 행 추가·삭제가 가능하며, 적용 전 기존 테마와 비교합니다.")
         if not dialog.exec():
             return
-        self._apply_import_rows(dialog.rows())
+        separators = ",/|;" + self._settings.get("theme_new_import_custom_separators")
+        self._apply_import_rows(dialog.rows(), separators, "theme_new_import_exclusions")
         return
 
     def _import_text(self) -> None:
         dialog = TextThemeImportDialog(self._settings, self)
         if not dialog.exec():
             return
-        self._separators = ",/|;" + self._settings.get("theme_custom_separators")
+        separators = ",/|;" + self._settings.get("theme_text_import_custom_separators")
         marker = self._settings.get("theme_text_heading_marker")
-        rows = parse_theme_text(dialog.text, self._separators, marker)
+        rows = parse_theme_text(dialog.text, separators, marker, dialog.include_subcategories)
         if not rows:
             QMessageBox.information(self, "텍스트 확인", f"{marker} 테마 제목 아래에서 종목명을 찾지 못했습니다. 텍스트 내용을 확인하세요.")
             return
-        self._apply_import_rows(rows)
+        self._apply_import_rows(rows, separators, "theme_text_import_exclusions")
 
-    def _apply_import_rows(self, raw_rows: tuple[tuple[str, str], ...]) -> None:
-        valid, errors = validate_theme_rows(self._filter_import_exclusions(raw_rows), self._separators)
+    def _apply_import_rows(self, raw_rows: tuple[tuple[str, str], ...], separators: str, exclusion_setting_key: str) -> None:
+        valid, errors = validate_theme_rows(
+            self._filter_import_exclusions(raw_rows, separators, exclusion_setting_key),
+            separators,
+        )
         if not valid and not errors:
             QMessageBox.information(self, "입력 확인", "추가할 종목과 테마를 한 행 이상 입력하세요.")
             return
@@ -2178,9 +2307,9 @@ class ThemeManagerDialog(QDialog):
             QMessageBox.warning(self, "종목 매칭 실패", f"종목 DB에서 찾을 수 없습니다.\n{names}")
             return
         changes = preview_theme_changes(matched, self._repository)
-        preview = ThemePreviewDialog(changes, skipped, self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_import_exclusions"), self._separators)))
+        preview = ThemePreviewDialog(changes, skipped, self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get(exclusion_setting_key), separators)))
         if preview.exec():
-            changes = preview.changes(self._separators)
+            changes = preview.changes(separators)
             applied = sum(change.status != "변경 없음" for change in changes)
             for change in changes:
                 if change.status != "변경 없음":
@@ -2193,7 +2322,45 @@ class ThemeManagerDialog(QDialog):
         resolved: list[MatchedThemeRow] = []
         for row in rows:
             original_name = str(getattr(row, "name", ""))
-            candidate, cancelled = choose_similar_stock(self, self._repository, original_name)
+            themes = tuple(getattr(row, "themes", ()))
+            renamed, handled = confirm_pending_name_change(self, self._repository, original_name, themes)
+            if handled:
+                if renamed is not None:
+                    code, current_name = renamed
+                    resolved.append(MatchedThemeRow(code, current_name, themes))
+                continue
+            split_finder = getattr(self._repository, "find_concatenated_stocks", None)
+            split = split_finder(original_name) if callable(split_finder) else ()
+            if split:
+                labels = " + ".join(name for _, name in split)
+                if QMessageBox.question(
+                    self,
+                    "붙어 있는 종목명 확인",
+                    f"'{original_name}'을(를) 다음 종목들로 나눌 수 있습니다.\n\n{labels}\n\n이대로 나눌까요?",
+                ) == QMessageBox.StandardButton.Yes:
+                    resolved.extend(MatchedThemeRow(code, name, themes) for code, name in split)
+                    continue
+            partial_finder = getattr(self._repository, "find_partial_concatenated_stocks", None)
+            known, fragments = partial_finder(original_name) if callable(partial_finder) else ((), ())
+            if known and fragments:
+                known_labels = " + ".join(name for _, name in known)
+                fragment_labels = ", ".join(fragments)
+                if QMessageBox.question(
+                    self,
+                    "붙어 있는 종목명 일부 확인",
+                    f"'{original_name}'에서 다음 종목은 확인됐습니다.\n\n{known_labels}\n\n"
+                    f"남은 이름만 다시 찾습니다: {fragment_labels}\n\n계속할까요?",
+                ) == QMessageBox.StandardButton.Yes:
+                    resolved.extend(MatchedThemeRow(code, name, themes) for code, name in known)
+                    for fragment in fragments:
+                        candidate, cancelled = choose_similar_stock(self, self._repository, fragment, themes)
+                        if cancelled:
+                            return (), True
+                        if candidate:
+                            code, selected_name = candidate
+                            resolved.append(MatchedThemeRow(code, selected_name, themes))
+                    continue
+            candidate, cancelled = choose_similar_stock(self, self._repository, original_name, themes)
             if candidate:
                 code, selected_name = candidate
                 resolved.append(MatchedThemeRow(code, selected_name, tuple(getattr(row, "themes", ()))))
@@ -2240,13 +2407,19 @@ class ThemeManagerDialog(QDialog):
         dialog = ThemeBulkEditDialog(tuple(names), self)
         if not dialog.exec() or not dialog.changes:
             return
-        preview = "\n".join(f"{before} → {after or '삭제'}" for before, after in dialog.changes)
+        parsed_changes = tuple((before, parse_themes(after, ",/|;")) for before, after in dialog.changes)
+        preview = "\n".join(
+            f"{before} → {' + '.join(targets) if targets else '삭제'}"
+            for before, targets in parsed_changes
+        )
         if QMessageBox.question(self, "테마 일괄 수정", f"다음 변경을 모든 종목에 적용합니다.\n\n{preview}\n\n계속할까요?") != QMessageBox.StandardButton.Yes:
             return
-        for before, after in dialog.changes:
+        for before, targets in parsed_changes:
             try:
-                if after:
-                    self._repository.rename_theme(before, after)
+                if len(targets) > 1:
+                    self._repository.split_theme(before, targets)
+                elif targets:
+                    self._repository.rename_theme(before, targets[0])
                 else:
                     self._repository.delete_themes((before,))
             except ValueError as error:
@@ -2261,12 +2434,21 @@ class ThemeManagerDialog(QDialog):
 
 
 class NxtMarkerDelegate(QStyledItemDelegate):
+    ACTIVE_MARKER_COLOR = QColor("#0078D7")
+
+    def __init__(self, parent: object | None = None) -> None:
+        super().__init__(parent)
+        self._selected_cell: tuple[int, int] | None = None
+
+    def set_selected_cell(self, cell: tuple[int, int] | None) -> None:
+        self._selected_cell = cell
+
     def paint(self, painter: QPainter, option: object, index: object) -> None:
-        # 기본 파란 호버/선택 배경은 행의 강조색을 덮으므로 제거하고, 대신
-        # 마우스가 올라간/선택한 바로 그 셀의 왼쪽에만 가는 표시줄을 그린다.
-        active = bool(
-            option.state & (QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_MouseOver)
-        )
+        # 기본 파란 호버/선택 배경은 행의 강조색을 덮으므로 제거한다.
+        # 왼쪽 표시줄은 현재 마우스가 올라간 셀 또는 사용자가 마지막으로
+        # 클릭한 셀 하나에만 그린다.
+        clicked = self._selected_cell == (index.row(), index.column())
+        active = clicked or bool(option.state & QStyle.StateFlag.State_MouseOver)
         cell_option = QStyleOptionViewItem(option)
         cell_option.state &= ~(
             QStyle.StateFlag.State_Selected
@@ -2278,8 +2460,9 @@ class NxtMarkerDelegate(QStyledItemDelegate):
             rect = option.rect
             painter.save()
             painter.setPen(Qt.PenStyle.NoPen)
-            # 순위 기준 선택 목록의 표시색과 같은 시스템 강조색을 사용한다.
-            painter.setBrush(option.palette.color(QPalette.ColorRole.Highlight))
+            # 행 선택용 연파랑과 분리해, 예전처럼 호버 위치가 또렷하게
+            # 보이는 Windows 계열의 진한 파란색 표시줄을 사용한다.
+            painter.setBrush(self.ACTIVE_MARKER_COLOR)
             painter.drawRoundedRect(rect.left() + 1, rect.center().y() - 7, 2, 14, 1, 1)
             painter.restore()
         if not index.data(Qt.ItemDataRole.UserRole + 2):
@@ -2293,6 +2476,8 @@ class NxtMarkerDelegate(QStyledItemDelegate):
         painter.restore()
 
 class MainWindow(QMainWindow):
+    TRADE_VALUE_ALERT_ROLE = Qt.ItemDataRole.UserRole + 3
+    TRADE_VALUE_ALERT_COLOR = QColor("#F4CCCC")
     COLUMNS = (("rank","순위"),("stock","종목"),("themes","테마"),("change_rate","등락률"),("strength_1m","1분강도"),("current_price","현재가"),("trade_value_1m","1분"),("trade_value_5m","5분"),("trade_value_60m","60분"),("trade_value_day","1일"),("strength_5m","5분강도"),("strength_60m","60분강도"),("strength_day","1일강도"),("new_high_price","신고가"),("high_distance","신고가%"),("market_cap","시가총액"))
     HEADERS = tuple(label for _, label in COLUMNS)
 
@@ -2380,6 +2565,7 @@ class MainWindow(QMainWindow):
         self._last_rank_by_code: dict[str, int] = {}
         self._rank_changed_codes: set[str] = set()
         self._selected_table_cell: tuple[int, int] | None = None
+        self._selected_table_code: str | None = None
         self._ranking_priority_preparing = False
         self._resizing_columns = False
         self._restoring_columns = False
@@ -2507,7 +2693,7 @@ class MainWindow(QMainWindow):
         vertical_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         # 순위 칸의 행 경계에 올렸을 때에도 크기 조절 커서를 보여 준다.
         self._table.setMouseTracking(True)
         self._table.viewport().setMouseTracking(True)
@@ -3067,14 +3253,27 @@ class MainWindow(QMainWindow):
         self._schedule_next_ranking_refresh()
 
     def _toggle_table_cell_selection(self, row: int, column: int) -> None:
-        """같은 셀을 다시 누르면 선택 표시를 해제한다."""
+        """클릭한 종목의 행 전체를 강조하고 같은 행을 다시 누르면 해제한다."""
         cell = (row, column)
+        previous_code = self._selected_table_code
+        stock_item = self._table.item(row, 1)
+        selected_code = str(stock_item.data(Qt.ItemDataRole.UserRole) or "") if stock_item is not None else ""
         if self._selected_table_cell == cell:
             self._table.clearSelection()
             self._table.setCurrentItem(None)
             self._selected_table_cell = None
+            self._selected_table_code = None
         else:
             self._selected_table_cell = cell
+            self._selected_table_code = selected_code or None
+            self._table.selectRow(row)
+        delegate = self._table.itemDelegate()
+        if isinstance(delegate, NxtMarkerDelegate):
+            delegate.set_selected_cell(self._selected_table_cell)
+        if previous_code:
+            self._apply_row_background(previous_code)
+        if self._selected_table_code:
+            self._apply_row_background(self._selected_table_code)
         self._table.viewport().update()
 
     def _open_column_manager(self) -> None:
@@ -3327,19 +3526,20 @@ class MainWindow(QMainWindow):
         self._start_initial_ranking()
 
     def _select_theme_image(self, mode: str = "theme_column") -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "테마 이미지 선택", self._settings.get("theme_image_import_dir"), "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)")
-        if not path:
+        paths, _ = QFileDialog.getOpenFileNames(self, "테마 이미지 선택", self._settings.get("theme_image_import_dir"), "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if not paths:
             return
-        self._settings.set("theme_image_import_dir", str(Path(path).parent))
+        image_paths = tuple(Path(path) for path in paths)
+        self._settings.set("theme_image_import_dir", str(image_paths[0].parent))
         theme_header = self._settings.get("theme_image_import_theme_header").strip()
-        self._start_image_theme_ocr(Path(path), mode, theme_header)
+        self._start_image_theme_ocr(image_paths, mode, theme_header)
 
-    def _start_image_theme_ocr(self, image_path: Path, mode: str = "theme_column", theme_header: str = "테마") -> None:
+    def _start_image_theme_ocr(self, image_paths: tuple[Path, ...], mode: str = "theme_column", theme_header: str = "테마") -> None:
         previous = getattr(self, "_image_theme_ocr_worker", None)
         if previous is not None and previous.isRunning():
             QMessageBox.information(self, "이미지 OCR", "이미지 분석이 이미 진행 중입니다.")
             return
-        worker = ImageThemeOcrWorker(image_path, mode, theme_header)
+        worker = ImageThemeOcrWorker(image_paths, mode, theme_header)
         worker.setParent(self)
         progress = QProgressDialog("OCR 엔진을 준비하고 있습니다…", "취소", 0, 0, self)
         progress.setWindowTitle("이미지 테마 분석")
@@ -3356,7 +3556,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._close_image_theme_ocr_progress)
         worker.finished.connect(lambda: self.statusBar().showMessage("이미지 OCR 작업 종료"))
         self._image_theme_ocr_worker = worker
-        self.statusBar().showMessage("이미지 OCR 모델을 준비하고 있습니다. 첫 실행은 모델 다운로드로 시간이 걸릴 수 있습니다.")
+        self.statusBar().showMessage(f"이미지 {len(image_paths)}장의 OCR 모델을 준비하고 있습니다. 첫 실행은 모델 다운로드로 시간이 걸릴 수 있습니다.")
         progress.show()
         worker.start()
         QTimer.singleShot(60_000, lambda: self._warn_slow_image_ocr(worker))
@@ -3378,8 +3578,10 @@ class MainWindow(QMainWindow):
         worker.setParent(self)
         def completed(count: int, cached: bool) -> None:
             self.statusBar().showMessage("KRX 상장종목 목록 확인 완료" if cached else f"KRX 상장종목 {count:,}개 갱신 완료")
+            self._review_pending_stock_name_changes()
             continuation()
         worker.completed.connect(completed)
+        worker.history_failed.connect(lambda message: logger.warning("KIND 상호변경 이력 동기화 실패: %s", message))
         worker.failed.connect(lambda message: (QMessageBox.warning(self, "KRX 상장종목 목록", f"전체 목록을 갱신하지 못했습니다.\n저장된 목록으로 계속합니다.\n\n{message}"), continuation()))
         self._krx_stock_catalog_worker = worker
         self.statusBar().showMessage("KRX 전체 상장종목 목록을 확인하고 있습니다.")
@@ -3390,7 +3592,11 @@ class MainWindow(QMainWindow):
             return
         worker = KrxStockCatalogWorker(self._stock_lookup, self._settings)
         worker.setParent(self)
-        worker.completed.connect(lambda count, cached: QMessageBox.information(self, "상장종목 목록 동기화", f"동기화 완료\n성공 날짜: {self._settings.get('krx_stock_catalog_date')}\n{'오늘 이미 받은 목록입니다.' if cached else f'{count:,}개 종목을 갱신했습니다.'}"))
+        def completed(count: int, cached: bool) -> None:
+            QMessageBox.information(self, "상장종목 목록 동기화", f"동기화 완료\n성공 날짜: {self._settings.get('krx_stock_catalog_date')}\n{'오늘 이미 받은 목록입니다.' if cached else f'{count:,}개 종목을 갱신했습니다.'}")
+            self._review_pending_stock_name_changes()
+        worker.completed.connect(completed)
+        worker.history_failed.connect(lambda message: QMessageBox.warning(self, "상호변경 이력 동기화", f"상장종목 목록은 갱신됐지만 KIND 상호변경 이력은 받지 못했습니다.\n\n{message}"))
         worker.failed.connect(lambda message: QMessageBox.warning(self, "상장종목 목록 동기화 실패", message))
         self._krx_stock_catalog_worker = worker
         self.statusBar().showMessage("KRX 전체 상장종목 목록을 동기화하고 있습니다.")
@@ -3409,12 +3615,29 @@ class MainWindow(QMainWindow):
             return
         worker = KrxStockCatalogWorker(self._stock_lookup, self._settings)
         worker.setParent(self)
-        worker.completed.connect(lambda count, _cached: self.statusBar().showMessage(f"KRX 상장종목 {count:,}개 자동 동기화 완료"))
+        def completed(count: int, _cached: bool) -> None:
+            self.statusBar().showMessage(f"KRX 상장종목 {count:,}개 자동 동기화 완료")
+            self._review_pending_stock_name_changes()
+        worker.completed.connect(completed)
+        worker.history_failed.connect(lambda message: logger.warning("KIND 상호변경 이력 자동 동기화 실패: %s", message))
         worker.failed.connect(lambda message: logger.warning("KRX 상장종목 자동 동기화 실패: %s", message))
         worker.finished.connect(lambda: None if self._is_after_hours_data_pause() else self._start_historical_high_loading(tuple(self._row_by_code)))
         self._krx_stock_catalog_worker = worker
         self.statusBar().showMessage("최하위 작업: KRX 전체 상장종목 목록 동기화 중")
         worker.start()
+
+    def _review_pending_stock_name_changes(self) -> None:
+        lookup = self._stock_lookup
+        if lookup is None or not hasattr(lookup, "pending_name_changes") or not hasattr(lookup, "review_name_changes"):
+            return
+        changes = lookup.pending_name_changes()
+        if not changes:
+            return
+        dialog = StockNameChangeReviewDialog(changes, self)
+        if dialog.exec():
+            lookup.review_name_changes(dialog.decisions())
+            approved = sum(dialog.decisions().values())
+            self.statusBar().showMessage(f"종목명 변경 확인 완료: {approved:,}개 과거 이름 연결")
 
     def _warn_slow_image_ocr(self, worker: ImageThemeOcrWorker) -> None:
         if worker is not getattr(self, "_image_theme_ocr_worker", None) or not worker.isRunning():
@@ -3426,10 +3649,13 @@ class MainWindow(QMainWindow):
     def _show_image_theme_rows(self, rows: object) -> None:
         if not isinstance(rows, tuple):
             return
-        dialog = ImageThemeRowsDialog(rows, self)
+        dialog = ImageThemeRowsDialog(rows, self, self._settings)
         if dialog.exec():
-            separators = ",/|;" + self._settings.get("theme_custom_separators")
-            imported, errors = validate_theme_rows(self._filter_import_exclusions(dialog.rows(), separators), separators)
+            separators = ",/|;" + self._settings.get("theme_image_import_custom_separators")
+            imported, errors = validate_theme_rows(
+                self._filter_import_exclusions(dialog.rows(), separators, "theme_image_import_exclusions"),
+                separators,
+            )
             if errors:
                 QMessageBox.warning(self, "이미지 테마 확인", "\n".join(errors))
                 return
@@ -3438,7 +3664,7 @@ class MainWindow(QMainWindow):
             if cancelled:
                 return
             changes = preview_theme_changes(matched + resolved, self._theme_store) if self._theme_store else ()
-            preview = ThemePreviewDialog(changes, len(unmatched) - len(resolved), self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_import_exclusions"), separators)))
+            preview = ThemePreviewDialog(changes, len(unmatched) - len(resolved), self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_image_import_exclusions"), separators)))
             if preview.exec() and self._theme_store:
                 changes = preview.changes(separators)
                 applied = sum(change.status != "변경 없음" for change in changes)
@@ -3459,12 +3685,25 @@ class MainWindow(QMainWindow):
             self._settings.set("theme_excel_import_dir", str(Path(path).parent))
             try:
                 source = ExcelThemeRepository(Path(path)); header, raw_rows = source.load_header_and_rows()
-                separators = ",/|;" + self._settings.get("theme_custom_separators")
-                rows, errors = validate_theme_rows(self._filter_import_exclusions(raw_rows, separators), separators)
-                errors = validate_theme_header(header) + errors
+                errors = validate_theme_header(header)
             except Exception as error:
                 self.statusBar().showMessage(f"Excel 읽기 실패: {error}")
                 return
+            if errors:
+                QMessageBox.warning(self, "Excel 검증 오류", "\n".join(errors))
+                return
+            editor = ImageThemeRowsDialog(raw_rows, self, self._settings, "theme_excel_import")
+            editor.setWindowTitle("Excel 테마 수정")
+            labels = editor.findChildren(QLabel)
+            if labels:
+                labels[0].setText("Excel에서 읽은 종목명과 테마를 수정하세요. 구분자와 제외 테마는 Excel 업데이트에만 저장됩니다.")
+            if not editor.exec():
+                return
+            separators = ",/|;" + self._settings.get("theme_excel_import_custom_separators")
+            rows, errors = validate_theme_rows(
+                self._filter_import_exclusions(editor.rows(), separators, "theme_excel_import_exclusions"),
+                separators,
+            )
             self.statusBar().showMessage(f"Excel 검증 완료 · 유효 {len(rows)}건 · 오류 {len(errors)}건")
             if errors:
                 QMessageBox.warning(self, "Excel 검증 오류", "\n".join(errors))
@@ -3476,7 +3715,7 @@ class MainWindow(QMainWindow):
                 matched = matched + resolved
                 changes = preview_theme_changes(matched, self._theme_store) if self._theme_store else ()
                 changed = sum(change.status == "테마 변경" for change in changes); new = sum(change.status == "신규" for change in changes)
-                preview = ThemePreviewDialog(changes, len(unmatched), self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_import_exclusions"), separators)))
+                preview = ThemePreviewDialog(changes, len(unmatched), self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_excel_import_exclusions"), separators)))
                 if preview.exec() and self._theme_store:
                     changes = preview.changes(separators)
                     applied = sum(change.status != "변경 없음" for change in changes)
@@ -3488,8 +3727,13 @@ class MainWindow(QMainWindow):
                 unchanged = sum(change.status == "변경 없음" for change in changes)
                 self.statusBar().showMessage(f"Excel 결과 · 전체 {len(raw_rows)} · 변경 없음 {unchanged} · 신규 {new} · 테마 변경 {changed} · 오류/제외 {len(unmatched) - len(resolved)}")
 
-    def _filter_import_exclusions(self, rows: tuple[tuple[str, str], ...], separators: str) -> tuple[tuple[str, str], ...]:
-        excluded = {theme_key(theme) for theme in parse_themes(self._settings.get("theme_import_exclusions"), separators)}
+    def _filter_import_exclusions(
+        self,
+        rows: tuple[tuple[str, str], ...],
+        separators: str,
+        setting_key: str = "theme_import_exclusions",
+    ) -> tuple[tuple[str, str], ...]:
+        excluded = {theme_key(theme) for theme in parse_themes(self._settings.get(setting_key), separators)}
         if not excluded:
             return rows
         filtered: list[tuple[str, str]] = []
@@ -3505,11 +3749,51 @@ class MainWindow(QMainWindow):
         resolved: list[MatchedThemeRow] = []
         for row in rows:
             original_name = str(getattr(row, "name", ""))
+            themes = tuple(getattr(row, "themes", ()))
+            renamed, handled = confirm_pending_name_change(self, self._stock_lookup, original_name, themes)
+            if handled:
+                if renamed is not None:
+                    code, current_name = renamed
+                    resolved.append(MatchedThemeRow(code, current_name, themes))
+                continue
+            split_finder = getattr(self._stock_lookup, "find_concatenated_stocks", None)
+            split = split_finder(original_name) if callable(split_finder) else ()
+            if split:
+                labels = " + ".join(name for _, name in split)
+                if QMessageBox.question(
+                    self,
+                    "붙어 있는 종목명 확인",
+                    f"{source_label}의 '{original_name}'을(를) 다음 종목들로 나눌 수 있습니다.\n\n"
+                    f"{labels}\n\n이대로 나눌까요?",
+                ) == QMessageBox.StandardButton.Yes:
+                    resolved.extend(MatchedThemeRow(code, name, themes) for code, name in split)
+                    continue
+            partial_finder = getattr(self._stock_lookup, "find_partial_concatenated_stocks", None)
+            known, fragments = partial_finder(original_name) if callable(partial_finder) else ((), ())
+            if known and fragments:
+                known_labels = " + ".join(name for _, name in known)
+                fragment_labels = ", ".join(fragments)
+                if QMessageBox.question(
+                    self,
+                    "붙어 있는 종목명 일부 확인",
+                    f"{source_label}의 '{original_name}'에서 다음 종목은 확인됐습니다.\n\n{known_labels}\n\n"
+                    f"남은 이름만 다시 찾습니다: {fragment_labels}\n\n계속할까요?",
+                ) == QMessageBox.StandardButton.Yes:
+                    resolved.extend(MatchedThemeRow(code, name, themes) for code, name in known)
+                    for fragment in fragments:
+                        candidate, cancelled = choose_similar_stock(self, self._stock_lookup, fragment, themes)
+                        if cancelled:
+                            return (), True
+                        if candidate:
+                            code, selected_name = candidate
+                            resolved.append(MatchedThemeRow(code, selected_name, themes))
+                    continue
             while True:
                 name, ok = QInputDialog.getText(
                     self,
                     "키움 종목명 확인",
                     f"{source_label}에서 읽은 '{original_name}' 종목명이 현재 키움 종목 목록에 없습니다.\n"
+                    f"이 종목이 있던 테마: {', '.join(themes) or '없음'}\n"
                     "OCR 오인식이거나 키움의 실제 표기와 다른 이름일 수 있습니다.\n"
                     "키움에 표시되는 정확한 종목명으로 수정하세요. 비워 두면 이번 업데이트에서 제외합니다.",
                     text=original_name,
@@ -3525,7 +3809,7 @@ class MainWindow(QMainWindow):
                         self._stock_lookup.save_alias(original_name, code)
                     resolved.append(MatchedThemeRow(code, name, tuple(getattr(row, "themes", ()))))
                     break
-                candidate, cancelled = choose_similar_stock(self, self._stock_lookup, name)
+                candidate, cancelled = choose_similar_stock(self, self._stock_lookup, name, themes)
                 if candidate:
                     code, selected_name = candidate
                     if original_name != selected_name and hasattr(self._stock_lookup, "save_alias"):
@@ -3585,6 +3869,9 @@ class MainWindow(QMainWindow):
     def _apply_uniform_row_height(self, height: int) -> None:
         """한 행 조절값을 표 전체 행에 적용하고 로컬에 저장한다."""
         height = max(12, min(100, int(height)))
+        # 열 너비와 동일하게 직접 조절한 뒤 30초 동안은 현재 크기를
+        # 유지하고, 이후 창 크기를 바꾸면 반응형 자동 맞춤으로 복귀한다.
+        self._manual_column_resize_until = time.monotonic() + 30.0
         self._syncing_row_heights = True
         try:
             header = self._table.verticalHeader()
@@ -4199,17 +4486,31 @@ class MainWindow(QMainWindow):
                 self._realtime_codes = ()
                 self.statusBar().showMessage("현재 시간에는 수신 가능한 실시간 체결 종목이 없습니다.")
             return
-        if self._realtime_worker is not None and self._realtime_worker.isRunning() and active_codes == self._realtime_codes:
+        if self._realtime_worker is not None and self._realtime_worker.isRunning():
+            if active_codes == self._realtime_codes:
+                return
+            self._realtime_worker.update_codes(
+                active_codes,
+                tuple(code for code in active_codes if code in self._nxt_enabled_codes),
+            )
+            self._realtime_codes = active_codes
+            self.statusBar().showMessage(f"실시간 연결 유지 · 구독 종목 변경 중 · {len(active_codes)}종목")
             return
         if self._realtime_worker is not None:
             if not self._realtime_worker.stop():
                 self._on_background_failure("이전 실시간 연결을 아직 종료하는 중입니다. 잠시 후 다시 시도합니다.")
                 return
         worker = self._realtime_worker_factory(active_codes)
+        worker.update_codes(
+            active_codes,
+            tuple(code for code in active_codes if code in self._nxt_enabled_codes),
+        )
         worker.setParent(self)
         worker.trade_received.connect(self._on_trade_tick)
         worker.status_changed.connect(self.statusBar().showMessage)
         worker.connection_failed.connect(self._on_realtime_failure)
+        worker.connection_opened.connect(self._minute_aggregator.reset_cumulative_baselines)
+        worker.codes_added.connect(self._minute_aggregator.reset_cumulative_baselines)
         worker.subscription_ready.connect(lambda: self._start_realtime_followups(codes))
         self._realtime_worker = worker
         self._realtime_codes = active_codes
@@ -4800,10 +5101,8 @@ class MainWindow(QMainWindow):
             threshold = float(self._settings.get(f"trade_value_{period}_alert_eok"))
             is_alert = self._settings.get("trade_value_alert_enabled") == "1" and threshold > 0 and value >= threshold
             row = self._row_by_code.get(code, 0)
-            item.setBackground(
-                QColor("#F4CCCC") if is_alert and code not in self._near_high_codes
-                else self._row_background_color(code, row)
-            )
+            item.setData(self.TRADE_VALUE_ALERT_ROLE, is_alert)
+            item.setBackground(self.TRADE_VALUE_ALERT_COLOR if is_alert else self._row_background_color(code, row))
             item.setForeground(QColor("#C00000") if is_alert else QColor("black"))
             font = item.font()
             font.setBold(is_alert)
@@ -4965,7 +5264,11 @@ class MainWindow(QMainWindow):
         for column in range(self._table.columnCount()):
             item = self._table.item(row, column)
             if item is not None:
-                item.setBackground(color)
+                item.setBackground(
+                    self.TRADE_VALUE_ALERT_COLOR
+                    if bool(item.data(self.TRADE_VALUE_ALERT_ROLE))
+                    else color
+                )
             widget = self._table.cellWidget(row, column)
             if widget is not None:
                 palette = widget.palette()
@@ -4977,6 +5280,9 @@ class MainWindow(QMainWindow):
     def _row_background_color(self, code: str, row: int) -> QColor:
         if code in self._near_high_codes:
             return QColor("#FDE9E7")
+        # 선택 행은 신고가 근접 다음인 2순위다.
+        if code == self._selected_table_code:
+            return QColor("#DDEBF7")
         if code in self._rank_changed_codes and self._settings.get("rank_changed_highlight_enabled") == "1":
             return QColor(self._settings.get("rank_changed_row_color"))
         rank_item = self._table.item(row, 0) if hasattr(self, "_table") else None
@@ -5239,12 +5545,15 @@ class MainWindow(QMainWindow):
         palette = self._table.palette()
         palette.setColor(QPalette.ColorRole.Base, QColor(self._settings.get("rank_row_odd_color")))
         palette.setColor(QPalette.ColorRole.AlternateBase, QColor(self._settings.get("rank_row_even_color")))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor("#DDEBF7"))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
         self._table.setPalette(palette)
         self._table.setAlternatingRowColors(True)
         font_size = int(self._settings.get("ui_font_size"))
         row_height = int(self._settings.get("ui_row_height"))
         responsive = self._settings.get("ui_mode") == "responsive"
-        if row_height:
+        manual_size_hold = time.monotonic() < self._manual_column_resize_until
+        if row_height and (not responsive or manual_size_hold):
             self._table.verticalHeader().setDefaultSectionSize(row_height)
         elif responsive:
             # 자동 UI의 행 높이는 창의 세로 공간과 표시 행 수에 맞춘다.

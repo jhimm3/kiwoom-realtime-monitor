@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
-from kiwoom_monitor.presentation.main_window import MainWindow, selected_high_cycle_periods
+from kiwoom_monitor.presentation.main_window import MainWindow, NxtMarkerDelegate, selected_high_cycle_periods
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
 
 
@@ -88,6 +88,57 @@ class MainWindowTest(unittest.TestCase):
     def test_high_cycle_periods_keep_fixed_order_and_recover_empty_value(self) -> None:
         self.assertEqual(("20", "historical"), selected_high_cycle_periods("historical,20"))
         self.assertEqual(("5", "20", "250", "historical"), selected_high_cycle_periods(""))
+
+    def test_selected_row_background_is_below_near_high_and_above_rank_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings, FakeRankingLoader())
+            window._selected_table_code = "005930"
+
+            self.assertEqual("#ddebf7", window._row_background_color("005930", 0).name())
+
+            window._rank_changed_codes.add("005930")
+            self.assertEqual("#ddebf7", window._row_background_color("005930", 0).name())
+
+            window._near_high_codes.add("005930")
+            self.assertEqual("#fde9e7", window._row_background_color("005930", 0).name())
+            window.close()
+
+    def test_hover_marker_keeps_strong_blue_independent_of_row_selection_color(self) -> None:
+        self.assertEqual("#0078d7", NxtMarkerDelegate.ACTIVE_MARKER_COLOR.name())
+
+    def test_delegate_remembers_only_the_clicked_cell_marker(self) -> None:
+        delegate = NxtMarkerDelegate()
+        delegate.set_selected_cell((2, 4))
+        self.assertEqual((2, 4), delegate._selected_cell)
+        delegate.set_selected_cell(None)
+        self.assertIsNone(delegate._selected_cell)
+
+    def test_rank_changed_highlight_default_duration_is_one_second(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "monitor.sqlite3")
+            database.initialize()
+            self.assertEqual("1.00", database.settings.get("rank_changed_highlight_seconds"))
+
+    def test_trade_value_cell_alert_stays_above_near_high_row_background(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings, FakeRankingLoader())
+            window._refresh_rankings()
+            window._ranking_worker.wait()
+            QApplication.processEvents()
+            item = window._table.item(0, 6)
+            item.setData(window.TRADE_VALUE_ALERT_ROLE, True)
+            window._near_high_codes.add("005930")
+
+            window._apply_row_background("005930")
+
+            self.assertEqual("#f4cccc", item.background().color().name())
+            self.assertEqual("#fde9e7", window._table.item(0, 5).background().color().name())
+            window._theme_trade_summary_timer.stop()
+            window.close()
 
 
 if __name__ == "__main__":

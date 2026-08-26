@@ -44,13 +44,21 @@ class RealtimeTradeWorker(QThread):
     status_changed = Signal(str)
     connection_failed = Signal(str)
     subscription_ready = Signal()
+    connection_opened = Signal(object)
+    codes_added = Signal(object)
 
-    def __init__(self, token_provider: Callable[[], str], environment: str, codes: tuple[str, ...], now_provider: Callable[[], datetime] | None = None) -> None:
+    def __init__(self, token_provider: Callable[[], str], environment: str, codes: tuple[str, ...], now_provider: Callable[[], datetime] | None = None, nxt_codes: tuple[str, ...] = ()) -> None:
         super().__init__()
         self._token_provider = token_provider
         self._environment = environment
         self._codes = tuple(dict.fromkeys(code for code in codes if code))
+        self._nxt_codes = tuple(dict.fromkeys(code for code in nxt_codes if code))
         self._now_provider = now_provider or korea_now
+
+    def update_codes(self, codes: tuple[str, ...], nxt_codes: tuple[str, ...] = ()) -> None:
+        """소켓을 끊지 않고 다음 수신 반복에서 구독 목록만 교체한다."""
+        self._codes = tuple(dict.fromkeys(code for code in codes if code))
+        self._nxt_codes = tuple(dict.fromkeys(code for code in nxt_codes if code))
 
     def run(self) -> None:
         while not self.isInterruptionRequested():
@@ -75,29 +83,36 @@ class RealtimeTradeWorker(QThread):
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
     async def _receive(self, session: str) -> None:
-        if not self._codes:
+        initial_codes = self._codes
+        initial_nxt_codes = self._nxt_codes
+        if not initial_codes:
             return
         token = await asyncio.to_thread(self._token_provider)
-        codes = tuple(f"{code}_NX" for code in self._codes) if session == "NXT" else self._codes
         uri = f"{WS_BASE_URLS[self._environment]}/api/dostk/websocket"
         async with connect(uri, open_timeout=15, ping_interval=None) as websocket:
             await websocket.send(json.dumps({"trnm": "LOGIN", "token": token}))
             login = json.loads(await asyncio.wait_for(websocket.recv(), timeout=15))
             if login.get("return_code") not in (None, 0, "0"):
                 raise RuntimeError(f"WebSocket 로그인 실패: {login.get('return_msg', '')}")
-            await websocket.send(
-                json.dumps(
-                    {
-                        "trnm": "REG",
-                        "grp_no": "1",
-                        "refresh": "1",
-                        "data": [{"item": list(codes), "type": ["0B"]}],
-                    }
-                )
-            )
-            self.status_changed.emit(f"실시간 체결 구독 중 · {session} · {len(codes)}종목")
+            subscribed_codes = initial_codes
+            subscribed_nxt_codes = initial_nxt_codes
+            await self._send_subscription(websocket, session, subscribed_codes, subscribed_nxt_codes)
+            self.connection_opened.emit(subscribed_codes)
+            self.status_changed.emit(f"실시간 체결 구독 중 · {session} · {len(subscribed_codes)}종목")
             self.subscription_ready.emit()
             while not self.isInterruptionRequested():
+                desired_codes = self._codes
+                desired_nxt_codes = self._nxt_codes
+                if desired_codes != subscribed_codes or desired_nxt_codes != subscribed_nxt_codes:
+                    if not desired_codes:
+                        return
+                    added_codes = tuple(code for code in desired_codes if code not in subscribed_codes)
+                    await self._send_subscription(websocket, session, desired_codes, desired_nxt_codes)
+                    subscribed_codes = desired_codes
+                    subscribed_nxt_codes = desired_nxt_codes
+                    if added_codes:
+                        self.codes_added.emit(added_codes)
+                    self.status_changed.emit(f"실시간 체결 구독 변경 · {session} · {len(subscribed_codes)}종목")
                 try:
                     raw = await asyncio.wait_for(websocket.recv(), timeout=1)
                 except TimeoutError:
@@ -110,6 +125,24 @@ class RealtimeTradeWorker(QThread):
                     continue
                 for tick in parse_trade_ticks(message):
                     self.trade_received.emit(tick)
+
+    @staticmethod
+    async def _send_subscription(websocket: object, session: str, codes: tuple[str, ...], nxt_codes: tuple[str, ...] = ()) -> None:
+        items = (
+            tuple(f"{code}_NX" for code in codes)
+            if session == "NXT"
+            else codes + tuple(f"{code}_NX" for code in nxt_codes if code in codes)
+        )
+        await websocket.send(
+            json.dumps(
+                {
+                    "trnm": "REG",
+                    "grp_no": "1",
+                    "refresh": "1",
+                    "data": [{"item": list(items), "type": ["0B"]}],
+                }
+            )
+        )
 
     def stop(self, timeout_ms: int = 3000) -> bool:
         self.requestInterruption()

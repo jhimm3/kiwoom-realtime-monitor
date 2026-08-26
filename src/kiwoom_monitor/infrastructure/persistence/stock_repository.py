@@ -5,13 +5,41 @@ from pathlib import Path
 
 from kiwoom_monitor.application.trade_strength import StockFundamentals
 from kiwoom_monitor.application.historical_high_service import HistoricalHighCache, HistoricalHighEvidence, HistoricalHighTarget
+from kiwoom_monitor.application.theme_matching import extract_known_stocks_and_unknown_fragments, split_concatenated_stock_name
+from kiwoom_monitor.infrastructure.persistence.stock_aliases import seed_known_stock_aliases
+from kiwoom_monitor.infrastructure.krx.kind_name_history import KindNameHistorySync
 
 class StockRepository:
     def __init__(self, path: Path) -> None: self._path = path
+
+    @staticmethod
+    def _remember_renames(con: sqlite3.Connection, stocks: tuple[tuple[str, str, str], ...]) -> None:
+        """같은 종목코드의 이름 변경을 사용자 확인 대기 상태로 남긴다."""
+        for code, new_name, _market in stocks:
+            row = con.execute("SELECT name FROM stocks WHERE code=?", (code,)).fetchone()
+            if row is None:
+                continue
+            old_name = str(row[0]).strip()
+            new_name = str(new_name).strip()
+            if not old_name or old_name == new_name:
+                continue
+            # 현재 다른 종목이 사용 중인 이름은 과거 별칭으로 가로채지 않는다.
+            owner = con.execute("SELECT code FROM stocks WHERE name=? AND code<>?", (old_name, code)).fetchone()
+            if owner is not None:
+                continue
+            con.execute(
+                "INSERT INTO stock_name_history(stock_code,old_name,new_name,source,decision) VALUES(?,?,?,'KRX','pending') "
+                "ON CONFLICT(stock_code,old_name) DO UPDATE SET new_name=excluded.new_name, changed_at=CURRENT_TIMESTAMP, "
+                "decision=CASE WHEN stock_name_history.new_name=excluded.new_name THEN stock_name_history.decision ELSE 'pending' END",
+                (code, old_name, new_name),
+            )
+
     def upsert(self, code: str, name: str, market: str = "") -> None:
         con = sqlite3.connect(self._path)
         try:
+            self._remember_renames(con, ((code, name, market),))
             con.execute("INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market", (code,name,market))
+            seed_known_stock_aliases(con)
             con.commit()
         finally:
             con.close()
@@ -20,11 +48,13 @@ class StockRepository:
             return
         con = sqlite3.connect(self._path)
         try:
+            self._remember_renames(con, stocks)
             con.executemany(
                 "INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) "
                 "ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, updated_at=CURRENT_TIMESTAMP",
                 stocks,
             )
+            seed_known_stock_aliases(con)
             con.commit()
         finally:
             con.close()
@@ -52,11 +82,85 @@ class StockRepository:
         finally:
             con.close()
         return tuple((str(code), str(stock_name)) for code, stock_name in rows[:limit])
+    def find_concatenated_stocks(self, name: str) -> tuple[tuple[str, str], ...]:
+        con = sqlite3.connect(self._path)
+        try:
+            rows = con.execute("SELECT code, name FROM stocks ORDER BY LENGTH(name) DESC, name").fetchall()
+        finally:
+            con.close()
+        return split_concatenated_stock_name(
+            name, tuple((str(code), str(stock_name)) for code, stock_name in rows)
+        )
+    def find_partial_concatenated_stocks(self, name: str) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
+        con = sqlite3.connect(self._path)
+        try:
+            rows = con.execute("SELECT code, name FROM stocks ORDER BY LENGTH(name) DESC, name").fetchall()
+        finally:
+            con.close()
+        return extract_known_stocks_and_unknown_fragments(
+            name, tuple((str(code), str(stock_name)) for code, stock_name in rows)
+        )
+
+    def sync_kind_name_history(self, *, initial: bool) -> int:
+        return KindNameHistorySync(self._path).sync(initial=initial)
+
     def save_alias(self, alias: str, stock_code: str) -> None:
         con = sqlite3.connect(self._path)
         try:
             con.execute("INSERT INTO stock_aliases(alias, stock_code) VALUES (?, ?) ON CONFLICT(alias) DO UPDATE SET stock_code=excluded.stock_code", (alias, stock_code))
             con.commit()
+        finally:
+            con.close()
+
+    def pending_name_changes(self) -> tuple[tuple[str, str, str, str], ...]:
+        con = sqlite3.connect(self._path)
+        try:
+            rows = con.execute(
+                "SELECT stock_code,old_name,new_name,source FROM stock_name_history "
+                "WHERE decision='pending' ORDER BY changed_at,stock_code"
+            ).fetchall()
+        finally:
+            con.close()
+        return tuple((str(code), str(old), str(new), str(source)) for code, old, new, source in rows)
+
+    def pending_name_change(self, old_name: str) -> tuple[str, str, str, str] | None:
+        con = sqlite3.connect(self._path)
+        try:
+            row = con.execute(
+                "SELECT stock_code,old_name,new_name,source FROM stock_name_history "
+                "WHERE old_name=? AND decision='pending'",
+                (old_name.strip(),),
+            ).fetchone()
+        finally:
+            con.close()
+        return tuple(str(value) for value in row) if row is not None else None  # type: ignore[return-value]
+
+    def review_name_changes(self, decisions: dict[tuple[str, str], bool]) -> None:
+        """승인한 과거 이름만 별칭으로 만들고, 나머지는 거절 상태로 보관한다."""
+        if not decisions:
+            return
+        con = sqlite3.connect(self._path)
+        try:
+            with con:
+                for (stock_code, old_name), approved in decisions.items():
+                    row = con.execute(
+                        "SELECT new_name FROM stock_name_history WHERE stock_code=? AND old_name=? AND decision='pending'",
+                        (stock_code, old_name),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    if approved:
+                        owner = con.execute("SELECT code FROM stocks WHERE name=? AND code<>?", (old_name, stock_code)).fetchone()
+                        if owner is None:
+                            con.execute(
+                                "INSERT INTO stock_aliases(alias,stock_code) VALUES(?,?) "
+                                "ON CONFLICT(alias) DO UPDATE SET stock_code=excluded.stock_code",
+                                (old_name, stock_code),
+                            )
+                    con.execute(
+                        "UPDATE stock_name_history SET decision=? WHERE stock_code=? AND old_name=?",
+                        ("approved" if approved else "rejected", stock_code, old_name),
+                    )
         finally:
             con.close()
     def update_fundamentals(
