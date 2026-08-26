@@ -35,8 +35,8 @@ class MinuteTradeValueAggregator:
     def __init__(self, max_minutes: int = 730) -> None:
         self._max_minutes = max_minutes
         self._bars: dict[str, deque[MinuteOhlcv]] = defaultdict(lambda: deque(maxlen=max_minutes))
-        self._last_cumulative_volume: dict[str, int] = {}
-        self._last_cumulative_trade_value: dict[str, int] = {}
+        self._last_cumulative_volume: dict[tuple[str, str], int] = {}
+        self._last_cumulative_trade_value: dict[tuple[str, str], int] = {}
 
     def ingest(self, tick: TradeTick, observed_at: datetime) -> MinuteOhlcv | None:
         if tick.current_price is None:
@@ -82,7 +82,7 @@ class MinuteTradeValueAggregator:
                 tick.current_price,
                 tick.current_price,
                 volume,
-                0.0 if tick.cumulative_trade_value is not None else None,
+                trade_value_delta,
             )
             bars.append(bar)
         if len(bars) > 1 and bars[-1].minute < bars[-2].minute:
@@ -97,8 +97,9 @@ class MinuteTradeValueAggregator:
             return abs(tick.trade_volume)
         if tick.cumulative_volume is not None:
             cumulative = abs(tick.cumulative_volume)
-            previous = self._last_cumulative_volume.get(tick.code)
-            self._last_cumulative_volume[tick.code] = cumulative
+            key = (tick.code, tick.market)
+            previous = self._last_cumulative_volume.get(key)
+            self._last_cumulative_volume[key] = cumulative
             # 누적 거래량이 있는 체결은 차이만 사용한다. 일부 수신에서 거래량 필드가
             # 누적값으로 들어와 같은 값을 반복 합산하는 급증을 막는다.
             return max(0, cumulative - previous) if previous is not None else 0
@@ -114,8 +115,9 @@ class MinuteTradeValueAggregator:
         if tick.cumulative_trade_value is None:
             return None
         cumulative = abs(tick.cumulative_trade_value)
-        previous = self._last_cumulative_trade_value.get(tick.code)
-        self._last_cumulative_trade_value[tick.code] = cumulative
+        key = (tick.code, tick.market)
+        previous = self._last_cumulative_trade_value.get(key)
+        self._last_cumulative_trade_value[key] = cumulative
         if previous is None or cumulative < previous:
             return 0.0
         return (cumulative - previous) / 100
@@ -192,6 +194,16 @@ class MinuteTradeValueAggregator:
         )
         self._last_cumulative_volume.clear()
         self._last_cumulative_trade_value.clear()
+
+    def reset_cumulative_baselines(self, codes: tuple[str, ...]) -> None:
+        """신규 구독·재접속 뒤 공백 누적분을 현재 1분에 몰아 넣지 않는다."""
+        selected = set(codes)
+        self._last_cumulative_volume = {
+            key: value for key, value in self._last_cumulative_volume.items() if key[0] not in selected
+        }
+        self._last_cumulative_trade_value = {
+            key: value for key, value in self._last_cumulative_trade_value.items() if key[0] not in selected
+        }
 
 
 def _trade_minute(tick: TradeTick, observed_at: datetime) -> datetime:

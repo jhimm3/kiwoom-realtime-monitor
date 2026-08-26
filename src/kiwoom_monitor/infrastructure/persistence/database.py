@@ -13,7 +13,7 @@ DEFAULT_SETTINGS = {
     "rank_row_odd_color": "#FFFFFF",
     "rank_row_even_color": "#F2F2F2",
     "rank_changed_row_color": "#E2F0D9",
-    "rank_changed_highlight_seconds": "0.00",
+    "rank_changed_highlight_seconds": "1.00",
     "rank_changed_highlight_enabled": "1",
     "ui_mode": "responsive",
     "strength_1m_interest": "0.05", "strength_1m_caution": "0.1", "strength_1m_fire": "0.2",

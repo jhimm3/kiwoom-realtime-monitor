@@ -2434,12 +2434,21 @@ class ThemeManagerDialog(QDialog):
 
 
 class NxtMarkerDelegate(QStyledItemDelegate):
+    ACTIVE_MARKER_COLOR = QColor("#0078D7")
+
+    def __init__(self, parent: object | None = None) -> None:
+        super().__init__(parent)
+        self._selected_cell: tuple[int, int] | None = None
+
+    def set_selected_cell(self, cell: tuple[int, int] | None) -> None:
+        self._selected_cell = cell
+
     def paint(self, painter: QPainter, option: object, index: object) -> None:
-        # 기본 파란 호버/선택 배경은 행의 강조색을 덮으므로 제거하고, 대신
-        # 마우스가 올라간/선택한 바로 그 셀의 왼쪽에만 가는 표시줄을 그린다.
-        active = bool(
-            option.state & (QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_MouseOver)
-        )
+        # 기본 파란 호버/선택 배경은 행의 강조색을 덮으므로 제거한다.
+        # 왼쪽 표시줄은 현재 마우스가 올라간 셀 또는 사용자가 마지막으로
+        # 클릭한 셀 하나에만 그린다.
+        clicked = self._selected_cell == (index.row(), index.column())
+        active = clicked or bool(option.state & QStyle.StateFlag.State_MouseOver)
         cell_option = QStyleOptionViewItem(option)
         cell_option.state &= ~(
             QStyle.StateFlag.State_Selected
@@ -2451,8 +2460,9 @@ class NxtMarkerDelegate(QStyledItemDelegate):
             rect = option.rect
             painter.save()
             painter.setPen(Qt.PenStyle.NoPen)
-            # 순위 기준 선택 목록의 표시색과 같은 시스템 강조색을 사용한다.
-            painter.setBrush(option.palette.color(QPalette.ColorRole.Highlight))
+            # 행 선택용 연파랑과 분리해, 예전처럼 호버 위치가 또렷하게
+            # 보이는 Windows 계열의 진한 파란색 표시줄을 사용한다.
+            painter.setBrush(self.ACTIVE_MARKER_COLOR)
             painter.drawRoundedRect(rect.left() + 1, rect.center().y() - 7, 2, 14, 1, 1)
             painter.restore()
         if not index.data(Qt.ItemDataRole.UserRole + 2):
@@ -2466,6 +2476,8 @@ class NxtMarkerDelegate(QStyledItemDelegate):
         painter.restore()
 
 class MainWindow(QMainWindow):
+    TRADE_VALUE_ALERT_ROLE = Qt.ItemDataRole.UserRole + 3
+    TRADE_VALUE_ALERT_COLOR = QColor("#F4CCCC")
     COLUMNS = (("rank","순위"),("stock","종목"),("themes","테마"),("change_rate","등락률"),("strength_1m","1분강도"),("current_price","현재가"),("trade_value_1m","1분"),("trade_value_5m","5분"),("trade_value_60m","60분"),("trade_value_day","1일"),("strength_5m","5분강도"),("strength_60m","60분강도"),("strength_day","1일강도"),("new_high_price","신고가"),("high_distance","신고가%"),("market_cap","시가총액"))
     HEADERS = tuple(label for _, label in COLUMNS)
 
@@ -2553,6 +2565,7 @@ class MainWindow(QMainWindow):
         self._last_rank_by_code: dict[str, int] = {}
         self._rank_changed_codes: set[str] = set()
         self._selected_table_cell: tuple[int, int] | None = None
+        self._selected_table_code: str | None = None
         self._ranking_priority_preparing = False
         self._resizing_columns = False
         self._restoring_columns = False
@@ -2681,7 +2694,7 @@ class MainWindow(QMainWindow):
         vertical_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         # 순위 칸의 행 경계에 올렸을 때에도 크기 조절 커서를 보여 준다.
         self._table.setMouseTracking(True)
         self._table.viewport().setMouseTracking(True)
@@ -3241,14 +3254,27 @@ class MainWindow(QMainWindow):
         self._schedule_next_ranking_refresh()
 
     def _toggle_table_cell_selection(self, row: int, column: int) -> None:
-        """같은 셀을 다시 누르면 선택 표시를 해제한다."""
+        """클릭한 종목의 행 전체를 강조하고 같은 행을 다시 누르면 해제한다."""
         cell = (row, column)
+        previous_code = self._selected_table_code
+        stock_item = self._table.item(row, 1)
+        selected_code = str(stock_item.data(Qt.ItemDataRole.UserRole) or "") if stock_item is not None else ""
         if self._selected_table_cell == cell:
             self._table.clearSelection()
             self._table.setCurrentItem(None)
             self._selected_table_cell = None
+            self._selected_table_code = None
         else:
             self._selected_table_cell = cell
+            self._selected_table_code = selected_code or None
+            self._table.selectRow(row)
+        delegate = self._table.itemDelegate()
+        if isinstance(delegate, NxtMarkerDelegate):
+            delegate.set_selected_cell(self._selected_table_cell)
+        if previous_code:
+            self._apply_row_background(previous_code)
+        if self._selected_table_code:
+            self._apply_row_background(self._selected_table_code)
         self._table.viewport().update()
     def _open_column_manager(self) -> None:
         if self._columns is None:
@@ -3843,6 +3869,9 @@ class MainWindow(QMainWindow):
     def _apply_uniform_row_height(self, height: int) -> None:
         """한 행 조절값을 표 전체 행에 적용하고 로컬에 저장한다."""
         height = max(12, min(100, int(height)))
+        # 열 너비와 동일하게 직접 조절한 뒤 30초 동안은 현재 크기를
+        # 유지하고, 이후 창 크기를 바꾸면 반응형 자동 맞춤으로 복귀한다.
+        self._manual_column_resize_until = time.monotonic() + 30.0
         self._syncing_row_heights = True
         try:
             header = self._table.verticalHeader()
@@ -4460,17 +4489,31 @@ class MainWindow(QMainWindow):
                 self._realtime_codes = ()
                 self.statusBar().showMessage("현재 시간에는 수신 가능한 실시간 체결 종목이 없습니다.")
             return
-        if self._realtime_worker is not None and self._realtime_worker.isRunning() and active_codes == self._realtime_codes:
+        if self._realtime_worker is not None and self._realtime_worker.isRunning():
+            if active_codes == self._realtime_codes:
+                return
+            self._realtime_worker.update_codes(
+                active_codes,
+                tuple(code for code in active_codes if code in self._nxt_enabled_codes),
+            )
+            self._realtime_codes = active_codes
+            self.statusBar().showMessage(f"실시간 연결 유지 · 구독 종목 변경 중 · {len(active_codes)}종목")
             return
         if self._realtime_worker is not None:
             if not self._realtime_worker.stop():
                 self._on_background_failure("이전 실시간 연결을 아직 종료하는 중입니다. 잠시 후 다시 시도합니다.")
                 return
         worker = self._realtime_worker_factory(active_codes)
+        worker.update_codes(
+            active_codes,
+            tuple(code for code in active_codes if code in self._nxt_enabled_codes),
+        )
         worker.setParent(self)
         worker.trade_received.connect(self._on_trade_tick)
         worker.status_changed.connect(self.statusBar().showMessage)
         worker.connection_failed.connect(self._on_realtime_failure)
+        worker.connection_opened.connect(self._minute_aggregator.reset_cumulative_baselines)
+        worker.codes_added.connect(self._minute_aggregator.reset_cumulative_baselines)
         worker.subscription_ready.connect(lambda: self._start_realtime_followups(codes))
         self._realtime_worker = worker
         self._realtime_codes = active_codes
@@ -5061,10 +5104,8 @@ class MainWindow(QMainWindow):
             threshold = float(self._settings.get(f"trade_value_{period}_alert_eok"))
             is_alert = self._settings.get("trade_value_alert_enabled") == "1" and threshold > 0 and value >= threshold
             row = self._row_by_code.get(code, 0)
-            item.setBackground(
-                QColor("#F4CCCC") if is_alert and code not in self._near_high_codes
-                else self._row_background_color(code, row)
-            )
+            item.setData(self.TRADE_VALUE_ALERT_ROLE, is_alert)
+            item.setBackground(self.TRADE_VALUE_ALERT_COLOR if is_alert else self._row_background_color(code, row))
             item.setForeground(QColor("#C00000") if is_alert else QColor("black"))
             font = item.font()
             font.setBold(is_alert)
@@ -5226,7 +5267,11 @@ class MainWindow(QMainWindow):
         for column in range(self._table.columnCount()):
             item = self._table.item(row, column)
             if item is not None:
-                item.setBackground(color)
+                item.setBackground(
+                    self.TRADE_VALUE_ALERT_COLOR
+                    if bool(item.data(self.TRADE_VALUE_ALERT_ROLE))
+                    else color
+                )
             widget = self._table.cellWidget(row, column)
             if widget is not None:
                 palette = widget.palette()
@@ -5238,6 +5283,9 @@ class MainWindow(QMainWindow):
     def _row_background_color(self, code: str, row: int) -> QColor:
         if code in self._near_high_codes:
             return QColor("#FDE9E7")
+        # 선택 행은 신고가 근접 다음인 2순위다.
+        if code == self._selected_table_code:
+            return QColor("#DDEBF7")
         if code in self._rank_changed_codes and self._settings.get("rank_changed_highlight_enabled") == "1":
             return QColor(self._settings.get("rank_changed_row_color"))
         rank_item = self._table.item(row, 0) if hasattr(self, "_table") else None
@@ -5500,12 +5548,15 @@ class MainWindow(QMainWindow):
         palette = self._table.palette()
         palette.setColor(QPalette.ColorRole.Base, QColor(self._settings.get("rank_row_odd_color")))
         palette.setColor(QPalette.ColorRole.AlternateBase, QColor(self._settings.get("rank_row_even_color")))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor("#DDEBF7"))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
         self._table.setPalette(palette)
         self._table.setAlternatingRowColors(True)
         font_size = int(self._settings.get("ui_font_size"))
         row_height = int(self._settings.get("ui_row_height"))
         responsive = self._settings.get("ui_mode") == "responsive"
-        if row_height:
+        manual_size_hold = time.monotonic() < self._manual_column_resize_until
+        if row_height and (not responsive or manual_size_hold):
             self._table.verticalHeader().setDefaultSectionSize(row_height)
         elif responsive:
             # 자동 UI의 행 높이는 창의 세로 공간과 표시 행 수에 맞춘다.
