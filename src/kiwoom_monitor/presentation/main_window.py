@@ -117,7 +117,7 @@ def selected_high_cycle_periods(value: str) -> tuple[str, ...]:
     periods = tuple(period for period in HIGH_PERIODS if period in selected)
     return periods or HIGH_PERIODS
 
-APP_VERSION = "1.1.15"
+APP_VERSION = "1.1.16"
 APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 INVESTMENT_NOTICE = "본 앱은 투자 자문이 아니며 시세 지연·오류가 있을 수 있습니다."
@@ -2630,6 +2630,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_DISPLAY_NAME)
         self.resize(int(self._settings.get("window_width")), int(self._settings.get("window_height")))
         self.setMinimumWidth(320)
+        self._restore_window_position()
 
         toolbar = QToolBar("도구")
         toolbar.setObjectName("main_tools_toolbar")
@@ -3249,7 +3250,6 @@ class MainWindow(QMainWindow):
         else:
             self._selected_table_cell = cell
         self._table.viewport().update()
-
     def _open_column_manager(self) -> None:
         if self._columns is None:
             return
@@ -4106,6 +4106,10 @@ class MainWindow(QMainWindow):
 
         self._table_stack.setCurrentWidget(self._table)
         self._table.setRowCount(len(stocks))
+        # 새 행과 테마 배지를 만들기 전에 반응형 행 높이·글자 크기를 먼저
+        # 확정한다. 행을 다 만든 뒤 다시 계산하면 한 번의 순위 갱신에서
+        # 배지가 두 번 생성되어 표 크기가 흔들리는 것처럼 보인다.
+        self._apply_table_visuals(refresh_theme_badges=False)
         self._set_api_status("API: 연결됨", "#008000")
         self._row_by_code.clear()
         self._ranked_stock_names.clear()
@@ -4176,7 +4180,6 @@ class MainWindow(QMainWindow):
             self._render_high_distance(stock.code)
         for code in self._row_by_code:
             self._apply_row_background(code)
-        self._apply_table_visuals()
         self._ensure_initial_ranking_rows_visible()
         self._start_rank_changed_highlights()
         self.statusBar().showMessage(f"조회 완료 · {len(stocks)}개 종목 · {'순위 변동 없음' if unchanged else '순위 변동 반영'} · 실시간 체결 데이터 연결 중")
@@ -5491,7 +5494,7 @@ class MainWindow(QMainWindow):
             return
         self.close()
 
-    def _apply_table_visuals(self) -> None:
+    def _apply_table_visuals(self, *, refresh_theme_badges: bool = True) -> None:
         if not hasattr(self, "_table"):
             return
         palette = self._table.palette()
@@ -5533,7 +5536,8 @@ class MainWindow(QMainWindow):
         icon_size = max(8, min(32, self._table.verticalHeader().defaultSectionSize() - 4))
         self._table.setIconSize(QSize(icon_size, icon_size))
         # 반응형 표 글자 크기가 변하면 이미 만들어진 테마 배지도 함께 갱신한다.
-        self._refresh_theme_badges()
+        if refresh_theme_badges:
+            self._refresh_theme_badges()
 
     def _ensure_initial_ranking_rows_visible(self) -> None:
         """첫 정상 순위 수신 시 상위 20개 행이 한 화면에 들어오게 한다."""
@@ -5606,6 +5610,11 @@ class MainWindow(QMainWindow):
         if event.size().width() != event.oldSize().width():
             QTimer.singleShot(0, self._resize_columns_proportionally)
 
+    def moveEvent(self, event: object) -> None:
+        super().moveEvent(event)
+        if hasattr(self, "_window_geometry_save_timer"):
+            self._window_geometry_save_timer.start()
+
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         # show 과정에서 예약된 자동 맞춤은 아직 막혀 있다. 모두 끝난 뒤부터
@@ -5614,6 +5623,20 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._enable_initial_column_auto_fit)
 
     def _save_window_geometry(self) -> None:
-        """창 크기는 Drive와 무관하게 현재 컴퓨터에 즉시 보관한다."""
-        self._settings.set("window_width", str(self.width()))
-        self._settings.set("window_height", str(self.height()))
+        """창 크기와 화면 위치를 현재 컴퓨터에 즉시 보관한다."""
+        geometry = self.normalGeometry() if self.isMaximized() or self.isFullScreen() else self.geometry()
+        self._settings.set("window_width", str(geometry.width()))
+        self._settings.set("window_height", str(geometry.height()))
+        self._settings.set("window_x", str(geometry.x()))
+        self._settings.set("window_y", str(geometry.y()))
+
+    def _restore_window_position(self) -> None:
+        try:
+            x = int(self._settings.get("window_x"))
+            y = int(self._settings.get("window_y"))
+        except (TypeError, ValueError):
+            return
+        # 모니터 구성 변경 후 창이 화면 밖에 남는 것을 방지한다.
+        probe = QPoint(x + 40, y + 40)
+        if any(screen.availableGeometry().contains(probe) for screen in QApplication.screens()):
+            self.move(x, y)
