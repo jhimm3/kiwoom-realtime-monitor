@@ -150,19 +150,22 @@ def main(arguments: list[str] | None = None) -> int:
             return
         screen = QApplication.screenAt(QPoint(main_x + main_width // 2, main_y + main_height // 2))
         available = screen.availableGeometry() if screen is not None else QApplication.primaryScreen().availableGeometry()
+        news_frame = window.frameGeometry()
+        news_width = news_frame.width()
+        news_height = news_frame.height()
         if mode == "docked_left":
-            x, y = main_x - window.width(), main_y
+            x, y = main_x - news_width, main_y
         elif mode == "docked_top":
-            x, y = main_x, main_y - window.height()
+            x, y = main_x, main_y - news_height
         elif mode == "docked_bottom":
             x, y = main_x, main_y + main_height
         else:
             x, y = main_x + main_width, main_y
-        x = max(available.left(), min(x, available.right() - window.width() + 1))
-        y = max(available.top(), min(main_y, available.bottom() - window.height() + 1))
+        x = max(available.left(), min(x, available.right() - news_width + 1))
+        y = max(available.top(), min(main_y, available.bottom() - news_height + 1))
         if mode in {"docked_top", "docked_bottom"}:
-            y = main_y - window.height() if mode == "docked_top" else main_y + main_height
-            y = max(available.top(), min(y, available.bottom() - window.height() + 1))
+            y = main_y - news_height if mode == "docked_top" else main_y + main_height
+            y = max(available.top(), min(y, available.bottom() - news_height + 1))
         window.move(x, y)
 
     def poll_command() -> None:
