@@ -160,6 +160,8 @@ def main() -> None:
         google_drive_sync=google_drive_sync,
         initial_google_drive_download=initial_google_drive_download,
         api_runtime_factory=build_api_runtime,
+        news_config_path=paths.data_dir / "naver_news.dat" if not getattr(sys, "frozen", False) else None,
+        news_database_path=paths.database_path if not getattr(sys, "frozen", False) else None,
     )
     window.show()
     sys.exit(app.exec())

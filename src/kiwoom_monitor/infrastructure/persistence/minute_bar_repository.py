@@ -30,6 +30,7 @@ class MinuteBarRepository:
                 code,
                 bar.minute.isoformat(timespec="minutes"),
                 int(bar.open_price), int(bar.high_price), int(bar.low_price), int(bar.close_price), int(bar.volume),
+                float(bar.trade_value_eok),
             )
             for code, bars in bars_by_code.items()
             if code
@@ -40,11 +41,11 @@ class MinuteBarRepository:
         connection = sqlite3.connect(self._path)
         try:
             connection.executemany(
-                "INSERT INTO minute_bars(trade_date, stock_code, minute, open_price, high_price, low_price, close_price, volume) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "INSERT INTO minute_bars(trade_date, stock_code, minute, open_price, high_price, low_price, close_price, volume, trade_value_eok) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(trade_date, stock_code, minute) DO UPDATE SET "
                 "open_price=excluded.open_price, high_price=excluded.high_price, low_price=excluded.low_price, "
-                "close_price=excluded.close_price, volume=excluded.volume",
+                "close_price=excluded.close_price, volume=excluded.volume, trade_value_eok=excluded.trade_value_eok",
                 rows,
             )
             connection.commit()
@@ -81,7 +82,7 @@ class MinuteBarRepository:
         connection = sqlite3.connect(self._path)
         try:
             rows = connection.execute(
-                "SELECT trade_date, stock_code, open_price, high_price, low_price, close_price, volume "
+                "SELECT trade_date, stock_code, open_price, high_price, low_price, close_price, volume, trade_value_eok "
                 f"FROM minute_bars WHERE stock_code IN ({placeholders})",
                 codes,
             ).fetchall()
@@ -92,12 +93,16 @@ class MinuteBarRepository:
         finally:
             connection.close()
         totals: dict[tuple[str, str], tuple[float, int]] = {}
-        for trade_date, code, open_price, high_price, low_price, close_price, volume in rows:
+        for trade_date, code, open_price, high_price, low_price, close_price, volume, stored_trade_value in rows:
             key = (str(code), str(trade_date))
             if key not in targets:
                 continue
             value, count = totals.get(key, (0.0, 0))
-            value += int(volume) * (int(open_price) + int(high_price) + int(low_price) + int(close_price)) / 4 / 100_000_000
+            value += (
+                float(stored_trade_value)
+                if stored_trade_value is not None
+                else int(volume) * (int(open_price) + int(high_price) + int(low_price) + int(close_price)) / 4 / 100_000_000
+            )
             totals[key] = (value, count + 1)
         sync_times = {(str(code), str(trade_date)): str(completed_at) for trade_date, code, completed_at in sync_rows}
         report_rows = [

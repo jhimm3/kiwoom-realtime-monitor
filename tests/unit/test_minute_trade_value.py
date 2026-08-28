@@ -31,6 +31,32 @@ class MinuteTradeValueTests(unittest.TestCase):
 
         self.assertEqual(0.0, aggregator.bucket_trade_value_eok("005930", 1, now))
 
+    def test_zero_snapshot_before_first_positive_cumulative_value_is_not_added(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 8, 14, 10, 0, 1)
+
+        # 순위 재진입 때 0 스냅샷 뒤 당일 누적값이 오더라도, 공백 구간
+        # 전체를 현재 1분에 넣지 않고 첫 양수 값을 새 기준점으로 삼는다.
+        aggregator.ingest(TradeTick("005930", 100, None, 0, 10, None, "100001"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 7_457, 10, None, "100002"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 7_557, 10, None, "100003"), now)
+
+        self.assertEqual(1.0, aggregator.bucket_trade_value_eok("005930", 1, now))
+
+    def test_zero_snapshot_after_resubscription_does_not_add_the_gap(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 8, 14, 9, 9, 1)
+        aggregator.ingest(TradeTick("005930", 100, None, 9_000, 10, None, "090901"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 9_100, 10, None, "090902"), now)
+
+        aggregator.reset_cumulative_baselines(("005930",))
+        reentered = now.replace(minute=57)
+        aggregator.ingest(TradeTick("005930", 100, None, 0, 10, None, "095701"), reentered)
+        aggregator.ingest(TradeTick("005930", 100, None, 16_557, 10, None, "095702"), reentered)
+        aggregator.ingest(TradeTick("005930", 100, None, 16_657, 10, None, "095703"), reentered)
+
+        self.assertEqual(1.0, aggregator.bucket_trade_value_eok("005930", 1, reentered))
+
     def test_uses_hero_formula_for_one_minute(self) -> None:
         aggregator = MinuteTradeValueAggregator()
         at = datetime(2026, 8, 14, 10, 15, 10)

@@ -156,6 +156,7 @@ class Database:
                 low_price INTEGER NOT NULL,
                 close_price INTEGER NOT NULL,
                 volume INTEGER NOT NULL,
+                trade_value_eok REAL,
                 PRIMARY KEY(trade_date, stock_code, minute)
             );
             CREATE INDEX IF NOT EXISTS idx_minute_bars_date_code ON minute_bars(trade_date, stock_code);
@@ -194,9 +195,17 @@ class Database:
             """)
             self._initialize_theme_profiles(connection)
             self._add_daily_bar_columns(connection)
+            self._add_minute_bar_columns(connection)
             connection.commit()
         finally:
             connection.close()
+
+    @staticmethod
+    def _add_minute_bar_columns(connection: sqlite3.Connection) -> None:
+        """기존 DB의 분봉에도 실제 분당 거래대금 저장 열을 추가한다."""
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(minute_bars)")}
+        if "trade_value_eok" not in columns:
+            connection.execute("ALTER TABLE minute_bars ADD COLUMN trade_value_eok REAL")
 
     @staticmethod
     def _apply_v1(connection: sqlite3.Connection) -> None:

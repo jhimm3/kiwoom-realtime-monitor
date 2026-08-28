@@ -118,7 +118,11 @@ class MinuteTradeValueAggregator:
         key = (tick.code, tick.market)
         previous = self._last_cumulative_trade_value.get(key)
         self._last_cumulative_trade_value[key] = cumulative
-        if previous is None or cumulative < previous:
+        # 신규·재구독 직후 키움이 먼저 누적값 0을 보낸 다음 실제 당일
+        # 누적값을 보낼 수 있다. 0을 기준점으로 확정하면 순위에서 빠져
+        # 있던 동안의 거래대금 전체가 현재 1분에 한꺼번에 들어간다.
+        # 첫 양수 누적값까지 기준점으로만 사용하고 그다음 변화부터 더한다.
+        if previous is None or previous == 0 or cumulative < previous:
             return 0.0
         return (cumulative - previous) / 100
 

@@ -19,7 +19,7 @@ from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from PySide6.QtGui import QCloseEvent, QResizeEvent, QShowEvent, QColor, QDesktopServices, QFontMetrics, QIcon, QKeySequence, QPainter, QPolygon, QPalette
+from PySide6.QtGui import QBrush, QCloseEvent, QResizeEvent, QShowEvent, QColor, QDesktopServices, QFontMetrics, QIcon, QKeySequence, QPainter, QPolygon, QPalette
 from PySide6.QtCore import QEvent, QEventLoop, QThread, QTimer, QUrl, QSize, QPoint, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -117,7 +117,7 @@ def selected_high_cycle_periods(value: str) -> tuple[str, ...]:
     periods = tuple(period for period in HIGH_PERIODS if period in selected)
     return periods or HIGH_PERIODS
 
-APP_VERSION = "1.1.16"
+APP_VERSION = "1.1.17"
 APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 INVESTMENT_NOTICE = "본 앱은 투자 자문이 아니며 시세 지연·오류가 있을 수 있습니다."
@@ -2501,6 +2501,8 @@ class MainWindow(QMainWindow):
         google_drive_sync: GoogleDriveSyncService | None = None,
         initial_google_drive_download: bool = False,
         api_runtime_factory: Callable[[], dict[str, object]] | None = None,
+        news_config_path: Path | None = None,
+        news_database_path: Path | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -2528,6 +2530,11 @@ class MainWindow(QMainWindow):
         self._theme_store = theme_store
         self._google_drive_sync = google_drive_sync
         self._api_runtime_factory = api_runtime_factory
+        # 뉴스창은 소스에서 실행하는 테스트 앱에서만 경로를 전달받아 사용한다.
+        # 동적 import로 유지해 공식 PyInstaller 설치본에는 실험 기능이 섞이지 않는다.
+        self._news_config_path = news_config_path
+        self._news_database_path = news_database_path
+        self._stock_news_window: QDialog | None = None
         self._api_reloading = False
         self._google_drive_worker: GoogleDriveSyncWorker | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
@@ -2698,11 +2705,14 @@ class MainWindow(QMainWindow):
         # 순위 칸의 행 경계에 올렸을 때에도 크기 조절 커서를 보여 준다.
         self._table.setMouseTracking(True)
         self._table.viewport().setMouseTracking(True)
-        self._table.cellClicked.connect(self._toggle_table_cell_selection)
-        self._table.cellDoubleClicked.connect(self._edit_theme_from_main_table)
+        self._table.cellClicked.connect(self._handle_main_table_click)
+        self._table.cellDoubleClicked.connect(self._handle_main_table_double_click)
         self._table.setItemDelegate(NxtMarkerDelegate(self._table))
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.horizontalHeader().setStretchLastSection(False)
+        # 행 전체 선택은 Qt에서 모든 열이 선택된 것으로 간주되어 모든 제목을
+        # 한꺼번에 강조한다. 기본 강조는 끄고 실제 클릭한 셀의 제목만 표시한다.
+        self._table.horizontalHeader().setHighlightSections(False)
         self._table.horizontalHeader().setSectionsMovable(True)
         self._table.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.horizontalHeader().customContextMenuRequested.connect(self._show_column_menu)
@@ -3271,11 +3281,55 @@ class MainWindow(QMainWindow):
         delegate = self._table.itemDelegate()
         if isinstance(delegate, NxtMarkerDelegate):
             delegate.set_selected_cell(self._selected_table_cell)
+        self._update_selected_column_header()
         if previous_code:
             self._apply_row_background(previous_code)
         if self._selected_table_code:
             self._apply_row_background(self._selected_table_code)
         self._table.viewport().update()
+
+    def _update_selected_column_header(self) -> None:
+        selected_column = self._selected_table_cell[1] if self._selected_table_cell is not None else -1
+        for column in range(self._table.columnCount()):
+            item = self._table.horizontalHeaderItem(column)
+            if item is None:
+                continue
+            selected = column == selected_column
+            font = item.font()
+            font.setBold(selected)
+            font.setUnderline(False)
+            item.setFont(font)
+            item.setForeground(QBrush())
+
+    def _handle_main_table_click(self, row: int, column: int) -> None:
+        self._toggle_table_cell_selection(row, column)
+        if self._stock_news_window is not None and self._stock_news_window.isVisible():
+            self._show_stock_news(row, activate=False)
+
+    def _handle_main_table_double_click(self, row: int, column: int) -> None:
+        if column == 1 and self._news_config_path is not None and self._news_database_path is not None:
+            self._show_stock_news(row)
+            return
+        self._edit_theme_from_main_table(row, column)
+
+    def _show_stock_news(self, row: int, *, activate: bool = True) -> None:
+        if row < 0 or row >= self._table.rowCount():
+            return
+        stock_item = self._table.item(row, 1)
+        if stock_item is None:
+            return
+        code = str(stock_item.data(Qt.ItemDataRole.UserRole) or "")
+        name = stock_item.text().strip()
+        if not code or not name or self._news_config_path is None or self._news_database_path is None:
+            return
+        if self._stock_news_window is None:
+            from kiwoom_monitor.presentation.stock_news_window import StockNewsWindow
+
+            self._stock_news_window = StockNewsWindow(
+                self._news_config_path, self._news_database_path, self
+            )
+        self._stock_news_window.set_stock(code, name, activate=activate)
+
     def _open_column_manager(self) -> None:
         if self._columns is None:
             return
@@ -5493,6 +5547,10 @@ class MainWindow(QMainWindow):
         if self._running_workers():
             event.ignore()
             return
+        if self._stock_news_window is not None:
+            shutdown = getattr(self._stock_news_window, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
         event.accept()
 
     def _workers(self) -> tuple[QThread | None, ...]:
