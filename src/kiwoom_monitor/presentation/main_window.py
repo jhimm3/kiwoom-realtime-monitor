@@ -20,7 +20,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from PySide6.QtGui import QBrush, QCloseEvent, QResizeEvent, QShowEvent, QColor, QDesktopServices, QFontMetrics, QIcon, QKeySequence, QPainter, QPolygon, QPalette
-from PySide6.QtCore import QEvent, QEventLoop, QThread, QTimer, QUrl, QSize, QPoint, Signal
+from PySide6.QtCore import QEvent, QEventLoop, QSettings, QThread, QTimer, QUrl, QSize, QPoint, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -117,7 +117,7 @@ def selected_high_cycle_periods(value: str) -> tuple[str, ...]:
     periods = tuple(period for period in HIGH_PERIODS if period in selected)
     return periods or HIGH_PERIODS
 
-APP_VERSION = "1.1.17"
+APP_VERSION = "1.1.18"
 APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 INVESTMENT_NOTICE = "본 앱은 투자 자문이 아니며 시세 지연·오류가 있을 수 있습니다."
@@ -2530,11 +2530,17 @@ class MainWindow(QMainWindow):
         self._theme_store = theme_store
         self._google_drive_sync = google_drive_sync
         self._api_runtime_factory = api_runtime_factory
-        # 뉴스창은 소스에서 실행하는 테스트 앱에서만 경로를 전달받아 사용한다.
-        # 동적 import로 유지해 공식 PyInstaller 설치본에는 실험 기능이 섞이지 않는다.
+        # 뉴스는 별도 프로세스와 전용 DB로 실행해 실시간 표의 Qt 이벤트 루프와
+        # SQLite 잠금을 공유하지 않는다.
         self._news_config_path = news_config_path
         self._news_database_path = news_database_path
-        self._stock_news_window: QDialog | None = None
+        self._news_process: subprocess.Popen[bytes] | None = None
+        self._news_command_path = news_database_path.with_name("news_command.json") if news_database_path else None
+        self._news_selection_request_id = 0
+        self._news_dock_timer = QTimer(self)
+        self._news_dock_timer.setSingleShot(True)
+        self._news_dock_timer.setInterval(60)
+        self._news_dock_timer.timeout.connect(self._sync_news_window)
         self._api_reloading = False
         self._google_drive_worker: GoogleDriveSyncWorker | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
@@ -3303,11 +3309,32 @@ class MainWindow(QMainWindow):
 
     def _handle_main_table_click(self, row: int, column: int) -> None:
         self._toggle_table_cell_selection(row, column)
-        if self._stock_news_window is not None and self._stock_news_window.isVisible():
-            self._show_stock_news(row, activate=False)
+        if self._news_process is not None and self._news_process.poll() is None:
+            stock_item = self._table.item(row, 1)
+            if stock_item is None:
+                return
+            code = str(stock_item.data(Qt.ItemDataRole.UserRole) or "")
+            name = stock_item.text().strip()
+            if not code or not name:
+                return
+            # 연속 클릭 중에는 뉴스 DB 확인조차 매번 시작하지 않고 마지막
+            # 종목만 넘긴다. 순위가 바뀌어도 캡처한 코드/이름을 사용한다.
+            self._news_selection_request_id += 1
+            request_id = self._news_selection_request_id
+            QTimer.singleShot(
+                80,
+                lambda: self._apply_pending_news_selection(request_id, code, name),
+            )
+
+    def _apply_pending_news_selection(self, request_id: int, code: str, name: str) -> None:
+        if request_id != self._news_selection_request_id:
+            return
+        if self._news_process is not None and self._news_process.poll() is None:
+            self._send_news_command(code, name, activate=False)
 
     def _handle_main_table_double_click(self, row: int, column: int) -> None:
         if column == 1 and self._news_config_path is not None and self._news_database_path is not None:
+            self._news_selection_request_id += 1
             self._show_stock_news(row)
             return
         self._edit_theme_from_main_table(row, column)
@@ -3322,13 +3349,68 @@ class MainWindow(QMainWindow):
         name = stock_item.text().strip()
         if not code or not name or self._news_config_path is None or self._news_database_path is None:
             return
-        if self._stock_news_window is None:
-            from kiwoom_monitor.presentation.stock_news_window import StockNewsWindow
+        self._ensure_news_process()
+        self._send_news_command(code, name, activate=activate)
 
-            self._stock_news_window = StockNewsWindow(
-                self._news_config_path, self._news_database_path, self
+    def _ensure_news_process(self) -> None:
+        if self._news_process is not None and self._news_process.poll() is None:
+            return
+        if self._news_config_path is None or self._news_database_path is None or self._news_command_path is None:
+            return
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, "--news-process"]
+        else:
+            venv_python = Path(sys.prefix) / "Scripts" / "python.exe"
+            command = [str(venv_python if venv_python.is_file() else sys.executable), "-m", "kiwoom_monitor.news_process"]
+        command.extend([
+            "--config", str(self._news_config_path),
+            "--database", str(self._news_database_path),
+            "--command-file", str(self._news_command_path),
+            "--parent-pid", str(os.getpid()),
+        ])
+        project_root = self._news_config_path.parent.parent
+        working_directory = project_root if (project_root / "pyproject.toml").is_file() else Path(sys.executable).resolve().parent
+        try:
+            self._news_process = subprocess.Popen(
+                command, cwd=str(working_directory),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        self._stock_news_window.set_stock(code, name, activate=activate)
+        except OSError as error:
+            logger.warning("뉴스 프로세스를 시작하지 못했습니다: %s", error)
+            self.statusBar().showMessage("뉴스창을 시작하지 못했습니다.")
+
+    def _send_news_command(self, code: str = "", name: str = "", *, activate: bool = True,
+                           action: str = "show") -> None:
+        if self._news_command_path is None:
+            return
+        self._news_selection_request_id += 1
+        document = {
+            "request_id": self._news_selection_request_id,
+            "action": action,
+            "code": code,
+            "name": name,
+            "activate": activate,
+            "window_mode": self._news_window_mode(),
+            "main_geometry": [self.x(), self.y(), self.width(), self.height()],
+        }
+        temporary = self._news_command_path.with_suffix(".tmp")
+        try:
+            temporary.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(self._news_command_path)
+        except OSError as error:
+            logger.warning("뉴스 프로세스 명령을 저장하지 못했습니다: %s", error)
+
+    @staticmethod
+    def _news_window_mode() -> str:
+        mode = str(QSettings("KiwoomMonitor", "StockNewsWindow").value("window_mode", "independent"))
+        return mode if mode in {"independent", "linked", "docked"} else "independent"
+
+    def _sync_news_window(self) -> None:
+        if self._news_process is None or self._news_process.poll() is not None:
+            return
+        mode = self._news_window_mode()
+        if mode in {"linked", "docked"}:
+            self._send_news_command(action="sync", activate=False)
 
     def _open_column_manager(self) -> None:
         if self._columns is None:
@@ -5513,6 +5595,16 @@ class MainWindow(QMainWindow):
         logger.warning("실시간 체결 연결 실패: %s", message)
         self.statusBar().showMessage("실시간 체결 연결에 실패했습니다. 새로고침으로 다시 시도하세요.")
 
+    def changeEvent(self, event: QEvent) -> None:
+        """독립 뉴스 프로세스의 최소화 상태만 메인창과 맞춘다."""
+        super().changeEvent(event)
+        if self._news_process is None or self._news_process.poll() is not None:
+            return
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._send_news_command(action="minimize" if self.isMinimized() else "restore")
+        elif event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            self._sync_news_window()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self._closing:
             self._closing = True
@@ -5547,10 +5639,8 @@ class MainWindow(QMainWindow):
         if self._running_workers():
             event.ignore()
             return
-        if self._stock_news_window is not None:
-            shutdown = getattr(self._stock_news_window, "shutdown", None)
-            if callable(shutdown):
-                shutdown()
+        if self._news_process is not None and self._news_process.poll() is None:
+            self._send_news_command(action="shutdown")
         event.accept()
 
     def _workers(self) -> tuple[QThread | None, ...]:
@@ -5710,6 +5800,8 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "_window_geometry_save_timer"):
             self._window_geometry_save_timer.start()
+        if hasattr(self, "_news_dock_timer") and self._news_window_mode() == "docked":
+            self._news_dock_timer.start()
         # 수동으로 열 폭을 조정한 뒤 30초 동안은 창을 어떻게 조절해도
         # 행 높이·열 너비를 모두 유지한다.
         if time.monotonic() < self._manual_column_resize_until:
@@ -5723,6 +5815,8 @@ class MainWindow(QMainWindow):
         super().moveEvent(event)
         if hasattr(self, "_window_geometry_save_timer"):
             self._window_geometry_save_timer.start()
+        if hasattr(self, "_news_dock_timer") and self._news_window_mode() == "docked":
+            self._news_dock_timer.start()
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)

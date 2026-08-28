@@ -13,6 +13,11 @@ class AppPaths:
     log_dir: Path
     database_path: Path
 
+    @property
+    def news_database_path(self) -> Path:
+        """메인 실시간 DB와 물리적으로 분리된 뉴스 전용 DB."""
+        return self.data_dir / "news.sqlite3"
+
     @classmethod
     def for_current_user(cls) -> "AppPaths":
         """프로그램 본체와 분리된 현재 사용자 데이터 위치를 돌려준다.

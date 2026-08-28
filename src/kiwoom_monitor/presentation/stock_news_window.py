@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -48,10 +49,13 @@ from kiwoom_monitor.infrastructure.naver_news import (
     is_excluded_news,
     news_provider,
 )
-from kiwoom_monitor.application.news_analysis import assess_stock_news
 from kiwoom_monitor.application.news_grouping import NewsEventGroup, group_similar_news
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
-from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository, news_identity
+from kiwoom_monitor.infrastructure.persistence.news_ai_repository import (
+    NewsAIRepository,
+    StoredAINewsAnalysis,
+    news_identity,
+)
 from kiwoom_monitor.infrastructure.dart_disclosures import DartDisclosureClient
 from kiwoom_monitor.infrastructure.article_text import fetch_article_text
 from kiwoom_monitor.infrastructure.news_ai import DEFAULT_MODELS, MODEL_OPTIONS, AINewsAnalysis, analyze_article
@@ -92,11 +96,12 @@ class NewsCellMarkerDelegate(QStyledItemDelegate):
 
 
 class NewsSearchWorker(QThread):
-    completed = Signal(str, str, object, bool)
+    completed = Signal(str, str, object, bool, object, int)
     failed = Signal(str, str, str)
 
     def __init__(self, stock_code: str, stock_name: str, credentials: NaverNewsCredentials,
                  official: OfficialNewsSettings, dart_cache_path: Path, naver_since: datetime,
+                 database_path: Path,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._stock_code = stock_code
@@ -105,6 +110,7 @@ class NewsSearchWorker(QThread):
         self._official = official
         self._dart_cache_path = dart_cache_path
         self._naver_since = naver_since
+        self._database_path = database_path
 
     def run(self) -> None:
         items: list[StockNewsItem] = []
@@ -129,9 +135,64 @@ class NewsSearchWorker(QThread):
             errors.append(f"DART: {error}")
         if items or not errors:
             unique = {item.original_link or item.link or item.title: item for item in items}
-            self.completed.emit(self._stock_code, self._stock_name, tuple(unique.values()), naver_succeeded)
+            fetched = tuple(unique.values())
+            try:
+                repository = StockNewsRepository(self._database_path)
+                known = {news_identity(item) for item in repository.load(self._stock_code)}
+                new_identities = {news_identity(item) for item in fetched} - known
+                checked_at = datetime.now(UTC)
+                new_count = repository.upsert(
+                    self._stock_code, fetched, checked_at,
+                    naver_checked_at=checked_at if naver_succeeded else None,
+                )
+            except (OSError, ValueError, sqlite3.Error) as error:
+                self.failed.emit(self._stock_code, self._stock_name, f"뉴스 저장 실패: {error}")
+                return
+            self.completed.emit(
+                self._stock_code, self._stock_name, fetched, naver_succeeded,
+                new_identities, new_count,
+            )
         else:
             self.failed.emit(self._stock_code, self._stock_name, " / ".join(errors))
+
+
+class NewsPrepareWorker(QThread):
+    """DB 조회와 사건 묶음을 UI 스레드 밖에서 준비한다."""
+
+    completed = Signal(int, str, object, object, object, bool, object)
+    failed = Signal(int, str, str)
+
+    def __init__(self, request_id: int, stock_code: str, database_path: Path,
+                 news_filter: NewsFilterSettings, show_low_relevance: bool,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._request_id = request_id
+        self._stock_code = stock_code
+        self._database_path = database_path
+        self._news_filter = news_filter
+        self._show_low_relevance = show_low_relevance
+
+    def run(self) -> None:
+        try:
+            # 기본 관련성·분류·판단은 저장 당시 계산된 값을 그대로 사용한다.
+            repository = StockNewsRepository(self._database_path)
+            items = repository.load(self._stock_code)
+            filtered = tuple(
+                item for item in items
+                if not is_excluded_news(item, self._news_filter)
+                and (item.assessment.relevant or self._show_low_relevance)
+            )
+            groups = group_similar_news(filtered)
+            representatives = tuple(group.representative for group in groups)
+            ai_results = NewsAIRepository(self._database_path).load_many(self._stock_code, representatives)
+            recently_checked = repository.recently_checked(self._stock_code, StockNewsWindow.CHECK_INTERVAL_SECONDS)
+            last_naver_check = repository.last_naver_checked_at(self._stock_code)
+            self.completed.emit(
+                self._request_id, self._stock_code, items, groups, ai_results,
+                recently_checked, last_naver_check,
+            )
+        except (OSError, ValueError, sqlite3.Error) as error:
+            self.failed.emit(self._request_id, self._stock_code, str(error))
 
 
 class AINewsWorker(QThread):
@@ -430,6 +491,7 @@ class StockNewsWindow(QDialog):
         self._window_settings = QSettings("KiwoomMonitor", "StockNewsWindow")
         self._position_initialized = self._restore_window_geometry()
         self._config = LocalNaverNewsConfig(config_path)
+        self._database_path = database_path
         self._repository = StockNewsRepository(database_path)
         self._ai_repository = NewsAIRepository(database_path)
         self._news_filter = NewsFilterSettings()
@@ -444,6 +506,13 @@ class StockNewsWindow(QDialog):
         self._visible_groups: tuple[NewsEventGroup, ...] = ()
         self._selected_news_cell: tuple[int, int] | None = None
         self._worker: NewsSearchWorker | None = None
+        self._prepare_worker: NewsPrepareWorker | None = None
+        self._prepare_request_id = 0
+        self._pending_prepare: tuple[int, str] | None = None
+        self._pending_new_identities: set[str] = set()
+        self._ai_result_cache: dict[str, StoredAINewsAnalysis] = {}
+        self._render_generation = 0
+        self._render_row = 0
         self._settings_dialog: NaverNewsSettingsDialog | None = None
         self._ai_worker: AINewsWorker | None = None
         self._ai_item: StockNewsItem | None = None
@@ -454,14 +523,14 @@ class StockNewsWindow(QDialog):
         self._pending_refresh = False
         self._auto_refresh = QTimer(self)
         self._auto_refresh.setInterval(self.AUTO_REFRESH_MS)
-        self._auto_refresh.timeout.connect(self.refresh)
+        self._auto_refresh.timeout.connect(self._schedule_prepare)
 
         self._stock_label = QLabel("메인 표에서 종목명을 클릭하세요.")
         self._stock_label.setStyleSheet("font-size: 17px; font-weight: 700;")
         self._status_label = QLabel("대기")
         self._status_label.setStyleSheet("color: #667085;")
         self._show_low_relevance = QCheckBox("관련성 낮은 뉴스도 보기")
-        self._show_low_relevance.toggled.connect(self._render_items)
+        self._show_low_relevance.toggled.connect(self._schedule_prepare)
         refresh = QPushButton("새로고침")
         refresh.clicked.connect(lambda: self.refresh(force=True))
         settings = QPushButton("⚙")
@@ -471,11 +540,20 @@ class StockNewsWindow(QDialog):
         settings.clicked.connect(self._open_settings)
         self._window_mode = QComboBox()
         self._window_mode.addItem("독립 창", "independent")
-        self._window_mode.addItem("메인창에 연결", "attached")
-        self._window_mode.setToolTip(
-            "독립 창: 메인창과 뉴스창 중 클릭한 창이 앞으로 옵니다.\n"
-            "메인창에 연결: 뉴스창이 메인창에 소속되어 메인창보다 앞에 유지됩니다."
-        )
+        if self._main_window is not None:
+            self._window_mode.addItem("메인창에 연결", "attached")
+            self._window_mode.setToolTip(
+                "독립 창: 메인창과 뉴스창 중 클릭한 창이 앞으로 옵니다.\n"
+                "메인창에 연결: 뉴스창이 메인창에 소속되어 메인창보다 앞에 유지됩니다."
+            )
+        else:
+            self._window_mode.addItem("메인창과 함께 앞으로", "linked")
+            self._window_mode.addItem("메인창 옆에 고정", "docked")
+            self._window_mode.setToolTip(
+                "독립 창: 두 창을 따로 전환합니다.\n"
+                "메인창과 함께 앞으로: 메인창을 선택하면 뉴스창도 함께 보이게 올립니다.\n"
+                "메인창 옆에 고정: 함께 올리고 메인창 옆 위치를 유지합니다."
+            )
         saved_window_mode = str(self._window_settings.value("window_mode", "independent"))
         saved_window_mode_index = self._window_mode.findData(saved_window_mode)
         self._window_mode.setCurrentIndex(max(0, saved_window_mode_index))
@@ -547,24 +625,86 @@ class StockNewsWindow(QDialog):
 
     def set_stock(self, code: str, name: str, *, activate: bool = True) -> None:
         changed = code != self._stock_code
+        if changed:
+            self._pending_new_identities.clear()
+            self._auto_ai_identities.clear()
         self._stock_code = code
         self._stock_name = name.strip()
         self._stock_label.setText(f"{self._stock_name} ({self._stock_code})")
         if changed:
-            self._items = self._repository.load(code)
-            self._render_items()
-            if self._items:
-                relevant_count = sum(item.assessment.relevant for item in self._items)
-                self._status_label.setText(f"저장된 뉴스 {len(self._items)}건 · 증권 관련 {relevant_count}건 · 새 뉴스 확인 중")
+            self._schedule_prepare()
+            self._status_label.setText(f"{self._stock_name}의 저장된 뉴스를 준비하는 중…")
         if not self._position_initialized:
             self._position_beside_main_window()
             self._position_initialized = True
-        self.show()
+        if not self.isVisible():
+            self.show()
         if activate:
             self.raise_()
             self.activateWindow()
-        if changed:
-            self.refresh()
+
+    def _schedule_prepare(self) -> None:
+        if not self._stock_code:
+            return
+        self._prepare_request_id += 1
+        self._pending_prepare = (self._prepare_request_id, self._stock_code)
+        if self._prepare_worker is None:
+            self._start_pending_prepare()
+
+    def _start_pending_prepare(self) -> None:
+        pending = self._pending_prepare
+        if pending is None or self._prepare_worker is not None:
+            return
+        self._pending_prepare = None
+        request_id, stock_code = pending
+        worker = NewsPrepareWorker(
+            request_id, stock_code, self._database_path, self._news_filter,
+            self._show_low_relevance.isChecked(), self,
+        )
+        self._prepare_worker = worker
+        worker.completed.connect(self._on_prepare_completed)
+        worker.failed.connect(self._on_prepare_failed)
+        worker.finished.connect(self._on_prepare_finished)
+        worker.start()
+
+    def _on_prepare_completed(self, request_id: int, stock_code: str, items: object,
+                              groups: object, ai_results: object, recently_checked: bool,
+                              last_naver_check: object) -> None:
+        if request_id != self._prepare_request_id or stock_code != self._stock_code:
+            return
+        if not isinstance(items, tuple) or not isinstance(groups, tuple) or not isinstance(ai_results, dict):
+            return
+        self._items = items
+        self._visible_groups = groups
+        self._visible_items = tuple(group.representative for group in groups)
+        self._ai_result_cache = ai_results
+        self._render_items()
+        relevant_count = sum(item.assessment.relevant for item in items)
+        self._status_label.setText(f"저장된 뉴스 {len(items)}건 · 증권 관련 {relevant_count}건")
+        if not recently_checked:
+            self._start_news_search(
+                last_naver_check if isinstance(last_naver_check, datetime) else None,
+            )
+        if self._pending_new_identities:
+            self._configure_auto_candidates(self._pending_new_identities)
+            self._pending_new_identities.clear()
+        else:
+            # 프로세스 재시작이나 종목 전환 경쟁으로 메모리 후보가 사라져도
+            # 현재 종목의 '최신 N건' 범위 안에서 미분석 대표 기사를 복구한다.
+            self._configure_recent_auto_candidates()
+        self._resume_auto_analysis()
+
+    def _on_prepare_failed(self, request_id: int, stock_code: str, message: str) -> None:
+        if request_id == self._prepare_request_id and stock_code == self._stock_code:
+            self._status_label.setText(f"뉴스 준비 실패: {message}")
+
+    def _on_prepare_finished(self) -> None:
+        worker = self._prepare_worker
+        self._prepare_worker = None
+        if worker is not None:
+            worker.wait()
+            worker.deleteLater()
+        self._start_pending_prepare()
 
     def refresh(self, *, force: bool = False) -> None:
         if not self._stock_name:
@@ -573,6 +713,13 @@ class StockNewsWindow(QDialog):
             if self._items:
                 self._status_label.setText(f"저장된 최신 뉴스 {len(self._items)}건")
             return
+        if self._worker is not None and self._worker.isRunning():
+            self._pending_refresh = True
+            self._status_label.setText(f"{self._stock_name} 뉴스 조회 대기 중…")
+            return
+        self._start_news_search(self._repository.last_naver_checked_at(self._stock_code))
+
+    def _start_news_search(self, last_naver_check: datetime | None) -> None:
         if self._worker is not None and self._worker.isRunning():
             self._pending_refresh = True
             self._status_label.setText(f"{self._stock_name} 뉴스 조회 대기 중…")
@@ -586,17 +733,15 @@ class StockNewsWindow(QDialog):
         except (OSError, ValueError):
             official = OfficialNewsSettings()
         if (not credentials.client_id or not credentials.client_secret) and not (official.dart_enabled and official.dart_api_key):
-            self._items = ()
-            self._render_items()
-            self._status_label.setText("뉴스 API 설정이 필요합니다.")
+            self._status_label.setText("뉴스 API 설정이 필요합니다. 저장된 뉴스는 그대로 표시합니다.")
             return
         requested_code = self._stock_code
         requested_name = self._stock_name
         two_days_ago = datetime.now(UTC) - timedelta(days=2)
-        last_naver_check = self._repository.last_naver_checked_at(requested_code)
         naver_since = max(two_days_ago, last_naver_check.astimezone(UTC)) if last_naver_check else two_days_ago
         worker = NewsSearchWorker(requested_code, requested_name, credentials, official,
-                                  self._config.directory / "dart_corp_codes.json", naver_since, self)
+                                  self._config.directory / "dart_corp_codes.json", naver_since,
+                                  self._database_path, self)
         self._worker = worker
         worker.completed.connect(self._on_completed)
         worker.failed.connect(self._on_failed)
@@ -604,33 +749,44 @@ class StockNewsWindow(QDialog):
         self._status_label.setText(f"{requested_name}의 증권 관련 뉴스를 찾는 중…")
         worker.start()
 
-    def _on_completed(self, stock_code: str, stock_name: str, items: object, naver_succeeded: bool) -> None:
-        if not isinstance(items, tuple):
+    def _on_completed(self, stock_code: str, stock_name: str, items: object,
+                      naver_succeeded: bool, new_identities: object, new_count: int) -> None:
+        if not isinstance(items, tuple) or not isinstance(new_identities, set):
             return
-        known = {news_identity(item) for item in self._repository.load(stock_code)}
-        new_identities = {news_identity(item) for item in items} - known
-        checked_at = datetime.now(UTC)
-        new_count = self._repository.upsert(
-            stock_code, items, checked_at, naver_checked_at=checked_at if naver_succeeded else None,
-        )
         if stock_code == self._stock_code:
-            self._items = self._repository.load(stock_code)
-            self._render_items()
-            relevant_count = sum(item.assessment.relevant for item in self._items)
             update_text = f"새 뉴스 {new_count}건 저장" if new_count else "새 뉴스 없음 · 저장된 내용 유지"
-            self._status_label.setText(f"{update_text} · 전체 {len(self._items)}건 중 증권 관련 {relevant_count}건")
-            try:
-                ai = self._config.load_ai()
-            except (OSError, ValueError):
-                ai = NewsAISettings()
-            if ai.auto_analyze:
-                candidates = [
-                    news_identity(group.representative) for group in self._visible_groups
-                    if any(news_identity(item) in new_identities for item in group.items)
-                    and (group.representative.link or group.representative.original_link)
-                    and self._ai_repository.load(stock_code, group.representative) is None
-                ]
-                self._auto_ai_identities = set(candidates[:ai.auto_recent_limit])
+            self._status_label.setText(f"{update_text} · 뉴스 목록을 백그라운드에서 정리하는 중…")
+            self._pending_new_identities = new_identities
+            self._schedule_prepare()
+
+    def _configure_auto_candidates(self, new_identities: set[str]) -> None:
+        try:
+            ai = self._config.load_ai()
+        except (OSError, ValueError):
+            ai = NewsAISettings()
+        if not ai.auto_analyze:
+            return
+        candidates = [
+            news_identity(group.representative) for group in self._visible_groups
+            if any(news_identity(item) in new_identities for item in group.items)
+            and (group.representative.link or group.representative.original_link)
+            and news_identity(group.representative) not in self._ai_result_cache
+        ]
+        self._auto_ai_identities = set(candidates[:ai.auto_recent_limit])
+
+    def _configure_recent_auto_candidates(self) -> None:
+        try:
+            ai = self._config.load_ai()
+        except (OSError, ValueError):
+            return
+        if not ai.auto_analyze:
+            return
+        latest_groups = self._visible_groups[:ai.auto_recent_limit]
+        self._auto_ai_identities = {
+            news_identity(group.representative) for group in latest_groups
+            if (group.representative.link or group.representative.original_link)
+            and news_identity(group.representative) not in self._ai_result_cache
+        }
 
     def _on_failed(self, stock_code: str, stock_name: str, message: str) -> None:
         if stock_code == self._stock_code:
@@ -641,38 +797,27 @@ class StockNewsWindow(QDialog):
         worker = self._worker
         self._worker = None
         if worker is not None:
+            worker.wait()
             worker.deleteLater()
         if self._pending_refresh:
             self._pending_refresh = False
-            self.refresh(force=True)
+            self._schedule_prepare()
             return
         # completed 신호는 QThread가 완전히 끝나기 직전에 전달된다. finished까지
         # 기다려 네이버의 모든 페이지와 DART 조회가 종료된 뒤 AI를 시작한다.
-        if self._auto_ai_identities:
-            QTimer.singleShot(0, self._auto_analyze_next)
+        self._resume_auto_analysis()
 
     def _render_items(self) -> None:
-        try:
-            self._news_filter = self._config.load_filter()
-        except (OSError, ValueError):
-            logger.warning("저장된 뉴스 필터 설정을 읽지 못해 현재값을 유지합니다.", exc_info=True)
-        self._apply_column_visibility()
-        reassessed_items = tuple(
-            StockNewsItem(
-                item.title, item.description, item.link, item.original_link, item.published_at,
-                assess_stock_news(self._stock_name, item.title, item.description),
-            )
-            for item in self._items
-        )
-        self._items = reassessed_items
-        filtered_items = tuple(
-            item for item in reassessed_items
-            if not is_excluded_news(item, self._news_filter)
-            and (item.assessment.relevant or self._show_low_relevance.isChecked())
-        )
-        self._visible_groups = group_similar_news(filtered_items)
-        self._visible_items = tuple(group.representative for group in self._visible_groups)
+        # ResizeToContents 상태에서 셀을 하나씩 넣으면 셀마다 열 너비를 다시
+        # 계산해 메인 UI 이벤트까지 잠깐씩 밀린다. 채우는 동안은 현재 너비를
+        # 고정하고, 소량의 행만 넣은 뒤 이벤트 루프에 제어를 돌려준다.
+        self._render_generation += 1
+        generation = self._render_generation
+        header = self._table.horizontalHeader()
+        for column in range(self._table.columnCount()):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
         self._table.setRowCount(len(self._visible_items))
+        self._render_row = 0
         self._selected_news_cell = None
         delegate = self._table.itemDelegate()
         if isinstance(delegate, NewsCellMarkerDelegate):
@@ -680,7 +825,14 @@ class StockNewsWindow(QDialog):
         self._detail.clear()
         self._open_button.setEnabled(False)
         self._ai_button.setEnabled(False)
-        for row, item in enumerate(self._visible_items):
+        QTimer.singleShot(0, lambda: self._render_item_chunk(generation))
+
+    def _render_item_chunk(self, generation: int) -> None:
+        if generation != self._render_generation:
+            return
+        end = min(self._render_row + 12, len(self._visible_items))
+        for row in range(self._render_row, end):
+            item = self._visible_items[row]
             published = item.published_at.astimezone().strftime("%m-%d %H:%M") if item.published_at else "-"
             category, outlook, _reason, source = self._effective_judgment(item)
             displayed_outlook = f"{outlook}  ᴬᴵ" if source.startswith("AI 원문 분석") else outlook
@@ -700,6 +852,11 @@ class StockNewsWindow(QDialog):
                     cell.setForeground(_outlook_color(outlook, self._news_filter))
                     font = cell.font(); font.setBold(True); cell.setFont(font)
                 self._table.setItem(row, column, cell)
+        self._render_row = end
+        if end < len(self._visible_items):
+            QTimer.singleShot(0, lambda: self._render_item_chunk(generation))
+            return
+        self._apply_column_visibility()
 
     def _apply_column_visibility(self) -> None:
         if not hasattr(self, "_table"):
@@ -714,8 +871,12 @@ class StockNewsWindow(QDialog):
         header = self._table.horizontalHeader()
         for column in range(len(keys)):
             header.setSectionResizeMode(
-                column, QHeaderView.ResizeMode.Stretch if column == last_visible else QHeaderView.ResizeMode.ResizeToContents
+                column, QHeaderView.ResizeMode.Stretch if column == last_visible else QHeaderView.ResizeMode.Interactive
             )
+        default_widths = (105, 100, 125, 145, 360)
+        for column, width in enumerate(default_widths):
+            if column != last_visible and header.sectionSize(column) < 40:
+                header.resizeSection(column, width)
 
     def _select_news_cell(self, row: int, column: int) -> None:
         self._selected_news_cell = (row, column)
@@ -778,7 +939,7 @@ class StockNewsWindow(QDialog):
         return f"<hr><p><b>관련 기사 {len(group.items)}건</b></p><ul>{''.join(rows)}</ul>"
 
     def _effective_judgment(self, item: StockNewsItem) -> tuple[str, str, str, str]:
-        stored = self._ai_repository.load(self._stock_code, item)
+        stored = self._ai_result_cache.get(news_identity(item))
         if stored is None:
             return item.assessment.category, item.assessment.outlook, item.assessment.reason, "제목·검색 요약 규칙"
         result = stored.analysis
@@ -795,7 +956,7 @@ class StockNewsWindow(QDialog):
         return category, outlook, reason, f"AI 원문 분석 ({stored.provider} · 신뢰도 {result.confidence}%)"
 
     def _ai_html(self, item: StockNewsItem) -> str:
-        stored = self._ai_repository.load(self._stock_code, item)
+        stored = self._ai_result_cache.get(news_identity(item))
         if stored is None:
             return (
                 "<p style='color:#667085'><b>AI 원문 분석</b>"
@@ -863,15 +1024,24 @@ class StockNewsWindow(QDialog):
             identity = news_identity(item)
             if identity not in self._auto_ai_identities:
                 continue
-            if self._ai_repository.load(self._stock_code, item) is None and (item.link or item.original_link):
+            if identity not in self._ai_result_cache and (item.link or item.original_link):
                 self._auto_ai_identities.discard(identity)
                 self._start_ai_analysis(self._visible_groups[row], automatic=True)
                 return
         self._auto_ai_identities.clear()
 
+    def _resume_auto_analysis(self) -> None:
+        """후보 생성·뉴스 조회·이전 AI 종료 순서와 무관하게 대기열을 재확인한다."""
+        if self._auto_ai_identities:
+            QTimer.singleShot(0, self._auto_analyze_next)
+
     def _on_ai_completed(self, result: object, provider: str, model: str, body_hash: str) -> None:
         if isinstance(result, AINewsAnalysis) and self._ai_item is not None:
             self._ai_repository.save(self._ai_stock_code, self._ai_item, provider, model, body_hash, result)
+            if self._ai_stock_code == self._stock_code:
+                self._ai_result_cache[news_identity(self._ai_item)] = StoredAINewsAnalysis(
+                    result, provider, model, datetime.now(UTC),
+                )
             self._status_label.setText("AI 원문 분석을 DB에 저장했습니다.")
             self._ai_continue = self._ai_automatic_run and bool(self._auto_ai_identities)
             if self._ai_stock_code == self._stock_code:
@@ -908,12 +1078,14 @@ class StockNewsWindow(QDialog):
         worker = self._ai_worker
         self._ai_worker = None
         if worker is not None:
+            worker.wait()
             worker.deleteLater()
         self._ai_button.setText("AI 원문 분석")
         self._ai_button.setEnabled(self._table.currentRow() >= 0)
         self._ai_automatic_run = False
-        if self._ai_continue:
-            QTimer.singleShot(0, self._auto_analyze_next)
+        # 이전 작업이 끝나기 직전 또는 끝난 직후 마지막 종목의 후보가
+        # 만들어지는 두 경우 모두 여기서 다시 확인한다.
+        self._resume_auto_analysis()
 
     def _open_selected(self) -> None:
         self._open_item(self._table.currentRow())
@@ -946,7 +1118,7 @@ class StockNewsWindow(QDialog):
 
     def _on_settings_saved(self) -> None:
         self._news_filter = self._config.load_filter()
-        self._render_items()
+        self._schedule_prepare()
         self.refresh(force=True)
 
     def _clear_settings_dialog(self, dialog: NaverNewsSettingsDialog) -> None:
@@ -958,8 +1130,11 @@ class StockNewsWindow(QDialog):
         self._apply_window_mode(str(self._window_mode.currentData()))
 
     def _apply_window_mode(self, mode: str, *, persist: bool = True) -> None:
-        """뉴스창을 독립 창 또는 메인창 소유 창으로 즉시 전환한다."""
-        mode = "attached" if mode == "attached" and self._main_window is not None else "independent"
+        """같은 프로세스의 소유 창 또는 분리 프로세스 표시 방식을 저장한다."""
+        if self._main_window is None:
+            mode = mode if mode in {"independent", "linked", "docked"} else "independent"
+        else:
+            mode = "attached" if mode == "attached" else "independent"
         geometry = self.saveGeometry()
         was_visible = self.isVisible()
         if mode == "attached":
@@ -970,6 +1145,7 @@ class StockNewsWindow(QDialog):
         self.restoreGeometry(geometry)
         if persist:
             self._window_settings.setValue("window_mode", mode)
+            self._window_settings.sync()
         if was_visible:
             self.show()
             self.raise_()
@@ -995,6 +1171,15 @@ class StockNewsWindow(QDialog):
         self._save_window_geometry()
         self._allow_close = True
         self._auto_refresh.stop()
+        self._prepare_request_id += 1
+        self._pending_prepare = None
+        worker = self._prepare_worker
+        if worker is not None and worker.isRunning():
+            worker.wait(3000)
+        for active_worker in (self._worker, self._ai_worker):
+            if active_worker is not None and active_worker.isRunning():
+                active_worker.requestInterruption()
+                active_worker.wait(10_000)
         self.close()
 
     def _save_window_geometry(self) -> None:

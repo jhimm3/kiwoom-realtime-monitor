@@ -33,6 +33,7 @@ from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepo
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
 from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
 from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncService
+from kiwoom_monitor.infrastructure.persistence.news_database import migrate_legacy_news_database
 from kiwoom_monitor.presentation.main_window import APP_DISPLAY_NAME, MainWindow
 
 
@@ -58,17 +59,22 @@ def _set_taskbar_app_id() -> None:
 
 
 def main() -> None:
+    if "--news-process" in sys.argv:
+        from kiwoom_monitor.news_process import main as news_main
+        index = sys.argv.index("--news-process")
+        raise SystemExit(news_main(sys.argv[index + 1:]))
     _set_taskbar_app_id()
     paths = AppPaths.for_current_user()
     configure_logging(paths.log_dir)
 
     database = Database(paths.database_path)
     database.initialize()
+    migrate_legacy_news_database(paths.database_path, paths.news_database_path)
     minute_bar_repository = MinuteBarRepository(paths.database_path)
     minute_bar_repository.purge_before(datetime.now().date() - timedelta(days=30))
     daily_bar_repository = DailyBarRepository(paths.database_path)
     daily_bar_repository.purge_before(datetime.now().date() - timedelta(days=30))
-    google_drive_sync = GoogleDriveSyncService(paths.database_path)
+    google_drive_sync = GoogleDriveSyncService(paths.database_path, paths.news_database_path)
     local_changed_at = database.settings.get("google_drive_local_changed_at")
     last_upload_at = database.settings.get("google_drive_last_upload_success_at")
     local_changes_are_newer = database.settings.get("google_drive_unsynced_changes") == "1" or (
@@ -160,8 +166,8 @@ def main() -> None:
         google_drive_sync=google_drive_sync,
         initial_google_drive_download=initial_google_drive_download,
         api_runtime_factory=build_api_runtime,
-        news_config_path=paths.data_dir / "naver_news.dat" if not getattr(sys, "frozen", False) else None,
-        news_database_path=paths.database_path if not getattr(sys, "frozen", False) else None,
+        news_config_path=paths.data_dir / "naver_news.dat",
+        news_database_path=paths.news_database_path,
     )
     window.show()
     sys.exit(app.exec())

@@ -56,6 +56,33 @@ class NewsAIRepository:
             str(row[0]), str(row[1]), datetime.fromisoformat(str(row[8])),
         )
 
+    def load_many(
+        self, stock_code: str, items: tuple[StockNewsItem, ...],
+    ) -> dict[str, StoredAINewsAnalysis]:
+        """한 종목의 저장된 AI 결과를 DB 연결 한 번으로 읽는다."""
+        identities = tuple(dict.fromkeys(news_identity(item) for item in items))
+        if not identities:
+            return {}
+        placeholders = ",".join("?" for _ in identities)
+        connection = sqlite3.connect(self._database_path)
+        try:
+            rows = connection.execute(
+                "SELECT identity, provider, model, summary, outlook, confidence, reason, "
+                "positive_evidence, negative_evidence, analyzed_at, category "
+                f"FROM stock_news_ai WHERE stock_code=? AND identity IN ({placeholders})",
+                (stock_code, *identities),
+            ).fetchall()
+        finally:
+            connection.close()
+        return {
+            str(row[0]): StoredAINewsAnalysis(
+                AINewsAnalysis(str(row[3]), str(row[4]), int(row[5]), str(row[6]),
+                               tuple(json.loads(row[7])), tuple(json.loads(row[8])), str(row[10])),
+                str(row[1]), str(row[2]), datetime.fromisoformat(str(row[9])),
+            )
+            for row in rows
+        }
+
     def save(self, stock_code: str, item: StockNewsItem, provider: str, model: str,
              body_hash: str, analysis: AINewsAnalysis) -> None:
         connection = sqlite3.connect(self._database_path)

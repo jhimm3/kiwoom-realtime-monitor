@@ -4,12 +4,14 @@
 
 ## 현재 버전
 
-- **1.1.16**
-- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.16)
+- **1.1.18**
+- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.18)
 - [소개 페이지](docs/index.html) · [개인정보처리방침](docs/privacy.html)
 
 ## 변경 내역
 
+- [1.1.18](docs/RELEASE_NOTES_v1.1.18.md) — 뉴스 전용 프로세스·DB 분리, AI 캐시 백업, 빠른 종목 전환 및 창 연동 안정화
+- [1.1.17](docs/RELEASE_NOTES_v1.1.17.md) — 네이버 뉴스·선택형 DART 공시, 사건 묶음과 사용자 API 기반 AI 원문 분석
 - [1.1.16](docs/RELEASE_NOTES_v1.1.16.md) — KRX·NXT 실시간 거래대금 안정화, 순위표 흔들림 완화, 메인 창 위치·크기 복원
 - [1.1.15](docs/RELEASE_NOTES_v1.1.15.md) — 테마 OCR·텍스트 가져오기 개선, 붙은 종목명 분리, KIND 상호변경 연동
 - [1.1.14](docs/RELEASE_NOTES_v1.1.14.md) — 역사적 신고가 당일 수정주가 기준 통일, 헤더 전환 강조 깜빡임 제거

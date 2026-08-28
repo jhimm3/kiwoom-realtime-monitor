@@ -25,6 +25,7 @@ _REACTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _TRACKING_QUERY_KEYS = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid", "gclid"}
+_MIN_TIMESTAMP = float("-inf")
 
 
 def group_similar_news(
@@ -33,17 +34,21 @@ def group_similar_news(
     """완전 중복을 제거하고 최근 48시간의 유사 기사를 사건별로 묶는다."""
     unique = _deduplicate(items)
     ordered = sorted(unique, key=_published_timestamp, reverse=True)
+    # 같은 기사에 대한 정규화·숫자 추출이 군집 비교 안쪽에서 수천 번
+    # 반복되면 200건 기준 수 초가 걸린다. 기사별 특징은 처음 한 번만 만든다.
+    features = {id(item): _event_features(item) for item in ordered}
     clusters: list[list[StockNewsItem]] = []
     for item in ordered:
+        item_features = features[id(item)]
         target = next(
             (
                 cluster for cluster in clusters
-                if _within_window(item, cluster, window)
+                if _within_window_features(item_features, cluster, features, window)
                 and all(
-                    not _anchors_conflict(_event_anchors(item), _event_anchors(existing))
+                    not _anchors_conflict(item_features.anchors, features[id(existing)].anchors)
                     for existing in cluster
                 )
-                and any(_same_event(item, existing) for existing in cluster)
+                and any(_same_event_features(item_features, features[id(existing)]) for existing in cluster)
             ),
             None,
         )
@@ -66,6 +71,61 @@ def group_similar_news(
             any(_is_past_event_republication(item) for item in group_items),
         ))
     return tuple(sorted(groups, key=lambda group: max(map(_published_timestamp, group.items)), reverse=True))
+
+
+@dataclass(frozen=True)
+class _EventFeatures:
+    title: str
+    combined: str
+    title_ngrams: frozenset[str]
+    anchors: dict[str, frozenset[str]]
+    category: str
+    timestamp: float
+
+
+def _event_features(item: StockNewsItem) -> _EventFeatures:
+    title = _normalize(item.title)
+    return _EventFeatures(
+        title,
+        _normalize(f"{item.title} {item.description}"),
+        frozenset(_ngrams(title)),
+        _event_anchors(item),
+        item.assessment.category,
+        item.published_at.astimezone(UTC).timestamp() if item.published_at else _MIN_TIMESTAMP,
+    )
+
+
+def _same_event_features(left: _EventFeatures, right: _EventFeatures) -> bool:
+    if _anchors_conflict(left.anchors, right.anchors):
+        return False
+    categories_compatible = left.category == right.category or "주가·수급" in {left.category, right.category}
+    if not categories_compatible:
+        return False
+    title_ngrams = _set_similarity(left.title_ngrams, right.title_ngrams)
+    if title_ngrams >= 0.48:
+        return True
+    # 공통 3글자조차 없으면 긴 한국어 뉴스 제목이 동일 사건일 가능성이
+    # 없으므로 비용이 큰 SequenceMatcher 두 번을 실행하지 않는다.
+    if not (left.title_ngrams & right.title_ngrams):
+        return False
+    title_ratio = SequenceMatcher(None, left.title, right.title).ratio()
+    if title_ratio >= 0.60:
+        return True
+    return title_ratio >= 0.48 and SequenceMatcher(None, left.combined, right.combined).ratio() >= 0.52
+
+
+def _within_window_features(
+    item: _EventFeatures, cluster: list[StockNewsItem],
+    features: dict[int, _EventFeatures], window: timedelta,
+) -> bool:
+    if item.timestamp == _MIN_TIMESTAMP:
+        return False
+    seconds = window.total_seconds()
+    return any(
+        features[id(existing)].timestamp != _MIN_TIMESTAMP
+        and abs(item.timestamp - features[id(existing)].timestamp) <= seconds
+        for existing in cluster
+    )
 
 
 def is_market_reaction_article(item: StockNewsItem) -> bool:
@@ -142,6 +202,12 @@ def _ngram_similarity(left: str, right: str) -> float:
     if not left_values or not right_values:
         return 0.0
     return len(left_values & right_values) / len(left_values | right_values)
+
+
+def _set_similarity(left: frozenset[str], right: frozenset[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
 
 
 def _event_anchors(item: StockNewsItem) -> dict[str, frozenset[str]]:

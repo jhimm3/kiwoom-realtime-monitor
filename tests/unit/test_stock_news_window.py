@@ -54,6 +54,21 @@ class StockNewsWindowTests(unittest.TestCase):
             window.shutdown()
             main.close()
 
+    def test_separate_process_window_offers_three_display_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            window._window_settings = QSettings(str(root / "window.ini"), QSettings.Format.IniFormat)
+
+            self.assertEqual(
+                ["independent", "linked", "docked"],
+                [window._window_mode.itemData(index) for index in range(window._window_mode.count())],
+            )
+            window._apply_window_mode("docked")
+            self.assertEqual("docked", window._window_settings.value("window_mode"))
+
+            window.shutdown()
+
     def test_judgment_double_click_starts_ai_and_title_double_click_opens_article(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -89,13 +104,30 @@ class StockNewsWindowTests(unittest.TestCase):
                 provider="gemini", model="test-model",
             )
 
-            with patch.object(window._ai_repository, "load", return_value=stored):
+            window._ai_result_cache[news_identity(item)] = stored
+            with patch.object(window._ai_repository, "load") as load:
                 detail = window._ai_html(item)
+            load.assert_not_called()
 
             self.assertIn(f"관련성 {item.assessment.relevance_score}점", detail)
             self.assertIn("신뢰도 87%", detail)
             self.assertLess(detail.index("<b>이유:</b>"), detail.index("<b>원문 요약:</b>"))
             self.assertLess(detail.index("<b>긍정 근거:</b>"), detail.index("<b>원문 요약:</b>"))
+            window.shutdown()
+
+    def test_rapid_stock_changes_keep_only_last_prepare_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            active_worker = SimpleNamespace(isRunning=lambda: True)
+            window._prepare_worker = active_worker
+
+            with patch.object(window, "refresh"):
+                window.set_stock("005930", "삼성전자", activate=False)
+                window.set_stock("000660", "SK하이닉스", activate=False)
+
+            self.assertEqual((window._prepare_request_id, "000660"), window._pending_prepare)
+            window._prepare_worker = None
             window.shutdown()
 
     def test_window_geometry_is_flushed_when_saved(self) -> None:
@@ -139,6 +171,43 @@ class StockNewsWindowTests(unittest.TestCase):
 
             self.assertEqual(0, window._table.currentRow())
             start.assert_called_once_with(groups[1], automatic=True)
+            window.shutdown()
+
+    def test_ai_finish_always_rechecks_last_stock_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            window._ai_continue = False
+            window._ai_worker = None
+
+            with patch.object(window, "_resume_auto_analysis") as resume:
+                window._on_ai_finished()
+
+            resume.assert_called_once_with()
+            window.shutdown()
+
+    def test_recent_candidates_are_recovered_after_process_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            first = StockNewsItem(
+                "최신 기사", "내용", "https://example.com/1", "https://example.com/1",
+                datetime.now(UTC), assess_stock_news("테스트기업", "최신 기사", "내용"),
+            )
+            second = StockNewsItem(
+                "둘째 기사", "내용", "https://example.com/2", "https://example.com/2",
+                datetime.now(UTC), assess_stock_news("테스트기업", "둘째 기사", "내용"),
+            )
+            window._visible_groups = (NewsEventGroup(first, (first,)), NewsEventGroup(second, (second,)))
+            window._ai_result_cache = {news_identity(first): SimpleNamespace()}
+
+            with patch.object(
+                window._config, "load_ai",
+                return_value=NewsAISettings("gemini", "key", "model", 0, 2, True),
+            ):
+                window._configure_recent_auto_candidates()
+
+            self.assertEqual({news_identity(second)}, window._auto_ai_identities)
             window.shutdown()
 
 
