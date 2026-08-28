@@ -3391,6 +3391,10 @@ class MainWindow(QMainWindow):
         if self._news_command_path is None:
             return
         self._news_selection_request_id += 1
+        # 상·하·좌·우 고정은 제목 표시줄과 Windows 테두리까지 포함한 실제
+        # 창 외곽을 기준으로 해야 한다. self.x/y/width/height는 내용 영역이라
+        # 위·아래는 제목 표시줄만큼, 좌·우는 테두리만큼 서로 겹치게 된다.
+        frame = self.frameGeometry()
         document = {
             "request_id": self._news_selection_request_id,
             "action": action,
@@ -3398,7 +3402,7 @@ class MainWindow(QMainWindow):
             "name": name,
             "activate": activate,
             "window_mode": self._news_window_mode(),
-            "main_geometry": [self.x(), self.y(), self.width(), self.height()],
+            "main_geometry": [frame.x(), frame.y(), frame.width(), frame.height()],
         }
         temporary = self._news_command_path.with_suffix(".tmp")
         try:
