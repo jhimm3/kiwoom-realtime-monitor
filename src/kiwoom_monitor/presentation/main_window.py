@@ -5847,10 +5847,14 @@ class MainWindow(QMainWindow):
     def _save_window_geometry(self) -> None:
         """창 크기와 화면 위치를 현재 컴퓨터에 즉시 보관한다."""
         geometry = self.normalGeometry() if self.isMaximized() or self.isFullScreen() else self.geometry()
+        # geometry()의 좌표는 제목 표시줄을 제외한 내용 영역 기준인데 move()는
+        # 최상위 창 외곽 위치로 적용된다. 내용 좌표를 저장하면 재실행할 때마다
+        # 제목 표시줄 높이만큼 아래·오른쪽으로 밀리므로 외곽 좌표를 보관한다.
+        frame = self.frameGeometry()
         self._settings.set("window_width", str(geometry.width()))
         self._settings.set("window_height", str(geometry.height()))
-        self._settings.set("window_x", str(geometry.x()))
-        self._settings.set("window_y", str(geometry.y()))
+        self._settings.set("window_x", str(frame.x()))
+        self._settings.set("window_y", str(frame.y()))
 
     def _restore_window_position(self) -> None:
         try:
