@@ -2541,6 +2541,13 @@ class MainWindow(QMainWindow):
         self._news_dock_timer.setSingleShot(True)
         self._news_dock_timer.setInterval(60)
         self._news_dock_timer.timeout.connect(self._sync_news_window)
+        # 복원 직후 ActivationChange가 command 파일의 restore를 sync로
+        # 덮어쓰지 않게, 뉴스 프로세스의 80ms 폴링보다 충분히 늦게 보낸다.
+        self._news_restore_sync_pending = False
+        self._news_restore_sync_timer = QTimer(self)
+        self._news_restore_sync_timer.setSingleShot(True)
+        self._news_restore_sync_timer.setInterval(250)
+        self._news_restore_sync_timer.timeout.connect(self._finish_news_restore_sync)
         self._api_reloading = False
         self._google_drive_worker: GoogleDriveSyncWorker | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
@@ -3411,6 +3418,10 @@ class MainWindow(QMainWindow):
         mode = self._news_window_mode()
         if mode in {"linked", "docked"}:
             self._send_news_command(action="sync", activate=False)
+
+    def _finish_news_restore_sync(self) -> None:
+        self._news_restore_sync_pending = False
+        self._sync_news_window()
 
     def _open_column_manager(self) -> None:
         if self._columns is None:
@@ -5601,9 +5612,17 @@ class MainWindow(QMainWindow):
         if self._news_process is None or self._news_process.poll() is not None:
             return
         if event.type() == QEvent.Type.WindowStateChange:
-            self._send_news_command(action="minimize" if self.isMinimized() else "restore")
+            if self.isMinimized():
+                self._news_restore_sync_timer.stop()
+                self._news_restore_sync_pending = False
+                self._send_news_command(action="minimize")
+            else:
+                self._news_restore_sync_pending = True
+                self._send_news_command(action="restore")
+                self._news_restore_sync_timer.start()
         elif event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
-            self._sync_news_window()
+            if not self._news_restore_sync_pending:
+                self._sync_news_window()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self._closing:
