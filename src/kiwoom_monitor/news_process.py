@@ -180,6 +180,10 @@ def main(arguments: list[str] | None = None) -> int:
         if action == "restore":
             if restore_after_main:
                 window.showNormal()
+                # showNormal()만 호출하면 별도 프로세스인 뉴스창이 복원은
+                # 되어도 메인창 뒤에 남을 수 있다. 최소화 전에 보이던 창은
+                # 포커스를 빼앗지 않는 방식으로 두 창의 Z 순서도 함께 복원한다.
+                raise_without_focus()
                 restore_after_main = False
             return
         if action == "sync":

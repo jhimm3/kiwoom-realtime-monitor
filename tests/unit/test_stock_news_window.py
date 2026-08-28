@@ -235,6 +235,32 @@ class StockNewsWindowTests(unittest.TestCase):
             self.assertFalse(window._auto_ai_identities)
             window.shutdown()
 
+    def test_automatic_analysis_starts_with_newest_visible_event(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            old = StockNewsItem(
+                "과거 기사", "내용", "https://example.com/old", "https://example.com/old",
+                datetime(2026, 8, 27, tzinfo=UTC), assess_stock_news("테스트기업", "과거 기사", "내용"),
+            )
+            newest = StockNewsItem(
+                "최신 기사", "내용", "https://example.com/new", "https://example.com/new",
+                datetime(2026, 8, 29, tzinfo=UTC), assess_stock_news("테스트기업", "최신 기사", "내용"),
+            )
+            groups = (NewsEventGroup(newest, (newest,)), NewsEventGroup(old, (old,)))
+            window._visible_items = (newest, old)
+            window._visible_groups = groups
+            window._auto_ai_identities = {news_identity(newest), news_identity(old)}
+
+            with patch.object(
+                window._config, "load_ai",
+                return_value=NewsAISettings("gemini", "key", "model", 0, 2, True, "single", 2),
+            ), patch.object(window, "_start_ai_groups") as start:
+                window._auto_analyze_next()
+
+            start.assert_called_once_with((groups[0],), automatic=True)
+            window.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()
