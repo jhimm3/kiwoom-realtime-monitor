@@ -12,6 +12,14 @@ from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 
 
 @dataclass(frozen=True)
+class AICompanyImpact:
+    company: str
+    outlook: str
+    confidence: int
+    reason: str
+
+
+@dataclass(frozen=True)
 class AINewsAnalysis:
     summary: str
     outlook: str
@@ -20,6 +28,7 @@ class AINewsAnalysis:
     positive_evidence: tuple[str, ...] = ()
     negative_evidence: tuple[str, ...] = ()
     category: str = "기타 증권뉴스"
+    company_impacts: tuple[AICompanyImpact, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -90,7 +99,7 @@ def _prompt(stock_name: str, title: str, article_text: str) -> str:
 본문: {article_text}
 
 JSON 하나만 출력하라:
-{{"summary":"3문장 이내 요약","category":"실적·전망|수주·계약|투자·인수합병|자본·주주환원|임상·허가|경영권·주주|주가·수급|공시·규제|산업·정책|기타 증권뉴스 중 하나","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0부터100 정수,"reason":"판정 이유","positive_evidence":["근거"],"negative_evidence":["근거"]}}
+{{"summary":"3문장 이내 요약","category":"실적·전망|수주·계약|투자·인수합병|자본·주주환원|임상·허가|경영권·주주|주가·수급|공시·규제|산업·정책|기타 증권뉴스 중 하나","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0부터100 정수,"reason":"판정 이유","positive_evidence":["근거"],"negative_evidence":["근거"],"company_impacts":[{{"company":"기사에 나온 상장사명","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0,"reason":"그 회사 관점의 이유"}}]}}
 단순 주가 상승·하락 보도는 기업가치 호재·악재로 단정하지 말고, '뜨거운 감자' 같은 관용어와 부인·반등·회복 문맥을 정확히 구분하라."""
 
 
@@ -106,7 +115,7 @@ def _batch_prompt(stock_name: str, articles: tuple[tuple[str, str], ...]) -> str
 {sections}
 
 입력 순서와 같은 JSON 배열 하나만 출력하라. 각 항목에 id를 반드시 유지하라:
-[{{"id":1,"summary":"3문장 이내 요약","category":"실적·전망|수주·계약|투자·인수합병|자본·주주환원|임상·허가|경영권·주주|주가·수급|공시·규제|산업·정책|기타 증권뉴스 중 하나","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0,"reason":"판정 이유","positive_evidence":["근거"],"negative_evidence":["근거"]}}]
+[{{"id":1,"summary":"3문장 이내 요약","category":"실적·전망|수주·계약|투자·인수합병|자본·주주환원|임상·허가|경영권·주주|주가·수급|공시·규제|산업·정책|기타 증권뉴스 중 하나","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0,"reason":"판정 이유","positive_evidence":["근거"],"negative_evidence":["근거"],"company_impacts":[{{"company":"상장사명","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0,"reason":"회사별 이유"}}]}}]
 기사에 없는 내용을 추측하지 말고 단순 주가 반응과 관용어를 기업가치 변화로 오판하지 마라."""
 
 
@@ -199,10 +208,23 @@ def _parse_value(value: dict[str, object]) -> AINewsAnalysis:
         "경영권·주주", "주가·수급", "공시·규제", "산업·정책", "기타 증권뉴스",
     }:
         category = "기타 증권뉴스"
+    impacts: list[AICompanyImpact] = []
+    raw_impacts = value.get("company_impacts", ())
+    if isinstance(raw_impacts, list):
+        for impact in raw_impacts:
+            if not isinstance(impact, dict) or not str(impact.get("company", "")).strip():
+                continue
+            impact_outlook = str(impact.get("outlook", "판단 자료 부족"))
+            if impact_outlook not in {"긍정", "부정", "혼재", "판단 자료 부족"}:
+                impact_outlook = "판단 자료 부족"
+            impacts.append(AICompanyImpact(
+                str(impact.get("company", "")).strip(), impact_outlook,
+                max(0, min(100, int(impact.get("confidence", 0)))), str(impact.get("reason", "")).strip(),
+            ))
     return AINewsAnalysis(
         str(value.get("summary", "")).strip(), outlook,
         max(0, min(100, int(value.get("confidence", 0)))), str(value.get("reason", "")).strip(),
         tuple(map(str, value.get("positive_evidence", ()) or ())),
         tuple(map(str, value.get("negative_evidence", ()) or ())),
-        category,
+        category, tuple(impacts),
     )

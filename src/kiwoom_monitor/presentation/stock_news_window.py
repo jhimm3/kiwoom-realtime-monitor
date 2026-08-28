@@ -164,12 +164,13 @@ class NewsPrepareWorker(QThread):
     completed = Signal(int, str, object, object, object, bool, object)
     failed = Signal(int, str, str)
 
-    def __init__(self, request_id: int, stock_code: str, database_path: Path,
+    def __init__(self, request_id: int, stock_code: str, stock_name: str, database_path: Path,
                  news_filter: NewsFilterSettings, show_low_relevance: bool,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._request_id = request_id
         self._stock_code = stock_code
+        self._stock_name = stock_name
         self._database_path = database_path
         self._news_filter = news_filter
         self._show_low_relevance = show_low_relevance
@@ -186,7 +187,9 @@ class NewsPrepareWorker(QThread):
             )
             groups = group_similar_news(filtered)
             representatives = tuple(group.representative for group in groups)
-            ai_results = NewsAIRepository(self._database_path).load_many(self._stock_code, representatives)
+            ai_results = NewsAIRepository(self._database_path).load_many(
+                self._stock_code, representatives, self._stock_name,
+            )
             recently_checked = repository.recently_checked(self._stock_code, StockNewsWindow.CHECK_INTERVAL_SECONDS)
             last_naver_check = repository.last_naver_checked_at(self._stock_code)
             self.completed.emit(
@@ -696,7 +699,7 @@ class StockNewsWindow(QDialog):
         self._pending_prepare = None
         request_id, stock_code = pending
         worker = NewsPrepareWorker(
-            request_id, stock_code, self._database_path, self._news_filter,
+            request_id, stock_code, self._stock_name, self._database_path, self._news_filter,
             self._show_low_relevance.isChecked(), self,
         )
         self._prepare_worker = worker

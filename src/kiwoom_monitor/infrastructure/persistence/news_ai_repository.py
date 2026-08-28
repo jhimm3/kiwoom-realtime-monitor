@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
-from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis, AIRequestUsage
+from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis, AICompanyImpact, AIRequestUsage
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,12 @@ class NewsAIRepository:
                 "model TEXT NOT NULL, request_mode TEXT NOT NULL, event_count INTEGER NOT NULL, article_count INTEGER NOT NULL, "
                 "input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0)"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS news_ai_shared ("
+                "identity TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, summary TEXT NOT NULL, "
+                "category TEXT NOT NULL, positive_evidence TEXT NOT NULL, negative_evidence TEXT NOT NULL, "
+                "company_impacts TEXT NOT NULL, body_hash TEXT NOT NULL, analyzed_at TEXT NOT NULL)"
+            )
             connection.commit()
         finally:
             connection.close()
@@ -63,7 +69,7 @@ class NewsAIRepository:
         )
 
     def load_many(
-        self, stock_code: str, items: tuple[StockNewsItem, ...],
+        self, stock_code: str, items: tuple[StockNewsItem, ...], stock_name: str = "",
     ) -> dict[str, StoredAINewsAnalysis]:
         """한 종목의 저장된 AI 결과를 DB 연결 한 번으로 읽는다."""
         identities = tuple(dict.fromkeys(news_identity(item) for item in items))
@@ -80,7 +86,7 @@ class NewsAIRepository:
             ).fetchall()
         finally:
             connection.close()
-        return {
+        loaded = {
             str(row[0]): StoredAINewsAnalysis(
                 AINewsAnalysis(str(row[3]), str(row[4]), int(row[5]), str(row[6]),
                                tuple(json.loads(row[7])), tuple(json.loads(row[8])), str(row[10])),
@@ -88,6 +94,30 @@ class NewsAIRepository:
             )
             for row in rows
         }
+        missing = tuple(identity for identity in identities if identity not in loaded)
+        normalized_name = _normalized_company_name(stock_name)
+        if missing and normalized_name:
+            placeholders = ",".join("?" for _ in missing)
+            connection = sqlite3.connect(self._database_path)
+            try:
+                shared_rows = connection.execute(
+                    "SELECT identity,provider,model,summary,category,positive_evidence,negative_evidence,company_impacts,analyzed_at "
+                    f"FROM news_ai_shared WHERE identity IN ({placeholders})", missing,
+                ).fetchall()
+            finally:
+                connection.close()
+            for row in shared_rows:
+                impacts = _decode_impacts(str(row[7]))
+                impact = next((value for value in impacts if _normalized_company_name(value.company) == normalized_name), None)
+                if impact is None:
+                    continue
+                loaded[str(row[0])] = StoredAINewsAnalysis(
+                    AINewsAnalysis(
+                        str(row[3]), impact.outlook, impact.confidence, impact.reason,
+                        tuple(json.loads(row[5])), tuple(json.loads(row[6])), str(row[4]), impacts,
+                    ), str(row[1]), str(row[2]), datetime.fromisoformat(str(row[8])),
+                )
+        return loaded
 
     def save(self, stock_code: str, item: StockNewsItem, provider: str, model: str,
              body_hash: str, analysis: AINewsAnalysis) -> None:
@@ -104,6 +134,18 @@ class NewsAIRepository:
                  analysis.confidence, analysis.reason, json.dumps(analysis.positive_evidence, ensure_ascii=False),
                  json.dumps(analysis.negative_evidence, ensure_ascii=False), body_hash, datetime.now(UTC).isoformat()),
             )
+            if analysis.company_impacts:
+                connection.execute(
+                    "INSERT INTO news_ai_shared(identity,provider,model,summary,category,positive_evidence,negative_evidence,company_impacts,body_hash,analyzed_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(identity) DO UPDATE SET provider=excluded.provider,model=excluded.model,"
+                    "summary=excluded.summary,category=excluded.category,positive_evidence=excluded.positive_evidence,"
+                    "negative_evidence=excluded.negative_evidence,company_impacts=excluded.company_impacts,body_hash=excluded.body_hash,analyzed_at=excluded.analyzed_at",
+                    (news_identity(item), provider, model, analysis.summary, analysis.category,
+                     json.dumps(analysis.positive_evidence, ensure_ascii=False),
+                     json.dumps(analysis.negative_evidence, ensure_ascii=False),
+                     json.dumps([impact.__dict__ for impact in analysis.company_impacts], ensure_ascii=False),
+                     body_hash, datetime.now(UTC).isoformat()),
+                )
             connection.commit()
         finally:
             connection.close()
@@ -144,3 +186,19 @@ class NewsAIRepository:
         finally:
             connection.close()
         return tuple(map(int, row or (0, 0, 0, 0)))
+
+
+def _normalized_company_name(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def _decode_impacts(raw: str) -> tuple[AICompanyImpact, ...]:
+    try:
+        values = json.loads(raw)
+    except (TypeError, ValueError):
+        return ()
+    return tuple(
+        AICompanyImpact(str(value.get("company", "")), str(value.get("outlook", "판단 자료 부족")),
+                        int(value.get("confidence", 0)), str(value.get("reason", "")))
+        for value in values if isinstance(value, dict) and value.get("company")
+    )
