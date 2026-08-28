@@ -61,11 +61,11 @@ class StockNewsWindowTests(unittest.TestCase):
             window._window_settings = QSettings(str(root / "window.ini"), QSettings.Format.IniFormat)
 
             self.assertEqual(
-                ["independent", "linked", "docked"],
+                ["independent", "linked", "docked_right", "docked_left", "docked_top", "docked_bottom"],
                 [window._window_mode.itemData(index) for index in range(window._window_mode.count())],
             )
-            window._apply_window_mode("docked")
-            self.assertEqual("docked", window._window_settings.value("window_mode"))
+            window._apply_window_mode("docked_left")
+            self.assertEqual("docked_left", window._window_settings.value("window_mode"))
 
             window.shutdown()
 

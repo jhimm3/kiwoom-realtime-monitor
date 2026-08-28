@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import hashlib
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -565,8 +566,16 @@ class StockNewsWindow(QDialog):
 
         self._stock_label = QLabel("메인 표에서 종목명을 클릭하세요.")
         self._stock_label.setStyleSheet("font-size: 17px; font-weight: 700;")
+        self._count_label = QLabel("")
+        self._count_label.setStyleSheet("color: #475467;")
         self._status_label = QLabel("대기")
         self._status_label.setStyleSheet("color: #667085;")
+        self._auto_ai_toggle = QCheckBox("AI 자동 분석")
+        try:
+            self._auto_ai_toggle.setChecked(self._config.load_ai().auto_analyze)
+        except (OSError, ValueError):
+            pass
+        self._auto_ai_toggle.toggled.connect(self._toggle_auto_analysis)
         self._show_low_relevance = QCheckBox("관련성 낮은 뉴스도 보기")
         self._show_low_relevance.toggled.connect(self._schedule_prepare)
         refresh = QPushButton("새로고침")
@@ -586,13 +595,18 @@ class StockNewsWindow(QDialog):
             )
         else:
             self._window_mode.addItem("메인창과 함께 앞으로", "linked")
-            self._window_mode.addItem("메인창 옆에 고정", "docked")
+            self._window_mode.addItem("메인창 오른쪽에 고정", "docked_right")
+            self._window_mode.addItem("메인창 왼쪽에 고정", "docked_left")
+            self._window_mode.addItem("메인창 위쪽에 고정", "docked_top")
+            self._window_mode.addItem("메인창 아래쪽에 고정", "docked_bottom")
             self._window_mode.setToolTip(
                 "독립 창: 두 창을 따로 전환합니다.\n"
                 "메인창과 함께 앞으로: 메인창을 선택하면 뉴스창도 함께 보이게 올립니다.\n"
-                "메인창 옆에 고정: 함께 올리고 메인창 옆 위치를 유지합니다."
+                "고정: 함께 올리고 선택한 상·하·좌·우 위치를 유지합니다."
             )
         saved_window_mode = str(self._window_settings.value("window_mode", "independent"))
+        if saved_window_mode == "docked":
+            saved_window_mode = "docked_right"
         saved_window_mode_index = self._window_mode.findData(saved_window_mode)
         self._window_mode.setCurrentIndex(max(0, saved_window_mode_index))
         self._window_mode.currentIndexChanged.connect(self._change_window_mode)
@@ -603,6 +617,7 @@ class StockNewsWindow(QDialog):
         top = QHBoxLayout()
         top.addWidget(self._stock_label)
         top.addStretch()
+        top.addWidget(self._auto_ai_toggle)
         top.addWidget(self._show_low_relevance)
         top.addWidget(refresh)
         top.addWidget(kind)
@@ -659,6 +674,7 @@ class StockNewsWindow(QDialog):
         notice.setStyleSheet("color: #667085; padding: 4px;")
         layout = QVBoxLayout(self)
         layout.addLayout(top)
+        layout.addWidget(self._count_label)
         layout.addWidget(self._status_label)
         layout.addWidget(splitter, 1)
         layout.addWidget(notice)
@@ -721,6 +737,7 @@ class StockNewsWindow(QDialog):
         self._ai_result_cache = ai_results
         self._render_items()
         relevant_count = sum(item.assessment.relevant for item in items)
+        self._count_label.setText(f"저장된 뉴스 {len(items)}건 · 증권 관련 {relevant_count}건")
         self._status_label.setText(f"저장된 뉴스 {len(items)}건 · 증권 관련 {relevant_count}건")
         if not recently_checked:
             self._start_news_search(
@@ -1228,8 +1245,31 @@ class StockNewsWindow(QDialog):
 
     def _on_settings_saved(self) -> None:
         self._news_filter = self._config.load_filter()
+        ai = self._config.load_ai()
+        self._auto_ai_toggle.blockSignals(True)
+        self._auto_ai_toggle.setChecked(ai.auto_analyze)
+        self._auto_ai_toggle.blockSignals(False)
         self._schedule_prepare()
         self.refresh(force=True)
+
+    def _toggle_auto_analysis(self, enabled: bool) -> None:
+        try:
+            ai = self._config.load_ai()
+            self._config.save(
+                self._config.load(), self._news_filter,
+                replace(ai, auto_analyze=enabled), self._config.load_official(),
+            )
+        except (OSError, ValueError) as error:
+            self._status_label.setText(f"AI 자동 분석 설정 저장 실패: {error}")
+            return
+        if enabled:
+            self._configure_recent_auto_candidates()
+            self._resume_auto_analysis()
+            self._status_label.setText("AI 자동 분석을 켰습니다.")
+        else:
+            self._auto_ai_identities.clear()
+            self._manual_ai_queue = False
+            self._status_label.setText("AI 자동 분석을 껐습니다.")
 
     def _clear_settings_dialog(self, dialog: NaverNewsSettingsDialog) -> None:
         if self._settings_dialog is dialog:
@@ -1242,7 +1282,9 @@ class StockNewsWindow(QDialog):
     def _apply_window_mode(self, mode: str, *, persist: bool = True) -> None:
         """같은 프로세스의 소유 창 또는 분리 프로세스 표시 방식을 저장한다."""
         if self._main_window is None:
-            mode = mode if mode in {"independent", "linked", "docked"} else "independent"
+            valid_modes = {"independent", "linked", "docked_right", "docked_left", "docked_top", "docked_bottom"}
+            mode = "docked_right" if mode == "docked" else mode
+            mode = mode if mode in valid_modes else "independent"
         else:
             mode = "attached" if mode == "attached" else "independent"
         geometry = self.saveGeometry()

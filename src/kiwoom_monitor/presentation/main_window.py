@@ -3410,13 +3410,16 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _news_window_mode() -> str:
         mode = str(QSettings("KiwoomMonitor", "StockNewsWindow").value("window_mode", "independent"))
-        return mode if mode in {"independent", "linked", "docked"} else "independent"
+        if mode == "docked":
+            return "docked_right"
+        valid = {"independent", "linked", "docked_right", "docked_left", "docked_top", "docked_bottom"}
+        return mode if mode in valid else "independent"
 
     def _sync_news_window(self) -> None:
         if self._news_process is None or self._news_process.poll() is not None:
             return
         mode = self._news_window_mode()
-        if mode in {"linked", "docked"}:
+        if mode == "linked" or mode.startswith("docked_"):
             self._send_news_command(action="sync", activate=False)
 
     def _finish_news_restore_sync(self) -> None:
@@ -5819,7 +5822,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "_window_geometry_save_timer"):
             self._window_geometry_save_timer.start()
-        if hasattr(self, "_news_dock_timer") and self._news_window_mode() == "docked":
+        if hasattr(self, "_news_dock_timer") and self._news_window_mode().startswith("docked_"):
             self._news_dock_timer.start()
         # 수동으로 열 폭을 조정한 뒤 30초 동안은 창을 어떻게 조절해도
         # 행 높이·열 너비를 모두 유지한다.
@@ -5834,7 +5837,7 @@ class MainWindow(QMainWindow):
         super().moveEvent(event)
         if hasattr(self, "_window_geometry_save_timer"):
             self._window_geometry_save_timer.start()
-        if hasattr(self, "_news_dock_timer") and self._news_window_mode() == "docked":
+        if hasattr(self, "_news_dock_timer") and self._news_window_mode().startswith("docked_"):
             self._news_dock_timer.start()
 
     def showEvent(self, event: QShowEvent) -> None:

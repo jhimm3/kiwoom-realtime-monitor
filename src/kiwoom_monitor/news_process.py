@@ -141,7 +141,7 @@ def main(arguments: list[str] | None = None) -> int:
         # 않으면서 현재 앱들 위의 일반 창 순서로 이동한다.
         _raise_hwnd_without_focus(int(window.winId()))
 
-    def dock_beside_main(geometry: object) -> None:
+    def dock_beside_main(geometry: object, mode: str) -> None:
         if not isinstance(geometry, list) or len(geometry) != 4:
             return
         try:
@@ -150,11 +150,19 @@ def main(arguments: list[str] | None = None) -> int:
             return
         screen = QApplication.screenAt(QPoint(main_x + main_width // 2, main_y + main_height // 2))
         available = screen.availableGeometry() if screen is not None else QApplication.primaryScreen().availableGeometry()
-        x = main_x + main_width
-        if x + window.width() > available.right() + 1:
-            x = main_x - window.width()
+        if mode == "docked_left":
+            x, y = main_x - window.width(), main_y
+        elif mode == "docked_top":
+            x, y = main_x, main_y - window.height()
+        elif mode == "docked_bottom":
+            x, y = main_x, main_y + main_height
+        else:
+            x, y = main_x + main_width, main_y
         x = max(available.left(), min(x, available.right() - window.width() + 1))
         y = max(available.top(), min(main_y, available.bottom() - window.height() + 1))
+        if mode in {"docked_top", "docked_bottom"}:
+            y = main_y - window.height() if mode == "docked_top" else main_y + main_height
+            y = max(available.top(), min(y, available.bottom() - window.height() + 1))
         window.move(x, y)
 
     def poll_command() -> None:
@@ -189,16 +197,16 @@ def main(arguments: list[str] | None = None) -> int:
                 restore_after_main = False
             return
         if action == "sync":
-            if mode == "docked":
-                dock_beside_main(document.get("main_geometry"))
-            if mode in {"linked", "docked"} and window.isVisible():
+            if mode.startswith("docked_") or mode == "docked":
+                dock_beside_main(document.get("main_geometry"), "docked_right" if mode == "docked" else mode)
+            if (mode == "linked" or mode.startswith("docked_") or mode == "docked") and window.isVisible():
                 raise_without_focus()
             return
         code, name = str(document.get("code", "")), str(document.get("name", "")).strip()
         if code and name:
             window.set_stock(code, name, activate=bool(document.get("activate", True)))
-            if mode == "docked":
-                dock_beside_main(document.get("main_geometry"))
+            if mode.startswith("docked_") or mode == "docked":
+                dock_beside_main(document.get("main_geometry"), "docked_right" if mode == "docked" else mode)
 
     command_timer = QTimer()
     command_timer.setInterval(80)
@@ -225,7 +233,7 @@ def main(arguments: list[str] | None = None) -> int:
         active = window.isVisible() and window.isActiveWindow()
         if active and not news_was_active:
             mode = str(window._window_mode.currentData() or "independent")
-            if mode in {"linked", "docked"}:
+            if mode == "linked" or mode.startswith("docked_") or mode == "docked":
                 # 부모를 먼저 올리고 뉴스창을 다시 위에 두어 사용자가 선택한
                 # 뉴스창의 키보드 포커스와 시각적 우선순위를 유지한다.
                 _raise_hwnd_without_focus(_find_visible_window(options.parent_pid))
