@@ -58,7 +58,9 @@ from kiwoom_monitor.infrastructure.persistence.news_ai_repository import (
 )
 from kiwoom_monitor.infrastructure.dart_disclosures import DartDisclosureClient
 from kiwoom_monitor.infrastructure.article_text import fetch_article_text
-from kiwoom_monitor.infrastructure.news_ai import DEFAULT_MODELS, MODEL_OPTIONS, AINewsAnalysis, analyze_article
+from kiwoom_monitor.infrastructure.news_ai import (
+    DEFAULT_MODELS, MODEL_OPTIONS, AINewsAnalysis, AIRequestUsage, analyze_articles,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -196,49 +198,54 @@ class NewsPrepareWorker(QThread):
 
 
 class AINewsWorker(QThread):
-    completed = Signal(object, str, str, str)
-    failed = Signal(str)
+    completed = Signal(object, object, str, str, object, int)
+    failed = Signal(str, bool, int)
 
-    def __init__(self, items: tuple[StockNewsItem, ...], stock_name: str, settings: NewsAISettings,
+    def __init__(self, groups: tuple[NewsEventGroup, ...], stock_name: str, settings: NewsAISettings,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._items, self._stock_name, self._settings = items, stock_name, settings
+        self._groups, self._stock_name, self._settings = groups, stock_name, settings
 
     def run(self) -> None:
+        api_attempted = False
+        article_count = 0
         try:
-            article_sections: list[str] = []
-            last_error: Exception | None = None
-            for index, item in enumerate(self._items, start=1):
-                body = ""
-                for url in dict.fromkeys((item.link, item.original_link)):
-                    if not url:
-                        continue
-                    try:
-                        body = fetch_article_text(url)
-                        break
-                    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
-                        last_error = error
-                if body:
-                    article_sections.append(
-                        f"[기사 {index}/{len(self._items)}: {item.title}]\n{body}"
-                    )
-                elif item.description:
-                    article_sections.append(
-                        f"[기사 {index}/{len(self._items)}: {item.title} · 검색 요약만 제공됨]\n{item.description}"
-                    )
-            if not article_sections:
-                raise ValueError(str(last_error or "기사 본문을 가져오지 못했습니다."))
-            combined_body = "\n\n".join(article_sections)
-            result = analyze_article(self._settings, self._stock_name, self._items[0].title, combined_body)
+            event_inputs: list[tuple[str, str]] = []
+            body_hashes: list[str] = []
+            for group in self._groups:
+                article_sections: list[str] = []
+                last_error: Exception | None = None
+                for index, item in enumerate(group.items, start=1):
+                    body = ""
+                    for url in dict.fromkeys((item.link, item.original_link)):
+                        if not url:
+                            continue
+                        try:
+                            body = fetch_article_text(url)
+                            break
+                        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+                            last_error = error
+                    if body:
+                        article_sections.append(f"[관련 기사 {index}/{len(group.items)}: {item.title}]\n{body}")
+                    elif item.description:
+                        article_sections.append(f"[관련 기사 {index}/{len(group.items)}: {item.title} · 검색 요약]\n{item.description}")
+                if not article_sections:
+                    raise ValueError(str(last_error or "기사 본문을 가져오지 못했습니다."))
+                combined_body = "\n\n".join(article_sections)
+                event_inputs.append((group.representative.title, combined_body))
+                body_hashes.append(hashlib.sha256(combined_body.encode("utf-8")).hexdigest())
+                article_count += len(group.items)
+            api_attempted = True
+            results, usage = analyze_articles(self._settings, self._stock_name, tuple(event_inputs))
             model = self._settings.model.strip() or DEFAULT_MODELS[self._settings.provider]
-            self.completed.emit(result, self._settings.provider, model,
-                                hashlib.sha256(combined_body.encode("utf-8")).hexdigest())
+            self.completed.emit(results, tuple(body_hashes), self._settings.provider, model, usage, article_count)
         except Exception as error:  # worker boundary: show a recoverable message in the UI
-            self.failed.emit(str(error))
+            self.failed.emit(str(error), api_attempted, article_count)
 
 
 class NaverNewsSettingsDialog(QDialog):
-    def __init__(self, config: LocalNaverNewsConfig, parent: QWidget | None = None) -> None:
+    def __init__(self, config: LocalNaverNewsConfig, parent: QWidget | None = None,
+                 *, database_path: Path | None = None) -> None:
         super().__init__(parent)
         self._config = config
         self._window_settings = QSettings("KiwoomMonitor", "NewsSettingsDialog")
@@ -298,21 +305,46 @@ class NaverNewsSettingsDialog(QDialog):
         self._ai_auto_recent_limit.setValue(ai.auto_recent_limit)
         self._ai_auto = QCheckBox("새 뉴스 자동 분석")
         self._ai_auto.setChecked(ai.auto_analyze)
+        self._ai_request_mode = QComboBox()
+        self._ai_request_mode.addItem("기사별 1건씩 요청", "single")
+        self._ai_request_mode.addItem("여러 사건을 한 요청으로 묶기", "batch")
+        self._ai_request_mode.setCurrentIndex(max(0, self._ai_request_mode.findData(ai.request_mode)))
+        self._ai_batch_size = QSpinBox()
+        self._ai_batch_size.setRange(2, 20)
+        self._ai_batch_size.setValue(ai.batch_size)
+        self._ai_request_mode.currentIndexChanged.connect(
+            lambda: self._ai_batch_size.setEnabled(self._ai_request_mode.currentData() == "batch")
+        )
+        self._ai_batch_size.setEnabled(ai.request_mode == "batch")
         ai_link = QPushButton("선택한 AI API 키 페이지 열기")
         ai_link.clicked.connect(self._open_ai_key_page)
         ai_guide = QLabel(
             "기사 본문을 읽고 요약·긍정/부정 가능성을 판정합니다. 기본은 수동 분석이며, "
-            "결과는 DB에 저장됩니다. 하루 최대 분석 건수를 0으로 두면 무제한입니다."
+            "결과와 실제 API 요청 횟수·토큰 사용량은 DB에 저장됩니다. 묶음 요청은 여러 사건을 "
+            "한 번 호출하므로 RPD를 절약합니다. 하루 최대 요청 건수를 0으로 두면 무제한입니다."
         )
         ai_guide.setWordWrap(True)
+        usage_text = "오늘 앱 기록: 아직 API 요청 통계를 확인할 수 없습니다."
+        if database_path is not None:
+            requests, input_tokens, output_tokens, total_tokens = NewsAIRepository(database_path).daily_usage()
+            usage_text = (
+                f"오늘 앱 기록: API 요청 {requests}회 · 입력 {input_tokens:,} · "
+                f"출력 {output_tokens:,} · 합계 {total_tokens:,} 토큰"
+            )
+        self._ai_usage = QLabel(usage_text)
+        self._ai_usage.setWordWrap(True)
+        self._ai_usage.setStyleSheet("color:#52606d;")
         ai_box = QGroupBox("AI 원문 분석")
         ai_layout = QFormLayout(ai_box)
         ai_layout.addRow(ai_guide)
+        ai_layout.addRow(self._ai_usage)
         ai_layout.addRow("공급자", self._ai_provider)
         ai_layout.addRow("API 키", self._ai_key)
         ai_layout.addRow("모델", self._ai_model)
-        ai_layout.addRow("하루 최대 분석 건수", self._ai_limit)
+        ai_layout.addRow("하루 최대 API 요청 건수", self._ai_limit)
         ai_layout.addRow("종목당 최신 자동 분석 건수", self._ai_auto_recent_limit)
+        ai_layout.addRow("API 요청 방식", self._ai_request_mode)
+        ai_layout.addRow("묶음당 최대 사건 수", self._ai_batch_size)
         ai_layout.addRow(self._ai_auto)
         ai_layout.addRow(ai_link)
 
@@ -465,7 +497,8 @@ class NaverNewsSettingsDialog(QDialog):
             str(self._outlook_color_buttons["mixed"].property("selectedColor")),
             str(self._outlook_color_buttons["neutral"].property("selectedColor")),
         ), NewsAISettings(ai_provider, self._ai_key.text().strip(), str(self._ai_model.currentData() or ""),
-                          self._ai_limit.value(), self._ai_auto_recent_limit.value(), self._ai_auto.isChecked()),
+                          self._ai_limit.value(), self._ai_auto_recent_limit.value(), self._ai_auto.isChecked(),
+                          str(self._ai_request_mode.currentData()), self._ai_batch_size.value()),
            OfficialNewsSettings(self._dart_key.text().strip(), self._dart_enabled.isChecked()))
         self.accept()
 
@@ -516,9 +549,11 @@ class StockNewsWindow(QDialog):
         self._settings_dialog: NaverNewsSettingsDialog | None = None
         self._ai_worker: AINewsWorker | None = None
         self._ai_item: StockNewsItem | None = None
+        self._ai_groups: tuple[NewsEventGroup, ...] = ()
         self._ai_stock_code = ""
         self._ai_continue = False
         self._ai_automatic_run = False
+        self._manual_ai_queue = False
         self._auto_ai_identities: set[str] = set()
         self._pending_refresh = False
         self._auto_refresh = QTimer(self)
@@ -601,11 +636,14 @@ class StockNewsWindow(QDialog):
         self._ai_button = QPushButton("AI 원문 분석")
         self._ai_button.setEnabled(False)
         self._ai_button.clicked.connect(lambda _checked=False: self._analyze_selected(automatic=False))
+        self._continue_ai_button = QPushButton("선택 위치부터 미분석 이어서 분석")
+        self._continue_ai_button.setToolTip("선택한 행부터 과거 방향으로 미분석 사건을 설정 건수만큼 분석합니다.")
+        self._continue_ai_button.clicked.connect(self._analyze_unanalyzed_from_selection)
         detail_panel = QWidget()
         detail_layout = QVBoxLayout(detail_panel)
         detail_layout.setContentsMargins(0, 0, 0, 0)
         detail_layout.addWidget(self._detail, 1)
-        detail_buttons = QHBoxLayout(); detail_buttons.addWidget(self._ai_button); detail_buttons.addStretch(); detail_buttons.addWidget(self._open_button)
+        detail_buttons = QHBoxLayout(); detail_buttons.addWidget(self._ai_button); detail_buttons.addWidget(self._continue_ai_button); detail_buttons.addStretch(); detail_buttons.addWidget(self._open_button)
         detail_layout.addLayout(detail_buttons)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -781,12 +819,14 @@ class StockNewsWindow(QDialog):
             return
         if not ai.auto_analyze:
             return
-        latest_groups = self._visible_groups[:ai.auto_recent_limit]
-        self._auto_ai_identities = {
-            news_identity(group.representative) for group in latest_groups
+        # 중간에 다른 종목/이전 실행에서 분석된 기사가 있어도 거기서 멈추지
+        # 않고, 전체 목록에서 실제 미분석 사건을 최신순 N개 찾는다.
+        candidates = (
+            news_identity(group.representative) for group in self._visible_groups
             if (group.representative.link or group.representative.original_link)
             and news_identity(group.representative) not in self._ai_result_cache
-        }
+        )
+        self._auto_ai_identities = set(tuple(candidates)[:ai.auto_recent_limit])
 
     def _on_failed(self, stock_code: str, stock_name: str, message: str) -> None:
         if stock_code == self._stock_code:
@@ -985,6 +1025,9 @@ class StockNewsWindow(QDialog):
         self._start_ai_analysis(self._visible_groups[row], automatic=automatic)
 
     def _start_ai_analysis(self, group: NewsEventGroup, *, automatic: bool) -> None:
+        self._start_ai_groups((group,), automatic=automatic)
+
+    def _start_ai_groups(self, groups: tuple[NewsEventGroup, ...], *, automatic: bool) -> None:
         if self._ai_worker is not None:
             return
         try:
@@ -994,19 +1037,50 @@ class StockNewsWindow(QDialog):
         used = self._ai_repository.daily_count()
         if settings.daily_limit > 0 and used >= settings.daily_limit:
             QMessageBox.information(self, "AI 분석", f"오늘 설정한 상한 {settings.daily_limit}건을 모두 사용했습니다."); return
-        self._ai_item = group.representative
+        if not groups:
+            return
+        self._ai_groups = groups
+        self._ai_item = groups[0].representative
         self._ai_stock_code = self._stock_code
         self._ai_continue = False
         self._ai_automatic_run = automatic
-        self._ai_worker = AINewsWorker(group.items, self._stock_name, settings, self)
+        self._ai_worker = AINewsWorker(groups, self._stock_name, settings, self)
         self._ai_worker.completed.connect(self._on_ai_completed)
         self._ai_worker.failed.connect(self._on_ai_failed)
         self._ai_worker.finished.connect(self._on_ai_finished)
         self._ai_button.setEnabled(False)
         self._ai_button.setText("AI 분석 중…")
         progress = f"{used + 1}/{settings.daily_limit}" if settings.daily_limit > 0 else f"{used + 1}/무제한"
-        self._status_label.setText(f"AI가 사건 묶음 {len(group.items)}건을 읽고 있습니다… ({progress})")
+        related_count = sum(len(group.items) for group in groups)
+        self._status_label.setText(
+            f"AI 요청 1회로 사건 {len(groups)}개·관련 기사 {related_count}건을 읽고 있습니다… ({progress})"
+        )
         self._ai_worker.start()
+
+    def _analyze_unanalyzed_from_selection(self) -> None:
+        if self._ai_worker is not None:
+            return
+        try:
+            settings = self._config.load_ai()
+        except (OSError, ValueError) as error:
+            self._status_label.setText(f"AI 설정을 읽지 못했습니다: {error}")
+            return
+        start = max(0, self._table.currentRow())
+        candidates = tuple(
+            group for group in self._visible_groups[start:]
+            if news_identity(group.representative) not in self._ai_result_cache
+            and (group.representative.link or group.representative.original_link)
+        )[:settings.auto_recent_limit]
+        if not candidates:
+            self._status_label.setText("선택 위치 이후에 미분석 뉴스가 없습니다.")
+            return
+        self._manual_ai_queue = True
+        if settings.request_mode == "single":
+            self._auto_ai_identities.update(news_identity(group.representative) for group in candidates[1:])
+            self._start_ai_groups((candidates[0],), automatic=True)
+        else:
+            self._auto_ai_identities.update(news_identity(group.representative) for group in candidates[settings.batch_size:])
+            self._start_ai_groups(candidates[:settings.batch_size], automatic=True)
 
     def _auto_analyze_next(self) -> None:
         if (self._worker is not None and self._worker.isRunning()) \
@@ -1016,52 +1090,84 @@ class StockNewsWindow(QDialog):
             settings = self._config.load_ai()
         except (OSError, ValueError):
             return
-        if not settings.auto_analyze or settings.provider == "none" or not settings.api_key:
+        if (not settings.auto_analyze and not self._manual_ai_queue) or settings.provider == "none" or not settings.api_key:
             return
         if settings.daily_limit > 0 and self._ai_repository.daily_count() >= settings.daily_limit:
             return
+        candidates: list[NewsEventGroup] = []
         for row, item in enumerate(self._visible_items):
             identity = news_identity(item)
             if identity not in self._auto_ai_identities:
                 continue
             if identity not in self._ai_result_cache and (item.link or item.original_link):
-                self._auto_ai_identities.discard(identity)
-                self._start_ai_analysis(self._visible_groups[row], automatic=True)
-                return
+                candidates.append(self._visible_groups[row])
+                if settings.request_mode == "single" or len(candidates) >= settings.batch_size:
+                    break
+        if candidates:
+            for group in candidates:
+                self._auto_ai_identities.discard(news_identity(group.representative))
+            self._start_ai_groups(tuple(candidates), automatic=True)
+            return
         self._auto_ai_identities.clear()
+        self._manual_ai_queue = False
 
     def _resume_auto_analysis(self) -> None:
         """후보 생성·뉴스 조회·이전 AI 종료 순서와 무관하게 대기열을 재확인한다."""
         if self._auto_ai_identities:
             QTimer.singleShot(0, self._auto_analyze_next)
 
-    def _on_ai_completed(self, result: object, provider: str, model: str, body_hash: str) -> None:
-        if isinstance(result, AINewsAnalysis) and self._ai_item is not None:
-            self._ai_repository.save(self._ai_stock_code, self._ai_item, provider, model, body_hash, result)
+    def _on_ai_completed(self, results: object, body_hashes: object, provider: str, model: str,
+                         usage: object, article_count: int) -> None:
+        if not isinstance(results, tuple) or not isinstance(body_hashes, tuple) or len(results) != len(self._ai_groups):
+            return
+        request_usage = usage if isinstance(usage, AIRequestUsage) else AIRequestUsage()
+        request_mode = "batch" if len(self._ai_groups) > 1 else "single"
+        self._ai_repository.log_request(provider, model, request_mode, len(self._ai_groups), article_count, request_usage)
+        for group, body_hash, result in zip(self._ai_groups, body_hashes, results, strict=True):
+            if not isinstance(result, AINewsAnalysis):
+                continue
+            item = group.representative
+            self._ai_repository.save(self._ai_stock_code, item, provider, model, str(body_hash), result)
             if self._ai_stock_code == self._stock_code:
-                self._ai_result_cache[news_identity(self._ai_item)] = StoredAINewsAnalysis(
+                self._ai_result_cache[news_identity(item)] = StoredAINewsAnalysis(
                     result, provider, model, datetime.now(UTC),
                 )
-            self._status_label.setText("AI 원문 분석을 DB에 저장했습니다.")
-            self._ai_continue = self._ai_automatic_run and bool(self._auto_ai_identities)
-            if self._ai_stock_code == self._stock_code:
-                analyzed_identity = news_identity(self._ai_item)
+        requests, input_tokens, output_tokens, total_tokens = self._ai_repository.daily_usage()
+        self._status_label.setText(
+            f"AI 요청 1회로 사건 {len(self._ai_groups)}개 저장 · 오늘 요청 {requests}회 · "
+            f"이번 입력 {request_usage.input_tokens:,} TPM · 오늘 토큰 입력 {input_tokens:,}/출력 {output_tokens:,}/합계 {total_tokens:,}"
+        )
+        self._ai_continue = self._ai_automatic_run and bool(self._auto_ai_identities)
+        if self._ai_stock_code == self._stock_code:
+            for group in self._ai_groups:
+                analyzed_identity = news_identity(group.representative)
                 row = next((index for index, item in enumerate(self._visible_items)
                             if news_identity(item) == analyzed_identity), -1)
-                if 0 <= row < len(self._visible_items):
-                    category, outlook, _reason, source = self._effective_judgment(self._visible_items[row])
-                    category_cell = self._table.item(row, 2)
-                    if category_cell is not None:
-                        category_cell.setText(category)
-                    cell = self._table.item(row, 3)
-                    if cell is not None:
-                        cell.setText(f"{outlook}  ᴬᴵ" if source.startswith("AI 원문 분석") else outlook)
-                        cell.setForeground(_outlook_color(outlook, self._news_filter))
+                if not (0 <= row < len(self._visible_items)):
+                    continue
+                category, outlook, _reason, source = self._effective_judgment(self._visible_items[row])
+                category_cell = self._table.item(row, 2)
+                if category_cell is not None:
+                    category_cell.setText(category)
+                cell = self._table.item(row, 3)
+                if cell is not None:
+                    cell.setText(f"{outlook}  ᴬᴵ" if source.startswith("AI 원문 분석") else outlook)
+                    cell.setForeground(_outlook_color(outlook, self._news_filter))
                 if row == self._table.currentRow():
                     self._show_detail(row)
                     self._detail.verticalScrollBar().setValue(0)
 
-    def _on_ai_failed(self, message: str) -> None:
+    def _on_ai_failed(self, message: str, api_attempted: bool = False, article_count: int = 0) -> None:
+        if api_attempted:
+            try:
+                settings = self._config.load_ai()
+                model = settings.model.strip() or DEFAULT_MODELS.get(settings.provider, "")
+                self._ai_repository.log_request(
+                    settings.provider, model, "batch" if len(self._ai_groups) > 1 else "single",
+                    len(self._ai_groups), article_count, AIRequestUsage(),
+                )
+            except (OSError, ValueError, sqlite3.Error):
+                logger.warning("실패한 AI 요청 통계를 저장하지 못했습니다.", exc_info=True)
         self._ai_continue = self._ai_automatic_run and bool(self._auto_ai_identities)
         if self._ai_continue:
             self._status_label.setText(f"AI 분석 실패 · 이 기사를 건너뛰고 다음 기사를 계속합니다: {message}")
@@ -1083,6 +1189,7 @@ class StockNewsWindow(QDialog):
         self._ai_button.setText("AI 원문 분석")
         self._ai_button.setEnabled(self._table.currentRow() >= 0)
         self._ai_automatic_run = False
+        self._ai_groups = ()
         # 이전 작업이 끝나기 직전 또는 끝난 직후 마지막 종목의 후보가
         # 만들어지는 두 경우 모두 여기서 다시 확인한다.
         self._resume_auto_analysis()
@@ -1104,7 +1211,7 @@ class StockNewsWindow(QDialog):
             self._settings_dialog.activateWindow()
             return
         try:
-            dialog = NaverNewsSettingsDialog(self._config, self)
+            dialog = NaverNewsSettingsDialog(self._config, self, database_path=self._database_path)
         except (OSError, ValueError):
             QMessageBox.warning(self, "뉴스 API 설정", "저장된 뉴스 API 설정을 읽지 못했습니다. 설정 파일을 다시 만들어 주세요.")
             return

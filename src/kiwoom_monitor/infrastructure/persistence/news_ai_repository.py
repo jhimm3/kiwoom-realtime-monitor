@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
-from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis
+from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis, AIRequestUsage
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,12 @@ class NewsAIRepository:
                 "summary TEXT NOT NULL, category TEXT NOT NULL DEFAULT '', outlook TEXT NOT NULL, confidence INTEGER NOT NULL, "
                 "reason TEXT NOT NULL, positive_evidence TEXT NOT NULL DEFAULT '[]', negative_evidence TEXT NOT NULL DEFAULT '[]', "
                 "body_hash TEXT NOT NULL DEFAULT '', analyzed_at TEXT NOT NULL, PRIMARY KEY(stock_code, identity))"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS news_ai_requests ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, requested_at TEXT NOT NULL, provider TEXT NOT NULL, "
+                "model TEXT NOT NULL, request_mode TEXT NOT NULL, event_count INTEGER NOT NULL, article_count INTEGER NOT NULL, "
+                "input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0)"
             )
             connection.commit()
         finally:
@@ -107,8 +113,34 @@ class NewsAIRepository:
         connection = sqlite3.connect(self._database_path)
         try:
             row = connection.execute(
-                "SELECT COUNT(*) FROM stock_news_ai WHERE substr(analyzed_at, 1, 10)=?", (today,)
+                "SELECT COUNT(*) FROM news_ai_requests WHERE substr(requested_at, 1, 10)=?", (today,)
             ).fetchone()
         finally:
             connection.close()
         return int(row[0]) if row else 0
+
+    def log_request(self, provider: str, model: str, request_mode: str, event_count: int,
+                    article_count: int, usage: AIRequestUsage) -> None:
+        connection = sqlite3.connect(self._database_path)
+        try:
+            connection.execute(
+                "INSERT INTO news_ai_requests(requested_at,provider,model,request_mode,event_count,article_count,input_tokens,output_tokens,total_tokens) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (datetime.now().astimezone().isoformat(), provider, model, request_mode, event_count, article_count,
+                 usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def daily_usage(self) -> tuple[int, int, int, int]:
+        today = datetime.now().astimezone().date().isoformat()
+        connection = sqlite3.connect(self._database_path)
+        try:
+            row = connection.execute(
+                "SELECT COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(total_tokens),0) "
+                "FROM news_ai_requests WHERE substr(requested_at,1,10)=?", (today,),
+            ).fetchone()
+        finally:
+            connection.close()
+        return tuple(map(int, row or (0, 0, 0, 0)))

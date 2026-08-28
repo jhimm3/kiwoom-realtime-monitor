@@ -166,11 +166,11 @@ class StockNewsWindowTests(unittest.TestCase):
             with patch.object(window._config, "load_ai", return_value=NewsAISettings("gemini", "key", "model", 0, 10, True)), \
                     patch.object(window._ai_repository, "daily_count", return_value=0), \
                     patch.object(window._ai_repository, "load", return_value=None), \
-                    patch.object(window, "_start_ai_analysis") as start:
+                    patch.object(window, "_start_ai_groups") as start:
                 window._auto_analyze_next()
 
             self.assertEqual(0, window._table.currentRow())
-            start.assert_called_once_with(groups[1], automatic=True)
+            start.assert_called_once_with((groups[1],), automatic=True)
             window.shutdown()
 
     def test_ai_finish_always_rechecks_last_stock_candidates(self) -> None:
@@ -208,6 +208,31 @@ class StockNewsWindowTests(unittest.TestCase):
                 window._configure_recent_auto_candidates()
 
             self.assertEqual({news_identity(second)}, window._auto_ai_identities)
+            window.shutdown()
+
+    def test_batch_mode_starts_multiple_events_in_one_worker_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            items = tuple(
+                StockNewsItem(
+                    f"기사 {index}", "내용", f"https://example.com/{index}", f"https://example.com/{index}",
+                    datetime.now(UTC), assess_stock_news("테스트기업", f"기사 {index}", "내용"),
+                ) for index in range(3)
+            )
+            groups = tuple(NewsEventGroup(item, (item,)) for item in items)
+            window._visible_items = items
+            window._visible_groups = groups
+            window._auto_ai_identities = {news_identity(item) for item in items}
+
+            with patch.object(
+                window._config, "load_ai",
+                return_value=NewsAISettings("gemini", "key", "model", 0, 3, True, "batch", 3),
+            ), patch.object(window, "_start_ai_groups") as start:
+                window._auto_analyze_next()
+
+            start.assert_called_once_with(groups, automatic=True)
+            self.assertFalse(window._auto_ai_identities)
             window.shutdown()
 
 

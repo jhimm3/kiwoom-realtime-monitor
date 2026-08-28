@@ -46,6 +46,8 @@ class NewsAISettings:
     daily_limit: int = 30
     auto_recent_limit: int = 10
     auto_analyze: bool = False
+    request_mode: str = "single"
+    batch_size: int = 10
 
 
 @dataclass(frozen=True)
@@ -103,11 +105,17 @@ class LocalNaverNewsConfig:
             auto_recent_limit = int(values.get("ai_auto_recent_limit", 10))
         except (TypeError, ValueError):
             auto_recent_limit = 10
+        try:
+            batch_size = int(values.get("ai_batch_size", 10))
+        except (TypeError, ValueError):
+            batch_size = 10
         return NewsAISettings(
             str(values.get("ai_provider", "none")), str(values.get("ai_api_key", "")),
             str(values.get("ai_model", "")), max(0, min(1_000_000, daily_limit)),
             max(1, min(1000, auto_recent_limit)),
             bool(values.get("ai_auto_analyze", False)),
+            str(values.get("ai_request_mode", "single")) if values.get("ai_request_mode") in {"single", "batch"} else "single",
+            max(2, min(20, batch_size)),
         )
 
     @property
@@ -156,6 +164,8 @@ class LocalNaverNewsConfig:
             "ai_daily_limit": current_ai.daily_limit,
             "ai_auto_recent_limit": current_ai.auto_recent_limit,
             "ai_auto_analyze": current_ai.auto_analyze,
+            "ai_request_mode": current_ai.request_mode,
+            "ai_batch_size": current_ai.batch_size,
             "dart_api_key": current_official.dart_api_key,
             "dart_enabled": current_official.dart_enabled,
         }
