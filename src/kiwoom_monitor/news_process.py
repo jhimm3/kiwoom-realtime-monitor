@@ -72,8 +72,10 @@ def _raise_hwnd_without_focus(hwnd: int) -> None:
     )
     set_window_pos.restype = wintypes.BOOL
     flags = 0x0001 | 0x0002 | 0x0010 | 0x0200  # NOSIZE|NOMOVE|NOACTIVATE|NOOWNERZORDER
-    set_window_pos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0, flags)
-    set_window_pos(hwnd, wintypes.HWND(-2), 0, 0, 0, 0, flags)
+    # TOPMOST→NOTOPMOST 전환은 다른 프로그램까지 전체 Z 순서를 다시
+    # 계산하게 해 Chrome·Codex 창이 순간적으로 사라졌다 나타날 수 있다.
+    # 뉴스창 한 개만 일반 최상단으로 이동하고 키보드 포커스는 유지한다.
+    set_window_pos(hwnd, wintypes.HWND(0), 0, 0, 0, 0, flags)  # HWND_TOP
 
 
 def _parent_is_alive(process_id: int) -> bool:
