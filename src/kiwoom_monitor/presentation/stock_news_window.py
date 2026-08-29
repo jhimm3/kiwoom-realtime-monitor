@@ -549,6 +549,11 @@ class NaverNewsSettingsDialog(QDialog):
 class StockNewsWindow(QDialog):
     CHECK_INTERVAL_SECONDS = 180.0
     AUTO_REFRESH_MS = 180_000
+    STATUS_NOTICE = (
+        "기본 판단은 제목·요약 규칙이고, AI 분석은 가져올 수 있는 기사 원문을 읽습니다. "
+        "모두 투자 판단을 대신하지 않으며, 원문은 기본 브라우저에서 엽니다."
+    )
+    STATUS_RESTORE_MS = 7000
 
     def __init__(self, config_path: Path, database_path: Path, parent: QWidget | None = None) -> None:
         # 부모가 있는 최상위 창은 Windows에서 '소유 창'이 되어 부모보다 항상
@@ -602,8 +607,13 @@ class StockNewsWindow(QDialog):
         self._stock_label.setStyleSheet("font-size: 17px; font-weight: 700;")
         self._count_label = QLabel("")
         self._count_label.setStyleSheet("color: #475467;")
-        self._status_label = QLabel("대기")
-        self._status_label.setStyleSheet("color: #667085;")
+        self._status_label = QLabel(self.STATUS_NOTICE)
+        self._status_label.setWordWrap(True)
+        self._status_label.setStyleSheet("color: #667085; padding: 4px;")
+        self._status_restore_timer = QTimer(self)
+        self._status_restore_timer.setSingleShot(True)
+        self._status_restore_timer.setInterval(self.STATUS_RESTORE_MS)
+        self._status_restore_timer.timeout.connect(self._restore_status_notice)
         self._auto_ai_toggle = QCheckBox("AI 자동 분석")
         try:
             self._auto_ai_toggle.setChecked(self._config.load_ai().auto_analyze)
@@ -703,15 +713,11 @@ class StockNewsWindow(QDialog):
         splitter.addWidget(detail_panel)
         splitter.setSizes((390, 210))
 
-        notice = QLabel("기본 판단은 제목·요약 규칙이고, AI 분석은 가져올 수 있는 기사 원문을 읽습니다. 모두 투자 판단을 대신하지 않으며, 원문은 기본 브라우저에서 엽니다.")
-        notice.setWordWrap(True)
-        notice.setStyleSheet("color: #667085; padding: 4px;")
         layout = QVBoxLayout(self)
         layout.addLayout(top)
         layout.addLayout(self._shortcut_layout)
-        layout.addWidget(self._status_label)
         layout.addWidget(splitter, 1)
-        layout.addWidget(notice)
+        layout.addWidget(self._status_label)
         self._apply_window_mode(str(self._window_mode.currentData()), persist=False)
 
     def set_stock(self, code: str, name: str, *, activate: bool = True) -> None:
@@ -772,8 +778,8 @@ class StockNewsWindow(QDialog):
         self._render_items()
         relevant_count = sum(item.assessment.relevant for item in items)
         self._count_label.setText(f"저장된 뉴스 {len(items)}건 · 증권 관련 {relevant_count}건")
-        # 건수는 전용 줄에 계속 표시하므로 AI·조회 상태 줄에는 중복하지 않는다.
-        self._status_label.clear()
+        # 진행 결과를 잠시 보여준 뒤 맨 아래 기본 안내로 돌아간다.
+        self._schedule_status_notice()
         if not recently_checked:
             self._start_news_search(
                 last_naver_check if isinstance(last_naver_check, datetime) else None,
@@ -790,6 +796,7 @@ class StockNewsWindow(QDialog):
     def _on_prepare_failed(self, request_id: int, stock_code: str, message: str) -> None:
         if request_id == self._prepare_request_id and stock_code == self._stock_code:
             self._status_label.setText(f"뉴스 준비 실패: {message}")
+            self._schedule_status_notice()
 
     def _on_prepare_finished(self) -> None:
         worker = self._prepare_worker
@@ -887,6 +894,7 @@ class StockNewsWindow(QDialog):
         if stock_code == self._stock_code:
             suffix = " · 저장된 뉴스를 표시합니다." if self._items else ""
             self._status_label.setText(message + suffix)
+            self._schedule_status_notice()
 
     def _on_finished(self) -> None:
         worker = self._worker
@@ -1105,6 +1113,7 @@ class StockNewsWindow(QDialog):
         self._ai_worker.finished.connect(self._on_ai_finished)
         self._ai_button.setEnabled(False)
         self._ai_button.setText("AI 분석 중…")
+        self._status_restore_timer.stop()
         progress = f"{used + 1}/{settings.daily_limit}" if settings.daily_limit > 0 else f"{used + 1}/무제한"
         related_count = sum(len(group.items) for group in groups)
         self._status_label.setText(
@@ -1248,6 +1257,19 @@ class StockNewsWindow(QDialog):
         # 이전 작업이 끝나기 직전 또는 끝난 직후 마지막 종목의 후보가
         # 만들어지는 두 경우 모두 여기서 다시 확인한다.
         self._resume_auto_analysis()
+        self._schedule_status_notice()
+
+    def _schedule_status_notice(self) -> None:
+        self._status_restore_timer.start()
+
+    def _restore_status_notice(self) -> None:
+        news_running = self._worker is not None and self._worker.isRunning()
+        prepare_running = self._prepare_worker is not None and self._prepare_worker.isRunning()
+        if news_running or prepare_running or self._ai_worker is not None or self._auto_ai_identities:
+            self._status_restore_timer.start()
+            return
+        self._status_label.setText(self.STATUS_NOTICE)
+        self._status_label.setToolTip("")
 
     def _open_selected(self) -> None:
         self._open_item(self._table.currentRow())
