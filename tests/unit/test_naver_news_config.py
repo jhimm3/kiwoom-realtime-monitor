@@ -17,11 +17,17 @@ class NaverNewsConfigTests(unittest.TestCase):
 
             self.assertEqual(shortcuts[:5], config.load_shortcuts())
 
-    def test_kind_is_the_default_shortcut(self) -> None:
+    def test_default_shortcuts_include_kind_and_ipo_calendar(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = LocalNaverNewsConfig(Path(directory) / "naver_news.dat")
 
-            self.assertEqual((("KIND", "https://kind.krx.co.kr/"),), config.load_shortcuts())
+            self.assertEqual(
+                (
+                    ("KIND", "https://kind.krx.co.kr/"),
+                    ("공모주 일정", "https://www.38.co.kr/html/fund/index.htm?o=nw"),
+                ),
+                config.load_shortcuts(),
+            )
 
 
 if __name__ == "__main__":

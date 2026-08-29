@@ -132,7 +132,10 @@ class LocalNaverNewsConfig:
         values = self._load_values()
         raw = values.get("news_shortcuts")
         if not isinstance(raw, list):
-            return (("KIND", "https://kind.krx.co.kr/"),)
+            return (
+                ("KIND", "https://kind.krx.co.kr/"),
+                ("공모주 일정", "https://www.38.co.kr/html/fund/index.htm?o=nw"),
+            )
         shortcuts: list[tuple[str, str]] = []
         for item in raw[:5]:
             if not isinstance(item, dict):
