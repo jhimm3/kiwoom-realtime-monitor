@@ -117,7 +117,7 @@ def selected_high_cycle_periods(value: str) -> tuple[str, ...]:
     periods = tuple(period for period in HIGH_PERIODS if period in selected)
     return periods or HIGH_PERIODS
 
-APP_VERSION = "1.1.18"
+APP_VERSION = "1.1.19"
 APP_DISPLAY_NAME = "키움 실시간 모니터" if getattr(sys, "frozen", False) else "키움 실시간 모니터 (테스트)"
 APP_COPYRIGHT = "Copyright 2026 크니. All rights reserved."
 INVESTMENT_NOTICE = "본 앱은 투자 자문이 아니며 시세 지연·오류가 있을 수 있습니다."

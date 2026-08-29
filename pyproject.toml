@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kiwoom-realtime-monitor"
-version = "1.1.18"
+version = "1.1.19"
 description = "키움 REST API 기반 실시간 종목 모니터"
 requires-python = ">=3.13"
 dependencies = [

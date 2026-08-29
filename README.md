@@ -4,12 +4,13 @@
 
 ## 현재 버전
 
-- **1.1.18**
-- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.18)
+- **1.1.19**
+- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.19)
 - [소개 페이지](docs/index.html) · [개인정보처리방침](docs/privacy.html)
 
 ## 변경 내역
 
+- [1.1.19](docs/RELEASE_NOTES_v1.1.19.md) — AI 단건·묶음 요청, 호출량 추적, 뉴스창 배치·복원과 뉴스 설정 백업 개선
 - [1.1.18](docs/RELEASE_NOTES_v1.1.18.md) — 뉴스 전용 프로세스·DB 분리, AI 캐시 백업, 빠른 종목 전환 및 창 연동 안정화
 - [1.1.17](docs/RELEASE_NOTES_v1.1.17.md) — 네이버 뉴스·선택형 DART 공시, 사건 묶음과 사용자 API 기반 AI 원문 분석
 - [1.1.16](docs/RELEASE_NOTES_v1.1.16.md) — KRX·NXT 실시간 거래대금 안정화, 순위표 흔들림 완화, 메인 창 위치·크기 복원
@@ -29,6 +30,7 @@
 ## 개발 문서
 
 - [AI 인수인계 개발실행서 v3.3](docs/AI_인수인계_개발실행서_v3.3.md) — 현재 구조·설정·API·빌드·배포의 기준 문서
+- [API 발급 가이드](docs/API_발급_가이드.md) — 키움·네이버·DART·AI·Google Drive 자격 증명 준비 방법
 - [기술 명세서](docs/키움_실시간_모니터_기술명세서_v2.0.md)
 - [OCR 모델 직접 설치](docs/OCR_모델_직접_설치.md)
 
