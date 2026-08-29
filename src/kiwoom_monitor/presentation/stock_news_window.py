@@ -738,7 +738,8 @@ class StockNewsWindow(QDialog):
         self._render_items()
         relevant_count = sum(item.assessment.relevant for item in items)
         self._count_label.setText(f"저장된 뉴스 {len(items)}건 · 증권 관련 {relevant_count}건")
-        self._status_label.setText(f"저장된 뉴스 {len(items)}건 · 증권 관련 {relevant_count}건")
+        # 건수는 전용 줄에 계속 표시하므로 AI·조회 상태 줄에는 중복하지 않는다.
+        self._status_label.clear()
         if not recently_checked:
             self._start_news_search(
                 last_naver_check if isinstance(last_naver_check, datetime) else None,
