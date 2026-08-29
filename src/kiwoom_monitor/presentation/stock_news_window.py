@@ -654,7 +654,8 @@ class StockNewsWindow(QDialog):
         top.addWidget(settings)
 
         self._shortcut_layout = QHBoxLayout()
-        self._shortcut_layout.addStretch()
+        self._shortcut_layout.setContentsMargins(0, 0, 0, 0)
+        self._shortcut_layout.addWidget(self._count_label)
         self._rebuild_shortcuts()
 
         self._table = QTableWidget(0, 5)
@@ -708,7 +709,6 @@ class StockNewsWindow(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(top)
         layout.addLayout(self._shortcut_layout)
-        layout.addWidget(self._count_label)
         layout.addWidget(self._status_label)
         layout.addWidget(splitter, 1)
         layout.addWidget(notice)
@@ -1327,6 +1327,7 @@ class StockNewsWindow(QDialog):
             button.setToolTip(url)
             button.clicked.connect(lambda _checked=False, target=url: QDesktopServices.openUrl(QUrl(target)))
             self._shortcut_layout.addWidget(button)
+        self._shortcut_layout.addStretch()
 
     def _change_window_mode(self) -> None:
         self._apply_window_mode(str(self._window_mode.currentData()))
