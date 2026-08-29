@@ -1322,12 +1322,12 @@ class StockNewsWindow(QDialog):
             shortcuts = self._config.load_shortcuts()
         except (OSError, ValueError):
             shortcuts = ()
+        self._shortcut_layout.addStretch()
         for name, url in shortcuts:
             button = QPushButton(name)
             button.setToolTip(url)
             button.clicked.connect(lambda _checked=False, target=url: QDesktopServices.openUrl(QUrl(target)))
             self._shortcut_layout.addWidget(button)
-        self._shortcut_layout.addStretch()
 
     def _change_window_mode(self) -> None:
         self._apply_window_mode(str(self._window_mode.currentData()))
