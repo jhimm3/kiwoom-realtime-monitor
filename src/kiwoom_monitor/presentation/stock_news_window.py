@@ -263,6 +263,7 @@ class NaverNewsSettingsDialog(QDialog):
         news_filter = config.load_filter()
         ai = config.load_ai()
         official = config.load_official()
+        shortcuts = config.load_shortcuts()
         self._client_id = QLineEdit(credentials.client_id)
         self._client_secret = QLineEdit(credentials.client_secret)
         self._client_secret.setEchoMode(QLineEdit.EchoMode.Password)
@@ -288,6 +289,24 @@ class NaverNewsSettingsDialog(QDialog):
         dart_layout.addRow(self._dart_enabled)
         dart_layout.addRow("API 키", self._dart_key)
         dart_layout.addRow(dart_link)
+
+        shortcut_guide = QLabel("이름과 주소를 입력한 항목만 뉴스창에 표시됩니다. 최대 5개까지 만들 수 있습니다.")
+        shortcut_guide.setWordWrap(True)
+        shortcut_box = QGroupBox("뉴스창 바로가기")
+        shortcut_layout = QFormLayout(shortcut_box)
+        shortcut_layout.addRow(shortcut_guide)
+        self._shortcut_edits: list[tuple[QLineEdit, QLineEdit]] = []
+        for index in range(5):
+            name, url = shortcuts[index] if index < len(shortcuts) else ("", "")
+            name_edit = QLineEdit(name)
+            name_edit.setPlaceholderText("버튼 이름")
+            url_edit = QLineEdit(url)
+            url_edit.setPlaceholderText("https://...")
+            row = QHBoxLayout()
+            row.addWidget(name_edit, 1)
+            row.addWidget(url_edit, 3)
+            shortcut_layout.addRow(f"바로가기 {index + 1}", row)
+            self._shortcut_edits.append((name_edit, url_edit))
 
         self._ai_provider = QComboBox()
         self._ai_provider.addItem("사용 안 함", "none")
@@ -416,6 +435,7 @@ class NaverNewsSettingsDialog(QDialog):
         content_layout.setContentsMargins(4, 4, 4, 4)
         content_layout.addWidget(api_box)
         content_layout.addWidget(dart_box)
+        content_layout.addWidget(shortcut_box)
         content_layout.addWidget(ai_box)
         content_layout.addWidget(filter_box)
         content_layout.addWidget(provider_box)
@@ -493,6 +513,19 @@ class NaverNewsSettingsDialog(QDialog):
         if not visible_columns:
             QMessageBox.warning(self, "입력 확인", "뉴스표에는 한 개 이상의 열을 표시해야 합니다.")
             return
+        shortcuts: list[tuple[str, str]] = []
+        for name_edit, url_edit in self._shortcut_edits:
+            name, url = name_edit.text().strip(), url_edit.text().strip()
+            if not name and not url:
+                continue
+            if not name or not url:
+                QMessageBox.warning(self, "입력 확인", "바로가기는 이름과 주소를 모두 입력하거나 모두 비워야 합니다.")
+                return
+            parsed = QUrl(url)
+            if not parsed.isValid() or parsed.scheme().lower() not in {"http", "https"}:
+                QMessageBox.warning(self, "입력 확인", f"'{name}' 바로가기 주소는 http:// 또는 https://로 시작해야 합니다.")
+                return
+            shortcuts.append((name, url))
         self._config.save(credentials, NewsFilterSettings(
             self._ad_filter_enabled.isChecked(), words, providers, self._provider_filter_enabled.isChecked(),
             visible_columns,
@@ -503,7 +536,8 @@ class NaverNewsSettingsDialog(QDialog):
         ), NewsAISettings(ai_provider, self._ai_key.text().strip(), str(self._ai_model.currentData() or ""),
                           self._ai_limit.value(), self._ai_auto_recent_limit.value(), self._ai_auto.isChecked(),
                           str(self._ai_request_mode.currentData()), self._ai_batch_size.value()),
-           OfficialNewsSettings(self._dart_key.text().strip(), self._dart_enabled.isChecked()))
+           OfficialNewsSettings(self._dart_key.text().strip(), self._dart_enabled.isChecked()),
+           tuple(shortcuts))
         self.accept()
 
     def done(self, result: int) -> None:
@@ -610,19 +644,18 @@ class StockNewsWindow(QDialog):
         saved_window_mode_index = self._window_mode.findData(saved_window_mode)
         self._window_mode.setCurrentIndex(max(0, saved_window_mode_index))
         self._window_mode.currentIndexChanged.connect(self._change_window_mode)
-        kind = QPushButton("KIND")
-        kind.setToolTip("한국거래소 KIND 공시 페이지 열기")
-        kind.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://kind.krx.co.kr/")))
-
         top = QHBoxLayout()
         top.addWidget(self._stock_label)
         top.addStretch()
         top.addWidget(self._auto_ai_toggle)
         top.addWidget(self._show_low_relevance)
         top.addWidget(refresh)
-        top.addWidget(kind)
         top.addWidget(self._window_mode)
         top.addWidget(settings)
+
+        self._shortcut_layout = QHBoxLayout()
+        self._shortcut_layout.addStretch()
+        self._rebuild_shortcuts()
 
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(("시각", "제공처", "분류", "판단", "제목"))
@@ -674,6 +707,7 @@ class StockNewsWindow(QDialog):
         notice.setStyleSheet("color: #667085; padding: 4px;")
         layout = QVBoxLayout(self)
         layout.addLayout(top)
+        layout.addLayout(self._shortcut_layout)
         layout.addWidget(self._count_label)
         layout.addWidget(self._status_label)
         layout.addWidget(splitter, 1)
@@ -1250,6 +1284,7 @@ class StockNewsWindow(QDialog):
         self._auto_ai_toggle.blockSignals(True)
         self._auto_ai_toggle.setChecked(ai.auto_analyze)
         self._auto_ai_toggle.blockSignals(False)
+        self._rebuild_shortcuts()
         self._schedule_prepare()
         self.refresh(force=True)
 
@@ -1276,6 +1311,22 @@ class StockNewsWindow(QDialog):
         if self._settings_dialog is dialog:
             self._settings_dialog = None
         dialog.deleteLater()
+
+    def _rebuild_shortcuts(self) -> None:
+        while self._shortcut_layout.count() > 1:
+            item = self._shortcut_layout.takeAt(1)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        try:
+            shortcuts = self._config.load_shortcuts()
+        except (OSError, ValueError):
+            shortcuts = ()
+        for name, url in shortcuts:
+            button = QPushButton(name)
+            button.setToolTip(url)
+            button.clicked.connect(lambda _checked=False, target=url: QDesktopServices.openUrl(QUrl(target)))
+            self._shortcut_layout.addWidget(button)
 
     def _change_window_mode(self) -> None:
         self._apply_window_mode(str(self._window_mode.currentData()))

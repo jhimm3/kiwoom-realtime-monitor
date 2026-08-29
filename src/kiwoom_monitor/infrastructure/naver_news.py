@@ -128,6 +128,21 @@ class LocalNaverNewsConfig:
             str(values.get("dart_api_key", "")), bool(values.get("dart_enabled", False)),
         )
 
+    def load_shortcuts(self) -> tuple[tuple[str, str], ...]:
+        values = self._load_values()
+        raw = values.get("news_shortcuts")
+        if not isinstance(raw, list):
+            return (("KIND", "https://kind.krx.co.kr/"),)
+        shortcuts: list[tuple[str, str]] = []
+        for item in raw[:5]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            url = str(item.get("url", "")).strip()
+            if name and url:
+                shortcuts.append((name, url))
+        return tuple(shortcuts)
+
     def _load_values(self) -> dict[str, object]:
         if not self._path.exists():
             return {}
@@ -141,11 +156,13 @@ class LocalNaverNewsConfig:
     def save(
         self, credentials: NaverNewsCredentials, news_filter: NewsFilterSettings | None = None,
         ai: NewsAISettings | None = None, official: OfficialNewsSettings | None = None,
+        shortcuts: tuple[tuple[str, str], ...] | None = None,
     ) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         current_filter = news_filter or self.load_filter()
         current_ai = ai or self.load_ai()
         current_official = official or self.load_official()
+        current_shortcuts = self.load_shortcuts() if shortcuts is None else shortcuts[:5]
         values = {
             "client_id": credentials.client_id,
             "client_secret": credentials.client_secret,
@@ -168,6 +185,7 @@ class LocalNaverNewsConfig:
             "ai_batch_size": current_ai.batch_size,
             "dart_api_key": current_official.dart_api_key,
             "dart_enabled": current_official.dart_enabled,
+            "news_shortcuts": [{"name": name, "url": url} for name, url in current_shortcuts],
         }
         payload = json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         encrypted = base64.b64encode(_protect(payload)).decode("ascii")
