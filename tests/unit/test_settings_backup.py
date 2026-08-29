@@ -9,9 +9,62 @@ from pathlib import Path
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.settings_backup import SettingsBackupService
+from kiwoom_monitor.infrastructure.naver_news import (
+    LocalNaverNewsConfig,
+    NaverNewsCredentials,
+    NewsAISettings,
+    NewsFilterSettings,
+    OfficialNewsSettings,
+)
 
 
 class SettingsBackupServiceTest(unittest.TestCase):
+    def test_news_shortcuts_are_restored_without_copying_api_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database_path = root / "monitor.db"
+            Database(database_path).initialize()
+            config = LocalNaverNewsConfig(root / "naver_news.dat")
+            original = (("공시", "https://example.com/disclosure"), ("일정", "https://example.com/calendar"))
+            expected_filter = NewsFilterSettings(
+                False, ("광고어",), ("제외언론",), False,
+                ("time", "title"), "#112233", "#223344", "#334455", "#445566",
+            )
+            expected_ai = NewsAISettings("gemini", "ai-secret", "gemini-test", 77, 23, True, "batch", 7)
+            expected_official = OfficialNewsSettings("dart-secret", True)
+            config.save(
+                NaverNewsCredentials("client-id", "client-secret"),
+                expected_filter, expected_ai, expected_official, original,
+            )
+            backup_path = root / "settings.json"
+
+            SettingsBackupService(database_path).export_to(backup_path)
+            config.save(
+                NaverNewsCredentials("new-id", "new-secret"), NewsFilterSettings(),
+                NewsAISettings("openai", "new-ai-secret", "other-model"),
+                OfficialNewsSettings("new-dart-secret", False),
+                (("다른 링크", "https://other.example"),),
+            )
+            SettingsBackupService(database_path).import_from(backup_path)
+
+            self.assertEqual(original, config.load_shortcuts())
+            self.assertEqual(NaverNewsCredentials("new-id", "new-secret"), config.load())
+            self.assertEqual(expected_filter, config.load_filter())
+            restored_ai = config.load_ai()
+            self.assertEqual("new-ai-secret", restored_ai.api_key)
+            self.assertEqual(expected_ai.provider, restored_ai.provider)
+            self.assertEqual(expected_ai.model, restored_ai.model)
+            self.assertEqual(expected_ai.daily_limit, restored_ai.daily_limit)
+            self.assertEqual(expected_ai.auto_recent_limit, restored_ai.auto_recent_limit)
+            self.assertEqual(expected_ai.auto_analyze, restored_ai.auto_analyze)
+            self.assertEqual(expected_ai.request_mode, restored_ai.request_mode)
+            self.assertEqual(expected_ai.batch_size, restored_ai.batch_size)
+            self.assertEqual(OfficialNewsSettings("new-dart-secret", True), config.load_official())
+            exported = backup_path.read_text(encoding="utf-8")
+            self.assertNotIn("client-secret", exported)
+            self.assertNotIn("ai-secret", exported)
+            self.assertNotIn("dart-secret", exported)
+
     def test_export_then_import_restores_user_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "monitor.db"
