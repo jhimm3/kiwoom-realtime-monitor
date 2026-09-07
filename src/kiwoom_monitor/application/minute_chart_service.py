@@ -14,6 +14,7 @@ class RestClient(Protocol):
 
 class MinuteChartService:
     _MAX_INITIAL_BARS = 730
+    _MAX_TWO_DAY_BARS = 1_500
 
     def __init__(self, client: RestClient, *, include_nxt: bool = False) -> None:
         self._client = client
@@ -30,14 +31,45 @@ class MinuteChartService:
             return krx_bars
         return _combine_krx_nxt_bars(krx_bars, nxt_bars)
 
-    def _load_market(self, code: str, today: datetime) -> tuple[MinuteOhlcv, ...]:
+    def load_recent(self, code: str, today: datetime) -> tuple[MinuteOhlcv, ...]:
+        """연속조회 없이 첫 페이지만 받아 장중 완료 봉을 가볍게 확인한다."""
+        krx_bars = self._load_market_page(code, today)
+        if not self._include_nxt:
+            return krx_bars
+        try:
+            nxt_bars = self._load_market_page(f"{code}_NX", today)
+        except Exception:
+            return krx_bars
+        return _combine_krx_nxt_bars(krx_bars, nxt_bars)
+
+    def load_two_trading_days(self, code: str, today: datetime) -> tuple[MinuteOhlcv, ...]:
+        """선택 거래일과 그 직전 실제 거래일의 분봉을 충분히 가져온다."""
+        krx_bars = self._load_market(code, today, self._MAX_TWO_DAY_BARS)
+        if not self._include_nxt:
+            return _last_two_trading_days(krx_bars, today)
+        try:
+            nxt_bars = self._load_market(f"{code}_NX", today, self._MAX_TWO_DAY_BARS)
+        except Exception:
+            return _last_two_trading_days(krx_bars, today)
+        return _last_two_trading_days(_combine_krx_nxt_bars(krx_bars, nxt_bars, self._MAX_TWO_DAY_BARS), today)
+
+    def _load_market_page(self, code: str, today: datetime) -> tuple[MinuteOhlcv, ...]:
+        body = {"stk_cd": code, "tic_scope": "1", "upd_stkpc_tp": "1", "base_dt": today.strftime("%Y%m%d")}
+        response, _, _ = self._request_page(body)
+        bars = tuple(
+            bar for record in self._records(response) if isinstance(record, dict)
+            if (bar := self._to_bar(record, today)) is not None
+        )
+        return tuple(sorted({bar.minute: bar for bar in bars}.values(), key=lambda bar: bar.minute))
+
+    def _load_market(self, code: str, today: datetime, maximum: int | None = None) -> tuple[MinuteOhlcv, ...]:
+        maximum = maximum or self._MAX_INITIAL_BARS
         body = {"stk_cd": code, "tic_scope": "1", "upd_stkpc_tp": "1", "base_dt": today.strftime("%Y%m%d")}
         response, has_next, next_key = self._request_page(body)
         records = self._records(response)
-        # ka10080은 한 페이지에 약 390개만 돌려줄 수 있으므로, 시작 보완 시
-        # 연속조회 한 페이지를 더 받아 최대 730개의 최근 1분봉을 채운다.
-        if has_next and next_key:
-            next_response, _, _ = self._request_page(body, cont_yn="Y", next_key=next_key)
+        # ka10080은 한 페이지에 약 390개이므로 필요한 봉 수까지만 연속조회한다.
+        while has_next and next_key and len(records) < maximum:
+            next_response, has_next, next_key = self._request_page(body, cont_yn="Y", next_key=next_key)
             records.extend(self._records(next_response))
         by_minute = {
             bar.minute: bar
@@ -45,7 +77,7 @@ class MinuteChartService:
             if isinstance(record, dict)
             if (bar := self._to_bar(record, today)) is not None
         }
-        return tuple(sorted(by_minute.values(), key=lambda bar: bar.minute)[-self._MAX_INITIAL_BARS :])
+        return tuple(sorted(by_minute.values(), key=lambda bar: bar.minute)[-maximum:])
 
     def _request_page(self, body: dict[str, Any], *, cont_yn: str = "N", next_key: str = "") -> tuple[dict[str, Any], bool, str]:
         continuation = getattr(self._client, "request_with_continuation", None)
@@ -95,7 +127,7 @@ def _positive_int(value: object) -> int | None:
 
 
 def _combine_krx_nxt_bars(
-    krx_bars: tuple[MinuteOhlcv, ...], nxt_bars: tuple[MinuteOhlcv, ...]
+    krx_bars: tuple[MinuteOhlcv, ...], nxt_bars: tuple[MinuteOhlcv, ...], maximum: int | None = None,
 ) -> tuple[MinuteOhlcv, ...]:
     """동일 분의 KRX·NXT 거래대금을 합산한다."""
     by_minute: dict[datetime, MinuteOhlcv] = {bar.minute: bar for bar in krx_bars}
@@ -113,4 +145,11 @@ def _combine_krx_nxt_bars(
             volume=krx.volume + nxt.volume,
             trade_value_eok_override=krx.trade_value_eok + nxt.trade_value_eok,
         )
-    return tuple(sorted(by_minute.values(), key=lambda bar: bar.minute)[-MinuteChartService._MAX_INITIAL_BARS :])
+    limit = maximum or MinuteChartService._MAX_INITIAL_BARS
+    return tuple(sorted(by_minute.values(), key=lambda bar: bar.minute)[-limit:])
+
+
+def _last_two_trading_days(bars: tuple[MinuteOhlcv, ...], target: datetime) -> tuple[MinuteOhlcv, ...]:
+    available = sorted({bar.minute.date() for bar in bars if bar.minute.date() <= target.date()})
+    days = set(available[-2:])
+    return tuple(bar for bar in bars if bar.minute.date() in days)

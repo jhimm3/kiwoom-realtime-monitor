@@ -23,6 +23,9 @@ node_modules/
 .ruff_cache/
 .coverage
 htmlcov/
+tmp/
+scripts/extract_texty_lecture_pdfs.py
+scripts/ocr_lecture_pdfs.ps1
 
 # 패키징 산출물
 build/

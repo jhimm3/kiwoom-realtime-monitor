@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -70,6 +71,44 @@ class MainWindowTest(unittest.TestCase):
             self.assertEqual("250", database.settings.get("high_distance_period"))
             window.close()
 
+    def test_theme_header_groups_common_theme_and_sorts_group_by_change_rate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings, themes={"가": "AI", "나": "AI", "다": "바이오"})
+
+            class Stock:
+                new_high_periods = ()
+                current_price = None
+
+                def __init__(self, rank: int, code: str, name: str, change: str) -> None:
+                    self.rank, self.code, self.name, self.change_rate = rank, code, name, change
+
+            window._on_ranking_loaded((
+                Stock(1, "000001", "가", "+1.00"),
+                Stock(2, "000002", "나", "+3.00"),
+                Stock(3, "000003", "다", "+5.00"),
+            ))
+            window._toggle_table_header_mode(2)
+            self.assertEqual(["나", "가", "다"], [window._table.item(row, 1).text() for row in range(3)])
+            window._toggle_table_header_mode(2)
+            self.assertEqual(["가", "나", "다"], [window._table.item(row, 1).text() for row in range(3)])
+            window.close()
+
+    def test_top20_minute_rows_can_be_aggregated_to_five_minutes(self) -> None:
+        rows = [
+            (datetime(2026, 9, 8, 9, 1), 1.0, 2.0, 0.0),
+            (datetime(2026, 9, 8, 9, 4), 3.0, 4.0, 1.0),
+            (datetime(2026, 9, 8, 9, 5), 5.0, 6.0, 0.0),
+        ]
+        self.assertEqual(
+            [
+                (datetime(2026, 9, 8, 9, 0), 4.0, 6.0, 1.0),
+                (datetime(2026, 9, 8, 9, 5), 5.0, 6.0, 0.0),
+            ],
+            MainWindow._aggregate_top20_rows(rows, 5),
+        )
+
     def test_high_header_reenables_table_updates_after_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
@@ -126,9 +165,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
-            window._refresh_rankings()
-            window._ranking_worker.wait()
-            QApplication.processEvents()
+            window._on_ranking_loaded(FakeRankingLoader().load_top_stocks())
             item = window._table.item(0, 6)
             item.setData(window.TRADE_VALUE_ALERT_ROLE, True)
             window._near_high_codes.add("005930")

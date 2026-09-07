@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
@@ -10,6 +11,38 @@ from kiwoom_monitor.application.historical_high_service import HistoricalHighEvi
 
 
 class StockRepositoryTests(unittest.TestCase):
+    def test_blank_market_update_preserves_catalog_market(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            repository = StockRepository(database_path)
+            repository.upsert("005930", "삼성전자", "KOSPI")
+
+            repository.upsert("005930", "삼성전자", "")
+
+            self.assertEqual(repository.load_markets(("005930",)), {"005930": "KOSPI"})
+            self.assertFalse(repository.has_missing_markets(("005930",)))
+
+    def test_missing_market_is_detected_for_catalog_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            repository = StockRepository(database_path)
+            repository.upsert("005930", "삼성전자", "")
+
+            self.assertTrue(repository.has_missing_markets(("005930",)))
+
+    def test_intraday_high_is_persisted_and_never_lowered(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            repository = StockRepository(database_path)
+            repository.upsert("001210", "금호전기", "코스피")
+            day = date(2026, 8, 28)
+            repository.update_intraday_highs({"001210": 10_680}, day)
+            repository.update_intraday_highs({"001210": 9_500}, day)
+            self.assertEqual({"001210": 10_680}, repository.load_intraday_highs(("001210",), day))
+
     def test_matches_neontech_former_name_to_current_stock_code(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "monitor.sqlite3"

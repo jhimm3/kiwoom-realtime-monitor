@@ -224,20 +224,27 @@ class ThemeRepository:
         )
 
     def replace_for_stock(self, code: str, themes: tuple[str, ...]) -> None:
+        self.replace_many(((code, themes),))
+
+    def replace_many(self, changes: tuple[tuple[str, tuple[str, ...]], ...]) -> None:
+        """Apply an import as one transaction instead of reopening SQLite per stock."""
+        if not changes:
+            return
         palette = ("#DCE6F1", "#FFF2CC", "#E2F0D9", "#FCE4D6", "#E4DFEC")
         connection = self._connect()
         try:
             profile_id = self._profile_id(connection)
-            connection.execute("DELETE FROM profile_stock_themes WHERE profile_id=? AND stock_code=?", (profile_id, code))
-            seen: set[str] = set()
-            for raw_name in themes:
-                name = raw_name.strip()
-                if not name or name.casefold() in seen:
-                    continue
-                seen.add(name.casefold())
-                color = palette[sum(map(ord, name)) % len(palette)]
-                connection.execute("INSERT OR IGNORE INTO profile_themes(profile_id, theme_name, default_color) VALUES (?, ?, ?)", (profile_id, name, color))
-                connection.execute("INSERT INTO profile_stock_themes(profile_id, stock_code, theme_name) VALUES (?, ?, ?)", (profile_id, code, name))
+            for code, themes in changes:
+                connection.execute("DELETE FROM profile_stock_themes WHERE profile_id=? AND stock_code=?", (profile_id, code))
+                seen: set[str] = set()
+                for raw_name in themes:
+                    name = raw_name.strip()
+                    if not name or name.casefold() in seen:
+                        continue
+                    seen.add(name.casefold())
+                    color = palette[sum(map(ord, name)) % len(palette)]
+                    connection.execute("INSERT OR IGNORE INTO profile_themes(profile_id, theme_name, default_color) VALUES (?, ?, ?)", (profile_id, name, color))
+                    connection.execute("INSERT INTO profile_stock_themes(profile_id, stock_code, theme_name) VALUES (?, ?, ?)", (profile_id, code, name))
             connection.commit()
         finally:
             connection.close()

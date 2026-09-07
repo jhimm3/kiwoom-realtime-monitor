@@ -1,5 +1,6 @@
 from __future__ import annotations
 import sqlite3
+from datetime import date, timedelta
 from difflib import get_close_matches
 from pathlib import Path
 
@@ -38,7 +39,7 @@ class StockRepository:
         con = sqlite3.connect(self._path)
         try:
             self._remember_renames(con, ((code, name, market),))
-            con.execute("INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market", (code,name,market))
+            con.execute("INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=CASE WHEN excluded.market<>'' THEN excluded.market ELSE stocks.market END", (code,name,market))
             seed_known_stock_aliases(con)
             con.commit()
         finally:
@@ -51,7 +52,7 @@ class StockRepository:
             self._remember_renames(con, stocks)
             con.executemany(
                 "INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) "
-                "ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, updated_at=CURRENT_TIMESTAMP",
+                "ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=CASE WHEN excluded.market<>'' THEN excluded.market ELSE stocks.market END, updated_at=CURRENT_TIMESTAMP",
                 stocks,
             )
             seed_known_stock_aliases(con)
@@ -100,6 +101,33 @@ class StockRepository:
         return extract_known_stocks_and_unknown_fragments(
             name, tuple((str(code), str(stock_name)) for code, stock_name in rows)
         )
+
+    def load_markets(self, codes: tuple[str, ...]) -> dict[str, str]:
+        if not codes:
+            return {}
+        placeholders = ",".join("?" for _ in codes)
+        con = sqlite3.connect(self._path)
+        try:
+            rows = con.execute(
+                f"SELECT code,market FROM stocks WHERE code IN ({placeholders})", codes,
+            ).fetchall()
+        finally:
+            con.close()
+        return {str(code): str(market).strip().upper() for code, market in rows}
+
+    def has_missing_markets(self, codes: tuple[str, ...]) -> bool:
+        if not codes:
+            return False
+        placeholders = ",".join("?" for _ in codes)
+        con = sqlite3.connect(self._path)
+        try:
+            count = con.execute(
+                f"SELECT COUNT(*) FROM stocks WHERE code IN ({placeholders}) AND TRIM(market)=''",
+                codes,
+            ).fetchone()[0]
+        finally:
+            con.close()
+        return int(count) > 0
 
     def sync_kind_name_history(self, *, initial: bool) -> int:
         return KindNameHistorySync(self._path).sync(initial=initial)
@@ -308,6 +336,20 @@ class StockRepository:
             con.close()
         return {str(code): bool(enabled) for code, enabled in rows if enabled is not None}
 
+    def load_cached_nxt_enabled(self, codes: tuple[str, ...]) -> dict[str, bool]:
+        if not codes:
+            return {}
+        placeholders = ",".join("?" for _ in codes)
+        con = sqlite3.connect(self._path)
+        try:
+            rows = con.execute(
+                f"SELECT code,nxt_enabled FROM stocks WHERE code IN ({placeholders}) AND nxt_enabled IS NOT NULL",
+                codes,
+            ).fetchall()
+        finally:
+            con.close()
+        return {str(code): bool(enabled) for code, enabled in rows}
+
     def update_nxt_enabled(self, code: str, enabled: bool, today: str) -> None:
         con = sqlite3.connect(self._path)
         try:
@@ -347,6 +389,37 @@ class StockRepository:
                 "UPDATE stocks SET last_price=?, last_price_updated_at=CURRENT_TIMESTAMP WHERE code=?",
                 values,
             )
+            con.commit()
+        finally:
+            con.close()
+
+    def load_intraday_highs(self, codes: tuple[str, ...], trade_date: date) -> dict[str, int]:
+        if not codes:
+            return {}
+        placeholders = ",".join("?" for _ in codes)
+        con = sqlite3.connect(self._path)
+        try:
+            rows = con.execute(
+                f"SELECT stock_code, high_price FROM intraday_highs WHERE trade_date=? AND stock_code IN ({placeholders})",
+                (trade_date.isoformat(), *codes),
+            ).fetchall()
+        finally:
+            con.close()
+        return {str(code): int(price) for code, price in rows if int(price) > 0}
+
+    def update_intraday_highs(self, prices: dict[str, int], trade_date: date) -> None:
+        values = tuple((trade_date.isoformat(), code, int(price)) for code, price in prices.items() if code and int(price) > 0)
+        if not values:
+            return
+        con = sqlite3.connect(self._path)
+        try:
+            con.executemany(
+                "INSERT INTO intraday_highs(trade_date,stock_code,high_price) VALUES (?,?,?) "
+                "ON CONFLICT(trade_date,stock_code) DO UPDATE SET "
+                "high_price=MAX(intraday_highs.high_price,excluded.high_price),updated_at=CURRENT_TIMESTAMP",
+                values,
+            )
+            con.execute("DELETE FROM intraday_highs WHERE trade_date<?", ((trade_date - timedelta(days=35)).isoformat(),))
             con.commit()
         finally:
             con.close()

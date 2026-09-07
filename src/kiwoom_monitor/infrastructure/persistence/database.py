@@ -160,6 +160,40 @@ class Database:
                 PRIMARY KEY(trade_date, stock_code, minute)
             );
             CREATE INDEX IF NOT EXISTS idx_minute_bars_date_code ON minute_bars(trade_date, stock_code);
+            CREATE TABLE IF NOT EXISTS market_index_minute_bars (
+                trade_date TEXT NOT NULL, market TEXT NOT NULL, minute TEXT NOT NULL,
+                open_value REAL NOT NULL, high_value REAL NOT NULL,
+                low_value REAL NOT NULL, close_value REAL NOT NULL,
+                trade_value_eok REAL,
+                PRIMARY KEY(trade_date, market, minute)
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_index_bars_date_market
+                ON market_index_minute_bars(trade_date, market, minute);
+            CREATE TABLE IF NOT EXISTS top20_trade_value_index (
+                minute TEXT PRIMARY KEY,
+                trade_date TEXT NOT NULL,
+                trade_value_eok REAL NOT NULL,
+                stock_codes TEXT NOT NULL,
+                stock_count INTEGER NOT NULL,
+                capture_state TEXT NOT NULL DEFAULT 'realtime_complete',
+                kospi_trade_value_eok REAL NOT NULL DEFAULT 0,
+                kosdaq_trade_value_eok REAL NOT NULL DEFAULT 0,
+                unknown_trade_value_eok REAL NOT NULL DEFAULT 0,
+                kospi_stock_count INTEGER NOT NULL DEFAULT 0,
+                kosdaq_stock_count INTEGER NOT NULL DEFAULT 0,
+                unknown_stock_count INTEGER NOT NULL DEFAULT 0,
+                cohort_segments TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_top20_trade_value_index_date
+                ON top20_trade_value_index(trade_date, minute);
+            CREATE TABLE IF NOT EXISTS market_index_daily_bars (
+                trade_date TEXT NOT NULL, market TEXT NOT NULL,
+                open_value REAL NOT NULL, high_value REAL NOT NULL,
+                low_value REAL NOT NULL, close_value REAL NOT NULL,
+                volume INTEGER NOT NULL DEFAULT 0, trade_value_eok REAL,
+                PRIMARY KEY(trade_date, market)
+            );
             CREATE TABLE IF NOT EXISTS minute_history_sync_log (
                 trade_date TEXT NOT NULL,
                 stock_code TEXT NOT NULL,
@@ -180,6 +214,28 @@ class Database:
                 stock_code TEXT PRIMARY KEY,
                 synced_on TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS intraday_highs (
+                trade_date TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                high_price INTEGER NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(trade_date, stock_code)
+            );
+            CREATE INDEX IF NOT EXISTS idx_intraday_highs_date_code ON intraday_highs(trade_date, stock_code);
+            CREATE TABLE IF NOT EXISTS market_data_finalization_log (
+                trade_date TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                finalized_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(trade_date, stock_code)
+            );
+            CREATE TABLE IF NOT EXISTS market_data_unconfirmed_log (
+                trade_date TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                missing_parts TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(trade_date, stock_code)
+            );
             CREATE TABLE IF NOT EXISTS historical_high_evidence (
                 stock_code TEXT NOT NULL,
                 period TEXT NOT NULL,
@@ -196,6 +252,7 @@ class Database:
             self._initialize_theme_profiles(connection)
             self._add_daily_bar_columns(connection)
             self._add_minute_bar_columns(connection)
+            self._add_top20_index_columns(connection)
             connection.commit()
         finally:
             connection.close()
@@ -206,6 +263,21 @@ class Database:
         columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(minute_bars)")}
         if "trade_value_eok" not in columns:
             connection.execute("ALTER TABLE minute_bars ADD COLUMN trade_value_eok REAL")
+
+    @staticmethod
+    def _add_top20_index_columns(connection: sqlite3.Connection) -> None:
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(top20_trade_value_index)")}
+        for name, column_type in (
+            ("kospi_trade_value_eok", "REAL NOT NULL DEFAULT 0"),
+            ("kosdaq_trade_value_eok", "REAL NOT NULL DEFAULT 0"),
+            ("unknown_trade_value_eok", "REAL NOT NULL DEFAULT 0"),
+            ("kospi_stock_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("kosdaq_stock_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("unknown_stock_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("cohort_segments", "TEXT NOT NULL DEFAULT '[]'"),
+        ):
+            if name not in columns:
+                connection.execute(f"ALTER TABLE top20_trade_value_index ADD COLUMN {name} {column_type}")
 
     @staticmethod
     def _apply_v1(connection: sqlite3.Connection) -> None:
@@ -245,6 +317,9 @@ class Database:
         existing = {str(row[1]) for row in connection.execute("PRAGMA table_info(daily_bars)")}
         if "close_price" not in existing:
             connection.execute("ALTER TABLE daily_bars ADD COLUMN close_price INTEGER")
+        for column in ("open_price", "low_price", "volume"):
+            if column not in existing:
+                connection.execute(f"ALTER TABLE daily_bars ADD COLUMN {column} INTEGER")
 
     @staticmethod
     def _initialize_theme_profiles(connection: sqlite3.Connection) -> None:

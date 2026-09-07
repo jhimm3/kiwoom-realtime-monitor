@@ -62,3 +62,15 @@ class MinuteChartServiceTests(unittest.TestCase):
         self.assertEqual(1, len(bars))
         self.assertEqual(30, bars[0].volume)
         self.assertAlmostEqual(0.0000515, bars[0].trade_value_eok)
+
+    def test_two_day_chart_uses_previous_available_trading_day(self) -> None:
+        class TwoDayClient:
+            def request(self, _api_id: str, _path: str, _body: dict[str, object]) -> dict[str, object]:
+                return {"stk_min_pole_chart_qry": [
+                    {"cntr_tm": "20260831100000", "open_pric": "110", "high_pric": "120", "low_pric": "100", "cur_prc": "115", "trde_qty": "20"},
+                    {"cntr_tm": "20260828150000", "open_pric": "100", "high_pric": "110", "low_pric": "90", "cur_prc": "105", "trde_qty": "10"},
+                    {"cntr_tm": "20260827150000", "open_pric": "90", "high_pric": "100", "low_pric": "80", "cur_prc": "95", "trde_qty": "10"},
+                ]}
+
+        bars = MinuteChartService(TwoDayClient()).load_two_trading_days("005930", datetime(2026, 8, 31))
+        self.assertEqual(["2026-08-28", "2026-08-31"], sorted({bar.minute.date().isoformat() for bar in bars}))

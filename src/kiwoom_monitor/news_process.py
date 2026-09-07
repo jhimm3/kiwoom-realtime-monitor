@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QTimer
@@ -113,6 +114,7 @@ def main(arguments: list[str] | None = None) -> int:
     config_path = Path(options.config)
     database_path = Path(options.database)
     command_path = Path(options.command_file)
+    state_path = command_path.with_name("news_window_state.json")
     configure_logging(database_path.parent / "logs")
     initialize_news_database(database_path)
 
@@ -130,6 +132,23 @@ def main(arguments: list[str] | None = None) -> int:
     logger.info("뉴스 전용 프로세스 시작: parent=%s", options.parent_pid)
     last_request_id = -1
     restore_after_main = False
+    last_published_visibility: bool | None = None
+
+    def publish_visibility(*, force: bool = False) -> None:
+        nonlocal last_published_visibility
+        visible = window.isVisible() and not window.isMinimized()
+        if not force and visible == last_published_visibility:
+            return
+        temporary = state_path.with_suffix(".tmp")
+        try:
+            temporary.write_text(
+                json.dumps({"visible": visible, "pid": os.getpid(), "updated_at": time.time_ns()}),
+                encoding="utf-8",
+            )
+            temporary.replace(state_path)
+            last_published_visibility = visible
+        except OSError:
+            logger.debug("뉴스창 상태 파일 저장 실패", exc_info=True)
 
     def raise_without_focus() -> None:
         """Windows 포커스는 메인창에 둔 채 뉴스창만 같은 Z 순서로 올린다."""
@@ -183,12 +202,14 @@ def main(arguments: list[str] | None = None) -> int:
         if action == "shutdown":
             logger.info("뉴스 전용 프로세스 종료 명령 수신")
             window.shutdown()
+            publish_visibility(force=True)
             app.quit()
             return
         if action == "minimize":
             restore_after_main = window.isVisible() and not window.isMinimized()
             if restore_after_main:
                 window.showMinimized()
+            publish_visibility(force=True)
             return
         if action == "restore":
             if restore_after_main:
@@ -198,6 +219,7 @@ def main(arguments: list[str] | None = None) -> int:
                 # 포커스를 빼앗지 않는 방식으로 두 창의 Z 순서도 함께 복원한다.
                 raise_without_focus()
                 restore_after_main = False
+            publish_visibility(force=True)
             return
         if action == "sync":
             if mode.startswith("docked_") or mode == "docked":
@@ -207,9 +229,14 @@ def main(arguments: list[str] | None = None) -> int:
             return
         code, name = str(document.get("code", "")), str(document.get("name", "")).strip()
         if code and name:
-            window.set_stock(code, name, activate=bool(document.get("activate", True)))
+            window.set_stock(
+                code, name, activate=bool(document.get("activate", True)),
+                journal_group_id=str(document.get("journal_group_id", "")),
+                trade_date=str(document.get("trade_date", "")),
+            )
             if mode.startswith("docked_") or mode == "docked":
                 dock_beside_main(document.get("main_geometry"), "docked_right" if mode == "docked" else mode)
+            publish_visibility(force=True)
 
     command_timer = QTimer()
     command_timer.setInterval(80)
@@ -242,9 +269,11 @@ def main(arguments: list[str] | None = None) -> int:
                 _raise_hwnd_without_focus(_find_visible_window(options.parent_pid))
                 raise_without_focus()
         news_was_active = active
+        publish_visibility()
 
     activation_timer.timeout.connect(sync_parent_on_news_activation)
     activation_timer.start()
+    publish_visibility(force=True)
     poll_command()
     return app.exec()
 

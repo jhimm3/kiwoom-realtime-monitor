@@ -15,6 +15,20 @@ class FakeClient:
 
 
 class DailyHighServiceTests(unittest.TestCase):
+    def test_keeps_latest_250_daily_bars_for_persistence(self) -> None:
+        from datetime import date, timedelta
+
+        class ManyBarsClient:
+            def request(self, api_id: str, path: str, body: dict[str, object]) -> dict[str, object]:
+                base = date(2026, 8, 28)
+                return {"stk_dt_pole_chart_qry": [
+                    {"dt": (base - timedelta(days=index)).strftime("%Y%m%d"), "high_pric": str(1_000 + index)}
+                    for index in range(300)
+                ]}
+
+        targets = DailyHighService(ManyBarsClient()).load("005930")
+        self.assertEqual(250, len(targets.daily_bars))
+
     def test_calculates_five_and_twenty_day_highs_from_latest_daily_bars(self) -> None:
         client = FakeClient()
         targets = DailyHighService(client).load("005930")

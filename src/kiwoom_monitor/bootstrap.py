@@ -27,6 +27,8 @@ from kiwoom_monitor.application.stock_fundamentals_service import StockFundament
 from kiwoom_monitor.application.daily_high_service import DailyHighService
 from kiwoom_monitor.application.historical_high_service import HistoricalHighService
 from kiwoom_monitor.application.nxt_eligibility_service import NxtEligibilityService
+from kiwoom_monitor.application.investor_flow_service import InvestorFlowService
+from kiwoom_monitor.application.program_trade_service import ProgramTradeService
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
 from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSettingsRepository
 from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository as DatabaseThemeRepository
@@ -59,6 +61,10 @@ def _set_taskbar_app_id() -> None:
 
 
 def main() -> None:
+    if "--journal-process" in sys.argv:
+        from kiwoom_monitor.journal_process import main as journal_main
+        index = sys.argv.index("--journal-process")
+        raise SystemExit(journal_main(sys.argv[index + 1:]))
     if "--news-process" in sys.argv:
         from kiwoom_monitor.news_process import main as news_main
         index = sys.argv.index("--news-process")
@@ -73,7 +79,7 @@ def main() -> None:
     minute_bar_repository = MinuteBarRepository(paths.database_path)
     minute_bar_repository.purge_before(datetime.now().date() - timedelta(days=30))
     daily_bar_repository = DailyBarRepository(paths.database_path)
-    daily_bar_repository.purge_before(datetime.now().date() - timedelta(days=30))
+    daily_bar_repository.retain_latest(250)
     google_drive_sync = GoogleDriveSyncService(paths.database_path, paths.news_database_path)
     local_changed_at = database.settings.get("google_drive_local_changed_at")
     last_upload_at = database.settings.get("google_drive_last_upload_success_at")
@@ -123,6 +129,8 @@ def main() -> None:
                 ), codes
             ),
             "nxt_eligibility_worker_factory": lambda codes: NxtEligibilityWorker(NxtEligibilityService(client), codes),
+            "entry_investor_loader": InvestorFlowService(client).load,
+            "program_trade_loader": ProgramTradeService(client).load_day,
         }
 
     api_runtime: dict[str, object] = {}
@@ -168,6 +176,10 @@ def main() -> None:
         api_runtime_factory=build_api_runtime,
         news_config_path=paths.data_dir / "naver_news.dat",
         news_database_path=paths.news_database_path,
+        journal_database_path=paths.journal_database_path,
+        monitor_database_path=paths.database_path,
+        entry_investor_loader=api_runtime.get("entry_investor_loader"),
+        program_trade_loader=api_runtime.get("program_trade_loader"),
     )
     window.show()
     sys.exit(app.exec())

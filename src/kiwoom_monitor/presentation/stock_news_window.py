@@ -577,6 +577,8 @@ class StockNewsWindow(QDialog):
             logger.warning("저장된 뉴스 필터 설정을 읽지 못해 기본값을 사용합니다.", exc_info=True)
         self._stock_code = ""
         self._stock_name = ""
+        self._journal_group_id = ""
+        self._journal_trade_date = ""
         self._items: tuple[StockNewsItem, ...] = ()
         self._visible_items: tuple[StockNewsItem, ...] = ()
         self._visible_groups: tuple[NewsEventGroup, ...] = ()
@@ -701,11 +703,14 @@ class StockNewsWindow(QDialog):
         self._continue_ai_button = QPushButton("선택 위치부터 미분석 이어서 분석")
         self._continue_ai_button.setToolTip("선택한 행부터 과거 방향으로 미분석 사건을 설정 건수만큼 분석합니다.")
         self._continue_ai_button.clicked.connect(self._analyze_unanalyzed_from_selection)
+        self._journal_link_button = QPushButton("매매일지에 추가")
+        self._journal_link_button.setEnabled(False)
+        self._journal_link_button.clicked.connect(self._toggle_journal_link)
         detail_panel = QWidget()
         detail_layout = QVBoxLayout(detail_panel)
         detail_layout.setContentsMargins(0, 0, 0, 0)
         detail_layout.addWidget(self._detail, 1)
-        detail_buttons = QHBoxLayout(); detail_buttons.addWidget(self._ai_button); detail_buttons.addWidget(self._continue_ai_button); detail_buttons.addStretch(); detail_buttons.addWidget(self._open_button)
+        detail_buttons = QHBoxLayout(); detail_buttons.addWidget(self._ai_button); detail_buttons.addWidget(self._continue_ai_button); detail_buttons.addWidget(self._journal_link_button); detail_buttons.addStretch(); detail_buttons.addWidget(self._open_button)
         detail_layout.addLayout(detail_buttons)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -720,15 +725,20 @@ class StockNewsWindow(QDialog):
         layout.addWidget(self._status_label)
         self._apply_window_mode(str(self._window_mode.currentData()), persist=False)
 
-    def set_stock(self, code: str, name: str, *, activate: bool = True) -> None:
+    def set_stock(self, code: str, name: str, *, activate: bool = True,
+                  journal_group_id: str = "", trade_date: str = "") -> None:
         changed = code != self._stock_code
+        context_changed = journal_group_id.strip() != self._journal_group_id or trade_date.strip() != self._journal_trade_date
         if changed:
             self._pending_new_identities.clear()
             self._auto_ai_identities.clear()
         self._stock_code = code
         self._stock_name = name.strip()
-        self._stock_label.setText(f"{self._stock_name} ({self._stock_code})")
-        if changed:
+        self._journal_group_id = journal_group_id.strip()
+        self._journal_trade_date = trade_date.strip()
+        date_suffix = f" · 매매일 {self._journal_trade_date}" if self._journal_trade_date else ""
+        self._stock_label.setText(f"{self._stock_name} ({self._stock_code}){date_suffix}")
+        if changed or context_changed:
             self._schedule_prepare()
             self._status_label.setText(f"{self._stock_name}의 저장된 뉴스를 준비하는 중…")
         if not self._position_initialized:
@@ -772,6 +782,15 @@ class StockNewsWindow(QDialog):
         if not isinstance(items, tuple) or not isinstance(groups, tuple) or not isinstance(ai_results, dict):
             return
         self._items = items
+        if self._journal_trade_date:
+            try:
+                target_day = datetime.fromisoformat(self._journal_trade_date).date()
+                groups = tuple(
+                    group for group in groups
+                    if any(item.published_at and item.published_at.astimezone().date() == target_day for item in group.items)
+                )
+            except ValueError:
+                pass
         self._visible_groups = groups
         self._visible_items = tuple(group.representative for group in groups)
         self._ai_result_cache = ai_results
@@ -1021,12 +1040,25 @@ class StockNewsWindow(QDialog):
             + self._related_articles_html(group)
         )
         self._open_button.setEnabled(bool(item.link or item.original_link))
+        linked = news_identity(item) in self._repository.journal_linked_identities(self._journal_group_id, self._stock_code) if self._journal_group_id else False
+        self._journal_link_button.setEnabled(bool(self._journal_group_id))
+        self._journal_link_button.setText("매매일지에서 제거" if linked else "매매일지에 추가")
         try:
             ai = self._config.load_ai()
         except (OSError, ValueError):
             ai = NewsAISettings()
         self._ai_button.setEnabled(bool((item.link or item.original_link) and ai.provider != "none" and ai.api_key)
                                    and (self._ai_worker is None or not self._ai_worker.isRunning()))
+
+    def _toggle_journal_link(self) -> None:
+        row = self._table.currentRow()
+        if not self._journal_group_id or row < 0 or row >= len(self._visible_items):
+            return
+        item = self._visible_items[row]; identity = news_identity(item)
+        linked = identity in self._repository.journal_linked_identities(self._journal_group_id, self._stock_code)
+        self._repository.set_journal_link(self._journal_group_id, self._stock_code, identity, not linked)
+        self._show_detail(row)
+        self._status_label.setText("매매일지 연결을 해제했습니다." if linked else "대표 뉴스를 매매일지에 보존했습니다.")
 
     @staticmethod
     def _related_articles_html(group: NewsEventGroup) -> str:

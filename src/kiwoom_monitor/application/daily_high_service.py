@@ -17,6 +17,9 @@ class DailyBar:
     high_price: int
     trade_value_eok: float | None
     close_price: int | None = None
+    open_price: int | None = None
+    low_price: int | None = None
+    volume: int | None = None
 
 
 @dataclass(frozen=True)
@@ -46,12 +49,13 @@ class DailyHighTargets:
         previous_bar = ordered[previous_index] if len(ordered) > previous_index else None
         previous_value = previous_bar.trade_value_eok if previous_bar is not None else None
         previous_close = previous_bar.close_price if previous_bar is not None else None
-        # 개발 확인 CSV와 DB 보관은 최근 30일 범위만 사용한다.
+        # 개발 확인 CSV는 최근 30일만 사용하지만, 원본 일봉은 신고가 계산과
+        # 매매일지 재사용을 위해 최근 250거래일까지 보존한다.
         values = tuple((bar.trade_date, bar.trade_value_eok) for bar in ordered[:30] if bar.trade_value_eok is not None)
         # ka10001의 250일 최고가는 권리 조정 전 가격일 수 있다. 현재가·차트와
         # 같은 수정주가 기준은 ka10081 일봉의 최근 250개 고가로 계산한다.
         high_250 = _highest(prices[:250]) if include_high_250 else None
-        return cls(_highest(prices[:5]), _highest(prices[:20]), high_250, previous_value, previous_close, values, ordered[:30])
+        return cls(_highest(prices[:5]), _highest(prices[:20]), high_250, previous_value, previous_close, values, ordered[:250])
 
 
 class DailyHighService:
@@ -98,7 +102,8 @@ class DailyHighService:
         if not isinstance(records, list):
             raise ValueError("ka10081 일봉 목록 형식이 올바르지 않습니다.")
         bars = tuple(
-            DailyBar(day, high, _daily_trade_value(row), _price(row.get("cur_prc")))
+            DailyBar(day, high, _daily_trade_value(row), _price(row.get("cur_prc")),
+                     _price(row.get("open_pric")), _price(row.get("low_pric")), _nonnegative_int(row.get("trde_qty")))
             for row in records
             if isinstance(row, dict)
             if len(day := _record_date(row)) == 8 and day.isdigit()
@@ -137,6 +142,10 @@ def _combine_krx_nxt_bars(krx_bars: tuple[DailyBar, ...], nxt_bars: tuple[DailyB
             max(krx.high_price, nxt.high_price),
             sum(trade_values) if krx.trade_value_eok is not None or nxt.trade_value_eok is not None else None,
             krx.close_price if krx.close_price is not None else nxt.close_price,
+            krx.open_price if krx.open_price is not None else nxt.open_price,
+            min(value for value in (krx.low_price, nxt.low_price) if value is not None)
+            if krx.low_price is not None or nxt.low_price is not None else None,
+            (krx.volume or 0) + (nxt.volume or 0),
         )
     return tuple(sorted(by_date.values(), key=lambda bar: bar.trade_date, reverse=True))
 
@@ -158,3 +167,10 @@ def _positive_number(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _nonnegative_int(value: object) -> int | None:
+    try:
+        return abs(int(str(value).strip().replace(",", "")))
+    except (TypeError, ValueError):
+        return None

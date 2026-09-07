@@ -18,6 +18,11 @@ class AppPaths:
         """메인 실시간 DB와 물리적으로 분리된 뉴스 전용 DB."""
         return self.data_dir / "news.sqlite3"
 
+    @property
+    def journal_database_path(self) -> Path:
+        """실시간 표와 SQLite 잠금을 공유하지 않는 매매일지 전용 DB."""
+        return self.data_dir / "journal.sqlite3"
+
     @classmethod
     def for_current_user(cls) -> "AppPaths":
         """프로그램 본체와 분리된 현재 사용자 데이터 위치를 돌려준다.

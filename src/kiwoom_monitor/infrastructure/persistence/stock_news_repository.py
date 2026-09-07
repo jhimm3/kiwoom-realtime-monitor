@@ -41,6 +41,13 @@ class StockNewsRepository:
                     checked_at TEXT NOT NULL,
                     naver_checked_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS journal_news_links (
+                    group_id TEXT NOT NULL,
+                    stock_code TEXT NOT NULL,
+                    identity TEXT NOT NULL,
+                    linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(group_id, stock_code, identity)
+                );
                 """
             )
             columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(stock_news_sync)")}
@@ -124,16 +131,60 @@ class StockNewsRepository:
                 "naver_checked_at=COALESCE(excluded.naver_checked_at, stock_news_sync.naver_checked_at)",
                 (stock_code, checked_at.isoformat(), naver_checked_at.isoformat() if naver_checked_at else None),
             )
-            # 종목별 최신 200건만 보관해 장기간 사용해도 DB가 불필요하게 커지지 않는다.
+            # 매매일지에 연결한 기사는 최신 200건 밖으로 밀려나도 계속 보존한다.
             connection.execute(
                 "DELETE FROM stock_news WHERE stock_code=? AND identity NOT IN ("
-                "SELECT identity FROM stock_news WHERE stock_code=? ORDER BY COALESCE(published_at, first_seen_at) DESC LIMIT 200)",
+                "SELECT identity FROM stock_news WHERE stock_code=? ORDER BY COALESCE(published_at, first_seen_at) DESC LIMIT 200) "
+                "AND NOT EXISTS (SELECT 1 FROM journal_news_links l WHERE l.stock_code=stock_news.stock_code AND l.identity=stock_news.identity)",
                 (stock_code, stock_code),
             )
             connection.commit()
         finally:
             connection.close()
         return sum(1 for item in items if news_identity(item) not in existing)
+
+    def set_journal_link(self, group_id: str, stock_code: str, identity: str, linked: bool) -> None:
+        connection = sqlite3.connect(self._database_path)
+        try:
+            if linked:
+                connection.execute(
+                    "INSERT OR IGNORE INTO journal_news_links(group_id,stock_code,identity) VALUES (?,?,?)",
+                    (group_id, stock_code, identity),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM journal_news_links WHERE group_id=? AND stock_code=? AND identity=?",
+                    (group_id, stock_code, identity),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def journal_linked_identities(self, group_id: str, stock_code: str) -> set[str]:
+        connection = sqlite3.connect(self._database_path)
+        try:
+            return {str(row[0]) for row in connection.execute(
+                "SELECT identity FROM journal_news_links WHERE group_id=? AND stock_code=?",
+                (group_id, stock_code),
+            )}
+        finally:
+            connection.close()
+
+    def load_journal_linked(self, group_id: str, stock_code: str) -> tuple[StockNewsItem, ...]:
+        connection = sqlite3.connect(self._database_path)
+        try:
+            rows = connection.execute(
+                "SELECT n.title,n.description,n.link,n.original_link,n.published_at,n.relevant,n.category,n.outlook,n.reason,n.relevance_score,n.outlook_score "
+                "FROM journal_news_links l JOIN stock_news n ON n.stock_code=l.stock_code AND n.identity=l.identity "
+                "WHERE l.group_id=? AND l.stock_code=? ORDER BY COALESCE(n.published_at,n.first_seen_at) DESC",
+                (group_id, stock_code),
+            ).fetchall()
+        finally:
+            connection.close()
+        return tuple(StockNewsItem(
+            str(row[0]), str(row[1]), str(row[2]), str(row[3]), _parse_datetime(row[4]),
+            NewsAssessment(bool(row[5]), str(row[6]), str(row[7]), str(row[8]), int(row[9]), int(row[10])),
+        ) for row in rows)
 
 
 def _identity(item: StockNewsItem) -> str:

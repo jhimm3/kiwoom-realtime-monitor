@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from threading import RLock
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from .settings import KiwoomSettings
 
 JsonObject = dict[str, Any]
 UrlOpen = Callable[..., Any]
+logger = logging.getLogger(__name__)
 
 
 class KiwoomApiError(RuntimeError):
@@ -175,6 +177,12 @@ class KiwoomRestClient:
                     payload = json.loads(response.read().decode("utf-8"))
                 break
             except HTTPError as error:
+                if error.code == 429:
+                    logger.warning(
+                        "키움 REST 요청 제한(HTTP 429): api_id=%s · 시도=%d/4%s",
+                        extra_headers.get("api-id", "oauth2/token"), attempt + 1,
+                        " · 감속 후 재시도" if attempt < 3 else " · 재시도 한도 도달",
+                    )
                 if error.code == 429 and attempt < 3:
                     self._slow_down_after_rate_limit()
                     time.sleep(5 * (attempt + 1))

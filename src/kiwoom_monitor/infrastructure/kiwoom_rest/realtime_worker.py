@@ -11,7 +11,10 @@ from datetime import UTC, datetime, time as clock_time, timedelta
 from PySide6.QtCore import QThread, Signal
 from websockets.asyncio.client import connect
 
-from .realtime import TradeTick, parse_trade_ticks
+from .realtime import (
+    OrderExecution, TradeTick, parse_market_index_ticks, parse_order_executions,
+    parse_program_trade_ticks, parse_trade_ticks,
+)
 
 
 WS_BASE_URLS = {
@@ -41,11 +44,15 @@ class RealtimeTradeWorker(QThread):
     """로그인·구독·PING 응답을 처리하고 체결 틱을 Qt 신호로 전달한다."""
 
     trade_received = Signal(object)
+    order_executed = Signal(object)
+    market_state_received = Signal(object)
+    program_trade_received = Signal(object)
     status_changed = Signal(str)
     connection_failed = Signal(str)
     subscription_ready = Signal()
     connection_opened = Signal(object)
     codes_added = Signal(object)
+    diagnostics_changed = Signal(object)
 
     def __init__(self, token_provider: Callable[[], str], environment: str, codes: tuple[str, ...], now_provider: Callable[[], datetime] | None = None, nxt_codes: tuple[str, ...] = ()) -> None:
         super().__init__()
@@ -54,6 +61,11 @@ class RealtimeTradeWorker(QThread):
         self._codes = tuple(dict.fromkeys(code for code in codes if code))
         self._nxt_codes = tuple(dict.fromkeys(code for code in nxt_codes if code))
         self._now_provider = now_provider or korea_now
+        self._abnormal_disconnects = 0
+        self._reconnects = 0
+        self._connected_once = False
+        self._reconnect_pending = False
+        self._last_disconnect_reason = ""
 
     def update_codes(self, codes: tuple[str, ...], nxt_codes: tuple[str, ...] = ()) -> None:
         """소켓을 끊지 않고 다음 수신 반복에서 구독 목록만 교체한다."""
@@ -70,8 +82,11 @@ class RealtimeTradeWorker(QThread):
             try:
                 asyncio.run(self._receive(session))
                 if not self.isInterruptionRequested():
+                    if market_session(self._now_provider(), self._environment) == session:
+                        self._record_abnormal_disconnect("WebSocket 연결이 예기치 않게 종료됨")
                     self.status_changed.emit("실시간 연결이 종료되어 다시 연결합니다…")
             except Exception as error:
+                self._record_abnormal_disconnect(str(error))
                 self.connection_failed.emit(str(error))
             if not self.isInterruptionRequested():
                 self._wait_or_stop(3)
@@ -96,7 +111,12 @@ class RealtimeTradeWorker(QThread):
                 raise RuntimeError(f"WebSocket 로그인 실패: {login.get('return_msg', '')}")
             subscribed_codes = initial_codes
             subscribed_nxt_codes = initial_nxt_codes
-            await self._send_subscription(websocket, session, subscribed_codes, subscribed_nxt_codes)
+            await self._send_subscription(websocket, session, subscribed_codes, subscribed_nxt_codes, self._environment)
+            if self._connected_once and self._reconnect_pending:
+                self._reconnects += 1
+            self._connected_once = True
+            self._reconnect_pending = False
+            self._emit_diagnostics()
             self.connection_opened.emit(subscribed_codes)
             self.status_changed.emit(f"실시간 체결 구독 중 · {session} · {len(subscribed_codes)}종목")
             self.subscription_ready.emit()
@@ -107,7 +127,7 @@ class RealtimeTradeWorker(QThread):
                     if not desired_codes:
                         return
                     added_codes = tuple(code for code in desired_codes if code not in subscribed_codes)
-                    await self._send_subscription(websocket, session, desired_codes, desired_nxt_codes)
+                    await self._send_subscription(websocket, session, desired_codes, desired_nxt_codes, self._environment)
                     subscribed_codes = desired_codes
                     subscribed_nxt_codes = desired_nxt_codes
                     if added_codes:
@@ -125,21 +145,49 @@ class RealtimeTradeWorker(QThread):
                     continue
                 for tick in parse_trade_ticks(message):
                     self.trade_received.emit(tick)
+                for execution in parse_order_executions(message):
+                    self.order_executed.emit(execution)
+                for market_tick in parse_market_index_ticks(message):
+                    self.market_state_received.emit(market_tick)
+                for program_tick in parse_program_trade_ticks(message):
+                    self.program_trade_received.emit(program_tick)
+
+    def _record_abnormal_disconnect(self, reason: str) -> None:
+        self._abnormal_disconnects += 1
+        self._reconnect_pending = True
+        self._last_disconnect_reason = reason
+        self._emit_diagnostics()
+
+    def _emit_diagnostics(self) -> None:
+        self.diagnostics_changed.emit({
+            "abnormal_disconnects": self._abnormal_disconnects,
+            "reconnects": self._reconnects,
+            "last_disconnect_reason": self._last_disconnect_reason,
+            "updated_at": self._now_provider().isoformat(timespec="seconds"),
+        })
 
     @staticmethod
-    async def _send_subscription(websocket: object, session: str, codes: tuple[str, ...], nxt_codes: tuple[str, ...] = ()) -> None:
+    async def _send_subscription(websocket: object, session: str, codes: tuple[str, ...], nxt_codes: tuple[str, ...] = (), environment: str = "real") -> None:
         items = (
             tuple(f"{code}_NX" for code in codes)
             if session == "NXT"
             else codes + tuple(f"{code}_NX" for code in nxt_codes if code in codes)
         )
+        program_items = tuple(f"{code}_AL" for code in codes) if environment == "real" else codes
+        # 모의투자는 KRX만 지원한다. 실전은 SOR(_AL) 누적 프로그램매매를
+        # 구독해 KRX/NXT를 따로 받은 뒤 서로 덮어쓰는 일을 피한다.
         await websocket.send(
             json.dumps(
                 {
                     "trnm": "REG",
                     "grp_no": "1",
                     "refresh": "1",
-                    "data": [{"item": list(items), "type": ["0B"]}],
+                    "data": [
+                        {"item": list(items), "type": ["0B"]},
+                        {"item": list(program_items), "type": ["0w"]},
+                        {"item": [""], "type": ["00"]},
+                        {"item": ["001", "101"], "type": ["0J", "0U"]},
+                    ],
                 }
             )
         )
