@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class ColumnSettingsRepository:
         con = sqlite3.connect(self._database_path)
         try:
             con.executemany("UPDATE column_settings SET visible=?, position=?, width=? WHERE column_name=?", [(int(s.visible),s.position,s.width,s.name) for s in settings])
+            self._record_versions(con, tuple(setting.name for setting in settings))
             con.commit()
         finally:
             con.close()
@@ -36,6 +38,20 @@ class ColumnSettingsRepository:
                 "UPDATE column_settings SET visible=?, position=?, width=? WHERE column_name=?",
                 [(visible, position, width, name) for name, visible, position, width in DEFAULT_COLUMNS],
             )
+            self._record_versions(con, tuple(name for name, *_ in DEFAULT_COLUMNS))
             con.commit()
         finally:
             con.close()
+
+    @staticmethod
+    def _record_versions(connection: sqlite3.Connection, names: tuple[str, ...]) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS central_column_setting_versions ("
+            "column_name TEXT PRIMARY KEY, updated_at TEXT NOT NULL)"
+        )
+        now = datetime.now(UTC).isoformat()
+        connection.executemany(
+            "INSERT INTO central_column_setting_versions(column_name,updated_at) VALUES(?,?) "
+            "ON CONFLICT(column_name) DO UPDATE SET updated_at=excluded.updated_at",
+            ((name, now) for name in names),
+        )

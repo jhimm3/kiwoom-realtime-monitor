@@ -1,5 +1,5 @@
 from __future__ import annotations
-import tempfile, unittest
+import sqlite3, tempfile, unittest
 from pathlib import Path
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSetting, ColumnSettingsRepository
@@ -11,6 +11,12 @@ class ColumnSettingsRepositoryTests(unittest.TestCase):
             saved = list(repository.list()); saved[0] = ColumnSetting(saved[0].name, False, 2, 123); repository.save(tuple(saved))
             restored = next(item for item in repository.list() if item.name == saved[0].name)
             self.assertFalse(restored.visible); self.assertEqual(123, restored.width)
+            connection = sqlite3.connect(path)
+            self.assertIsNotNone(connection.execute(
+                "SELECT updated_at FROM central_column_setting_versions WHERE column_name=?",
+                (saved[0].name,),
+            ).fetchone())
+            connection.close()
             repository.reset()
             restored = next(item for item in repository.list() if item.name == saved[0].name)
             self.assertTrue(restored.visible); self.assertEqual(32, restored.width); self.assertEqual(0, restored.position)

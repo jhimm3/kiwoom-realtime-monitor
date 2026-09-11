@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
-from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis, AICompanyImpact, AIRequestUsage
+from kiwoom_monitor.infrastructure.news_ai import (
+    ANALYSIS_PROMPT_VERSION, AINewsAnalysis, AICompanyImpact, AIRequestUsage,
+)
+from kiwoom_monitor.infrastructure.persistence.news_schema import initialize_news_schema
+from kiwoom_monitor.infrastructure.persistence.sqlite_connections import (
+    sqlite_read_connection,
+    sqlite_transaction,
+)
 
 
 @dataclass(frozen=True)
@@ -16,6 +22,11 @@ class StoredAINewsAnalysis:
     provider: str
     model: str
     analyzed_at: datetime
+    body_hash: str = ""
+
+    @property
+    def uses_current_prompt(self) -> bool:
+        return self.body_hash.startswith(f"{ANALYSIS_PROMPT_VERSION}:")
 
 
 def news_identity(item: StockNewsItem) -> str:
@@ -25,47 +36,21 @@ def news_identity(item: StockNewsItem) -> str:
 class NewsAIRepository:
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
-        connection = sqlite3.connect(self._database_path)
-        try:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS stock_news_ai ("
-                "stock_code TEXT NOT NULL, identity TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, "
-                "summary TEXT NOT NULL, category TEXT NOT NULL DEFAULT '', outlook TEXT NOT NULL, confidence INTEGER NOT NULL, "
-                "reason TEXT NOT NULL, positive_evidence TEXT NOT NULL DEFAULT '[]', negative_evidence TEXT NOT NULL DEFAULT '[]', "
-                "body_hash TEXT NOT NULL DEFAULT '', analyzed_at TEXT NOT NULL, PRIMARY KEY(stock_code, identity))"
-            )
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS news_ai_requests ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, requested_at TEXT NOT NULL, provider TEXT NOT NULL, "
-                "model TEXT NOT NULL, request_mode TEXT NOT NULL, event_count INTEGER NOT NULL, article_count INTEGER NOT NULL, "
-                "input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0)"
-            )
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS news_ai_shared ("
-                "identity TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, summary TEXT NOT NULL, "
-                "category TEXT NOT NULL, positive_evidence TEXT NOT NULL, negative_evidence TEXT NOT NULL, "
-                "company_impacts TEXT NOT NULL, body_hash TEXT NOT NULL, analyzed_at TEXT NOT NULL)"
-            )
-            connection.commit()
-        finally:
-            connection.close()
+        initialize_news_schema(self._database_path)
 
     def load(self, stock_code: str, item: StockNewsItem) -> StoredAINewsAnalysis | None:
-        connection = sqlite3.connect(self._database_path)
-        try:
+        with sqlite_read_connection(self._database_path) as connection:
             row = connection.execute(
-                "SELECT provider, model, summary, outlook, confidence, reason, positive_evidence, negative_evidence, analyzed_at, category "
+                "SELECT provider, model, summary, outlook, confidence, reason, positive_evidence, negative_evidence, analyzed_at, category, body_hash "
                 "FROM stock_news_ai WHERE stock_code=? AND identity=?",
                 (stock_code, news_identity(item)),
             ).fetchone()
-        finally:
-            connection.close()
         if row is None:
             return None
         return StoredAINewsAnalysis(
             AINewsAnalysis(str(row[2]), str(row[3]), int(row[4]), str(row[5]),
                            tuple(json.loads(row[6])), tuple(json.loads(row[7])), str(row[9])),
-            str(row[0]), str(row[1]), datetime.fromisoformat(str(row[8])),
+            str(row[0]), str(row[1]), datetime.fromisoformat(str(row[8])), str(row[10]),
         )
 
     def load_many(
@@ -76,21 +61,18 @@ class NewsAIRepository:
         if not identities:
             return {}
         placeholders = ",".join("?" for _ in identities)
-        connection = sqlite3.connect(self._database_path)
-        try:
+        with sqlite_read_connection(self._database_path) as connection:
             rows = connection.execute(
                 "SELECT identity, provider, model, summary, outlook, confidence, reason, "
-                "positive_evidence, negative_evidence, analyzed_at, category "
+                "positive_evidence, negative_evidence, analyzed_at, category, body_hash "
                 f"FROM stock_news_ai WHERE stock_code=? AND identity IN ({placeholders})",
                 (stock_code, *identities),
             ).fetchall()
-        finally:
-            connection.close()
         loaded = {
             str(row[0]): StoredAINewsAnalysis(
                 AINewsAnalysis(str(row[3]), str(row[4]), int(row[5]), str(row[6]),
                                tuple(json.loads(row[7])), tuple(json.loads(row[8])), str(row[10])),
-                str(row[1]), str(row[2]), datetime.fromisoformat(str(row[9])),
+                str(row[1]), str(row[2]), datetime.fromisoformat(str(row[9])), str(row[11]),
             )
             for row in rows
         }
@@ -98,14 +80,11 @@ class NewsAIRepository:
         normalized_name = _normalized_company_name(stock_name)
         if missing and normalized_name:
             placeholders = ",".join("?" for _ in missing)
-            connection = sqlite3.connect(self._database_path)
-            try:
+            with sqlite_read_connection(self._database_path) as connection:
                 shared_rows = connection.execute(
-                    "SELECT identity,provider,model,summary,category,positive_evidence,negative_evidence,company_impacts,analyzed_at "
+                    "SELECT identity,provider,model,summary,category,positive_evidence,negative_evidence,company_impacts,analyzed_at,body_hash "
                     f"FROM news_ai_shared WHERE identity IN ({placeholders})", missing,
                 ).fetchall()
-            finally:
-                connection.close()
             for row in shared_rows:
                 impacts = _decode_impacts(str(row[7]))
                 impact = next((value for value in impacts if _normalized_company_name(value.company) == normalized_name), None)
@@ -115,14 +94,13 @@ class NewsAIRepository:
                     AINewsAnalysis(
                         str(row[3]), impact.outlook, impact.confidence, impact.reason,
                         tuple(json.loads(row[5])), tuple(json.loads(row[6])), str(row[4]), impacts,
-                    ), str(row[1]), str(row[2]), datetime.fromisoformat(str(row[8])),
+                    ), str(row[1]), str(row[2]), datetime.fromisoformat(str(row[8])), str(row[9]),
                 )
         return loaded
 
     def save(self, stock_code: str, item: StockNewsItem, provider: str, model: str,
              body_hash: str, analysis: AINewsAnalysis) -> None:
-        connection = sqlite3.connect(self._database_path)
-        try:
+        with sqlite_transaction(self._database_path) as connection:
             connection.execute(
                 "INSERT INTO stock_news_ai(stock_code, identity, provider, model, summary, category, outlook, confidence, reason, positive_evidence, negative_evidence, body_hash, analyzed_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(stock_code, identity) DO UPDATE SET "
@@ -146,45 +124,32 @@ class NewsAIRepository:
                      json.dumps([impact.__dict__ for impact in analysis.company_impacts], ensure_ascii=False),
                      body_hash, datetime.now(UTC).isoformat()),
                 )
-            connection.commit()
-        finally:
-            connection.close()
 
     def daily_count(self) -> int:
         today = datetime.now().astimezone().date().isoformat()
-        connection = sqlite3.connect(self._database_path)
-        try:
+        with sqlite_read_connection(self._database_path) as connection:
             row = connection.execute(
                 "SELECT COUNT(*) FROM news_ai_requests WHERE substr(requested_at, 1, 10)=?", (today,)
             ).fetchone()
-        finally:
-            connection.close()
         return int(row[0]) if row else 0
 
     def log_request(self, provider: str, model: str, request_mode: str, event_count: int,
                     article_count: int, usage: AIRequestUsage) -> None:
-        connection = sqlite3.connect(self._database_path)
-        try:
+        with sqlite_transaction(self._database_path) as connection:
             connection.execute(
                 "INSERT INTO news_ai_requests(requested_at,provider,model,request_mode,event_count,article_count,input_tokens,output_tokens,total_tokens) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (datetime.now().astimezone().isoformat(), provider, model, request_mode, event_count, article_count,
                  usage.input_tokens, usage.output_tokens, usage.total_tokens),
             )
-            connection.commit()
-        finally:
-            connection.close()
 
     def daily_usage(self) -> tuple[int, int, int, int]:
         today = datetime.now().astimezone().date().isoformat()
-        connection = sqlite3.connect(self._database_path)
-        try:
+        with sqlite_read_connection(self._database_path) as connection:
             row = connection.execute(
                 "SELECT COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(total_tokens),0) "
                 "FROM news_ai_requests WHERE substr(requested_at,1,10)=?", (today,),
             ).fetchone()
-        finally:
-            connection.close()
         return tuple(map(int, row or (0, 0, 0, 0)))
 
 

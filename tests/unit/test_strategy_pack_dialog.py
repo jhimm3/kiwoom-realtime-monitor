@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from kiwoom_monitor.application.strategy_pack import MIMOSA_MANIFEST, StrategyPackManifest
 from kiwoom_monitor.application.strategy_pack_extraction import ExtractedStrategyDraft, StrategyRuleDraft
-from kiwoom_monitor.journal_process import StrategyPackManagerDialog
+from kiwoom_monitor.presentation.strategy_pack_dialogs import StrategyPackManagerDialog
 from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
 
 

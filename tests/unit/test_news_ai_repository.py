@@ -7,7 +7,9 @@ from pathlib import Path
 
 from kiwoom_monitor.application.news_analysis import assess_stock_news
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
-from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis, AICompanyImpact, AIRequestUsage
+from kiwoom_monitor.infrastructure.news_ai import (
+    AINewsAnalysis, AICompanyImpact, AIRequestUsage, analysis_body_hash,
+)
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository, news_identity
 
 
@@ -20,7 +22,7 @@ class NewsAIRepositoryTests(unittest.TestCase):
                 datetime.now(UTC), assess_stock_news("A회사", "공동 기사", "두 회사 계약"),
             )
             repository.save(
-                "000001", item, "gemini", "model", "hash",
+                "000001", item, "gemini", "model", analysis_body_hash("A회사", "본문"),
                 AINewsAnalysis(
                     "공동 요약", "긍정", 90, "A회사 수주", (), (), "수주·계약",
                     (AICompanyImpact("A회사", "긍정", 90, "수주"), AICompanyImpact("B회사", "부정", 75, "경쟁 심화")),
@@ -55,7 +57,7 @@ class NewsAIRepositoryTests(unittest.TestCase):
             )
             for index, item in enumerate(items):
                 repository.save(
-                    "000000", item, "gemini", "model", "hash",
+                    "000000", item, "gemini", "model", analysis_body_hash("테스트", "본문"),
                     AINewsAnalysis(f"요약 {index}", "긍정", 80, "이유", (), (), "수주·계약"),
                 )
 
@@ -63,6 +65,21 @@ class NewsAIRepositoryTests(unittest.TestCase):
 
             self.assertEqual({news_identity(item) for item in items}, set(loaded))
             self.assertEqual("요약 0", loaded[news_identity(items[0])].analysis.summary)
+
+    def test_old_prompt_results_remain_visible_but_are_marked_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = NewsAIRepository(Path(directory) / "monitor.sqlite3")
+            item = StockNewsItem(
+                "시장 기사", "삼성전자 단순 나열", "https://example.com/old", "",
+                datetime.now(UTC), assess_stock_news("삼성전자", "시장 기사", "삼성전자 주가"),
+            )
+            repository.save(
+                "005930", item, "gemini", "model", "legacy-hash",
+                AINewsAnalysis("시장 전체 요약", "부정", 70, "시장 하락"),
+            )
+
+            stored = repository.load_many("005930", (item,), "삼성전자")[news_identity(item)]
+            self.assertFalse(stored.uses_current_prompt)
 
 
 if __name__ == "__main__":

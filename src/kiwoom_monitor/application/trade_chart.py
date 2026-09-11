@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Protocol
 
 
@@ -43,6 +43,37 @@ class DailyTradeChartService:
                 low_price, close_price, volume, trade_value, "daily_confirmed",
             ))
         return tuple(sorted(rows, key=lambda row: str(row[0]))[-250:])
+
+
+def daily_chart_display_target(
+    target: str,
+    code: str,
+    *,
+    selected_history_code: str,
+    live_code: str,
+) -> str:
+    if target == "history" and code == selected_history_code:
+        return "history"
+    if target == "live" and code == live_code:
+        return "live"
+    if target.startswith("detached:"):
+        return "detached"
+    return ""
+
+
+def should_reuse_cached_daily_chart(
+    target: str,
+    day: date,
+    cached_count: int,
+    *,
+    today: date,
+) -> bool:
+    """과거 복기·분리 차트에 250개 일봉이 있으면 API 재조회를 생략한다."""
+    return (
+        (target == "history" or target.startswith("detached:"))
+        and day < today
+        and cached_count >= 250
+    )
 
 
 def aggregate_chart_rows(

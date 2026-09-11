@@ -9,10 +9,38 @@ import time
 import unittest
 from pathlib import Path
 
-from kiwoom_monitor.news_process import _parent_is_alive
+from kiwoom_monitor.news_process import (
+    _file_signature,
+    _news_content_signature,
+    _parent_is_alive,
+)
 
 
 class NewsProcessTests(unittest.TestCase):
+    def test_file_signature_changes_when_database_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "news.sqlite3"
+            self.assertEqual(_file_signature(path), (0, 0))
+            path.write_bytes(b"first")
+            first = _file_signature(path)
+            path.write_bytes(b"second-version")
+            self.assertNotEqual(first, _file_signature(path))
+
+    def test_news_content_signature_ignores_unrelated_monitor_database_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor = root / "monitor.sqlite3"
+            news = root / "news.sqlite3"
+            monitor.write_bytes(b"ranking-before")
+            news.write_bytes(b"news-before")
+            initial = _news_content_signature(news)
+
+            monitor.write_bytes(b"ranking-after-with-more-bytes")
+
+            self.assertEqual(initial, _news_content_signature(news))
+            news.write_bytes(b"news-after-with-more-bytes")
+            self.assertNotEqual(initial, _news_content_signature(news))
+
     def test_current_process_is_reported_as_alive(self) -> None:
         self.assertTrue(_parent_is_alive(os.getpid()))
 

@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_submodules
 from pathlib import Path
 import os
 import shutil
@@ -10,6 +11,7 @@ datas = [('data/near_high_sounds', 'data/near_high_sounds'), ('data/ocr_models/P
 binaries = []
 datas += collect_data_files('paddle')
 binaries += collect_dynamic_libs('paddle')
+server_hiddenimports = collect_submodules('fastapi') + collect_submodules('uvicorn')
 # PyInstaller 6.22/PySide 6.11 조합은 Qt 핵심 DLL을 PySide6 하위에만
 # 배치할 수 있다. Windows 로더는 QtGui.pyd를 불러올 때 _internal 루트도
 # 기준으로 삼으므로, 정상 동작한 이전 배포본과 같이 최상위 DLL을 루트에
@@ -32,7 +34,7 @@ a = Analysis(
     pathex=['src'],
     binaries=binaries,
     datas=datas,
-    hiddenimports=['paddleocr', 'paddlex', 'googleapiclient.discovery', 'google_auth_oauthlib.flow'],
+    hiddenimports=['paddleocr', 'paddlex', 'googleapiclient.discovery', 'google_auth_oauthlib.flow', *server_hiddenimports],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

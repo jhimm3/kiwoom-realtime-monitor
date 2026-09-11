@@ -97,6 +97,21 @@ class DailyHighServiceTests(unittest.TestCase):
 
         self.assertEqual(3_002_000, targets.high_250_price)
 
+    def test_keeps_last_combined_250_high_when_nxt_response_is_temporarily_empty(self) -> None:
+        class EmptyNxtClient:
+            def request(self, api_id: str, path: str, body: dict[str, object]) -> dict[str, object]:
+                if str(body["stk_cd"]).endswith("_NX"):
+                    return {"stk_dt_pole_chart_qry": []}
+                return {"stk_dt_pole_chart_qry": [{"dt": "20260825", "high_pric": "2987000"}]}
+
+        targets = DailyHighService(
+            EmptyNxtClient(),
+            include_nxt=True,
+            cached_high_250_loader=lambda code: 3_007_000,
+        ).load("000660")
+
+        self.assertEqual(3_007_000, targets.high_250_price)
+
     def test_successful_nxt_response_replaces_stale_cached_250_high(self) -> None:
         class CombinedClient:
             def request(self, api_id: str, path: str, body: dict[str, object]) -> dict[str, object]:

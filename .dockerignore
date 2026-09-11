@@ -1,0 +1,11 @@
+.git
+.venv
+build
+dist
+release
+data
+tmp
+deploy/synology/.env
+deploy/synology/postgres-data
+**/__pycache__
+**/*.pyc

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -35,6 +36,15 @@ class SettingsRepository:
                 "INSERT INTO settings(key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS central_setting_versions ("
+                "setting_key TEXT PRIMARY KEY, updated_at TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO central_setting_versions(setting_key,updated_at) VALUES(?,?) "
+                "ON CONFLICT(setting_key) DO UPDATE SET updated_at=excluded.updated_at",
+                (key, datetime.now(UTC).isoformat()),
             )
             connection.commit()
         finally:

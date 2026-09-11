@@ -1,0 +1,62 @@
+services:
+  database:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    image: kiwoom-monitor-server:2026.09.12-shared-backup-contract-v1
+    build:
+      context: ../..
+      dockerfile: deploy/synology/server.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      KIWOOM_SERVER_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB}
+      MONITOR_SERVER_ACCESS_TOKEN: ${MONITOR_SERVER_ACCESS_TOKEN}
+      KIWOOM_SERVER_HOST: 0.0.0.0
+      KIWOOM_SERVER_PORT: ${KIWOOM_MONITOR_PORT:-8787}
+      KIWOOM_ENVIRONMENT: ${KIWOOM_ENVIRONMENT}
+      KIWOOM_APP_KEY: ${KIWOOM_APP_KEY}
+      KIWOOM_SECRET_KEY: ${KIWOOM_SECRET_KEY}
+      AUTONOMOUS_TOP20_ENABLED: ${AUTONOMOUS_TOP20_ENABLED:-1}
+      TOP20_OUTBOX_PATH: /app/data/top20-index-outbox.json
+      EXTERNAL_MARKET_ENABLED: ${EXTERNAL_MARKET_ENABLED:-1}
+      EXTERNAL_MARKET_POLL_SECONDS: ${EXTERNAL_MARKET_POLL_SECONDS:-300}
+      EXTERNAL_MARKET_SYMBOLS: ${EXTERNAL_MARKET_SYMBOLS:-NASDAQ_FUTURES:MNQU26.CME,WTI_FUTURES:CLV26.NYM}
+      EXTERNAL_MARKET_AUTO_ROLL_ENABLED: ${EXTERNAL_MARKET_AUTO_ROLL_ENABLED:-1}
+      EXTERNAL_MARKET_ROLL_CONFIRMATIONS: ${EXTERNAL_MARKET_ROLL_CONFIRMATIONS:-2}
+      NAVER_NEWS_CLIENT_ID: ${NAVER_NEWS_CLIENT_ID}
+      NAVER_NEWS_CLIENT_SECRET: ${NAVER_NEWS_CLIENT_SECRET}
+      NEWS_REFRESH_SECONDS: ${NEWS_REFRESH_SECONDS}
+      DART_ENABLED: ${DART_ENABLED}
+      DART_API_KEY: ${DART_API_KEY}
+      DART_CACHE_PATH: ${DART_CACHE_PATH}
+      NEWS_AI_PROVIDER: ${NEWS_AI_PROVIDER}
+      NEWS_AI_MODEL: ${NEWS_AI_MODEL}
+      NEWS_AI_DAILY_LIMIT: ${NEWS_AI_DAILY_LIMIT}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    ports:
+      - "${KIWOOM_MONITOR_PORT:-8787}:${KIWOOM_MONITOR_PORT:-8787}"
+    volumes:
+      - ./server-data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:${KIWOOM_MONITOR_PORT:-8787}/health', timeout=5))['status']=='ok'\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s

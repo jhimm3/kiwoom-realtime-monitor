@@ -3,14 +3,11 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from .news_ai_repository import NewsAIRepository
-from .stock_news_repository import StockNewsRepository
+from .news_schema import initialize_news_schema
 
 
 def initialize_news_database(news_database_path: Path) -> None:
-    news_database_path.parent.mkdir(parents=True, exist_ok=True)
-    StockNewsRepository(news_database_path)
-    NewsAIRepository(news_database_path)
+    initialize_news_schema(news_database_path)
 
 
 def migrate_legacy_news_database(main_database_path: Path, news_database_path: Path) -> None:

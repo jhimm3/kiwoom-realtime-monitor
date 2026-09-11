@@ -88,6 +88,15 @@ class DailyHighService:
             if cached is not None and cached > (targets.high_250_price or 0):
                 return replace(targets, high_250_price=cached)
             return targets
+        if not nxt_bars:
+            # 중앙 서버의 NXT 일봉 캐시가 아직 채워지는 중이거나 키움이
+            # 성공 응답 안에 빈 목록을 돌려주는 경우도 실패와 같다. 이를
+            # 정상 NXT 조회로 취급하면 250일 최고가가 KRX 단독값으로 잠시
+            # 내려간다. 마지막 정상 KRX+NXT 값이 더 높으면 유지한다.
+            cached = self._cached_high_250_loader(code) if self._cached_high_250_loader is not None else None
+            if cached is not None and cached > (targets.high_250_price or 0):
+                return replace(targets, high_250_price=cached)
+            return targets
         return DailyHighTargets.from_daily_bars(_combine_krx_nxt_bars(krx_bars, nxt_bars), as_of=date.today())
 
     def _load_bars(self, code: str) -> tuple[DailyBar, ...]:

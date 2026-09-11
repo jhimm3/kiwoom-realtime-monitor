@@ -31,14 +31,22 @@ class ThemeBackupServiceTest(unittest.TestCase):
             repository.create_profile("회사")
             repository.select_profile("회사")
             repository.replace_for_stock("005930", ("AI",))
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute("UPDATE settings SET value='회사' WHERE key='theme_active_profile'")
+                connection.commit()
+            finally:
+                connection.close()
             backup_path = Path(directory) / "themes.json"
             ThemeBackupService(database_path).export_to(backup_path)
+            repository.select_profile("기본 테마")
 
             connection = sqlite3.connect(database_path)
             try:
                 connection.execute("DELETE FROM profile_stock_themes")
                 connection.execute("DELETE FROM profile_themes")
                 connection.execute("UPDATE settings SET value = '1' WHERE key = 'decimal_strength'")
+                connection.execute("UPDATE settings SET value = '기본 테마' WHERE key = 'theme_active_profile'")
                 connection.commit()
             finally:
                 connection.close()
@@ -49,6 +57,7 @@ class ThemeBackupServiceTest(unittest.TestCase):
             try:
                 self.assertEqual(('1',), connection.execute("SELECT value FROM settings WHERE key = 'decimal_strength'").fetchone())
                 self.assertEqual(2, connection.execute("SELECT COUNT(*) FROM theme_profiles").fetchone()[0])
+                self.assertEqual(('회사',), connection.execute("SELECT value FROM settings WHERE key = 'theme_active_profile'").fetchone())
             finally:
                 connection.close()
             repository.select_profile("기본 테마")

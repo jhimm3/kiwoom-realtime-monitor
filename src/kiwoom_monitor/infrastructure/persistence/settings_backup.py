@@ -17,6 +17,7 @@ from kiwoom_monitor.infrastructure.naver_news import (
 )
 
 from .database import DEFAULT_COLUMNS, DEFAULT_SETTINGS
+from .theme_backup import ThemeBackupError, ThemeBackupService
 
 
 class SettingsBackupError(ValueError):
@@ -25,7 +26,8 @@ class SettingsBackupError(ValueError):
 
 class SettingsBackupService:
     FORMAT = "kiwoom-realtime-monitor-settings"
-    VERSION = 3
+    VERSION = 4
+    THEME_SETTING_KEYS = frozenset(key for key in DEFAULT_SETTINGS if key.startswith("theme_") and not key.endswith("_dir") and not key.startswith("theme_manager_"))
     # 백업 파일은 사용자가 고른 아이콘/알림 소리만 포함한다. 복원 시에는
     # 허용된 폴더와 확장자, 크기를 모두 다시 확인한다.
     MAX_BACKUP_DOCUMENT_BYTES = 32 * 1024 * 1024
@@ -53,26 +55,6 @@ class SettingsBackupService:
                 for name, visible, position, width in connection.execute(
                     "SELECT column_name, visible, position, width FROM column_settings ORDER BY position"
                 )
-            ]
-            themes = [
-                {"name": name, "color": color}
-                for name, color in connection.execute("SELECT theme_name, default_color FROM themes ORDER BY theme_name")
-            ]
-            stock_themes = [
-                {"code": code, "theme": theme, "color": color}
-                for code, theme, color in connection.execute(
-                    "SELECT st.stock_code, t.theme_name, st.custom_color "
-                    "FROM stock_themes st JOIN themes t ON t.theme_id = st.theme_id "
-                    "ORDER BY st.stock_code, t.theme_name"
-                )
-            ]
-            aliases = [
-                {"alias": alias, "code": code}
-                for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")
-            ]
-            stock_catalog = [
-                {"code": code, "name": name, "market": market}
-                for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")
             ]
         finally:
             connection.close()
@@ -120,7 +102,10 @@ class SettingsBackupService:
                 },
             })
         if include_themes:
-            document.update({"themes": themes, "stock_themes": stock_themes, "aliases": aliases, "stock_catalog": stock_catalog})
+            document.update({
+                "theme_data": ThemeBackupService(self._database_path).export_document(),
+                "theme_settings": {key: value for key, value in settings.items() if key in self.THEME_SETTING_KEYS},
+            })
         path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _export_assets(self, settings: dict[str, str]) -> list[dict[str, str]]:
@@ -161,7 +146,7 @@ class SettingsBackupService:
             raise
         except (OSError, json.JSONDecodeError) as error:
             raise SettingsBackupError("설정 백업 파일을 읽을 수 없습니다.") from error
-        if not isinstance(document, dict) or document.get("format") != self.FORMAT or document.get("version") not in {1, 2, self.VERSION}:
+        if not isinstance(document, dict) or document.get("format") != self.FORMAT or document.get("version") not in {1, 2, 3, self.VERSION}:
             raise SettingsBackupError("이 프로그램에서 만든 설정 백업 파일이 아닙니다.")
         settings = document.get("settings", {})
         columns = document.get("columns", [])
@@ -172,6 +157,8 @@ class SettingsBackupService:
         assets = document.get("assets", [])
         news_shortcuts = document.get("news_shortcuts")
         news_settings = document.get("news_settings")
+        theme_data = document.get("theme_data")
+        theme_settings = document.get("theme_settings", {})
         if not all(isinstance(value, list) for value in (columns, themes, stock_themes, aliases)) or not isinstance(settings, dict):
             raise SettingsBackupError("설정 백업 파일 형식이 올바르지 않습니다.")
 
@@ -190,7 +177,7 @@ class SettingsBackupService:
                         connection.executemany("UPDATE column_settings SET visible = ?, position = ?, width = ? WHERE column_name = ?", [(int(bool(item.get("visible"))), int(item.get("position", 0)), max(20, int(item.get("width", 100))), str(item["name"])) for item in imported_columns])
                     elif include_column_layout:
                         connection.executemany("UPDATE column_settings SET visible = ?, position = ? WHERE column_name = ?", [(int(bool(item.get("visible"))), int(item.get("position", 0)), str(item["name"])) for item in imported_columns])
-                if include_themes:
+                if include_themes and not isinstance(theme_data, dict):
                     for item in (stock_catalog if isinstance(stock_catalog, list) else ()):
                         if not isinstance(item, dict): continue
                         code, name, market = str(item.get("code", "")).upper(), str(item.get("name", "")).strip(), str(item.get("market", "")).strip()
@@ -214,6 +201,22 @@ class SettingsBackupService:
             raise SettingsBackupError("설정 백업 파일을 적용할 수 없습니다.") from error
         finally:
             connection.close()
+        if include_themes and isinstance(theme_data, dict):
+            try:
+                ThemeBackupService(self._database_path).import_document(theme_data)
+            except ThemeBackupError as error:
+                raise SettingsBackupError("설정 백업의 테마 프로필을 적용할 수 없습니다.") from error
+        if include_themes and isinstance(theme_settings, dict):
+            connection = sqlite3.connect(self._database_path)
+            try:
+                with connection:
+                    connection.executemany(
+                        "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        ((key, str(value)) for key, value in theme_settings.items()
+                         if key in self.THEME_SETTING_KEYS and key not in excluded_setting_keys),
+                    )
+            finally:
+                connection.close()
         if include_settings:
             self._import_assets(assets)
             self._import_news_settings(news_settings, news_shortcuts)

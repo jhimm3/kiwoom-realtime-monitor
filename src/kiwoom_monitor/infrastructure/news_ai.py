@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -9,6 +10,15 @@ from urllib.request import Request, urlopen
 
 from kiwoom_monitor.infrastructure.naver_news import NewsAISettings
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
+
+
+# 대상 종목 관점 계약이 바뀌면 이전 분석을 완료 결과로 재사용하지 않는다.
+ANALYSIS_PROMPT_VERSION = "target-company-v2"
+
+
+def analysis_body_hash(stock_name: str, body: str) -> str:
+    value = f"{ANALYSIS_PROMPT_VERSION}\0{stock_name.strip()}\0{body}"
+    return f"{ANALYSIS_PROMPT_VERSION}:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
 
 
 @dataclass(frozen=True)
@@ -43,6 +53,20 @@ DEFAULT_MODELS = {
     "gemini": "gemini-3.5-flash-lite",
     "claude": "claude-haiku-4-5-20251001",
 }
+
+
+class NewsAIProviderError(RuntimeError):
+    """AI 공급자의 재시도 가능한 HTTP 실패를 상태 코드와 함께 보존한다."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = int(status_code)
+        if self.status_code == 429:
+            message = "AI 공급자 호출 한도를 초과했습니다(429). 잠시 후 다시 시도하세요."
+        elif self.status_code == 503:
+            message = "AI 서버가 일시적으로 혼잡합니다(503). 잠시 후 다시 시도하세요."
+        else:
+            message = f"AI 서버가 요청을 처리하지 못했습니다({self.status_code}). 잠시 후 다시 시도하세요."
+        super().__init__(message)
 
 MODEL_OPTIONS = {
     "openai": (
@@ -98,6 +122,8 @@ def _prompt(stock_name: str, title: str, article_text: str) -> str:
 제목: {title}
 본문: {article_text}
 
+outlook, confidence, reason과 긍정·부정 근거는 기사 전체나 다른 회사가 아니라 반드시 위 종목 {stock_name}의 주가·실적·사업에 미치는 영향만 판정하라. {stock_name}을 단순 나열했거나 직접 영향을 확인할 근거가 없으면 outlook을 "판단 자료 부족"으로 하고 summary에도 직접 관계가 없음을 분명히 적어라.
+
 JSON 하나만 출력하라:
 {{"summary":"3문장 이내 요약","category":"실적·전망|수주·계약|투자·인수합병|자본·주주환원|임상·허가|경영권·주주|주가·수급|공시·규제|산업·정책|기타 증권뉴스 중 하나","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0부터100 정수,"reason":"판정 이유","positive_evidence":["근거"],"negative_evidence":["근거"],"company_impacts":[{{"company":"기사에 나온 상장사명","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0,"reason":"그 회사 관점의 이유"}}]}}
 단순 주가 상승·하락 보도는 기업가치 호재·악재로 단정하지 말고, '뜨거운 감자' 같은 관용어와 부인·반등·회복 문맥을 정확히 구분하라."""
@@ -112,6 +138,7 @@ def _batch_prompt(stock_name: str, articles: tuple[tuple[str, str], ...]) -> str
     )
     return f"""당신은 한국 주식 뉴스 분석기다. 종목 {stock_name}에 대한 서로 다른 사건 {len(articles)}개를 한 요청으로 분석하라.
 각 사건 본문에는 동일 사건으로 묶인 관련 기사가 여러 개 포함될 수 있다. 중복 표현은 한 번만 반영하고 과거 사실과 현재 변화를 구분하라.
+각 결과의 outlook, confidence, reason과 근거는 반드시 대상 종목 {stock_name}의 관점으로 작성하라. {stock_name}이 단순 나열되었거나 직접 영향을 확인할 근거가 없으면 "판단 자료 부족"으로 판정하고 summary에도 직접 관계가 없음을 밝혀라.
 {sections}
 
 입력 순서와 같은 JSON 배열 하나만 출력하라. 각 항목에 id를 반드시 유지하라:
@@ -129,9 +156,7 @@ def _request(url: str, headers: dict[str, str], payload: dict[str, object]) -> d
             if error.code not in {429, 500, 502, 503, 504}:
                 raise
             if attempt == 2:
-                if error.code == 503:
-                    raise RuntimeError("AI 서버가 일시적으로 혼잡합니다(503). 잠시 후 다시 시도하세요.") from error
-                raise RuntimeError(f"AI 서버가 요청을 처리하지 못했습니다({error.code}). 잠시 후 다시 시도하세요.") from error
+                raise NewsAIProviderError(error.code) from error
             retry_after = error.headers.get("Retry-After", "") if error.headers else ""
             try:
                 delay = max(1.0, min(5.0, float(retry_after)))

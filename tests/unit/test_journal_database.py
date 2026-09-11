@@ -7,14 +7,24 @@ from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
+from kiwoom_monitor.domain.market_data_contract import (
+    DataCompleteness,
+    DataValueKind,
+    MarketDatasetKind,
+    ObservationOrigin,
+)
 from kiwoom_monitor.application.trade_journal_summary import TradeReview
 from kiwoom_monitor.application.trade_cost_service import DailyTradeCost
 from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository, TradeEntrySnapshot
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import (
+    MarketDataMetadataRepository,
+)
 from kiwoom_monitor.application.trade_setup_classification import TradeSetupClassification
 from kiwoom_monitor.application.personal_trade_rules import StructuredTradeRule
 
@@ -49,6 +59,27 @@ class JournalRepositoryTests(unittest.TestCase):
             self.assertEqual(captured.themes, loaded[0].themes)
             self.assertEqual(captured.theme_ranks, loaded[0].theme_ranks)
             self.assertEqual(captured.market_state, loaded[0].market_state)
+            metadata = MarketDataMetadataRepository(Path(directory) / "journal.sqlite3")
+            rank = metadata.load(
+                MarketDatasetKind.ENTRY_CONTEXT,
+                "005930:rank",
+                captured.execution_key,
+            )
+            news = metadata.load(
+                MarketDatasetKind.ENTRY_CONTEXT,
+                "005930:news",
+                captured.execution_key,
+            )
+            trade_value = metadata.load(
+                MarketDatasetKind.ENTRY_CONTEXT,
+                "005930:trade_value_1m",
+                captured.execution_key,
+            )
+            assert rank is not None and news is not None and trade_value is not None
+            self.assertEqual(ObservationOrigin.REALTIME, rank.origin)
+            self.assertEqual(DataCompleteness.COMPLETE, rank.completeness)
+            self.assertEqual(DataCompleteness.MISSING, news.completeness)
+            self.assertEqual(DataValueKind.UNKNOWN, trade_value.value_kind)
 
     def test_provisional_snapshot_does_not_overwrite_backfilled_investor_flow(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -57,6 +88,7 @@ class JournalRepositoryTests(unittest.TestCase):
                 "2026-08-31:005930:order-1:fill-1", "order-1", "005930", "삼성전자", "매수",
                 datetime(2026, 8, 31, 9, 4, 12), 70_000, 3, "KRX",
                 investor_flow={
+                    "available": True,
                     "foreign_net_buy_quantity": 1_200,
                     "institution_net_buy_quantity": -300,
                     "status": "confirmed",
@@ -74,6 +106,60 @@ class JournalRepositoryTests(unittest.TestCase):
             )
             self.assertEqual(1_200, loaded[0].investor_flow["foreign_net_buy_quantity"])
             self.assertEqual(-300, loaded[0].investor_flow["institution_net_buy_quantity"])
+            metadata = MarketDataMetadataRepository(Path(directory) / "journal.sqlite3").load(
+                MarketDatasetKind.ENTRY_CONTEXT,
+                "005930:investor_flow",
+                captured.execution_key,
+            )
+            assert metadata is not None
+            self.assertEqual(ObservationOrigin.BACKFILLED, metadata.origin)
+
+    def test_news_added_after_execution_is_marked_as_backfilled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.sqlite3")
+            captured = TradeEntrySnapshot(
+                "2026-08-31:005930:order-1:fill-1", "order-1", "005930", "삼성전자", "매수",
+                datetime(2026, 8, 31, 9, 4, 12), 70_000, 3, "KRX",
+            )
+            repository.save_entry_snapshot(captured)
+
+            repository.save_snapshot_news_backfill(
+                captured.execution_key, ({"title": "장중 기사", "published_at": "2026-08-31T09:00:00"},),
+            )
+
+            loaded = repository.load_entry_snapshots(
+                "005930", datetime(2026, 8, 31), datetime(2026, 9, 1),
+            )
+            self.assertTrue(loaded[0].news[0]["backfilled"])
+            metadata = MarketDataMetadataRepository(Path(directory) / "journal.sqlite3").load(
+                MarketDatasetKind.ENTRY_CONTEXT,
+                "005930:news",
+                captured.execution_key,
+            )
+            assert metadata is not None
+            self.assertEqual(ObservationOrigin.BACKFILLED, metadata.origin)
+            self.assertEqual(DataCompleteness.COMPLETE, metadata.completeness)
+            self.assertGreater(metadata.available_at, metadata.effective_at)
+
+    def test_entry_snapshot_and_metadata_are_rolled_back_together(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            captured = TradeEntrySnapshot(
+                "execution-rollback", "order-1", "005930", "삼성전자", "매수",
+                datetime(2026, 8, 31, 9, 4, 12), 70_000, 3, "KRX", rank=2,
+            )
+            with patch(
+                "kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository.upsert_market_data_metadata",
+                side_effect=RuntimeError("metadata failed"),
+            ), self.assertRaisesRegex(RuntimeError, "metadata failed"):
+                repository.save_entry_snapshot(captured)
+
+            with closing(sqlite3.connect(path)) as connection:
+                count = connection.execute(
+                    "SELECT count(*) FROM trade_entry_snapshots"
+                ).fetchone()[0]
+            self.assertEqual(0, count)
 
     def test_daily_bar_with_missing_trade_value_does_not_close_journal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -121,6 +207,54 @@ class JournalRepositoryTests(unittest.TestCase):
             repository.save_trade_setup_cycle_override("group-1", 0, "")
             self.assertEqual({1: "과대낙폭"}, repository.load_trade_setup_cycle_overrides("group-1"))
 
+    def test_trade_summary_support_data_can_be_loaded_in_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.sqlite3")
+            repository.save_trade_setup(
+                "group-1", TradeSetupClassification("돌파", 84, ("직전 고점 돌파",)), "눌림",
+            )
+            repository.save_trade_setup_cycle_override("group-1", 1, "과대낙폭")
+            repository.save_review(
+                TradeReview("group-1", "돌파 확인", "추격 진입", "돌파", "보통", "복기 완료")
+            )
+
+            setups = repository.load_trade_setups(("group-1", "missing"))
+            overrides = repository.load_trade_setup_cycle_overrides_many(("group-1", "missing"))
+            reviews = repository.load_reviews(("group-1", "missing"))
+
+            self.assertEqual("돌파", setups["group-1"][0].setup_type)
+            self.assertEqual("눌림", setups["group-1"][1])
+            self.assertEqual({1: "과대낙폭"}, overrides["group-1"])
+            self.assertEqual("복기 완료", reviews["group-1"].status)
+            self.assertNotIn("missing", setups)
+            self.assertNotIn("missing", overrides)
+            self.assertNotIn("missing", reviews)
+
+    def test_trade_analysis_setup_and_legacy_override_roll_back_together(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            original = TradeSetupClassification("기타", 1, ())
+            repository.save_trade_setup("group-1", original, "돌파")
+            connection = sqlite3.connect(path)
+            connection.execute(
+                "CREATE TRIGGER reject_cycle_override BEFORE INSERT ON trade_setup_cycle_overrides "
+                "BEGIN SELECT RAISE(ABORT, 'test failure'); END"
+            )
+            connection.commit()
+            connection.close()
+
+            with self.assertRaises(sqlite3.IntegrityError):
+                repository.save_trade_analysis_setup(
+                    "group-1", TradeSetupClassification("돌파", 80, ("근거",)), (0, "돌파")
+                )
+
+            loaded = repository.load_trade_setup("group-1")
+            self.assertIsNotNone(loaded)
+            self.assertEqual("기타", loaded[0].setup_type)
+            self.assertEqual("돌파", loaded[1])
+            self.assertEqual({}, repository.load_trade_setup_cycle_overrides("group-1"))
+
     def test_extracted_personal_rules_survive_without_original_document(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
@@ -166,6 +300,49 @@ class JournalRepositoryTests(unittest.TestCase):
             self.assertEqual(1, len(values))
             self.assertEqual(200, values[0].total_cost)
 
+    def test_history_sync_saves_fills_and_costs_in_one_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            fill = TradeFill(
+                "1", "005930", "삼성전자", "매도", datetime(2026, 9, 8, 10, 0), 1, 100_000,
+            )
+            cost = DailyTradeCost(
+                date(2026, 9, 8), date(2026, 9, 10), "005930", "매도",
+                100_000, 99_800, 20, 180, 200,
+            )
+
+            repository.upsert_history_sync((fill,), (cost,), now=datetime(2026, 9, 8, 20, 5))
+
+            self.assertEqual((fill,), repository.load_fills(datetime(2026, 9, 8), datetime(2026, 9, 9)))
+            self.assertEqual((cost,), repository.load_trade_costs(datetime(2026, 9, 8), datetime(2026, 9, 9)))
+
+    def test_history_sync_rolls_back_fills_when_cost_save_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            fill = TradeFill(
+                "1", "005930", "삼성전자", "매도", datetime(2026, 9, 8, 10, 0), 1, 100_000,
+            )
+            cost = DailyTradeCost(
+                date(2026, 9, 8), date(2026, 9, 10), "005930", "매도",
+                100_000, 99_800, 20, 180, 200,
+            )
+            with closing(sqlite3.connect(path)) as connection:
+                with connection:
+                    connection.execute(
+                        "CREATE TRIGGER reject_trade_cost BEFORE INSERT ON daily_trade_costs "
+                        "BEGIN SELECT RAISE(ABORT, 'cost failed'); END"
+                    )
+
+            with self.assertRaisesRegex(sqlite3.Error, "cost failed"):
+                repository.upsert_history_sync((fill,), (cost,))
+
+            with closing(sqlite3.connect(path)) as connection:
+                fill_count = connection.execute("SELECT count(*) FROM trade_fills").fetchone()[0]
+                cost_count = connection.execute("SELECT count(*) FROM daily_trade_costs").fetchone()[0]
+            self.assertEqual((0, 0), (fill_count, cost_count))
+
     def test_repairs_legacy_cost_code_that_lost_internal_letter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
@@ -205,6 +382,43 @@ class JournalRepositoryTests(unittest.TestCase):
             row = repository.load_bars("005930", datetime(2026, 8, 29, 10, 2))[0]
             self.assertEqual(120, row[2])
             self.assertEqual("api_confirmed", row[7])
+
+            metadata = MarketDataMetadataRepository(root / "journal.sqlite3").load(
+                MarketDatasetKind.MINUTE_BAR, "005930", "2026-08-29T10:00"
+            )
+            assert metadata is not None
+            self.assertEqual(DataCompleteness.COMPLETE, metadata.completeness)
+            self.assertEqual(ObservationOrigin.QUERY, metadata.origin)
+            self.assertEqual(DataValueKind.ESTIMATED, metadata.value_kind)
+
+    def test_journal_partial_and_daily_bars_store_observation_meaning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            minute = datetime(2026, 9, 10, 10, 0)
+            repository.upsert_bars(
+                "005930",
+                (MinuteOhlcv(minute, 100, 110, 90, 105, 20, 1.0),),
+                "realtime_partial",
+            )
+            repository.upsert_daily_bars(
+                "005930",
+                (("2026-09-09T00:00", 90, 110, 80, 105, 200, 3.5),),
+                now=datetime(2026, 9, 10, 10, 1),
+            )
+
+            metadata = MarketDataMetadataRepository(path)
+            partial = metadata.load(
+                MarketDatasetKind.MINUTE_BAR, "005930", "2026-09-10T10:00"
+            )
+            daily = metadata.load(MarketDatasetKind.DAILY_BAR, "005930", "2026-09-09")
+
+            assert partial is not None and daily is not None
+            self.assertEqual(DataCompleteness.PARTIAL, partial.completeness)
+            self.assertEqual(DataValueKind.UNKNOWN, partial.value_kind)
+            self.assertEqual(ObservationOrigin.REALTIME, partial.origin)
+            self.assertEqual(DataCompleteness.COMPLETE, daily.completeness)
+            self.assertEqual(ObservationOrigin.QUERY, daily.origin)
 
     def test_chart_bars_include_target_and_previous_available_day_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -252,6 +466,72 @@ class JournalRepositoryTests(unittest.TestCase):
             state = repository.bar_backfill_state("005930", day)
             self.assertEqual("확정", state.state)
             self.assertEqual(2, state.bar_count)
+
+    def test_bar_backfill_states_matches_single_item_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.sqlite3")
+            partial_day = date(2026, 8, 27)
+            failed_day = date(2026, 8, 28)
+            repository.upsert_bars(
+                "005930",
+                (MinuteOhlcv(datetime(2026, 8, 27, 10), 100, 110, 90, 105, 20),),
+                "realtime_partial",
+            )
+            repository.mark_bar_backfill("000660", failed_day, "실패", "일시 오류")
+
+            states = repository.bar_backfill_states((
+                ("005930", partial_day),
+                ("000660", failed_day),
+                ("035420", failed_day),
+            ))
+
+            self.assertEqual("일부", states[("005930", partial_day)].state)
+            self.assertEqual("실패", states[("000660", failed_day)].state)
+            self.assertEqual("일시 오류", states[("000660", failed_day)].message)
+            self.assertEqual("미조회", states[("035420", failed_day)].state)
+
+    def test_bar_backfill_result_saves_only_target_day_and_confirms_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.sqlite3")
+            day = date(2026, 8, 28)
+            target = MinuteOhlcv(datetime(2026, 8, 28, 10), 100, 110, 90, 105, 20)
+            other = MinuteOhlcv(datetime(2026, 8, 27, 10), 90, 100, 80, 95, 10)
+
+            saved = repository.save_bar_backfill_result(
+                "005930", day, (other, target), datetime(2026, 8, 28, 20, 5),
+            )
+
+            state = repository.bar_backfill_state("005930", day)
+            self.assertTrue(saved)
+            self.assertEqual("확정", state.state)
+            self.assertEqual(1, state.bar_count)
+
+    def test_empty_bar_backfill_result_records_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.sqlite3")
+            day = date(2026, 8, 28)
+
+            saved = repository.save_bar_backfill_result("005930", day, ())
+
+            state = repository.bar_backfill_state("005930", day)
+            self.assertFalse(saved)
+            self.assertEqual("실패", state.state)
+            self.assertEqual("해당 거래일의 분봉이 반환되지 않았습니다.", state.message)
+
+    def test_bar_backfill_result_rolls_back_bars_and_state_together(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            day = date(2026, 8, 28)
+            bar = MinuteOhlcv(datetime(2026, 8, 28, 10), 100, 110, 90, 105, 20)
+
+            with patch(
+                "kiwoom_monitor.infrastructure.persistence.journal_bar_repository.upsert_market_data_metadata",
+                side_effect=RuntimeError("metadata failed"),
+            ), self.assertRaisesRegex(RuntimeError, "metadata failed"):
+                repository.save_bar_backfill_result("005930", day, (bar,))
+
+            self.assertEqual("미조회", repository.bar_backfill_state("005930", day).state)
 
     def test_backfill_candidates_are_based_on_saved_trade_dates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

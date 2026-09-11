@@ -18,7 +18,9 @@ from kiwoom_monitor.application.news_analysis import assess_stock_news
 from kiwoom_monitor.infrastructure.naver_news import NewsAISettings, StockNewsItem
 from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis
 from kiwoom_monitor.application.news_grouping import NewsEventGroup
-from kiwoom_monitor.infrastructure.persistence.news_ai_repository import news_identity
+from kiwoom_monitor.infrastructure.persistence.news_ai_repository import (
+    StoredAINewsAnalysis, news_identity,
+)
 
 
 class StockNewsWindowTests(unittest.TestCase):
@@ -208,6 +210,33 @@ class StockNewsWindowTests(unittest.TestCase):
                 window._configure_recent_auto_candidates()
 
             self.assertEqual({news_identity(second)}, window._auto_ai_identities)
+            window.shutdown()
+
+    def test_legacy_ai_result_is_visible_without_automatic_bulk_reanalysis(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            item = StockNewsItem(
+                "시장 전체 기사", "대상 종목은 단순 나열", "https://example.com/legacy",
+                "https://example.com/legacy", datetime.now(UTC),
+                assess_stock_news("테스트기업", "시장 전체 기사", "대상 종목은 단순 나열"),
+            )
+            identity = news_identity(item)
+            window._visible_groups = (NewsEventGroup(item, (item,)),)
+            window._ai_result_cache = {
+                identity: StoredAINewsAnalysis(
+                    AINewsAnalysis("기존 요약", "혼재", 50, "시장 전체 판단"),
+                    "gemini", "model", datetime.now(UTC), "legacy-hash",
+                )
+            }
+
+            with patch.object(
+                window._config, "load_ai",
+                return_value=NewsAISettings("gemini", "key", "model", 0, 1, True),
+            ):
+                window._configure_recent_auto_candidates()
+
+            self.assertEqual(set(), window._auto_ai_identities)
             window.shutdown()
 
     def test_batch_mode_starts_multiple_events_in_one_worker_request(self) -> None:

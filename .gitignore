@@ -26,6 +26,8 @@ htmlcov/
 tmp/
 scripts/extract_texty_lecture_pdfs.py
 scripts/ocr_lecture_pdfs.ps1
+deploy/synology/.env
+deploy/synology/postgres-data/
 
 # 패키징 산출물
 build/
@@ -34,6 +36,8 @@ release/
 pyinstaller-build.log
 *.spec
 resources/UpdateHelper.exe
+outputs/
+reports/*.json
 
 # 편집기·운영체제 파일
 .idea/

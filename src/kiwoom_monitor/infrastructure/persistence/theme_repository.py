@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from difflib import get_close_matches
 from pathlib import Path
+from typing import Callable
 
 from kiwoom_monitor.application.theme_matching import extract_known_stocks_and_unknown_fragments, split_concatenated_stock_name
 
@@ -13,12 +14,20 @@ class ThemeRepository:
     def __init__(self, path: Path, profile_name: str = "기본 테마") -> None:
         self._path = path
         self._profile_name = profile_name.strip() or "기본 테마"
+        self._change_callback: Callable[[], None] | None = None
         self._ensure_active_profile()
         self._merge_case_insensitive_themes()
 
     @property
     def active_profile(self) -> str:
         return self._profile_name
+
+    def set_change_callback(self, callback: Callable[[], None] | None) -> None:
+        self._change_callback = callback
+
+    def _changed(self) -> None:
+        if self._change_callback is not None:
+            self._change_callback()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path)
@@ -71,6 +80,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
+        self._changed()
         return clean
 
     def delete_profile(self, name: str) -> None:
@@ -84,6 +94,7 @@ class ThemeRepository:
                 connection.commit()
         finally:
             connection.close()
+        self._changed()
 
     def rename_profile(self, before: str, after: str) -> str:
         clean = after.strip()
@@ -107,6 +118,7 @@ class ThemeRepository:
             connection.close()
         if self._profile_name.casefold() == before.strip().casefold():
             self._profile_name = clean
+        self._changed()
         return clean
 
     def _merge_case_insensitive_themes(self) -> None:
@@ -248,6 +260,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
+        self._changed()
 
     def all_by_name(self) -> dict[str, str]:
         connection = self._connect()
@@ -297,6 +310,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
+        self._changed()
 
     def set_stock_theme_color(self, code: str, name: str, color: str) -> None:
         connection = self._connect()
@@ -305,6 +319,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
+        self._changed()
 
     def delete_themes(self, names: tuple[str, ...]) -> None:
         connection = self._connect()
@@ -316,6 +331,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
+        self._changed()
 
     def rename_theme(self, before: str, after: str) -> None:
         after = after.strip()
@@ -342,6 +358,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
+        self._changed()
 
     def split_theme(self, before: str, targets: tuple[str, ...]) -> None:
         clean_targets: list[str] = []
@@ -392,6 +409,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
+        self._changed()
 
     def clear_all_themes(self) -> None:
         connection = self._connect()
@@ -402,3 +420,4 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
+        self._changed()

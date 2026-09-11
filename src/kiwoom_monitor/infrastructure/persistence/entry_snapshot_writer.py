@@ -6,12 +6,14 @@ from pathlib import Path
 from queue import Empty, Queue
 import time
 from dataclasses import replace
-from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from datetime import date, datetime, time as datetime_time
 from typing import Callable
 
 from PySide6.QtCore import QThread, Signal
 
-from .journal_database import JournalRepository, TradeEntrySnapshot
+from .journal_database import JournalRepository
+from .journal_snapshot_repository import TradeEntrySnapshot
+from .journal_snapshot_service import news_at_execution
 from .stock_news_repository import StockNewsRepository
 
 
@@ -148,34 +150,3 @@ class EntrySnapshotWriter(QThread):
             return {"available": False, "error": str(error)}
         self._investor_cache[snapshot.stock_code] = (time.monotonic(), value)
         return value
-
-
-KST = timezone(timedelta(hours=9))
-
-
-def news_at_execution(repository: StockNewsRepository | None, snapshot: TradeEntrySnapshot) -> tuple[dict[str, object], ...]:
-    if repository is None:
-        return ()
-    try:
-        items = repository.load(snapshot.stock_code, limit=50)
-    except Exception:
-        return ()
-    executed = snapshot.executed_at.replace(tzinfo=KST) if snapshot.executed_at.tzinfo is None else snapshot.executed_at.astimezone(KST)
-    lower = executed - timedelta(hours=48)
-    result = []
-    for item in items:
-        published = item.published_at
-        if published is None:
-            continue
-        published = published.replace(tzinfo=KST) if published.tzinfo is None else published.astimezone(KST)
-        if not lower <= published <= executed + timedelta(minutes=5):
-            continue
-        result.append({
-            "title": item.title, "link": item.original_link or item.link,
-            "published_at": published.isoformat(), "relevant": item.assessment.relevant,
-            "category": item.assessment.category, "outlook": item.assessment.outlook,
-            "reason": item.assessment.reason,
-        })
-        if len(result) >= 10:
-            break
-    return tuple(result)

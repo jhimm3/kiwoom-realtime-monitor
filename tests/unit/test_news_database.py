@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,11 +12,59 @@ from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
 from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis
 from kiwoom_monitor.infrastructure.persistence.news_ai_backup import NewsAIBackupService
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository
-from kiwoom_monitor.infrastructure.persistence.news_database import migrate_legacy_news_database
+from kiwoom_monitor.infrastructure.persistence.news_database import (
+    initialize_news_database,
+    migrate_legacy_news_database,
+)
+from kiwoom_monitor.infrastructure.persistence.news_schema import (
+    NEWS_SCHEMA_BASELINE_NAME,
+    NEWS_SCHEMA_VERSION,
+)
+from kiwoom_monitor.infrastructure.persistence.schema_migrations import SchemaMigrationError
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
 
 
 class NewsDatabaseTests(unittest.TestCase):
+    def test_existing_news_survives_schema_baseline_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "news.sqlite3"
+            item = StockNewsItem(
+                "공급계약", "100억원 계약", "https://example.com/1", "https://example.com/1",
+                datetime.now(UTC), assess_stock_news("회사", "공급계약", "100억원 계약"),
+            )
+            StockNewsRepository(path).upsert("000001", (item,))
+            NewsAIRepository(path).save(
+                "000001", item, "gemini", "model", "hash",
+                AINewsAnalysis("요약", "긍정", 80, "이유", (), (), "수주·계약"),
+            )
+            with closing(sqlite3.connect(path)) as connection:
+                with connection:
+                    connection.execute("DROP TABLE news_schema_migrations")
+
+            initialize_news_database(path)
+            with closing(sqlite3.connect(path)) as connection:
+                versions = connection.execute(
+                    "SELECT version,name FROM news_schema_migrations ORDER BY version"
+                ).fetchall()
+
+            self.assertEqual([(NEWS_SCHEMA_VERSION, NEWS_SCHEMA_BASELINE_NAME)], versions)
+            self.assertEqual(1, len(StockNewsRepository(path).load("000001")))
+            self.assertIsNotNone(NewsAIRepository(path).load("000001", item))
+
+    def test_news_repository_rejects_a_newer_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "news.sqlite3"
+            initialize_news_database(path)
+            with closing(sqlite3.connect(path)) as connection:
+                with connection:
+                    connection.execute(
+                        "INSERT INTO news_schema_migrations(version,name,applied_at) "
+                        "VALUES(2,'future','2026-09-10T00:00:00+00:00')"
+                    )
+
+            with self.assertRaisesRegex(SchemaMigrationError, "newer"):
+                StockNewsRepository(path)
+
     def test_migrates_news_tables_out_of_main_database(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

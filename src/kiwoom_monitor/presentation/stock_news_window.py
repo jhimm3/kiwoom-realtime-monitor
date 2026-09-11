@@ -1,33 +1,24 @@
 from __future__ import annotations
 
 import logging
-import hashlib
+import json
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.error import HTTPError, URLError
 
-from PySide6.QtCore import QSettings, QThread, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QSettings, QTimer, Qt, QUrl
 from PySide6.QtGui import QBrush, QColor, QCloseEvent, QDesktopServices, QGuiApplication, QPainter, QShowEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
-    QColorDialog,
     QDialog,
-    QDialogButtonBox,
-    QFormLayout,
     QHBoxLayout,
     QHeaderView,
-    QGroupBox,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
-    QPlainTextEdit,
-    QScrollArea,
-    QSpinBox,
     QSplitter,
     QStyle,
     QStyledItemDelegate,
@@ -51,16 +42,43 @@ from kiwoom_monitor.infrastructure.naver_news import (
     news_provider,
 )
 from kiwoom_monitor.application.news_grouping import NewsEventGroup, group_similar_news
+from kiwoom_monitor.application.news_auto_analysis import (
+    auto_candidate_identities,
+    next_auto_groups,
+    unanalyzed_groups_from,
+)
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import (
     NewsAIRepository,
     StoredAINewsAnalysis,
     news_identity,
 )
-from kiwoom_monitor.infrastructure.dart_disclosures import DartDisclosureClient
-from kiwoom_monitor.infrastructure.article_text import fetch_article_text
 from kiwoom_monitor.infrastructure.news_ai import (
-    DEFAULT_MODELS, MODEL_OPTIONS, AINewsAnalysis, AIRequestUsage, analyze_articles,
+    DEFAULT_MODELS, AINewsAnalysis, AIRequestUsage,
+)
+from kiwoom_monitor.infrastructure.central_news_client import CentralNewsClient
+from kiwoom_monitor.infrastructure.central_ai_client import CentralAIClient
+from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
+from kiwoom_monitor.infrastructure.central_operational_settings import CentralOperationalSettingsClient
+from kiwoom_monitor.presentation.news_workers import (
+    AINewsWorker,
+    NEWS_CHECK_INTERVAL_SECONDS,
+    NewsPrepareWorker,
+    NewsSearchWorker,
+)
+from kiwoom_monitor.presentation.news_settings_dialog import NaverNewsSettingsDialog
+from kiwoom_monitor.presentation.news_execution import (
+    ai_progress_text,
+    ai_start_block_reason,
+    automatic_ai_run_allowed,
+    dispose_finished_worker,
+)
+from kiwoom_monitor.presentation.news_view_model import (
+    ai_detail_html,
+    build_display_row,
+    effective_judgment,
+    escape_html,
+    related_articles_html,
 )
 
 
@@ -98,456 +116,8 @@ class NewsCellMarkerDelegate(QStyledItemDelegate):
             painter.restore()
 
 
-class NewsSearchWorker(QThread):
-    completed = Signal(str, str, object, bool, object, int)
-    failed = Signal(str, str, str)
-
-    def __init__(self, stock_code: str, stock_name: str, credentials: NaverNewsCredentials,
-                 official: OfficialNewsSettings, dart_cache_path: Path, naver_since: datetime,
-                 database_path: Path,
-                 parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._stock_code = stock_code
-        self._stock_name = stock_name
-        self._credentials = credentials
-        self._official = official
-        self._dart_cache_path = dart_cache_path
-        self._naver_since = naver_since
-        self._database_path = database_path
-
-    def run(self) -> None:
-        items: list[StockNewsItem] = []
-        errors: list[str] = []
-        naver_succeeded = False
-        try:
-            if self._credentials.client_id and self._credentials.client_secret:
-                items.extend(NaverNewsClient(self._credentials).search(self._stock_name, since=self._naver_since))
-                naver_succeeded = True
-        except HTTPError as error:
-            message = "API 인증 또는 호출 한도를 확인하세요." if error.code in {401, 403, 429} else f"네이버 뉴스 응답 오류 ({error.code})"
-            errors.append(message)
-        except (URLError, TimeoutError, OSError) as error:
-            errors.append(f"네트워크 연결 실패: {error}")
-        except (ValueError, KeyError) as error:
-            errors.append(str(error))
-        try:
-            if self._official.dart_enabled and self._official.dart_api_key:
-                items.extend(DartDisclosureClient(self._official.dart_api_key, self._dart_cache_path).search(
-                    self._stock_code, self._stock_name))
-        except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError) as error:
-            errors.append(f"DART: {error}")
-        if items or not errors:
-            unique = {item.original_link or item.link or item.title: item for item in items}
-            fetched = tuple(unique.values())
-            try:
-                repository = StockNewsRepository(self._database_path)
-                known = {news_identity(item) for item in repository.load(self._stock_code)}
-                new_identities = {news_identity(item) for item in fetched} - known
-                checked_at = datetime.now(UTC)
-                new_count = repository.upsert(
-                    self._stock_code, fetched, checked_at,
-                    naver_checked_at=checked_at if naver_succeeded else None,
-                )
-            except (OSError, ValueError, sqlite3.Error) as error:
-                self.failed.emit(self._stock_code, self._stock_name, f"뉴스 저장 실패: {error}")
-                return
-            self.completed.emit(
-                self._stock_code, self._stock_name, fetched, naver_succeeded,
-                new_identities, new_count,
-            )
-        else:
-            self.failed.emit(self._stock_code, self._stock_name, " / ".join(errors))
-
-
-class NewsPrepareWorker(QThread):
-    """DB 조회와 사건 묶음을 UI 스레드 밖에서 준비한다."""
-
-    completed = Signal(int, str, object, object, object, bool, object)
-    failed = Signal(int, str, str)
-
-    def __init__(self, request_id: int, stock_code: str, stock_name: str, database_path: Path,
-                 news_filter: NewsFilterSettings, show_low_relevance: bool,
-                 parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._request_id = request_id
-        self._stock_code = stock_code
-        self._stock_name = stock_name
-        self._database_path = database_path
-        self._news_filter = news_filter
-        self._show_low_relevance = show_low_relevance
-
-    def run(self) -> None:
-        try:
-            # 기본 관련성·분류·판단은 저장 당시 계산된 값을 그대로 사용한다.
-            repository = StockNewsRepository(self._database_path)
-            items = repository.load(self._stock_code)
-            filtered = tuple(
-                item for item in items
-                if not is_excluded_news(item, self._news_filter)
-                and (item.assessment.relevant or self._show_low_relevance)
-            )
-            groups = group_similar_news(filtered)
-            representatives = tuple(group.representative for group in groups)
-            ai_results = NewsAIRepository(self._database_path).load_many(
-                self._stock_code, representatives, self._stock_name,
-            )
-            recently_checked = repository.recently_checked(self._stock_code, StockNewsWindow.CHECK_INTERVAL_SECONDS)
-            last_naver_check = repository.last_naver_checked_at(self._stock_code)
-            self.completed.emit(
-                self._request_id, self._stock_code, items, groups, ai_results,
-                recently_checked, last_naver_check,
-            )
-        except (OSError, ValueError, sqlite3.Error) as error:
-            self.failed.emit(self._request_id, self._stock_code, str(error))
-
-
-class AINewsWorker(QThread):
-    completed = Signal(object, object, str, str, object, int)
-    failed = Signal(str, bool, int)
-
-    def __init__(self, groups: tuple[NewsEventGroup, ...], stock_name: str, settings: NewsAISettings,
-                 parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._groups, self._stock_name, self._settings = groups, stock_name, settings
-
-    def run(self) -> None:
-        api_attempted = False
-        article_count = 0
-        try:
-            event_inputs: list[tuple[str, str]] = []
-            body_hashes: list[str] = []
-            for group in self._groups:
-                article_sections: list[str] = []
-                last_error: Exception | None = None
-                for index, item in enumerate(group.items, start=1):
-                    body = ""
-                    for url in dict.fromkeys((item.link, item.original_link)):
-                        if not url:
-                            continue
-                        try:
-                            body = fetch_article_text(url)
-                            break
-                        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
-                            last_error = error
-                    if body:
-                        article_sections.append(f"[관련 기사 {index}/{len(group.items)}: {item.title}]\n{body}")
-                    elif item.description:
-                        article_sections.append(f"[관련 기사 {index}/{len(group.items)}: {item.title} · 검색 요약]\n{item.description}")
-                if not article_sections:
-                    raise ValueError(str(last_error or "기사 본문을 가져오지 못했습니다."))
-                combined_body = "\n\n".join(article_sections)
-                event_inputs.append((group.representative.title, combined_body))
-                body_hashes.append(hashlib.sha256(combined_body.encode("utf-8")).hexdigest())
-                article_count += len(group.items)
-            api_attempted = True
-            results, usage = analyze_articles(self._settings, self._stock_name, tuple(event_inputs))
-            model = self._settings.model.strip() or DEFAULT_MODELS[self._settings.provider]
-            self.completed.emit(results, tuple(body_hashes), self._settings.provider, model, usage, article_count)
-        except Exception as error:  # worker boundary: show a recoverable message in the UI
-            self.failed.emit(str(error), api_attempted, article_count)
-
-
-class NaverNewsSettingsDialog(QDialog):
-    def __init__(self, config: LocalNaverNewsConfig, parent: QWidget | None = None,
-                 *, database_path: Path | None = None) -> None:
-        super().__init__(parent)
-        self._config = config
-        self._window_settings = QSettings("KiwoomMonitor", "NewsSettingsDialog")
-        self.setWindowTitle("뉴스 설정")
-        self.resize(570, 650)
-        self.setMinimumSize(410, 340)
-        geometry = self._window_settings.value("geometry")
-        if geometry is not None:
-            self.restoreGeometry(geometry)
-        credentials = config.load()
-        news_filter = config.load_filter()
-        ai = config.load_ai()
-        official = config.load_official()
-        shortcuts = config.load_shortcuts()
-        self._client_id = QLineEdit(credentials.client_id)
-        self._client_secret = QLineEdit(credentials.client_secret)
-        self._client_secret.setEchoMode(QLineEdit.EchoMode.Password)
-        guide = QLabel("NAVER API HUB에서 검색 API를 신청한 뒤 Client ID와 Client Secret을 입력하세요.\n키와 뉴스 필터 설정은 현재 PC에 암호화하여 저장하며 설정 백업에는 포함하지 않습니다.")
-        guide.setWordWrap(True)
-        link = QPushButton("NAVER API HUB 열기")
-        link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://www.ncloud.com/product/applicationService/naverApi")))
-        api_box = QGroupBox("네이버 뉴스 API")
-        api_layout = QFormLayout(api_box)
-        api_layout.addRow(guide)
-        api_layout.addRow("Client ID", self._client_id)
-        api_layout.addRow("Client Secret", self._client_secret)
-        api_layout.addRow(link)
-
-        self._dart_enabled = QCheckBox("DART 공시 함께 조회")
-        self._dart_enabled.setChecked(official.dart_enabled)
-        self._dart_key = QLineEdit(official.dart_api_key)
-        self._dart_key.setEchoMode(QLineEdit.EchoMode.Password)
-        dart_link = QPushButton("OpenDART API 키 발급 페이지")
-        dart_link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://opendart.fss.or.kr/uss/umt/EgovMberInsertView.do")))
-        dart_box = QGroupBox("금융감독원 DART 공시")
-        dart_layout = QFormLayout(dart_box)
-        dart_layout.addRow(self._dart_enabled)
-        dart_layout.addRow("API 키", self._dart_key)
-        dart_layout.addRow(dart_link)
-
-        shortcut_guide = QLabel("이름과 주소를 입력한 항목만 뉴스창에 표시됩니다. 최대 5개까지 만들 수 있습니다.")
-        shortcut_guide.setWordWrap(True)
-        shortcut_box = QGroupBox("뉴스창 바로가기")
-        shortcut_layout = QFormLayout(shortcut_box)
-        shortcut_layout.addRow(shortcut_guide)
-        self._shortcut_edits: list[tuple[QLineEdit, QLineEdit]] = []
-        for index in range(5):
-            name, url = shortcuts[index] if index < len(shortcuts) else ("", "")
-            name_edit = QLineEdit(name)
-            name_edit.setPlaceholderText("버튼 이름")
-            url_edit = QLineEdit(url)
-            url_edit.setPlaceholderText("https://...")
-            row = QHBoxLayout()
-            row.addWidget(name_edit, 1)
-            row.addWidget(url_edit, 3)
-            shortcut_layout.addRow(f"바로가기 {index + 1}", row)
-            self._shortcut_edits.append((name_edit, url_edit))
-
-        self._ai_provider = QComboBox()
-        self._ai_provider.addItem("사용 안 함", "none")
-        self._ai_provider.addItem("OpenAI", "openai")
-        self._ai_provider.addItem("Google Gemini", "gemini")
-        self._ai_provider.addItem("Anthropic Claude", "claude")
-        self._ai_provider.setCurrentIndex(max(0, self._ai_provider.findData(ai.provider)))
-        self._ai_key = QLineEdit(ai.api_key)
-        self._ai_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._ai_model = QComboBox()
-        self._ai_provider.currentIndexChanged.connect(self._populate_ai_models)
-        self._populate_ai_models(ai.model)
-        self._ai_limit = QSpinBox()
-        self._ai_limit.setRange(0, 1_000_000)
-        self._ai_limit.setSpecialValueText("무제한")
-        self._ai_limit.setValue(ai.daily_limit)
-        self._ai_auto_recent_limit = QSpinBox()
-        self._ai_auto_recent_limit.setRange(1, 1000)
-        self._ai_auto_recent_limit.setValue(ai.auto_recent_limit)
-        self._ai_auto = QCheckBox("새 뉴스 자동 분석")
-        self._ai_auto.setChecked(ai.auto_analyze)
-        self._ai_request_mode = QComboBox()
-        self._ai_request_mode.addItem("기사별 1건씩 요청", "single")
-        self._ai_request_mode.addItem("여러 사건을 한 요청으로 묶기", "batch")
-        self._ai_request_mode.setCurrentIndex(max(0, self._ai_request_mode.findData(ai.request_mode)))
-        self._ai_batch_size = QSpinBox()
-        self._ai_batch_size.setRange(2, 20)
-        self._ai_batch_size.setValue(ai.batch_size)
-        self._ai_request_mode.currentIndexChanged.connect(
-            lambda: self._ai_batch_size.setEnabled(self._ai_request_mode.currentData() == "batch")
-        )
-        self._ai_batch_size.setEnabled(ai.request_mode == "batch")
-        ai_link = QPushButton("선택한 AI API 키 페이지 열기")
-        ai_link.clicked.connect(self._open_ai_key_page)
-        ai_guide = QLabel(
-            "기사 본문을 읽고 요약·긍정/부정 가능성을 판정합니다. 기본은 수동 분석이며, "
-            "결과와 실제 API 요청 횟수·토큰 사용량은 DB에 저장됩니다. 묶음 요청은 여러 사건을 "
-            "한 번 호출하므로 RPD를 절약합니다. 하루 최대 요청 건수를 0으로 두면 무제한입니다."
-        )
-        ai_guide.setWordWrap(True)
-        usage_text = "오늘 앱 기록: 아직 API 요청 통계를 확인할 수 없습니다."
-        if database_path is not None:
-            requests, input_tokens, output_tokens, total_tokens = NewsAIRepository(database_path).daily_usage()
-            usage_text = (
-                f"오늘 앱 기록: API 요청 {requests}회 · 입력 {input_tokens:,} · "
-                f"출력 {output_tokens:,} · 합계 {total_tokens:,} 토큰"
-            )
-        self._ai_usage = QLabel(usage_text)
-        self._ai_usage.setWordWrap(True)
-        self._ai_usage.setStyleSheet("color:#52606d;")
-        ai_box = QGroupBox("AI 원문 분석")
-        ai_layout = QFormLayout(ai_box)
-        ai_layout.addRow(ai_guide)
-        ai_layout.addRow(self._ai_usage)
-        ai_layout.addRow("공급자", self._ai_provider)
-        ai_layout.addRow("API 키", self._ai_key)
-        ai_layout.addRow("모델", self._ai_model)
-        ai_layout.addRow("하루 최대 API 요청 건수", self._ai_limit)
-        ai_layout.addRow("종목당 최신 자동 분석 건수", self._ai_auto_recent_limit)
-        ai_layout.addRow("API 요청 방식", self._ai_request_mode)
-        ai_layout.addRow("묶음당 최대 사건 수", self._ai_batch_size)
-        ai_layout.addRow(self._ai_auto)
-        ai_layout.addRow(ai_link)
-
-        self._ad_filter_enabled = QCheckBox("뉴스 광고 필터링 사용")
-        self._ad_filter_enabled.setChecked(news_filter.enabled)
-        self._excluded_words = QPlainTextEdit()
-        self._excluded_words.setPlainText(", ".join(news_filter.excluded_words))
-        self._excluded_words.setPlaceholderText("예: 광고, 체험단, 이벤트, 할인")
-        self._excluded_words.setMaximumHeight(95)
-        filter_guide = QLabel("기사 제목이나 요약에 제외 단어가 하나라도 있으면 목록에서 숨깁니다. 쉼표 또는 줄바꿈으로 구분하세요.")
-        filter_guide.setWordWrap(True)
-        filter_box = QGroupBox("광고 뉴스 필터")
-        filter_layout = QVBoxLayout(filter_box)
-        filter_layout.addWidget(self._ad_filter_enabled)
-        filter_layout.addWidget(filter_guide)
-        filter_layout.addWidget(self._excluded_words)
-
-        self._excluded_providers = QPlainTextEdit()
-        self._excluded_providers.setPlainText(", ".join(news_filter.excluded_providers))
-        self._excluded_providers.setPlaceholderText("예: 연합뉴스, yna.co.kr, 특정언론사")
-        self._excluded_providers.setMaximumHeight(75)
-        provider_guide = QLabel("숨길 뉴스 제공처를 언론사명 또는 원문 주소의 도메인으로 입력하세요. 쉼표 또는 줄바꿈으로 구분합니다.")
-        provider_guide.setWordWrap(True)
-        self._provider_filter_enabled = QCheckBox("뉴스 제공처 필터링 사용")
-        self._provider_filter_enabled.setChecked(news_filter.provider_filter_enabled)
-        provider_box = QGroupBox("뉴스 제공처 필터")
-        provider_layout = QVBoxLayout(provider_box)
-        provider_layout.addWidget(self._provider_filter_enabled)
-        provider_layout.addWidget(provider_guide)
-        provider_layout.addWidget(self._excluded_providers)
-
-        column_box = QGroupBox("뉴스표 표시 열")
-        column_layout = QHBoxLayout(column_box)
-        self._column_checks: dict[str, QCheckBox] = {}
-        for key, label in (("time", "시각"), ("provider", "제공처"), ("category", "분류"),
-                           ("outlook", "판단"), ("title", "제목")):
-            check = QCheckBox(label)
-            check.setChecked(key in news_filter.visible_columns)
-            self._column_checks[key] = check
-            column_layout.addWidget(check)
-        column_layout.addStretch()
-
-        color_box = QGroupBox("뉴스 판단 색상")
-        color_layout = QFormLayout(color_box)
-        self._outlook_color_buttons: dict[str, QPushButton] = {}
-        for key, label, color in (
-            ("positive", "호재", news_filter.positive_color),
-            ("negative", "악재", news_filter.negative_color),
-            ("mixed", "호재·악재 혼재", news_filter.mixed_color),
-            ("neutral", "판단 보류", news_filter.neutral_color),
-        ):
-            button = QPushButton(color.upper())
-            button.setProperty("selectedColor", color.upper())
-            self._set_color_button_style(button, color)
-            button.clicked.connect(lambda _checked=False, target=button: self._choose_outlook_color(target))
-            self._outlook_color_buttons[key] = button
-            color_layout.addRow(label, button)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self._save)
-        buttons.rejected.connect(self.reject)
-
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(4, 4, 4, 4)
-        content_layout.addWidget(api_box)
-        content_layout.addWidget(dart_box)
-        content_layout.addWidget(shortcut_box)
-        content_layout.addWidget(ai_box)
-        content_layout.addWidget(filter_box)
-        content_layout.addWidget(provider_box)
-        content_layout.addWidget(column_box)
-        content_layout.addWidget(color_box)
-        content_layout.addStretch()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setWidget(content)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(scroll, 1)
-        layout.addWidget(buttons)
-
-    def _open_ai_key_page(self) -> None:
-        pages = {
-            "openai": "https://platform.openai.com/api-keys",
-            "gemini": "https://aistudio.google.com/app/apikey",
-            "claude": "https://console.anthropic.com/settings/keys",
-        }
-        url = pages.get(str(self._ai_provider.currentData()))
-        if url:
-            QDesktopServices.openUrl(QUrl(url))
-
-    def _choose_outlook_color(self, button: QPushButton) -> None:
-        current = QColor(str(button.property("selectedColor") or "#666666"))
-        selected = QColorDialog.getColor(current, self, "뉴스 판단 색상 선택")
-        if selected.isValid():
-            value = selected.name().upper()
-            button.setProperty("selectedColor", value)
-            button.setText(value)
-            self._set_color_button_style(button, value)
-
-    @staticmethod
-    def _set_color_button_style(button: QPushButton, color: str) -> None:
-        button.setStyleSheet(f"color: {color}; font-weight: 700;")
-
-    def _populate_ai_models(self, saved_model: object = None) -> None:
-        provider = str(self._ai_provider.currentData())
-        # 초기 로드에서는 저장값을 유지하고, 사용자가 공급자를
-        # 바꾸면 새 공급자의 추천 모델을 바로 선택한다.
-        target = (saved_model or DEFAULT_MODELS.get(provider, "")) if isinstance(saved_model, str) \
-            else DEFAULT_MODELS.get(provider, "")
-        self._ai_model.clear()
-        if provider == "none":
-            self._ai_model.addItem("공급자를 먼저 선택하세요", "")
-            self._ai_model.setEnabled(False)
-            return
-        self._ai_model.setEnabled(True)
-        for label, model_id in MODEL_OPTIONS.get(provider, ()):
-            self._ai_model.addItem(label, model_id)
-        index = self._ai_model.findData(target)
-        if index < 0 and target:
-            self._ai_model.addItem(f"기존 저장 모델 · {target}", target)
-            index = self._ai_model.count() - 1
-        self._ai_model.setCurrentIndex(max(0, index))
-
-    def _save(self) -> None:
-        credentials = NaverNewsCredentials(self._client_id.text().strip(), self._client_secret.text().strip())
-        if bool(credentials.client_id) != bool(credentials.client_secret):
-            QMessageBox.warning(self, "입력 확인", "Client ID와 Client Secret은 둘 다 입력하거나 둘 다 비워야 합니다.")
-            return
-        words = tuple(dict.fromkeys(
-            word.strip() for word in self._excluded_words.toPlainText().replace("\n", ",").split(",") if word.strip()
-        ))
-        providers = tuple(dict.fromkeys(
-            provider.strip() for provider in self._excluded_providers.toPlainText().replace("\n", ",").split(",") if provider.strip()
-        ))
-        ai_provider = str(self._ai_provider.currentData())
-        if ai_provider != "none" and not self._ai_key.text().strip():
-            QMessageBox.warning(self, "입력 확인", "AI를 사용하려면 선택한 공급자의 API 키를 입력하세요.")
-            return
-        visible_columns = tuple(key for key, check in self._column_checks.items() if check.isChecked())
-        if not visible_columns:
-            QMessageBox.warning(self, "입력 확인", "뉴스표에는 한 개 이상의 열을 표시해야 합니다.")
-            return
-        shortcuts: list[tuple[str, str]] = []
-        for name_edit, url_edit in self._shortcut_edits:
-            name, url = name_edit.text().strip(), url_edit.text().strip()
-            if not name and not url:
-                continue
-            if not name or not url:
-                QMessageBox.warning(self, "입력 확인", "바로가기는 이름과 주소를 모두 입력하거나 모두 비워야 합니다.")
-                return
-            parsed = QUrl(url)
-            if not parsed.isValid() or parsed.scheme().lower() not in {"http", "https"}:
-                QMessageBox.warning(self, "입력 확인", f"'{name}' 바로가기 주소는 http:// 또는 https://로 시작해야 합니다.")
-                return
-            shortcuts.append((name, url))
-        self._config.save(credentials, NewsFilterSettings(
-            self._ad_filter_enabled.isChecked(), words, providers, self._provider_filter_enabled.isChecked(),
-            visible_columns,
-            str(self._outlook_color_buttons["positive"].property("selectedColor")),
-            str(self._outlook_color_buttons["negative"].property("selectedColor")),
-            str(self._outlook_color_buttons["mixed"].property("selectedColor")),
-            str(self._outlook_color_buttons["neutral"].property("selectedColor")),
-        ), NewsAISettings(ai_provider, self._ai_key.text().strip(), str(self._ai_model.currentData() or ""),
-                          self._ai_limit.value(), self._ai_auto_recent_limit.value(), self._ai_auto.isChecked(),
-                          str(self._ai_request_mode.currentData()), self._ai_batch_size.value()),
-           OfficialNewsSettings(self._dart_key.text().strip(), self._dart_enabled.isChecked()),
-           tuple(shortcuts))
-        self.accept()
-
-    def done(self, result: int) -> None:
-        """저장·취소·X 버튼 어떤 방식으로 닫더라도 마지막 크기를 기억한다."""
-        self._window_settings.setValue("geometry", self.saveGeometry())
-        super().done(result)
-
-
 class StockNewsWindow(QDialog):
-    CHECK_INTERVAL_SECONDS = 180.0
+    CHECK_INTERVAL_SECONDS = NEWS_CHECK_INTERVAL_SECONDS
     AUTO_REFRESH_MS = 180_000
     STATUS_NOTICE = (
         "기본 판단은 제목·요약 규칙이고, AI 분석은 가져올 수 있는 기사 원문을 읽습니다. "
@@ -570,6 +140,17 @@ class StockNewsWindow(QDialog):
         self._database_path = database_path
         self._repository = StockNewsRepository(database_path)
         self._ai_repository = NewsAIRepository(database_path)
+        self._central_news_client: CentralNewsClient | None = None
+        self._central_ai_client: CentralAIClient | None = None
+        self._central_operational_client: CentralOperationalSettingsClient | None = None
+        try:
+            source = DataSourceConfig(config_path.with_name("data_source.json")).load()
+            if source.mode in {"local_server", "personal_server"}:
+                self._central_news_client = CentralNewsClient(source.server_url, source.access_token)
+                self._central_ai_client = CentralAIClient(source.server_url, source.access_token)
+                self._central_operational_client = CentralOperationalSettingsClient(source)
+        except (OSError, ValueError, json.JSONDecodeError):
+            logger.warning("중앙 뉴스 설정을 읽지 못해 로컬 뉴스 모드를 사용합니다.", exc_info=True)
         self._news_filter = NewsFilterSettings()
         try:
             self._news_filter = self._config.load_filter()
@@ -820,9 +401,7 @@ class StockNewsWindow(QDialog):
     def _on_prepare_finished(self) -> None:
         worker = self._prepare_worker
         self._prepare_worker = None
-        if worker is not None:
-            worker.wait()
-            worker.deleteLater()
+        dispose_finished_worker(worker)
         self._start_pending_prepare()
 
     def refresh(self, *, force: bool = False) -> None:
@@ -851,7 +430,11 @@ class StockNewsWindow(QDialog):
             official = self._config.load_official()
         except (OSError, ValueError):
             official = OfficialNewsSettings()
-        if (not credentials.client_id or not credentials.client_secret) and not (official.dart_enabled and official.dart_api_key):
+        try:
+            ai_settings = self._config.load_ai()
+        except (OSError, ValueError):
+            ai_settings = NewsAISettings()
+        if self._central_news_client is None and (not credentials.client_id or not credentials.client_secret) and not (official.dart_enabled and official.dart_api_key):
             self._status_label.setText("뉴스 API 설정이 필요합니다. 저장된 뉴스는 그대로 표시합니다.")
             return
         requested_code = self._stock_code
@@ -860,7 +443,7 @@ class StockNewsWindow(QDialog):
         naver_since = max(two_days_ago, last_naver_check.astimezone(UTC)) if last_naver_check else two_days_ago
         worker = NewsSearchWorker(requested_code, requested_name, credentials, official,
                                   self._config.directory / "dart_corp_codes.json", naver_since,
-                                  self._database_path, self)
+                                  self._database_path, self._central_news_client, ai_settings, self)
         self._worker = worker
         worker.completed.connect(self._on_completed)
         worker.failed.connect(self._on_failed)
@@ -885,13 +468,19 @@ class StockNewsWindow(QDialog):
             ai = NewsAISettings()
         if not ai.auto_analyze:
             return
-        candidates = [
-            news_identity(group.representative) for group in self._visible_groups
-            if any(news_identity(item) in new_identities for item in group.items)
-            and (group.representative.link or group.representative.original_link)
-            and news_identity(group.representative) not in self._ai_result_cache
-        ]
-        self._auto_ai_identities = set(candidates[:ai.auto_recent_limit])
+        self._auto_ai_identities = set(auto_candidate_identities(
+            self._visible_groups,
+            self._current_ai_result_identities(),
+            ai.auto_recent_limit,
+            new_identities=new_identities,
+        ))
+
+    def _current_ai_result_identities(self) -> set[str]:
+        """표에는 레거시 결과를 보이되 자동분석 완료로는 세지 않는다."""
+        return {
+            identity for identity, stored in self._ai_result_cache.items()
+            if getattr(stored, "uses_current_prompt", True)
+        }
 
     def _configure_recent_auto_candidates(self) -> None:
         try:
@@ -900,14 +489,13 @@ class StockNewsWindow(QDialog):
             return
         if not ai.auto_analyze:
             return
-        # 중간에 다른 종목/이전 실행에서 분석된 기사가 있어도 거기서 멈추지
-        # 않고, 전체 목록에서 실제 미분석 사건을 최신순 N개 찾는다.
-        candidates = (
-            news_identity(group.representative) for group in self._visible_groups
-            if (group.representative.link or group.representative.original_link)
-            and news_identity(group.representative) not in self._ai_result_cache
-        )
-        self._auto_ai_identities = set(tuple(candidates)[:ai.auto_recent_limit])
+        # 앱을 다시 열었을 때는 과거 프롬프트 버전 결과도 이미 분석된 기사로
+        # 센다. 규칙 변경만으로 최근 100건을 자동 재요청하지 않는다.
+        self._auto_ai_identities = set(auto_candidate_identities(
+            self._visible_groups,
+            self._ai_result_cache.keys(),
+            ai.auto_recent_limit,
+        ))
 
     def _on_failed(self, stock_code: str, stock_name: str, message: str) -> None:
         if stock_code == self._stock_code:
@@ -918,9 +506,7 @@ class StockNewsWindow(QDialog):
     def _on_finished(self) -> None:
         worker = self._worker
         self._worker = None
-        if worker is not None:
-            worker.wait()
-            worker.deleteLater()
+        dispose_finished_worker(worker)
         if self._pending_refresh:
             self._pending_refresh = False
             self._schedule_prepare()
@@ -955,23 +541,14 @@ class StockNewsWindow(QDialog):
         end = min(self._render_row + 12, len(self._visible_items))
         for row in range(self._render_row, end):
             item = self._visible_items[row]
-            published = item.published_at.astimezone().strftime("%m-%d %H:%M") if item.published_at else "-"
-            category, outlook, _reason, source = self._effective_judgment(item)
-            displayed_outlook = f"{outlook}  ᴬᴵ" if source.startswith("AI 원문 분석") else outlook
             group = self._visible_groups[row]
-            suffixes = []
-            if len(group.items) > 1:
-                suffixes.append(f"관련 기사 {len(group.items)}건")
-            if group.stage:
-                suffixes.append(f"단계: {group.stage}")
-            if group.past_event_republication:
-                suffixes.append("과거 사건 재언급 가능")
-            displayed_title = item.title + (f"  · {' · '.join(suffixes)}" if suffixes else "")
-            values = (published, news_provider(item), category, displayed_outlook, displayed_title)
+            stored = self._ai_result_cache.get(news_identity(item))
+            display = build_display_row(item, group, stored)
+            values = (display.published, display.provider, display.category, display.outlook, display.title)
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(value)
                 if column == 3:
-                    cell.setForeground(_outlook_color(outlook, self._news_filter))
+                    cell.setForeground(_outlook_color(self._effective_judgment(item)[1], self._news_filter))
                     font = cell.font(); font.setBold(True); cell.setFont(font)
                 self._table.setItem(row, column, cell)
         self._render_row = end
@@ -1062,56 +639,13 @@ class StockNewsWindow(QDialog):
 
     @staticmethod
     def _related_articles_html(group: NewsEventGroup) -> str:
-        if len(group.items) <= 1:
-            return ""
-        rows: list[str] = []
-        for item in group.items[1:]:
-            published = item.published_at.astimezone().strftime("%m-%d %H:%M") if item.published_at else "-"
-            url = item.original_link or item.link
-            title = _html(item.title)
-            title_html = f"<a href='{_html(url)}'>{title}</a>" if url else title
-            rows.append(f"<li>{_html(published)} · {_html(news_provider(item))} · {title_html}</li>")
-        return f"<hr><p><b>관련 기사 {len(group.items)}건</b></p><ul>{''.join(rows)}</ul>"
+        return related_articles_html(group)
 
     def _effective_judgment(self, item: StockNewsItem) -> tuple[str, str, str, str]:
-        stored = self._ai_result_cache.get(news_identity(item))
-        if stored is None:
-            return item.assessment.category, item.assessment.outlook, item.assessment.reason, "제목·검색 요약 규칙"
-        result = stored.analysis
-        if result.outlook == "긍정":
-            outlook = "호재 가능성 높음" if result.confidence >= 70 else "호재 가능성"
-        elif result.outlook == "부정":
-            outlook = "악재 가능성 높음" if result.confidence >= 70 else "악재 가능성"
-        elif result.outlook == "혼재":
-            outlook = "호재·악재 혼재"
-        else:
-            outlook = "판단 보류"
-        reason = result.reason or "AI 원문 분석에서 구체적인 판단 이유를 제공하지 않았습니다."
-        category = result.category or item.assessment.category
-        return category, outlook, reason, f"AI 원문 분석 ({stored.provider} · 신뢰도 {result.confidence}%)"
+        return effective_judgment(item, self._ai_result_cache.get(news_identity(item)))
 
     def _ai_html(self, item: StockNewsItem) -> str:
-        stored = self._ai_result_cache.get(news_identity(item))
-        if stored is None:
-            return (
-                "<p style='color:#667085'><b>AI 원문 분석</b>"
-                f" · 관련성 {item.assessment.relevance_score}점 · 신뢰도 - · 아직 분석하지 않음</p><hr>"
-            )
-        result = stored.analysis
-        positive = " / ".join(result.positive_evidence) or "-"
-        negative = " / ".join(result.negative_evidence) or "-"
-        return (
-            f"<div style='background:#EEF6FF; border:1px solid #9CC7F2; padding:10px;'>"
-            f"<h3 style='margin-top:0'>AI 원문 분석 · 관련성 {item.assessment.relevance_score}점"
-            f" · 신뢰도 {result.confidence}%</h3>"
-            f"<p><b>판단:</b> {_html(result.outlook)}</p>"
-            f"<p><b>원문 기준 분류:</b> {_html(result.category or item.assessment.category)}</p>"
-            f"<p><b>이유:</b> {_html(result.reason)}</p>"
-            f"<p><b>긍정 근거:</b> {_html(positive)}</p>"
-            f"<p><b>부정 근거:</b> {_html(negative)}</p>"
-            f"<p><b>원문 요약:</b> {_html(result.summary)}</p>"
-            f"<p style='color:#667085'>{_html(stored.provider)} · {_html(stored.model)} · DB 저장됨</p></div><hr>"
-        )
+        return ai_detail_html(item, self._ai_result_cache.get(news_identity(item)))
 
     def _analyze_selected(self, *, automatic: bool = False) -> None:
         row = self._table.currentRow()
@@ -1130,23 +664,27 @@ class StockNewsWindow(QDialog):
         except (OSError, ValueError) as error:
             QMessageBox.warning(self, "AI 분석", str(error)); return
         used = self._ai_repository.daily_count()
-        if settings.daily_limit > 0 and used >= settings.daily_limit:
+        block_reason = ai_start_block_reason(settings, used, len(groups))
+        if block_reason == "daily_limit":
             QMessageBox.information(self, "AI 분석", f"오늘 설정한 상한 {settings.daily_limit}건을 모두 사용했습니다."); return
-        if not groups:
+        if block_reason == "empty":
             return
         self._ai_groups = groups
         self._ai_item = groups[0].representative
         self._ai_stock_code = self._stock_code
         self._ai_continue = False
         self._ai_automatic_run = automatic
-        self._ai_worker = AINewsWorker(groups, self._stock_name, settings, self)
+        self._ai_worker = AINewsWorker(
+            groups, self._stock_name, settings, self,
+            stock_code=self._stock_code, central_client=self._central_ai_client,
+        )
         self._ai_worker.completed.connect(self._on_ai_completed)
         self._ai_worker.failed.connect(self._on_ai_failed)
         self._ai_worker.finished.connect(self._on_ai_finished)
         self._ai_button.setEnabled(False)
         self._ai_button.setText("AI 분석 중…")
         self._status_restore_timer.stop()
-        progress = f"{used + 1}/{settings.daily_limit}" if settings.daily_limit > 0 else f"{used + 1}/무제한"
+        progress = ai_progress_text(settings, used)
         related_count = sum(len(group.items) for group in groups)
         self._status_label.setText(
             f"AI 요청 1회로 사건 {len(groups)}개·관련 기사 {related_count}건을 읽고 있습니다… ({progress})"
@@ -1162,11 +700,12 @@ class StockNewsWindow(QDialog):
             self._status_label.setText(f"AI 설정을 읽지 못했습니다: {error}")
             return
         start = max(0, self._table.currentRow())
-        candidates = tuple(
-            group for group in self._visible_groups[start:]
-            if news_identity(group.representative) not in self._ai_result_cache
-            and (group.representative.link or group.representative.original_link)
-        )[:settings.auto_recent_limit]
+        candidates = unanalyzed_groups_from(
+            self._visible_groups,
+            start,
+            self._current_ai_result_identities(),
+            settings.auto_recent_limit,
+        )
         if not candidates:
             self._status_label.setText("선택 위치 이후에 미분석 뉴스가 없습니다.")
             return
@@ -1186,23 +725,25 @@ class StockNewsWindow(QDialog):
             settings = self._config.load_ai()
         except (OSError, ValueError):
             return
-        if (not settings.auto_analyze and not self._manual_ai_queue) or settings.provider == "none" or not settings.api_key:
+        if not automatic_ai_run_allowed(
+            settings,
+            manual_queue=self._manual_ai_queue,
+            central_client_available=self._central_ai_client is not None,
+            used_requests=self._ai_repository.daily_count(),
+        ):
             return
-        if settings.daily_limit > 0 and self._ai_repository.daily_count() >= settings.daily_limit:
-            return
-        candidates: list[NewsEventGroup] = []
-        for row, item in enumerate(self._visible_items):
-            identity = news_identity(item)
-            if identity not in self._auto_ai_identities:
-                continue
-            if identity not in self._ai_result_cache and (item.link or item.original_link):
-                candidates.append(self._visible_groups[row])
-                if settings.request_mode == "single" or len(candidates) >= settings.batch_size:
-                    break
+        candidates = next_auto_groups(
+            self._visible_items,
+            self._visible_groups,
+            self._auto_ai_identities,
+            self._current_ai_result_identities(),
+            settings.request_mode,
+            settings.batch_size,
+        )
         if candidates:
             for group in candidates:
                 self._auto_ai_identities.discard(news_identity(group.representative))
-            self._start_ai_groups(tuple(candidates), automatic=True)
+            self._start_ai_groups(candidates, automatic=True)
             return
         self._auto_ai_identities.clear()
         self._manual_ai_queue = False
@@ -1218,7 +759,9 @@ class StockNewsWindow(QDialog):
             return
         request_usage = usage if isinstance(usage, AIRequestUsage) else AIRequestUsage()
         request_mode = "batch" if len(self._ai_groups) > 1 else "single"
-        self._ai_repository.log_request(provider, model, request_mode, len(self._ai_groups), article_count, request_usage)
+        central_cache_hit = bool(getattr(self._ai_worker, "central_cache_hit", False))
+        if not central_cache_hit:
+            self._ai_repository.log_request(provider, model, request_mode, len(self._ai_groups), article_count, request_usage)
         for group, body_hash, result in zip(self._ai_groups, body_hashes, results, strict=True):
             if not isinstance(result, AINewsAnalysis):
                 continue
@@ -1226,7 +769,7 @@ class StockNewsWindow(QDialog):
             self._ai_repository.save(self._ai_stock_code, item, provider, model, str(body_hash), result)
             if self._ai_stock_code == self._stock_code:
                 self._ai_result_cache[news_identity(item)] = StoredAINewsAnalysis(
-                    result, provider, model, datetime.now(UTC),
+                    result, provider, model, datetime.now(UTC), str(body_hash),
                 )
         requests, input_tokens, output_tokens, total_tokens = self._ai_repository.daily_usage()
         self._status_label.setText(
@@ -1279,9 +822,7 @@ class StockNewsWindow(QDialog):
     def _on_ai_finished(self) -> None:
         worker = self._ai_worker
         self._ai_worker = None
-        if worker is not None:
-            worker.wait()
-            worker.deleteLater()
+        dispose_finished_worker(worker)
         self._ai_button.setText("AI 원문 분석")
         self._ai_button.setEnabled(self._table.currentRow() >= 0)
         self._ai_automatic_run = False
@@ -1320,7 +861,10 @@ class StockNewsWindow(QDialog):
             self._settings_dialog.activateWindow()
             return
         try:
-            dialog = NaverNewsSettingsDialog(self._config, self, database_path=self._database_path)
+            dialog = NaverNewsSettingsDialog(
+                self._config, self, database_path=self._database_path,
+                operational_client=self._central_operational_client,
+            )
         except (OSError, ValueError):
             QMessageBox.warning(self, "뉴스 API 설정", "저장된 뉴스 API 설정을 읽지 못했습니다. 설정 파일을 다시 만들어 주세요.")
             return
@@ -1496,5 +1040,4 @@ def _outlook_color(outlook: str, settings: NewsFilterSettings) -> QColor:
 
 
 def _html(value: str) -> str:
-    from html import escape
-    return escape(value).replace("\n", "<br>")
+    return escape_html(value)

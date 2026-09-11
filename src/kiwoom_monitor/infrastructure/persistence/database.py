@@ -4,6 +4,13 @@ import sqlite3
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+from kiwoom_monitor.infrastructure.persistence.market_data_metadata_schema import (
+    create_market_data_metadata_table,
+)
+from kiwoom_monitor.infrastructure.persistence.schema_migrations import (
+    SQLiteMigration,
+    SQLiteMigrationRunner,
+)
 from kiwoom_monitor.infrastructure.persistence.stock_aliases import seed_known_stock_aliases
 
 
@@ -46,6 +53,7 @@ DEFAULT_SETTINGS = {
     "show_server_clock": "1",
     "theme_trade_summary_enabled": "1",
     "theme_trade_summary_period": "day",
+    "theme_group_sort_basis": "all",
     "theme_trade_summary_excluded_stocks": "",
     "theme_trade_summary_excluded_enabled": "1",
     "theme_image_import_dir": "",
@@ -100,6 +108,9 @@ DEFAULT_COLUMNS = (
 )
 
 
+MAIN_SCHEMA_VERSION = 3
+
+
 class Database:
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
@@ -109,15 +120,25 @@ class Database:
         connection = sqlite3.connect(self._database_path)
         try:
             connection.execute("PRAGMA foreign_keys = ON")
+            migrations = SQLiteMigrationRunner(connection)
+            migrations.prepare()
+            migrations.ensure_compatible(MAIN_SCHEMA_VERSION)
             connection.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)"
+                "CREATE TABLE IF NOT EXISTS central_setting_versions ("
+                "setting_key TEXT PRIMARY KEY, updated_at TEXT NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS central_column_setting_versions ("
+                "column_name TEXT PRIMARY KEY, updated_at TEXT NOT NULL)"
             )
             applied = {
                 row[0] for row in connection.execute("SELECT version FROM schema_migrations")
             }
             if 1 not in applied:
                 self._apply_v1(connection)
-                connection.execute("INSERT INTO schema_migrations(version) VALUES (1)")
+                migrations.record_applied(1, "initial_settings_and_columns")
+            else:
+                migrations.record_applied(1, "initial_settings_and_columns")
             connection.executemany("INSERT OR IGNORE INTO column_settings(column_name, visible, position, width) VALUES (?, ?, ?, ?)", DEFAULT_COLUMNS)
             removed_new_high = connection.execute("DELETE FROM column_settings WHERE column_name = 'new_high'").rowcount
             if removed_new_high:
@@ -253,6 +274,20 @@ class Database:
             self._add_daily_bar_columns(connection)
             self._add_minute_bar_columns(connection)
             self._add_top20_index_columns(connection)
+            # v2는 과거에 버전 없이 누적된 현재 호환 스키마의 기준점이다.
+            # 실제 데이터 변환은 없으며 이후 변경부터 v3 migration으로 추가한다.
+            migrations.record_applied(2, "legacy_compatibility_schema_baseline")
+            migrations.apply(
+                (
+                    SQLiteMigration(1, "initial_settings_and_columns", lambda _: None),
+                    SQLiteMigration(2, "legacy_compatibility_schema_baseline", lambda _: None),
+                    SQLiteMigration(
+                        3,
+                        "market_data_observation_metadata",
+                        create_market_data_metadata_table,
+                    ),
+                )
+            )
             connection.commit()
         finally:
             connection.close()

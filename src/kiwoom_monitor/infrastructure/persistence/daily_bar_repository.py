@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from kiwoom_monitor.application.daily_high_service import DailyBar, DailyHighTargets
+from kiwoom_monitor.infrastructure.persistence.local_bar_observations import (
+    local_daily_bar_observation,
+)
+from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import (
+    upsert_market_data_metadata,
+)
+from kiwoom_monitor.infrastructure.persistence.market_data_metadata_schema import (
+    MARKET_DATA_METADATA_TABLE,
+)
 
 
 class DailyBarRepository:
@@ -166,7 +175,14 @@ class DailyBarRepository:
         latest = {str(code): str(trade_date) for code, trade_date in rows if trade_date}
         return tuple(code for code in codes if latest.get(code, "") < expected.isoformat())
 
-    def upsert_targets(self, code: str, targets: DailyHighTargets, synced_on: date) -> None:
+    def upsert_targets(
+        self,
+        code: str,
+        targets: DailyHighTargets,
+        synced_on: date,
+        *,
+        observed_at: datetime | None = None,
+    ) -> None:
         if not code or not targets.daily_bars:
             return
         rows = tuple((code, f"{bar.trade_date[:4]}-{bar.trade_date[4:6]}-{bar.trade_date[6:]}", bar.high_price, bar.trade_value_eok, bar.close_price, bar.open_price, bar.low_price, bar.volume) for bar in targets.daily_bars[:250])
@@ -178,6 +194,19 @@ class DailyBarRepository:
                 "WHERE daily_bars.high_price != excluded.high_price OR COALESCE(daily_bars.trade_value_eok, -1) != COALESCE(excluded.trade_value_eok, -1) OR COALESCE(daily_bars.close_price, -1) != COALESCE(excluded.close_price, -1)",
                 rows,
             )
+            available_at = observed_at or datetime.now()
+            for bar in targets.daily_bars[:250]:
+                trading_day = date.fromisoformat(
+                    f"{bar.trade_date[:4]}-{bar.trade_date[4:6]}-{bar.trade_date[6:]}"
+                )
+                observation = local_daily_bar_observation(
+                    code,
+                    trading_day,
+                    bar,
+                    available_at=available_at,
+                    source="kiwoom-ka10081",
+                )
+                upsert_market_data_metadata(connection, trading_day.isoformat(), observation)
             connection.execute(
                 "INSERT INTO daily_bar_sync_log(stock_code, synced_on) VALUES (?, ?) ON CONFLICT(stock_code) DO UPDATE SET synced_on=excluded.synced_on",
                 (code, synced_on.isoformat()),
@@ -190,6 +219,15 @@ class DailyBarRepository:
         connection = sqlite3.connect(self._path)
         try:
             connection.execute("DELETE FROM daily_bars WHERE trade_date < ?", (cutoff.isoformat(),))
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (MARKET_DATA_METADATA_TABLE,),
+            ).fetchone():
+                connection.execute(
+                    f"DELETE FROM {MARKET_DATA_METADATA_TABLE} "
+                    "WHERE dataset_kind='daily_bar' AND observation_key < ?",
+                    (cutoff.isoformat(),),
+                )
             connection.commit()
         finally:
             connection.close()
@@ -209,6 +247,16 @@ class DailyBarRepository:
                 ")",
                 (limit,),
             )
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (MARKET_DATA_METADATA_TABLE,),
+            ).fetchone():
+                connection.execute(
+                    f"DELETE FROM {MARKET_DATA_METADATA_TABLE} AS metadata "
+                    "WHERE dataset_kind='daily_bar' AND NOT EXISTS ("
+                    "SELECT 1 FROM daily_bars AS bars WHERE bars.stock_code=metadata.subject "
+                    "AND bars.trade_date=metadata.observation_key)"
+                )
             connection.commit()
         finally:
             connection.close()

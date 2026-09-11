@@ -74,6 +74,32 @@ def _target_topic(lesson: int, section: str, subsection: str) -> str:
     return LESSON_TOPICS.get(lesson, "미분류")
 
 
+def load_personal_trade_rules(path: Path) -> tuple[str, ...]:
+    """개인 문서의 전체 문단을 순서와 중복 제거를 유지해 추출한다."""
+    if not path.is_file():
+        return ()
+    try:
+        if path.suffix.lower() == ".docx":
+            with zipfile.ZipFile(path) as archive:
+                root = ElementTree.fromstring(archive.read("word/document.xml"))
+            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            values = []
+            for paragraph in root.iter(f"{namespace}p"):
+                text = "".join(node.text or "" for node in paragraph.iter(f"{namespace}t")).strip()
+                if text:
+                    values.append(text)
+        else:
+            values = path.read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeError, KeyError, zipfile.BadZipFile, ElementTree.ParseError):
+        return ()
+    selected: list[str] = []
+    for value in values:
+        rule = value.strip().lstrip("-•*0123456789. ")
+        if rule and rule not in selected:
+            selected.append(rule)
+    return tuple(selected[:2_000])
+
+
 def extract_structured_trade_rules(path: Path) -> tuple[StructuredTradeRule, ...]:
     if not path.is_file():
         return ()

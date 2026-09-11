@@ -8,8 +8,10 @@ import tempfile
 from io import BytesIO
 from pathlib import Path
 
+from kiwoom_monitor.infrastructure.central_settings_sync import is_shared_setting
 from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import _protect, _unprotect
 
+from .database import DEFAULT_SETTINGS
 from .settings_backup import SettingsBackupService
 from .news_ai_backup import NewsAIBackupService
 
@@ -27,15 +29,12 @@ class GoogleDriveSyncService:
     SETTINGS_REMOTE_NAME = "kiwoom-monitor-settings-v1.json"
     THEMES_REMOTE_NAME = "kiwoom-monitor-themes-v1.json"
     NEWS_AI_REMOTE_NAME = "kiwoom-monitor-news-ai-v1.json"
-    LOCAL_ONLY_SETTINGS = frozenset({
-        "window_width",
-        "window_height",
-        "settings_dialog_width",
-        "settings_dialog_height",
-        "google_drive_unsynced_changes",
-        "google_drive_local_changed_at",
-        "google_drive_last_upload_success_at",
-    })
+    # NAS와 Google Drive가 서로 다른 의미의 "공통 설정"을 만들지 않는다.
+    # 창 위치/크기, 로컬 파일 경로, 동기화 실행 상태처럼 PC에 종속된 값은
+    # 두 경계 모두 central_settings_sync의 한 정책으로 제외한다.
+    LOCAL_ONLY_SETTINGS = frozenset(
+        key for key in DEFAULT_SETTINGS if not is_shared_setting(key)
+    )
 
     def __init__(self, database_path: Path, news_database_path: Path | None = None) -> None:
         self._database_path = database_path
@@ -78,10 +77,9 @@ class GoogleDriveSyncService:
                 for name, _, _ in self._selected_files(target)
                 if (info := self._find_remote_file_info(service, folder_id, name)) is not None
             ]
-            if target in {"settings", "both"}:
-                info = self._find_remote_file_info(service, folder_id, self.NEWS_AI_REMOTE_NAME)
-                if info is not None:
-                    modified_times.append(str(info.get("modifiedTime", "")))
+            info = self._find_remote_file_info(service, folder_id, self.NEWS_AI_REMOTE_NAME)
+            if info is not None:
+                modified_times.append(str(info.get("modifiedTime", "")))
             if not modified_times:
                 legacy = self._find_remote_file_info(service, folder_id, self.LEGACY_REMOTE_NAME)
                 if legacy is not None:
@@ -111,18 +109,17 @@ class GoogleDriveSyncService:
                         service.files().update(fileId=existing, media_body=media, fields="id,modifiedTime").execute()
                     else:
                         service.files().create(body={"name": name, "parents": [folder_id]}, media_body=media, fields="id,modifiedTime").execute()
-                if target in {"settings", "both"}:
-                    source = Path(directory) / self.NEWS_AI_REMOTE_NAME
-                    NewsAIBackupService(self._news_database_path).export_to(source)
-                    existing = self._find_remote_file(service, folder_id, self.NEWS_AI_REMOTE_NAME)
-                    media = self._media_upload(source.read_bytes())
-                    if existing:
-                        service.files().update(fileId=existing, media_body=media, fields="id,modifiedTime").execute()
-                    else:
-                        service.files().create(
-                            body={"name": self.NEWS_AI_REMOTE_NAME, "parents": [folder_id]},
-                            media_body=media, fields="id,modifiedTime",
-                        ).execute()
+                source = Path(directory) / self.NEWS_AI_REMOTE_NAME
+                NewsAIBackupService(self._news_database_path).export_to(source)
+                existing = self._find_remote_file(service, folder_id, self.NEWS_AI_REMOTE_NAME)
+                media = self._media_upload(source.read_bytes())
+                if existing:
+                    service.files().update(fileId=existing, media_body=media, fields="id,modifiedTime").execute()
+                else:
+                    service.files().create(
+                        body={"name": self.NEWS_AI_REMOTE_NAME, "parents": [folder_id]},
+                        media_body=media, fields="id,modifiedTime",
+                    ).execute()
         except Exception as error:
             raise GoogleDriveSyncError(f"Google Drive 업로드에 실패했습니다: {error}") from error
         return f"Google Drive에 {self._target_label(target)}을(를) 업로드했습니다."
@@ -132,11 +129,7 @@ class GoogleDriveSyncService:
         folder_id = self._find_sync_folder(service)
         files = self._selected_files(target)
         remote_files = [(name, self._find_remote_file(service, folder_id, name) if folder_id else None, include_settings, include_themes) for name, include_settings, include_themes in files]
-        ai_file_id = (
-            self._find_remote_file(service, folder_id, self.NEWS_AI_REMOTE_NAME)
-            if folder_id and target in {"settings", "both"}
-            else None
-        )
+        ai_file_id = self._find_remote_file(service, folder_id, self.NEWS_AI_REMOTE_NAME) if folder_id else None
         # 분리 저장 전의 단일 파일도 한 번은 읽어 기존 업로드를 잃지 않는다.
         if folder_id and not any(file_id for _, file_id, _, _ in remote_files):
             legacy_id = self._find_remote_file(service, folder_id, self.LEGACY_REMOTE_NAME)
@@ -164,16 +157,15 @@ class GoogleDriveSyncService:
                         self.LOCAL_ONLY_SETTINGS,
                         include_column_widths=False,
                     )
-                if target in {"settings", "both"} and folder_id:
-                    if ai_file_id:
-                        buffer = BytesIO()
-                        downloader = MediaIoBaseDownload(buffer, service.files().get_media(fileId=ai_file_id))
-                        done = False
-                        while not done:
-                            _, done = downloader.next_chunk()
-                        source = Path(directory) / self.NEWS_AI_REMOTE_NAME
-                        source.write_bytes(buffer.getvalue())
-                        NewsAIBackupService(self._news_database_path).import_from(source)
+                if ai_file_id:
+                    buffer = BytesIO()
+                    downloader = MediaIoBaseDownload(buffer, service.files().get_media(fileId=ai_file_id))
+                    done = False
+                    while not done:
+                        _, done = downloader.next_chunk()
+                    source = Path(directory) / self.NEWS_AI_REMOTE_NAME
+                    source.write_bytes(buffer.getvalue())
+                    NewsAIBackupService(self._news_database_path).import_from(source)
         except Exception as error:
             raise GoogleDriveSyncError(f"Google Drive 다운로드에 실패했습니다: {error}") from error
         return f"Google Drive {self._target_label(target)}을(를) 다운로드하고 바로 적용했습니다."

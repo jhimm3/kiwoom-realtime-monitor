@@ -36,9 +36,12 @@ def evaluate_strategy_pack(
         if metrics.get(rule.metric_key) is None
     )
     return TradeSetupClassification(
-        setup_type, confidence, evidence,
-        f"{manifest.name} · {len(matched_entry)}/{len(entry_rules)}개 진입조건 일치",
-        warnings, unavailable,
+        setup_type=setup_type,
+        confidence=confidence,
+        evidence=evidence,
+        subtype=f"{manifest.name} · {len(matched_entry)}/{len(entry_rules)}개 진입조건 일치",
+        unverifiable=unavailable,
+        warnings=warnings,
     )
 
 

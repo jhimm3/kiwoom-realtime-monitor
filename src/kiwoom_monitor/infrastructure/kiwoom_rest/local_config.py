@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from ctypes import wintypes
@@ -10,9 +11,11 @@ from ctypes import wintypes
 from .settings import KiwoomSettings
 
 
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-_kernel32.LocalFree.restype = ctypes.c_void_p
+_kernel32 = None
+if sys.platform == "win32":
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    _kernel32.LocalFree.restype = ctypes.c_void_p
 
 
 class _DataBlob(ctypes.Structure):
@@ -20,6 +23,8 @@ class _DataBlob(ctypes.Structure):
 
 
 def _protect(data: bytes) -> bytes:
+    if sys.platform != "win32" or _kernel32 is None:
+        raise RuntimeError("로컬 API 설정 암호화는 Windows 앱에서만 사용할 수 있습니다.")
     buffer = ctypes.create_string_buffer(data)
     source = _DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
     result = _DataBlob()
@@ -32,6 +37,8 @@ def _protect(data: bytes) -> bytes:
 
 
 def _unprotect(data: bytes) -> bytes:
+    if sys.platform != "win32" or _kernel32 is None:
+        raise RuntimeError("로컬 API 설정 복호화는 Windows 앱에서만 사용할 수 있습니다.")
     buffer = ctypes.create_string_buffer(data)
     source = _DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
     result = _DataBlob()

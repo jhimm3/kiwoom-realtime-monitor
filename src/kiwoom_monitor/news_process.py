@@ -6,7 +6,9 @@ from ctypes import wintypes
 import json
 import logging
 import os
+import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -15,6 +17,9 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from kiwoom_monitor.infrastructure.logging_config import configure_logging
+from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
+from kiwoom_monitor.infrastructure.central_content_sync import CentralContentSyncService
+from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 from kiwoom_monitor.infrastructure.persistence.news_database import initialize_news_database
 from kiwoom_monitor.presentation.stock_news_window import StockNewsWindow
 
@@ -102,6 +107,24 @@ def _parent_is_alive(process_id: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _file_signature(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (0, 0)
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _news_content_signature(news_database_path: Path) -> tuple[int, int]:
+    """뉴스 프로세스가 직접 소유하는 로컬 콘텐츠 변경만 감지한다.
+
+    실시간 순위·분봉도 쓰는 ``monitor.sqlite3``의 파일 수정 시각은 테마
+    변경 근거가 아니다. 테마 변경은 메인 프로세스의 전용 dispatcher가
+    중앙에 반영하므로 여기서는 뉴스/AI DB만 업로드 계기로 사용한다.
+    """
+    return _file_signature(news_database_path)
 
 
 def main(arguments: list[str] | None = None) -> int:
@@ -221,6 +244,10 @@ def main(arguments: list[str] | None = None) -> int:
                 restore_after_main = False
             publish_visibility(force=True)
             return
+        if action == "reload_settings":
+            window._on_settings_saved()
+            publish_visibility(force=True)
+            return
         if action == "sync":
             if mode.startswith("docked_") or mode == "docked":
                 dock_beside_main(document.get("main_geometry"), "docked_right" if mode == "docked" else mode)
@@ -273,6 +300,57 @@ def main(arguments: list[str] | None = None) -> int:
 
     activation_timer.timeout.connect(sync_parent_on_news_activation)
     activation_timer.start()
+
+    # 뉴스 수집과 AI 분석은 뉴스 전용 프로세스의 로컬 DB에 먼저 안전하게
+    # 저장된다. 중앙 모드에서는 파일 변경을 감지한 뒤 별도 daemon 스레드가
+    # 중앙 저장소에 복사한다. 네트워크 지연이나 서버 장애가 뉴스창 Qt 루프는
+    # 물론 메인 실시간 표에도 전달되지 않는다.
+    content_sync_timer: QTimer | None = None
+    content_sync_running = threading.Event()
+    last_content_signature: tuple[int, int] | None = None
+    try:
+        source = DataSourceConfig(config_path.with_name("data_source.json")).load()
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        logger.warning("중앙 콘텐츠 설정을 읽지 못했습니다: %s", error)
+        source = None
+    if source is not None and source.mode in {"local_server", "personal_server"}:
+        content_sync = CentralContentSyncService(CentralContentClient(
+            source.server_url, source.access_token,
+        ))
+        main_database_path = database_path.with_name("monitor.sqlite3")
+        last_content_signature = _news_content_signature(database_path)
+
+        def schedule_content_sync() -> None:
+            nonlocal last_content_signature
+            signature = _news_content_signature(database_path)
+            if content_sync_running.is_set():
+                return
+            local_changed = signature != last_content_signature
+            content_sync_running.set()
+
+            def run() -> None:
+                nonlocal last_content_signature
+                try:
+                    if local_changed:
+                        content_sync.push(main_database_path, database_path)
+                    pulled = content_sync.pull(main_database_path, database_path)
+                    last_content_signature = _news_content_signature(database_path)
+                    logger.info(
+                        "중앙 콘텐츠 동기화 완료: 내려받기 %s건, 로컬 변경=%s",
+                        pulled.total, local_changed,
+                    )
+                except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
+                    logger.warning("중앙 콘텐츠 변경분 보존 실패(로컬 자료 유지): %s", error)
+                finally:
+                    content_sync_running.clear()
+
+            threading.Thread(target=run, name="news-central-content-sync", daemon=True).start()
+
+        content_sync_timer = QTimer()
+        content_sync_timer.setInterval(60_000)
+        content_sync_timer.timeout.connect(schedule_content_sync)
+        content_sync_timer.start()
+        QTimer.singleShot(1_000, schedule_content_sync)
     publish_visibility(force=True)
     poll_command()
     return app.exec()

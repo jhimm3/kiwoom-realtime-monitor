@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -192,7 +194,11 @@ class LocalNaverNewsConfig:
         }
         payload = json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         encrypted = base64.b64encode(_protect(payload)).decode("ascii")
-        self._path.write_text(f"NAVER_NEWS_CONFIG_ENCRYPTED={encrypted}\n", encoding="utf-8")
+        temporary = self._path.with_name(
+            f".{self._path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        temporary.write_text(f"NAVER_NEWS_CONFIG_ENCRYPTED={encrypted}\n", encoding="utf-8")
+        temporary.replace(self._path)
 
 
 def _color_setting(values: dict[str, object], key: str, default: str) -> str:

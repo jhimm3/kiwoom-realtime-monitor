@@ -20,12 +20,64 @@ class ThemeBackupService:
         self._database_path = database_path
         self._profile_name = profile_name
 
+    def export_document(self) -> dict[str, object]:
+        """현재 테마 저장 구조를 파일 형식과 동일한 문서로 반환한다."""
+        if self._profile_name is not None:
+            raise ThemeBackupError("개별 프로필은 파일 내보내기를 사용하세요.")
+        connection = sqlite3.connect(self._database_path)
+        try:
+            active_row = connection.execute(
+                "SELECT value FROM settings WHERE key='theme_active_profile'"
+            ).fetchone()
+            common = {
+                "format": self.FORMAT,
+                "version": self.VERSION,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "active_profile": str(active_row[0]) if active_row is not None else "",
+                "aliases": [{"alias": alias, "code": code} for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")],
+                "stock_catalog": [{"code": code, "name": name, "market": market} for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")],
+            }
+            has_profiles = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='theme_profiles'"
+            ).fetchone() is not None
+            if has_profiles:
+                profiles = []
+                for profile_id, name in connection.execute("SELECT profile_id, profile_name FROM theme_profiles ORDER BY profile_name COLLATE NOCASE"):
+                    profiles.append({
+                        "name": name,
+                        "themes": [{"name": theme, "color": color} for theme, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
+                        "stock_themes": [{"code": code, "theme": theme, "color": color} for code, theme, color in connection.execute("SELECT stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=? ORDER BY stock_code, theme_name", (profile_id,))],
+                    })
+                return {**common, "profiles": profiles}
+            return {
+                **common,
+                "themes": [{"name": name, "color": color} for name, color in connection.execute("SELECT theme_name, default_color FROM themes ORDER BY theme_name")],
+                "stock_themes": [
+                    {"code": code, "theme": theme, "color": color}
+                    for code, theme, color in connection.execute(
+                        "SELECT st.stock_code, t.theme_name, st.custom_color FROM stock_themes st "
+                        "JOIN themes t ON t.theme_id = st.theme_id ORDER BY st.stock_code, t.theme_name"
+                    )
+                ],
+            }
+        finally:
+            connection.close()
+
+    def import_document(self, document: dict[object, object]) -> None:
+        """현재 프로필 문서를 적용한다. 예전 문서는 기존 import_from 경로가 처리한다."""
+        if self._profile_name is not None:
+            raise ThemeBackupError("개별 프로필은 파일 가져오기를 사용하세요.")
+        if isinstance(document.get("profiles"), list):
+            self._import_all_profiles(document)
+            return
+        raise ThemeBackupError("테마 프로필 백업 형식이 올바르지 않습니다.")
+
     def export_to(self, path: Path) -> None:
         if self._profile_name is not None:
             self._export_profile(path)
             return
         if self._has_profile_schema():
-            self._export_all_profiles(path)
+            path.write_text(json.dumps(self.export_document(), ensure_ascii=False, indent=2), encoding="utf-8")
             return
         connection = sqlite3.connect(self._database_path)
         try:
@@ -173,6 +225,16 @@ class ThemeBackupService:
                                 connection.execute("INSERT OR IGNORE INTO profile_stock_themes(profile_id, stock_code, theme_name, custom_color) VALUES (?, ?, ?, ?)", (profile_id, str(item["code"]), str(item["theme"]).strip(), item.get("color") or None))
                 if not connection.execute("SELECT 1 FROM theme_profiles").fetchone():
                     connection.execute("INSERT INTO theme_profiles(profile_name) VALUES ('기본 테마')")
+                active_profile = str(document.get("active_profile", "")).strip()
+                if active_profile and connection.execute(
+                    "SELECT 1 FROM theme_profiles WHERE profile_name=? COLLATE NOCASE",
+                    (active_profile,),
+                ).fetchone():
+                    connection.execute(
+                        "INSERT INTO settings(key,value) VALUES('theme_active_profile',?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (active_profile,),
+                    )
                 codes = {str(row[0]) for row in connection.execute("SELECT code FROM stocks")}
                 connection.execute("DELETE FROM stock_aliases")
                 aliases = document.get("aliases", [])

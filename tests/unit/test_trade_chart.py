@@ -3,10 +3,33 @@ from __future__ import annotations
 import unittest
 from datetime import datetime
 
-from kiwoom_monitor.application.trade_chart import DailyTradeChartService, aggregate_chart_rows
+from kiwoom_monitor.application.trade_chart import (
+    DailyTradeChartService,
+    aggregate_chart_rows,
+    daily_chart_display_target,
+    should_reuse_cached_daily_chart,
+)
 
 
 class TradeChartTests(unittest.TestCase):
+    def test_daily_chart_display_target_keeps_existing_routing(self) -> None:
+        context = {"selected_history_code": "A", "live_code": "B"}
+
+        self.assertEqual("history", daily_chart_display_target("history", "A", **context))
+        self.assertEqual("live", daily_chart_display_target("live", "B", **context))
+        self.assertEqual("detached", daily_chart_display_target("detached:C", "C", **context))
+        self.assertEqual("", daily_chart_display_target("history", "B", **context))
+        self.assertEqual("", daily_chart_display_target("live", "A", **context))
+
+    def test_only_complete_past_history_or_detached_cache_skips_api(self) -> None:
+        today = datetime(2026, 9, 10).date()
+
+        self.assertTrue(should_reuse_cached_daily_chart("history", datetime(2026, 9, 9).date(), 250, today=today))
+        self.assertTrue(should_reuse_cached_daily_chart("detached:A", datetime(2026, 9, 9).date(), 250, today=today))
+        self.assertFalse(should_reuse_cached_daily_chart("live", datetime(2026, 9, 9).date(), 250, today=today))
+        self.assertFalse(should_reuse_cached_daily_chart("history", today, 250, today=today))
+        self.assertFalse(should_reuse_cached_daily_chart("history", datetime(2026, 9, 9).date(), 249, today=today))
+
     def test_loads_recent_daily_ohlcv_rows_for_chart(self) -> None:
         class Client:
             def request(self, api_id, path, body):

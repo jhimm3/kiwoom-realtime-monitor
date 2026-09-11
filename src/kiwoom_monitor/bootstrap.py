@@ -3,18 +3,30 @@ from __future__ import annotations
 import sys
 import logging
 import ctypes
+import sqlite3
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from kiwoom_monitor.infrastructure.app_paths import AppPaths
+from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig, DataSourceSettings
+from kiwoom_monitor.infrastructure.central_server_process import LocalCentralServerProcess
+from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
+from kiwoom_monitor.infrastructure.central_content_sync import CentralContentSyncService
+from kiwoom_monitor.infrastructure.central_theme_sync import CentralThemeSyncDispatcher
+from kiwoom_monitor.infrastructure.central_settings_sync import CentralSettingsSyncService
 from kiwoom_monitor.infrastructure.logging_config import configure_logging
 from kiwoom_monitor.infrastructure.persistence.database import Database
-from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
 from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import LocalApiConfig
+from kiwoom_monitor.infrastructure.kiwoom_rest.client import KiwoomRestClient
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker import RealtimeTradeWorker
+from kiwoom_monitor.infrastructure.kiwoom_rest.central_realtime_worker import CentralRealtimeWorker
+from kiwoom_monitor.infrastructure.kiwoom_rest.validation_client import RealtimeValidationRecorder
+from kiwoom_monitor.infrastructure.kiwoom_rest.client_factory import create_query_client
 from kiwoom_monitor.infrastructure.kiwoom_rest.minute_history_worker import MinuteHistoryWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.fundamentals_worker import FundamentalsWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.daily_high_worker import DailyHighWorker
@@ -61,6 +73,15 @@ def _set_taskbar_app_id() -> None:
 
 
 def main() -> None:
+    if "--central-server" in sys.argv:
+        from kiwoom_monitor.central_server.__main__ import main as central_server_main
+        index = sys.argv.index("--central-server")
+        original = sys.argv
+        try:
+            sys.argv = [original[0], *original[index + 1:]]
+            raise SystemExit(central_server_main())
+        finally:
+            sys.argv = original
     if "--journal-process" in sys.argv:
         from kiwoom_monitor.journal_process import main as journal_main
         index = sys.argv.index("--journal-process")
@@ -75,11 +96,62 @@ def main() -> None:
 
     database = Database(paths.database_path)
     database.initialize()
+    local_central_server: LocalCentralServerProcess | None = None
+    configured_data_source = DataSourceSettings()
+    try:
+        configured_data_source = DataSourceConfig(paths.data_dir / "data_source.json").load()
+        if configured_data_source.mode == "local_server":
+            local_central_server = LocalCentralServerProcess(
+                configured_data_source, paths.data_dir / "api.env", paths.database_path,
+            )
+            local_central_server.start()
+    except (ValueError, RuntimeError, TimeoutError, OSError) as error:
+        logging.getLogger(__name__).warning("로컬 중앙 서버를 시작하지 못했습니다: %s", error)
+        if configured_data_source.mode == "local_server":
+            if local_central_server is not None:
+                local_central_server.stop()
+            local_central_server = None
     migrate_legacy_news_database(paths.database_path, paths.news_database_path)
+    central_theme_sync: CentralThemeSyncDispatcher | None = None
+    central_settings_sync: CentralSettingsSyncService | None = None
+    if configured_data_source.mode in {"local_server", "personal_server"} and not (
+        configured_data_source.mode == "local_server" and local_central_server is None
+    ):
+        central_content_service = CentralContentSyncService(CentralContentClient(
+            configured_data_source.server_url, configured_data_source.access_token,
+        ))
+        central_theme_sync = CentralThemeSyncDispatcher(
+            central_content_service, paths.database_path,
+        )
+
+        def sync_central_content() -> None:
+            try:
+                # 이전 실행의 로컬 대기 변경과 NAS 완료본의 수정 시각을 비교해
+                # 더 최신인 테마를 먼저 확정한 뒤 나머지 콘텐츠를 내려받는다.
+                if central_theme_sync is not None and central_theme_sync.has_pending \
+                        and not central_theme_sync.flush_pending():
+                    return
+                pulled = central_content_service.pull(paths.database_path, paths.news_database_path)
+                seed_marker = paths.data_dir / ".central_content_seeded"
+                if seed_marker.exists():
+                    logging.getLogger(__name__).info(
+                        "중앙 콘텐츠 시작 동기화 완료: 내려받기 %s건 · 초기 업로드 생략", pulled.total,
+                    )
+                else:
+                    pushed = central_content_service.push(paths.database_path, paths.news_database_path)
+                    seed_marker.write_text("1\n", encoding="utf-8")
+                    logging.getLogger(__name__).info(
+                        "중앙 콘텐츠 최초 이전 완료: 내려받기 %s건, 보존 %s건", pulled.total, pushed.total,
+                    )
+            except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
+                logging.getLogger(__name__).warning("중앙 콘텐츠 이전을 건너뜁니다: %s", error)
+
+        threading.Thread(target=sync_central_content, name="central-content-sync", daemon=True).start()
+        central_settings_sync = CentralSettingsSyncService(CentralContentClient(
+            configured_data_source.server_url, configured_data_source.access_token,
+        ))
     minute_bar_repository = MinuteBarRepository(paths.database_path)
-    minute_bar_repository.purge_before(datetime.now().date() - timedelta(days=30))
     daily_bar_repository = DailyBarRepository(paths.database_path)
-    daily_bar_repository.retain_latest(250)
     google_drive_sync = GoogleDriveSyncService(paths.database_path, paths.news_database_path)
     local_changed_at = database.settings.get("google_drive_local_changed_at")
     last_upload_at = database.settings.get("google_drive_last_upload_success_at")
@@ -96,13 +168,59 @@ def main() -> None:
     def build_api_runtime() -> dict[str, object]:
         """현재 저장된 API 설정으로 작업 객체 묶음을 새로 만든다."""
         local_api = paths.data_dir / "api.env"
-        settings = LocalApiConfig(local_api).load()
-        if not settings.app_key or not settings.secret_key:
-            raise ValueError("API 키가 아직 설정되지 않았습니다.")
-        client = KiwoomRestClient(settings)
+        # API 설정 창에서 페일오버를 바꾼 경우 앱 전체를 다시 켜지 않아도
+        # 새 실행 객체에 반영되도록 PC 전용 연결 설정을 다시 읽는다.
+        source = DataSourceConfig(paths.data_dir / "data_source.json").load()
+        # 로컬 서버 시작에 실패한 경우 이번 실행은 기존 직접 연결로 복구한다.
+        if source.mode == "local_server" and local_central_server is None:
+            source = DataSourceSettings()
+        client = create_query_client(
+            local_api, paths.data_dir / "data_source.json", source_settings=source,
+        )
+        if source.mode == "local":
+            settings = LocalApiConfig(local_api).load()
+            realtime_factory = lambda codes: RealtimeTradeWorker(
+                client.get_access_token, settings.environment, codes, client.server_now,
+            )
+        elif source.mode == "personal_server" and (
+            source.local_fallback_enabled or source.parallel_validation_enabled
+        ):
+            local_settings = LocalApiConfig(local_api).load()
+            if local_settings.app_key and local_settings.secret_key:
+                # 중앙 서버와 로컬 WebSocket을 동시에 열지 않는다. 중앙 연결이
+                # 연속 실패한 동안에만 전용 직접 연결 객체를 잠시 실행한다.
+                direct_client = KiwoomRestClient(local_settings)
+
+                def create_direct_realtime(codes, nxt_codes=()):
+                    return RealtimeTradeWorker(
+                        direct_client.get_access_token,
+                        local_settings.environment,
+                        codes,
+                        direct_client.server_now,
+                        nxt_codes,
+                    )
+
+                realtime_recorder = (
+                    RealtimeValidationRecorder(paths.data_dir / "central_local_realtime_validation.jsonl")
+                    if source.parallel_validation_enabled else None
+                )
+                realtime_factory = lambda codes: CentralRealtimeWorker(
+                    source,
+                    codes,
+                    fallback_factory=create_direct_realtime if source.local_fallback_enabled else None,
+                    validation_factory=create_direct_realtime if source.parallel_validation_enabled else None,
+                    validation_recorder=realtime_recorder,
+                )
+            else:
+                logging.getLogger(__name__).warning(
+                    "로컬 자동 전환이 켜져 있지만 이 PC에 키움 API 키가 없어 중앙 실시간만 사용합니다."
+                )
+                realtime_factory = lambda codes: CentralRealtimeWorker(source, codes)
+        else:
+            realtime_factory = lambda codes: CentralRealtimeWorker(source, codes)
         return {
             "ranking_loader": RankingService(client, stocks=StockRepository(paths.database_path), query_type=database.settings.get("rank_query_type")),
-            "realtime_worker_factory": lambda codes: RealtimeTradeWorker(client.get_access_token, settings.environment, codes, client.server_now),
+            "realtime_worker_factory": realtime_factory,
             "minute_history_worker_factory": lambda codes: MinuteHistoryWorker(
                 MinuteChartService(client, include_nxt=True), codes, client.server_now
             ),
@@ -154,6 +272,8 @@ def main() -> None:
 
     sys.excepthook = report_unhandled_error
     theme_store = DatabaseThemeRepository(paths.database_path, database.settings.get("theme_active_profile"))
+    if central_theme_sync is not None:
+        theme_store.set_change_callback(central_theme_sync.notify)
     themes = theme_store.all_by_name()
     window = MainWindow(
         settings=database.settings,
@@ -182,4 +302,54 @@ def main() -> None:
         program_trade_loader=api_runtime.get("program_trade_loader"),
     )
     window.show()
-    sys.exit(app.exec())
+
+    def retain_market_bars_after_startup() -> None:
+        def run() -> None:
+            try:
+                minute_bar_repository.purge_before(datetime.now().date() - timedelta(days=30))
+            except sqlite3.Error as error:
+                logging.getLogger(__name__).warning("시작 후 분봉 보존 정리를 건너뜁니다: %s", error)
+            try:
+                daily_bar_repository.retain_latest(250)
+            except sqlite3.Error as error:
+                logging.getLogger(__name__).warning("시작 후 일봉 보존 정리를 건너뜁니다: %s", error)
+
+        threading.Thread(target=run, name="market-bar-retention", daemon=True).start()
+
+    # 실제 크기 DB에서 분봉/일봉 정리가 각각 약 0.65초/0.12초까지 걸렸다.
+    # 첫 화면과 최초 순위 처리를 먼저 시작한 뒤 한 번 실행해 보존 정책은 유지한다.
+    QTimer.singleShot(30_000, retain_market_bars_after_startup)
+    central_settings_running = threading.Event()
+    central_settings_timer: QTimer | None = None
+    if central_settings_sync is not None:
+        def schedule_central_settings_sync() -> None:
+            if central_settings_running.is_set():
+                return
+            central_settings_running.set()
+
+            def run() -> None:
+                try:
+                    central_settings_sync.sync(paths.database_path)
+                    database.settings.clear_cache()
+                except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
+                    logging.getLogger(__name__).warning("공통 설정 중앙 동기화 실패(로컬 설정 유지): %s", error)
+                finally:
+                    central_settings_running.clear()
+
+            threading.Thread(target=run, name="central-app-settings-sync", daemon=True).start()
+
+        central_settings_timer = QTimer()
+        central_settings_timer.setInterval(60_000)
+        central_settings_timer.timeout.connect(schedule_central_settings_sync)
+        central_settings_timer.start()
+        QTimer.singleShot(1_000, schedule_central_settings_sync)
+    try:
+        exit_code = app.exec()
+    finally:
+        if central_settings_timer is not None:
+            central_settings_timer.stop()
+        if central_theme_sync is not None:
+            central_theme_sync.close()
+        if local_central_server is not None:
+            local_central_server.stop()
+    sys.exit(exit_code)

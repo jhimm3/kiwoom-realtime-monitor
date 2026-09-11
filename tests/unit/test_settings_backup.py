@@ -108,6 +108,55 @@ class SettingsBackupServiceTest(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_theme_only_backup_uses_current_profiles_and_restores_theme_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.db"
+            Database(database_path).initialize()
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute("INSERT INTO stocks(code,name,market) VALUES('005930','삼성전자','KOSPI')")
+                connection.execute("INSERT INTO theme_profiles(profile_name) VALUES('내 테마')")
+                profile_id = connection.execute("SELECT profile_id FROM theme_profiles WHERE profile_name='내 테마'").fetchone()[0]
+                connection.execute("INSERT INTO profile_themes(profile_id,theme_name,default_color) VALUES(?, '반도체', '#123456')", (profile_id,))
+                connection.execute("INSERT INTO profile_stock_themes(profile_id,stock_code,theme_name,custom_color) VALUES(?,'005930','반도체','#654321')", (profile_id,))
+                connection.execute("UPDATE settings SET value='내 테마' WHERE key='theme_active_profile'")
+                connection.execute("UPDATE settings SET value='+' WHERE key='theme_text_import_custom_separators'")
+                connection.commit()
+            finally:
+                connection.close()
+            backup_path = Path(directory) / "themes.json"
+            service = SettingsBackupService(database_path)
+            service.export_to(backup_path, include_settings=False, include_themes=True)
+            document = json.loads(backup_path.read_text(encoding="utf-8"))
+            self.assertEqual(4, document["version"])
+            self.assertIn("profiles", document["theme_data"])
+            self.assertNotIn("themes", document)
+
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute("DELETE FROM profile_stock_themes")
+                connection.execute("DELETE FROM profile_themes")
+                connection.execute("DELETE FROM theme_profiles")
+                connection.execute("UPDATE settings SET value='기본 테마' WHERE key='theme_active_profile'")
+                connection.execute("UPDATE settings SET value='' WHERE key='theme_text_import_custom_separators'")
+                connection.commit()
+            finally:
+                connection.close()
+            service.import_from(backup_path, include_settings=False, include_themes=True)
+            connection = sqlite3.connect(database_path)
+            try:
+                restored = connection.execute(
+                    "SELECT p.profile_name,t.theme_name,s.stock_code FROM theme_profiles p "
+                    "JOIN profile_themes t ON t.profile_id=p.profile_id "
+                    "JOIN profile_stock_themes s ON s.profile_id=p.profile_id AND s.theme_name=t.theme_name "
+                    "WHERE p.profile_name='내 테마'"
+                ).fetchone()
+                self.assertEqual(('내 테마', '반도체', '005930'), restored)
+                values = dict(connection.execute("SELECT key,value FROM settings WHERE key IN ('theme_active_profile','theme_text_import_custom_separators')"))
+                self.assertEqual({'theme_active_profile': '내 테마', 'theme_text_import_custom_separators': '+'}, values)
+            finally:
+                connection.close()
+
     def test_export_and_import_preserve_all_per_import_theme_rules(self) -> None:
         keys = {
             "theme_new_import_custom_separators": "·",

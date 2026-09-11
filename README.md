@@ -1,15 +1,16 @@
 # 키움 실시간 종목순위·테마·거래강도 모니터
 
-키움 REST·WebSocket `0B` 기반의 Windows 상위 20종목 모니터입니다. 실시간 순위·현재가·기간 거래대금·거래강도와 최고가 근접 알림, NXT 표시, 테마 관리, Google Drive 선택 동기화, 설치·부분 업데이트를 제공합니다.
+키움 REST·WebSocket `0B` 기반의 Windows 상위 20종목 모니터입니다. 실시간 순위·현재가·기간 거래대금·거래강도와 최고가 근접 알림, NXT 표시, 테마·뉴스·자동 매매일지, TOP20 지수를 제공합니다. 선택형 개인 NAS 서버는 앱이 꺼져도 시장 자료를 수집하고 여러 PC에 같은 설정·테마·AI 분석 자료를 제공하며, NAS를 쓰지 않는 로컬 모드도 그대로 지원합니다.
 
 ## 현재 버전
 
-- **1.1.20**
-- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.20)
+- **2.0.0**
+- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v2.0.0)
 - [소개 페이지](docs/index.html) · [개인정보처리방침](docs/privacy.html)
 
 ## 변경 내역
 
+- [2.0.0](docs/RELEASE_NOTES_v2.0.0.md) — 개인 NAS 중앙 수집·장애전환, 공통 백업, 시점별 데이터 계약과 대규모 안정성 리팩터링
 - [1.1.20](docs/RELEASE_NOTES_v1.1.20.md) — 자동 매매일지·전략팩, 다중 차트, 진입 스냅샷, TOP20 거래대금 지수와 실시간 안정성 개선
 - [1.1.19](docs/RELEASE_NOTES_v1.1.19.md) — AI 단건·묶음 요청, 호출량 추적, 뉴스창 배치·복원과 뉴스 설정 백업 개선
 - [1.1.18](docs/RELEASE_NOTES_v1.1.18.md) — 뉴스 전용 프로세스·DB 분리, AI 캐시 백업, 빠른 종목 전환 및 창 연동 안정화
@@ -30,7 +31,12 @@
 
 ## 개발 문서
 
-- [AI 인수인계 개발실행서 v3.3](docs/AI_인수인계_개발실행서_v3.3.md) — 현재 구조·설정·API·빌드·배포의 기준 문서
+- [현재 구현 아키텍처](ARCHITECTURE_CURRENT.md) · [기능별 모듈 지도](MODULE_MAP.md)
+- [NAS API 계약](API_CONTRACT.md) · [DB 스키마 지도](DB_SCHEMA.md)
+- [과거 시장 재현용 데이터 계약](HISTORICAL_DATA_CONTRACT.md)
+- [향후 앱 개발 로드맵](FUTURE_DEVELOPMENT_ROADMAP.md)
+- [개발 불변 규칙](DEVELOPMENT_GUARDRAILS.md) · [문서/구현 감사](AUDIT_REPORT.md) · [리팩터링 최종 종료 보고서](reports/REFACTORING_CLOSEOUT_REPORT.md) · [변경 기록](CHANGELOG.md)
+- [AI 인수인계 개발실행서 v3.3](docs/AI_인수인계_개발실행서_v3.3.md) — 상세 운영·배포 기록과 2.0.0 전환 메모
 - [API 발급 가이드](docs/API_발급_가이드.md) — 키움·네이버·DART·AI·Google Drive 자격 증명 준비 방법
 - [AI 강의 전략팩 적용 가이드](docs/AI_강의_전략팩_적용_가이드.md) — PDF·스크립트를 AI로 분석하고 자동분석 전략팩으로 검토·적용하는 방법
 - [기술 명세서](docs/키움_실시간_모니터_기술명세서_v2.0.md)

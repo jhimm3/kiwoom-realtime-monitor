@@ -5,10 +5,19 @@ import unittest
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from kiwoom_monitor.application.personal_trade_rules import extract_structured_trade_rules
+from kiwoom_monitor.application.personal_trade_rules import extract_structured_trade_rules, load_personal_trade_rules
 
 
 class PersonalTradeRulesTests(unittest.TestCase):
+    def test_plain_text_loader_preserves_order_removes_prefixes_and_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rules.txt"
+            path.write_text("1. 손절선을 정한다\n- 거래대금을 확인한다\n손절선을 정한다\n", encoding="utf-8")
+            self.assertEqual(("손절선을 정한다", "거래대금을 확인한다"), load_personal_trade_rules(path))
+
+    def test_plain_text_loader_returns_empty_for_missing_file(self) -> None:
+        self.assertEqual((), load_personal_trade_rules(Path("missing-personal-rules.txt")))
+
     def test_parses_private_markdown_rulebook_by_lesson_and_subsection(self) -> None:
         content = """# 2강: 당일 주도주 돌파매매
 ## 유형 A: 박스권 돌파

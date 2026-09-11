@@ -8,6 +8,8 @@ from pathlib import Path
 from kiwoom_monitor.application.strategy_pack import (
     MIMOSA_MANIFEST, StrategyPackManifest, default_strategy_pack, select_strategy_candidate,
 )
+from kiwoom_monitor.application.generic_strategy_evaluator import evaluate_strategy_pack
+from kiwoom_monitor.application.strategy_pack_extraction import ExtractedStrategyDraft, StrategyRuleDraft
 from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.application.trade_journal_summary import group_trade_episodes
 from kiwoom_monitor.application.trade_setup_classification import TradeSetupClassification, classify_trade_setup
@@ -50,6 +52,27 @@ class StrategyPackTests(unittest.TestCase):
             repository = JournalRepository(Path(directory) / "journal.db")
             self.assertEqual((MIMOSA_MANIFEST,), repository.load_strategy_packs())
             self.assertEqual((MIMOSA_MANIFEST,), JournalRepository(Path(directory) / "journal.db").load_strategy_packs())
+
+    def test_generic_evaluator_keeps_warnings_and_unverifiable_separate(self) -> None:
+        at = datetime(2026, 8, 28, 10, 5)
+        episode = group_trade_episodes((
+            TradeFill("1", "005930", "삼성전자", "매수", at, 10, 105),
+            TradeFill("2", "005930", "삼성전자", "매도", at.replace(minute=10), 10, 110),
+        ))[0]
+        manifest = StrategyPackManifest("test", "테스트팩", 1, True, 1, ("돌파",), ("분봉",))
+        draft = ExtractedStrategyDraft((
+            StrategyRuleDraft("진입 조건", "10시 이후 진입", "x", "x", (), True, "entry_time_hhmm", ">=", 1000),
+            StrategyRuleDraft("위험관리", "10시 이후 진입 주의", "x", "x", (), True, "entry_time_hhmm", ">=", 1000),
+            StrategyRuleDraft("위험관리", "미확보 지표", "x", "x", (), True, "missing_metric", ">=", 1),
+        ), {})
+        rows = (("2026-08-28T10:04", 100, 105, 99, 104, 100, 1.0, "확정"),)
+
+        result = evaluate_strategy_pack(manifest, draft, episode, rows)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(("전략팩 주의조건 일치: 10시 이후 진입 주의",), result.warnings)
+        self.assertEqual(("측정값 미확보: 미확보 지표",), result.unverifiable)
 
     def test_strategy_pack_version_can_be_saved_and_loaded(self) -> None:
         pack = StrategyPackManifest(
