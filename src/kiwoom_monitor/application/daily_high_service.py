@@ -100,6 +100,20 @@ class DailyHighService:
         return DailyHighTargets.from_daily_bars(_combine_krx_nxt_bars(krx_bars, nxt_bars), as_of=date.today())
 
     def _load_bars(self, code: str) -> tuple[DailyBar, ...]:
+        stored_loader = getattr(self._client, "load_stored_daily_bars", None)
+        if callable(stored_loader):
+            market = "NXT" if code.endswith("_NX") else "KRX"
+            stored = stored_loader(code.removesuffix("_NX"), market, 250)
+            if stored is not None:
+                return tuple(
+                    DailyBar(
+                        str(row.get("trading_date", "")).replace("-", ""),
+                        int(row["high"]),
+                        float(row["trade_value_million_won"]) / 100,
+                        int(row["close"]), int(row["open"]), int(row["low"]), int(row["volume"]),
+                    )
+                    for row in stored if isinstance(row, dict)
+                )
         response = self._client.request(
             "ka10081",
             "/api/dostk/chart",

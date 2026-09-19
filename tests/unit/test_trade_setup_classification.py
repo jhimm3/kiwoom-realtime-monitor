@@ -7,7 +7,9 @@ from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.application.trade_journal_summary import group_trade_episodes, trade_fill_key
 from kiwoom_monitor.application.trade_setup_classification import (
     TRADE_SETUP_TYPES, classify_trade_setup, classify_trade_setup_cycles, normalize_trade_setup_type,
+    trade_fill_session_context, trade_setup_revision_fill_context,
 )
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 
 
 class TradeSetupClassificationTests(unittest.TestCase):
@@ -270,6 +272,101 @@ class TradeSetupClassificationTests(unittest.TestCase):
         result = classify_trade_setup(episode, rows)
         self.assertEqual("종가베팅", result.setup_type)
         self.assertTrue(any("큰 거래대금" in value for value in result.warnings))
+
+    def test_effective_date_krx_segments_only_regular_closing_auction_as_close_entry(self) -> None:
+        daily_rows = (
+            ("2026-09-10T00:00", 100, 101, 99, 100, 1, 1.0, "daily"),
+            ("2026-09-11T00:00", 100, 101, 99, 100, 1, 1.0, "daily"),
+        )
+        expected = {
+            (15, 25): (True, "KRX 종가 단일가"),
+            (15, 35): (False, "장후 시간외종가 주문접수"),
+            (15, 45): (False, "장후 시간외종가 체결"),
+            (16, 5): (False, "KRX 애프터마켓"),
+            (19, 45): (False, "KRX 애프터마켓"),
+        }
+        for (hour, minute), (is_close, label) in expected.items():
+            with self.subTest(hour=hour, minute=minute):
+                at = datetime(2026, 9, 14, hour, minute)
+                fills = (
+                    TradeFill("1", "005930", "삼성전자", "매수", at, 10, 100, "", "KRX"),
+                    TradeFill("2", "005930", "삼성전자", "매도", datetime(2026, 9, 15, 9), 10, 101, "", "KRX"),
+                )
+                rows = (
+                    ("2026-09-14T09:00", 100, 101, 99, 100, 1, 1.0, "confirmed"),
+                    (at.replace(second=0).isoformat(timespec="minutes"), 100, 101, 99, 100, 1, 1.0, "confirmed"),
+                )
+                result = classify_trade_setup(group_trade_episodes(fills)[0], rows, daily_rows)
+                self.assertEqual(is_close, result.setup_type == "종가베팅")
+                self.assertTrue(any(label in value for value in result.evidence))
+
+    def test_effective_date_unknown_venue_is_not_guessed_as_close_entry(self) -> None:
+        at = datetime(2026, 9, 14, 15, 25)
+        fills = (
+            TradeFill("1", "005930", "삼성전자", "매수", at, 10, 100),
+            TradeFill("2", "005930", "삼성전자", "매도", datetime(2026, 9, 15, 9), 10, 101),
+        )
+        rows = (
+            ("2026-09-14T09:00", 100, 101, 99, 100, 1, 1.0, "confirmed"),
+            ("2026-09-14T15:25", 100, 101, 99, 100, 1, 1.0, "confirmed"),
+        )
+        result = classify_trade_setup(group_trade_episodes(fills)[0], rows)
+        self.assertNotEqual("종가베팅", result.setup_type)
+        self.assertTrue(any("거래소가 없어" in value for value in result.warnings))
+
+    def test_effective_date_nxt_after_trade_keeps_dynamic_phase_unknown(self) -> None:
+        at = datetime(2026, 9, 14, 16, 5)
+        fill = TradeFill("1", "005930", "삼성전자", "매수", at, 10, 100, "", "NXT")
+        context = trade_fill_session_context(fill)
+        self.assertEqual("NXT_AFTER_MARKET", context.session)
+        self.assertEqual("UNKNOWN", context.phase)
+        fills = (
+            fill,
+            TradeFill("2", "005930", "삼성전자", "매도", datetime(2026, 9, 15, 9), 10, 101, "", "NXT"),
+        )
+        rows = (
+            ("2026-09-14T09:00", 100, 101, 99, 100, 1, 1.0, "confirmed"),
+            ("2026-09-14T16:05", 100, 101, 99, 100, 1, 1.0, "confirmed"),
+        )
+        result = classify_trade_setup(group_trade_episodes(fills)[0], rows)
+        self.assertNotEqual("종가베팅", result.setup_type)
+        self.assertTrue(any("세부 phase" in value for value in result.warnings))
+
+    def test_pre_effective_krx_late_entry_keeps_legacy_closing_rule(self) -> None:
+        at = datetime(2026, 9, 11, 16, 5)
+        fills = (
+            TradeFill("1", "005930", "삼성전자", "매수", at, 10, 100, "", "KRX"),
+            TradeFill("2", "005930", "삼성전자", "매도", datetime(2026, 9, 14, 9), 10, 101, "", "KRX"),
+        )
+        rows = (
+            ("2026-09-11T09:00", 100, 101, 99, 100, 1, 1.0, "confirmed"),
+            ("2026-09-11T16:05", 100, 101, 99, 100, 1, 1.0, "confirmed"),
+        )
+        result = classify_trade_setup(group_trade_episodes(fills)[0], rows)
+        self.assertEqual("종가베팅", result.setup_type)
+
+    def test_same_stock_real_and_mock_accounts_keep_separate_session_context(self) -> None:
+        real = AccountScope("kiwoom", AccountEnvironment.REAL, "11111111-1111-4111-8111-111111111111")
+        mock = AccountScope("kiwoom", AccountEnvironment.MOCK, "22222222-2222-4222-8222-222222222222")
+        at = datetime(2026, 9, 14, 16, 5)
+        episodes = group_trade_episodes((
+            TradeFill("1", "005930", "삼성전자", "매수", at, 1, 100, "", "KRX", real),
+            TradeFill("1", "005930", "삼성전자", "매수", at, 1, 100, "", "KRX", mock),
+        ))
+        self.assertEqual(2, len(episodes))
+        self.assertNotEqual(episodes[0].summary.account_scope, episodes[1].summary.account_scope)
+        contexts_by_environment = {
+            value.summary.account_scope.environment.value: trade_fill_session_context(value.fills[0])
+            for value in episodes
+        }
+        self.assertEqual("KRX_AFTER_MARKET", contexts_by_environment["real"].session)
+        self.assertEqual("SUPPORTED", contexts_by_environment["real"].support)
+        self.assertEqual("KRX_AFTER_MARKET", contexts_by_environment["mock"].session)
+        self.assertEqual("UNSUPPORTED", contexts_by_environment["mock"].support)
+        self.assertEqual("mock_session_not_verified", contexts_by_environment["mock"].reason)
+        contexts = tuple(trade_setup_revision_fill_context(value.fills[0]) for value in episodes)
+        self.assertTrue(all(str(value["fill_key"]).startswith("fill:v2:") for value in contexts))
+        self.assertNotEqual(contexts[0]["origin_scope"], contexts[1]["origin_scope"])
 
     def test_closing_bet_warns_when_intraday_trend_has_broken(self) -> None:
         at = datetime(2026, 8, 29, 19, 45)

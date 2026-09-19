@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from kiwoom_monitor.application.news_analysis import NewsAssessment
+from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import news_identity
 from kiwoom_monitor.infrastructure.persistence.news_schema import initialize_news_schema
@@ -89,43 +90,95 @@ class StockNewsRepository:
             connection.execute(
                 "DELETE FROM stock_news WHERE stock_code=? AND identity NOT IN ("
                 "SELECT identity FROM stock_news WHERE stock_code=? ORDER BY COALESCE(published_at, first_seen_at) DESC LIMIT 200) "
-                "AND NOT EXISTS (SELECT 1 FROM journal_news_links l WHERE l.stock_code=stock_news.stock_code AND l.identity=stock_news.identity)",
+                "AND NOT EXISTS (SELECT 1 FROM journal_news_links l WHERE l.stock_code=stock_news.stock_code "
+                "AND l.identity=stock_news.identity AND l.is_deleted=0)",
                 (stock_code, stock_code),
             )
         return sum(1 for item in items if news_identity(item) not in existing)
 
-    def set_journal_link(self, group_id: str, stock_code: str, identity: str, linked: bool) -> None:
+    def set_journal_link(
+        self, group_id: str, stock_code: str, identity: str, linked: bool,
+        *, account_scope: AccountScope = LEGACY_ACCOUNT_SCOPE,
+        canonical_scope: AccountScope | None = None,
+    ) -> None:
+        effective_scope = canonical_scope or account_scope
+        _validate_scope_pair(account_scope, effective_scope)
+        revised_at = datetime.now(UTC).isoformat()
         with sqlite_transaction(self._database_path) as connection:
             if linked:
                 connection.execute(
-                    "INSERT OR IGNORE INTO journal_news_links(group_id,stock_code,identity) VALUES (?,?,?)",
-                    (group_id, stock_code, identity),
+                    "INSERT INTO journal_news_links("
+                    "group_id,stock_code,identity,origin_broker,origin_environment,"
+                    "origin_account_ref,canonical_account_ref,is_deleted,updated_at,"
+                    "source_collection,source_owner,source_key,source_content_hash) "
+                    "VALUES (?,?,?,?,?,?,?,0,?,'local','local','local','unknown') "
+                    "ON CONFLICT(origin_broker,origin_environment,origin_account_ref,group_id,stock_code,identity) "
+                    "DO UPDATE SET canonical_account_ref=excluded.canonical_account_ref,"
+                    "is_deleted=0,updated_at=CASE WHEN journal_news_links.is_deleted=1 "
+                    "THEN excluded.updated_at ELSE journal_news_links.updated_at END",
+                    (
+                        group_id, stock_code, identity, account_scope.broker,
+                        account_scope.environment.value, account_scope.account_ref,
+                        effective_scope.account_ref, revised_at,
+                    ),
                 )
             else:
                 connection.execute(
-                    "DELETE FROM journal_news_links WHERE group_id=? AND stock_code=? AND identity=?",
-                    (group_id, stock_code, identity),
+                    "UPDATE journal_news_links SET is_deleted=1,updated_at=? "
+                    "WHERE group_id=? AND stock_code=? AND identity=? AND origin_broker=? "
+                    "AND origin_environment=? AND canonical_account_ref=? AND is_deleted=0",
+                    (
+                        revised_at, group_id, stock_code, identity, effective_scope.broker,
+                        effective_scope.environment.value, effective_scope.account_ref,
+                    ),
                 )
 
-    def journal_linked_identities(self, group_id: str, stock_code: str) -> set[str]:
+    def journal_linked_identities(
+        self, group_id: str, stock_code: str,
+        account_scope: AccountScope = LEGACY_ACCOUNT_SCOPE,
+    ) -> set[str]:
         with sqlite_read_connection(self._database_path) as connection:
             return {str(row[0]) for row in connection.execute(
-                "SELECT identity FROM journal_news_links WHERE group_id=? AND stock_code=?",
-                (group_id, stock_code),
+                "SELECT identity FROM journal_news_links WHERE group_id=? AND stock_code=? "
+                "AND origin_broker=? AND origin_environment=? AND canonical_account_ref=? "
+                "AND is_deleted=0",
+                (
+                    group_id, stock_code, account_scope.broker,
+                    account_scope.environment.value, account_scope.account_ref,
+                ),
             )}
 
-    def load_journal_linked(self, group_id: str, stock_code: str) -> tuple[StockNewsItem, ...]:
+    def load_journal_linked(
+        self, group_id: str, stock_code: str,
+        account_scope: AccountScope = LEGACY_ACCOUNT_SCOPE,
+    ) -> tuple[StockNewsItem, ...]:
         with sqlite_read_connection(self._database_path) as connection:
             rows = connection.execute(
                 "SELECT n.title,n.description,n.link,n.original_link,n.published_at,n.relevant,n.category,n.outlook,n.reason,n.relevance_score,n.outlook_score "
                 "FROM journal_news_links l JOIN stock_news n ON n.stock_code=l.stock_code AND n.identity=l.identity "
-                "WHERE l.group_id=? AND l.stock_code=? ORDER BY COALESCE(n.published_at,n.first_seen_at) DESC",
-                (group_id, stock_code),
+                "WHERE l.group_id=? AND l.stock_code=? AND l.origin_broker=? "
+                "AND l.origin_environment=? AND l.canonical_account_ref=? AND l.is_deleted=0 "
+                "ORDER BY COALESCE(n.published_at,n.first_seen_at) DESC",
+                (
+                    group_id, stock_code, account_scope.broker,
+                    account_scope.environment.value, account_scope.account_ref,
+                ),
             ).fetchall()
         return tuple(StockNewsItem(
             str(row[0]), str(row[1]), str(row[2]), str(row[3]), _parse_datetime(row[4]),
             NewsAssessment(bool(row[5]), str(row[6]), str(row[7]), str(row[8]), int(row[9]), int(row[10])),
         ) for row in rows)
+
+
+def _validate_scope_pair(origin: AccountScope, effective: AccountScope) -> None:
+    if origin == effective:
+        return
+    if (
+        origin == LEGACY_ACCOUNT_SCOPE
+        or origin.broker != effective.broker
+        or origin.environment != effective.environment
+    ):
+        raise ValueError("journal news account scopes cannot cross broker or environment")
 
 
 def _identity(item: StockNewsItem) -> str:

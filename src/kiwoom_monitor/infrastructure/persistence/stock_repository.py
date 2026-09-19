@@ -198,16 +198,27 @@ class StockRepository:
         float_ratio: float,
         high_250_price: int | None = None,
         float_shares: int | None = None,
+        upper_limit_price: int | None = None,
     ) -> None:
         con = sqlite3.connect(self._path)
         try:
-            row = con.execute("SELECT market_cap, float_ratio, high_250_price, float_shares FROM stocks WHERE code=?", (code,)).fetchone()
+            row = con.execute(
+                "SELECT market_cap, float_ratio, high_250_price, float_shares, upper_limit_price "
+                "FROM stocks WHERE code=?", (code,),
+            ).fetchone()
             saved_high_250_price = high_250_price if high_250_price is not None else (int(row[2]) if row is not None and row[2] else None)
-            changed = row is None or row[0] != market_cap or row[1] != float_ratio or row[2] != saved_high_250_price or row[3] != float_shares
+            changed = (
+                row is None or row[0] != market_cap or row[1] != float_ratio
+                or row[2] != saved_high_250_price or row[3] != float_shares
+                or row[4] != upper_limit_price
+            )
             if changed:
                 con.execute(
-                    "UPDATE stocks SET market_cap=?, float_ratio=?, float_shares=?, circulating_market_cap=?, high_250_price=?, fundamentals_updated_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE code=?",
-                    (market_cap, float_ratio, float_shares, market_cap * float_ratio / 100, saved_high_250_price, code),
+                    "UPDATE stocks SET market_cap=?, float_ratio=?, float_shares=?, circulating_market_cap=?, "
+                    "high_250_price=?, upper_limit_price=?, fundamentals_updated_at=CURRENT_TIMESTAMP, "
+                    "updated_at=CURRENT_TIMESTAMP WHERE code=?",
+                    (market_cap, float_ratio, float_shares, market_cap * float_ratio / 100,
+                     saved_high_250_price, upper_limit_price, code),
                 )
             else:
                 # 값은 보존하고, 다음 날 재조회하지 않도록 확인 시각만 갱신한다.
@@ -314,14 +325,19 @@ class StockRepository:
         con = sqlite3.connect(self._path)
         try:
             rows = con.execute(
-                f"SELECT code, market_cap, float_ratio, high_250_price, float_shares FROM stocks WHERE code IN ({placeholders}) AND market_cap IS NOT NULL AND float_ratio IS NOT NULL",
+                f"SELECT code, market_cap, float_ratio, high_250_price, float_shares, upper_limit_price "
+                f"FROM stocks WHERE code IN ({placeholders}) AND market_cap IS NOT NULL AND float_ratio IS NOT NULL",
                 codes,
             ).fetchall()
         finally:
             con.close()
         return {
-            str(code): StockFundamentals(float(market_cap), float(float_ratio), int(high_price) if high_price else None, int(float_shares) if float_shares else None)
-            for code, market_cap, float_ratio, high_price, float_shares in rows
+            str(code): StockFundamentals(
+                float(market_cap), float(float_ratio), int(high_price) if high_price else None,
+                int(float_shares) if float_shares else None,
+                int(upper_limit_price) if upper_limit_price else None,
+            )
+            for code, market_cap, float_ratio, high_price, float_shares, upper_limit_price in rows
             if float(market_cap) > 0 and float(float_ratio) >= 0
         }
 
@@ -463,17 +479,22 @@ class StockRepository:
         con = sqlite3.connect(self._path)
         try:
             rows = con.execute(
-                f"SELECT code, market_cap, float_ratio, high_250_price, fundamentals_updated_at FROM stocks WHERE code IN ({placeholders})",
+                f"SELECT code, market_cap, float_ratio, high_250_price, upper_limit_price, "
+                f"fundamentals_updated_at FROM stocks WHERE code IN ({placeholders})",
                 codes,
             ).fetchall()
         finally:
             con.close()
-        cached = {str(code): (market_cap, float_ratio, high_price, updated_at) for code, market_cap, float_ratio, high_price, updated_at in rows}
+        cached = {
+            str(code): (market_cap, float_ratio, high_price, upper_limit_price, updated_at)
+            for code, market_cap, float_ratio, high_price, upper_limit_price, updated_at in rows
+        }
         return tuple(
             code for code in codes
             if code not in cached
             or cached[code][0] is None
             or cached[code][1] is None
             or cached[code][2] is None
-            or str(cached[code][3] or "")[:10] != today
+            or cached[code][3] is None
+            or str(cached[code][4] or "")[:10] != today
         )

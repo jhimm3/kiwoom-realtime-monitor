@@ -44,6 +44,8 @@ class MarketDataCoverageTests(unittest.TestCase):
             (), start=self.start, end=self.end, available_by=self.end,
         )
         self.assertEqual(CoverageState.MISSING, report.state)
+        self.assertTrue(report.window_closed)
+        self.assertFalse(report.session_finalized)
         self.assertFalse(report.gap_inference_supported)
         self.assertEqual((), report.missing_intervals)
         self.assertEqual("no_trade_or_no_observation", report.absence_meaning)
@@ -54,6 +56,8 @@ class MarketDataCoverageTests(unittest.TestCase):
             explicit_complete=True,
         )
         self.assertEqual(CoverageState.COMPLETE, report.state)
+        self.assertTrue(report.window_closed)
+        self.assertTrue(report.session_finalized)
         self.assertEqual("no_trade_with_complete_coverage", report.absence_meaning)
 
     def test_observation_available_after_cutoff_is_excluded(self) -> None:
@@ -65,6 +69,16 @@ class MarketDataCoverageTests(unittest.TestCase):
         )
         self.assertEqual(CoverageState.MISSING, report.state)
         self.assertEqual(1, report.unavailable_by_cutoff_count)
+
+    def test_session_evidence_does_not_close_a_window_before_its_end(self) -> None:
+        report = evaluate_coverage(
+            (), start=self.start, end=self.end,
+            available_by=self.end - timedelta(minutes=1), explicit_complete=True,
+        )
+        self.assertFalse(report.window_closed)
+        self.assertTrue(report.session_finalized)
+        self.assertEqual(CoverageState.MISSING, report.state)
+        self.assertEqual("no_trade_or_no_observation", report.absence_meaning)
 
     def test_fixed_cadence_data_reports_grouped_missing_intervals(self) -> None:
         report = evaluate_coverage(

@@ -5,7 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from kiwoom_monitor.application.trade_journal_summary import TradeEpisode, split_trade_episode_cycles
+from kiwoom_monitor.application.market_session_schedule import (
+    KRX_AFTER_MARKET_EFFECTIVE_DATE,
+    MarketPhase,
+    MarketSession,
+    SessionSupport,
+    schedule_version_for,
+    session_window_at,
+)
+from kiwoom_monitor.application.trade_journal_summary import (
+    TradeEpisode,
+    split_trade_episode_cycles,
+    trade_fill_key,
+)
+from kiwoom_monitor.application.trade_history_service import TradeFill
 
 
 TRADE_SETUP_TYPES = (
@@ -29,6 +42,125 @@ class TradeSetupClassification:
     subtype: str = ""
     unverifiable: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TradeFillSessionContext:
+    """원 체결의 venue와 event time으로 확인 가능한 일지용 시장 구간."""
+
+    venue: str
+    session: str
+    phase: str
+    schedule_version: str
+    label: str
+    support: str
+    reason: str = ""
+
+
+def trade_fill_session_context(fill: TradeFill) -> TradeFillSessionContext:
+    """계좌 체결에 없는 venue/동적 phase를 시각만으로 만들어 내지 않는다."""
+    venue = str(fill.market or "").strip().upper()
+    version = schedule_version_for(fill.filled_at.date())
+    if venue not in {"KRX", "NXT"}:
+        minute = fill.filled_at.hour * 60 + fill.filled_at.minute
+        label = "일반 장후(거래소 미확인)" if minute >= 15 * 60 + 30 else "거래소·시장구간 미확인"
+        return TradeFillSessionContext(
+            "UNKNOWN", MarketSession.UNKNOWN.value, MarketPhase.UNKNOWN.value,
+            version, label, SessionSupport.UNKNOWN.value, "unknown_venue",
+        )
+
+    environment = getattr(fill.origin_scope.environment, "value", str(fill.origin_scope.environment))
+    window = session_window_at(fill.filled_at, venue=venue, environment=environment)
+    labels = {
+        MarketSession.KRX_OPENING_AUCTION: "KRX 시가 단일가 주문접수",
+        MarketSession.KRX_REGULAR: "KRX 정규장 연속매매",
+        MarketSession.KRX_CLOSING_AUCTION: "KRX 종가 단일가(15:20~15:30)",
+        MarketSession.KRX_AFTER_HOURS_CLOSE: (
+            "KRX 장후 시간외종가 주문접수(15:30~15:40)"
+            if window.phase is MarketPhase.AUCTION_ORDER_ENTRY
+            else "KRX 장후 시간외종가 체결(15:40~16:00)"
+        ),
+        MarketSession.KRX_LEGACY_PERIODIC_AUCTION: "KRX 시간외단일가(시행 전)",
+        MarketSession.KRX_AFTER_MARKET: "KRX 애프터마켓(16:00~20:00)",
+        MarketSession.NXT_PRE_MARKET: "NXT 프리마켓",
+        MarketSession.NXT_MAIN_MARKET: "NXT 메인마켓",
+        MarketSession.NXT_AFTER_MARKET: "NXT 애프터마켓",
+        MarketSession.CLOSED: f"{venue} 거래시간 밖",
+        MarketSession.UNKNOWN: f"{venue} 시장구간 미확인",
+    }
+    return TradeFillSessionContext(
+        venue, window.session.value, window.phase.value, window.schedule_version,
+        labels.get(window.session, f"{venue} 시장구간 미확인"),
+        window.support.value, window.reason,
+    )
+
+
+def trade_setup_revision_fill_context(fill: TradeFill) -> dict[str, object]:
+    context = trade_fill_session_context(fill)
+    return {
+        "fill_key": trade_fill_key(fill),
+        "origin_scope": fill.origin_scope.to_dict(),
+        "canonical_scope": fill.effective_scope.to_dict(),
+        "venue": context.venue,
+        "session": context.session,
+        "phase": context.phase,
+        "phase_source": "schedule" if context.phase != MarketPhase.UNKNOWN.value else "unknown",
+        "session_support": context.support,
+        "session_reason": context.reason,
+        "event_time": fill.filled_at.isoformat(timespec="seconds"),
+        "schedule_version": context.schedule_version,
+    }
+
+
+def _with_trade_session_context(
+    result: TradeSetupClassification, episode: TradeEpisode,
+) -> TradeSetupClassification:
+    entry = next((fill for fill in sorted(episode.fills, key=lambda value: value.filled_at) if fill.side == "매수"), None)
+    if entry is None:
+        return result
+    context = trade_fill_session_context(entry)
+    evidence = (*result.evidence, f"체결 시장구간: {context.label} · {context.venue} · {entry.filled_at:%H:%M:%S}")
+    warnings = list(result.warnings)
+    if context.venue == "UNKNOWN":
+        warnings.append("원 체결의 거래소가 없어 시간만으로 KRX/NXT 세션이나 종가매매를 확정하지 않았습니다.")
+    elif context.phase == MarketPhase.UNKNOWN.value:
+        warnings.append("원 체결에 세부 phase가 없어 NXT의 동적 단일가·연속매매 여부는 미확인입니다.")
+    if context.reason == "mock_session_not_verified":
+        warnings.append("키움 모의 환경의 해당 장후 구간 지원은 현재 검증되지 않았습니다.")
+    if (
+        entry.filled_at.date() >= KRX_AFTER_MARKET_EFFECTIVE_DATE
+        and context.session in {
+            MarketSession.KRX_AFTER_HOURS_CLOSE.value,
+            MarketSession.KRX_AFTER_MARKET.value,
+        }
+    ):
+        warnings.append("정규장 공식 종가(15:30) 이후 체결이므로 정규장 종가매매로 분류하지 않았습니다.")
+    return TradeSetupClassification(
+        result.setup_type, result.confidence, evidence, result.subtype,
+        result.unverifiable, tuple(dict.fromkeys(warnings)),
+    )
+
+
+def _is_closing_entry(fill: TradeFill) -> bool:
+    minute = fill.filled_at.hour * 60 + fill.filled_at.minute
+    venue = str(fill.market or "").strip().upper()
+    if fill.filled_at.date() < KRX_AFTER_MARKET_EFFECTIVE_DATE:
+        return (
+            (venue == "KRX" and minute >= 15 * 60 + 10)
+            or (venue == "NXT" and minute >= 19 * 60 + 40)
+            or (venue not in {"KRX", "NXT"} and (
+                15 * 60 + 10 <= minute <= 15 * 60 + 30 or minute >= 19 * 60 + 40
+            ))
+        )
+    context = trade_fill_session_context(fill)
+    return (
+        context.session == MarketSession.KRX_CLOSING_AUCTION.value
+        or (
+            context.venue == "NXT"
+            and context.session == MarketSession.NXT_AFTER_MARKET.value
+            and minute >= 19 * 60 + 40
+        )
+    )
 
 
 def lesson_unverifiable_for(setup_type: str) -> tuple[str, ...]:
@@ -119,7 +251,7 @@ def classify_trade_setup_cycles(
     results: list[TradeSetupClassification] = []
     prior_breakout_context = False
     for cycle in cycles:
-        result = _classify_single_cycle(cycle, rows, daily_rows)
+        result = _with_trade_session_context(_classify_single_cycle(cycle, rows, daily_rows), cycle)
         if (
             prior_breakout_context and result.setup_type == "기타"
             and result.subtype == "당일 고점 근접 진입"
@@ -155,7 +287,6 @@ def _classify_single_cycle(
         return TradeSetupClassification("기타", 20, ("매수 시점 이전 분봉이 없어 자동분류를 보류했습니다.",))
 
     minute_of_day = entry.filled_at.hour * 60 + entry.filled_at.minute
-    market = str(entry.market or "").upper()
     eight_at = entry_minute.replace(hour=8, minute=0)
     nine_at = entry_minute.replace(hour=9, minute=0)
     integrated_rows = tuple((minute, row) for minute, row in same_day if minute >= eight_at) or same_day
@@ -187,14 +318,7 @@ def _classify_single_cycle(
         opening_label = "KRX 정규장"
     minutes_from_opening_reference = max(0, minute_of_day - opening_reference_minute)
     opening_reference_text = f"{opening_reference_minute // 60:02d}:{opening_reference_minute % 60:02d}"
-    closing_entry = (
-        (market == "KRX" and minute_of_day >= 15 * 60 + 10)
-        or (market == "NXT" and minute_of_day >= 19 * 60 + 40)
-        or (market not in {"KRX", "NXT"} and (
-            15 * 60 + 10 <= minute_of_day <= 15 * 60 + 30
-            or minute_of_day >= 19 * 60 + 40
-        ))
-    )
+    closing_entry = _is_closing_entry(entry)
     prior_daily = tuple(
         row for row in daily_rows
         if datetime.fromisoformat(str(row[0])).date() < entry_minute.date()

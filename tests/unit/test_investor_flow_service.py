@@ -17,6 +17,23 @@ class FakeClient:
 
 
 class InvestorFlowServiceTests(unittest.TestCase):
+    def test_uses_stored_nas_flow_without_requesting_kiwoom(self) -> None:
+        class StoredClient(FakeClient):
+            def load_stored_investor_flow(self, code, day):
+                return {"stk_orgn_trde_trnsn": [{
+                    "dt": day, "for_daly_nettrde_qty": "12",
+                    "orgn_daly_nettrde_qty": "-3",
+                }]}
+
+        client = StoredClient({})
+        value = InvestorFlowService(client).load(
+            "005930", datetime(2026, 9, 14, 20, 5),
+        )
+
+        self.assertEqual([], client.calls)
+        self.assertEqual("NAS", value["market_basis"])
+        self.assertEqual(12, value["foreign_net_buy_quantity"])
+
     def test_marks_same_day_nonzero_values_as_pending_before_close(self) -> None:
         client = FakeClient({"stk_orgn_trde_trnsn": [{
             "dt": "20260831", "for_daly_nettrde_qty": "+1,200",

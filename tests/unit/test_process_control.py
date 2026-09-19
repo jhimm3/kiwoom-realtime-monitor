@@ -171,6 +171,20 @@ class ProcessControlTests(unittest.TestCase):
         self.assertTrue(manager.is_running)
         self.assertIs(process, manager.process)
 
+    def test_process_manager_can_request_below_normal_priority(self) -> None:
+        process = Mock()
+        process.poll.return_value = None
+        manager = AuxiliaryProcessManager()
+        with patch(
+            "kiwoom_monitor.presentation.process_control.launch_auxiliary_process",
+            return_value=process,
+        ) as launch:
+            manager.start(["research"], Path("workspace"), below_normal_priority=True)
+
+        launch.assert_called_once_with(
+            ["research"], Path("workspace"), below_normal_priority=True,
+        )
+
     def test_process_manager_clears_process_after_stop(self) -> None:
         process = Mock()
         process.poll.return_value = None

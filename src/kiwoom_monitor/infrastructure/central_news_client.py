@@ -9,9 +9,10 @@ from kiwoom_monitor.infrastructure.naver_news import NewsAISettings, StockNewsIt
 
 
 class CentralNewsClient(CentralContentClient):
-    def __init__(self, server_url: str, access_token: str, *, opener: Callable[..., Any] | None = None) -> None:
+    def __init__(self, server_url: str, access_token: str, *, opener: Callable[..., Any] | None = None,
+                 timeout_seconds: float = 30.0) -> None:
         kwargs = {"opener": opener} if opener is not None else {}
-        super().__init__(server_url, access_token, **kwargs)
+        super().__init__(server_url, access_token, timeout_seconds=timeout_seconds, **kwargs)
 
     def search(
         self, code: str, name: str, since: datetime | None = None,

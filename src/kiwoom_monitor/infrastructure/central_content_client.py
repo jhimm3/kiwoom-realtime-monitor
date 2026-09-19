@@ -1,12 +1,34 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
+
+
+class CentralContentHttpError(RuntimeError):
+    """중앙 콘텐츠 API가 HTTP 오류 상태를 반환했다."""
+
+    def __init__(self, status_code: int, detail: str = "") -> None:
+        self.status_code = int(status_code)
+        self.detail = detail
+        suffix = f" · {detail}" if detail else ""
+        super().__init__(f"중앙 자료 서버 오류: HTTP {self.status_code}{suffix}")
+
+
+class CentralContentUnavailableError(RuntimeError):
+    """중앙 콘텐츠 API에 연결하지 못했다."""
+
+
+def is_missing_collection_error(error: BaseException) -> bool:
+    """구형 fake client도 유지하면서 실제 HTTP 404만 기능 부재로 판정한다."""
+    if isinstance(error, CentralContentHttpError):
+        return error.status_code == 404
+    return type(error) is RuntimeError and "HTTP 404" in str(error)
 
 
 class CentralContentClient:
@@ -59,6 +81,59 @@ class CentralContentClient:
         result = self._request("PUT", f"/api/v1/content/{collection}", {"documents": documents})
         return int(result.get("saved", 0))
 
+    def load_theme_history(
+        self, *, as_of: float | None = None, limit: int = 100,
+    ) -> dict[str, Any]:
+        query_values: dict[str, object] = {"limit": max(1, min(int(limit), 1000))}
+        if as_of is not None:
+            query_values["as_of"] = max(0.0, float(as_of))
+        return self._request("GET", f"/api/v1/themes/history?{urlencode(query_values)}")
+
+    def load_news_history(
+        self, kind: str, *, target: str = "", identity: str = "",
+        as_of: float | None = None, limit: int = 100,
+    ) -> dict[str, Any]:
+        query: dict[str, object] = {
+            "target": target, "identity": identity, "limit": max(1, min(limit, 1000)),
+        }
+        if as_of is not None:
+            query["as_of"] = max(0.0, float(as_of))
+        return self._request("GET", f"/api/v1/news/history/{kind}?{urlencode(query)}")
+
+    def load_research_observations_page(
+        self,
+        start: datetime,
+        end: datetime,
+        kinds: tuple[str, ...],
+        *,
+        subject: str = "",
+        watermark: str = "",
+        cursor: int = 0,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        query = urlencode({
+            "start": start.isoformat(), "end": end.isoformat(), "kinds": ",".join(kinds),
+            "subject": subject, "watermark": watermark, "cursor": max(0, int(cursor)),
+            "limit": max(1, min(int(limit), 1000)),
+        })
+        return self._request("GET", f"/api/v1/research/observations?{query}")
+
+    def load_candidate_events(
+        self, *, after_sequence: int = 0, limit: int = 100,
+    ) -> dict[str, Any]:
+        query = urlencode({
+            "after_sequence": max(0, int(after_sequence)),
+            "limit": max(1, min(int(limit), 1000)),
+        })
+        return self._request("GET", f"/api/v1/research/candidates?{query}")
+
+    def capabilities(self) -> dict[str, bool]:
+        document = self._request("GET", "/api/v1/capabilities")
+        values = document.get("capabilities", {})
+        if not isinstance(values, dict):
+            raise RuntimeError("중앙 서버 capability 응답 형식이 올바르지 않습니다.")
+        return {str(key): bool(value) for key, value in values.items()}
+
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         request = Request(
             f"{self._server_url}{path}", method=method,
@@ -76,10 +151,9 @@ class CentralContentClient:
                     detail = str(document.get("detail", "")).strip()
             except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
                 pass
-            suffix = f" · {detail}" if detail else ""
-            raise RuntimeError(f"중앙 자료 서버 오류: HTTP {error.code}{suffix}") from error
+            raise CentralContentHttpError(error.code, detail) from error
         except (URLError, TimeoutError, ConnectionError, OSError) as error:
-            raise RuntimeError("중앙 자료 서버에 연결할 수 없습니다.") from error
+            raise CentralContentUnavailableError("중앙 자료 서버에 연결할 수 없습니다.") from error
         if not isinstance(result, dict):
             raise RuntimeError("중앙 자료 서버 응답 형식이 올바르지 않습니다.")
         return result

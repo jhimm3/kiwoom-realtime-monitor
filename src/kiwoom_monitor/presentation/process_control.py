@@ -27,8 +27,20 @@ class AuxiliaryProcessManager:
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
 
-    def start(self, command: Sequence[str], working_directory: Path) -> subprocess.Popen[bytes]:
-        self._process = launch_auxiliary_process(command, working_directory)
+    def start(
+        self,
+        command: Sequence[str],
+        working_directory: Path,
+        *,
+        below_normal_priority: bool = False,
+    ) -> subprocess.Popen[bytes]:
+        self._process = (
+            launch_auxiliary_process(
+                command, working_directory, below_normal_priority=True,
+            )
+            if below_normal_priority
+            else launch_auxiliary_process(command, working_directory)
+        )
         return self._process
 
     def stop(
@@ -212,12 +224,20 @@ def build_auxiliary_command(
     return command
 
 
-def launch_auxiliary_process(command: Sequence[str], working_directory: Path) -> subprocess.Popen[bytes]:
+def launch_auxiliary_process(
+    command: Sequence[str],
+    working_directory: Path,
+    *,
+    below_normal_priority: bool = False,
+) -> subprocess.Popen[bytes]:
     """Windows에서 명령창을 띄우지 않고 보조 프로세스를 시작한다."""
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if below_normal_priority:
+        creationflags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
     return subprocess.Popen(
         list(command),
         cwd=str(working_directory),
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        creationflags=creationflags,
     )
 
 

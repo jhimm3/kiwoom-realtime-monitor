@@ -21,6 +21,9 @@ class MinuteChartService:
         self._include_nxt = include_nxt
 
     def load_today(self, code: str, today: datetime) -> tuple[MinuteOhlcv, ...]:
+        stored = self._load_stored_today(code, today)
+        if stored is not None:
+            return stored
         krx_bars = self._load_market(code, today)
         if not self._include_nxt:
             return krx_bars
@@ -31,8 +34,26 @@ class MinuteChartService:
             return krx_bars
         return _combine_krx_nxt_bars(krx_bars, nxt_bars)
 
+    def load_today_with_completion(
+        self, code: str, today: datetime,
+    ) -> tuple[tuple[MinuteOhlcv, ...], bool]:
+        """분봉과 중앙 장후 전체 조회 완료 근거를 함께 반환한다."""
+        loader = getattr(self._client, "load_stored_minute_bars_with_coverage", None)
+        if callable(loader):
+            market = "COMBINED" if self._include_nxt else "KRX"
+            result = loader(code, today.date().isoformat(), market)
+            if result is not None:
+                rows, complete = result
+                return self._stored_rows_to_bars(rows, today), bool(complete)
+        bars = self.load_today(code, today)
+        # 중앙 저장 조회 계약이 없는 직접 Kiwoom client만 연속조회 완료를 신뢰한다.
+        return bars, not callable(getattr(self._client, "load_stored_minute_bars", None))
+
     def load_recent(self, code: str, today: datetime) -> tuple[MinuteOhlcv, ...]:
         """연속조회 없이 첫 페이지만 받아 장중 완료 봉을 가볍게 확인한다."""
+        stored = self._load_stored_today(code, today)
+        if stored is not None:
+            return stored
         krx_bars = self._load_market_page(code, today)
         if not self._include_nxt:
             return krx_bars
@@ -44,6 +65,9 @@ class MinuteChartService:
 
     def load_two_trading_days(self, code: str, today: datetime) -> tuple[MinuteOhlcv, ...]:
         """선택 거래일과 그 직전 실제 거래일의 분봉을 충분히 가져온다."""
+        stored = self._load_stored_two_trading_days(code, today)
+        if stored is not None:
+            return stored
         krx_bars = self._load_market(code, today, self._MAX_TWO_DAY_BARS)
         if not self._include_nxt:
             return _last_two_trading_days(krx_bars, today)
@@ -52,6 +76,92 @@ class MinuteChartService:
         except Exception:
             return _last_two_trading_days(krx_bars, today)
         return _last_two_trading_days(_combine_krx_nxt_bars(krx_bars, nxt_bars, self._MAX_TWO_DAY_BARS), today)
+
+    def _load_stored_two_trading_days(
+        self, code: str, today: datetime,
+    ) -> tuple[MinuteOhlcv, ...] | None:
+        loader = getattr(self._client, "load_stored_recent_minute_bars", None)
+        if not callable(loader):
+            return None
+        trading_date = today.date().isoformat()
+        if self._include_nxt:
+            try:
+                combined_rows = loader(code, trading_date, "COMBINED", 2)
+            except Exception:
+                # 구 NAS는 COMBINED 조회를 모르므로 기존 두 시장 조회로 호환한다.
+                combined_rows = None
+            if combined_rows is not None:
+                return _last_two_trading_days(
+                    self._stored_rows_to_bars(combined_rows, today), today,
+                )
+        krx_rows = loader(code, trading_date, "KRX", 2)
+        if krx_rows is None:
+            return None
+        krx_bars = self._stored_rows_to_bars(krx_rows, today)
+        if not self._include_nxt:
+            return _last_two_trading_days(krx_bars, today)
+        nxt_rows = loader(code, trading_date, "NXT", 2)
+        if nxt_rows is None:
+            return None
+        nxt_bars = self._stored_rows_to_bars(nxt_rows, today)
+        return _last_two_trading_days(
+            _combine_krx_nxt_bars(krx_bars, nxt_bars, self._MAX_TWO_DAY_BARS), today,
+        )
+
+    def _load_stored_today(
+        self, code: str, today: datetime,
+    ) -> tuple[MinuteOhlcv, ...] | None:
+        loader = getattr(self._client, "load_stored_minute_bars", None)
+        if not callable(loader):
+            return None
+        trading_date = today.date().isoformat()
+        if self._include_nxt:
+            try:
+                combined_rows = loader(code, trading_date, "COMBINED")
+            except Exception:
+                combined_rows = None
+            if combined_rows is not None:
+                return self._stored_rows_to_bars(combined_rows, today)
+        krx_rows = loader(code, trading_date, "KRX")
+        if krx_rows is None:
+            return None
+        krx_bars = self._stored_rows_to_bars(krx_rows, today)
+        if not self._include_nxt:
+            return krx_bars
+        nxt_rows = loader(code, trading_date, "NXT")
+        if nxt_rows is None:
+            return None
+        nxt_bars = self._stored_rows_to_bars(nxt_rows, today)
+        combined = _combine_krx_nxt_bars(krx_bars, nxt_bars)
+        return combined
+
+    @staticmethod
+    def _stored_rows_to_bars(
+        rows: object, today: datetime,
+    ) -> tuple[MinuteOhlcv, ...]:
+        if not isinstance(rows, (tuple, list)):
+            raise ValueError("중앙 DB 분봉 목록 형식이 올바르지 않습니다.")
+        values: dict[datetime, MinuteOhlcv] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("중앙 DB 분봉 행 형식이 올바르지 않습니다.")
+            try:
+                minute = datetime.fromisoformat(
+                    f"{row.get('trading_date') or today.date().isoformat()}T{row['minute']}"
+                ).replace(tzinfo=today.tzinfo)
+                bar = MinuteOhlcv(
+                    minute=minute,
+                    open_price=abs(int(row["open"])),
+                    high_price=abs(int(row["high"])),
+                    low_price=abs(int(row["low"])),
+                    close_price=abs(int(row["close"])),
+                    volume=abs(int(row["volume"])),
+                    trade_value_eok_override=abs(float(row["trade_value_million_won"])) / 100,
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("중앙 DB 분봉 행 형식이 올바르지 않습니다.") from error
+            values[minute] = bar
+        return tuple(values[key] for key in sorted(values))
 
     def _load_market_page(self, code: str, today: datetime) -> tuple[MinuteOhlcv, ...]:
         body = {"stk_cd": code, "tic_scope": "1", "upd_stkpc_tp": "1", "base_dt": today.strftime("%Y%m%d")}

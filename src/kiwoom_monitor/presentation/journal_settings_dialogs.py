@@ -39,7 +39,7 @@ class JournalSettingsDialog(QDialog):
         self.estimated_buy_cost_rate.setSingleStep(0.001); self.estimated_buy_cost_rate.setSuffix(" %"); self.estimated_buy_cost_rate.setValue(estimated_buy_cost_rate)
         self.estimated_sell_cost_rate = QDoubleSpinBox(); self.estimated_sell_cost_rate.setRange(0.0, 5.0); self.estimated_sell_cost_rate.setDecimals(4)
         self.estimated_sell_cost_rate.setSingleStep(0.001); self.estimated_sell_cost_rate.setSuffix(" %"); self.estimated_sell_cost_rate.setValue(estimated_sell_cost_rate)
-        self.auto_history_sync = QCheckBox("NXT 종료 후(20:05 이후) 하루 한 번 자동으로 가져오기"); self.auto_history_sync.setChecked(auto_history_sync)
+        self.auto_history_sync = QCheckBox("국내 전체 거래 종료 후(20:05 이후) 하루 한 번 자동으로 가져오기"); self.auto_history_sync.setChecked(auto_history_sync)
         self.ctrl_wheel_zoom = QCheckBox("차트에서 Ctrl + 마우스 휠로 확대·축소"); self.ctrl_wheel_zoom.setChecked(ctrl_wheel_zoom)
         self.trade_value_threshold = QDoubleSpinBox(); self.trade_value_threshold.setRange(0.0, 100_000.0)
         self.trade_value_threshold.setDecimals(2); self.trade_value_threshold.setSingleStep(10.0)

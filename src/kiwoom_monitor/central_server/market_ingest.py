@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, time as clock_time, timedelta
+import logging
+from datetime import date, datetime, time as clock_time, timedelta
 from typing import Any, Callable
 
+from kiwoom_monitor.application.market_session_schedule import KRX_AFTER_MARKET_EFFECTIVE_DATE
 from kiwoom_monitor.domain.market_data_contract import (
     DataCompleteness,
     DataValueKind,
@@ -18,6 +20,27 @@ from .market_observations import (
     minute_bar_observation,
     ranking_observation,
 )
+
+
+logger = logging.getLogger(__name__)
+
+
+def fundamentals_document_is_current(
+    document: object, trading_day: date,
+) -> bool:
+    """Return whether a stored ka10001 document was observed on the KST day."""
+    if not isinstance(document, dict):
+        return False
+    raw = str(document.get("observed_at") or "").strip()
+    if not raw:
+        return False
+    try:
+        observed_at = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=KST)
+    return observed_at.astimezone(KST).date() == trading_day
 
 
 class MarketDataIngestor:
@@ -78,7 +101,9 @@ class MarketDataIngestor:
                     volume * (open_price + high + low + close) / 4 / 1_000_000
                 ),
                 "updated_at": now.timestamp(),
+                "session_finalized": _minute_session_finalized(moment, market, now),
             })
+        comparison_values = list(values)
         observations = []
         for value in values:
             effective = datetime.fromisoformat(f"{value['trading_date']}T{value['minute']}")
@@ -115,6 +140,77 @@ class MarketDataIngestor:
             values = [pair[0] for pair in pairs]
             observations = [pair[1] for pair in pairs]
         self._store.replace_minute_bars(values, observations=observations)
+        try:
+            self._record_sor_trade_value_comparisons(
+                code, market, comparison_values, now,
+            )
+        except Exception:
+            # 비교 진단 실패가 원본 분봉 저장 성공을 되돌리면 안 된다.
+            logger.exception("SOR/조회 분봉 거래대금 비교 기록 실패: %s %s", code, market)
+
+    def _record_sor_trade_value_comparisons(
+        self, code: str, market: str, values: list[dict[str, Any]], now: datetime,
+    ) -> None:
+        """분봉 보완값과 같은 분의 SOR 실시간 거래대금 차이를 누적한다."""
+        if market not in {"KRX", "NXT"} or not values:
+            return
+        by_day: dict[str, list[dict[str, Any]]] = {}
+        for value in values:
+            by_day.setdefault(str(value["trading_date"]), []).append(value)
+        for day, day_values in by_day.items():
+            sor_rows = {
+                str(row.get("minute", "")): row
+                for row in self._store.load_minute_bars(code, day, "SOR")
+            }
+            if not sor_rows:
+                continue
+            owner = f"{day}:{code}"
+            existing = {
+                str(row.get("key", "")): row.get("document", {})
+                for row in self._store.load_documents(
+                    "minute_trade_value_comparisons", owner, 2000,
+                )
+                if isinstance(row.get("document"), dict)
+            }
+            documents: list[dict[str, Any]] = []
+            for value in day_values:
+                minute = str(value["minute"])
+                sor = sor_rows.get(minute)
+                if sor is None:
+                    continue
+                previous = existing.get(minute, {})
+                components = dict(previous.get("query_components_million_won", {}))
+                components[market] = int(value.get("trade_value_million_won", 0) or 0)
+                query_value = sum(int(component or 0) for component in components.values())
+                realtime_value = int(sor.get("trade_value_million_won", 0) or 0)
+                difference = realtime_value - query_value
+                documents.append({
+                    "owner": owner,
+                    "key": minute,
+                    "document": {
+                        "trading_date": day,
+                        "minute": minute,
+                        "code": code,
+                        "realtime_source": "SOR",
+                        "realtime_trade_value_million_won": realtime_value,
+                        "query_components_million_won": components,
+                        "query_trade_value_million_won": query_value,
+                        "difference_million_won": difference,
+                        "difference_percent": (
+                            round(difference / query_value * 100, 6)
+                            if query_value else None
+                        ),
+                        "query_scope": (
+                            "KRX+NXT" if {"KRX", "NXT"}.issubset(components)
+                            else market
+                        ),
+                        "compared_at": now.isoformat(),
+                    },
+                })
+            if documents:
+                self._store.upsert_documents(
+                    "minute_trade_value_comparisons", documents,
+                )
 
     def _ingest_daily(self, body: dict[str, Any], payload: dict[str, Any]) -> None:
         raw_code = str(body.get("stk_cd", "")).strip()
@@ -158,16 +254,17 @@ class MarketDataIngestor:
         first = next((row for row in records if isinstance(row, dict)), {})
         raw_date = str(first.get("dt", payload.get("base_date", ""))).strip()
         raw_time = str(first.get("tm", payload.get("base_time", ""))).strip().zfill(6)
+        now = self._now()
         snapshot_key = (
             f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}T{raw_time[:2]}:{raw_time[2:4]}:{raw_time[4:]}"
-            if len(raw_date) == 8 and len(raw_time) == 6 else datetime.now().isoformat(timespec="seconds")
+            if len(raw_date) == 8 and len(raw_time) == 6 else now.isoformat(timespec="seconds")
         )
         subject = str(body.get("qry_tp", "5"))
         value = {"query_type": subject, "items": records}
         self._store.save_dataset_snapshot(
             "ranking", subject, snapshot_key, value,
             observation=ranking_observation(
-                subject, snapshot_key, value, datetime.now(), source="kiwoom-ka00198"
+                subject, snapshot_key, value, now, source="kiwoom-ka00198"
             ),
         )
 
@@ -276,9 +373,35 @@ def _daily_completeness(
         return DataCompleteness.COMPLETE
     if trading_date > now.date().isoformat():
         return DataCompleteness.UNCONFIRMED
-    close_time = clock_time(15, 30) if market == "KRX" else clock_time(20)
+    close_time = _chart_completion_time(datetime.fromisoformat(trading_date).date(), market)
+    if close_time is None:
+        return DataCompleteness.IN_PROGRESS
     return (
         DataCompleteness.COMPLETE
         if now.time().replace(tzinfo=None) >= close_time
         else DataCompleteness.IN_PROGRESS
+    )
+
+
+def _minute_session_finalized(moment: datetime, market: str, now: datetime) -> bool:
+    if moment.date() < now.date():
+        return True
+    if moment.date() > now.date():
+        return False
+    close_time = _chart_completion_time(moment.date(), market)
+    if close_time is None:
+        return False
+    return now.time().replace(tzinfo=None) >= close_time
+
+
+def _chart_completion_time(trading_date: date, market: str) -> clock_time | None:
+    normalized = str(market).strip().upper()
+    if normalized == "NXT":
+        return clock_time(20)
+    if normalized != "KRX":
+        return None
+    return (
+        clock_time(20)
+        if trading_date >= KRX_AFTER_MARKET_EFFECTIVE_DATE
+        else clock_time(15, 30)
     )

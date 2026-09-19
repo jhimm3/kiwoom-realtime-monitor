@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 
 from kiwoom_monitor.news_process import (
+    _apply_show_command,
+    _command_account_scopes,
     _file_signature,
     _news_content_signature,
     _parent_is_alive,
@@ -17,6 +19,49 @@ from kiwoom_monitor.news_process import (
 
 
 class NewsProcessTests(unittest.TestCase):
+    def test_scope_free_command_is_legacy_but_partial_or_malformed_scope_is_rejected(self) -> None:
+        legacy = _command_account_scopes({"code": "005930", "name": "삼성전자"})
+        self.assertIsNotNone(legacy)
+        assert legacy is not None
+        self.assertEqual(legacy[0], legacy[1])
+        self.assertEqual("legacy-unassigned", legacy[0].account_ref)
+        self.assertIsNone(_command_account_scopes({"origin_scope": {"broker": "kiwoom"}}))
+        self.assertIsNone(_command_account_scopes({
+            "origin_scope": {
+                "broker": "kiwoom", "environment": "real",
+                "account_ref": "11111111-1111-4111-8111-111111111111",
+            },
+            "account_scope": {
+                "broker": "kiwoom", "environment": "mock",
+                "account_ref": "22222222-2222-4222-8222-222222222222",
+            },
+        }))
+
+    def test_receiver_does_not_replace_previous_context_for_malformed_late_command(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        class Window:
+            def set_stock(self, _code: str, _name: str, **kwargs: object) -> None:
+                calls.append(kwargs)
+
+        valid = {
+            "code": "005930", "name": "삼성전자",
+            "origin_scope": {
+                "broker": "kiwoom", "environment": "real",
+                "account_ref": "11111111-1111-4111-8111-111111111111",
+            },
+            "account_scope": {
+                "broker": "kiwoom", "environment": "real",
+                "account_ref": "11111111-1111-4111-8111-111111111111",
+            },
+        }
+        self.assertTrue(_apply_show_command(Window(), valid))  # type: ignore[arg-type]
+        self.assertFalse(_apply_show_command(Window(), {
+            "code": "000660", "name": "SK하이닉스",
+            "origin_scope": valid["origin_scope"],
+        }))  # type: ignore[arg-type]
+        self.assertEqual(1, len(calls))
+
     def test_file_signature_changes_when_database_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "news.sqlite3"

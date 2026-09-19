@@ -1,4 +1,11 @@
 .git
+.codex-backups
+.codex
+.agents
+**/.env
+**/.env.*
+!**/.env.example
+**/server-secrets
 .venv
 build
 dist
@@ -7,5 +14,7 @@ data
 tmp
 deploy/synology/.env
 deploy/synology/postgres-data
+deploy/synology/server-data
+deploy/synology/server-secrets
 **/__pycache__
 **/*.pyc

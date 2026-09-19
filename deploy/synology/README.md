@@ -4,6 +4,30 @@
 
 ## 준비
 
+### 런타임 인증 누적 배포 R7
+
+이번 누적 이미지 태그는 `2026.09.16-runtime-credentials-r7-deploy-v1`이다.
+프로젝트 소스를 먼저 동기화하고 Container Manager에서 서버 이미지를 다시 빌드한다.
+컨테이너 재시작만으로 소스 변경이 반영되지 않는다. 빌드 후 `/health.server_build`가
+이 태그와 같은지 확인하기 전에는 배포 완료로 판단하지 않는다.
+
+`.env`, `postgres-data`, `server-data`, `server-secrets`는 덮어쓰거나 일반 코드 백업에 넣지 않는다.
+이번 compose는 `server-secrets`를 `/app/secrets`에 영속 마운트하며 Dockerfile은
+별도 `--no-deps` 설치 뒤 cryptography를 직접 설치한다. master.key/암호문 복구는
+코드 백업과 분리한 접근 제한 백업으로만 관리한다. Docker context에서도 비밀/데이터/백업을 제외한다.
+최초 적용 전에 `deploy/synology/server-secrets` 빈 폴더를 File Station에서 만든다.
+Synology는 bind mount 원본 폴더가 없으면 이미지 빌드가 성공해도 서버 시작을 거부한다.
+이 경우 폴더 생성 후 기존 프로젝트를 다시 시작하면 된다. 이미 생성된 인증파일은 삭제하지 않는다.
+컨테이너의 vault 초기화는 폴더 권한을 0700으로 설정하며 실제 Linux 권한은 시작 후 확인한다.
+
+최초 HMAC/신원 registry와 NAS HTTPS/신뢰 프록시는 별도 설치 조건이다.
+이 준비 후에는 앱 NAS 설정에서 실전·모의·뉴스/AI 인증을 확인·적용하고 매번 env를 고치지 않는다.
+실전과 모의 계좌는 분리하며 인증 적용만으로 실전 주문을 허용하지 않는다.
+키 변경 중 기존 순위를 유지하는 대기는 최대 30초다. REG 승인·만료·재개 시작 실패를
+확인하고 실제 관측 간격/계좌별 수신을 검증한다. 휴장/구독 대기를 장애로 오인하지 않는다.
+
+누적 배포와 실제 운용 검증 상태는 `reports/NAS_DEPLOYMENT_PENDING.md`를 따른다.
+
 - DSM 패키지 센터에서 `Container Manager`를 설치한다.
 - File Station에서 `/volume1/docker/kiwoom-monitor` 폴더를 만든다.
 - 이 저장소 전체를 위 폴더에 복사한다. `deploy/synology` 폴더만 따로 복사하면 빌드할 수 없다.
@@ -12,11 +36,12 @@
 
 1. `/volume1/docker/kiwoom-monitor/deploy/synology/.env.example`을 같은 폴더의 `.env`로 복사한다.
 2. `.env`의 `POSTGRES_PASSWORD`와 `MONITOR_SERVER_ACCESS_TOKEN`을 서로 다른 긴 영문·숫자 값으로 교체한다. DB 비밀번호에는 URL 예약문자를 넣지 않는 것이 안전하다.
-3. 기본 포트 8787을 바꾸려면 `KIWOOM_MONITOR_PORT`를 1~65535 사이의 사용하지 않는 포트로 지정한다. DSM이 사용하는 일반적인 `SERVER_PORT` 이름은 쓰지 않는다.
-4. `KIWOOM_APP_KEY`, `KIWOOM_SECRET_KEY`를 입력한다. 뉴스·DART·AI를 서버에서 사용할 때만 해당 키도 입력한다.
-5. Container Manager에서 `프로젝트` → `생성`을 누른다.
-6. 프로젝트 이름은 `kiwoom-monitor`, 경로는 `/volume1/docker/kiwoom-monitor/deploy/synology`로 지정하고 기존 `docker-compose.yml`을 사용한다.
-7. 빌드 및 시작을 누른 뒤 `database`와 `server` 컨테이너가 모두 `healthy`인지 확인한다.
+3. VI·15% 조건식 수집은 `MARKET_EVENT_COLLECTION_ENABLED=true`가 기본이다. 저장 조건식 이름을 정확히 알고 있으면 `HOT_COHORT_CONDITION_NAME`에 넣고, 비우면 `HOT_COHORT_CONDITION_SUBSTRING=15%`가 정확히 한 조건에만 포함될 때 선택된다. 0개나 복수면 수집기가 추측하지 않고 진단 상태만 남긴다. D1 순위 불변 이력은 `RESEARCH_OBSERVATION_HISTORY_ENABLED=true`가 기본이며, 문제 시 `false`로 바꾸면 최신 순위 저장을 유지한 채 새 revision만 중단한다.
+4. 기본 포트 8787을 바꾸려면 `KIWOOM_MONITOR_PORT`를 1~65535 사이의 사용하지 않는 포트로 지정한다. DSM이 사용하는 일반적인 `SERVER_PORT` 이름은 쓰지 않는다.
+5. `KIWOOM_APP_KEY`, `KIWOOM_SECRET_KEY`를 입력한다. 뉴스·DART·AI를 서버에서 사용할 때만 해당 키도 입력한다.
+6. Container Manager에서 `프로젝트` → `생성`을 누른다.
+7. 프로젝트 이름은 `kiwoom-monitor`, 경로는 `/volume1/docker/kiwoom-monitor/deploy/synology`로 지정하고 기존 `docker-compose.yml`을 사용한다.
+8. 빌드 및 시작을 누른 뒤 `database`와 `server` 컨테이너가 모두 `healthy`인지 확인한다.
 
 같은 네트워크의 PC 브라우저에서 `http://NAS주소:KIWOOM_MONITOR_PORT/health`를 열어 `status`가 `ok`인지 확인한다. 이 주소는 공개 상태 확인용이며 실제 데이터 API는 토큰 인증을 요구한다.
 
@@ -30,7 +55,7 @@
 python /app/scripts/check_postgres_integration.py
 ```
 
-`status: ok`, 현재 `schema_version`, `checks`의 모든 값, `rollback: true`가 모두 나와야 한다. 검사는 쿼리 캐시·실시간 최신값·분봉·일봉·관측 메타데이터·데이터셋·문서·외부 봉을 왕복한다. 검증용 행은 성공·실패 여부와 관계없이 마지막에 삭제하므로 운영 자료로 누적되지 않는다. PostgreSQL 5432 포트를 외부에 노출할 필요는 없다.
+`status: ok`, 현재 `schema_version`, `checks`의 모든 값, `rollback: true`가 모두 나와야 한다. 검사는 쿼리 캐시·실시간 최신값·초봉·분봉·일봉·관측 메타데이터·데이터셋·문서·외부 봉, 테마/뉴스 불변 이력·뉴스 source 재사용과 늦은 RULE 예약, VI·cohort·상한가 원장을 왕복한다. 검증용 행은 성공·실패 여부와 관계없이 마지막에 삭제하므로 운영 자료로 누적되지 않는다. PostgreSQL 5432 포트를 외부에 노출할 필요는 없다.
 
 ## 앱 연결
 
@@ -54,6 +79,14 @@ NAS 연결 설정의 `서버 사용량`에서 앱 프로세스 메모리, 서버
 4. 인증서 설정에서 해당 호스트 이름에 발급한 인증서를 연결한다.
 5. 공유기의 외부 포트는 NAS의 HTTPS 소스 포트로만 전달하고 `KIWOOM_MONITOR_PORT`는 외부에 전달하지 않는다.
 6. 앱 NAS 주소에는 `https://호스트이름`을 입력한다. 외부 포트가 443이 아니면 `https://호스트이름:외부포트`로 입력한다. 앱은 실시간 연결을 자동으로 `wss://`로 바꾼다.
+
+DSM이 같은 호스트의 443을 사용하는 경우 API 프록시는 사용하지 않는 별도 포트(예: 8443)를 선택할 수 있다.
+이때 프록시 소스/공유기 전달/앱 주소 모두 해당 포트로 맞추고 대상 HTTP 8787은 유지한다.
+health 성공만으로 WSS와 비밀 쓰기까지 검증됐다고 보지 않는다. WebSocket 헤더/ready를 따로 확인한다.
+인증키 쓰기는 서버 접근 로그의 실제 프록시 peer IP를 `CREDENTIAL_TRUSTED_PROXIES`에 정확히 지정하고
+프록시가 단일 `X-Forwarded-Proto: https`를 보내야 한다. 최초 적용은 서버 컨테이너 설정 재적용이 필요하다.
+이는 최초 HTTPS 설치 조건이며 이후 키 변경마다 env/컨테이너를 수정하는 방식은 아니다.
+추정 gateway IP나 전체 네트워크를 허용하지 않고 TLS/peer 검증을 유지한다.
 
 공개 인터넷 대신 개인 장치에서만 쓸 경우에는 Tailscale/VPN이 공격 표면이 더 작다. 어느 방식을 쓰더라도 긴 `MONITOR_SERVER_ACCESS_TOKEN`은 유지한다.
 
@@ -120,7 +153,7 @@ AI 또는 개발자는 NAS 서버 코드 변경을 완료했다고 보고하기 
 권장 순서는 다음과 같다.
 
 1. 위 세 파일의 빌드 번호가 모두 같은지 확인한다.
-2. NAS의 프로젝트 폴더에 저장소 전체를 동기화한다. 일부 파일만 복사하지 않는다.
+2. NAS의 프로젝트 폴더에 저장소 전체를 동기화한다. 일부 파일만 복사하지 않는다. NAS에만 있는 `release`, `.codex-backups`, 운영 검사 산출물을 지우지 않도록 저장소 루트에는 삭제형 미러를 사용하지 않는다.
 3. `.env`, `postgres-data`, `server-data`는 덮어쓰거나 삭제하지 않는다.
 4. Container Manager의 `kiwoom-monitor` 프로젝트에서 **빌드**를 실행해 서버 이미지를 다시 만든다.
 5. 프로젝트를 **시작**하고 `database`와 `server`가 모두 정상인지 확인한다.
@@ -144,3 +177,15 @@ AI 또는 개발자는 NAS 서버 코드 변경을 완료했다고 보고하기 
 5. 쓰기가 필요할 때만 대상 파일과 백업 위치를 명시하여 승인된 실행으로 복사한다.
 
 사용자가 Windows에서 X:를 이미 볼 수 있다면 별도 권한 설정이나 재연결은 필요하지 않다. 승인 창은 NAS의 공유 권한을 부여하는 창이 아니라, Codex 명령을 사용자 세션 권한으로 한 번 실행하도록 허용하는 절차다.
+
+## D4 shadow 후보 설정
+
+후보 생성은 기본 OFF다. `SHADOW_CANDIDATE_ENABLED=1`로 바꾸려면 `SHADOW_CANDIDATE_CONFIG_JSON`에 `BreakoutStrategyConfig` 전체 JSON을 넣고 `SHADOW_CANDIDATE_UNIVERSE_MAX_AGE_SECONDS`를 양수로 명시해야 한다. polling 주기는 `SHADOW_CANDIDATE_POLL_SECONDS`이며 기본 2초다. 운영 추천값은 코드나 예제에 임의로 넣지 않는다.
+
+## O1 모의계좌 읽기 모니터
+
+기본값 `MOCK_ACCOUNT_MONITOR_ENABLED=0`은 계좌 REST 조회와 전용 00/04 WebSocket을 시작하지 않는다. 읽기 검증 때만 실전 키와 별도인 `KIWOOM_MOCK_APP_KEY`, `KIWOOM_MOCK_SECRET_KEY`, 익명 식별자인 `MOCK_ACCOUNT_REF`, 대조할 `MOCK_EXECUTION_RUN_ID`를 채운 뒤 1로 바꾼다. 주 시세의 `KIWOOM_ENVIRONMENT=real` 설정은 그대로 둬도 된다. 모의 경로는 자체 1초 간격 REST client와 WebSocket을 사용하므로 실전 조회의 0.2초 간격 bucket을 소비하지 않는다. 이 설정은 시작 복구와 00/04 대조만 켜며 주문 전송 기능은 켜지 않는다. 실제 계좌번호는 이 값이나 로그에 넣지 않는다.
+
+계좌 신원 registry를 처음 준비할 때 `.env`의 `ACCOUNT_IDENTITY_HMAC_KEY`에 32바이트 이상의 별도 비밀값을 넣고 DB와 분리해 보호 백업한다. 컨테이너 안에서 `PYTHONPATH=/app/src python /app/scripts/register_account_identity.py --environment mock --profile nas-mock-default`를 실행하면 `ka00001`로 현재 모의계좌를 확인하고 원문 대신 지속 UUID를 출력한다. 출력된 `scope.account_ref`를 `MOCK_ACCOUNT_REF`에 넣은 뒤 `ACCOUNT_IDENTITY_REGISTRY_ENABLED=1`로 켠다. 이후 서버는 시작할 때 같은 계좌인지 다시 확인하며 다르면 `ACCOUNT_CONTEXT_MISMATCH`로 계좌 모니터를 시작하지 않는다. 실전 계좌 등록은 `--environment real --profile nas-real-default`를 사용한다. 보호 키를 바꾸거나 잃으면 같은 계좌도 같은 ref임을 증명할 수 없으므로 기존 키를 복구해야 한다.
+
+`MOCK_ORDER_TRANSPORT_ENABLED=1`은 위 계좌 모니터가 켜진 경우에만 인증된 수동 `/api/v1/mock/orders` 지정가 주문·조회·취소 API를 연다. 같은 `request_id`는 한 번만 전송되며 후보·전략 자동주문은 연결되지 않는다. 주문 직전 계좌를 다시 조회하고 응답이 불명확하면 자동 재전송하지 않는다.

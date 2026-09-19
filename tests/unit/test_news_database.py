@@ -17,6 +17,8 @@ from kiwoom_monitor.infrastructure.persistence.news_database import (
     migrate_legacy_news_database,
 )
 from kiwoom_monitor.infrastructure.persistence.news_schema import (
+    NEWS_ACCOUNT_SCOPE_NAME,
+    NEWS_LINK_TOMBSTONE_NAME,
     NEWS_SCHEMA_BASELINE_NAME,
     NEWS_SCHEMA_VERSION,
 )
@@ -47,7 +49,13 @@ class NewsDatabaseTests(unittest.TestCase):
                     "SELECT version,name FROM news_schema_migrations ORDER BY version"
                 ).fetchall()
 
-            self.assertEqual([(NEWS_SCHEMA_VERSION, NEWS_SCHEMA_BASELINE_NAME)], versions)
+            self.assertEqual(
+                [
+                    (1, NEWS_SCHEMA_BASELINE_NAME), (2, NEWS_ACCOUNT_SCOPE_NAME),
+                    (NEWS_SCHEMA_VERSION, NEWS_LINK_TOMBSTONE_NAME),
+                ],
+                versions,
+            )
             self.assertEqual(1, len(StockNewsRepository(path).load("000001")))
             self.assertIsNotNone(NewsAIRepository(path).load("000001", item))
 
@@ -59,11 +67,40 @@ class NewsDatabaseTests(unittest.TestCase):
                 with connection:
                     connection.execute(
                         "INSERT INTO news_schema_migrations(version,name,applied_at) "
-                        "VALUES(2,'future','2026-09-10T00:00:00+00:00')"
+                        "VALUES(4,'future','2026-09-10T00:00:00+00:00')"
                     )
 
             with self.assertRaisesRegex(SchemaMigrationError, "newer"):
                 StockNewsRepository(path)
+
+    def test_v1_journal_news_links_migrate_to_legacy_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "news.sqlite3"
+            with closing(sqlite3.connect(path)) as connection:
+                with connection:
+                    connection.executescript("""
+                        CREATE TABLE journal_news_links(
+                            group_id TEXT NOT NULL, stock_code TEXT NOT NULL,
+                            identity TEXT NOT NULL, linked_at TEXT NOT NULL,
+                            PRIMARY KEY(group_id,stock_code,identity));
+                        INSERT INTO journal_news_links VALUES(
+                            'group-1','005930','article-1','2026-09-10T00:00:00');
+                        CREATE TABLE news_schema_migrations(
+                            version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL);
+                        INSERT INTO news_schema_migrations VALUES(
+                            1,'current_news_schema_baseline','2026-09-10T00:00:00');
+                    """)
+
+            initialize_news_database(path)
+
+            with closing(sqlite3.connect(path)) as connection:
+                row = connection.execute(
+                    "SELECT origin_broker,origin_environment,origin_account_ref,"
+                    "canonical_account_ref FROM journal_news_links"
+                ).fetchone()
+            self.assertEqual(
+                ("legacy", "unknown", "legacy-unassigned", "legacy-unassigned"), row,
+            )
 
     def test_migrates_news_tables_out_of_main_database(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

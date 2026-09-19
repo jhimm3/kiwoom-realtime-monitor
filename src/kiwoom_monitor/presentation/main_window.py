@@ -15,13 +15,13 @@ from html import escape
 from dataclasses import replace
 from pathlib import Path
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, time as clock_time, timedelta
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from PySide6.QtGui import QBrush, QCloseEvent, QResizeEvent, QShowEvent, QColor, QDesktopServices, QFontMetrics, QIcon, QKeySequence, QPainter, QPen, QPolygon, QPalette
+from PySide6.QtGui import QBrush, QCloseEvent, QResizeEvent, QShowEvent, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPen, QPolygon, QPalette
 from PySide6.QtCore import QDate, QEvent, QEventLoop, QSettings, QThread, QTimer, QUrl, QSize, QPoint, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -75,9 +75,15 @@ from kiwoom_monitor.infrastructure.persistence.settings_repository import Settin
 from kiwoom_monitor.infrastructure.app_paths import AppPaths
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig, DataSourceSettings
 from kiwoom_monitor.infrastructure.central_operational_settings import CentralOperationalSettingsClient
+from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 from kiwoom_monitor.infrastructure.persistence.database import DEFAULT_SETTINGS
-from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import MarketIndexTick, OrderExecution, TradeTick
+from kiwoom_monitor.infrastructure.persistence.market_cache_writer import MarketCacheWriter
+from kiwoom_monitor.presentation.candidate_monitor_dialog import CandidateMonitorDialog
+from kiwoom_monitor.presentation.research_dialog import ResearchDialog
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
+    MarketIndexTick, OrderExecution, StockPriceReference, TradeTick,
+)
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker import RealtimeTradeWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.minute_history_worker import MinuteHistoryWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.fundamentals_worker import FundamentalsWorker
@@ -98,6 +104,7 @@ from kiwoom_monitor.application.realtime_subscription import (
     RealtimeSubscriptionCoordinator,
 )
 from kiwoom_monitor.application.market_data_finalization import (
+    FinalizationScope,
     evaluate_finalization_outcome,
     finalization_candidates,
     finalization_target_date,
@@ -120,7 +127,10 @@ from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import Daily
 from kiwoom_monitor.infrastructure.persistence.settings_backup import SettingsBackupError, SettingsBackupService
 from kiwoom_monitor.infrastructure.central_settings_sync import is_shared_setting
 from kiwoom_monitor.infrastructure.persistence.journal_backup import JournalBackupService
-from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import TradeEntrySnapshot
+from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import (
+    TradeEntrySnapshot,
+    scoped_snapshot_execution_key,
+)
 from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
 from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupError, ThemeBackupService
 from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncError, GoogleDriveSyncService
@@ -171,6 +181,7 @@ from kiwoom_monitor.presentation.main_table_formatting import (
     decimal_places,
     format_market_cap_eok,
     format_trade_value_eok,
+    is_upper_limit_highlight,
     rank_highlight_duration_ms,
     row_background_color,
     theme_trade_summary_html,
@@ -257,6 +268,7 @@ from kiwoom_monitor.application.top20_trade_value_collector import (
     Top20MinuteRecord,
     Top20TradeValueCollector,
 )
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
 from kiwoom_monitor.infrastructure.news_ai import DEFAULT_MODELS, MODEL_OPTIONS
 from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import ImageThemeOcrWorker
 from kiwoom_monitor.infrastructure.krx.stock_catalog_worker import KrxStockCatalogWorker
@@ -269,9 +281,44 @@ class RankingLoader(Protocol):
 
 logger = logging.getLogger(__name__)
 
+
+def _journal_news_scope_pair(
+    document: Mapping[str, object],
+) -> tuple[AccountScope, AccountScope] | None:
+    has_origin = "origin_scope" in document
+    has_canonical = "account_scope" in document
+    if not has_origin and not has_canonical:
+        return LEGACY_ACCOUNT_SCOPE, LEGACY_ACCOUNT_SCOPE
+    if not has_origin or not has_canonical:
+        return None
+
+    def parse(value: object) -> AccountScope | None:
+        if not isinstance(value, Mapping):
+            return None
+        required = ("broker", "environment", "account_ref")
+        if any(key not in value or not str(value[key]).strip() for key in required):
+            return None
+        try:
+            return AccountScope(
+                str(value["broker"]), AccountEnvironment(str(value["environment"])),
+                str(value["account_ref"]),
+            )
+        except ValueError:
+            return None
+
+    origin = parse(document["origin_scope"])
+    canonical = parse(document["account_scope"])
+    if origin is None or canonical is None:
+        return None
+    if origin.broker != canonical.broker or origin.environment != canonical.environment:
+        return None
+    return origin, canonical
+
+
 class MainWindow(QMainWindow):
     TRADE_VALUE_ALERT_ROLE = Qt.ItemDataRole.UserRole + 3
     TRADE_VALUE_ALERT_COLOR = QColor("#F4CCCC")
+    UPPER_LIMIT_BADGE_COLOR = "#FFD6D6"
     COLUMNS = (("rank","순위"),("stock","종목"),("themes","테마"),("change_rate","등락률"),("strength_1m","1분강도"),("current_price","현재가"),("trade_value_1m","1분"),("trade_value_5m","5분"),("trade_value_60m","60분"),("trade_value_day","1일"),("strength_5m","5분강도"),("strength_60m","60분강도"),("strength_day","1일강도"),("new_high_price","신고가"),("high_distance","신고가%"),("market_cap","시가총액"))
     HEADERS = tuple(label for _, label in COLUMNS)
 
@@ -371,6 +418,9 @@ class MainWindow(QMainWindow):
         monitor_database_path: Path | None = None,
         entry_investor_loader: Callable[[str, datetime], dict[str, object]] | None = None,
         program_trade_loader: Callable[[str, date], tuple[dict[str, object], ...]] | None = None,
+        candidate_client: CentralContentClient | None = None,
+        candidate_settings_client: CentralOperationalSettingsClient | None = None,
+        research_data_dir: Path | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -380,6 +430,7 @@ class MainWindow(QMainWindow):
         self._fundamentals_worker_factory = fundamentals_worker_factory
         self._daily_high_worker_factory = daily_high_worker_factory
         self._fundamentals: dict[str, StockFundamentals] = {}
+        self._realtime_upper_limits: dict[str, int] = {}
         self._daily_highs: dict[str, DailyHighTargets] = {}
         self._historical_high_prices: dict[str, int] = {}
         self._previous_day_trade_values: dict[str, float] = {}
@@ -408,6 +459,22 @@ class MainWindow(QMainWindow):
         self._news_api_settings_dialog: QDialog | None = None
         self._journal_database_path = journal_database_path
         self._monitor_database_path = monitor_database_path
+        self._market_cache_writer: MarketCacheWriter | None = None
+        if monitor_database_path is not None:
+            self._market_cache_writer = MarketCacheWriter(monitor_database_path)
+            self._market_cache_writer.minute_saved.connect(self._start_top20_market_repair)
+            self._market_cache_writer.minute_failed.connect(self._on_minute_cache_write_failed)
+            self._market_cache_writer.price_failed.connect(self._on_price_cache_write_failed)
+            self._market_cache_writer.history_saved.connect(self._on_history_cache_saved)
+            self._market_cache_writer.history_failed.connect(self._on_history_cache_failed)
+            self._market_cache_writer.start()
+        self._candidate_dialog = (
+            CandidateMonitorDialog(candidate_client, candidate_settings_client, self)
+            if candidate_client is not None else None
+        )
+        self._research_dialog = (
+            ResearchDialog(research_data_dir, self) if research_data_dir is not None else None
+        )
         self._journal_process_manager = AuxiliaryProcessManager()
         self._journal_command_path = journal_database_path.with_name("journal_command.json") if journal_database_path else None
         self._journal_command_channel = JsonCommandChannel(self._journal_command_path, time_based_ids=True)
@@ -474,6 +541,8 @@ class MainWindow(QMainWindow):
         self._google_drive_operation = ""
         self._google_drive_show_completion = False
         self._google_drive_close_pending = False
+        self._google_drive_pending_target = ""
+        self._google_drive_active_target = ""
         self._google_drive_dirty = self._has_newer_local_google_drive_changes()
         self._google_drive_first_backup_pending = False
         # Drive 수정 시각 확인/다운로드는 순위 표 표시를 막지 않는다. 시작 시에는
@@ -507,7 +576,10 @@ class MainWindow(QMainWindow):
         self._table_update_flush_scheduled = False
         self._initial_ranking_size_adjusted = False
         self._ranking_execution = RankingExecutionCoordinator(self._ranking_now)
-        self._realtime_subscription = RealtimeSubscriptionCoordinator(self._ranking_now)
+        self._realtime_subscription = RealtimeSubscriptionCoordinator(
+            self._ranking_now,
+            lambda: str(self._environment_selector.currentData()),
+        )
         self._rank_changed_codes: set[str] = set()
         self._selected_table_cell: tuple[int, int] | None = None
         self._selected_table_code: str | None = None
@@ -660,6 +732,9 @@ class MainWindow(QMainWindow):
         self._realtime_worker_controller.order_executed.connect(self._on_order_execution)
         self._realtime_worker_controller.market_state_received.connect(self._on_market_index_tick)
         self._realtime_worker_controller.program_trade_received.connect(self._on_program_trade_tick)
+        self._realtime_worker_controller.stock_reference_received.connect(
+            self._on_stock_price_reference
+        )
         self._realtime_worker_controller.diagnostics_changed.connect(self._on_realtime_diagnostics_changed)
         self._realtime_worker_controller.status_changed.connect(self._on_realtime_status_changed)
         self._realtime_worker_controller.connection_failed.connect(self._on_realtime_failure)
@@ -714,6 +789,10 @@ class MainWindow(QMainWindow):
         self._daily_trade_comparison_timer.timeout.connect(self._flush_daily_trade_comparisons)
         self._ranking_timer = QTimer(self)
         self._ranking_timer.setSingleShot(True)
+        # 기본 CoarseTimer는 긴 대기에서 목표 시각보다 일찍 깨어날 수 있다.
+        # 30초 경계 직전에 실행되면 같은 경계를 다시 예약해 동일 순위를
+        # 연속 조회하고, 두 번째 "변동 없음"이 첫 변경 안내를 덮어쓴다.
+        self._ranking_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._ranking_timer.timeout.connect(self._on_ranking_timer)
         self._rank_changed_highlight_timer = QTimer(self)
         self._rank_changed_highlight_timer.setSingleShot(True)
@@ -781,6 +860,30 @@ class MainWindow(QMainWindow):
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
+        candidate_button = QPushButton("")
+        candidate_button.setObjectName("candidate_monitor_button")
+        candidate_button.setAccessibleName("Shadow 후보")
+        candidate_button.setEnabled(self._candidate_dialog is not None)
+        candidate_button.setFixedSize(14, 14)
+        candidate_button.setStyleSheet(
+            "QPushButton { background: #7C3AED; border: 1px solid #5B21B6; border-radius: 2px; padding: 0; }"
+            "QPushButton:hover { background: #8B5CF6; } QPushButton:disabled { background: #D0D5DD; border-color: #98A2B3; }"
+        )
+        candidate_button.setToolTip("Shadow 후보 · NAS가 기록한 주문 없는 전략 후보")
+        candidate_button.clicked.connect(self._show_candidate_monitor)
+        toolbar.addWidget(candidate_button)
+        research_button = QPushButton("")
+        research_button.setObjectName("research_button")
+        research_button.setAccessibleName("전략 연구")
+        research_button.setEnabled(self._research_dialog is not None)
+        research_button.setFixedSize(14, 14)
+        research_button.setStyleSheet(
+            "QPushButton { background: #0F9D8A; border: 1px solid #087F6F; border-radius: 2px; padding: 0; }"
+            "QPushButton:hover { background: #14B8A6; } QPushButton:disabled { background: #D0D5DD; border-color: #98A2B3; }"
+        )
+        research_button.setToolTip("전략 연구 · 저장 데이터에서 전략을 반복 비교")
+        research_button.clicked.connect(self._show_research_dialog)
+        toolbar.addWidget(research_button)
         self._rank_query_selector = QComboBox()
         for label, value in (("30초 간격", "5"), ("1분 간격", "1"), ("10분 간격", "2"), ("1시간 간격", "3"), ("당일 누적", "4")):
             self._rank_query_selector.addItem(label, value)
@@ -903,6 +1006,21 @@ class MainWindow(QMainWindow):
         if getattr(sys, "frozen", False) and self._settings.get("auto_update_check") == "1":
             QTimer.singleShot(1_200, lambda: self._check_for_updates(silent=True))
 
+    def _show_candidate_monitor(self) -> None:
+        if self._candidate_dialog is None:
+            self.statusBar().showMessage("NAS 연결 모드에서 Shadow 후보를 사용할 수 있습니다.", 5000)
+            return
+        self._candidate_dialog.show()
+        self._candidate_dialog.raise_()
+        self._candidate_dialog.activateWindow()
+
+    def _show_research_dialog(self) -> None:
+        if self._research_dialog is None:
+            return
+        self._research_dialog.show()
+        self._research_dialog.raise_()
+        self._research_dialog.activateWindow()
+
     def _show_investment_notice(self) -> None:
         """상태 표시줄에 투자 유의 안내를 잠시 보여 준다."""
         if self._closing:
@@ -945,6 +1063,8 @@ class MainWindow(QMainWindow):
             journal_backup_exporter=self._export_journal_backup,
             journal_backup_importer=self._import_journal_backup,
             news_api_settings_opener=self._open_news_api_settings,
+            shadow_settings_opener=self._show_candidate_monitor,
+            research_opener=self._show_research_dialog,
         )
         # 기본 설정은 메인 표를 막지 않는 별도 창으로 연다. 따라서 순위 갱신은
         # 설정 창이 열려 있어도 즉시 표에 반영된다.
@@ -1150,6 +1270,7 @@ class MainWindow(QMainWindow):
             self._render_high_distance(code)
             self._render_trade_values(code)
             self._render_market_cap(code)
+            self._render_change_rate(code)
         if bool(getattr(self, "_theme_group_sort_enabled", False)):
             self._sort_visible_rows_by_theme_group(True)
         self.statusBar().showMessage("기본 설정 저장 완료")
@@ -1658,8 +1779,13 @@ class MainWindow(QMainWindow):
         )
 
     def _send_news_command(self, code: str = "", name: str = "", *, activate: bool = True,
-                           action: str = "show", journal_group_id: str = "", trade_date: str = "") -> None:
+                           action: str = "show", journal_group_id: str = "", trade_date: str = "",
+                           origin_scope: AccountScope | None = None,
+                           account_scope: AccountScope | None = None) -> None:
         if self._news_command_path is None:
+            return
+        if (origin_scope is None) != (account_scope is None):
+            logger.warning("불완전한 계좌 범위가 포함된 뉴스 명령을 거절했습니다.")
             return
         # 상·하·좌·우 고정은 제목 표시줄과 Windows 테두리까지 포함한 실제
         # 창 외곽을 기준으로 해야 한다. self.x/y/width/height는 내용 영역이라
@@ -1675,6 +1801,15 @@ class MainWindow(QMainWindow):
             "journal_group_id": journal_group_id,
             "trade_date": trade_date,
         }
+        if origin_scope is not None and account_scope is not None:
+            if (
+                origin_scope.broker != account_scope.broker
+                or origin_scope.environment != account_scope.environment
+            ):
+                logger.warning("서로 다른 계좌 환경이 포함된 뉴스 명령을 거절했습니다.")
+                return
+            document["origin_scope"] = origin_scope.to_dict()
+            document["account_scope"] = account_scope.to_dict()
         try:
             self._news_command_channel.send(document)
         except OSError as error:
@@ -1687,10 +1822,16 @@ class MainWindow(QMainWindow):
         code = str(document.get("code", "")); name = str(document.get("name", ""))
         if not code or not name:
             return
+        scopes = _journal_news_scope_pair(document)
+        if scopes is None:
+            logger.warning("잘못된 계좌 범위가 포함된 매매일지 뉴스 요청을 거절했습니다.")
+            return
+        origin_scope, account_scope = scopes
         self._ensure_news_process()
         self._send_news_command(
             code, name, journal_group_id=str(document.get("group_id", "")),
             trade_date=str(document.get("trade_date", "")),
+            origin_scope=origin_scope, account_scope=account_scope,
         )
 
     @staticmethod
@@ -1757,9 +1898,17 @@ class MainWindow(QMainWindow):
             self._active_api_route = "local_fallback"
         elif "복구 여부" in message:
             self._active_api_route = "central_retry"
-        elif "중앙 실시간 체결 구독 중" in message:
+        elif (
+            "중앙 실시간 체결 구독 중" in message
+            or "나스 실시간 체결 구독 중" in message
+            or "나스 실시간 체결 재개" in message
+            or "중앙 실시간 체결 정상" in message
+            or "NAS 키움 실시간 수집" in message
+        ):
             self._active_api_route = "central"
         elif "시놀로지 서버 연결됨" in message and "원본 대기" in message:
+            self._active_api_route = "central_waiting"
+        elif "나스 실시간 연결 변경 중" in message or "나스 실시간 연결 대기" in message:
             self._active_api_route = "central_waiting"
         else:
             return
@@ -2604,11 +2753,31 @@ class MainWindow(QMainWindow):
             stocks,
             expected_count=expected_count,
             has_blocking_modal=self._has_blocking_modal(),
+            # NAS의 직전·부분 snapshot 재확인은 RankingService가 중앙 DB만
+            # 적응형 간격으로 확인한다. 여기서는 worker 완료 뒤 같은 재시도
+            # 흐름을 하나 더 만들지 않고 직접 API 응답만 UI 재시도한다.
+            allow_partial_retry=not bool(
+                getattr(self._ranking_loader, "last_response_from_storage", False)
+            ),
         )
         decision = outcome.decision
         if decision.action in {RankingResponseAction.RETRY_SOON, RankingResponseAction.WAIT_NEXT}:
-            self._set_api_status("API: 재조회", "#B36B00")
-            self.statusBar().showMessage(f"순위 응답이 {len(stocks)}/{expected_count}개입니다. 기존 목록을 유지하고 다시 조회합니다…")
+            stored_response = bool(
+                getattr(self._ranking_loader, "last_response_from_storage", False)
+            )
+            if stored_response and decision.action == RankingResponseAction.WAIT_NEXT:
+                self._set_connected_api_status()
+                self.statusBar().showMessage(
+                    f"NAS 최신 순위 일부 수신 ({len(stocks)}/{expected_count}) · "
+                    "기존 목록 유지 · 다음 회차 확인"
+                )
+            else:
+                self._set_api_status("API: 재조회", "#B36B00")
+                self.statusBar().showMessage(
+                    "NAS 최신 순위 대기 중 · 기존 목록 유지"
+                    if stored_response
+                    else f"순위 응답이 {len(stocks)}/{expected_count}개입니다. 기존 목록을 유지하고 다시 조회합니다…"
+                )
             if decision.action == RankingResponseAction.RETRY_SOON:
                 QTimer.singleShot(1_500, self._refresh_rankings)
             else:
@@ -2715,6 +2884,7 @@ class MainWindow(QMainWindow):
                 self._render_current_price(stock.code)
             self._render_trade_values(stock.code)
             self._render_market_cap(stock.code)
+            self._render_change_rate(stock.code)
             self._render_new_high_price(stock.code)
             self._render_high_distance(stock.code)
         for code in self._row_by_code:
@@ -3144,6 +3314,9 @@ class MainWindow(QMainWindow):
             return
         pending, self._pending_minute_bars = self._pending_minute_bars, {}
         market_pending, self._pending_market_index_bars = self._pending_market_index_bars, {}
+        if self._market_cache_writer is not None:
+            self._market_cache_writer.enqueue_minute_bars(pending, market_pending)
+            return
         grouped: dict[str, list[MinuteOhlcv]] = {}
         for (code, _), bar in pending.items():
             grouped.setdefault(code, []).append(bar)
@@ -3161,6 +3334,19 @@ class MainWindow(QMainWindow):
                 **market_pending, **self._pending_market_index_bars,
             }
             logger.warning("실시간 분봉 DB 저장 실패: %s", error)
+
+    def _on_minute_cache_write_failed(
+        self, pending: object, market_pending: object, message: str,
+    ) -> None:
+        if isinstance(pending, dict):
+            self._pending_minute_bars = {**pending, **self._pending_minute_bars}
+        if isinstance(market_pending, dict):
+            self._pending_market_index_bars = {
+                **market_pending, **self._pending_market_index_bars,
+            }
+        if not self._closing and not self._minute_bar_save_timer.isActive():
+            self._minute_bar_save_timer.start()
+        logger.warning("실시간 분봉 DB 저장 실패: %s", message)
 
     def _flush_daily_trade_comparisons(self) -> None:
         """이미 받은 ka10081 일봉값을 재사용해 개발 확인용 CSV를 갱신한다."""
@@ -3227,6 +3413,15 @@ class MainWindow(QMainWindow):
         self._pending_trade_ticks[tick.code] = tick
         if not self._trade_tick_flush_timer.isActive():
             self._trade_tick_flush_timer.start()
+
+    def _on_stock_price_reference(self, reference: StockPriceReference) -> None:
+        """0g가 알린 현재 기준 묶음으로 상한가 표시 원본을 교체한다."""
+        upper = reference.upper_limit_price
+        if upper is None or upper <= 0:
+            self._realtime_upper_limits.pop(reference.code, None)
+        else:
+            self._realtime_upper_limits[reference.code] = upper
+        self._render_change_rate(reference.code)
 
     def _prepare_top20_trade_value_index(self, codes: tuple[str, ...], observed_at: datetime) -> None:
         """현재 순위 구성을 다음 30초 경계부터 사용할 대상으로 예약한다."""
@@ -3343,7 +3538,10 @@ class MainWindow(QMainWindow):
         interval = 5 if self._top20_view_mode == "5m" else 60 if self._top20_view_mode == "60m" else 1
         if interval > 1:
             completed = self._aggregate_top20_rows(completed, interval)
-        status = f"{selected_date:%Y-%m-%d} · 저장 기록 {len(completed)}개" if completed else f"{selected_date:%Y-%m-%d} · 저장된 기록이 없습니다."
+        status = (
+            f"{selected_date:%Y-%m-%d} · 전체일 08:00~20:00 저장 기록 {len(completed)}개"
+            if completed else f"{selected_date:%Y-%m-%d} · 저장된 전체일 기록이 없습니다."
+        )
         self._top20_trade_value_chart.set_data(None, (0.0, 0.0, 0.0), completed, status)
 
     def _show_top20_trade_value_mode(self, mode: str) -> None:
@@ -3514,11 +3712,14 @@ class MainWindow(QMainWindow):
         target = self._selected_high_price(execution.code)
         high_distance = max(0.0, (target - execution.price) / target * 100) if target else None
         broker_key = ":".join(filter(None, (execution.order_no, execution.execution_no)))
-        execution_key = f"{executed_at.date().isoformat()}:{execution.code}:{broker_key}" if broker_key else ""
-        if not execution_key:
-            execution_key = hashlib.sha256(
+        source_execution_key = f"{executed_at.date().isoformat()}:{execution.code}:{broker_key}" if broker_key else ""
+        if not source_execution_key:
+            source_execution_key = hashlib.sha256(
                 f"{execution.code}|{execution.side}|{executed_at.isoformat()}|{execution.price}|{execution.quantity}".encode()
             ).hexdigest()
+        execution_key = scoped_snapshot_execution_key(
+            source_execution_key, execution.origin_scope,
+        )
         program = dict(self._latest_program_trade.get(execution.code, {}))
         investor_flow = {"program_trade": program} if program else {"program_trade": {"available": False, "backfill_pending": True}}
         writer.enqueue(TradeEntrySnapshot(
@@ -3533,6 +3734,7 @@ class MainWindow(QMainWindow):
             investor_flow=investor_flow,
             market_state=self._entry_market_state(),
             capture_state="realtime_core",
+            origin_scope=execution.origin_scope,
         ))
 
     def _on_program_trade_tick(self, tick: object) -> None:
@@ -3674,7 +3876,7 @@ class MainWindow(QMainWindow):
                 continue
             self._render_current_price(tick.code)
             if tick.change_rate is not None:
-                self._table.setItem(row, 3, self._change_rate_item(f"{tick.change_rate:+.{self._decimal_places('change_rate')}f}%"))
+                self._render_change_rate(tick.code)
             if tick.high_price and tick.high_price > 0:
                 self._render_new_high_price(tick.code)
             self._set_near_high_level(tick.code, tick.current_price)
@@ -3690,10 +3892,26 @@ class MainWindow(QMainWindow):
         highs = self._pending_today_high_cache
         self._pending_price_cache = {}
         self._pending_today_high_cache = {}
+        if self._market_cache_writer is not None:
+            self._market_cache_writer.enqueue_price_cache(
+                prices, highs, self._ranking_now().date(),
+            )
+            return
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_last_prices"):
             self._stock_lookup.update_last_prices(prices)
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_intraday_highs"):
             self._stock_lookup.update_intraday_highs(highs, self._ranking_now().date())
+
+    def _on_price_cache_write_failed(
+        self, prices: object, highs: object, _trade_date: object, message: str,
+    ) -> None:
+        if isinstance(prices, dict):
+            self._pending_price_cache = {**prices, **self._pending_price_cache}
+        if isinstance(highs, dict):
+            self._pending_today_high_cache = {**highs, **self._pending_today_high_cache}
+        if not self._closing and not self._price_cache_timer.isActive():
+            self._price_cache_timer.start()
+        logger.warning("현재가 캐시 저장 실패: %s", message)
 
     def _start_secondary_loading(self, codes: tuple[str, ...]) -> None:
         """Start non-realtime API work in the defined priority order."""
@@ -3755,6 +3973,7 @@ class MainWindow(QMainWindow):
         return target, finalization_candidates(
             codes, now, target, finalized, cached_nxt,
             self._finalization_attempts, self._finalization_retry_after,
+            session_scope=FinalizationScope.FULL_DAY,
         )
 
     def _is_after_hours_data_pause(self) -> bool:
@@ -3827,7 +4046,9 @@ class MainWindow(QMainWindow):
                 if not self._price_cache_timer.isActive():
                     self._price_cache_timer.start()
         stored = self._minute_bar_repository is None
-        if self._minute_bar_repository is not None:
+        if self._minute_bar_repository is not None and self._market_cache_writer is not None:
+            self._market_cache_writer.enqueue_history_bars(code, bars, now.date(), now)
+        elif self._minute_bar_repository is not None:
             try:
                 self._minute_bar_repository.upsert_bars(code, bars)
                 self._minute_bar_repository.record_history_sync(code, now.date(), now, len(bars))
@@ -3840,6 +4061,12 @@ class MainWindow(QMainWindow):
             return
         self._apply_near_high_background(code)
         self._render_trade_values(code)
+
+    def _on_history_cache_saved(self, code: str) -> None:
+        self._minute_history_codes.add(code)
+
+    def _on_history_cache_failed(self, code: str, error: str) -> None:
+        logger.warning("분봉 보완 DB 저장 실패 (%s): %s", code, error)
 
     def _start_nxt_eligibility_loading(self, codes: tuple[str, ...]) -> bool:
         if self._closing or self._ranking_execution.priority_preparing or not self._nxt_eligibility_worker_controller.available:
@@ -4040,6 +4267,7 @@ class MainWindow(QMainWindow):
             self._render_new_high_price(code)
             self._render_high_distance(code)
             self._render_trade_values(code)
+            self._render_change_rate(code)
 
     def _finalization_minute_bars_complete(self, code: str, bars: tuple[object, ...]) -> bool:
         target_day = self._after_close_finalization_date
@@ -4054,6 +4282,8 @@ class MainWindow(QMainWindow):
             (bar.minute for bar in bars if isinstance(bar, MinuteOhlcv)),
             target_day,
             cached_nxt.get(code, True),
+            session_scope=FinalizationScope.FULL_DAY,
+            query_completed=True,
         )
 
     def _on_daily_high_worker_finished(self, codes: tuple[str, ...]) -> None:
@@ -4358,6 +4588,7 @@ class MainWindow(QMainWindow):
                 widget.setPalette(palette)
                 widget.setAutoFillBackground(True)
                 widget.setStyleSheet(f"background-color: {color.name()};")
+        self._render_change_rate(code)
 
     def _row_background_color(self, code: str, row: int) -> QColor:
         rank_item = self._table.item(row, 0) if hasattr(self, "_table") else None
@@ -4412,6 +4643,38 @@ class MainWindow(QMainWindow):
             item.setForeground(QColor(color))
         return item
 
+    def _render_change_rate(self, code: str) -> None:
+        """실제 상한가 가격에 닿은 종목의 등락률을 배경으로 강조한다."""
+        row = self._row_by_code.get(code)
+        rate = self._last_change_rates.get(code)
+        if row is None or rate is None:
+            return
+        text = f"{rate:+.{self._decimal_places('change_rate')}f}%"
+        fundamentals = self._fundamentals.get(code)
+        upper = self._realtime_upper_limits.get(
+            code,
+            fundamentals.upper_limit_price if fundamentals is not None else None,
+        )
+        current = self._current_prices.get(code)
+        at_upper_limit = is_upper_limit_highlight(current, upper, rate)
+        enabled = self._settings.get("upper_limit_highlight_enabled") == "1"
+        item = self._change_rate_item(text)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        font = item.font()
+        font.setBold(at_upper_limit and enabled)
+        item.setFont(font)
+        item.setBackground(
+            QColor(self.UPPER_LIMIT_BADGE_COLOR)
+            if at_upper_limit and enabled
+            else self._row_background_color(code, row)
+        )
+        item.setToolTip(
+            f"현재가가 키움 기준 상한가 {upper:,}원"
+            if at_upper_limit and enabled else ""
+        )
+        self._table.setItem(row, 3, item)
+        self._table.removeCellWidget(row, 3)
+
     def _strength_badge_icons(self) -> tuple[str, str, str]:
         return tuple(
             "" if self._strength_icon_image_path(level) is not None else self._settings.get(f"strength_icon_{level}")
@@ -4460,10 +4723,14 @@ class MainWindow(QMainWindow):
             if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_fundamentals"):
                 # ka10001 원본 250일 고가는 권리 조정 전 가격일 수 있으므로
                 # daily high 작업이 저장한 수정주가 기준 캐시를 덮어쓰지 않는다.
-                self._stock_lookup.update_fundamentals(code, fundamentals.market_cap_eok, fundamentals.float_ratio_percent, None, fundamentals.float_shares)
+                self._stock_lookup.update_fundamentals(
+                    code, fundamentals.market_cap_eok, fundamentals.float_ratio_percent,
+                    None, fundamentals.float_shares, fundamentals.upper_limit_price,
+                )
             if self._defer_table_update_while_modal():
                 return
             self._render_market_cap(code)
+            self._render_change_rate(code)
             self._render_new_high_price(code)
             self._render_high_distance(code)
             self._render_trade_values(code)
@@ -4575,17 +4842,26 @@ class MainWindow(QMainWindow):
             self._save_current_price_cache()
             self._minute_bar_save_timer.stop()
             self._flush_pending_minute_bars()
+            if self._market_cache_writer is not None:
+                if not self._market_cache_writer.stop_and_drain():
+                    logger.warning("실시간 캐시 저장 스레드가 종료 제한시간 안에 끝나지 않았습니다.")
             self._daily_trade_comparison_timer.stop()
             self._flush_daily_trade_comparisons()
             if hasattr(self, "_trade_tick_flush_timer"):
                 self._trade_tick_flush_timer.stop()
             for player, _ in self._near_high_sound_players.values():
                 player.stop()
+            if self._candidate_dialog is not None:
+                self._candidate_dialog.stop()
+            if self._research_dialog is not None:
+                self._research_dialog.stop()
             self._refresh_button.setEnabled(False)
             self.statusBar().showMessage("종료 중: 실행 중인 작업을 일시 중지하고 있습니다…")
             if self._google_drive_sync is not None and self._google_drive_sync.connected and self._settings.get("google_drive_auto_upload_on_exit") == "1" and (self._google_drive_dirty or self._google_drive_debounce.isActive()):
                 self._start_google_drive_sync("upload", close_after=True)
             self._request_worker_stop()
+            if not self._image_theme_ocr_worker_controller.stop_for_shutdown():
+                logger.warning("OCR 보조 스레드가 강제 종료 제한시간 안에 끝나지 않았습니다.")
             if not self._running_workers():
                 self._stop_current_news_process()
                 if self._journal_command_path is not None:
@@ -4642,6 +4918,7 @@ class MainWindow(QMainWindow):
                 self._nxt_eligibility_worker: "NXT 확인",
                 self._new_high_worker: "신고가 목록",
                 self._ranking_worker: "실시간 순위",
+                self._image_theme_ocr_worker: "이미지 OCR",
                 self._google_drive_worker: "Google Drive",
                 self._update_check_worker: "업데이트 확인",
                 self._update_download_worker: "업데이트 다운로드",

@@ -87,3 +87,22 @@ def change_rate_text_color(value: object) -> str | None:
     if rate < 0:
         return "#0070C0"
     return None
+
+
+def is_upper_limit_highlight(
+    current_price: object, upper_limit_price: object, change_rate: object,
+) -> bool:
+    """현재 등락률 기준과 실제 제한가격이 함께 상한가를 가리킬 때만 참이다.
+
+    키움이 장중 가격제한가보다 먼저 등락률 기준을 다음 구간 값으로
+    전환하는 동안에는 이전 `upl_pric`과 0.00%가 잠시 함께 보일 수 있다.
+    국내 가격제한폭은 약 30%이므로 29% 미만은 서로 다른 기준 묶음으로
+    보고 강조하지 않는다.
+    """
+    try:
+        current = int(current_price)
+        upper = int(upper_limit_price)
+        rate = float(change_rate)
+    except (TypeError, ValueError):
+        return False
+    return upper > 0 and current >= upper and rate >= 29.0

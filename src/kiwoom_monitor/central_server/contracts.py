@@ -18,6 +18,17 @@ class ServerCapabilities:
     themes: bool = False
     trade_journal: bool = False
     shared_settings: bool = False
+    account_query_v2: bool = False
+    journal_v2_sync: bool = False
+    journal_news_links_v2: bool = False
+    combined_minute_bars: bool = False
+    trade_value_comparisons: bool = False
+    runtime_credentials_v1: bool = False
+    multi_account_query_v3: bool = False
+    scoped_mock_orders_v2: bool = False
+    account_contexts_v3: bool = False
+    planned_reconnect_v1: bool = False
+    execution_event_read_v1: bool = False
 
     def as_document(self) -> dict[str, object]:
         return {

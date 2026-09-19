@@ -33,6 +33,8 @@ class CoverageReport:
     partial_count: int
     unavailable_by_cutoff_count: int
     explicit_complete: bool
+    window_closed: bool
+    session_finalized: bool
     gap_inference_supported: bool
     missing_intervals: tuple[tuple[datetime, datetime], ...]
     absence_meaning: str
@@ -46,6 +48,8 @@ class CoverageReport:
             "partial_count": self.partial_count,
             "unavailable_by_cutoff_count": self.unavailable_by_cutoff_count,
             "explicit_complete": self.explicit_complete,
+            "window_closed": self.window_closed,
+            "session_finalized": self.session_finalized,
             "gap_inference_supported": self.gap_inference_supported,
             "missing_intervals": [
                 {"start": start.isoformat(), "end": end.isoformat()}
@@ -76,6 +80,8 @@ def evaluate_coverage(
         and _between(item.metadata.effective_at, start, end)
     )
     usable = tuple(item for item in eligible if item.metadata.was_available_by(available_by))
+    window_closed = available_by >= end
+    session_finalized = bool(explicit_complete)
     complete_count = sum(
         item.metadata.completeness == DataCompleteness.COMPLETE for item in usable
     )
@@ -87,7 +93,7 @@ def evaluate_coverage(
             usable, start=start, end=end, seconds=expected_seconds
         )
 
-    if explicit_complete and not partial_count:
+    if session_finalized and window_closed and not partial_count:
         state = CoverageState.COMPLETE
     elif expected_seconds is not None and not missing_intervals and not partial_count:
         state = CoverageState.COMPLETE
@@ -95,7 +101,7 @@ def evaluate_coverage(
         state = CoverageState.PARTIAL
     else:
         state = CoverageState.MISSING
-    if explicit_complete:
+    if session_finalized and window_closed:
         absence_meaning = "no_trade_with_complete_coverage"
     elif expected_seconds is not None:
         absence_meaning = "no_observation"
@@ -109,6 +115,8 @@ def evaluate_coverage(
         partial_count=partial_count,
         unavailable_by_cutoff_count=len(eligible) - len(usable),
         explicit_complete=explicit_complete,
+        window_closed=window_closed,
+        session_finalized=session_finalized,
         gap_inference_supported=gap_supported,
         missing_intervals=missing_intervals,
         absence_meaning=absence_meaning,

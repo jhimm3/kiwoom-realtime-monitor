@@ -22,6 +22,38 @@ from kiwoom_monitor.domain.market_data_contract import (
 
 
 class MarketDataIngestorTests(unittest.TestCase):
+    def test_records_sor_vs_query_trade_value_trend_after_minute_backfill(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.save_minute_bars([{
+                "trading_date": "2026-09-14", "minute": "10:01", "code": "005930",
+                "market": "SOR", "open": 10000, "high": 10000, "low": 10000,
+                "close": 10000, "volume": 2500, "trade_value_million_won": 25,
+                "updated_at": 1.0,
+            }])
+            ingestor = MarketDataIngestor(
+                store, now_provider=lambda: datetime(2026, 9, 14, 20, 5),
+            )
+            for suffix, volume in (("", 1000), ("_NX", 500)):
+                ingestor.ingest("ka10080", {
+                    "stk_cd": f"005930{suffix}", "base_dt": "20260914",
+                }, {"stk_min_pole_chart_qry": [{
+                    "cntr_tm": "20260914100100", "open_pric": "10000",
+                    "high_pric": "10000", "low_pric": "10000",
+                    "cur_prc": "10000", "trde_qty": str(volume),
+                }]})
+            saved = store.load_documents(
+                "minute_trade_value_comparisons", "2026-09-14:005930", 10,
+            )
+            store.close()
+
+        document = saved[0]["document"]
+        self.assertEqual({"KRX": 10, "NXT": 5}, document["query_components_million_won"])
+        self.assertEqual(25, document["realtime_trade_value_million_won"])
+        self.assertEqual(15, document["query_trade_value_million_won"])
+        self.assertEqual(10, document["difference_million_won"])
+        self.assertEqual("KRX+NXT", document["query_scope"])
     def test_ingests_krx_and_nxt_minute_query(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
@@ -108,11 +140,78 @@ class MarketDataIngestorTests(unittest.TestCase):
         self.assertEqual(DataCompleteness.IN_PROGRESS, metadata.completeness)
         self.assertEqual(DataValueKind.ACTUAL, metadata.value_kind)
 
+    def test_effective_date_krx_chart_data_is_not_finalized_at_regular_close(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            payload = {"stk_dt_pole_chart_qry": [{
+                "dt": "20260914", "open_pric": "70000", "high_pric": "71000",
+                "low_pric": "69000", "cur_prc": "70500", "trde_qty": "1234",
+            }]}
+            MarketDataIngestor(
+                store, now_provider=lambda: datetime(2026, 9, 14, 15, 35)
+            ).ingest("ka10081", {"stk_cd": "005930"}, payload)
+            metadata = store.load_market_data_metadata(
+                MarketDatasetKind.DAILY_BAR, "005930:KRX", "2026-09-14"
+            )
+            assert metadata is not None
+            self.assertEqual(DataCompleteness.IN_PROGRESS, metadata.completeness)
+
+            MarketDataIngestor(
+                store, now_provider=lambda: datetime(2026, 9, 14, 20, 5)
+            ).ingest("ka10081", {"stk_cd": "005930"}, payload)
+            metadata = store.load_market_data_metadata(
+                MarketDatasetKind.DAILY_BAR, "005930:KRX", "2026-09-14"
+            )
+            store.close()
+
+        assert metadata is not None
+        self.assertEqual(DataCompleteness.COMPLETE, metadata.completeness)
+
+    def test_pre_effective_krx_chart_keeps_1530_finalization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            MarketDataIngestor(
+                store, now_provider=lambda: datetime(2026, 9, 11, 15, 35)
+            ).ingest("ka10081", {"stk_cd": "005930"}, {
+                "stk_dt_pole_chart_qry": [{
+                    "dt": "20260911", "open_pric": "70000", "high_pric": "71000",
+                    "low_pric": "69000", "cur_prc": "70500", "trde_qty": "1234",
+                }],
+            })
+            metadata = store.load_market_data_metadata(
+                MarketDatasetKind.DAILY_BAR, "005930:KRX", "2026-09-11"
+            )
+            store.close()
+
+        assert metadata is not None
+        self.assertEqual(DataCompleteness.COMPLETE, metadata.completeness)
+
+    def test_effective_date_query_minute_separates_window_and_session_finalization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            payload = {"stk_min_pole_chart_qry": [{
+                "cntr_tm": "20260914152900", "open_pric": "70000", "high_pric": "70100",
+                "low_pric": "69900", "cur_prc": "70050", "trde_qty": "1000",
+            }]}
+            MarketDataIngestor(
+                store, now_provider=lambda: datetime(2026, 9, 14, 15, 35)
+            ).ingest("ka10080", {"stk_cd": "005930", "base_dt": "20260914"}, payload)
+            revisions = store.load_observation_revisions("minute_bar", "005930:KRX")
+            store.close()
+
+        self.assertTrue(revisions[-1]["payload"]["window_closed"])
+        self.assertFalse(revisions[-1]["payload"]["session_finalized"])
+
     def test_ingests_ranking_and_supply_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
-            ingestor = MarketDataIngestor(store)
+            ingestor = MarketDataIngestor(
+                store, now_provider=lambda: datetime(2026, 9, 8, 10, 15, 31),
+            )
             ingestor.ingest("ka00198", {"qry_tp": "5"}, {
                 "item_inq_rank": [{"dt": "20260908", "tm": "101530", "stk_cd": "005930", "bigd_rank": "1"}],
             })
@@ -126,6 +225,7 @@ class MarketDataIngestorTests(unittest.TestCase):
             ranking_metadata = store.load_market_data_metadata(
                 MarketDatasetKind.CANDIDATE_SET, "5", "2026-09-08T10:15:30"
             )
+            ranking_revisions = store.load_observation_revisions("ranking", "5")
             investor = store.load_dataset_snapshots("investor_flow", "005930")
             program = store.load_dataset_snapshots("program_flow", "005930")
         self.assertEqual("005930", ranking[0]["payload"]["items"][0]["stk_cd"])
@@ -135,6 +235,7 @@ class MarketDataIngestorTests(unittest.TestCase):
         self.assertEqual(DataCompleteness.COMPLETE, ranking_metadata.completeness)
         self.assertEqual(ObservationOrigin.QUERY, ranking_metadata.origin)
         self.assertEqual(CandidateUniverse.RANKING_TOP20, ranking_metadata.candidate_universe)
+        self.assertEqual("2026-09-08T01:15:31+00:00", ranking_revisions[0]["available_at"])
         self.assertEqual("SOR", investor[0]["payload"]["market"])
         self.assertEqual("SOR", program[0]["payload"]["market"])
 

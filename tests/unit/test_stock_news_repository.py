@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import tempfile
+import sqlite3
+from contextlib import closing
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from kiwoom_monitor.application.news_analysis import NewsAssessment
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
@@ -57,6 +60,53 @@ class StockNewsRepositoryTest(unittest.TestCase):
             repository.upsert("005930", tuple(self._item(index) for index in range(201)))
             self.assertIn(news_identity(pinned), repository.journal_linked_identities("group-1", "005930"))
             self.assertEqual((pinned.title,), tuple(item.title for item in repository.load_journal_linked("group-1", "005930")))
+
+    def test_journal_news_links_are_separated_by_account_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = StockNewsRepository(Path(temporary_directory) / "news.sqlite3")
+            item = self._item(0)
+            repository.upsert("005930", (item,))
+            real = AccountScope(
+                "kiwoom", AccountEnvironment.REAL,
+                "11111111-1111-4111-8111-111111111111",
+            )
+            mock = AccountScope(
+                "kiwoom", AccountEnvironment.MOCK,
+                "22222222-2222-4222-8222-222222222222",
+            )
+
+            repository.set_journal_link(
+                "same-group", "005930", news_identity(item), True, account_scope=real,
+            )
+
+            self.assertEqual(
+                {news_identity(item)},
+                repository.journal_linked_identities("same-group", "005930", real),
+            )
+            self.assertEqual(set(), repository.journal_linked_identities("same-group", "005930", mock))
+            self.assertEqual((), repository.load_journal_linked("same-group", "005930", mock))
+
+    def test_unlink_keeps_tombstone_and_explicit_relink_advances_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "news.sqlite3"
+            repository = StockNewsRepository(path)
+            repository.set_journal_link("g", "005930", "article", True)
+            repository.set_journal_link("g", "005930", "article", False)
+            with closing(sqlite3.connect(path)) as connection:
+                deleted = connection.execute(
+                    "SELECT linked_at,updated_at,is_deleted FROM journal_news_links"
+                ).fetchone()
+            self.assertEqual(1, deleted[2])
+            self.assertEqual(set(), repository.journal_linked_identities("g", "005930"))
+
+            repository.set_journal_link("g", "005930", "article", True)
+            with closing(sqlite3.connect(path)) as connection:
+                restored = connection.execute(
+                    "SELECT linked_at,updated_at,is_deleted FROM journal_news_links"
+                ).fetchone()
+            self.assertEqual(deleted[0], restored[0])
+            self.assertGreaterEqual(restored[1], deleted[1])
+            self.assertEqual(0, restored[2])
 
 
 if __name__ == "__main__":

@@ -23,7 +23,11 @@ class RestClient(Protocol):
 class StockFundamentalsService:
     def __init__(self, client: RestClient) -> None: self._client = client
     def load(self, code: str) -> StockFundamentals:
-        row = self._client.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": code})
+        stored_loader = getattr(self._client, "load_stored_fundamentals", None)
+        stored = stored_loader(code) if callable(stored_loader) else None
+        row = stored if isinstance(stored, dict) else self._client.request(
+            "ka10001", "/api/dostk/stkinfo", {"stk_cd": code},
+        )
         try:
             # 원본값은 호환성을 위해 읽어 두되, 화면의 250일 최고가는
             # 수정주가 기준 ka10081 계산값을 우선한다.
@@ -37,6 +41,9 @@ class StockFundamentalsService:
             float_ratio = 100.0 if raw_float_ratio is None or not str(raw_float_ratio).strip() else float(str(raw_float_ratio).replace(",", ""))
             raw_float_shares = _positive_int(row.get("dstr_stk"))
             float_shares = raw_float_shares * _DSTR_STK_MULTIPLIER if raw_float_shares is not None else None
-            return StockFundamentals(market_cap, float_ratio, high_250, float_shares)
+            upper_limit_price = _positive_int(row.get("upl_pric"))
+            return StockFundamentals(
+                market_cap, float_ratio, high_250, float_shares, upper_limit_price,
+            )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"{code}의 시가총액 또는 유통비율 값이 올바르지 않습니다.") from error

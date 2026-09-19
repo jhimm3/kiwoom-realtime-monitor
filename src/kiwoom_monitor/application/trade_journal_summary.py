@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import date, datetime
 
 from kiwoom_monitor.application.trade_history_service import TradeFill
+from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
 
 
 @dataclass(frozen=True)
@@ -21,6 +24,7 @@ class TradeJournalSummary:
     matched_cost: int
     open_quantity: int
     fill_count: int
+    account_scope: AccountScope = LEGACY_ACCOUNT_SCOPE
 
     @property
     def return_rate(self) -> float:
@@ -53,10 +57,41 @@ class TradeReview:
     tags: str = ""
     rating: str = "보통"
     status: str = "미작성"
+    origin_scope: AccountScope = LEGACY_ACCOUNT_SCOPE
+    canonical_scope: AccountScope | None = None
+
+    def __post_init__(self) -> None:
+        if self.canonical_scope is not None and (
+            self.canonical_scope.broker != self.origin_scope.broker
+            or self.canonical_scope.environment != self.origin_scope.environment
+        ):
+            raise ValueError("canonical review scope cannot cross broker or environment")
+
+    @property
+    def account_scope(self) -> AccountScope:
+        return self.canonical_scope or self.origin_scope
 
 
 def trade_fill_key(fill: TradeFill) -> str:
-    return "|".join((fill.order_no, fill.stock_code, fill.filled_at.isoformat(timespec="seconds"), fill.side))
+    legacy_key = "|".join((
+        fill.order_no, fill.stock_code,
+        fill.filled_at.isoformat(timespec="seconds"), fill.side,
+    ))
+    if fill.origin_scope == LEGACY_ACCOUNT_SCOPE:
+        return legacy_key
+    identity = json.dumps(
+        {
+            "version": 2,
+            "origin_scope": fill.origin_scope.to_dict(),
+            "order_no": fill.order_no,
+            "stock_code": fill.stock_code,
+            "filled_at": fill.filled_at.isoformat(timespec="seconds"),
+            "side": fill.side,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "fill:v2:" + hashlib.sha256(identity).hexdigest()
 
 
 def group_trade_episodes(
@@ -69,10 +104,10 @@ def group_trade_episodes(
     """
     overrides = overrides or {}
     automatic: dict[str, list[TradeFill]] = {}
-    by_stock: dict[str, list[TradeFill]] = {}
+    by_stock: dict[tuple[AccountScope, str], list[TradeFill]] = {}
     for fill in fills:
-        by_stock.setdefault(fill.stock_code, []).append(fill)
-    for code, stock_fills in by_stock.items():
+        by_stock.setdefault((fill.effective_scope, fill.stock_code), []).append(fill)
+    for (_scope, code), stock_fills in by_stock.items():
         position = 0
         current_id = ""
         for fill in sorted(stock_fills, key=lambda value: value.filled_at):
@@ -92,11 +127,11 @@ def group_trade_episodes(
 
     # 같은 종목·같은 시작일의 자동 회차는 그날 첫 회차 ID 아래 합친다.
     # 첫 체결 기반 ID를 유지해 기존 첫 회차 복기와의 연결도 보존한다.
-    canonical_by_day: dict[tuple[str, date], str] = {}
+    canonical_by_day: dict[tuple[AccountScope, str, date], str] = {}
     automatic_canonical: dict[str, str] = {}
     for automatic_id, values in automatic.items():
         first = min(values, key=lambda value: value.filled_at)
-        key = (first.stock_code, first.filled_at.date())
+        key = (first.effective_scope, first.stock_code, first.filled_at.date())
         automatic_canonical[automatic_id] = canonical_by_day.setdefault(key, automatic_id)
 
     grouped: dict[str, list[TradeFill]] = {}
@@ -118,9 +153,9 @@ def group_trade_episodes(
 
 def summarize_trade_fills(fills: tuple[TradeFill, ...]) -> tuple[TradeJournalSummary, ...]:
     """평균법이 아닌 FIFO로 실현손익을 계산한다. 수수료·세금은 API 원자료에 없어 제외한다."""
-    grouped: dict[tuple[date, str], list[TradeFill]] = {}
+    grouped: dict[tuple[AccountScope, date, str], list[TradeFill]] = {}
     for fill in fills:
-        grouped.setdefault((fill.filled_at.date(), fill.stock_code), []).append(fill)
+        grouped.setdefault((fill.effective_scope, fill.filled_at.date(), fill.stock_code), []).append(fill)
 
     summaries: list[TradeJournalSummary] = []
     for values in grouped.values():
@@ -160,6 +195,9 @@ def split_trade_episode_cycles(episode: TradeEpisode) -> tuple[TradeEpisode, ...
 
 def _summarize_values(ordered: tuple[TradeFill, ...]) -> TradeJournalSummary:
     trade_date, stock_code = ordered[0].filled_at.date(), ordered[0].stock_code
+    account_scope = ordered[0].effective_scope
+    if any(fill.effective_scope != account_scope for fill in ordered):
+        raise ValueError("trade summary cannot mix account scopes")
     lots: list[list[int]] = []  # [남은 수량, 매수가]
     buy_quantity = sell_quantity = buy_amount = sell_amount = 0
     realized_profit = matched_cost = 0
@@ -196,4 +234,5 @@ def _summarize_values(ordered: tuple[TradeFill, ...]) -> TradeJournalSummary:
         matched_cost=matched_cost,
         open_quantity=open_quantity,
         fill_count=len(ordered),
+        account_scope=account_scope,
     )

@@ -10,18 +10,76 @@ import sqlite3
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from kiwoom_monitor.domain.order_contract import (
+    AccountEnvironment,
+    AccountScope,
+    LEGACY_ACCOUNT_SCOPE,
+)
 from kiwoom_monitor.infrastructure.logging_config import configure_logging
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
 from kiwoom_monitor.infrastructure.central_content_sync import CentralContentSyncService
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 from kiwoom_monitor.infrastructure.persistence.news_database import initialize_news_database
 from kiwoom_monitor.presentation.stock_news_window import StockNewsWindow
+
+
+def _command_account_scope(value: object) -> AccountScope | None:
+    if not isinstance(value, Mapping):
+        return None
+    required = ("broker", "environment", "account_ref")
+    if any(key not in value or not str(value[key]).strip() for key in required):
+        return None
+    try:
+        return AccountScope(
+            broker=str(value["broker"]),
+            environment=AccountEnvironment(str(value["environment"])),
+            account_ref=str(value["account_ref"]),
+        )
+    except ValueError:
+        return None
+
+
+def _command_account_scopes(
+    document: Mapping[str, object],
+) -> tuple[AccountScope, AccountScope] | None:
+    has_origin = "origin_scope" in document
+    has_canonical = "account_scope" in document
+    if not has_origin and not has_canonical:
+        return LEGACY_ACCOUNT_SCOPE, LEGACY_ACCOUNT_SCOPE
+    if not has_origin or not has_canonical:
+        return None
+    origin = _command_account_scope(document["origin_scope"])
+    canonical = _command_account_scope(document["account_scope"])
+    if origin is None or canonical is None:
+        return None
+    if origin.broker != canonical.broker or origin.environment != canonical.environment:
+        return None
+    return origin, canonical
+
+
+def _apply_show_command(window: StockNewsWindow, document: Mapping[str, object]) -> bool:
+    code = str(document.get("code", ""))
+    name = str(document.get("name", "")).strip()
+    if not code or not name:
+        return False
+    scopes = _command_account_scopes(document)
+    if scopes is None:
+        return False
+    origin_scope, account_scope = scopes
+    window.set_stock(
+        code, name, activate=bool(document.get("activate", True)),
+        journal_group_id=str(document.get("journal_group_id", "")),
+        trade_date=str(document.get("trade_date", "")),
+        origin_scope=origin_scope, account_scope=account_scope,
+    )
+    return True
 
 
 def _application_icon_path() -> Path:
@@ -254,16 +312,12 @@ def main(arguments: list[str] | None = None) -> int:
             if (mode == "linked" or mode.startswith("docked_") or mode == "docked") and window.isVisible():
                 raise_without_focus()
             return
-        code, name = str(document.get("code", "")), str(document.get("name", "")).strip()
-        if code and name:
-            window.set_stock(
-                code, name, activate=bool(document.get("activate", True)),
-                journal_group_id=str(document.get("journal_group_id", "")),
-                trade_date=str(document.get("trade_date", "")),
-            )
+        if _apply_show_command(window, document):
             if mode.startswith("docked_") or mode == "docked":
                 dock_beside_main(document.get("main_geometry"), "docked_right" if mode == "docked" else mode)
             publish_visibility(force=True)
+        elif document.get("code") or document.get("name"):
+            logging.getLogger(__name__).warning("잘못된 계좌 범위가 포함된 뉴스 명령을 거절했습니다.")
 
     command_timer = QTimer()
     command_timer.setInterval(80)

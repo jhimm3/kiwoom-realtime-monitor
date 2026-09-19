@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Mapping, Protocol
 
+from kiwoom_monitor.application.journal_enrichment import JournalResearchLink
 from kiwoom_monitor.application.personal_trade_rules import StructuredTradeRule
 from kiwoom_monitor.application.strategy_pack import StrategyPackManifest
 from kiwoom_monitor.application.strategy_review_context import strategy_review_reference
@@ -202,6 +203,7 @@ def build_trade_analysis_view_model(
     personal_rule_count: int,
     draft_rule_counts: dict[str, int],
     total_return_rate: float,
+    research_links: tuple[JournalResearchLink, ...] = (),
 ) -> TradeAnalysisViewModel:
     """저장소나 Qt 객체 없이 자동분석 화면 전체에 필요한 값을 만든다."""
     overrides = type_selection.override_map()
@@ -240,6 +242,15 @@ def build_trade_analysis_view_model(
         analyses=analyses,
         snapshot_count=len(entry_snapshots),
     )
+    if research_links:
+        counts = {
+            timing: sum(1 for link in research_links if link.evidence_timing == timing)
+            for timing in ("at_execution", "post_trade", "unverified")
+        }
+        data_status += (
+            f"\n연구 근거 연결 {len(research_links)}건 · 당시 확인 {counts['at_execution']} · "
+            f"사후 확인 {counts['post_trade']} · 가용성 미확인 {counts['unverified']}"
+        )
     blocks = [format_daily_analysis_summary(analyses, total_return_rate)]
     blocks.extend(format_linked_news_blocks(linked_news))
     for index, analysis in enumerate(analyses):

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from kiwoom_monitor.application.market_session_schedule import active_realtime_codes
+from kiwoom_monitor.application.market_session_schedule import realtime_subscription_target
 
 
 class RealtimeSubscriptionAction(str, Enum):
@@ -22,6 +22,7 @@ class RealtimeSubscriptionDecision:
     action: RealtimeSubscriptionAction
     active_codes: tuple[str, ...] = ()
     nxt_codes: tuple[str, ...] = ()
+    signature: tuple[str, ...] = ()
     stop_existing_first: bool = False
 
 
@@ -31,9 +32,12 @@ class RealtimeSubscriptionCoordinator:
     QThread 생성·신호 연결·종료 대기는 presentation adapter가 수행한다.
     """
 
-    def __init__(self, now: Callable[[], datetime]) -> None:
+    def __init__(self, now: Callable[[], datetime], environment: Callable[[], str] | None = None) -> None:
         self._now = now
+        self._environment = environment or (lambda: "real")
         self._current_codes: tuple[str, ...] = ()
+        self._current_nxt_codes: tuple[str, ...] = ()
+        self._current_signature: tuple[str, ...] = ()
 
     @property
     def current_codes(self) -> tuple[str, ...]:
@@ -41,6 +45,8 @@ class RealtimeSubscriptionCoordinator:
 
     def reset(self) -> None:
         self._current_codes = ()
+        self._current_nxt_codes = ()
+        self._current_signature = ()
 
     def plan(
         self,
@@ -55,32 +61,43 @@ class RealtimeSubscriptionCoordinator:
         if closing or not worker_available:
             return RealtimeSubscriptionDecision(RealtimeSubscriptionAction.NONE)
 
-        active_codes = active_realtime_codes(
+        target = realtime_subscription_target(
             requested_codes, nxt_enabled_codes, self._now(),
+            environment=self._environment(),
         )
-        nxt_codes = tuple(code for code in active_codes if code in nxt_enabled_codes)
+        active_codes = target.active_codes
+        nxt_codes = target.nxt_codes
         if not active_codes:
             action = RealtimeSubscriptionAction.STOP if worker_running else RealtimeSubscriptionAction.NONE
             return RealtimeSubscriptionDecision(action)
         if worker_running:
             action = (
                 RealtimeSubscriptionAction.NONE
-                if active_codes == self._current_codes
+                if (
+                    active_codes == self._current_codes
+                    and nxt_codes == self._current_nxt_codes
+                    and target.signature == self._current_signature
+                )
                 else RealtimeSubscriptionAction.UPDATE
             )
-            return RealtimeSubscriptionDecision(action, active_codes, nxt_codes)
+            return RealtimeSubscriptionDecision(action, active_codes, nxt_codes, target.signature)
         return RealtimeSubscriptionDecision(
             RealtimeSubscriptionAction.START,
             active_codes,
             nxt_codes,
+            target.signature,
             stop_existing_first=worker_exists,
         )
 
     def commit(self, decision: RealtimeSubscriptionDecision) -> None:
         if decision.action == RealtimeSubscriptionAction.STOP:
             self._current_codes = ()
+            self._current_nxt_codes = ()
+            self._current_signature = ()
         elif decision.action in {
             RealtimeSubscriptionAction.UPDATE,
             RealtimeSubscriptionAction.START,
         }:
             self._current_codes = decision.active_codes
+            self._current_nxt_codes = decision.nxt_codes
+            self._current_signature = decision.signature

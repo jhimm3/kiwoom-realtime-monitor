@@ -5,7 +5,9 @@ from __future__ import annotations
 import math
 from datetime import date, datetime, time
 
+from kiwoom_monitor.application.market_session_schedule import KRX_AFTER_MARKET_EFFECTIVE_DATE
 from kiwoom_monitor.application.trade_history_service import TradeFill
+from kiwoom_monitor.application.trade_setup_classification import trade_fill_session_context
 
 
 def rounded_price_grid(minimum: float, maximum: float, target_lines: int = 8) -> tuple[float, float, float]:
@@ -33,23 +35,49 @@ def visible_trade_fills(fills: tuple[TradeFill, ...], start: datetime, end: date
     return tuple(fill for fill in fills if start <= fill.filled_at < end)
 
 
-def chart_close_information(fills: tuple[TradeFill, ...], rows: tuple[tuple[object, ...], ...], *, index_mode: bool = False) -> str:
+def chart_close_information(
+    fills: tuple[TradeFill, ...], rows: tuple[tuple[object, ...], ...], *,
+    index_mode: bool = False, as_of: datetime | None = None,
+) -> str:
+    current = as_of or datetime.now()
     target_day = max((fill.filled_at.date() for fill in fills), default=None)
     day_rows = tuple(row for row in rows if target_day is not None and datetime.fromisoformat(str(row[0])).date() == target_day)
     if not day_rows:
-        return "당일 종가 미확정" if target_day == date.today() else "확정 일봉 보완 대기"
+        return "당일 종가 미확정" if target_day == current.date() else "확정 일봉 보완 대기"
     close_price = float(day_rows[-1][4]) if index_mode else int(day_rows[-1][4])
     previous_rows = tuple(row for row in rows if datetime.fromisoformat(str(row[0])).date() < target_day)
     price_text = f"{close_price:,.2f}" if index_mode else f"{close_price:,}원"
+    close_label = "지수 제공 범위 종가" if index_mode else "종가"
+    if target_day is not None and target_day >= KRX_AFTER_MARKET_EFFECTIVE_DATE and not index_mode:
+        regular_rows = tuple(
+            row for row in day_rows
+            if time(9, 0) <= datetime.fromisoformat(str(row[0])).time() < time(15, 30)
+        )
+        regular_text = (
+            f"{int(regular_rows[-1][4]):,}원" if regular_rows else "자료 없음"
+        )
+        source = str(day_rows[-1][7]).lower() if len(day_rows[-1]) > 7 else ""
+        source_confirms = "confirmed" in source or "확정" in source
+        full_day_closed = target_day < current.date() or (
+            target_day == current.date() and current.time() >= time(20, 0) and source_confirms
+        )
+        full_day_label = "전체일 최종가(20:00 기준)" if full_day_closed else "전체일 현재가(20:00 최종가 미확정)"
+        prefix = f"{target_day:%m-%d} KRX 정규장 종가(15:30) {regular_text}  ·  {full_day_label} {price_text}"
+        if not previous_rows:
+            return f"{prefix}  ·  전일 전체일 최종가 대비 자료 없음"
+        previous_close = int(previous_rows[-1][4])
+        change = (close_price / previous_close - 1) * 100 if previous_close else 0.0
+        return f"{prefix}  ·  전일 전체일 최종가 대비 {change:+.2f}%"
     if not previous_rows:
-        return f"{target_day:%m-%d} 종가 {price_text}  ·  전일 종가 대비 자료 없음"
+        return f"{target_day:%m-%d} {close_label} {price_text}  ·  전일 종가 대비 자료 없음"
     previous_close = float(previous_rows[-1][4]) if index_mode else int(previous_rows[-1][4])
     change = (close_price / previous_close - 1) * 100 if previous_close else 0.0
-    return f"{target_day:%m-%d} 종가 {price_text}  ·  전일 종가 대비 {change:+.2f}%"
+    return f"{target_day:%m-%d} {close_label} {price_text}  ·  전일 종가 대비 {change:+.2f}%"
 
 
 def trade_callout_text(fill: TradeFill) -> str:
-    return f"{fill.filled_at:%H:%M:%S} · {fill.price:,}원 · {fill.quantity:,}주"
+    context = trade_fill_session_context(fill)
+    return f"{fill.filled_at:%H:%M:%S} · {context.label} · {fill.price:,}원 · {fill.quantity:,}주"
 
 
 def format_trade_value_eok(value: object, decimals: int = 2) -> str:
@@ -82,26 +110,39 @@ def chart_time_tick_indices(row_minutes: list[datetime], interval: str, plot_wid
         if index == 0 or value.date() != row_minutes[index - 1].date():
             if not any(row_minutes[candidate].date() == value.date() for candidate in indices):
                 indices.append(index)
+        if (
+            value.date() >= KRX_AFTER_MARKET_EFFECTIVE_DATE
+            and (value.hour * 60 + value.minute) in {9 * 60, 15 * 60 + 20, 15 * 60 + 30, 15 * 60 + 40, 16 * 60, 20 * 60}
+        ):
+            indices.append(index)
     return sorted(set(indices))
 
 
 def multi_day_time_tick_indices(row_minutes: list[datetime], indices: list[int]) -> list[int]:
     boundary_indices = {index for index in range(1, len(row_minutes)) if row_minutes[index].date() != row_minutes[index - 1].date()}
-    session_edges = {8 * 60, 9 * 60, 15 * 60 + 30, 20 * 60}
+    session_edges = {8 * 60, 9 * 60, 15 * 60 + 20, 15 * 60 + 30, 15 * 60 + 40, 16 * 60, 20 * 60}
     return [index for index in indices if index not in boundary_indices and row_minutes[index].hour * 60 + row_minutes[index].minute not in session_edges]
 
 
-def daily_chart_rows(rows: tuple[tuple[object, ...], ...]) -> tuple[tuple[object, ...], ...]:
+def daily_chart_rows(
+    rows: tuple[tuple[object, ...], ...], *, scope: str = "provided",
+) -> tuple[tuple[object, ...], ...]:
+    if scope not in {"provided", "regular"}:
+        raise ValueError(f"unknown daily chart scope: {scope}")
     grouped: dict[date, list[tuple[object, ...]]] = {}
     for row in rows:
         try:
-            grouped.setdefault(datetime.fromisoformat(str(row[0])).date(), []).append(row)
+            moment = datetime.fromisoformat(str(row[0]))
+            if scope == "regular" and not (time(9, 0) <= moment.time() < time(15, 30)):
+                continue
+            grouped.setdefault(moment.date(), []).append(row)
         except (TypeError, ValueError):
             continue
     result: list[tuple[object, ...]] = []
     for day, values in sorted(grouped.items()):
         trade_values = [float(value[6]) for value in values if value[6] is not None]
-        result.append((datetime.combine(day, time()).isoformat(timespec="minutes"), float(values[0][1]), max(float(value[2]) for value in values), min(float(value[3]) for value in values), float(values[-1][4]), 0, sum(trade_values) if trade_values else None, "market_index_daily"))
+        source = "market_index_daily_regular_09:00_15:30" if scope == "regular" else "market_index_daily_provided_range"
+        result.append((datetime.combine(day, time()).isoformat(timespec="minutes"), float(values[0][1]), max(float(value[2]) for value in values), min(float(value[3]) for value in values), float(values[-1][4]), 0, sum(trade_values) if trade_values else None, source))
     return tuple(result)
 
 

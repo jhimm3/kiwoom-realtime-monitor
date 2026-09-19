@@ -30,6 +30,7 @@ class RankingService:
     EXPECTED_STOCKS = 20
     STOCK_INFO_PATH = "/api/dostk/stkinfo"
     STALE_SNAPSHOT_RETRY_LIMIT = 20
+    STALE_SNAPSHOT_RETRY_MAX_SECONDS = 0.75
 
     def __init__(self, client: RestClient, high_cache_seconds: float = 60.0, stocks: StockWriter | None = None, query_type: str = "5") -> None:
         self._client = client
@@ -56,25 +57,71 @@ class RankingService:
                 self._new_high_cache = loader(self.NEW_HIGH_PERIODS)
         new_high_codes = self._new_high_cache or {period: set() for period in self.NEW_HIGH_PERIODS}
         response: dict[str, Any] = {}
+        stale_stored_response = False
+        partial_stored_response = False
+        stored_loader = getattr(self._client, "load_stored_ranking", None)
+        self._last_response_from_storage = False
+        if callable(stored_loader):
+            for stale_snapshot_retries in range(self.STALE_SNAPSHOT_RETRY_LIMIT + 1):
+                stored = stored_loader(self._query_type)
+                if not isinstance(stored, dict):
+                    break
+                self._last_response_from_storage = True
+                response = stored
+                records = response.get("item_inq_rank", [])
+                snapshot_at = self._snapshot_at(records)
+                stale_stored_response = self._is_stale_snapshot(snapshot_at)
+                partial_stored_response = self._is_partial_stored_snapshot(records)
+                if not stale_stored_response and not partial_stored_response:
+                    stale_stored_response = False
+                    break
+                if stale_snapshot_retries >= self.STALE_SNAPSHOT_RETRY_LIMIT:
+                    break
+                delay = self._stale_snapshot_retry_delay(stale_snapshot_retries)
+                if stale_stored_response:
+                    logger.info(
+                        "NAS 순위가 이전 기준 스냅샷(%s)이어서 %.2f초 뒤 다시 확인합니다. (%d/%d)",
+                        snapshot_at.strftime("%H:%M:%S") if snapshot_at else "알 수 없음",
+                        delay,
+                        stale_snapshot_retries + 1,
+                        self.STALE_SNAPSHOT_RETRY_LIMIT,
+                    )
+                else:
+                    logger.info(
+                        "NAS 최신 순위가 부분 자료(%d/%d)여서 %.2f초 뒤 다시 확인합니다. (%d/%d)",
+                        self._valid_stored_record_count(records),
+                        self.EXPECTED_STOCKS,
+                        delay,
+                        stale_snapshot_retries + 1,
+                        self.STALE_SNAPSHOT_RETRY_LIMIT,
+                    )
+                time.sleep(delay)
+        if stale_stored_response or partial_stored_response:
+            # 최신 회차를 끝내 받지 못했을 때 직전 순위를 새 응답처럼 화면에
+            # 적용하지 않는다. 빈 결과는 UI가 현재 표를 보존하고 다음 회차를
+            # 기다리게 하는 명시적인 "최신 자료 미수신" 신호다.
+            response = {"item_inq_rank": []}
         # 간헐적으로 ka00198이 일부 순위만 반환한다. 정상 응답(20개)을
         # 우선 사용하도록 짧게 재시도하고, 끝까지 부분 응답이면 UI가
         # 기존 순위표를 유지하도록 그대로 반환한다.
         partial_response_retries = 0
         stale_snapshot_retries = 0
-        while True:
+        while not response:
             response = self._client.request("ka00198", self.STOCK_INFO_PATH, {"qry_tp": self._query_type})
             records = response.get("item_inq_rank", [])
             if isinstance(records, list) and len(records) >= self.EXPECTED_STOCKS:
                 snapshot_at = self._snapshot_at(records)
                 if self._is_stale_snapshot(snapshot_at) and stale_snapshot_retries < self.STALE_SNAPSHOT_RETRY_LIMIT:
                     stale_snapshot_retries += 1
+                    delay = self._stale_snapshot_retry_delay(stale_snapshot_retries - 1)
                     logger.info(
-                        "ka00198이 이전 기준 스냅샷(%s)을 반환해 0.75초 뒤 재조회합니다. (%d/%d)",
+                        "ka00198이 이전 기준 스냅샷(%s)을 반환해 %.2f초 뒤 재조회합니다. (%d/%d)",
                         snapshot_at.strftime("%H:%M:%S") if snapshot_at else "알 수 없음",
+                        delay,
                         stale_snapshot_retries,
                         self.STALE_SNAPSHOT_RETRY_LIMIT,
                     )
-                    time.sleep(0.75)
+                    time.sleep(delay)
                     continue
                 break
             if partial_response_retries < 2:
@@ -137,6 +184,10 @@ class RankingService:
                     self._stocks.upsert(code, name, market)
         return tuple(stocks)
 
+    @property
+    def last_response_from_storage(self) -> bool:
+        return bool(getattr(self, "_last_response_from_storage", False))
+
     def _is_stale_snapshot(self, snapshot_at: datetime | None) -> bool:
         """각 순위 기준 시각보다 이전 스냅샷이면 한 번만 보정 조회한다."""
         if snapshot_at is None:
@@ -156,6 +207,35 @@ class RankingService:
         else:
             return False
         return snapshot_at < expected
+
+    @classmethod
+    def _is_partial_stored_snapshot(cls, records: object) -> bool:
+        """20행 안의 빈 코드·이름을 NAS 갱신 중 부분 자료로 판정한다."""
+        return (
+            isinstance(records, list)
+            and len(records) >= cls.EXPECTED_STOCKS
+            and cls._valid_stored_record_count(records) < cls.EXPECTED_STOCKS
+        )
+
+    @classmethod
+    def _valid_stored_record_count(cls, records: object) -> int:
+        if not isinstance(records, list):
+            return 0
+        return sum(
+            isinstance(record, dict)
+            and bool(str(record.get("stk_cd", "")).strip())
+            and bool(str(record.get("stk_nm", "")).strip())
+            for record in records[: cls.EXPECTED_STOCKS]
+        )
+
+    @classmethod
+    def _stale_snapshot_retry_delay(cls, retry_index: int) -> float:
+        index = max(0, retry_index)
+        if index < 2:
+            return 0.25
+        if index < 4:
+            return 0.5
+        return cls.STALE_SNAPSHOT_RETRY_MAX_SECONDS
 
     @staticmethod
     def _snapshot_at(records: object) -> datetime | None:
@@ -203,7 +283,12 @@ class RankingService:
 
     def refresh_new_highs(self) -> None:
         """사용자가 요청할 때만 신고가 목록을 다시 조회한다."""
-        self._new_high_cache = {period: self._load_new_high_codes(period) for period in self.NEW_HIGH_PERIODS}
+        stored_loader = getattr(self._client, "load_stored_new_highs", None)
+        stored = stored_loader(self.NEW_HIGH_PERIODS) if callable(stored_loader) else None
+        self._new_high_cache = (
+            stored if isinstance(stored, dict)
+            else {period: self._load_new_high_codes(period) for period in self.NEW_HIGH_PERIODS}
+        )
         self._new_high_cached_at = time.monotonic()
         if self._stocks is not None:
             updater = getattr(self._stocks, "update_new_highs", None)

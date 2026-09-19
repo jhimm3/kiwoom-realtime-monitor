@@ -9,10 +9,13 @@ from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
 from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import StoredAINewsAnalysis
 from kiwoom_monitor.presentation.news_view_model import (
+    StoredNewsEvidence,
     ai_detail_html,
     build_display_row,
     effective_judgment,
     related_articles_html,
+    stored_news_core_sentences_html,
+    stored_news_evidence_html,
 )
 
 
@@ -57,7 +60,80 @@ class NewsViewModelTests(unittest.TestCase):
         self.assertNotIn("<script>", related)
         self.assertIn("&lt;script&gt;", related)
         self.assertIn("관련 기사 2건", related)
-        self.assertIn("아직 분석하지 않음", detail)
+        self.assertEqual("", detail)
+
+    def test_nas_evidence_separates_rule_scores_from_ai_and_escapes_body(self) -> None:
+        evidence = StoredNewsEvidence(
+            identity="article-1", article_revision_id="article-r1", body_revision_id="body-r1",
+            body_status="fulltext", body_text="본문 <script>alert(1)</script>",
+            event={
+                "certainty": "CONFIRMED", "novelty": "NEW", "amount_won": 50_000_000_000,
+                "counterparty": "고객사<1>", "scope": "TARGET_COMPANY", "role": "FACT",
+                "importance_score": 80, "confidence_score": 0, "novelty_score": 80,
+                "ai_required": True,
+                "result": {
+                    "ai_reason": ["conditional_amount"],
+                    "evidence_spans": [{"field": "body", "text": "<계약>", "fact": "confirmed"}],
+                },
+            },
+        )
+
+        rendered = stored_news_evidence_html(evidence)
+
+        self.assertIn("원문 수집 완료", rendered)
+        self.assertIn("계약 확정", rendered)
+        self.assertIn("50,000,000,000원", rendered)
+        self.assertIn("AI 분석 점수나 AI 신뢰도가 아님", rendered)
+        self.assertIn("확신도 0", rendered)
+        self.assertIn("조건부 금액", rendered)
+        self.assertNotIn("<script>", rendered)
+        self.assertIn("&lt;script&gt;", rendered)
+        self.assertIn("&lt;계약&gt;", rendered)
+        self.assertNotIn("AI 없이 뽑은 핵심 문장", rendered)
+        self.assertIn("AI 없이 뽑은 핵심 문장", stored_news_core_sentences_html(evidence))
+
+    def test_non_contract_evidence_does_not_show_empty_contract_rule(self) -> None:
+        rendered = stored_news_evidence_html(StoredNewsEvidence(
+            identity="a", article_revision_id="ar", body_revision_id="br",
+            body_status="fulltext", body_text="테스트기업이 분기 실적을 발표했습니다.",
+        ))
+
+        self.assertNotIn("공급계약 규칙", rendered)
+        self.assertNotIn("NAS 저장 근거", rendered)
+        self.assertIn("기사 원문", rendered)
+
+    def test_nas_evidence_distinguishes_summary_failed_pending_and_historical_version(self) -> None:
+        summary = stored_news_evidence_html(StoredNewsEvidence(
+            identity="a", article_revision_id="ar", body_revision_id="br",
+            body_status="summary_only", body_text="검색 요약", historical_revision=True,
+        ))
+        failed = stored_news_evidence_html(StoredNewsEvidence(
+            identity="a", article_revision_id="ar", body_revision_id="br",
+            body_status="failed", body_error="수집 <실패>",
+        ))
+        pending = stored_news_evidence_html(StoredNewsEvidence(
+            identity="a", article_revision_id="ar", notice="본문이 아직 처리 중입니다.",
+        ))
+
+        self.assertIn("검색 요약만 저장", summary)
+        self.assertIn("저장 당시 판본", summary)
+        self.assertIn("본문 수집 실패", failed)
+        self.assertIn("수집 &lt;실패&gt;", failed)
+        self.assertIn("본문 아직 처리 중", pending)
+
+    def test_nas_evidence_formats_body_into_readable_paragraphs_without_trusting_html(self) -> None:
+        body = (
+            "첫 번째 문장입니다. 두 번째 문장입니다. 세 번째 문장입니다. "
+            "네 번째 문장에는 <태그>가 있습니다. 다섯 번째 문장입니다."
+        )
+        rendered = stored_news_evidence_html(StoredNewsEvidence(
+            identity="a", article_revision_id="ar", body_revision_id="br",
+            body_status="fulltext", body_text=body,
+        ))
+
+        self.assertGreaterEqual(rendered.count("line-height:1.75"), 2)
+        self.assertIn("&lt;태그&gt;", rendered)
+        self.assertNotIn("<태그>", rendered)
 
 
 if __name__ == "__main__":

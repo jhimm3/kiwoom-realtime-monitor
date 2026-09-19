@@ -1,13 +1,32 @@
 from __future__ import annotations
 
 import unittest
+import uuid
 from datetime import datetime
 
 from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.application.trade_journal_summary import group_trade_episodes, summarize_trade_fills, trade_fill_key
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 
 
 class TradeJournalSummaryTests(unittest.TestCase):
+    def test_fifo_and_grouping_never_mix_accounts(self) -> None:
+        at = datetime(2026, 9, 13, 9)
+        real = AccountScope("kiwoom", AccountEnvironment.REAL, str(uuid.uuid4()))
+        mock = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
+        fills = (
+            TradeFill("1", "005930", "삼성전자", "매수", at, 1, 100, origin_scope=real),
+            TradeFill("1", "005930", "삼성전자", "매도", at.replace(minute=1), 1, 110, origin_scope=mock),
+        )
+
+        summaries = summarize_trade_fills(fills)
+        episodes = group_trade_episodes(fills)
+
+        self.assertEqual(2, len(summaries))
+        self.assertEqual({real, mock}, {value.account_scope for value in summaries})
+        self.assertEqual(2, len(episodes))
+        self.assertNotEqual(trade_fill_key(fills[0]), trade_fill_key(fills[1]))
+
     def test_fifo_realized_profit_and_open_quantity(self) -> None:
         fills = (
             TradeFill("1", "005930", "삼성전자", "매수", datetime(2026, 8, 28, 9, 1), 10, 100),

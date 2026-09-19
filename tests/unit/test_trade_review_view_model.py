@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import date, datetime, timedelta
 
+from kiwoom_monitor.application.journal_enrichment import journal_research_link
 from kiwoom_monitor.application.personal_trade_rules import StructuredTradeRule
 from kiwoom_monitor.application.strategy_pack import StrategyPackManifest, default_strategy_pack
 from kiwoom_monitor.application.trade_history_service import TradeFill
@@ -98,6 +99,10 @@ class TradeReviewViewModelTests(unittest.TestCase):
             analyses=(analysis,), entry_snapshots=(), linked_news=(),
             active_pack=default_strategy_pack(), packs=(), structured_rules=(rule,),
             personal_rule_count=1, draft_rule_counts={}, total_return_rate=1.0,
+            research_links=(
+                journal_research_link("execution-1", run_id="run-1", snapshot_id="snapshot-1", evidence_timing="at_execution"),
+                journal_research_link("execution-1", run_id="run-2", snapshot_id="snapshot-2", evidence_timing="unverified"),
+            ),
         )
 
         self.assertIn("예상 매매유형: 돌파", model.setup_summary_text)
@@ -105,6 +110,7 @@ class TradeReviewViewModelTests(unittest.TestCase):
         self.assertEqual("자동 판정 사용", model.cycle_rows[0].override_value)
         self.assertEqual("세부 돌파", model.cycle_rows[0].subtype)
         self.assertIn("개인원칙 강의구조 연결 · 1강 1문단", model.data_status_text)
+        self.assertIn("연구 근거 연결 2건 · 당시 확인 1 · 사후 확인 0 · 가용성 미확인 1", model.data_status_text)
         self.assertIn("하루 종합 · 자동 확인 가능한 설정 기준 충족", model.analysis_text)
         self.assertIn("[1차 · 돌파] 전략팩: 미모사 기본 전략팩", model.analysis_text)
 

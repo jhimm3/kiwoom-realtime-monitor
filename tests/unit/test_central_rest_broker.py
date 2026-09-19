@@ -6,7 +6,10 @@ import time
 import unittest
 from typing import Any
 
-from kiwoom_monitor.central_server.rest_broker import CentralRestBroker, BrokerResult, MAX_MEMORY_CACHE_ENTRIES
+from kiwoom_monitor.central_server.rest_broker import (
+    CentralRestBroker, BrokerResult, MAX_MEMORY_CACHE_ENTRIES, MOCK_ACCOUNT_ENDPOINTS,
+    ranking_reservation_delay,
+)
 
 
 class FakeClient:
@@ -24,6 +27,11 @@ class FakeClient:
 
 
 class CentralRestBrokerTests(unittest.TestCase):
+    def test_low_priority_work_reserves_the_upcoming_ranking_boundary(self) -> None:
+        self.assertAlmostEqual(3.351, ranking_reservation_delay(26.999), places=3)
+        self.assertEqual(0.0, ranking_reservation_delay(30.0))
+        self.assertEqual(0.0, ranking_reservation_delay(38.0))
+
     def test_ranking_request_runs_before_queued_historical_backfill(self) -> None:
         """A queued screen ranking must overtake lower-priority history work."""
         class BlockingClient(FakeClient):
@@ -132,6 +140,41 @@ class CentralRestBrokerTests(unittest.TestCase):
             await broker.close()
             self.assertEqual("ka10080", handled[0][0])
             self.assertEqual("005930", handled[0][1]["stk_cd"])
+        asyncio.run(scenario())
+
+    def test_mock_account_broker_has_separate_allowlist_and_namespace(self) -> None:
+        async def scenario() -> None:
+            client = FakeClient()
+            broker = CentralRestBroker(
+                client, allowed_endpoints=MOCK_ACCOUNT_ENDPOINTS,
+                namespace="mock:account-hash",
+            )
+            await broker.request("ka10075", "/api/dostk/acnt", {"all_stk_tp": "0"})
+            await broker.request("kt00001", "/api/dostk/acnt", {"qry_tp": "3"})
+            with self.assertRaisesRegex(ValueError, "허용하지 않는"):
+                await broker.request("ka00198", "/api/dostk/stkinfo", {})
+            with self.assertRaisesRegex(ValueError, "허용하지 않는"):
+                await broker.request("kt10000", "/api/dostk/ordr", {})
+            await broker.close()
+            self.assertEqual(["ka10075", "kt00001"], [call[0] for call in client.calls])
+        asyncio.run(scenario())
+
+    def test_storage_failure_marks_recording_gap_without_failing_query(self) -> None:
+        async def scenario() -> None:
+            def fail_storage(_api_id, _body, _payload):
+                raise RuntimeError("database unavailable")
+
+            broker = CentralRestBroker(FakeClient(), response_handler=fail_storage)
+            with self.assertLogs(
+                "kiwoom_monitor.central_server.rest_broker", level="ERROR",
+            ) as captured:
+                result = await broker.request(
+                    "ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"},
+                )
+            await broker.close()
+            self.assertIsInstance(result.payload, dict)
+            self.assertTrue(any("recording_gap" in line for line in captured.output))
+
         asyncio.run(scenario())
 
 

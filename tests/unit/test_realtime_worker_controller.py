@@ -14,6 +14,7 @@ class FakeRealtimeWorker(QObject):
     order_executed = Signal(object)
     market_state_received = Signal(object)
     program_trade_received = Signal(object)
+    stock_reference_received = Signal(object)
     diagnostics_changed = Signal(object)
     status_changed = Signal(str)
     connection_failed = Signal(str)
@@ -48,20 +49,24 @@ class RealtimeWorkerControllerTests(unittest.TestCase):
         controller = RealtimeWorkerController(worker_factory=lambda _codes: worker)  # type: ignore[arg-type]
         trades: list[object] = []
         followups: list[object] = []
+        references: list[object] = []
         controller.trade_received.connect(trades.append)
         controller.subscription_ready.connect(followups.append)
+        controller.stock_reference_received.connect(references.append)
 
         started = controller.start(
             ("005930", "000660"), ("005930",), followup_codes=("005930",),
         )
         worker.trade_received.emit("tick")
         worker.subscription_ready.emit()
+        worker.stock_reference_received.emit("reference")
 
         self.assertTrue(started)
         self.assertTrue(controller.is_running)
         self.assertEqual([(("005930", "000660"), ("005930",))], worker.updates)
         self.assertEqual(["tick"], trades)
         self.assertEqual([("005930",)], followups)
+        self.assertEqual(["reference"], references)
 
     def test_update_and_stop_are_owned_by_controller(self) -> None:
         worker = FakeRealtimeWorker()

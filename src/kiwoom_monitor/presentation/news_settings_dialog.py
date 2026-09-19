@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QUrl
+from PySide6.QtCore import QSettings, QUrl, Slot
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -38,6 +38,7 @@ from kiwoom_monitor.infrastructure.central_operational_settings import (
     apply_to_local_news,
 )
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository
+from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
 
 class NaverNewsSettingsDialog(QDialog):
     def __init__(self, config: LocalNaverNewsConfig, parent: QWidget | None = None,
@@ -47,6 +48,10 @@ class NaverNewsSettingsDialog(QDialog):
         self._config = config
         self._operational_client = operational_client
         self._operational_error = ""
+        self._operations_worker: SettingsRequestWorker | None = None
+        self._operations_baseline: dict[str, object] = {}
+        self._initial_load_started = False
+        self._closed = False
         self._window_settings = QSettings("KiwoomMonitor", "NewsSettingsDialog")
         self._section = section if section in {"news", "connections", "all"} else "news"
         self.setWindowTitle("뉴스 API 연결" if self._section == "connections" else "뉴스 설정")
@@ -60,14 +65,7 @@ class NaverNewsSettingsDialog(QDialog):
         ai = config.load_ai()
         official = config.load_official()
         shortcuts = config.load_shortcuts()
-        if operational_client is not None:
-            try:
-                operations = operational_client.load()
-                apply_to_local_news(config, operations)
-                ai = config.load_ai()
-                official = config.load_official()
-            except (RuntimeError, ValueError, OSError) as error:
-                self._operational_error = str(error)
+        operations: dict[str, object] = {}
         self._client_id = QLineEdit(credentials.client_id)
         self._client_secret = QLineEdit(credentials.client_secret)
         self._client_secret.setEchoMode(QLineEdit.EchoMode.Password)
@@ -163,6 +161,8 @@ class NaverNewsSettingsDialog(QDialog):
         self._ai_usage.setWordWrap(True)
         self._ai_usage.setStyleSheet("color:#52606d;")
         ai_box = QGroupBox("AI 원문 분석")
+        self._ai_box = ai_box
+        ai_box.setParent(self)
         ai_layout = QFormLayout(ai_box)
         if self._section != "connections":
             ai_layout.addRow(ai_guide)
@@ -185,6 +185,11 @@ class NaverNewsSettingsDialog(QDialog):
             status.setWordWrap(True)
             status.setStyleSheet("color:#C00000;" if self._operational_error else "color:#008000;")
             ai_layout.addRow("NAS", status)
+            self._operations_status = status
+            reload_button = QPushButton("NAS 운영 설정 다시 불러오기")
+            self._operations_reload_button = reload_button
+            reload_button.clicked.connect(self._load_operational_settings)
+            ai_layout.addRow(reload_button)
 
         self._ad_filter_enabled = QCheckBox("뉴스 광고 필터링 사용")
         self._ad_filter_enabled.setChecked(news_filter.enabled)
@@ -214,6 +219,25 @@ class NaverNewsSettingsDialog(QDialog):
         provider_layout.addWidget(provider_guide)
         provider_layout.addWidget(self._excluded_providers)
 
+        raw_processing_providers = operations.get("news_processing_excluded_providers", [])
+        processing_providers = raw_processing_providers if isinstance(raw_processing_providers, list) else []
+        self._processing_excluded_providers = QPlainTextEdit()
+        self._processing_excluded_providers.setPlainText(", ".join(
+            str(value) for value in processing_providers if str(value).strip()
+        ))
+        self._processing_excluded_providers.setPlaceholderText("예: thebell.co.kr, 특정언론사")
+        self._processing_excluded_providers.setMaximumHeight(75)
+        processing_guide = QLabel(
+            "NAS에는 기사 제목·링크를 남기고, 이 언론사의 새 원문 추출·규칙 분류·자동 AI 처리만 제외합니다. "
+            "이미 처리됐거나 대기 중인 작업은 유지됩니다."
+        )
+        processing_guide.setWordWrap(True)
+        processing_box = QGroupBox("NAS 뉴스 처리 제외")
+        processing_box.setParent(self)
+        processing_layout = QVBoxLayout(processing_box)
+        processing_layout.addWidget(processing_guide)
+        processing_layout.addWidget(self._processing_excluded_providers)
+
         column_box = QGroupBox("뉴스표 표시 열")
         column_layout = QHBoxLayout(column_box)
         self._column_checks: dict[str, QCheckBox] = {}
@@ -242,10 +266,12 @@ class NaverNewsSettingsDialog(QDialog):
             color_layout.addRow(label, button)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        self._buttons = buttons
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
 
         content = QWidget()
+        self._content = content
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(4, 4, 4, 4)
         if self._section in {"connections", "all"}:
@@ -262,7 +288,11 @@ class NaverNewsSettingsDialog(QDialog):
                 ai_options_layout = QFormLayout(ai_options_box)
                 ai_options_layout.addRow(ai_guide)
                 ai_options_layout.addRow(self._ai_usage)
-                ai_options_layout.addRow("현재 공급자", QLabel(self._ai_provider.currentText()))
+                self._current_provider_label = QLabel(self._ai_provider.currentText())
+                ai_options_layout.addRow("현재 공급자", self._current_provider_label)
+                if operational_client is not None:
+                    ai_options_layout.addRow("NAS", self._operations_status)
+                    ai_options_layout.addRow(self._operations_reload_button)
                 ai_options_layout.addRow("모델", self._ai_model)
                 ai_options_layout.addRow("하루 최대 API 요청 건수", self._ai_limit)
                 ai_options_layout.addRow("종목당 최신 자동 분석 건수", self._ai_auto_recent_limit)
@@ -273,9 +303,15 @@ class NaverNewsSettingsDialog(QDialog):
             content_layout.addWidget(shortcut_box)
             content_layout.addWidget(filter_box)
             content_layout.addWidget(provider_box)
+            if operational_client is not None:
+                content_layout.addWidget(processing_box)
             content_layout.addWidget(column_box)
             content_layout.addWidget(color_box)
         content_layout.addStretch()
+        if self._section == "news":
+            ai_box.hide()
+        if self._section == "connections" or operational_client is None:
+            processing_box.hide()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -328,7 +364,77 @@ class NaverNewsSettingsDialog(QDialog):
             index = self._ai_model.count() - 1
         self._ai_model.setCurrentIndex(max(0, index))
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._closed = False
+        if self._operational_client is not None and not self._initial_load_started:
+            self._initial_load_started = True
+            self._load_operational_settings()
+
+    def _set_operational_controls_enabled(self, enabled: bool) -> None:
+        for widget in (self._ai_provider, self._ai_model, self._ai_limit,
+                       self._dart_enabled, self._processing_excluded_providers):
+            widget.setEnabled(enabled)
+        self._buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(enabled)
+
+    def _load_operational_settings(self) -> None:
+        if self._operations_worker is not None or self._operational_client is None:
+            return
+        self._set_operational_controls_enabled(False)
+        self._operations_status.setText("NAS 운영 설정을 불러오는 중…")
+        worker = SettingsRequestWorker(self._operational_client.load)
+        self._operations_worker = worker
+        worker.succeeded.connect(self._operational_settings_loaded)
+        worker.failed.connect(self._operational_settings_failed)
+        worker.start()
+
+    @Slot(object)
+    def _operational_settings_loaded(self, values: dict[str, object]) -> None:
+        self._operations_worker = None
+        if self._closed:
+            return
+        self._operational_error = ""
+        self._operations_baseline = dict(values)
+        index = self._ai_provider.findData(str(values.get("ai_provider", "none")))
+        self._ai_provider.setCurrentIndex(max(0, index))
+        if hasattr(self, "_current_provider_label"):
+            self._current_provider_label.setText(self._ai_provider.currentText())
+        self._populate_ai_models(str(values.get("ai_model", "")))
+        self._ai_limit.setValue(int(values.get("ai_daily_limit", 0)))
+        self._dart_enabled.setChecked(bool(values.get("dart_enabled", False)))
+        self._processing_excluded_providers.setPlainText(
+            ", ".join(str(value) for value in values.get("news_processing_excluded_providers", []))
+        )
+        self._set_operational_controls_enabled(True)
+        self._operations_status.setText("NAS 운영 설정과 연동됨")
+        try:
+            apply_to_local_news(self._config, values)
+        except (ValueError, OSError):
+            self._operations_status.setText("NAS 설정 수신 완료 · PC 설정 반영 실패")
+
+    @Slot(str)
+    def _operational_settings_failed(self, message: str) -> None:
+        self._operations_worker = None
+        if self._closed:
+            return
+        self._operational_error = message
+        self._content.setEnabled(True)
+        self._operations_status.setText(f"NAS 설정 실패 · 다시 불러오세요. {message}")
+        self._set_operational_controls_enabled(True)
+        # Loaded shared values cannot be edited/saved after a conflict.
+        for widget in (self._ai_provider, self._ai_model, self._ai_limit,
+                       self._dart_enabled, self._processing_excluded_providers):
+            widget.setEnabled(False)
+
+    @Slot(object)
+    def _operational_settings_saved(self, _values: object) -> None:
+        self._operations_worker = None
+        if not self._closed:
+            self.accept()
+
     def _save(self) -> None:
+        if self._operations_worker is not None:
+            return
         credentials = self._config.load()
         news_filter = self._config.load_filter()
         ai_settings = self._config.load_ai()
@@ -399,23 +505,44 @@ class NaverNewsSettingsDialog(QDialog):
         except (OSError, ValueError) as error:
             QMessageBox.warning(self, "뉴스 설정 저장", f"로컬 뉴스 설정을 저장하지 못했습니다.\n{error}")
             return
-        if self._operational_client is not None:
-            try:
-                values = self._operational_client.update({
-                    "ai_provider": ai_settings.provider,
-                    "ai_model": ai_settings.model,
-                    "ai_daily_limit": ai_settings.daily_limit,
-                    "dart_enabled": official_settings.dart_enabled,
-                })
-                apply_to_local_news(self._config, values)
-            except (RuntimeError, ValueError, OSError) as error:
-                QMessageBox.warning(
-                    self, "NAS 뉴스 설정 동기화",
-                    f"로컬에는 저장했지만 NAS 운영 설정에는 반영하지 못했습니다.\n{error}",
-                )
+        if self._operational_client is not None and not self._operational_error:
+            changes: dict[str, object] = {
+                "ai_provider": ai_settings.provider,
+                "ai_model": ai_settings.model,
+                "ai_daily_limit": ai_settings.daily_limit,
+                "dart_enabled": official_settings.dart_enabled,
+            }
+            if self._section in {"news", "all"}:
+                changes["news_processing_excluded_providers"] = list(dict.fromkeys(
+                    value.strip() for value in
+                    self._processing_excluded_providers.toPlainText().replace("\n", ",").split(",")
+                    if value.strip()
+                ))
+            changes = {name: value for name, value in changes.items()
+                       if value != self._operations_baseline.get(name)}
+            client, config = self._operational_client, self._config
+
+            def save() -> object:
+                values = client.update(changes)
+                apply_to_local_news(config, values)
+                return values
+
+            self._set_operational_controls_enabled(False)
+            self._content.setEnabled(False)
+            self._operations_status.setText("NAS 운영 설정을 저장하는 중…")
+            worker = SettingsRequestWorker(save)
+            self._operations_worker = worker
+            worker.succeeded.connect(self._operational_settings_saved)
+            worker.failed.connect(self._operational_settings_failed)
+            worker.start()
+            return
+        if self._operational_client is not None and self._operational_error:
+            QMessageBox.warning(self, "NAS 뉴스 설정",
+                                "PC 설정만 저장했습니다. NAS 설정은 다시 불러온 뒤 저장하세요.")
         self.accept()
 
     def done(self, result: int) -> None:
         """저장·취소·X 버튼 어떤 방식으로 닫더라도 마지막 크기를 기억한다."""
         self._window_settings.setValue("geometry", self.saveGeometry())
+        self._closed = True
         super().done(result)

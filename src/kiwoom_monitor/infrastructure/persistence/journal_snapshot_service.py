@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Protocol
 
+from kiwoom_monitor.domain.order_contract import AccountScope
 from kiwoom_monitor.domain.snapshot_provenance import mark_news_backfilled
 from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import TradeEntrySnapshot
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
@@ -15,6 +16,7 @@ from kiwoom_monitor.infrastructure.persistence.stock_news_repository import Stoc
 class JournalSnapshotStore(Protocol):
     def load_entry_snapshots(
         self, code: str, start: datetime, end: datetime,
+        account_scope: AccountScope | None = None,
     ) -> tuple[TradeEntrySnapshot, ...]: ...
 
     def save_snapshot_news_backfill(
@@ -78,14 +80,19 @@ def load_episode_entry_snapshots(
     ended_at: datetime,
     *,
     news_loader: NewsAtExecution = news_at_execution,
+    account_scope: AccountScope | None = None,
 ) -> tuple[TradeEntrySnapshot, ...]:
     """회차 주변 스냅샷을 읽고 뉴스가 비어 있을 때만 장후 자료를 연결한다."""
     try:
-        snapshots = repository.load_entry_snapshots(
-            stock_code,
-            started_at - timedelta(minutes=1),
-            ended_at + timedelta(minutes=1),
-        )
+        if account_scope is None:
+            snapshots = repository.load_entry_snapshots(
+                stock_code, started_at - timedelta(minutes=1), ended_at + timedelta(minutes=1),
+            )
+        else:
+            snapshots = repository.load_entry_snapshots(
+                stock_code, started_at - timedelta(minutes=1), ended_at + timedelta(minutes=1),
+                account_scope,
+            )
     except sqlite3.Error:
         return ()
     if news_repository is None:

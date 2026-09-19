@@ -1,16 +1,821 @@
 # Changelog
 
+## 2026-09-16 실시간 순위 우선 처리와 종목 자료 최신화
+
+- 중앙 Kiwoom 조회 큐가 30초 순위 경계 직전 5초 동안 새 저우선순위 TR을 시작하지 않도록 해, 이미 실행 중인 일봉·분봉·기본정보 조회 때문에 순위 요청이 수초 밀리는 구간을 줄였다.
+- TOP20 또는 계좌 추적 종목이 처음 등장하면 NAS가 신고가 계산용 KRX/NXT 일봉을 먼저 확인하고, 비어 있을 때만 `ka10081`을 요청해 이후 앱의 30초 신고가 계산에서 저장 자료를 재사용한다.
+- `ka10001` 기본정보는 문서 존재만으로 재사용하지 않고 KST 당일 관측 자료만 유효하게 본다. 오래된 시가총액·유통비율 문서는 NAS가 당일 한 번 새로 받아 저장한다.
+- 뉴스 수집·정제·분류 경로는 이번 누적 빌드에서 추가로 변경하지 않았다.
+
+## 2026-09-16 O2-Md — 지속 안전 gate와 결정적 O1 intent
+
+- 각 action Decision 직전에 binding·lease·정규장·freshness·계좌/손익/데이터/장애 한도와 진행 중 O1 주문을 다시 검사한다.
+- 계좌별 FIFO+broker 비용이 완결된 당일 순손익 출처만 허용하고 unknown·추정 출처는 차단한다.
+- 승인 gate를 먼저 저장하고 실행 잠금 안에서 한 LIMIT intent만 제출한 뒤 신규 주문을 다시 닫는다. 같은 Decision은 기존 O1 intent를 사용한다.
+- 긴급 중지는 신규 주문만 즉시 닫고 기존 주문·포지션은 broker 대조와 명시 정책에 남긴다.
+
+## 2026-09-16 O2-Mc — broker 복구와 중지 gate
+
+- 자동 runtime lease를 다시 확인한 뒤 기존 mock account 전체 복구를 주문·포지션·예약자금·손익·데이터/장애 한도와 대조한다.
+- 미완성/오래된 복구, 알 수 없는 당일 손익·데이터 공백, 기존 계좌 상태와 한도 초과를 `BLOCKED` 사유로 불변 저장한다.
+- 통과 상태도 `CLEARED_ORDERS_DISABLED`로 기록하며 신규 주문은 계속 닫는다.
+
+## 2026-09-16 O2-Mb — 후보 입장과 모의계좌 단일 lease
+
+- READY 명세의 현재 mock binding·최신 SHADOW revision·CR3 final batch/run/result 완료 근거를 입장 시 다시 대조한다.
+- spec당 하나의 불변 admission과 결정적 자동 run ID를 만들고 기존 O1 계좌 단일 lease를 재사용한다.
+- 자동 runtime은 신규 주문이 닫힌 상태로 시작한다. 수동/다른 자동 run이 lease를 보유하면 receipt와 주문을 만들지 않는다.
+
+## 2026-09-16 O2-Ma — 자동 모의운용 동결 명세
+
+- 최종 후보/result hash와 final batch/run, 검증된 mock binding, forward profile과 동시성·자금·손실·장애·교체·중지·복구 한도를 내용 주소형 명세로 고정한다.
+- 미정값과 profile/scope/SHADOW 불일치, 현재 O1 범위를 넘는 다중 전략·포지션 및 비정규장 session은 `BLOCKED`로 판정한다.
+- 현재 최신 계좌 binding과 일치하는 명세만 비공개 중앙 문서에 불변 저장한다. runtime과 주문 transport는 활성화하지 않는다.
+
+## 2026-09-16 A5e3 — 새 전략 버전과 CR3 개발 재검증 queue
+
+- 채택된 개선안을 부모 전략을 덮지 않는 `feedback_strategy_version/v1` 불변 버전으로 만든다.
+- 기존 캠페인의 명시 template를 새 설정의 baseline/no-trade 개발 재검증 job으로 바꾼다.
+- final holdout template 사용과 proposal 중복 버전을 차단한다.
+- queue 전에 버전당 하나의 불변 request를 저장하고, 중앙 문서와 연구 SQLite 사이 중단은 결정적 version/request/experiment/job/receipt ID로 재시도한다.
+- receipt 저장 실패 뒤 재시도해도 기존 연구 job을 재사용하며 주문은 활성화하지 않는다.
+
+## 2026-09-16 A5e2 — 등록된 한 파라미터 개선안 revision
+
+- 적격 기계 복기와 등록 Family·factor·명시 허용값으로 검토 대기 개선안을 생성한다.
+- 각 제안은 정규화된 기준 전략과 정확히 한 정수 파라미터만 다르다.
+- seed는 후보 순서에만 영향을 주고 같은 review·정책·변경의 제안 ID는 유지한다.
+- 저장 전 원본 review의 계좌·전략·evidence·평가 방향을 대조한다.
+- 제안 저장만으로 전략 채택, 연구 대기열 등록이나 주문은 실행하지 않는다.
+
+## 2026-09-16 A5e1 — 사용자 복기와 분리된 기계 복기 revision
+
+- 적격 FeedbackEvidence와 명시 최소 거래일·거래 수로 결정적인 기계 복기를 만든다.
+- 실제 비용 포함 순손익, 승/패/보합 수, 승률과 비용 비율을 계산하고 표본 부족을 별도 상태로 남긴다.
+- 불완전·편향·사후 노출 피드백은 개선 제안 입력으로 승격하지 않는다.
+- 저장된 원본 evidence로 다시 계산한 동일 revision만 비공개 중앙 컬렉션에 불변 저장한다.
+- 사용자 메모·수동 유형·전략 원본과 주문 경로는 변경하지 않는다.
+
+## 2026-09-16 A5d — 비용 포함 불변 FeedbackEvidence
+
+- A5c 대조 체결과 kt00015 실제 비용을 회차별로 연결해 내용 주소형 피드백 문서를 만든다.
+- 부분·충돌·요약 전용 체결, 비용 누락, 열린 포지션은 확정 순손익을 내보내지 않는다.
+- 계좌·기간·전략·run/decision 계보, 사전/사후 선택, PIT 근거와 최종결과 노출 상태를 동결한다.
+- 관련 없는 연구 링크로 PIT 안전을 주장할 수 없고, 적격 문서만 기존 forward 평가 입력으로 변환한다.
+- `execution_feedback_evidence`를 기존 중앙 문서 저장소에 불변 저장하며 일지/사용자 복기는 변경하지 않는다.
+
+## 2026-09-16 A5c — kt00007/중앙 상세 체결 대조
+
+- canonical 계좌·KST 거래일·주문번호·종목·매수/매도를 기준으로 두 체결 출처를 대조한다.
+- 정확 일치, 상세 전용, 요약 전용, 부분 수량, 금액/체결 ID 충돌을 구분한다.
+- 상세가 있으면 상세 한 벌만 선택해 요약 수량과 이중 합산하지 않는다.
+- run 변경 및 canonical alias 뒤의 같은 broker 체결 ID를 중복 체결로 세지 않는다.
+- 기존 화면 체결, 사용자 복기, 수동 묶음과 DB 스키마는 변경하지 않는다.
+
+## 2026-09-16 A5b — 상세 체결 projection과 원자 cursor
+
+- 매매일지 DB v9에 중앙 실행 event projection과 계좌별 cursor 표를 추가했다.
+- 상세 FILL은 계좌·KST 거래일·broker 주문/체결 ID로 멱등화하고 run ID는 계보로만 보존한다.
+- 누적 체결 event는 상세 누락수량만 표시하며 후착 상세 FILL을 실제 수량에 다시 더하지 않는다.
+- 행 충돌·cursor 공백에서는 페이지 전체를 롤백하고, 정확한 재조회는 0건 추가로 끝난다.
+
+## 2026-09-16 A5a — 계좌별 모의 실행 원장 증분 읽기
+
+- 검증된 mock binding 아래에서 여러 run의 intent/event를 중앙 수락 순서 커서로 조회한다.
+- NAS API와 PC 클라이언트가 계좌 문맥·binding revision·커서 역행을 거절한다.
+- 조회는 Kiwoom TR이나 주문을 만들지 않으며 일지 체결과 연구 성과는 아직 변경하지 않는다.
+
+## 2026-09-16 CR4c 백엔드 — 개발 결과 기반 자동 후속 가설
+
+- campaign 정책에 Family별 허용값, 고정 seed, 회차 생성 상한과 전체 가설 상한을 추가했다. 기존 정책 문서는 기본값으로 호환한다.
+- 완료 baseline 보고서의 TRAIN/VALIDATION만 `development_evidence_snapshot/v1`으로 고정하고 FINAL/OOS 및 원시 보고서는 생성 입력에서 제외했다.
+- 부모의 정확한 전략 설정에서 한 필드만 바꾼 READY 자식을 만들고, campaign 안의 같은 Family+전체 설정은 다시 등록하지 않는다.
+- 연구 DB v23에 부모+개발 근거+정책 revision별 생성/소진/차단 원장을 추가했다. 자식 등록과 원장 기록 사이 종료도 콘텐츠 ID로 멱등 복구하며, 일시정지 후 정책 개정은 새 revision에서 다시 확장한다.
+- worker 반복은 완료 부모 하나 확장 후 기존 CR4b Family 순환 예약을 수행한다. 자동 final과 주문/NAS/API는 변경하지 않았다.
+- 전략 연구 창에 `자동 가설 설정 / 현황`을 추가했다. 일시정지 상태에서 Family·한 파라미터·허용값·seed·상한을 저장하고 기준 가설을 bootstrap하며, 가설·개발 근거·revision별 확장 상태를 표시한다.
+- 최종 연구 회귀 626개와 마지막 UI 상한 직접 회귀 2개를 통과했다. 실제 24시간 운전과 NAS 전체 규모 성능 검증은 V1에 남겼다.
+
+## 2026-09-16 CR4b — 가설 campaign 예약과 두 Family 순환
+
+- 가설에 `campaign:<id>` 연구 scope를 고정해 다른 campaign의 개발 근거가 자동 실행에 섞이지 않게 했다.
+- 자동 가설 정책을 명시적으로 켠 campaign만 같은 scope의 READY 가설 묶음을 등록할 수 있다. 자동 final은 계속 금지한다.
+- 연구 DB v22에 AVAILABLE→ENQUEUED 단방향 가설 큐와 대응 job 바인딩을 추가했다.
+- 활성 campaign worker가 반복마다 최대 한 가설을 기존 제한 탐색 job으로 만들며, 두 Family가 남아 있으면 번갈아 예약한다.
+- 각 가설은 저장된 정확한 전략 설정의 baseline/no-trade만 실행한다. 재시작·재시도는 같은 가설을 새 독립 job으로 만들지 않는다.
+- 가설 없음·소진·기준 실험 부재를 별도 대기 사유로 표시한다. 자동 후속 가설 생성과 설정 화면은 후속이다.
+
+## 2026-09-16 CR4a — 등록 단일 파라미터 가설과 불변 계보
+
+- 명시한 등록 Family·Factor·정수 허용값만 받는 `research_hypothesis/v1` 생성 계약을 추가했다.
+- 기준 전략과 한 파라미터만 다른 후보를 기존 전략 config로 다시 검증하고, seed는 후보 순서에만 사용한다.
+- 가설 ID는 기준·부모·개발 근거·변경 내용의 canonical hash이므로 같은 조건 재생성이 독립 가설로 중복되지 않는다.
+- 연구 DB v21에 불변 가설 문서와 부모 edge를 추가했다. 부모 선행과 배치 전체 원자성을 검사하며 v20 기존 행을 보존한다.
+- 기존 baseline/no-trade trial, campaign 실행, final 원장과 NAS/API/계좌·주문은 변경하지 않았다. 자동 campaign 연결·두 Family 순환·UI는 후속이다.
+
+## 2026-09-16 CR3d3c — 최종 결과의 개발 사용 노출 기록
+
+- DB·locked batch·request ID·timezone-aware 시각·사용자 근거를 고정하는 `final_holdout_exposure_request/v1`과 `--expose-final` child를 추가했다.
+- child는 원장 window의 batch/spec을 다시 확인하고 RUNNING 후보가 없을 때만 기존 v20 API로 `EXPOSED_DEVELOPMENT`를 원자 기록한다.
+- 최종평가 화면에 개발 사용 근거 입력과 되돌릴 수 없는 기록 버튼을 추가했다. UI는 연구 DB를 열지 않는다.
+- 결과 DB/window/batch/request/state envelope이 일치할 때만 전환 완료를 표시하고 취소·오류에서는 기존 최종 결과 표를 유지한다.
+- 같은 final 창을 다시 미사용 검증으로 쓰지 못하며 다음 최종 평가에는 새 미사용 기간이 필요하다. DB migration/NAS/API/계좌·주문은 변경하지 않았다.
+
+## 2026-09-16 CR3d3b — 최종평가 실행·명시 복구 화면
+
+- 전략 연구 창에 `최종 평가` 별도 창을 추가해 요청 선택, child 실행·취소, 후보별 결과를 표시한다.
+- UI는 정규화한 불변 request snapshot과 UUID result/cancel 파일만 소유하며 연구 DB/frozen source를 열지 않는다.
+- native exit/status, batch/window, candidate 순서, 구현 hash, recovery ID, 전체 상태가 일치한 결과만 표에 반영하고 오류에서는 이전 표를 유지한다.
+- FAILED/CANCELLED 후보는 선택하고 복구 근거를 입력해 새 request ID/owner로만 복구한다. 자동 재시도하지 않으며 미시작 후보만 같은 snapshot으로 이어서 실행한다.
+- 창 닫기는 취소 파일을 쓰고 블로킹하지 않으며 앱 종료는 자신의 child/임시 파일만 정리한다. DB v20/NAS/API/계좌·주문은 변경하지 않았다.
+
+## 2026-09-16 CR3d3a — 최종평가 요청·CLI 프로세스 경계
+
+- locked batch·1~200개 fixed candidate·접근 nonce/시각·owner·선택 recovery를 고정하는 `independent_final_holdout_request/v1` JSON을 추가했다.
+- 4 MiB/정확한 필드/후보 scientific hash/timezone/recovery 대상을 source·DB 접근 전에 검증한다.
+- `research_process --evaluate-final`이 기존 준비·접근 원장·실행·명시 복구를 별도 프로세스에서 순서대로 호출한다.
+- result/cancel 파일이 요청·연구 DB·동결 dataset·run artifact를 덮어쓰지 못하게 막고 기존 원자 결과 쓰기를 재사용한다.
+- 성공/취소/자원 차단/파싱·준비 실패 exit 상태를 분리한다. 자동 retry·UI·NAS/API·계좌·주문은 변경하지 않았다.
+
+## 2026-09-16 CR3d2c — 실패·취소 최종 후보의 명시 복구
+
+- 연구 v20에 final execution generation과 REQUESTED/CLAIMED recovery 감사 원장을 추가했다.
+- 같은 코드·입력·정책·run ID를 다시 검증하고 기존 FAILED/CANCELLED 후보만 request ID·owner·reason으로 복구한다.
+- immutable output manifest가 있으면 불확실한 게시 상태로 보고 복구를 차단한다. 일치하는 부분 DB 행은 기존 불변 검증으로 재사용한다.
+- recovery claim은 run/execution RUNNING 전환, generation 증가, 요청 CLAIMED를 한 트랜잭션에서 처리한다.
+- 같은 요청은 멱등이지만 한 번 CLAIMED된 요청은 재실행권이 아니다. 추가 복구에는 새 감사 요청이 필요하다.
+- 자동 retry, RUNNING orphan 회수, CLI/UI/NAS/API/계좌·주문은 변경하지 않았다. read-only v17/v18/v19/v20을 유지한다.
+
+## 2026-09-16 CR3d2b — 최종 후보 소유권 실행
+
+- 연구 v19에 batch+candidate별 final execution 소유권 표를 추가하고 claim과 research run 생성을 원자화했다.
+- 준비된 고정 후보만 independent_final_holdout/v1로 실행한다. 후보마다 새 엔진·현금·상태를 사용한다.
+- 완료는 immutable output 게시 뒤 확정하며 DB/report/output을 대조한 cache만 재사용한다.
+- RUNNING은 BUSY, FAILED/CANCELLED는 terminal이다. 자동 재시도와 후보 간 비교·합산·재선택은 없다.
+- 실행 중인 final window의 개발 노출을 막는다. 기존 연구/개발 실행과 v17/v18/v19/v20 read-only 비교를 유지한다.
+- CLI/UI/NAS/API/계좌·주문은 변경하지 않았다.
+
+## 2026-09-16 CR3d2a — 최종 후보·동결 입력 검증과 원장 선행 준비
+
+- 고정 후보의 전략·실행/비용 근거·세션·실제 구현 hash와 batch 후보 집합/평가 정책을 대조한다.
+- full frozen source를 한 번 검증하고 최종 구간의 warmup/active/as-of context만 복사한다. 전체 원본 ID·통계는 projected identity에 섞지 않는다.
+- 동일 DB 트랜잭션에서 과거 실제 입력 범위와 평가/warmup 합집합을 검사한 뒤 접근을 저장하고 입력을 반환한다. 연속 실행의 평가 구간 사이/밖 자료와 불명확한 기록도 차단한다.
+- final 입력은 일반 실행/개발 재활용을 차단한다. DB v18/기존 metadata 원장 API/개발 출력은 유지한다.
+- 실제 final 엔진·claim은 CR3d2b, CLI는 CR3d3a에서 후속 연결했다. UI는 아직 후속이며 NAS/API/계좌·주문은 변경하지 않는다.
+
+## 2026-09-16 CR3d1 — 최종 평가 접근·노출 원장 기반
+
+- 동결 후보 hash/자료/평가 조건을 고정하는 final_holdout_batch/v1 계약과 연구 DB v18 접근/노출 원장을 추가했다.
+- 최초 접근의 후보 묶음을 원자 고정하고 같은 기간의 변경 후보·revision·세션 설정, 겹치는 기간의 우회 재사용을 막는다.
+- 결과를 개선에 사용한 창은 EXPOSED_DEVELOPMENT로 영구 기록한다. 동일 요청은 멱등이며 동일 batch의 기술적 새 요청은 이력을 남긴다.
+- 기존 DB 기록을 보존하고 읽기 전용 결과 비교는 v17/v18을 지원한다. 실제 평가 실행은 CR3d2, CLI는 CR3d3a에서 후속 연결했으며 화면은 아직 후속이다.
+
+## 2026-09-16 CR3c3 — 종목 그룹×시간 순차 검증 화면
+
+- 기존 여러 구간 순차 검증 창에서 그룹 v2 JSON 실행/취소·진행·같은 snapshot 이어 실행을 지원한다. 시간 v1도 유지한다.
+- 모든 구간/그룹 단계와 그룹별 요청·완료·미시작, 적격/양수, 구간 손익 중앙값·최악 구간 MDD를 표시한다.
+- 전체 실행 완료와 식별 결과의 표본 적격을 구별하며 그룹 간 손익을 합산하지 않는다. 계약/종료 오류에서는 이전 두 표를 유지한다.
+- 기존 별도 child/file 경계를 재사용한다. GUI에서 연구 DB나 동결 원본 자료를 읽지 않는다.
+- Windows에서 진행 파일을 읽는 순간 파일 교체가 실패해 검증 구간이 실패로 남던 문제를 재현하고, 해당 충돌에만 제한 재시도를 추가했다. 원자 교체/이전 결과 보존과 지속 오류 보고는 유지한다.
+
+## 2026-09-16 CR3c2 — 종목 그룹×시간 순차 검증 요청
+
+- independent_development_validation/v2가 공통 hash 정책의 2~20 bucket과 시간순 1~20 개발 fold를 묶는다. 총 200 step 제한.
+- 기존 source 검증/독립 실행/claim/cache·취소·예산 처리를 재사용하며 fold 먼저/bucket 다음 순서로 실행한다.
+- 모든 fold/bucket/key·미시작/실패 상태와 전체 batch 상태를 저장한다. 비교는 bucket별 확인된 run ID로 분리한다.
+- 기존 요청/결과 v1과 DB v17/NAS/API/계좌·주문은 유지한다. 화면 v2 실행은 아직 안내/거절하며 연결은 다음 CR3c3다.
+
+## 2026-09-16 CR3c1 — 고정 종목 분할과 거래 대상 제한
+
+- stock_hash_partition/v1은 버전/salt/종목코드 SHA256으로 안정된 2~20 bucket 배정을 제공한다.
+- development_partition/v3 명시 요청은 선택 bucket을 고정한다. 기존 v2 JSON/기본 경로를 유지한다.
+- 전체 as-of TOP20/peer 이력/테마를 유지하며 허용 종목만 시뮬레이션 엔진과 전략 평가에 보낸다.
+- v3 보고서의 종목별 체결 합/허용 종목을 검사한다. 다른 bucket 정책은 기존 동일 조건 집계에 섞지 않는다.
+- 정규화 의존성의 실행 hash 누락을 재현하고 ranking.py를 명시 profile hash에 포함했다. legacy 고정 hash는 유지한다.
+- DB v17/NAS/API/계좌·주문은 그대로다. 그룹×시간 순차 요청/화면 연결과 최종 접근 원장은 후속이다.
+
+## 2026-09-16 CR3b4 — 순차 검증 화면 실행
+
+- 연구 창에 여러 구간 순차 검증 실행/취소/진행 창을 연결했다. 낮은 우선순위 별도 프로세스와 기존 실행기를 재사용한다.
+- 파싱된 절대 경로 요청 snapshot과 UUID별 파일을 사용하며 같은 요청의 명시 이어 실행을 지원한다.
+- 진행 파일을 250ms마다 확인하고 모든 구간/미시작/실패 상태를 표시한다. 부분 비교 COMPLETE를 전체 완료로 보이지 않는다.
+- native 종료/범위/구현 hash/기간/역할을 대조하며 오류는 기존 표를 보존한다. 닫기는 비동기 취소, 앱 종료는 owned child 정리다.
+- DB v17/NAS/API/실제 계좌·주문 계약 유지. 순차 검증 자동 반복/영속 batch 복원/강제 종료 orphan 복구는 후속이다.
+
+## 2026-09-16 CR3b3 — 여러 개발 구간 순차 검증
+
+- --validate-partitions가 고정 전략/원본 ID·hash/시간 순서의 TRAIN·VALIDATION 2~20개를 검증한다.
+- source 한 번 로드·구간별 독립 입력/새 엔진, 코드 hash 고정·대조, 완료 캐시와 취소/예산/자원 차단 재개를 연결했다.
+- 기존 v17 run을 scoped ID로 원자 선점하며 failed/불완전 완료/BUSY를 자동 덮어쓰지 않는다.
+- runner와 batch의 취소 이중 확정 경계를 재현하고 새 scope에서는 batch만 종료 상태를 확정하도록 수정했다.
+- RUNNING/구간 종료/최종 진행 파일과 모든 fold 상태를 보존한다. 확인된 ID의 비교와 전체 batch 완료를 구분한다.
+- 기본 단일 실행 ID/인터페이스·DB/NAS/API/주문 계약은 유지한다. 화면 연결은 다음 CR3b4다.
+
+## 2026-09-16 CR3b2 — 독립 개발 결과 조회 화면
+
+- 연구 화면의 독립 구간 결과 비교 버튼과 작은 명시 JSON/--compare-runs CLI를 연결했다.
+- 기존 연구 v17을 SQLite mode=ro/timeout 1초로 열며 DB 생성/마이그레이션/runner/키움 조회는 없다.
+- 별도 낮은 우선순위 child/UUID 파일로 요청을 포착하고 종료 코드/DB/run scope/version을 검증한다.
+- KST 기간·표본·구간 손익/MDD·제외 근거와 strata tooltip을 표시한다. 취소/오류는 기존 표를 보존한다.
+- DB/NAS/API/주문 계약은 유지한다. 여러 개발 구간 순차 검증은 다음 CR3b3다.
+
+## 2026-09-16 CR3b1 — 독립 개발 구간 비교 계약
+
+- 명시 run 1~200개의 저장 결과를 읽어 전략/비용/코드/자료 계약을 비교하고 구간별 불변 근거를 만든다.
+- 중복 근거·활성 기간 겹침·자료 revision을 독립 표본에서 제외하며 실패/누락/표본 부족을 보존한다.
+- 구간 손익 분포/최악 구간 MDD를 제공한다. 독립 현금을 연속 계좌 수익률로 합산하지 않는다.
+- DB v17/NAS/API/기존 검색 계약은 유지한다. 프로세스 조회/화면 연결은 다음 CR3b2다.
+
+## 2026-09-16 CR3a4b — 독립 개발 구간의 화면 등록
+
+- 캠페인 등록 버튼이 독립 구간 요청을 기존 별도 프로세스에 넘긴다. 큰 입력은 UI 스레드에서 읽지 않는다.
+- 요청 snapshot과 회차별 결과/취소 파일, paused 선택 선저장, 종료 코드·저장 job/evidence 대조를 연결했다.
+- 취소/창 숨김/앱 종료/중복 호출·완료 전 상태 변경을 처리하며 이미 완료한 등록은 보존한다.
+- 등록 오류 문구가 상태 refresh로 덮이는 회귀를 재현하고 호출 순서를 수정했다.
+- DB v17/NAS/API/주문 경로는 유지한다. 여러 개발 구간 검증은 후속이다.
+
+## 2026-09-16 CR3a4a — 개발 구간 캠페인의 원본·실행 명세
+
+- 연구 DB v17에 불변 source_request_json을 추가하고 기존 실행 spec/예산/완료 판정을 유지한다.
+- 별도 연구 프로세스 --register-campaign으로 원본 검증 뒤 등록한다. 캠페인 재시작은 원본에서 같은 실행 spec을 재구성해야 한다.
+- 고정 범위 자료 감지를 독립 구간에 연결한다. 개발 근거가 같은 새 자료는 기존 job acceptance로 보존한다.
+- 화면의 background 등록 연결은 후속이다. 구 v16 이관을 지원하며 NAS/API/주문 변경은 없다.
+
+## 2026-09-16 CR3a3 — 독립 개발 구간 유한 탐색
+
+- JSON limited_search가 TRAIN/VALIDATION 한 구간을 명시 선택해 기존 유한 탐색을 실행한다.
+- 원본 식별값 검증 후 선택 입력/평가로 유효 spec을 동결한다. 요청 spec은 보존하며 구간 밖 변경은 cache를 바꾸지 않는다.
+- 기본/no-trade/ablation/cost-stress·완료 재사용·중단 재시도를 같은 개발 입력으로 연결했다.
+- 최종 구간 선택/자동 campaign 연결은 계속 거부한다. DB v16/NAS/API/주문 경로 변경 없음.
+
+## 2026-09-16 CR3a2 — 독립 개발 자료와 명시 실행
+
+- v2 명시 선택으로 TRAIN/VALIDATION 하나만 기존 실행기에 전달한다. 최종 구간 선택/자동 탐색 연결은 아직 금지다.
+- 원본 시각/ID를 보존한 직전 순위·테마와 선택 warmup/구간만 복사한다. 전체 품질·watermark·source ID는 제외한다.
+- fold마다 새 모의 엔진으로 시작하고 warmup 주문·후보 생성을 막는다. 내부 날짜의 보유/현금은 유지한다.
+- 경계 미청산 포지션은 fold 종료 시각에 censor한다. 순위만 있거나 뒤늦게 받은 분봉을 warmup 근거로 판단하지 않는다.
+- JSON single_run/rank_comparison과 CLI에 연결했다. 기존 v1/DB v16/NAS API/실제 주문은 변경하지 않는다.
+
+## 2026-09-16 CR3a1 — 개발 후보 선택 근거 격리
+
+- 최종 구간까지 합친 보고서 상태/사유가 개발 후보의 적격 여부를 바꾸던 경로를 수정했다.
+- 불변 DevelopmentEvidence에 개발 fold의 상태·사유·요약만 복사한다. OOS 손익/열람/실패는 제외한다.
+- 개발 구간 자체의 실패·무거래·자료 부족은 유지하며 전체 보고서는 수정하지 않는다.
+- 입력/현금/품질 계산의 독립 partition 연결은 다음 단계다. 연구 DB v16/NAS API/주문은 변경하지 않는다.
+
+## 2026-09-16 CR2c3c2 — 완성 연구 자료 등록 복구
+
+- 저장된 완성 자료를 NAS 다운로드 전에 등록한다. 용량 부족/서버 접속 실패 중에도 기존 자료를 복구한다.
+- 등록으로 연구 대기열이 차면 새 다운로드를 건너뛴다. 준비 후 반환 경로만 확인해 중복 스캔을 피한다.
+- 동결 manifest/scope·작업자 소유·일시정지와 signature 등록 순서를 유지한다.
+- 완성 자료는 참조 여부와 무관하게 보존한다. DB 변경/새 계층/NAS 재빌드 없음.
+
+## 2026-09-16 CR2c3c1 — 오래된 미완성 연구 임시 파일 정리
+
+- NAS 자료 자동 준비 전에 24시간 이상 지난 미완성 임시 파일을 원장과 대조해 정리한다.
+- 완성 자료·참조된 자료·생성 표시 없는 폴더·사용자 파일·링크는 보존한다. 완성 폴더는 삭제하지 않는다.
+- 중간에 멈추거나 파일이 잠기면 정리 원장에서 이어 처리한다. 기존 연구·수집 실패와 분리했다.
+- 연구 DB v16은 기존 행을 변경하지 않는다. NAS 재빌드가 필요 없는 PC 변경이다.
+
+## 2026-09-16 CR2c3b — PC 연구 폴더 용량 상한과 자료 준비 원장
+
+- `새 자료 폴더`에 용량 상한을 추가했다. 기본 무제한이며 용량 부족 때 새 준비만 대기한다.
+- 자료·테마·manifest·소유 표시까지 예산에 포함한다. 기존/완료된 연구 파일은 삭제하지 않는다.
+- 중복 파일 준비를 직렬화하고 일시정지·오래된 작업자의 완성 게시를 막는다. 임시 경로와 결과는 원장에 기록한다.
+- 연구 DB v15는 기존 source를 무제한으로 유지한다. NAS 재빌드는 필요 없다. 실제 정리는 후속이다.
+
+## 2026-09-16 CR2c3a — PC 연구 자료 보관 준비
+
+- 새 자동 생성 임시/완성 자료에 소유 표시를 남기고 제한된 읽기 전용 용량 목록을 만든다.
+- 완료된 연구와 다른 캠페인의 입력 참조도 보호한다. 무표시 폴더·링크·손상 자료는 정리 대상으로 판단하지 않는다.
+- 실제 삭제/용량 상한은 다음 단계다. NAS 재빌드는 필요 없다. 연구 DB는 v14 유지.
+
+## 2026-09-16 CR2c2b — NAS 연구 입력 자동 준비
+
+- `새 자료 폴더`의 `NAS에서 새 자료 자동 준비`를 켜면 기존 앱 NAS 연결 설정으로 같은 범위의 export를 준비한다.
+- 관측 revision/테마 이력이 그대로면 전체 다운로드를 생략한다. 새 자료는 임시 검증 뒤 새 완성 폴더로 게시하고 자동 등록한다.
+- 기존 일별 bundle 경계를 유지하며 백로그가 꽉 차면 다운로드하지 않는다. 취소·NAS 장애·부분 응답은 source별로 처리한다.
+- 연구 DB v14는 기존 source를 NAS OFF로 유지하며 config 경로/signature만 추가한다. 토큰을 연구 DB에 저장하지 않는다.
+- 키움 TR/서버 API/주문 경로는 변경하지 않았다. NAS 재빌드는 필요 없다. 디스크 보관/새 날짜 정책은 후속이다.
+
+## 2026-09-16 CR2c2a — 같은 범위 새 연구 자료 자동 등록
+
+- 연구 창의 `새 자료 폴더`에서 기준 실험/상위 폴더/자동 등록 ON·OFF를 저장한다. 일시정지·작업자 종료 후 설정한다.
+- 기존 worker가 완성 export/bundle을 60초마다 확인해 같은 연구 범위의 새 근거만 등록한다. 중복/단순 watermark 변경은 재실행하지 않는다.
+- 연구 DB v13은 source/acceptance를 추가하고 기존 연구/예산/복구 이력은 보존한다. job·예산·acceptance는 원자 등록한다.
+- 백로그는 정상 대기하고 자료 오류는 별도 backoff/격리로 처리한다. 자료 읽기는 GUI에서 하지 않는다.
+- NAS 자동 export 준비·새 날짜 확장·보관 정책은 아직 남는다. 이번 PC 변경으로 NAS 재빌드는 필요 없다.
+
+## 2026-09-16 CR2c1 — 연구 작업자 복구 이력
+
+- PC 연구 DB v12에 작업자 실행 이력·연속 실패·다음 재시도 시각을 저장한다. 기존 연구 결과와 예산 이력은 보존한다.
+- 시작 실패·비정상 종료에 기본 30초부터 backoff를 적용하고 연속 3회 실패 시 자동 재시도를 멈춘다.
+- 앱 재시작도 대기/실패 상한을 유지한다. 원인 확인 후 `시작 / 재개`로 명시 재시도한다.
+- 창 숨김·일시정지·앱 종료는 실패로 세지 않는다. 살아 있는 작업자와 중복 실행하거나 소유권을 잃은 결과를 저장하지 않는다.
+- 관련 새 자료 자동 등록·디스크 보관은 후속이다. PC 소스 변경으로 NAS 재빌드는 필요 없다.
+
+## 2026-09-16 CR2b2 — 캠페인 예산 확대와 명시 재시도
+
+- PC 연구 DB v11에 실험별 운영 예산 revision을 추가했다. 원래 실험 명세와 완료 결과/보고서는 보존한다.
+- 일시정지·작업자 종료 후 연구 창의 `실험 예산 / 재시도`에서 횟수/회차 시간/메모리/CPU 예산을 바꿀 수 있다.
+- 2개 완료 뒤 한도를 4개로 늘리면 기존 2개를 유지하고 새 2개만 실행한다. 일반 유한 완료 캐시는 유지한다.
+- 자원 차단/실패는 명시 재시도할 수 있다. 동시 변경/오래된 worker/DB 쓰기 실패와 backlog 상한을 검사한다.
+- 새 자료 자동 등록·보관·crash 격리는 CR2c 후속이며 NAS 재빌드는 필요 없다.
+
+## 2026-09-16 CR2b1 — 캠페인 실행·제어 연결
+
+- PC 연구 창에 캠페인 요청 등록, 시작/재개, 일시정지, 중지를 연결했다. DB v10과 기존 유한 실행기를 재사용한다.
+- 앱 시작 시 저장된 RUNNING 캠페인을 복원하고, 창 숨김/앱 종료는 실행 의도를 보존한 채 worker를 종료한다.
+- 결과 commit은 캠페인/실험 소유권과 실행 의도를 원자 검사하며 외부 JSON 변경·삭제는 저장된 실험을 바꾸지 않는다.
+- 실험 횟수 한도와 등록된 전체 조합 완료를 구분한다. 예산 확대·새 자료 자동 선택·보관/crash 격리는 후속이다.
+- 자동 최종평가/새 가설 생성/주문은 연결하지 않는다. NAS 재빌드는 필요 없다.
+
+## 2026-09-16 CR2a — 지속 캠페인 원장
+
+- PC 연구 DB v10에 캠페인 설정 revision·실행 의도·등록 작업·예약 cycle을 추가했다. 기존 데이터는 보존한다.
+- 동시 예약/lease 만료 fencing·실패 backoff·자원 차단·중단 후 완료 결과 복구를 구현했다.
+- 완료된 100개는 active backlog에 포함하지 않아 101번째 작업을 등록할 수 있다.
+- 기존 GUI의 유한 자동 재개는 그대로이며 캠페인 worker/시작·일시정지·중지 연결은 CR2b에서 구현한다. NAS 재빌드는 필요 없다.
+
+## 2026-09-16 CR1b — 연구 자원 제한과 계측
+
+- PC 연구 프로세스/CLI에 메모리 preflight·실제 RSS 검사와 짧은 CPU batch 양보를 적용했다. 기본 512MiB/CPU 목표 50%.
+- 다기간 bundle은 ingest를 증분 변환하며 전후 논리 결과가 같다. 20일 작은 fixture의 CPU 계산 비용은 줄었지만 전체 대기시간은 크게 줄지 않았다.
+- 자원 중단은 전략 실패가 아닌 재시도 가능한 INTERRUPTED attempt로 기록하고 GUI 자동 반복을 멈춘다.
+- 1/5/20일 작은 실행 및 20종목·390분 입력 크기를 계측했다. 실제 NAS 전체기간 성능 보증은 아니며 NAS 재빌드가 필요 없다.
+
+## 2026-09-16 CR1b — 다기간 연구 실행 연결
+
+- 검증한 날짜별 bundle을 기존 CLI와 앱의 별도 연구 프로세스에서 실행한다. 명시 session_profile 일치를 먼저 검사한다.
+- 일별 파일/ordinal은 보존하고 UTC 가용시각·ingest·ID 순으로 중복 제거한다. 후속 정정/미래 자료를 앞당겨 반영하지 않는다.
+- 여러 날짜에 걸쳐 현금/보유를 유지하며 하루 bundle은 기존 하루 identity/논리 결과와 일치한다.
+- CPU/RSS 제한·규모 계측과 24시간 지속 캠페인은 후속이다. NAS 재빌드/배포는 이번 단계에 필요하지 않다.
+
+## 2026-09-16 CR1a — 날짜별 연구 자료 준비
+
+- 기존 NAS 24시간 export를 재사용해 여러 명시 KST 날짜의 불변 bundle index/검증 reader를 추가했다.
+- 완료된 일별 파일은 명시 재사용 옵션에서 API 없이 유지하고, 변조/누락·혼합 조건·revision/테마 충돌·테마 잘림은 거부한다.
+- 기존 하루 데이터/ordinal/실행 계약은 유지하며 runner는 bundle을 명시 거절한다. 연속 실행/자원 계측 CR1b는 후속이다.
+- 임시 fixture 회귀 69개 통과, 실제 NAS/API/사용자 DB/키/주문/서버 build는 변경하지 않았다.
+
+## 2026-09-16 런타임 인증 R7c2 — HTTPS 초기 연결 확인
+
+- 사용자 프록시/서버 재적용 후 HTTPS 8443의 build/health·DB·인증 메타데이터·WSS ready를 확인했다.
+- 실제 접근 로그 IP만 신뢰하고 필수값 없는 JSON으로 secure boundary 통과를 확인했다. 실제 키/프로필/주문 변경은 없다.
+- 앱 저장 NAS 주소만 검증된 HTTPS 주소로 전환하고 토큰/기타 설정을 보존했다. 실행 앱 재시작 필요.
+- 장중 REG/다계좌·교체 관측 간격·PostgreSQL 통합/실제 Linux 권한은 후속 검증이다.
+
+## 2026-09-16 런타임 인증 R7b — 시작 후 기본 운영 확인
+
+- 사용자 재빌드/시작 후 R7 실제 build/health·DB 읽기·인증 메타데이터·앱 WebSocket ready를 확인했다.
+- 거래시간 밖의 정상 체결 대기와 별개로 순위 저장 회차가 30초마다 진행됨을 확인했다.
+- HTTPS 도메인 TLS는 통과했지만 nginx 404다. 사용자 확인상 역방향 프록시 미설정으로 연결 준비가 남아 있다.
+- 실제 키/계좌/주문/설정은 변경하지 않았으며 장중 REG/다계좌·PostgreSQL 통합/Linux 권한은 후속 검증이다.
+
+## 2026-09-16 런타임 인증 R7a — 누적 배포 준비
+
+- Docker build context에서 NAS 전용 코드 백업/모든 실제 env/인증 저장소를 제외하도록 보완했다.
+- NAS 계좌/뉴스/AI 인증과 재연결 누적 소스의 build 세 곳을 `2026.09.16-runtime-credentials-r7-deploy-v1`로 갱신했다.
+- 실제 Dockerfile의 cryptography 설치/compose secret 영속 마운트와 배포 안내를 확인·문서화했다.
+- 배포 관련 회귀 368개 통과(Windows POSIX 권한 1개 skip), 실제 NAS는 구 build에서 정상 응답 중이다.
+- 경로 검증/기존 57개 원본 코드 백업 뒤 변경 135개를 동기화하고 전체 763개 hash를 확인했다.
+- 제공된 HTTPS IP 주소는 인증서 이름 불일치로 실패했다. 실제 이미지 재빌드/HTTPS 준비/운영 검증은 별도 완료 조건이다.
+
+## 2026-09-16 런타임 인증 R6c2 — 계획된 실시간 재연결
+
+- 기존 collector의 계획된 재연결을 최대 30초로 제한하고 health/capability/WS로 상태를 전달한다.
+- PC는 기존 표를 유지하고 계획된 상류 오류만 유예한다. 반복 통지는 deadline을 늘리지 않는다.
+- REG 승인/재개 시작 실패/만료/종료는 대기를 끝내며 휴장/구독 대기는 정상 장애와 구분한다.
+- paused TR의 명시 대기는 일반 API 오류로 분리해 REST 로컬 TR을 만들지 않는다.
+- 교체 전후 허용 0B 관측 간격을 UTC 시각·최신 상태·PC/NAS 로그·PC 문구로 기록한다.
+- 누적 build `2026.09.16-runtime-credentials-r6-planned-reconnect-v1`, NAS 동기화 전. 실제 교체·배포 검증은 R7이다.
+
+## 2026-09-16 런타임 인증 R6c1 — PC 실전계좌 입력
+
+- NAS 설정에 별도 실전계좌 관리 버튼을 추가하고 기존 계좌 화면/HTTPS client를 확장했다.
+- 실전 프로필 생성·키 확인/적용·비활성화·계좌 조회 ON/OFF를 기존 서버 계약에 연결했다.
+- real/mock 요청·진행 상태를 분리하고 확인한 계좌/revision으로만 적용한다. PC 키 설정을 쓰지 않는다.
+- 실전 모의주문 토글을 숨기고 true 요청/응답을 거절한다. 계좌 설정 적용과 실제 REG 승인은 따로 표시한다.
+- 계획된 재연결의 기존 순위표 유지/deadline 처리는 R6c2 후속이다. NAS 동기화/재빌드는 R7까지 보류한다.
+
+## 2026-09-16 NAS 런타임 인증 R6b3c2b — 실전 계좌 WebSocket 연계
+
+- 시세 담당 00/04는 기존 시장 연결에서 분배하고 비담당은 자기 계좌 전용 real 연결만 사용한다.
+- verified 9201/scope/binding·monitor generation으로 계좌를 분리하고 비담당 이벤트도 기존 hub에 전달한다.
+- 계좌 이벤트는 별도 writer/실전 내부 문서로 저장하며 0.5초 재조회 신호 병합과 30초 backup을 유지한다.
+- 실제 token/socket/이벤트 저장 drain과 재개 직후 첫 이벤트를 연결했다. 저장 실패 pending/queue overflow는 상태로 남긴다.
+- mock 원장/시세 0B/0w 정책은 유지한다. PC 표시·동시 토큰 실제 운용 검증은 후속이다.
+- build: 2026.09.16-runtime-credentials-r6-real-account-realtime-v1. NAS 동기화/배포 전.
+
+## 2026-09-16 NAS 런타임 인증 R6b3c2a — 자동 실전 계좌 수집/저장/ON-OFF
+
+- 기존 실전 owner/context의 계좌별 30초 REST 수집을 연결하고 수동 조회 중 중복 회차를 건너뛴다.
+- verified scope/binding/설정 revision을 저장 트랜잭션에서 확인하는 실전 전용 내부 문서를 추가했다. mock 원장은 유지한다.
+- HTTPS 계좌 PUT을 환경별 owner로 분배한다. OFF/ON은 시장 시세/순위 collector·broker를 재시작하지 않는다.
+- 키/역할 변경·OFF·종료는 조회와 실제 저장을 완료하고, 결과 불명확한 설정 쓰기는 해당 계좌 수집만 차단한다.
+- applied_revision은 REST 정책이며 monitor_status에 수집 성공/실패를 별도 표시한다. 계좌 WS는 후속이다.
+- build: 2026.09.16-runtime-credentials-r6-real-account-monitor-v1. NAS 동기화/배포 전.
+
+## 2026-09-16 NAS 런타임 인증 R6b3c1 — 실전 계좌 복구 조회
+
+- 기존 계좌 파서/연속조회를 공유하고 real/mock reader의 환경 검사와 주문/잔고 조회 거래소를 분리했다.
+- 실전 context별 단일 소유 read task와 키 변경/역할 전환/종료의 실제 전체 조회 drain을 연결했다.
+- 실전 결과는 mock 주문 원장에 넣지 않으며 일반 v1 무신원 계좌 복구 요청은 차단한다.
+- 자동 monitor/실전 저장/WS/운영 PUT은 후속이다. build: 2026.09.16-runtime-credentials-r6-real-account-reads-v1. NAS 동기화 전.
+
+## 2026-09-15 NAS 런타임 인증 R6b3b2 — 실행 중 시세 담당 변경
+
+- 독점 구간 안에서 물리 drain/직전 검증/역할 CAS 후 기존 중앙·계좌 broker의 검증된 client만 교환한다.
+- 단일 시장 collector/큐/집계, 두 계좌의 물리 요청 잠금·호출 이력·cursor와 기본계좌/v2 대상을 보존한다.
+- 인증된 역할 PUT과 적용 revision을 연결하고 실시간 신원/토큰/시각은 현재 담당을 사용한다. 재시작도 저장된 담당을 복원한다.
+- 저장 전 실패는 복구, 저장 후/불명확/복구 실패는 조회·시장 차단 후 재시작 복구. HTTP 대기 취소는 소유 task를 버리지 않는다.
+- build: 2026.09.15-runtime-credentials-r6-market-role-switch-v1. NAS 소스 동기화·배포 전이다.
+
+## 2026-09-15 NAS 런타임 인증 R6b3b1 — 담당 전환 독점 구간
+
+- 기존 실전 owner에 역할 작업과 인증 후보의 상호 배제, 직전 역할/계좌/vault revision/context 재검증을 구현했다.
+- disable 정책을 읽는 첫 await 전에도 credential 예약을 잡는다. 취소/예외 해제·종료 대기를 검증한다.
+- 실제 역할 저장/REST/WS 전환과 새 공개 PUT은 아직 연결하지 않았다. 기존 순위/모의 owner는 이 예약을 사용하지 않는다.
+- build: 2026.09.15-runtime-credentials-r6-market-role-barrier-v1. NAS 소스 동기화·배포 전이다.
+
+## 2026-09-15 NAS 런타임 인증 R6b3a — 시세 역할 저장과 담당 보호
+
+- 기존 문서 저장소에서 시세 담당/불변 기본계좌 역할을 분리하고 revision CAS·현재 binding/활성 계좌를 검증한다.
+- 담당 profile disable/계좌 연결 해제를 막으며 기존 계좌 설정·binding·완료 replay를 보존한다.
+- 인증된 GET /api/v1/settings/market-profile만 추가한다. 적용 revision은 null이며 실제 담당 전환/PUT은 후속이다.
+- PostgreSQL 검사의 임시 역할 변경은 rollback한다. 실제 NAS/키/사용자 DB 변경과 배포는 하지 않았다.
+- build: 2026.09.15-runtime-credentials-r6-market-profile-settings-v1. 상세는 R6b3a 구현 보고서 참조.
+
+## 2026-09-15 NAS 런타임 인증 R6b2 — 실전 owner/API·복수 계좌 과거 조회
+
+- 누적 build `2026.09.15-runtime-credentials-r6-real-owner-v1`.
+- 실전 owner를 기존 HTTPS credential API/v3 선택 계좌에 연결. 기존 시세 담당의 단일 collector/client/broker와 복수 실전 과거 조회를 분리하고 keyless 최초 등록/기동 이관/동일 계좌 scope·run·cursor/계좌 lock·disable 이력을 보호한다.
+- commit 후 실패에서 이전 키 조회를 열지 않고 같은 broker 큐/client 잠금/호출 간격의 명시 후보만 검증하는 복구 경로 추가. 시세 담당 disable은 MARKET_PROFILE_REQUIRED로 거절한다.
+- 신규 14개 포함 회귀 266개 실행(265 통과·POSIX 권한 1 skip), 실패 0·exit=0. 구문/공백·build 3곳 일치 확인.
+- R6b2 인증/과거 조회 기반 로컬 완료. R6b3 시세 역할 CAS/실전계좌 실시간 수집·운영, R6c PC 입력/계획된 재연결, R7 누적 배포/실환경은 후속이다. NAS 동기화 전이며 중간 재빌드는 요청하지 않는다.
+
+## 2026-09-15 NAS 런타임 인증 R6b1 — 실전계좌 활성화 저장
+
+- 누적 build `2026.09.15-runtime-credentials-r6-real-account-claims-v1`.
+- 기존 DB 계좌 claim을 실전/모의에 공통 적용. 최초 조회 ON/모의주문 OFF·동일 profile 키 갱신 설정 보존·중복 profile의 binding/원장/draft 활성화 rollback·disable 이력과 완료 replay 보존.
+- 수정 전 신규 8개로 실전 claim 누락/중복 허용 재현. 계좌 설정 27개 통과; 인접 회귀 214개 실행(213 통과, POSIX 권한 1 skip), 실패 0·종료 코드 0.
+- 실제 PostgreSQL 검사기에 실전 5개 검사/생성 행 정리 추가, 새 검사 블록의 임시 SQLite 시뮬레이션 확인. 실 PostgreSQL/키움 호출은 실행하지 않았다.
+- 새 SQL/endpoint/실전 hook 없음. R6b2 owner/API·R6c PC 표시·R7 누적 배포는 후속이며 NAS 동기화 전이다. 중간 재빌드를 요청하지 않는다.
+
+## 2026-09-15 NAS 런타임 인증 R6a — 실전 재연결 기반
+
+- 누적 build `2026.09.15-runtime-credentials-r6-reconnect-barriers-v1`.
+- 기존 collector에 계획된 pause/drain/resume·connection generation을 추가했다. 이전 socket/token thread/접수 장 마감 처리의 실제 완료를 기다리고 늦은 이전 frame을 적용하지 않는다.
+- 실제 DB 저장 완료 전에 close/pause가 끝나는 문제 두 가지를 수정 전 재현했다. 저장은 단일 lock의 owned task로 직렬화하고 close도 owned task로 실제 완료를 기다린다. 기존 실패 대기분/aggregator/hub는 유지한다.
+- 새 연결 최초 REG 승인에는 같은 source도 누적 기준점/연속 관측 시작을 다시 설정해 수신 공백 누적량을 첫 틱에 합산하지 않는다. 계좌 query는 신규 BUSY/접수 작업 drain 뒤 적용 시 cursor 폐기, 취소 시 보존을 선택한다.
+- 신규 11개를 포함한 관련 회귀 235개 모두 통과. Python 4개 구문/공백·누적 build 3곳 일치를 확인했다. 기존 순위 우선순위·독립 real/mock 한도·공개 API/SQL은 유지한다.
+- R6a 기반만 로컬 완료. 실제 실전 키 owner/API/계좌 binding은 R6b, PC 입력/planned reconnect 표시는 R6c 후속이다. 실전 credential hook/capability는 아직 추가하지 않았다. NAS 소스 동기화 전이며 중간 재빌드를 요청하지 않는다.
+
+## 2026-09-15 NAS 런타임 인증 R5d2c — 공통 뉴스 검색 운영
+
+- 누적 build `2026.09.15-runtime-credentials-r5-news-query-operations-v1`.
+- NAS 설정에 기존 공통 뉴스 수집 ON/OFF·한 줄 검색어·검색어별 주기를 연결했다. 빈 줄/앞뒤 공백/중복 정리, 최대 50개·UI ON 빈 목록 검사, 구 NAS 필드 제외와 worker/부분 PUT/CAS를 유지한다.
+- 등록 종목 뉴스 주기와 구분하고 검색어를 PC 직접 뉴스 설정/키에 복사하지 않는다. NAS 폼만 스크롤하고 Save/Cancel을 유지해 작은 창에서도 저장한다.
+- 수집 중 OFF/교체 뒤 낡은 검색어가 이어지는 문제와 단축 주기가 이전 예약을 기다리는 문제를 수정 전 재현했다. 같은 collector에서 접수 검색어를 완료하고 다음 query의 새 정책을 확인하며 정상 last_success + 현재 주기로 다음 조회를 판정한다.
+- 기존 기사/cursor/요청 사용량·일일 상한과 실패 backoff/부분 페이지를 보존한다. 새 endpoint/SQL/manager/키움 TR 없음.
+- 신규 10개를 포함한 최종 관련 회귀 205개 통과. Python 4개 구문/공백·누적 build 3곳 일치·일반/작은 창 배치를 확인했다.
+- R0~R5 로컬 완료. 다음은 R6 실전 인증 교체, R7 누적 배포/실환경도 남았다. NAS 소스 동기화 전이며 중간 재빌드를 요청하지 않는다.
+
+## 2026-09-15 NAS 런타임 인증 R5d2b — 조건검색 운영
+
+- 누적 build `2026.09.15-runtime-credentials-r5-condition-operations-v1`.
+- NAS 운영 화면에서 조건검색 추적 ON/OFF·정확한 이름·substring을 변경한다. 기존 operations/부분 PUT/CAS를 사용하며 구 NAS에는 새 필드를 보내지 않는다.
+- 같은 서비스/단일 WebSocket 수신 loop에서 새 조건 전체 초기 결과를 확인한 뒤 전환하고 이전 등록을 해제한다. 실패/timeout/잘못된 페이지/해제 ACK 실패는 복구 필요로 공개하며 기존 활성 조건과 코호트를 보존한다.
+- 초기 결과 다음 보류 실시간 신호를 적용하며 queue는 접수 당시 조건 문맥을 유지한다. OFF도 기존 코호트·당일/익일 보존·VI/체결 수집을 유지한다. 새 manager/SQL 테이블/연결 없음.
+- 관련 회귀 172개와 추가 검증을 포함한 신규 경계 17개 통과. 가짜 단일 WebSocket 실제 수신 loop, 저장/적용/상류 실패 복구, Qt 입력/상태와 누적 build 3곳 일치를 확인했다.
+- R5d2b 로컬 완료. 다음은 R5d2c 공통 뉴스 검색어 운영 UI이며 R6/R7도 남았다. NAS 소스 동기화 전이고 중간 재빌드를 요청하지 않는다.
+
+## 2026-09-15 NAS 런타임 인증 R5d2a — 해외시세 운영
+
+- build `2026.09.15-runtime-credentials-r5-external-operations-v1`: 기존 operations에 해외 지연 시세 ON/OFF·주기·자동 월물 전환·확인 횟수를 연결했다. 초기 OFF에도 수집기를 준비하며 저장 OFF는 ENV ON보다 우선한다.
+- 수집 cycle과 설정 변경 task를 기존 수집기가 소유해 caller/loop 취소 뒤 실제 fetch·봉·roll/status 저장을 끝낸다. 설정은 drain 후 직렬 적용하고 shutdown은 pending 변경/수집 완료를 기다린다.
+- 기존 봉/roll 이력/일봉 기준 cache를 보존한다. PC는 구 NAS 누락 필드를 보내지 않으며 저장 후 실행 적용 실패를 복구 필요로 표시한다. 초기 symbol/기존 자동 roll 계약은 유지하며 수동 상품/활성 월물 변경은 미포함이다.
+- 신규 10개·최종 관련 회귀 125개 모두 통과. 가짜 공급자/임시 DB/offscreen Qt 검증이다. SQL/순위 경로 변경 없음.
+- R5d2a 로컬 완료. 다음은 R5d2b 조건검색/기타 운영 확대. NAS 소스 동기화 전이며 R6/R7도 남았다. 중간 재빌드를 요청하지 않는다.
+
+## 2026-09-15 NAS 런타임 인증 R5d1 — 공급자 PC 입력 화면
+
+- NAS 설정에 네이버/DART/OpenAI/Gemini/Claude 키 관리 메뉴를 추가했다. 기존 HTTPS client/관리 화면을 공급자 고정 옵션으로 확장하고 global 화면에서는 계좌 UI·계좌 요청을 제외한다.
+- password 입력을 전달 직전/종료 시 비우고 PC 설정/DB/미러/백업에 저장하지 않는다. 공급자·NAS별 pending 요청을 유지하며 다른 공급자/대상과 섞지 않는다.
+- 고정 기본 프로필/provider/revision/operation/계좌 null을 확인하고 명시 apply한다. timeout 후 같은 operation만 조회하며 AI ACTIVE/캐시를 인증 성공으로 표현하지 않는다.
+- 신규 11개·최종 관련 회귀 163개 모두 통과. 가짜 공급자/임시 DB/Qt offscreen으로 다섯 폼의 준비·적용·비활성화까지 검증했고 유료 AI 호출은 0회다.
+- R5d1 로컬 완료, 다음은 R5d2 운영 확대다. 서버/API/SQL 변경 없음; NAS build는 R5c를 유지한다. R6/R7과 NAS 동기화/배포는 남았으며 중간 재빌드를 요청하지 않는다.
+
+## 2026-09-15 NAS 런타임 인증 R5c — AI 세 공급자, 배포 전
+
+- build `2026.09.15-runtime-credentials-r5-ai-rotation-v1`: OpenAI/Gemini/Claude의 고정 global owner를 연결했다. keyless vault 설치에도 같은 AI 서비스/뉴스 작업기를 조립한다.
+- prepare는 유료 분석 없이 UNVERIFIED, 명시 apply의 ACTIVE는 키 적용 완료다. 첫 실제 분석의 검증 상태는 revision별 runtime_validation으로 공개하며 캐시는 새 키를 검증하지 않는다.
+- 본문 준비 전 공급자/model/key/revision을 고정하고 취소된 HTTP 대기자와 실제 분석/저장을 구분해 교체·종료 시 실제 완료를 기다린다. 공급자별 pause와 commit 이후 이전 키 차단을 유지한다.
+- 실행 병합 키는 revision/body hash를 구분한다. 기존 성공 캐시·품질 버전·기사/작업·일일 사용량/상한은 유지하며 JSON 결과/사용량에 실행 인증 revision만 추가했다. DB migration/AI 품질 로직 변경 없음.
+- 신규 17개 및 누적 관련 회귀 351개 중 350 통과/Windows 1개 생략. 실제 API·NAS·사용자 DB 없는 임시 검증이다.
+- R5c 로컬 완료. 다음은 R5d 공급자 UI/운영 확대, R6/R7과 NAS 소스 동기화는 남았다. R7까지 중간 재빌드를 요청하지 않는다.
+
+## 2026-09-15 NAS 런타임 인증 R5b — DART, 배포 전
+
+- build `2026.09.15-runtime-credentials-r5-dart-rotation-v1`: 기존 뉴스 인증 파일에 DART 기본 프로필 owner를 연결했다. keyless vault 설치에도 등록하며 회사코드 캐시를 건드리지 않는 공시 1건 검색으로 검증한다.
+- 종목 수집 접수 시 NAVER/DART/사용 여부를 고정하고 실제 수집·저장 완료 뒤 키를 교체한다. 독립 pause로 동시 교체를 보호하며 NAVER query-set는 DART 교체 중에도 계속한다.
+- cache Path/30일 갱신 수명·뉴스/cursor/작업·NAVER 사용량과 운영 dart_enabled를 보존한다. 인증 키 오류와 점검/한도/통신 실패를 비밀 없는 코드로 구분한다. commit 이후 실패는 DART 부재/복구 필요 상태로 두며 이전 키를 복원하지 않는다.
+- R5b 로컬 완료, 다음은 AI다. 공급자 PC UI/운영 확대·R6/R7은 후속이고 NAS 소스 동기화 전이다. 중간 재빌드는 요청하지 않는다. DB migration/뉴스 품질 로직 변경 없음.
+- 관련 회귀 334개 중 333 통과/Windows 1개 생략, 최종 DART 18개 모두 통과. 실제 API·NAS·사용자 DB 없는 임시 검증이다.
+
+## 2026-09-15 NAS 런타임 인증 R5a — 네이버 두 수집 경로, 배포 전
+
+- build `2026.09.15-runtime-credentials-r5-naver-rotation-v1`: 네이버 고정 기본 프로필 owner를 기존 prepare/apply API에 연결했다. 키 없는 vault 설치에도 등록하며 AI 설정에 종속되지 않는다.
+- 종목별/공통 검색의 시작 client를 고정하고 실제 페이지 수집·성공/실패 DB 저장을 drain한 뒤 함께 교체한다. HTTP waiter/정기 loop 취소와 실제 thread 종료를 구분하고 서버 종료에도 저장 완료를 기다린다.
+- 기존 기사/cursor/작업/사용량을 보존하며 검증 HTTP도 일일 예산에 합산한다. disable tombstone과 commit 이후 이전 키 차단/타 공급자 독립 처리를 지원한다. DB migration·분류/요약 규칙 변경 없음.
+- R5a 로컬 완료, DART·AI·공급자 UI/운영 확대와 R6/R7은 남았다. NAS 소스 동기화 전이며 R7까지 중간 재빌드는 대기한다. 실제 API 호출 없는 신규 경계/로컬 HTTPS route 테스트를 추가했다.
+- 취소된 종목 요청의 늦은 완료 객체가 남는 경우를 재현하고 완료 callback으로 정리했다. 관련 회귀 316개 중 315 통과/Windows 1개 생략, 최종 뉴스/서버 112개 통과. 실제 NAS 검증 전이다.
+
+## 2026-09-15 NAS 런타임 인증 R4b — 선택 계좌 PC 연결, 배포 전
+
+- build `2026.09.15-runtime-credentials-r4-selected-client-v1`: 인증된 조회 가능 계좌 목록/v3 capability를 추가했다. 키움 TR·인증 갱신 없이 기존 admitted binding을 읽는다.
+- 매매일지 계좌 목록은 background로 갱신하며 새 계좌도 일지 없이 선택 가능하다. 조회 시작 시 선택 scope/profile/binding 버전을 고정하고 늦은 선택 변경/연결 변경을 저장 전에 차단한다. 빈 결과도 계좌 context를 보존한다.
+- PC의 v2 선택 모의 submit/GET/cancel을 연결하고 미확인 submit은 같은 ID/내용으로 먼저 확인한다. 명시 NAS 계좌 조회는 단일 PC 프로필로 fallback하지 않는다. 기존 기본 v2/시세 fallback는 유지한다.
+- R0~R4 로컬 완료. R5 뉴스·R6 실전 owner·R7 NAS 누적 동기화/검증과 새 자동주문 화면/실제 운용은 후속이다. 중간 NAS 재빌드는 요청하지 않는다.
+
+## 2026-09-15 NAS 런타임 인증 R4a — PC 모의계좌 관리 화면
+
+- 설정의 NAS 메뉴에 모의계좌 추가·API 키/계좌 확인·명시 적용·비활성화와 계좌별 조회/수동 주문 허용 화면을 추가했다.
+- 기존 HTTPS 인증 API를 사용하고 redirect/HTTP 키 전송을 막는다. 입력한 NAS 키는 PC 설정/DB/미러에 저장하지 않는다.
+- 중복 클릭을 막고 창 종료 중 실제 I/O를 기다린다. 같은 NAS로 재열면 안전한 요청 ID를 공유하며 적용 timeout은 동일 operation만 조회한다.
+- R4b 매매일지 선택 계좌/PC worker 연결은 후속이다. 서버 소스/build/DB 변경 없음; 최신 NAS 누적 build는 R3g이며 R7까지 동기화/재빌드는 대기한다.
+
+## 2026-09-15 NAS 런타임 인증 R3g — 선택 계좌 조회·모의주문, 배포 전
+
+- build `2026.09.15-runtime-credentials-r3-scoped-accounts-v1`: 계좌/profile/binding 버전을 명시하는 v3 계좌 조회와 v2 모의 주문·조회·취소를 추가했다.
+- 계좌별 cursor·실제 페이지 작업 수명을 기존 manager/bundle에서 관리한다. 다른 계좌/오래된 연결은 요청 전 거절하고 늦은 응답도 재검증한다.
+- scoped 요청 ID는 계좌/run별로 분리하며 중복/UNKNOWN 주문은 다시 전송하지 않는다. 주문 OFF라도 해당 계좌의 저장 주문은 조회 가능하다.
+- 기존 v1 기본 모의 계좌와 v2 기본 시세 계좌 조회는 유지한다. R3 서버 기능 로컬 완료, R4 UI와 R7 NAS 누적 동기화/검증은 후속이다.
+
+## 2026-09-15 NAS 런타임 인증 R3f — 계좌 비활성화·설정 적용, 배포 전
+
+- build `2026.09.15-runtime-credentials-r3-account-controls-v1`: 모의 키 disable prepare/apply와 인증·HTTPS 계좌 설정 PUT을 연결했다.
+- 명시 disabled tombstone은 재시작 후 env로 복구하지 않는다. 계좌/run·기존 binding·미확정 주문을 유지하고 활성 연결의 키/토큰은 종료 후 비운다.
+- monitor/주문 허용 토글은 실제 기존 작업 종료·DB CAS·새 bundle 준비 후 적용 완료를 표시한다. 저장 후 실패는 닫고 동일 설정 재적용으로 복구한다.
+- 계좌별 scoped API와 입력 UI는 후속이다. NAS 소스 동기화/배포는 R7 누적 진행한다.
+
+## 2026-09-15 NAS 런타임 인증 R3e — 실제 모의 owner, 배포 전
+
+- build `2026.09.15-runtime-credentials-r3-mock-owner-v1`: vault/HMAC 기반 모의계좌 prepare/apply를
+  실제 복수 계좌 owner에 연결했다. 동일 계좌의 client·큐·한도·UUID·run을 유지한다.
+- 신규 계좌는 별도 run·주문 OFF다. monitor ON은 초기 계좌 읽기/lease 확인 뒤 ACTIVE를 공개한다.
+- 준비 취소/TTL의 계좌 lock·후보 참조 해제, commit 전 이전 연결 복원, commit 후 fence/다음 키 복구와
+  이전 activation receipt 복구를 연결했다. 계좌 조회/인증/WS token 동시 작업은 2개로 제한한다.
+- 비동기 bootstrap은 시세 기동을 기다리게 하지 않으며 기본 주문 API는 검증된 admitted bundle만 사용한다.
+  main mock 시세 프로필은 계좌 owner에서 제외한다.
+- 키 비활성화·설정 PUT·scoped query/order·입력 UI는 후속이다. NAS 동기화/배포는 R7 누적 진행한다.
+
+## 2026-09-15 NAS 런타임 인증 R3d — 계좌 설정 CAS, 배포 전
+
+- build `2026.09.15-runtime-credentials-r3-account-settings-v1`: 검증 계좌별 운영 설정의
+  revision CAS·profile/binding 검증과 인증 GET을 구현했다.
+- 새 모의 계좌의 주문 OFF 설정을 binding/활성화 원장과 함께 저장하며 중복 활성 profile은
+  전체 트랜잭션을 롤백한다. 같은 계좌 갱신과 완료 replay는 기존 설정을 보존한다.
+- 두 DB 연결의 설정 갱신/계좌 활성화 경합을 회귀로 확인한다. 실제 계좌 적용 owner·설정 PUT·
+  키 교체 hooks·scoped API는 후속이며 NAS 동기화/배포는 R7 누적 진행한다.
+
+## 2026-09-15 NAS 런타임 인증 R3c — 계좌 bundle, 배포 전
+
+- build `2026.09.15-runtime-credentials-r3-bundle-v1`: 기존 모의 연결의 client·큐·실행·수신을
+  계좌/run/profile 고정 bundle로 조립하고 실제 시작/종료 작업을 소유한다.
+- 계좌 불일치는 binding 확정 전에 거절하고 인증/monitor 시작 실패는 모의 기능만 닫는다.
+  공개 health·시작 로그는 안전한 오류 코드만 사용한다.
+- WS 신원은 연결 bundle에 고정하며 주문 응답은 시작 당시 gateway를 유지한다.
+- 실제 키 교체 owner·복수 계좌 활성화·scoped API는 후속 R3이며 NAS 동기화·배포는 R7 누적 진행한다.
+
+## 2026-09-15 NAS 런타임 인증 R3b — 모니터 종료·DB 소유권, 배포 전
+
+- build `2026.09.15-runtime-credentials-r3-monitor-fence-v1`: 모의 모니터 시작/복구/직접 조회/종료
+  task 수명을 소유하고 실제 조회·저장을 drain한 뒤 임대를 해제한다. heartbeat는 복구와 독립 실행한다.
+- 모의 WS 종료는 실제 토큰 thread/socket 종료를 기다리며 닫는 중 이벤트를 전달하지 않는다.
+  모의 REAL data=null은 빈 batch로 처리한다.
+- 운영 repository의 임대/scope 검사와 intent/event/account snapshot 쓰기를 같은 DB 트랜잭션으로 묶었다.
+  owner 교체 뒤 늦은 주문 성공 응답은 기존 SUBMISSION_UNKNOWN을 덮지 않는다.
+- 실제 키 교체·복수 계좌 bundle/scoped API는 다음 R3 부분이며 NAS 동기화·배포는 R7 누적 진행한다.
+
+## 2026-09-15 NAS 런타임 인증 R3a — 모의 명령 장벽, 배포 전
+
+- build `2026.09.15-runtime-credentials-r3-command-barrier-v1`: gateway의 서버 소유 주문/취소 task,
+  HTTP 취소 보호·접수 gate·실제 drain과 정상 서버 종료 대기를 구현했다.
+- ExecutionRuntime의 동기 작업/종료 직렬화, 느린 전송 중 별도 heartbeat 유지,
+  신규 주문 OFF와 현재 account/run/owner에 한정한 임대 해제를 추가했다.
+- R3 전체는 진행 중이다. monitor/WS drain·DB 소유권 fence·계좌 bundle/키 교체·scoped API는 후속이며
+  운영 계좌 교체는 아직 연결하지 않았다. NAS 동기화·배포는 R7 누적 진행한다.
+
+## 2026-09-15 NAS 런타임 인증 R2b — 준비·적용 API, 배포 전
+
+- build `2026.09.15-runtime-credentials-r2-api-v1`: 프로필 생성 및 준비/상태/적용/취소 API,
+  5분 TTL·프로필 직렬화·서버 소유 task·request digest/revision 충돌 검사 구현.
+- 파일 commit 뒤 binding/활성화를 원자 기록하고 runtime revision 확인 후 ACTIVE를 표시한다.
+  commit 이후 실패는 복구 필요로 보존하며 재시작 후 DB 최종화는 멱등 처리한다.
+- 키 입력은 HTTPS와 명시 trusted proxy만 허용하며 요청 원문을 오류에 포함하지 않는다.
+- 공통 R2는 로컬 완료다. 실제 공급자 owner·계좌 runtime·입력 UI는 R3 이후 연결하며,
+  미연결 공급자는 prepare를 거절한다. NAS 소스 동기화·재빌드는 R7에 누적 진행한다.
+
+## 2026-09-15 NAS 런타임 인증 R2a — 공통 REST 장벽, 배포 전
+
+- build `2026.09.15-runtime-credentials-r2-barrier-v1`: 후보 OAuth/계좌 확인을 기존 요청
+  한도와 순위 우선 큐에 연결, 실제 HTTP·DB·token drain, 취소된 교체/재개/종료 대기 보호.
+- 인증 교체 후 캐시 세대를 분리한다. 초기 기존 캐시 키와 정상 요청 정책은 유지한다.
+- 외부 prepare/apply API와 계좌 runtime은 아직 연결 전이다. R2 전체 완료는 아니다.
+- 최종 회귀 192개 실행(191 통과, POSIX 권한 1개 생략), exit=0.
+
+## 2026-09-15 NAS 런타임 인증 R1 — 로컬 구현, 배포 전
+
+- build `2026.09.15-runtime-credentials-r1-v1`: 전용 암호화 키 저장, 초기 env 이관,
+  파일 분실/손상 복구 fence, 기동 설정 합성과 중앙 v19 프로필·멱등 계좌 활성화 원장.
+- DB 실패는 binding과 활성화를 함께 롤백한다. 키 입력 UI와 실행 중 교체는 다음 단계다.
+- NAS 동기화 전. 회귀 167개 실행(166 통과, POSIX 권한 1개 생략).
+
+- `2026.09.15-runtime-settings-r0-v1`: NAS 운영 설정을 변경 필드만 저장하고 revision 충돌을 확인한다.
+  DB 저장 실패 시 기존 실행값을 유지하고 저장 후 적용 실패는 복구 대기로 구분한다.
+  NAS·뉴스 설정 조회/저장과 API 연결 테스트를 백그라운드로 옮겼다.
+  API 키 런타임 변경·다중 계좌 연결은 다음 구현 단계다.
+
+- `2026.09.15-shadow-candidate-settings-v1`: Shadow 후보 감지의 환경변수 시작 시점 종속을 제거했다. NAS를 재시작하지 않고 앱에서 감지를 켜고 끄며 완료봉 돌파의 주요 조건과 순위 자료 유효시간을 변경한다. 설정은 NAS 운영 DB에 남아 다음 기동에도 복원되고 잘못된 전략 객체는 저장 전에 거부된다. 메인 도구막대의 `Shadow 후보`와 `전략 연구` 글자 버튼은 30초 간격 선택 왼쪽의 작은 보라색·청록색 네모로 바꾸고 접근성 이름과 툴팁을 유지했다.
+
+- `2026.09.15-upper-limit-basis-v1`: 키움이 장후 등락률 기준을 0.00%로 전환한 뒤에도 이전 `ka10001.upl_pric`과 현재가가 같아 상한가 배경·굵은 글씨가 남던 문제를 수정했다. 중앙·직접 실시간은 추적 종목의 `0g` 상한가·하한가·기준가를 함께 구독하고 NAS 최신 문서와 앱 이벤트로 전달한다. 현재가와 제한가격이 같아도 등락률이 가격제한폭과 모순되면 서로 다른 기준 구간으로 판정해 화면 강조와 새 상한가 사실을 만들지 않는다.
+
+- 2026-09-15 OCR 종료 교착 수정: 테스트 앱이 실제 사용자 데이터 경로 대신 비어 있는 워크트리 `data/ocr_models`를 보아, 이미 설치된 모바일 모델을 무시하고 Hugging Face의 88MB `PP-OCRv5_server_det` 확인·로드에 들어가던 문제를 수정했다. OCR은 `AppPaths`가 가리키는 사용자 데이터의 모바일 detector와 한국어 recognizer를 사용한다. Paddle의 모델 준비·predict처럼 QThread 중단 요청을 확인하지 않는 native 호출이 남아 있어도 앱 종료 시 OCR 보조 worker를 제한시간 뒤 정리해 창 종료를 무기한 막지 않는다. 2026-09-15 05:05 운영 로그의 server 모델 요청과 종료 후 잔류 PID로 원인을 확인했으며 OCR·메인 창 회귀 48개가 통과했다.
+
+- `2026.09.15-journal-minute-coverage-v2`: 매매일지 분봉 보완이 대상일 봉 일부만 받아도 `확정`으로 기록해 이후 봉을 다시 받지 않던 오류를 수정했다. 중앙 분봉 응답에 장후 수집 완료 근거를 추가하고, 앱은 그 근거가 있을 때만 전체일 확정한다. v2는 구 빌드가 `kind=minute`만 남긴 완료 문서를 이미 완료된 것으로 건너뛰던 호환 오류도 수정해, 전체 연속조회를 다시 수행하고 `window_closed/session_finalized`가 있는 문서로 승격한다. 2026-09-14 이후 기존 확정 기록 중 완료 표식이 없고 마지막 봉이 19:59보다 이른 자료는 자동으로 `일부`로 내려 다시 보완한다. 뉴스 상세는 같은 기사를 백그라운드 갱신할 때 스크롤 위치를 유지하고, 비AI 표시는 최종 판단→판단 이유→핵심 문장 순으로 정리했다. 원문 후반의 대상 회사 확정 사건을 보수적으로 보조 판정하는 2,000자 제한 검사도 포함한다.
+
+- `2026.09.15-selected-news-priority-v1`: 앱에서 사용자가 선택한 종목을 NAS 뉴스 작업기의 현재 우선 종목으로 전달한다. 실행 중인 작업은 중단하지 않고 다음 claim부터 해당 종목의 BODY와 후속 AI·RULE을 먼저 처리한다. 그 다음은 종목별 watchlist 최신 BODY, 공통 query-set 최신 BODY, 나머지 AI·RULE 순이며 새 기사 유입 사이에는 기존 누적분을 계속 처리한다. NAS 정기 watchlist 갱신은 현재 사용자 선택을 바꾸지 않는다. 뉴스창 하단의 제목·요약 규칙 및 기본 브라우저 안내 문구도 제거했다.
+
+- `2026.09.15-news-current-rule-view-v1`: AI 결과가 실제로 저장된 기사에만 `AI 원문 분석`을 표시한다. 최종 판단과 이유를 상세 상단에 두고 저장 원문은 하단으로 이동했으며, 공급계약 구조화 근거는 해당 판정 자료가 있는 기사에만 표시한다. 선택 종목의 기존 watchlist 기사도 최신 저장 본문을 읽어 현재 비AI 분류 규칙으로 조회 시 다시 계산한다. 원문·기사 판본은 덮어쓰지 않고 BODY·AI 작업도 재예약하지 않는다.
+
+- `2026.09.15-selected-news-1m-v1`: 사용자가 뉴스창에서 선택해 보고 있는 한 종목은 저장된 최종 확인이 1분 이상 지났을 때 NAS에 다시 요청하고, NAS도 해당 종목의 공급자 확인이 1분 이상 지났으면 즉시 새로 수집한다. 열린 뉴스창의 자동 확인도 1분으로 맞췄다. 전체 `news_watchlist`의 NAS 백그라운드 5분 주기와 공통 검색어 주기는 유지해 누적 종목 전체가 1분 요청으로 바뀌지 않게 했다. 백그라운드 결과로 목록을 다시 그릴 때는 기사 identity로 현재 선택 행을 복원하고 이미 표시한 NAS 본문 근거를 유지한다.
+
+- `2026.09.15-news-direction-calibration-v1`: 고정 뉴스 corpus 35,670건과 본문 revision 49,835건을 다시 전수 평가했다. 수급·공매도·거래대금 순위와 잘린 다종목 시장 요약을 제외하고, 유상증자처럼 실제 기업 사건이 있는 시총 반응 기사는 보존한다. 비AI 호재·악재 판정은 제목·검색 요약을 우선하며, 판단 근거가 없을 때만 대상 회사가 직접 등장한 정제 원문 도입부의 확정 사건을 보조로 쓴다. 목표가 상향·매수 의견·수혜와 계약 지연·재무 부담 등 명시적 표현을 보강했고, 기존 명확한 호재·악재를 원문 배경이 반대로 뒤집지 못하게 했다. 기사 대신 언론사 법적 고지만 추출된 본문 revision 937건은 빈 본문으로 판정한다.
+
+- `2026.09.15-ranking-boundary-catchup-v1`: NAS 시작 직후 순위 수집이나 키움 재조회가 진행되는 동안 00초·30초 경계를 지나면 해당 회차를 통째로 건너뛰던 문제를 수정했다. 스케줄러는 정확한 경계 초에 실행됐는지가 아니라 현재 시각이 속한 30초 회차가 마지막 처리 회차와 다른지를 비교하므로, 수집 완료 직후 새 회차를 즉시 따라잡는다.
+
+- `2026.09.15-ranking-startup-latency-v1`: NAS 재기동 시 다음 30초 경계까지 순위 수집을 시작하지 않아 앱이 전일 스냅샷을 최대 재시도 시간 동안 기다리던 문제를 수정했다. NAS는 시작 즉시 현재 30초 회차를 수집한다. 키움이 최신 `dt/tm`과 20행을 주면서 일부 행의 종목코드·종목명을 비우는 갱신 중 응답도 NAS에서 완성본이 올 때까지 재조회하고, 끝내 완성되지 않으면 그 회차를 저장하지 않는다. 앱도 이전·부분 NAS snapshot을 중앙 DB에만 0.25초 2회→0.5초 2회→이후 0.75초 간격으로 재확인해 NAS가 2~3초 뒤 저장한 완성본을 즉시 반영한다. 제한 안에 최신 완성 회차를 받지 못하면 직전 자료를 새 결과로 적용하지 않고 이미 표시된 정상 순위표를 유지하며 다음 회차까지 `API: 재조회`로 표시하지 않는다.
+
+- `2026.09.15-ranking-snapshot-freshness-v1`: `ka00198` 조회순위가 야간에도 계속 바뀌는 실제 응답을 기준으로 NAS 수집을 08:00~20:00에서 24시간 30초 주기로 확장했다. NAS→키움과 앱→NAS 모두 응답 `dt/tm`이 목표 회차보다 오래되면 0.25초 2회, 0.5초 2회, 이후 0.75초 간격으로 제한 재확인한다. 앱의 NAS 재확인은 중앙 DB GET만 사용하며 키움 TR로 우회하지 않는다. 순위 캐시는 첫 0.25초 재조회가 실제 요청에 도달하도록 0.2초로 줄였고, 실시간 체결·TOP20 거래대금 수집시간은 기존 시장 관측 구간을 유지한다.
+
+- 메인 순위 예약 타이머를 정확한 경계 시각에만 실행하도록 바꿨다. 기본 타이머가 30초 경계 직전에 일찍 깨어 같은 NAS 순위 스냅샷을 연속 조회하고, 첫 순위 변경 안내를 두 번째 `순위 변동 없음` 문구로 즉시 덮어쓰던 문제를 수정했다.
+
+- `2026.09.14-news-reaction-classification-v1`: NAS 최근 2일 화면용 뉴스 표본을 재평가해 이미 발생한 종목·시장 가격 움직임 기사 481건을 `시세 반영·시장 요약`으로 제외한다. 환율·유가·금리와 실적 전망의 급등락을 종목 주가 움직임으로 오인하지 않도록 문맥을 분리해, 영업이익 전망 하향 기사 10건이 함께 제외되던 문제를 해소했다. 범용 `투자`, `전망`을 인수합병·실적 분류어에서 제거해 `투자심리`와 `증시 전망`의 잘못된 세부 분류도 줄인다.
+
+- `2026.09.14-sor-comparison-summary-v1`: SOR 실시간과 KRX/NXT 분봉 조회 거래대금 비교 API에 완전 비교 수, 부분 비교 수, 범위별 건수, 합계 차이율·평균 차이율·평균/최대 절대 차이율을 추가한다. KRX와 NXT가 모두 보완된 분만 주 통계에 포함해 한 거래소만 조회된 중간값이 추이를 왜곡하지 않게 한다. NAS SOR→로컬 KRX/NXT→NAS SOR 전환의 첫 누적값은 기준점으로만 쓰는 양방향 회귀도 고정했다.
+
+- `2026.09.14-sor-source-contract-v1`: 키움 `_AL` 0B·0w를 KRX가 아닌 SOR 통합시세 원본으로 보존한다. 중앙 통합 분봉 조회는 같은 분에 SOR 한 벌을 우선하고 SOR가 없을 때만 KRX+NXT를 합쳐 세 흐름의 중복 거래대금을 막는다. SOR와 상세 구독이 바뀌면 누적 기준을 다시 잡고 이전 출처의 늦은 틱을 제외한다. 분봉 보완 시 SOR 실시간 거래대금과 KRX/NXT 조회 추정 거래대금의 분별 차이·차이율을 저장한다. 앱 상태 문구는 `나스 실시간 체결 구독 중 · N종목`으로 표시한다.
+
+- `2026.09.14-realtime-type-budget-v1`: 중앙 실시간의 0B 체결과 0w 프로그램매매를 서로 독립된 타입별 200개 한도로 계산한다. 0B는 모든 요청 종목을 먼저 보장하고 남는 자리에 TOP20, 실제 보유·매수 종목, 나머지 앱 요청 순으로 KRX/NXT 상세를 배정한다. 화면의 기존 `중앙 실시간 체결 구독 중 · N종목` 문구와 중복 제거 종목 수 의미는 유지한다.
+
+- 메인 순위표의 등락률 칸은 키움 기본정보의 실제 상한가 가격과 현재가를 비교해 상한가에 머무는 동안만 배경과 굵은 글씨로 강조한다. 별도 문구를 붙이지 않고 상한가가 깨진 첫 실시간 체결에 강조를 제거하며, 호가 단위 반올림으로 등락률이 29.97%처럼 보여도 정확히 판정한다. 기본 설정의 표시 형식에서 강조를 끌 수 있다.
+- 기본 설정 저장 뒤 예약된 Google Drive 업로드가 아직 생성되지 않은 대상 상태를 읽어 프로그램 오류 창을 띄우던 초기화 누락을 수정했다.
+
+- `2026.09.14-realtime-sor-budget-v2`: 키움 실전 토큰은 새 WebSocket 로그인 때 기존 연결을 `1000 Bye`로 종료하므로 중앙 실시간을 단일 연결로 유지한다. 모든 TOP20·당일/익일 15% 코호트는 최소 한 개의 0B 체결을 보장하고, NXT 가능 일반 코호트는 SOR 통합 코드로 등록한다. TOP20·실매수 편입 종목은 남은 190개 안전 예산 안에서 KRX/NXT venue 상세와 0w 프로그램을 우선 등록한다. REG/REMOVE는 0.25초 간격으로 보낸다. KRX 카탈로그 원본에 같은 종목코드가 중복돼도 최초 행 한 건으로 정규화해 PostgreSQL 일괄 저장의 중복 키 실패를 막는다.
+
+- `2026.09.14-realtime-socket-pool-v2`는 연결별 200개 제한을 피하려 여러 실전 WebSocket을 사용했으나, 실제 키움이 같은 토큰의 이전 연결을 종료하는 제약이 확인되어 `realtime-sor-budget-v1`로 대체됐다.
+
+- `2026.09.14-realtime-subscription-groups-v1`: 당일·익일 15% 조건 코호트와 TOP20 합집합이 커져도 키움 실시간 그룹 200종목 제한을 넘지 않도록 중앙 0B·0w 등록을 타입별 100개 단위 그룹으로 분할한다. 전체 희망 목록을 다시 보낼 때는 `refresh=0`으로 각 그룹을 교체하고 사라진 꼬리 그룹은 `REMOVE`하여 순위 교체 종목이 누적되지 않게 한다. PC 직접 실시간 경로도 전체 목록 갱신 시 기존 그룹을 교체한다.
+
+- `2026.09.14-ranking-priority-news-body-v1`: NAS 재시작 직후 종목 카탈로그 갱신이나 새 TOP20·계좌 편입 종목의 NXT 여부 조회가 느려져도 30초 순위 조회·저장을 기다리게 하지 않는다. TOP20 KRX 실시간 구독은 즉시 반영하고, NXT 판별·계좌 종목 합류·기본정보 보완은 최신 순위 기준의 단일 background 작업으로 이어간다. 이 변경은 아래 원문 기반 뉴스 관련성·공급계약 규칙 v2와 함께 배포한다.
+
+- `2026.09.14-news-body-relevance-v1`: NAS 원문이 있는 중앙 뉴스는 제목·요약과 원문 도입부를 함께 사용해 이미 발생한 장중 급등·급락·가격대 돌파 기사와 새 공시·계약·실적 사건을 구분한다. 공급계약 규칙 v2는 계약 문맥과 같은 문장에 있는 금액만 선택하고, 시세 기사 뒤쪽의 과거 계약과 수주잔고를 새 사건으로 만들지 않는다. 실제 NAS 최근 표본에서 가격 반응 기사 관련성 통과가 57건에서 5건, 공급계약 사건이 38행에서 12행, 주가의 계약금액 오인이 35행에서 0행으로 줄었다.
+
+- `2026.09.14-news-publisher-policy-v1`: 뉴스 제공처를 원문 URL 기준 `publisher_domain`과 정규화된 `publisher_name`으로 중앙 기사에 기록한다. 기존 화면 숨김 필터와 별도로 NAS 원문 추출·규칙 분류·자동 AI 처리 제외 목록을 운영 설정과 뉴스 설정 화면에 추가했다. 제외 기사의 제목·링크 관측은 유지하고 기존 작업은 소급 삭제하지 않는다.
+
+- `2026.09.14-mock-krx-after-probe-v1`: 키움 모의투자의 새 KRX 애프터 지원 여부를 실제 broker 응답으로 확인할 수 있도록 인증된 수동 KRX 지정가 주문을 16:00~20:00에도 허용한다. 이를 지원 확정으로 기록하지 않고 별도 probe 정책으로 남기며, NXT·시장가·15:20~16:00 신규 주문 차단은 유지한다. 장중 검증표는 15:20 종가 단일가, 15:30 주문접수, 15:40 NXT·KRX 장후종가, 16:00 KRX 애프터 합류와 SOR 실제 전송 venue 확인을 구분한다.
+
+- `2026.09.14-nas-owned-automatic-market-data-v5`: 앱이 켜져 있지 않아도 후보 연구 자료가 이어지도록 자동 시장자료 생산을 NAS로 옮겼다. TOP20 신규 편입과 실제 계좌 매수 체결 종목은 기본정보·NXT·등장 전 분봉에 더해 외국인/기관 수급과 수정주가 기준 역사적 신고가를 낮은 우선순위로 수집한다. 체결 종목은 시장자료 수집 대상에만 더하고 TOP20 순위·지수에는 넣지 않는다. 프로그램매매 `0W`는 중앙 원본으로 최신 스냅샷을 남기고, 장후 `ka10045`·`ka90008` 확정 보완은 NAS가 종목당 한 번 수행한다. 5·20·250일 신고가와 1~5 순위 기준도 NAS가 자체 주기로 갱신하며, 장후 코스피·코스닥 분봉·일봉도 NAS가 확정한다. 앱의 기본정보·NXT·신고가·역사적 신고가·수급·프로그램·시장지수·매매일지 일봉 서비스는 중앙 저장값을 읽는다. 매매일지의 오늘+직전 거래일 최초 차트도 중앙 최근 분봉 API를 사용하여 정상 NAS 연결 상태에서 `ka10080`을 만들지 않는다.
+
+- `2026.09.14-db-first-market-read-v2`: 데이터 생산 책임을 NAS로 옮겼다. NAS 자율 TOP20 수집기는 새 편입 종목의 중앙 기본정보와 NXT 문서를 먼저 확인하고, 없는 자료만 `ka10001`·`ka10100`으로 준비한다. 종목이 순위에 처음 나타났을 때 등장 전 KRX·NXT 분봉도 NAS가 `through_entry` 표식과 함께 한 번 보완하며 장후 전체일 확정과 구분한다. 앱의 기본 `5` 순위·당일 분봉·확정 일봉은 중앙 저장 API를 먼저 읽고, 중앙 분봉이 비어 있다는 이유로 앱이 `ka10080`을 발생시키지 않는다. 모든 준비 작업은 기본 순위 조회 뒤 백그라운드에서 실행한다.
+
+- `2026.09.14-db-first-market-read-v1`: NAS 모드에서 순위 뒤 분봉 보완이 저장된 중앙 KRX·NXT 분봉을 먼저 읽고, 중앙 행이 전혀 없거나 연결이 끊긴 경우에만 `ka10080`을 호출한다. 완료 coverage가 있는 일봉은 기존처럼 중앙 아카이브를 우선하며, 저장된 기본정보와 NXT 가능 여부도 범용 조회가 키움 TR보다 먼저 반환한다. 중앙 또는 키움에서 받은 대량 분봉의 로컬 SQLite 저장과 동기화 표식 기록은 기존 `MarketCacheWriter`로 옮겨 메인 Qt 스레드를 막지 않는다. 이전 null 실시간 frame 수정도 이 누적 빌드에 포함하며 NAS 소스만 준비하고 장중 서버는 재빌드·재시작하지 않는다.
+
+- `2026.09.14-null-realtime-frame-v1`: 08:55 KRX 사전 구독 직후 중앙 키움 WebSocket 처리에서 `NoneType is not iterable`로 원본 연결이 끊기고, 데스크톱이 즉시 60초 로컬 페일오버를 반복한 문제를 수정했다. 원본 프레임은 저장되지 않았지만 같은 시각 경로에서 `REAL data=null`을 넣으면 동일 예외가 재현됐다. HTTP 뉴스 동기화와 NAS health는 계속 정상이었으므로 NAS 네트워크 장애로 기록하지 않는다. 체결·계좌·시장지수·프로그램·VI 파서와 시장 이벤트 관측은 null data를 빈 batch로 무시하며 정상 데이터 계약은 유지한다. 빈 프레임은 정상적인 `현재 체결 정보 없음`으로 내부 처리해 경고를 표시하지 않고, 실제 페일오버 때만 원인을 단정하지 않는 `실시간 데이터를 로컬 경로로 임시 수신 중입니다`를 표시한다. NAS 소스만 준비하고 장중 서버 재빌드·재시작은 하지 않는다.
+
+- `2026.09.14-main-ui-cache-writer-v1`: 장중 메인 Qt 스레드에서 매초 20여 종목 분봉과 현재가·당일고가를 SQLite에 동기 저장해 50~110ms씩 화면을 멈추던 경로를 전용 단일 writer thread로 이동했다. 실시간 순위 조회·체결 수신·표 갱신 주기는 유지한다. 종료 시 대기 queue를 비우고, 저장 실패분은 그 사이 수신한 최신 값을 덮지 않게 복구한다. 최신 코드 재시작 뒤 WM_NULL 600회 측정에서 수정 전 p99 45.93ms·15ms 초과 35회가 수정 후 p99 6.04ms·15ms 초과 1회로 감소했다. 계좌 범위가 있는 체결 스냅샷은 scope를 포함한 v2 키를 만들고 최초·보충 저장 모두 명시 scope를 전달해 반복 실패와 5회 재시도 지연을 제거했다.
+
+- `2026.09.14-content-sync-idempotency-v1`: 뉴스 프로세스의 중앙 콘텐츠 동기화가 성공한 문서 hash manifest를 보존해 변경분만 업로드하고, pull 반영을 다시 echo하지 않는다. 기존 seeded 설치는 성공한 시작 pull 뒤 manifest가 없을 때 현재 자료를 한 번 baseline으로 이전한다. 실패한 batch는 재시작 뒤 재시도하며 중앙 SQLite/PostgreSQL은 동일 문서의 `updated_at`을 유지해 불필요한 재다운로드를 막는다. 동기화는 기존 별도 뉴스 프로세스에서 실행되어 최우선 실시간 순위 API 경로를 지연시키지 않는다. 누적 배포 후보 build ID를 확정했으며 NAS 동기화·이미지 빌드는 아직 수행하지 않았다.
+
+- `2026.09.13-session-journal-sync-v1`: 누적 배포 후보 build ID를 확정했다. 아직 NAS 동기화·이미지 빌드 전이다.
+
+- `2026.09.13-a4b-delete-namespace-0c`: 뉴스 DB v3가 계좌별 연결의 삭제 revision과 source provenance를 보존하고, v2 중앙 key를 불변 origin scope 기반 SHA-256으로 만든다. 일지 DB v8은 legacy source owner/content hash·관측/수정시각·충돌 상태와 `(collection,origin owner,document_key)`별 tombstone을 기록한다. v7의 v1 tombstone은 legacy scope로 이전하고 복원 불가능한 v2 scope만 unknown으로 격리한다. scoped 편집·reset은 실제 v2 collection을 사용하며 v1/v2 기존행과 삭제 scope를 검사해 namespace 교차 갱신을 막는다. 중앙 입력 검증 완료 뒤 `journal_news_links_v2=true`를 광고한다. NAS 배포와 build 식별자는 변경하지 않았다.
+
+- `2026.09.13-a4b-compatibility-0b`: 중앙 v1 콘텐츠 API가 `journal_sync_states`를 허용해 현 앱의 첫 일지 동기화 404를 제거했다. 검증 계좌 뉴스 연결은 독립 `journal_news_links_v2` capability로만 협상하며 0c 삭제 계약 전인 현 서버는 false를 광고한다. 구 NAS의 optional 컬렉션 404는 pending 진단으로 남기고 기사·AI·테마 처리를 계속하며, 삭제 상태를 읽지 못한 일지 sync는 merge/upload를 보류한다. 401/500/timeout은 기능 부재로 숨기지 않는다. NAS 배포와 build 식별자는 변경하지 않았다.
+
+- `2026.09.14-mock-order-session-gate-s6`: broker-backed 모의 신규 주문은 공통 시행일별 세션 정책에 따라 KRX 정규장 연속매매 `09:00~15:20`의 수동 LIMIT만 허용한다. 장후종가·KRX 애프터·NXT·동시호가 주문은 session/phase/schedule/profile 근거를 포함한 `UNSUPPORTED` 원장 event로 거절한다. 취소·broker 대조·재연결 복구·늦은 체결은 시간 gate에서 제외하며 정규장 잔량을 시각만으로 종료·자금 해제하거나 16시에 자동 재주문하지 않는다. 실제 모의 주문 전송과 NAS 배포는 수행하지 않았다.
+
+- `2026.09.14-research-session-profiles-s5`: 연구 요청·RunSpec·제한 검색·forward profile에 버전 있는 `krx-regular/v1`, `krx-after/v1`, `krx-full-day/v1` 세션 계약을 연결했다. 전체일도 15:30~16:00 고정가 구간을 제외하고 16:00에 Factor와 pending 연속성을 새로 시작한다. 다음 1분봉 전 공백·거래일 변경은 체결/outcome을 완료하지 않으며, 단일가/VI 호가 근거 없는 봉의 next-open과 가상 손절 경로는 미지원으로 남긴다. 필드가 없던 기존 요청과 완료 run/manifest/hash는 기존 해석과 식별자를 보존한다.
+
+- `2026.09.14-journal-session-classification-s4`: 시행일 이후 매매일지 자동분류는 원 체결 계좌 scope·venue·event time과 공통 시간표의 정적 구간을 `trade-analysis/v2` 근거로 고정한다. KRX 15:20~15:30 종가 단일가만 정규장 종가베팅 후보이며, 15:30~15:40 장후종가 주문접수·15:40~16:00 장후종가 체결·16:00~20:00 애프터는 정규장 종가매매로 분류하지 않는다. NXT 동적 phase와 venue 미확인은 UNKNOWN/일반 장후로 유지하며 수동 유형·메모·묶음은 덮어쓰지 않는다. 차트는 15:30 정규장 종가와 20:00 전체일 최종가를 구별하고, 20:05 자동 조회는 국내 전체 거래 종료 뒤 실행됨을 표시하며 실제비용 0건은 정산 대기로 남긴다. 집중 84개와 인접 trade 116개·journal 101개·market session 18개가 통과했다.
+
+- `2026.09.14-market-session-finalization-s3`: 시행일부터 KRX 전체일 분봉·차트용 일봉을 NXT 가능 여부와 무관하게 20:00 종료 후 20:05 보완하며, 15:30 정규장 종가와 전체일 확정을 분리한다. coverage는 요청 구간 종료(`window_closed`)와 성공한 세션 보완(`session_finalized`)을 별도 표시한다. 마지막 19:59 체결이 없어도 성공한 전체 조회와 대상일 실제 봉을 완료 근거로 사용하지만, 조회 실패·빈 대상일 자료·부분 수집을 0거래로 만들지 않는다. TOP20 일봉·시장 비교는 기존 KRX 정규장 09:00~15:29 합계를 유지하고 분·5분·60분 조회는 전체일 08:00~20:00 범위로 명시한다. 시행 전 확정 정책과 기존 `krx-regular/v1` 연구 입력은 유지한다. 집중·인접 회귀 119개가 통과했다.
+
+- `2026.09.14-market-session-subscription-s2a`: NAS 중앙 수집과 PC 직접·장애전환 실시간 worker가 시행일별 공통 정책으로 KRX/NXT 0B venue 목록을 갱신한다. 실전 KRX는 08:55에 준비하고 시행일 이후 현재 요청 종목을 20:00까지 KRX 관측 대상으로 유지하며, NXT 적격 목록은 기존 08:00~20:00 `_NX` 구독에만 사용한다. 15:20·15:30·15:40·16:00 경계는 정상 메시지가 계속 와도 정책 서명 변경으로 refresh되고, 15:30 KRX 정규장 종가 확정과 20:00 cohort 만료를 분리했다. mock 애프터, VI 호가 parser/storage, 주문, 최종화와 NAS 배포는 확대하지 않았다. 집중·인접 회귀 118개가 통과했다.
+
+- `2026.09.14-market-session-policy-s1`: 거래일 기준 `krx-nxt-schedule/2026-09-13`/`2026-09-14` 공통 정책을 추가해 KRX 정규장·장후 시간외종가·구 시간외단일가·신규 애프터를 구분한다. 기존 연구 reader와 NAS D4 shadow는 `krx-regular/v1`로 고정해 16시 이후 KRX 봉을 자동 소비하지 않는다. NXT 미확인 세부 phase와 mock 애프터 지원은 활성화하지 않았고, 구독·수집·DB·주문·NAS 배포는 후속 단계로 남겼다.
+
+- `2026-09-13 A4b design and boundary audit`: 직전 A4b 완료 판정을 정정했다. 실제 UI relay·묶음 편집에서 scope 누락, 일지 동기화 첫 API 404, 구 NAS 뉴스 capability 오판, 삭제 부활/v1 덮어쓰기를 재현했다. A3 직접 adapter도 현재 자격 재확인이 없다. 기존 구조의 수정 순서 0a~0c와 HTTPS 기존 계좌 대조·DPAPI 재검증·REST/WS 연결 계획을 `reports/A4B_DIRECT_WEBSOCKET_SCOPE_REVIEW.md`에 확정했다. 문서만 변경했으며 제품 코드·스키마·NAS·build 값은 변경하지 않았다. 아래 879개 회귀 통과는 당시 테스트 범위의 역사적 기록이며 위 오류까지 해결됐다는 의미가 아니다.
+
+- `2026.09.13-a4-journal-news-scope-v1`: 뉴스 DB v2가 기존 매매일지 뉴스 연결을 legacy scope로 보존하면서 신규 연결을 실전·모의 계좌별로 저장한다. 매매일지→뉴스 프로세스 명령과 자동 분석 준비도 선택한 계좌 scope를 전달한다. NAS 동기화는 v1 `journal_news_link`에 legacy만, capability 협상된 `journal_v2_news_links`에 검증 계좌만 전송하며 두 경계의 잘못된 scope 문서를 수입하지 않는다. 매매일지 DB v7은 v1에서 읽은 원본 collection/key/revision을 기록해 구 앱이 같은 revision을 다시 올려도 삭제한 legacy 자료가 부활하지 않게 한다. 전체 핵심 회귀 879개(`494+385`)가 통과했다.
+
+- `2026.09.13-a4-realtime-account-scope-v1`: NAS main/mock 00·04는 시작 시 검증한 `ka00001` 지문과 FID 9201이 일치할 때만 익명 account scope를 붙여 전달하고 원문 계좌번호를 버린다. entry snapshot은 이벤트 scope로 저장한다. 매매일지는 저장된 실전·모의·legacy 계좌를 한 개씩 선택해 조회하고 선택 계좌와 후착 조회 결과가 다르면 저장하지 않는다. 검증 계좌의 fills/costs/reviews/setups/snapshots/enrichment/analysis/research links와 tombstone은 capability 협상 뒤 `journal_v2_*` 컬렉션으로만 동기화하며 v1은 legacy로 제한한다. 백업 복원은 지원 버전보다 최신 DB를 덮어쓰기 전에 거절한다. 전체 핵심 회귀 874개(`494+380`)가 통과했다.
+
+- `2026.09.13-a3-account-query-v1`: 중앙 서버가 시작 시 main Kiwoom 자격의 `ka00001` 신원을 검증하고 `kt00007/kt00015` 전용 v2 계좌 조회 세션에서 익명 scope, binding revision, 본문, cursor와 페이지 순서를 고정한다. 앱은 완료된 전체 페이지 묶음만 체결·비용으로 변환하며 20페이지 초과·잘못된 cursor·중간 context 변경·체결/비용 scope 불일치를 저장 전에 거절한다. NAS 조회 중단 시 검증된 직접 binding이 같은 계좌일 때만 첫 페이지부터 재시작하고, 다른 계좌나 미검증 fallback은 수입하지 않는다. 일반 시세 조회와 병행검증 경로는 유지하며 전체 핵심 회귀 870개(`492+378`)가 통과했다.
+
+- `A2b account-scoped journal artifacts`: 매매일지 DB v6가 기존 execution/group/revision/link 키와 사용자 복기·유형·뉴스 JSON을 바꾸지 않고 legacy scope를 부여한다. 신규 진입 스냅샷은 `snapshot:v2` 계좌 키와 명시 scope를 요구하며, 복기·자동보완 작업·분석 revision·연구 링크는 origin/canonical scope를 별도로 저장하고 계좌별로 조회한다. 같은 원천 키와 입력도 실전·모의 계좌 사이에서 합쳐지지 않는다.
+
+- `A2a account-scoped journal fills and costs`: 매매일지 DB v5가 기존 v4 체결·실제 비용을 `legacy/unknown/legacy-unassigned`로 보존하면서 origin/canonical 계좌 scope를 키에 포함한다. 신규 검증 계좌 쓰기는 명시 scope가 없으면 거절하고, 같은 주문번호·종목·시각도 계좌별로 별도 보존한다. 체결 key는 기존 legacy 값을 유지하고 신규 scope만 `fill:v2` hash를 사용하며 FIFO·비용 배분·과거 매수 조회·수동 묶음은 canonical scope를 넘지 않는다. 기존 중앙 문서는 legacy scope로 읽기 호환한다.
+
+- `A1 verified account identity foundation`: `ka00001`을 해당 real/mock 전용 REST client와 limiter로 호출해 원문 계좌번호를 메모리에서만 정규화하고 보호 키 HMAC 지문으로 지속 UUID를 발급한다. 중앙 스키마 v17은 환경별 registry와 credential profile binding revision을 저장하고 v18은 오프라인 로컬 UUID를 검증된 중앙 UUID에 연결하는 불변 alias를 추가한다. Windows 직접 프로필 binding mirror는 별도 DPAPI 파일에 최신 revision만 보존한다. 등록 명령으로 최초 UUID를 받은 뒤 기능 플래그를 켜면 mock 계좌 모니터 시작 전에 설정 UUID와 실제 인증 계좌를 대조한다. 보호 키·원문·App Key는 DB와 일반 로그에 저장하지 않는다.
+
+- `CR0b interrupted-trial and lease fencing`: 연구 DB v9가 trial 실행 시도를 과학적 결과와 분리해 사용자 중지·프로세스 손실을 `INTERRUPTED`로 보존하고 같은 trial을 재시도한다. 결과와 attempt 완료는 한 트랜잭션이며 job claim/renew/finish/result commit은 owner token과 generation을 확인한다. 시간 slice는 진행 중 trial을 자르지 않고 다음 시작만 막으며 GUI 자동 재개는 체크 해제·취소·종료로 해제할 수 있다. v2 실행 의미는 `historical_simulation`으로 고정했고 active job만 backlog 한도에 포함한다.
+
+- `CR0a limited-search identity and selection fix`: `limited_search/v2`가 전체 기준 전략·체결/비용·실제 평가 fold·구현 hash를 실험 ID에 포함하고 운영 자원 예산을 분리한다. 후보 선택은 TRAIN/VALIDATION만 사용해 OOS를 제외하며, 파라미터 조합은 전체 Cartesian list 생성 전에 상한을 검사한다. 기존 v1 결과는 보존한다. 인접 연구 회귀 54개 통과. 취소 재시도·lease/GUI 수명·실제 자원 제한은 CR0b에 남아 있다.
+
+- `2026-09-13 continuous research/account scope design review`: 지속 캠페인·개발/최종 검증·계좌 신원/context·단일 DB scope·v2 sync를 설계로 확정하고 Sol 구현 계획을 작성했다. 취소 재개·search identity·OOS 선택 등의 감사 결과를 기록했다. 이번 변경은 문서이며 제품 코드·DB·NAS 배포를 변경하지 않았다.
+
+- `R2 long-running research controls` (추가 당시 기록, 후속 감사로 한계 확인): 한 변수 비교·trial 뒤 CPU 휴식·GUI 재개를 추가했다. 취소 trial 자체는 재시도하지 않아 완료를 보장하지 못하며 CPU/메모리 상한도 보장하지 않는다. 2026-09-13 재검토 결정과 CR0 수정 계획을 우선한다.
+
+- `2026.09.13-o1-manual-mock-orders-v1`: 인증된 수동 API 요청만 모의계좌 지정가 주문으로 전송하는 O1 게이트웨이를 연결했다. `request_id`는 run 안의 멱등키이며 같은 요청의 재전송은 broker 주문을 반복하지 않고, 다른 주문에 재사용하면 거부한다. 전송·취소 직전에 모의계좌 네 REST 조회로 상태를 복구하고, 주문 transport는 모의 REST client의 1초 제한을 공유한다. 후보·전략 자동주문은 연결하지 않았고 `MOCK_ORDER_TRANSPORT_ENABLED` 기본값은 0이다.
+
+- `2026.09.13-o1-separated-mock-client-v1`: 실전 조회와 모의계좌 조회가 같은 `KiwoomRestClient`의 요청 잠금·호출 간격을 공유하던 배선 오류를 수정했다. 모의계좌는 별도 모의 App Key/App Secret, 보수적 1초 간격 REST client·account broker, `00/04` 전용 WebSocket을 소유한다. 실전 환경은 기존 0.2초 간격과 시세 WebSocket을 유지하며, 모의계좌 모니터는 실전 키가 없어도 독립 실행할 수 있다. 주문 transport는 계속 연결하지 않았다.
+
+- `2026.09.13-o1-account-monitor-v1`: 명시적으로 켠 mock 환경에서만 중앙 서버가 계좌 전용 REST broker와 단일 실행 임대를 시작한다. 시작 시 네 계좌 조회로 계좌·주문 상태를 복구하고, 비공개 `00` 체결은 broker 주문번호로 기존 intent를 찾아 대조하며 `04` 잔고 알림은 불완전한 현금값을 직접 쓰지 않고 전체 REST 재조회만 요청한다. 계좌번호와 `04` 원문은 일반 실시간 허브에 공개하지 않으며 주문 transport는 연결하지 않는다.
+
+- `2026.09.13-o1-account-recovery-v1`: 격리된 mock 계좌 조회 경계에 `kt00001` 주문가능금액을 더하고 `ka10075/ka10076/kt00018` 연속응답을 미체결·누적체결·보유수량 snapshot으로 변환한다. 00 실시간은 공식 단위체결 필드와 실제 체결번호를 우선하며, REST 누적체결과 뒤늦은 상세 체결을 별도로 추적해 재시작·수신 지연에도 수량을 이중 합산하지 않는다. 실제 계좌번호는 저장하지 않고 서버 시작·주문 자동 송신은 계속 연결하지 않는다.
+
+- `O2a forward evaluation foundation`: 전략/Family/Factor/정책·주 데이터 경로·mock 계좌·평가 기간과 데이터/시스템/성과 기준을 content hash 프로파일로 동결한다. V1 대조 통계와 O1 실행 event를 전진평가 근거로 조립하고 broker 순손익에서는 broker가 이미 반영한 비용을 다시 빼지 않으며 별도 누락 비용만 차감한다. 기준 `TBD`, 미완료 표본, 최대 허용치 위반을 BLOCKED/PENDING/FAILED로 구분한다. 통과 보고서도 주문이나 stage를 자동 변경하지 않고 O2a에서는 `approved_for_live` 전환을 거부한다. 프로파일·보고서·stage revision은 기존 중앙 문서 저장소에 content-addressed 내부 컬렉션으로 보존한다.
+
+- `2026.09.13-o1-mock-execution-v1`: 키움 공식 모의 환경의 KRX 현금 주문 계약을 별도 단발 transport로 고정했다. 주문은 기존 인증·호출 간격을 공유하지만 통신 오류 재시도, NAS→로컬 장애전환, 중앙·로컬 병행 비교를 사용하지 않는다. mock 전용 intent 상태기계가 전송 전 만료·계좌·현금/보유량을 검사하고 응답 유실은 재전송 없이 unknown으로 보존하며, 부분체결·취소 경합·오래된 대조 응답을 처리한다. 중앙 DB v16은 intent/event/account snapshot/runtime lease 원장을 SQLite/PostgreSQL에 추가했다. 서버 시작에는 주문 실행기를 연결하지 않아 실제 모의 주문은 아직 전송하지 않는다.
+
+- `R2 registered family extension and research jobs`: `krx_pullback_reacceleration/v1`을 두 번째 실제 Family로 등록해 strict KRX 완료봉의 고점 뒤 눌림과 현재 봉 재가속을 기존 TOP20·단일 포지션 모의 체결로 평가한다. 연구 생성 모드와 replay/simulation 환경을 분리하고 미등록 연산·live 실행을 거부한다. 로컬 연구 DB v8은 유한 작업의 queued/running/completed/failed/cancelled 상태와 실행 임대·불변 상태 event를 저장하며 완료된 같은 dataset/spec은 다시 탐색하지 않는다. 결과 변화는 화면 알림 대상으로만 제안하고 운영 전략은 변경하지 않는다.
+
+- `R1 limited research search`: 등록된 돌파 Family·Factor·soft parameter만 작은 seed 고정 grid로 탐색한다. 기본전략·무거래·민감도·명시한 Factor 제거·비용 스트레스를 기존 D7 시간순 평가로 실행하고 trial/time/동시 실행 1개의 예산, 실패·취소·부적격 사용량, 중단 후 중복 없는 재개를 연구 DB v7에 기록한다. 화면은 단일 최고 점수 대신 순손익·최대 낙폭·거래 수·활동일·판정 사유를 가진 모든 후보 카드를 표시하며 운영 전략은 변경하지 않는다.
+
+- `V1 NAS/direct validation metrics`: 기존 병행 대조기에 일치·값 차이·지연·누락·중복·역순·비교 불가 상태와 비교 가능 분모, queue skip/eviction, 미매칭 만료, bounded 도착 간격 p50/p95/p99/최대값을 추가했다. 공유 불변 참조 없는 변동 응답과 공급자 ID 없는 동일초 복수 사건은 불일치로 단정하지 않는다. 중앙 envelope의 source ref와 source clock 차이는 대조 로그에만 쓰며 NAS 주 입력과 화면 신호는 유지한다.
+
+- `H2 theme leadership research`: D5 테마 revision과 H1의 종목·시장별 1초 가격·거래대금으로 대장 순위, 가격 이탈/재도달, 거래대금 둔화/재가속을 계산한다. 데이터 단절은 `UNKNOWN`으로 보존하고 표시 대장 안정화와 원시 사건 시각을 분리한다. 진입 당시 대장·테마·Factor/가설 참조를 `entry-thesis/v1`으로 고정하며 네 대응 정책은 주문 권한 없는 연구 제안으로만 저장한다. 연구 DB는 v6이며 원시 호가가 필요한 잠김 상태는 출력하지 않는다.
+
+- `C1 context hypothesis research`: N2 공급계약 사실, D5 관계 revision, 전 거래일 확정 모멘텀, D4 장중 발견과 기존 Yahoo 지연 5분/일봉을 `context-candidates/v1` 가설로 정규화한다. 사실과 영향 추론을 분리하고 장중 관측에 따라 `UNCONFIRMED`·수급 확인·대장 확인·무반응·만료·기각을 개정하며, 응답 근거까지 `research.sqlite3` v5 불변 이력에 저장한다. 전 거래일은 명시 세션 연결만 허용하고 지연 해외자료를 초단위 동시 자료로 표현하지 않으며, 이 가설은 자동 진입 권한을 갖지 않는다.
+
+- `F1 TOP20 market regime research`: 동일 TOP20 범위와 시점에서 거래대금 집중·순위 교체·대장 지속·동일 세션 시각 대비 거래대금·대표 테마 확산·성숙한 3분 돌파 결과를 분모와 함께 계산하는 `market_regime/v1`을 추가했다. 네 유형과 `UNKNOWN`은 검증 전 실험 규칙이며 데이터 중단·0분모·미성숙 표본을 0점으로 바꾸지 않는다. 연구 export는 기존 NAS 테마 이력을 hash로 고정한 sidecar에 포함하고 run 종료 시점의 유형·이유를 연구 화면에 표시한다. 기존 후보·알림·모의 진입 조건과 주문 경로는 변경하지 않는다.
+
+- `D8 journal enrichment ledger`: 매매일지 자동보완을 대상·종류·입력 지문·정책 버전별 SQLite 작업 원장으로 영속화했다. 체결·비용·분봉 저장 성공 후 완료하고 정산 대기 0건은 partial로 구분하며, 재시작 시 중단 작업을 재검사한다. 조회 기간의 선택하지 않은 회차도 일봉·시장지수·사후 뉴스·수급·파생 분석을 최대 20건씩 보완한다. 사용자 복기는 유지하고 기계 판정 revision과 실제 체결↔연구 run/decision/snapshot/가설 링크를 별도 불변 표에 저장하며, 뉴스는 N1 revision과 실제 가용시각이 있을 때만 당시 근거로 인정한다. 전체 DB 백업·복원 뒤 새 표가 유지되는지 검사하며 Windows 파일 잠금이 남지 않도록 SQLite 연결을 명시적으로 닫는다.
+
+- `D7b paired baseline research`: 필터 없는 동일 돌파 Family와 관심순위 지속 Factor 적용 run을 같은 dataset·비용·체결·fold로 자동 실행해 candidate key별 공통/제외/추가 거래와 회피 손실·놓친 이익을 비교한다. 연구 DB v4가 완료된 두 run의 비교를 불변 저장한다. 앱의 `전략 연구` 창은 명시 JSON 요청을 검증하고 Windows 낮은 우선순위의 별도 프로세스에서 실행·취소·재개하며 fold 결과를 표시한다. 현재 미지원인 VI 주문 가능 여부와 부분체결은 보고서 limitation으로 남긴다.
+
+- `D7a chronological evaluation baseline`: `chronological_holdout/v1` 시간순 TRAIN/VALIDATION/OOS 명세와 warmup/gap/purge, final holdout 접근 이력을 추가했다. 연구 보고는 데이터 hash·strict KRX 봉·후보군·비용 출처/유효기간·사용자 지정 최소 거래/활동일을 먼저 검사하고, fold별 비용 차감 손익·기대값·payoff/profit factor·MDD·turnover·노출·거절/검열·NO_TRADE·사건 반응과 종목/일자/시간대 집계를 별도 `research.sqlite3` v3 불변 행에 저장한다. 미접근 OOS는 결과 수치를 저장하지 않는다.
+
+- `2026.09.13-d4-shadow-candidates-v1`: 중앙 스키마 v15에 shadow 판단·후보 불변 원장과 재시작 checkpoint를 추가했다. NAS는 명시 설정이 있을 때만 D3 KRX 완료봉 돌파 판단을 증분 실행하며 오래되거나 없는 TOP20은 후보를 막는다. 인증 후보 cursor API와 데스크톱 `Shadow 후보` 창을 추가했고 첫 목록은 무음, 이후 새 ACTIVE event만 PC 로컬 설정에 따라 알린다. 주문·체결·실제 매매일지는 변경하지 않는다.
+
+- `2026.09.12-d3c-paper-execution-v1`: D3b 판단을 실계좌와 분리된 단일 포지션 모의 실행기로 연결했다. 판단시각 뒤 시작하는 첫 KRX strict 봉 시가에서만 체결하며 명시적 슬리피지·수수료·매도세, 현금 예약, 체결·mark·미체결/보유 검열을 기록한다. 같은 봉의 손절·목표 동시 도달은 손절을 실제값으로 쓰고 낙관 범위를 함께 남긴다. T+1초는 미지원, 1/3/5/10분 outcome은 COMPLETE/PENDING/CENSORED로 구분하며 연구 DB는 v2로 확장했다.
+- `2026.09.12-d3b-breakout-research-v1`: 고정 D2 export를 검증해 읽고 `rolling_high_breakout/v1`·`rank_persistence/v1`과 `krx_bar_close_breakout/v1`을 가상시각 순서로 실행하는 첫 연구 경로를 추가했다. 모든 판단은 Factor 입력 revision, Snapshot, Decision, 상태 전이와 후보 중복 키를 별도 `research.sqlite3` v1 원장에 남기며, 같은 입력은 같은 run ID와 논리 결과 hash를 만든다. 모의 체결·주문·UI는 포함하지 않는다.
+- `2026.09.12-d3a-minute-revisions-v1`: 중앙 스키마 v14에 분봉 operation 처리 원장과 연구 export용 가용시각 인덱스를 추가했다. 실시간 1분 delta는 stable ID로 정확히 한 번 합산되고 같은 트랜잭션에서 누적 전체 봉 revision을 남긴다. 실제 시계가 분 종료+2초를 지난 뒤 마감하며, 구독 중간 시작·연결 공백은 partial로 분리하고 무체결 봉은 만들지 않는다. 고정 연구 export에 `minute_bar`를 추가하고 가상시각 기준 최신 KRX strict 마감봉 reader를 제공한다.
+- `2026.09.12-d2-fixed-replay-v1`: 중앙 스키마 v13에 고정 연구 export manifest와 revision membership을 추가했다. 인증 API가 최대 한 세션의 D1 revision ID 집합을 최초 DB snapshot에서 확정하고 stable cursor로 내보내므로 5,000개 초과·동일시각·추출 중 신규 수집에서도 기존 dataset이 변하지 않는다. 클라이언트는 count/hash/ordinal을 검증하고, 파일 export와 전략 없는 TOP20 종목순서·가상시계 재생을 제공한다.
+- `2026.09.12-d1-observation-history-v1`: 중앙 스키마 v12에 순위와 TOP20 편입의 불변 관측 원장을 추가했다. 최신 projection·메타데이터·revision을 한 트랜잭션으로 저장하고, 같은 관측의 캐시 재처리는 합치며 A→B→A 정정은 모두 보존한다. 신규 시각은 UTC timezone-aware로 저장하고 TOP20 편입은 원본 ranking 관측키를 참조한다. 저장 실패는 화면 조회 성공을 깨뜨리지 않고 `recording_gap`으로 기록하며 환경 변수로 새 이력만 중단할 수 있다.
+- `2026.09.12-news-target-performance-v1`: 실환경 스택으로 확인한 N3 회사명 판별 병목을 수정했다. 기사마다 전체 KRX 종목의 정규식을 다시 컴파일하지 않도록 빠른 부분문자열 선검사와 이름별 패턴 캐시를 적용하고, 페이지 단위 종목 연결 계산은 서버 이벤트 루프 밖에서 실행한다. 1회 스택 진단 설정은 제거했다.
+- `2026.09.12-server-stack-diagnostic-v1`: 두 차례의 뉴스 작업 속도 제한 뒤에도 NAS 서버의 단일 코어 점유와 health timeout이 계속되어, 기동 15초 뒤 모든 Python 스레드 스택을 컨테이너 로그에 한 번 기록한다. 원인 함수 확인 후 진단 설정은 제거한다.
+- `2026.09.12-news-worker-fairness-v1`: 50ms 간격으로도 실환경 누적 뉴스 작업이 단일 코어를 점유한 결과를 반영해 후속 작업을 기본 초당 1건으로 제한한다. 공개 `/health`는 작업 스레드 대기열과 분리된 비동기 경로로 제공해 서버 생존 확인이 밀리지 않게 한다.
+- `2026.09.12-news-job-pacing-v1`: 누적 뉴스 후속 작업이 계속 존재할 때 실행기가 쉼 없이 반복해 NAS 단일 CPU 코어와 서버 응답을 고갈시키지 않도록 작업 사이에 50ms 간격을 둔다. 대기 작업이 없을 때의 기존 1초 폴링과 BODY/RULE/AI 처리 계약은 유지한다.
+
 이 파일은 앞으로의 변경을 짧게 누적한다. 배포판별 상세 사용자 변경은 `docs/RELEASE_NOTES_v*.md`에 유지한다.
 
 형식:
 
 ```text
 ## [Unreleased]
+
+### Added
+
+- 중앙 Kiwoom 단일 WebSocket에 시장 전체 VI(1h)와 이름 재해석형 KRX 저장 조건검색을 연결하고, 15% hot cohort를 다음 실제 관측 KRX 세션 종료까지 유지한다. VI·cohort·상한가 사실은 중앙 스키마 v9 불변 이력으로 저장하며 진단 API를 제공한다. TOP20 중복 구독은 hub union으로 합치고 자동 주문은 만들지 않는다.
+
+- NAS가 `ThemeBackupService.export_document()` 전체 테마 문서를 수락할 때 중앙 스키마 v5의 불변 snapshot 이력을 함께 기록하고, 동일 내용 재전송은 hash로 합치며 삭제·활성 프로필 전환·늦은 다른 PC 전송은 실제 서버 가용시각과 revision 관계를 보존한다. 인증 `/api/v1/themes/history`로 특정 가용시각까지의 이력을 읽을 수 있다.
+
+### Added
+
+- NAS의 기존 TOP20 0B 스트림을 종목·KRX/NXT·거래초별 OHLC, 거래량, 원 단위 거래대금, 체결 건수로 집계해 중앙 SQLite/PostgreSQL에 보존한다. 동일 저장 재시도는 절대값 upsert로 이중 합산하지 않는다.
 ### Added / Changed / Fixed / Removed / Security
 - 사용자 또는 개발자에게 의미 있는 한 줄 (관련 문서/이슈)
 ```
 
 ## [Unreleased]
+
+### Added
+
+- 중앙 모드 종목 뉴스창에서 선택한 대표 기사의 NAS 저장 본문과 공급계약 규칙 근거를 별도 영역으로 표시한다. 기사 identity·종목·기사/본문 revision이 정확히 맞을 때만 결합하고, GLOBAL 본문 재사용 시에도 다른 종목 사건을 섞지 않는다. 조회는 짧은 timeout의 단일 worker와 최신 대기 요청 하나로 처리하며 자동 AI와 주문은 실행하지 않는다.
+- 기존 `/api/v1/news/search` 결과에 해당 종목으로 confirmed 연결된 N3 GLOBAL 저장기사를 합친다. 같은 identity는 기존 종목 owner 기사를 우선하고 전체 결과는 최신순 최대 1000건이며, 목록 읽기는 외부 뉴스·본문·규칙·AI 작업을 추가하지 않는다. 자동 AI 입력도 기존 종목 owner 기사로 유지한다.
+- 중앙 스키마 v8에 NAVER query_set의 영속 cursor/run/observation, global article-target relation revision과 KST 일일 요청 예산을 추가했다. 자격증명이 있으면 중앙 서비스가 앱 선택과 무관하게 기본 9개 검색어를 수집하며, 24,000회 hard limit 안에서 watchlist 8,000/query_set 16,000 기본 몫을 분리한다. 인증 source 진단 API는 7일 중복률·절단·오류·본문/규칙/job 상태를 제공하고 이 범위를 전체시장 전수 피드로 표시하지 않는다.
+- 중앙 스키마 v7에 공급계약 사건과 기사 소속의 불변 revision을 추가했다. N1 본문 저장 뒤 기록 전용 RULE 작업이 정확한 기사/본문 revision을 읽어 MOU·해지·부인·가격반응·금액 단위·제목/본문 충돌을 설명 가능한 근거와 점수 버전으로 보존하며, 인증 뉴스 이력 API가 `event/membership` 조회를 지원한다. 자동 AI 필터·매매 후보·주문은 연결하지 않았다.
+- 중앙 스키마 v6에 기사·본문·AI 불변 revision과 영속 BODY/AI 작업 원장을 추가했다. 제목 저장은 느린 본문/AI와 분리되고, 수집기별 최초 수신·정정·본문 fallback/실패·정확한 분석 입력과 사용량을 가용시각대로 보존하며 인증 뉴스 이력 API로 조회할 수 있다.
+- `NEWS_HISTORY_JOBS_ENABLED=false`로 새 후속 작업 실행기를 끄면 기존 요청형 AI 분석 경로를 계속 사용할 수 있다.
+
+### Fixed
+
+- 중앙 스키마 v11에 confirmed 종목 관계 조회 인덱스를 추가해 종목 뉴스 목록 병합이 전체 기사·관계를 Python으로 읽지 않게 했다.
+- 중앙 스키마 v10에 source+identity 관측 조회 인덱스를 추가하고, 여러 검색어의 요약 변형 순환이 동일 GLOBAL article/BODY를 반복 생성하던 문제를 source별 직전 판본 재사용으로 막았다. 같은 source의 실제 A→B→A 정정 이력은 그대로 남는다.
+- 뉴스 source 진단 summary를 `limit`과 무관한 기간·source SQL 집계로 바꾸고 실제 서로 다른 기사 수인 `distinct_identity_count`를 추가했다. 수집 중 예산 확인은 전역 진단 대신 오늘 요청 원장만 읽는다.
+- 주말 최초 실행처럼 KRX catalog가 비어 있을 때 기존 catalog loader로 제한된 초기화를 시도하고, 본문 완료 후 confirmed target이 늦게 연결돼도 기존 본문으로 RULE을 멱등 예약한다.
 
 ## [2.0.0] - 2026-09-12
 

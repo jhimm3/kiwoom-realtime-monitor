@@ -6,14 +6,16 @@ import asyncio
 import json
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime, time as clock_time, timedelta
+from datetime import UTC, datetime, timedelta
 
 from PySide6.QtCore import QThread, Signal
 from websockets.asyncio.client import connect
 
+from kiwoom_monitor.application.market_session_schedule import realtime_subscription_target
+
 from .realtime import (
     OrderExecution, TradeTick, parse_market_index_ticks, parse_order_executions,
-    parse_program_trade_ticks, parse_trade_ticks,
+    parse_program_trade_ticks, parse_stock_price_references, parse_trade_ticks,
 )
 
 
@@ -25,12 +27,12 @@ WS_BASE_URLS = {
 
 def market_session(now: datetime, environment: str) -> str | None:
     """한국 장 시간에 맞는 체결 수신 거래소를 반환한다."""
-    if now.weekday() >= 5:
-        return None
-    current = now.timetz().replace(tzinfo=None)
-    if clock_time(9, 0) <= current < clock_time(15, 30):
+    target = realtime_subscription_target(
+        ("_probe",), {"_probe"}, now, environment=environment,
+    )
+    if target.krx_codes:
         return "KRX"
-    if environment == "real" and (clock_time(8, 0) <= current < clock_time(9, 0) or clock_time(15, 30) <= current < clock_time(20, 0)):
+    if target.nxt_codes:
         return "NXT"
     return None
 
@@ -47,6 +49,7 @@ class RealtimeTradeWorker(QThread):
     order_executed = Signal(object)
     market_state_received = Signal(object)
     program_trade_received = Signal(object)
+    stock_reference_received = Signal(object)
     status_changed = Signal(str)
     connection_failed = Signal(str)
     subscription_ready = Signal()
@@ -111,7 +114,14 @@ class RealtimeTradeWorker(QThread):
                 raise RuntimeError(f"WebSocket 로그인 실패: {login.get('return_msg', '')}")
             subscribed_codes = initial_codes
             subscribed_nxt_codes = initial_nxt_codes
-            await self._send_subscription(websocket, session, subscribed_codes, subscribed_nxt_codes, self._environment)
+            target = realtime_subscription_target(
+                subscribed_codes, set(subscribed_nxt_codes), self._now_provider(),
+                environment=self._environment,
+            )
+            policy_signature = target.signature
+            await self._send_subscription(
+                websocket, session, target.active_codes, target.nxt_codes, self._environment,
+            )
             if self._connected_once and self._reconnect_pending:
                 self._reconnects += 1
             self._connected_once = True
@@ -123,20 +133,37 @@ class RealtimeTradeWorker(QThread):
             while not self.isInterruptionRequested():
                 desired_codes = self._codes
                 desired_nxt_codes = self._nxt_codes
-                if desired_codes != subscribed_codes or desired_nxt_codes != subscribed_nxt_codes:
+                target = realtime_subscription_target(
+                    desired_codes, set(desired_nxt_codes), self._now_provider(),
+                    environment=self._environment,
+                )
+                if (
+                    desired_codes != subscribed_codes
+                    or desired_nxt_codes != subscribed_nxt_codes
+                    or target.signature != policy_signature
+                ):
                     if not desired_codes:
                         return
                     added_codes = tuple(code for code in desired_codes if code not in subscribed_codes)
-                    await self._send_subscription(websocket, session, desired_codes, desired_nxt_codes, self._environment)
+                    if not target.active_codes:
+                        return
+                    session = "KRX" if target.krx_codes else "NXT"
+                    await self._send_subscription(
+                        websocket, session, target.active_codes, target.nxt_codes, self._environment,
+                    )
                     subscribed_codes = desired_codes
                     subscribed_nxt_codes = desired_nxt_codes
+                    policy_signature = target.signature
                     if added_codes:
                         self.codes_added.emit(added_codes)
                     self.status_changed.emit(f"실시간 체결 구독 변경 · {session} · {len(subscribed_codes)}종목")
                 try:
                     raw = await asyncio.wait_for(websocket.recv(), timeout=1)
                 except TimeoutError:
-                    if market_session(self._now_provider(), self._environment) != session:
+                    if not realtime_subscription_target(
+                        self._codes, set(self._nxt_codes), self._now_provider(),
+                        environment=self._environment,
+                    ).active_codes:
                         return
                     continue
                 message = json.loads(raw)
@@ -151,6 +178,8 @@ class RealtimeTradeWorker(QThread):
                     self.market_state_received.emit(market_tick)
                 for program_tick in parse_program_trade_ticks(message):
                     self.program_trade_received.emit(program_tick)
+                for reference in parse_stock_price_references(message):
+                    self.stock_reference_received.emit(reference)
 
     def _record_abnormal_disconnect(self, reason: str) -> None:
         self._abnormal_disconnects += 1
@@ -181,9 +210,12 @@ class RealtimeTradeWorker(QThread):
                 {
                     "trnm": "REG",
                     "grp_no": "1",
-                    "refresh": "1",
+                    # 전체 희망 종목을 매번 다시 보내므로 기존 그룹은 교체한다.
+                    # 유지(1)하면 순위 교체 때 빠진 종목이 누적되어 200개 한도를 넘는다.
+                    "refresh": "0",
                     "data": [
                         {"item": list(items), "type": ["0B"]},
+                        {"item": list(codes), "type": ["0g"]},
                         {"item": list(program_items), "type": ["0w"]},
                         {"item": [""], "type": ["00"]},
                         {"item": ["001", "101"], "type": ["0J", "0U"]},

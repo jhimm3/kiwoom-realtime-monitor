@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Callable
 from urllib.error import HTTPError, URLError
 
 from PySide6.QtCore import QThread, Signal
@@ -28,9 +29,10 @@ from kiwoom_monitor.infrastructure.persistence.news_ai_repository import (
     news_identity,
 )
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
+from kiwoom_monitor.presentation.news_view_model import StoredNewsEvidence
 
 
-NEWS_CHECK_INTERVAL_SECONDS = 180.0
+NEWS_CHECK_INTERVAL_SECONDS = 60.0
 
 
 class NewsSearchWorker(QThread):
@@ -145,6 +147,217 @@ class NewsPrepareWorker(QThread):
             )
         except (OSError, ValueError, sqlite3.Error) as error:
             self.failed.emit(self._request_id, self._stock_code, str(error))
+
+
+class NewsEvidenceWorker(QThread):
+    """선택 기사에 정확히 대응하는 NAS revision 근거만 조회한다."""
+
+    completed = Signal(int, str, str, object)
+
+    def __init__(self, request_id: int, stock_code: str, item: StockNewsItem,
+                 central_client: CentralNewsClient, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._request_id = request_id
+        self._stock_code = stock_code
+        self._item = item
+        self._central_client = central_client
+
+    def run(self) -> None:
+        identity = news_identity(self._item)
+        for attempt in range(2):
+            if self.isInterruptionRequested():
+                return
+            try:
+                evidence = load_stored_news_evidence(
+                    self._central_client, self._stock_code, self._item,
+                    cancelled=self.isInterruptionRequested,
+                )
+                self.completed.emit(self._request_id, self._stock_code, identity, evidence)
+                return
+            except RuntimeError as error:
+                message = str(error)
+                if attempt == 0 and "HTTP 404" not in message:
+                    continue
+                notice = (
+                    "구버전 중앙 서버에는 저장 근거 조회 기능이 없습니다."
+                    if "HTTP 404" in message else f"저장 자료를 불러오지 못했습니다: {message}"
+                )
+                self.completed.emit(
+                    self._request_id, self._stock_code, identity,
+                    StoredNewsEvidence(identity=identity, notice=notice),
+                )
+                return
+            except _EvidenceCancelled:
+                return
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                self.completed.emit(
+                    self._request_id, self._stock_code, identity,
+                    StoredNewsEvidence(
+                        identity=identity,
+                        notice=f"저장 자료를 불러오지 못했습니다: {error}",
+                    ),
+                )
+                return
+
+
+def load_stored_news_evidence(
+    client: CentralNewsClient, stock_code: str, item: StockNewsItem,
+    *, cancelled: Callable[[], bool] = lambda: False,
+) -> StoredNewsEvidence:
+    """목록 판본→기사→본문→규칙 revision을 엄격한 ID 일치로 결합한다."""
+    identity = news_identity(item)
+    def load(kind: str, *, target: str = "", identity_value: str = "",
+             limit: int = 100) -> list[dict[str, object]]:
+        if cancelled():
+            raise _EvidenceCancelled
+        result = _history_rows(client.load_news_history(
+            kind, target=target, identity=identity_value, limit=limit,
+        ))
+        if cancelled():
+            raise _EvidenceCancelled
+        return result
+
+    target_rows = load("article", target=stock_code, identity_value=identity, limit=20)
+    target_matches = _matching_article_rows(target_rows, stock_code, identity, item)
+    rows = target_rows
+    matches = target_matches
+    if not matches:
+        global_rows = load("article", target="GLOBAL", identity_value=identity, limit=20)
+        rows = global_rows
+        matches = _matching_article_rows(global_rows, "GLOBAL", identity, item)
+    if not matches:
+        notice = (
+            "NAS에는 같은 기사 정체성의 다른 제목·요약 판본만 있어 판정을 함께 표시하지 않습니다."
+            if target_rows or rows else "저장 자료 없음"
+        )
+        return StoredNewsEvidence(identity=identity, title=item.title, notice=notice)
+
+    article = matches[0]
+    article_revision_id = str(article.get("article_revision_id") or "")
+    if not article_revision_id:
+        raise ValueError("기사 revision ID가 없습니다.")
+    historical = bool(rows and str(rows[0].get("article_revision_id") or "") != article_revision_id)
+
+    body_rows = load("body", target=article_revision_id, limit=20)
+    body = next(
+        (row for row in body_rows if str(row.get("article_revision_id") or "") == article_revision_id),
+        None,
+    )
+    if body is None and target_matches:
+        global_rows = load("article", target="GLOBAL", identity_value=identity, limit=20)
+        global_matches = _matching_article_rows(global_rows, "GLOBAL", identity, item)
+        if global_matches:
+            global_article = global_matches[0]
+            global_revision_id = str(global_article.get("article_revision_id") or "")
+            global_bodies = load("body", target=global_revision_id, limit=20)
+            global_body = next(
+                (row for row in global_bodies
+                 if str(row.get("article_revision_id") or "") == global_revision_id
+                 and str(row.get("status") or "") in {"fulltext", "summary_only"}),
+                None,
+            )
+            if global_body is not None:
+                article = global_article
+                article_revision_id = global_revision_id
+                body = global_body
+                historical = bool(
+                    global_rows
+                    and str(global_rows[0].get("article_revision_id") or "") != article_revision_id
+                )
+    if body is None:
+        return StoredNewsEvidence(
+            identity=identity, title=item.title, article_revision_id=article_revision_id,
+            historical_revision=historical, notice="본문이 아직 처리 중입니다.",
+        )
+
+    body_revision_id = str(body.get("body_revision_id") or "")
+    status = str(body.get("status") or "missing")
+    event = None
+    if body_revision_id and status in {"fulltext", "summary_only"}:
+        memberships = [
+            row for row in load("membership", identity_value=article_revision_id, limit=50)
+            if str(row.get("article_revision_id") or "") == article_revision_id
+            and str(row.get("body_revision_id") or "") == body_revision_id
+        ]
+        if memberships:
+            seen_event_ids: set[str] = set()
+            for membership in memberships:
+                event_id = str(membership.get("event_id") or "")
+                if not event_id or event_id in seen_event_ids or len(seen_event_ids) >= 5:
+                    continue
+                seen_event_ids.add(event_id)
+                events = load(
+                    "event", target=stock_code, identity_value=event_id, limit=10,
+                )
+                event = next(
+                    (row for row in events
+                     if str(row.get("event_revision_id") or "")
+                     == str(membership.get("event_revision_id") or "")
+                     and str(row.get("stock_code") or "") == stock_code
+                     and str(row.get("article_revision_id") or "") == article_revision_id
+                     and str(row.get("body_revision_id") or "") == body_revision_id),
+                    None,
+                )
+                if event is not None:
+                    break
+    from kiwoom_monitor.infrastructure.article_text import clean_article_text_with_details
+
+    raw_body_text = str(body.get("body_text") or "")
+    body_text, cut_marker, _cut_at = clean_article_text_with_details(raw_body_text)
+    cleaning_notice = ""
+    if status == "fulltext" and not body_text:
+        body_text = ""
+        cleaning_notice = "저장 본문이 포털 메뉴·짧은 속보 문구뿐이라 제거했습니다. 검색 요약을 사용합니다."
+    elif cut_marker:
+        cleaning_notice = f"저장 본문의 기사 종료 뒤 포털 문구를 제거했습니다. ({cut_marker})"
+    return StoredNewsEvidence(
+        identity=identity,
+        title=item.title,
+        article_revision_id=article_revision_id,
+        body_revision_id=body_revision_id,
+        body_status=status,
+        body_text=body_text,
+        body_error=str(body.get("error") or ""),
+        event=event,
+        historical_revision=historical,
+        notice=cleaning_notice or (
+            "동일 기사 정체성과 제목·요약이 일치하는 GLOBAL 저장 본문을 사용했습니다."
+            if str(article.get("stock_code") or "") == "GLOBAL" else ""
+        ),
+    )
+
+
+def _history_rows(document: object) -> list[dict[str, object]]:
+    if not isinstance(document, dict):
+        raise ValueError("뉴스 이력 응답 형식이 올바르지 않습니다.")
+    values = document.get("revisions", [])
+    if not isinstance(values, list):
+        raise ValueError("뉴스 이력 revision 형식이 올바르지 않습니다.")
+    return [value for value in values if isinstance(value, dict)]
+
+
+class _EvidenceCancelled(Exception):
+    pass
+
+
+def _matching_article_rows(
+    rows: list[dict[str, object]], expected_stock: str, identity: str, item: StockNewsItem,
+) -> list[dict[str, object]]:
+    matches = []
+    for row in rows:
+        document = row.get("document")
+        if not isinstance(document, dict):
+            continue
+        if str(row.get("stock_code") or "") != expected_stock:
+            continue
+        if str(row.get("identity") or "") != identity:
+            continue
+        if str(document.get("title") or "") != item.title:
+            continue
+        if str(document.get("description") or "") != item.description:
+            continue
+        matches.append(row)
+    return matches
 
 
 class AINewsWorker(QThread):

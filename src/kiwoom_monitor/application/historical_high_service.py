@@ -47,6 +47,17 @@ class HistoricalHighService:
         self._high_250_loader = high_250_loader
 
     def load(self, code: str) -> HistoricalHighTarget:
+        stored_loader = getattr(self._client, "load_stored_historical_high", None)
+        stored = stored_loader(code) if callable(stored_loader) else None
+        if isinstance(stored, dict):
+            evidence = tuple(
+                HistoricalHighEvidence(**value)
+                for value in stored.get("evidence", ()) if isinstance(value, dict)
+            )
+            return HistoricalHighTarget(
+                stored.get("price"), stored.get("first_year"), stored.get("last_year"),
+                stored.get("occurred_on"), evidence,
+            )
         high_250 = self._high_250_loader(code) if self._high_250_loader is not None else None
         cache = self._cache_loader(code) if self._cache_loader is not None else None
         if cache is not None and cache.target.evidence:

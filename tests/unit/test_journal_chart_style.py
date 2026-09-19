@@ -15,6 +15,7 @@ from kiwoom_monitor.journal_process import (
     average_price_label_positions, chart_close_information, format_trade_value_eok, multi_day_time_tick_indices, trade_callout_text,
     trade_marker_polygon, visible_trade_fills,
 )
+from kiwoom_monitor.application.journal_chart_layout import daily_chart_rows
 from kiwoom_monitor.application.trade_history_service import TradeFill
 
 
@@ -105,6 +106,41 @@ class JournalChartStyleTests(unittest.TestCase):
         self.assertIn("종가 1,100원", close_text)
         self.assertIn("전일 종가 대비 +11.11%", close_text)
         self.assertNotIn("시가", close_text)
+
+    def test_effective_date_chart_separates_regular_close_and_full_day_final(self) -> None:
+        fill = TradeFill("1", "001210", "금호전기", "매수", datetime(2026, 9, 14, 16, 5), 10, 105, "", "KRX")
+        rows = (
+            ("2026-09-11T15:29", 90, 91, 89, 90, 1, 1.0, "confirmed"),
+            ("2026-09-14T09:00", 95, 96, 94, 95, 1, 1.0, "confirmed"),
+            ("2026-09-14T15:29", 99, 101, 98, 100, 1, 1.0, "confirmed"),
+            ("2026-09-14T16:05", 104, 106, 103, 105, 1, 1.0, "confirmed"),
+            ("2026-09-14T19:59", 109, 111, 108, 110, 1, 1.0, "after_close_confirmed"),
+        )
+        text = chart_close_information((fill,), rows, as_of=datetime(2026, 9, 14, 20, 5))
+        self.assertIn("KRX 정규장 종가(15:30) 100원", text)
+        self.assertIn("전체일 최종가(20:00 기준) 110원", text)
+        self.assertIn("전일 전체일 최종가 대비", text)
+        self.assertIn("KRX 애프터마켓(16:00~20:00)", trade_callout_text(fill))
+
+    def test_current_full_day_close_remains_unconfirmed_before_twenty(self) -> None:
+        fill = TradeFill("1", "001210", "금호전기", "매수", datetime(2026, 9, 14, 16, 5), 1, 100, "", "KRX")
+        rows = (
+            ("2026-09-14T15:29", 100, 101, 99, 100, 1, 1.0, "confirmed"),
+            ("2026-09-14T19:45", 101, 102, 100, 101, 1, 1.0, "confirmed"),
+        )
+        text = chart_close_information((fill,), rows, as_of=datetime(2026, 9, 14, 19, 45))
+        self.assertIn("전체일 현재가(20:00 최종가 미확정)", text)
+
+    def test_daily_synthesis_can_explicitly_select_regular_or_full_day(self) -> None:
+        rows = (
+            ("2026-09-14T09:00", 100, 101, 99, 100, 1, 10.0, "confirmed"),
+            ("2026-09-14T15:29", 100, 102, 99, 101, 1, 20.0, "confirmed"),
+            ("2026-09-14T16:05", 101, 110, 100, 109, 1, 30.0, "confirmed"),
+        )
+        regular = daily_chart_rows(rows, scope="regular")
+        full = daily_chart_rows(rows)
+        self.assertEqual((101.0, 30.0, "market_index_daily_regular_09:00_15:30"), (regular[0][4], regular[0][6], regular[0][7]))
+        self.assertEqual((109.0, 60.0, "market_index_daily_provided_range"), (full[0][4], full[0][6], full[0][7]))
 
     def test_chart_line_and_rectangle_annotations_render_and_clear(self) -> None:
         chart = MinuteChart(); chart.resize(900, 420)
@@ -218,6 +254,13 @@ class JournalChartStyleTests(unittest.TestCase):
         values = [start + timedelta(minutes=index) for index in range(60)]
         indices = chart_time_tick_indices(values, "1분", 800)
         self.assertTrue(all((values[index].hour * 60 + values[index].minute) % 10 == 0 for index in indices))
+
+    def test_effective_date_time_axis_includes_new_krx_phase_boundaries(self) -> None:
+        values = [
+            datetime(2026, 9, 14, 15, 20), datetime(2026, 9, 14, 15, 30),
+            datetime(2026, 9, 14, 15, 40), datetime(2026, 9, 14, 16, 0),
+        ]
+        self.assertEqual([0, 1, 2, 3], chart_time_tick_indices(values, "1분", 800))
 
     def test_higher_average_price_label_stays_above_lower_price(self) -> None:
         positions = average_price_label_positions((

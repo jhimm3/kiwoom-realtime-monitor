@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 import json
 import sqlite3
+from collections import OrderedDict
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 
 from PySide6.QtCore import QSettings, QTimer, Qt, QUrl
 from PySide6.QtGui import QBrush, QColor, QCloseEvent, QDesktopServices, QGuiApplication, QPainter, QShowEvent
@@ -42,6 +44,7 @@ from kiwoom_monitor.infrastructure.naver_news import (
     news_provider,
 )
 from kiwoom_monitor.application.news_grouping import NewsEventGroup, group_similar_news
+from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
 from kiwoom_monitor.application.news_auto_analysis import (
     auto_candidate_identities,
     next_auto_groups,
@@ -63,6 +66,7 @@ from kiwoom_monitor.infrastructure.central_operational_settings import CentralOp
 from kiwoom_monitor.presentation.news_workers import (
     AINewsWorker,
     NEWS_CHECK_INTERVAL_SECONDS,
+    NewsEvidenceWorker,
     NewsPrepareWorker,
     NewsSearchWorker,
 )
@@ -79,6 +83,9 @@ from kiwoom_monitor.presentation.news_view_model import (
     effective_judgment,
     escape_html,
     related_articles_html,
+    StoredNewsEvidence,
+    stored_news_core_sentences_html,
+    stored_news_evidence_html,
 )
 
 
@@ -118,12 +125,11 @@ class NewsCellMarkerDelegate(QStyledItemDelegate):
 
 class StockNewsWindow(QDialog):
     CHECK_INTERVAL_SECONDS = NEWS_CHECK_INTERVAL_SECONDS
-    AUTO_REFRESH_MS = 180_000
-    STATUS_NOTICE = (
-        "기본 판단은 제목·요약 규칙이고, AI 분석은 가져올 수 있는 기사 원문을 읽습니다. "
-        "모두 투자 판단을 대신하지 않으며, 원문은 기본 브라우저에서 엽니다."
-    )
+    AUTO_REFRESH_MS = 60_000
+    STATUS_NOTICE = "뉴스 판정은 투자 판단을 대신하지 않습니다."
     STATUS_RESTORE_MS = 7000
+    EVIDENCE_CACHE_LIMIT = 24
+    EVIDENCE_CACHE_SECONDS = 30.0
 
     def __init__(self, config_path: Path, database_path: Path, parent: QWidget | None = None) -> None:
         # 부모가 있는 최상위 창은 Windows에서 '소유 창'이 되어 부모보다 항상
@@ -141,12 +147,16 @@ class StockNewsWindow(QDialog):
         self._repository = StockNewsRepository(database_path)
         self._ai_repository = NewsAIRepository(database_path)
         self._central_news_client: CentralNewsClient | None = None
+        self._central_evidence_client: CentralNewsClient | None = None
         self._central_ai_client: CentralAIClient | None = None
         self._central_operational_client: CentralOperationalSettingsClient | None = None
         try:
             source = DataSourceConfig(config_path.with_name("data_source.json")).load()
             if source.mode in {"local_server", "personal_server"}:
                 self._central_news_client = CentralNewsClient(source.server_url, source.access_token)
+                self._central_evidence_client = CentralNewsClient(
+                    source.server_url, source.access_token, timeout_seconds=5.0,
+                )
                 self._central_ai_client = CentralAIClient(source.server_url, source.access_token)
                 self._central_operational_client = CentralOperationalSettingsClient(source)
         except (OSError, ValueError, json.JSONDecodeError):
@@ -160,14 +170,25 @@ class StockNewsWindow(QDialog):
         self._stock_name = ""
         self._journal_group_id = ""
         self._journal_trade_date = ""
+        self._journal_origin_scope = LEGACY_ACCOUNT_SCOPE
+        self._journal_account_scope = LEGACY_ACCOUNT_SCOPE
         self._items: tuple[StockNewsItem, ...] = ()
         self._visible_items: tuple[StockNewsItem, ...] = ()
         self._visible_groups: tuple[NewsEventGroup, ...] = ()
         self._selected_news_cell: tuple[int, int] | None = None
+        self._selected_news_identity = ""
+        self._detail_identity = ""
         self._worker: NewsSearchWorker | None = None
         self._prepare_worker: NewsPrepareWorker | None = None
         self._prepare_request_id = 0
         self._pending_prepare: tuple[int, str] | None = None
+        self._evidence_worker: NewsEvidenceWorker | None = None
+        self._evidence_request_id = 0
+        self._pending_evidence: tuple[int, str, StockNewsItem] | None = None
+        self._selected_evidence_key: tuple[str, str, str, str] | None = None
+        self._evidence_cache: OrderedDict[
+            tuple[str, str, str, str], tuple[float, StoredNewsEvidence]
+        ] = OrderedDict()
         self._pending_new_identities: set[str] = set()
         self._ai_result_cache: dict[str, StoredAINewsAnalysis] = {}
         self._render_generation = 0
@@ -270,6 +291,7 @@ class StockNewsWindow(QDialog):
         self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self._apply_column_visibility()
         self._table.cellClicked.connect(self._select_news_cell)
+        self._table.currentCellChanged.connect(self._on_current_news_cell_changed)
         self._table.cellDoubleClicked.connect(self._on_news_cell_double_clicked)
 
         self._detail = QTextBrowser()
@@ -306,17 +328,33 @@ class StockNewsWindow(QDialog):
         layout.addWidget(self._status_label)
         self._apply_window_mode(str(self._window_mode.currentData()), persist=False)
 
-    def set_stock(self, code: str, name: str, *, activate: bool = True,
-                  journal_group_id: str = "", trade_date: str = "") -> None:
+    def set_stock(
+        self, code: str, name: str, *, activate: bool = True,
+        journal_group_id: str = "", trade_date: str = "",
+        origin_scope: AccountScope = LEGACY_ACCOUNT_SCOPE,
+        account_scope: AccountScope = LEGACY_ACCOUNT_SCOPE,
+    ) -> None:
         changed = code != self._stock_code
-        context_changed = journal_group_id.strip() != self._journal_group_id or trade_date.strip() != self._journal_trade_date
+        context_changed = (
+            journal_group_id.strip() != self._journal_group_id
+            or trade_date.strip() != self._journal_trade_date
+            or origin_scope != self._journal_origin_scope
+            or account_scope != self._journal_account_scope
+        )
         if changed:
             self._pending_new_identities.clear()
             self._auto_ai_identities.clear()
+            self._selected_news_identity = ""
+            self._detail_identity = ""
+            self._evidence_request_id += 1
+            self._pending_evidence = None
+            self._selected_evidence_key = None
         self._stock_code = code
         self._stock_name = name.strip()
         self._journal_group_id = journal_group_id.strip()
         self._journal_trade_date = trade_date.strip()
+        self._journal_origin_scope = origin_scope
+        self._journal_account_scope = account_scope
         date_suffix = f" · 매매일 {self._journal_trade_date}" if self._journal_trade_date else ""
         self._stock_label.setText(f"{self._stock_name} ({self._stock_code}){date_suffix}")
         if changed or context_changed:
@@ -521,21 +559,35 @@ class StockNewsWindow(QDialog):
         # 고정하고, 소량의 행만 넣은 뒤 이벤트 루프에 제어를 돌려준다.
         self._render_generation += 1
         generation = self._render_generation
+        selected_identity = self._selected_news_identity
+        selected_column = (
+            self._selected_news_cell[1]
+            if self._selected_news_cell is not None else max(0, self._table.currentColumn())
+        )
         header = self._table.horizontalHeader()
         for column in range(self._table.columnCount()):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
         self._table.setRowCount(len(self._visible_items))
         self._render_row = 0
         self._selected_news_cell = None
+        self._evidence_request_id += 1
+        self._pending_evidence = None
+        self._selected_evidence_key = None
         delegate = self._table.itemDelegate()
         if isinstance(delegate, NewsCellMarkerDelegate):
             delegate.set_selected_cell(None)
-        self._detail.clear()
-        self._open_button.setEnabled(False)
-        self._ai_button.setEnabled(False)
-        QTimer.singleShot(0, lambda: self._render_item_chunk(generation))
+        if not selected_identity:
+            self._detail.clear()
+            self._open_button.setEnabled(False)
+            self._ai_button.setEnabled(False)
+        QTimer.singleShot(
+            0,
+            lambda: self._render_item_chunk(generation, selected_identity, selected_column),
+        )
 
-    def _render_item_chunk(self, generation: int) -> None:
+    def _render_item_chunk(
+        self, generation: int, selected_identity: str = "", selected_column: int = 0,
+    ) -> None:
         if generation != self._render_generation:
             return
         end = min(self._render_row + 12, len(self._visible_items))
@@ -553,9 +605,31 @@ class StockNewsWindow(QDialog):
                 self._table.setItem(row, column, cell)
         self._render_row = end
         if end < len(self._visible_items):
-            QTimer.singleShot(0, lambda: self._render_item_chunk(generation))
+            QTimer.singleShot(
+                0,
+                lambda: self._render_item_chunk(generation, selected_identity, selected_column),
+            )
             return
         self._apply_column_visibility()
+        if selected_identity:
+            selected_row = next(
+                (
+                    row for row, item in enumerate(self._visible_items)
+                    if news_identity(item) == selected_identity
+                ),
+                -1,
+            )
+            if selected_row >= 0:
+                self._select_news_cell(
+                    selected_row,
+                    min(max(0, selected_column), self._table.columnCount() - 1),
+                )
+                return
+            self._selected_news_identity = ""
+            self._detail_identity = ""
+            self._detail.clear()
+            self._open_button.setEnabled(False)
+            self._ai_button.setEnabled(False)
 
     def _apply_column_visibility(self) -> None:
         if not hasattr(self, "_table"):
@@ -579,6 +653,7 @@ class StockNewsWindow(QDialog):
 
     def _select_news_cell(self, row: int, column: int) -> None:
         self._selected_news_cell = (row, column)
+        self._selected_news_identity = news_identity(self._visible_items[row])
         self._table.setCurrentCell(row, column)
         for item_row in range(self._table.rowCount()):
             background = QColor("#DDEBF7") if item_row == row else QBrush()
@@ -590,7 +665,14 @@ class StockNewsWindow(QDialog):
         if isinstance(delegate, NewsCellMarkerDelegate):
             delegate.set_selected_cell(self._selected_news_cell)
         self._table.viewport().update()
+        self._schedule_evidence(self._visible_items[row])
         self._show_detail(row)
+
+    def _on_current_news_cell_changed(
+        self, row: int, column: int, _previous_row: int, _previous_column: int,
+    ) -> None:
+        if row >= 0 and column >= 0 and self._selected_news_cell != (row, column):
+            self._select_news_cell(row, column)
 
     def _on_news_cell_double_clicked(self, row: int, column: int) -> None:
         """판단 더블클릭은 AI 분석, 제목 더블클릭은 원문 열기로 동작한다."""
@@ -607,17 +689,43 @@ class StockNewsWindow(QDialog):
         group = self._visible_groups[row]
         assessment = item.assessment
         category, outlook, reason, judgment_source = self._effective_judgment(item)
+        evidence_key = self._evidence_key(item)
+        cached = self._cached_evidence(evidence_key)
+        evidence_loading = (
+            self._central_evidence_client is not None
+            and self._selected_evidence_key == evidence_key
+            and cached is None
+        )
+        ai_html = self._ai_html(item)
+        core_sentences_html = stored_news_core_sentences_html(cached)
+        identity = news_identity(item)
+        preserve_scroll = self._detail_identity == identity
+        scroll_bar = self._detail.verticalScrollBar()
+        previous_scroll = scroll_bar.value() if preserve_scroll else 0
         self._detail.setHtml(
             f"<h3>{_html(item.title)}</h3>"
-            + self._ai_html(item)
+            + ai_html
             + f"<p><b>최종 판단: {_html(outlook)}</b> · {_html(category)} · 제공처: {_html(news_provider(item))}</p>"
-            f"<p>{_html(item.description) or '제공된 요약이 없습니다.'}</p>"
             f"<hr><p><b>최종 판단 이유:</b> {_html(reason)}</p>"
+            + core_sentences_html
+            + f"<p><b>검색 요약:</b> {_html(item.description) or '제공된 요약이 없습니다.'}</p>"
             f"<p style='color:#667085'>판단 기준: {_html(judgment_source)} · 관련성 점수 {assessment.relevance_score}</p>"
+            + (
+                stored_news_evidence_html(cached, loading=evidence_loading)
+                if self._central_evidence_client is not None else ""
+            )
             + self._related_articles_html(group)
         )
+        self._detail_identity = identity
+        if preserve_scroll:
+            QTimer.singleShot(
+                0,
+                lambda expected=identity, value=previous_scroll: self._restore_detail_scroll(expected, value),
+            )
         self._open_button.setEnabled(bool(item.link or item.original_link))
-        linked = news_identity(item) in self._repository.journal_linked_identities(self._journal_group_id, self._stock_code) if self._journal_group_id else False
+        linked = news_identity(item) in self._repository.journal_linked_identities(
+            self._journal_group_id, self._stock_code, self._journal_account_scope,
+        ) if self._journal_group_id else False
         self._journal_link_button.setEnabled(bool(self._journal_group_id))
         self._journal_link_button.setText("매매일지에서 제거" if linked else "매매일지에 추가")
         try:
@@ -627,13 +735,100 @@ class StockNewsWindow(QDialog):
         self._ai_button.setEnabled(bool((item.link or item.original_link) and ai.provider != "none" and ai.api_key)
                                    and (self._ai_worker is None or not self._ai_worker.isRunning()))
 
+    def _restore_detail_scroll(self, identity: str, value: int) -> None:
+        if self._detail_identity != identity:
+            return
+        scroll_bar = self._detail.verticalScrollBar()
+        scroll_bar.setValue(min(max(0, value), scroll_bar.maximum()))
+
+    def _schedule_evidence(self, item: StockNewsItem) -> None:
+        key = self._evidence_key(item)
+        if self._selected_evidence_key == key and (
+            self._evidence_worker is not None or self._pending_evidence is not None
+        ):
+            return
+        self._selected_evidence_key = key
+        self._evidence_request_id += 1
+        request_id = self._evidence_request_id
+        if self._central_evidence_client is None or self._cached_evidence(key) is not None:
+            self._pending_evidence = None
+            return
+        self._pending_evidence = (request_id, self._stock_code, item)
+        if self._evidence_worker is None:
+            self._start_pending_evidence()
+
+    def _start_pending_evidence(self) -> None:
+        pending = self._pending_evidence
+        if pending is None or self._evidence_worker is not None or self._central_evidence_client is None:
+            return
+        self._pending_evidence = None
+        request_id, stock_code, item = pending
+        worker = NewsEvidenceWorker(
+            request_id, stock_code, item, self._central_evidence_client, self,
+        )
+        self._evidence_worker = worker
+        worker.completed.connect(self._on_evidence_completed)
+        worker.finished.connect(self._on_evidence_finished)
+        worker.start()
+
+    def _on_evidence_completed(
+        self, request_id: int, stock_code: str, identity: str, evidence: object,
+    ) -> None:
+        if not isinstance(evidence, StoredNewsEvidence):
+            return
+        if request_id != self._evidence_request_id or stock_code != self._stock_code:
+            return
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._visible_items):
+            return
+        item = self._visible_items[row]
+        key = self._evidence_key(item)
+        if identity != news_identity(item) or key != self._selected_evidence_key:
+            return
+        self._evidence_cache[key] = (monotonic(), evidence)
+        self._evidence_cache.move_to_end(key)
+        while len(self._evidence_cache) > self.EVIDENCE_CACHE_LIMIT:
+            self._evidence_cache.popitem(last=False)
+        self._show_detail(row)
+
+    def _on_evidence_finished(self) -> None:
+        worker = self._evidence_worker
+        self._evidence_worker = None
+        dispose_finished_worker(worker)
+        self._start_pending_evidence()
+
+    def _cached_evidence(
+        self, key: tuple[str, str, str, str],
+    ) -> StoredNewsEvidence | None:
+        cached = self._evidence_cache.get(key)
+        if cached is None:
+            return None
+        cached_at, evidence = cached
+        if monotonic() - cached_at > self.EVIDENCE_CACHE_SECONDS:
+            self._evidence_cache.pop(key, None)
+            return None
+        self._evidence_cache.move_to_end(key)
+        return evidence
+
+    def _evidence_key(self, item: StockNewsItem) -> tuple[str, str, str, str]:
+        return self._stock_code, news_identity(item), item.title, item.description
+
     def _toggle_journal_link(self) -> None:
         row = self._table.currentRow()
         if not self._journal_group_id or row < 0 or row >= len(self._visible_items):
             return
         item = self._visible_items[row]; identity = news_identity(item)
-        linked = identity in self._repository.journal_linked_identities(self._journal_group_id, self._stock_code)
-        self._repository.set_journal_link(self._journal_group_id, self._stock_code, identity, not linked)
+        linked = identity in self._repository.journal_linked_identities(
+            self._journal_group_id, self._stock_code, self._journal_account_scope,
+        )
+        canonical_scope = (
+            self._journal_account_scope
+            if self._journal_account_scope != self._journal_origin_scope else None
+        )
+        self._repository.set_journal_link(
+            self._journal_group_id, self._stock_code, identity, not linked,
+            account_scope=self._journal_origin_scope, canonical_scope=canonical_scope,
+        )
         self._show_detail(row)
         self._status_label.setText("매매일지 연결을 해제했습니다." if linked else "대표 뉴스를 매매일지에 보존했습니다.")
 
@@ -976,10 +1171,13 @@ class StockNewsWindow(QDialog):
         self._auto_refresh.stop()
         self._prepare_request_id += 1
         self._pending_prepare = None
+        self._evidence_request_id += 1
+        self._pending_evidence = None
+        self._selected_evidence_key = None
         worker = self._prepare_worker
         if worker is not None and worker.isRunning():
             worker.wait(3000)
-        for active_worker in (self._worker, self._ai_worker):
+        for active_worker in (self._worker, self._ai_worker, self._evidence_worker):
             if active_worker is not None and active_worker.isRunning():
                 active_worker.requestInterruption()
                 active_worker.wait(10_000)

@@ -21,7 +21,7 @@ def main() -> None:
     arguments, _ = parser.parse_known_args()
     settings = CentralServerSettings.from_environment()
     server = uvicorn.Server(uvicorn.Config(
-        create_app(settings), host=settings.host, port=settings.port, log_level="info",
+        create_app(settings), host=settings.host, port=settings.port, log_level="info", proxy_headers=False,
     ))
     if arguments.parent_pid > 0:
         threading.Thread(

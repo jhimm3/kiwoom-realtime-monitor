@@ -16,7 +16,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QPoint, QRectF, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QDate, QPoint, QRectF, QSettings, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QBrush, QColor, QCloseEvent, QIcon, QImage, QPainter, QPen, QPolygon, QTextDocument
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QDoubleSpinBox,
@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
 
 from kiwoom_monitor.application.minute_chart_service import MinuteChartService
 from kiwoom_monitor.application.market_index_chart_service import MarketIndexChartService
+from kiwoom_monitor.application.market_session_schedule import KRX_AFTER_MARKET_EFFECTIVE_DATE
+from kiwoom_monitor.application.journal_enrichment import JournalEnrichmentService
 from kiwoom_monitor.application.trade_history_service import TradeFill, TradeHistoryService
 from kiwoom_monitor.application.trade_history_query_service import (
     TradeHistoryQueryService,
@@ -46,7 +48,7 @@ from kiwoom_monitor.application.journal_chart_layout import (
     trade_callout_text, visible_trade_fills,
 )
 from kiwoom_monitor.application.trade_journal_summary import (
-    TradeEpisode, TradeReview,
+    TradeEpisode, TradeReview, trade_fill_key,
 )
 from kiwoom_monitor.application.trade_group_edit_service import TradeGroupEditService
 from kiwoom_monitor.application.trade_episode_analysis_service import analyze_trade_cycles
@@ -79,10 +81,14 @@ from kiwoom_monitor.infrastructure.persistence.journal_bar_repository import Bar
 from kiwoom_monitor.infrastructure.persistence.journal_snapshot_service import load_episode_entry_snapshots
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
+from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
 from kiwoom_monitor.news_process import _application_icon_path, _parent_is_alive, _set_taskbar_app_id
 from kiwoom_monitor.presentation.journal_workers import (
-    BackfillWorker, ConfirmWorker, DailyChartWorker, HistoryWorker, MarketIndexBackfillWorker,
+    AnalysisEnrichmentWorker, BackfillWorker, ConfirmWorker, DailyChartWorker, HistoryWorker,
+    MarketIndexBackfillWorker,
 )
+from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
+from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountQueryContext
 from kiwoom_monitor.presentation.journal_delegates import JournalCellMarkerDelegate
 from kiwoom_monitor.presentation.journal_settings_dialogs import (
     JournalChartSettingsDialog, JournalSettingsDialog, MOVING_AVERAGE_DEFAULTS,
@@ -114,6 +120,13 @@ class JournalWindow(QMainWindow):
             monitor_db.parent / "journal_news_request.json", time_based_ids=True,
         )
         self._repo = JournalRepository(journal_db)
+        self._journal_enrichment = JournalEnrichmentService(
+            self._repo, f"journal-process:{os.getpid()}",
+        )
+        self._journal_enrichment.recover_interrupted()
+        self._history_enrichment_task_ids: dict[str, str] = {}
+        self._backfill_enrichment_task_ids: dict[tuple[str, date], str] = {}
+        self._backfill_enrichment_force = False
         self._trade_history_query = TradeHistoryQueryService(self._repo)
         self._trade_group_editor = TradeGroupEditService(self._repo)
         try:
@@ -123,11 +136,12 @@ class JournalWindow(QMainWindow):
         self._trade_analysis_preparer = TradeAnalysisPreparationService(
             self._repo,
             monitor_db,
-            lambda code, started_at, ended_at: load_episode_entry_snapshots(
+            lambda code, started_at, ended_at, account_scope=None: load_episode_entry_snapshots(
                 self._repo, self._snapshot_news_repo, code, started_at, ended_at,
+                account_scope=account_scope,
             ),
-            lambda group_id, code: (
-                self._snapshot_news_repo.load_journal_linked(group_id, code)
+            lambda group_id, code, account_scope: (
+                self._snapshot_news_repo.load_journal_linked(group_id, code, account_scope)
                 if self._snapshot_news_repo is not None else ()
             ),
         )
@@ -216,6 +230,9 @@ class JournalWindow(QMainWindow):
             settings = LocalApiConfig(config).load()
             self._api_ready = bool(settings.app_key and settings.secret_key)
         client = create_query_client(config, config.with_name("data_source.json"))
+        self._query_client = client
+        self._available_account_contexts = ()
+        self._account_list_worker = None
         self._minute_service = MinuteChartService(client, include_nxt=True)
         self._market_index_service = MarketIndexChartService(client)
         self._market_index_worker: MarketIndexBackfillWorker | None = None
@@ -231,6 +248,9 @@ class JournalWindow(QMainWindow):
         self._live_name = ""
         self._worker: ConfirmWorker | None = None
         self._history_worker: HistoryWorker | None = None
+        self._analysis_enrichment_worker: AnalysisEnrichmentWorker | None = None
+        self._analysis_enrichment_task_ids: dict[str, dict[str, str]] = {}
+        self._shutting_down = False
         self._quit_after_history_sync = False
         self._backfill_worker: BackfillWorker | None = None
         self._daily_chart_worker: DailyChartWorker | None = None
@@ -246,7 +266,9 @@ class JournalWindow(QMainWindow):
         self._episodes: tuple[TradeEpisode, ...] = ()
         self._all_episodes: tuple[TradeEpisode, ...] = ()
         self._active_episode: TradeEpisode | None = None
+        self._loaded_history_scope: AccountScope | None = None
         self._loading_review = False
+        self._review_dirty = False
         self._loading_setup = False
         self._last_confirmed_minute = ""
         self.setWindowTitle("키움 매매일지")
@@ -269,9 +291,17 @@ class JournalWindow(QMainWindow):
         self._result_filter.currentTextChanged.connect(self._apply_history_filters)
         self._review_filter = QComboBox(); self._review_filter.addItems(("전체 복기", "미작성", "작성 중", "복기 완료"))
         self._review_filter.currentTextChanged.connect(self._apply_history_filters)
+        self._account_filter = QComboBox()
+        self._account_filter.setMinimumWidth(175)
+        self._refresh_account_choices()
+        self._account_filter.currentIndexChanged.connect(self._account_filter_changed)
         sync = QPushButton("키움에서 체결내역 가져오기"); sync.clicked.connect(self.sync_history)
         journal_settings = QPushButton("⚙"); journal_settings.setToolTip("매매일지 설정"); journal_settings.setFixedWidth(34)
         journal_settings.clicked.connect(self._open_journal_settings)
+        filters.addWidget(QLabel("계좌")); filters.addWidget(self._account_filter)
+        account_reload = QPushButton("↻"); account_reload.setFixedWidth(28)
+        account_reload.setToolTip("API 계좌 목록 갱신"); account_reload.clicked.connect(self._load_api_account_choices)
+        filters.addWidget(account_reload)
         filters.addWidget(QLabel("기간")); filters.addWidget(self._from_date); filters.addWidget(QLabel("~")); filters.addWidget(self._to_date)
         filters.addWidget(self._stock_filter); filters.addWidget(self._result_filter); filters.addWidget(self._review_filter)
         filters.addWidget(sync); filters.addStretch(); filters.addWidget(self._status); filters.addWidget(journal_settings)
@@ -511,6 +541,10 @@ class JournalWindow(QMainWindow):
         self.setCentralWidget(root)
         self._review_save_timer = QTimer(self); self._review_save_timer.setSingleShot(True)
         self._review_save_timer.timeout.connect(self._save_active_review)
+        self._account_reload_timer = QTimer(self); self._account_reload_timer.setSingleShot(True)
+        self._account_reload_timer.timeout.connect(self._reload_selected_account)
+        self._history_followup_timer = QTimer(self); self._history_followup_timer.setSingleShot(True)
+        self._history_followup_timer.timeout.connect(self._run_history_followups)
         self._review_reason.textChanged.connect(self._review_changed); self._review_note.textChanged.connect(self._review_changed)
         self._review_tags.textChanged.connect(self._review_changed); self._review_rating.currentTextChanged.connect(self._review_changed)
         self._review_status.currentTextChanged.connect(self._review_changed)
@@ -520,13 +554,38 @@ class JournalWindow(QMainWindow):
         self._auto_backfill_timer.start(60_000)
         self._history_sync_timer = QTimer(self); self._history_sync_timer.timeout.connect(self._auto_sync_history_once)
         self._history_sync_timer.start(600_000)
+        self._enrichment_timer = QTimer(self); self._enrichment_timer.timeout.connect(self._schedule_analysis_enrichment)
+        self._enrichment_timer.start(300_000)
         self._central_sync_timer = QTimer(self); self._central_sync_timer.timeout.connect(self._schedule_central_journal_sync)
         self._central_sync_timer.start(60_000)
         self.reload_history()
-        self._refresh_backfill_table()
         QTimer.singleShot(1_200, self._auto_sync_history_once)
         QTimer.singleShot(2_000, self._check_automatic_backfill)
         QTimer.singleShot(500, self._schedule_central_journal_sync)
+        QTimer.singleShot(0, self._load_api_account_choices)
+
+    def _load_api_account_choices(self):
+        loader = getattr(self._query_client, "load_account_contexts", None)
+        if not callable(loader) or self._account_list_worker is not None or self._shutting_down: return
+        worker = SettingsRequestWorker(loader); self._account_list_worker = worker
+        worker.succeeded.connect(self._api_accounts_loaded); worker.failed.connect(self._api_accounts_failed)
+        worker.start()
+
+    @Slot(object)
+    def _api_accounts_loaded(self, contexts):
+        self._account_list_worker = None
+        if self._shutting_down: return
+        self._available_account_contexts = tuple(contexts)
+        saved = self._journal_settings.value("selected_account_scope", "", type=str)
+        preferred = contexts[0].scope if contexts and not saved else None
+        self._refresh_account_choices(preferred)
+        self.reload_history()
+        self._auto_sync_history_once()
+
+    @Slot(str)
+    def _api_accounts_failed(self, message):
+        self._account_list_worker = None
+        if not self._shutting_down: self._status.setText(f"API 계좌 목록 확인 실패 · {message}")
 
     def _schedule_central_journal_sync(self) -> None:
         self._central_journal_sync_runner.schedule()
@@ -804,45 +863,139 @@ class JournalWindow(QMainWindow):
             self._start_daily_chart(code, date.today(), "live")
 
     def sync_history(self) -> None:
-        if self._history_worker is not None and self._history_worker.isRunning():
+        if self._history_worker is not None:
             return
         start, end = self._from_date.date().toPython(), self._to_date.date().toPython()
         if start > end:
             start, end = end, start
         if (end - start).days > 31:
             self._status.setText("한 번에 최대 31일까지 조회할 수 있습니다."); return
-        worker = HistoryWorker(self._history_service, self._cost_service, start, end)
-        worker.progress.connect(self._status.setText); worker.failed.connect(lambda message: self._status.setText(f"조회 실패 · {message}"))
+        self._start_history_sync(start, end)
+
+    def _start_history_sync(self, start: date, end: date) -> None:
+        if self._history_worker is not None: return
+        self._history_expected_scope = self._selected_account_scope()
+        worker = HistoryWorker(self._history_service, self._cost_service, start, end,
+            account_client=self._query_client, account_scope=self._history_expected_scope)
+        worker.progress.connect(self._history_progress); worker.failed.connect(self._history_enrichment_failed)
         worker.completed.connect(self._history_received); worker.finished.connect(self._history_finished); worker.finished.connect(worker.deleteLater)
         self._history_worker = worker; worker.start()
 
+    @Slot(str)
+    def _history_progress(self, message):
+        if not self._shutting_down and self._selected_account_scope() == self._history_expected_scope:
+            self._status.setText(message)
+
     def _auto_sync_history_once(self) -> bool:
+        if self._history_worker is not None or self._account_list_worker is not None:
+            return False
+        if callable(getattr(self._query_client, "load_account_contexts", None)) and not any(
+                c.scope == self._selected_account_scope() for c in self._available_account_contexts):
+            return False
         if not self._auto_history_sync_enabled or not self._api_ready:
             return False
-        # NXT 애프터마켓 체결까지 포함하려면 당일 전체 체결은 20:05 이후에 확정한다.
+        # KRX·NXT의 20:00 전체 거래 종료 뒤 여유를 두고 당일 체결을 확인한다.
         now = datetime.now()
         if now.time() < time(20, 5):
             return False
-        if self._journal_settings.value("last_history_sync_day", "", type=str) == date.today().isoformat():
+        # 창이 날짜를 넘겨 열린 채로 있어도 생성 당시 QDate 선택값에 묶이지 않는다.
+        end = date.today()
+        start = end - timedelta(days=7)
+        target_ref = f"{start.isoformat()}:{end.isoformat()}"
+        inputs = {"start": start.isoformat(), "end": end.isoformat(), "api": "kt00007+kt00015"}
+        selected_scope = self._selected_account_scope()
+        fill_task = self._journal_enrichment.register(
+            "date_range", target_ref, "fills", inputs, account_scope=selected_scope,
+        )
+        cost_task = self._journal_enrichment.register(
+            "date_range", target_ref, "costs", inputs, account_scope=selected_scope,
+        )
+        started: dict[str, str] = {}
+        if self._journal_enrichment.start(fill_task.task_id, now):
+            started["fills"] = fill_task.task_id
+        if self._journal_enrichment.start(cost_task.task_id, now):
+            started["costs"] = cost_task.task_id
+        if not started:
             return False
+        self._history_enrichment_task_ids = started
         self._status.setText("오늘 첫 실행 · 키움 체결내역 자동 확인 중…")
-        self.sync_history()
-        return self._history_worker is not None and self._history_worker.isRunning()
+        self._start_history_sync(start, end)
+        running = self._history_worker is not None and self._history_worker.isRunning()
+        if not running:
+            for task_id in started.values():
+                self._journal_enrichment.fail(task_id, "체결 조회 worker를 시작하지 못했습니다.")
+            self._history_enrichment_task_ids = {}
+        return running
 
     def _history_received(self, result: object, start: object, end: object) -> None:
-        if isinstance(result, tuple) and len(result) == 3 and isinstance(result[0], tuple) and isinstance(result[1], tuple) and isinstance(start, date) and isinstance(end, date):
-            fills, costs, cost_error = result
-            self._repo.upsert_history_sync(fills, costs)
-            if datetime.now().time() >= time(20, 5):
+        if getattr(self, "_shutting_down", False): return
+        if isinstance(result, tuple) and len(result) in {3, 4} and isinstance(result[0], tuple) and isinstance(result[1], tuple) and isinstance(start, date) and isinstance(end, date):
+            fills, costs, cost_error = result[:3]
+            try:
+                expected_scope = getattr(self, "_history_expected_scope", LEGACY_ACCOUNT_SCOPE)
+                if len(result) == 4:
+                    context = result[3]
+                    if not isinstance(context, AccountQueryContext) or context.scope != expected_scope:
+                        raise ValueError("조회 완료 계좌 context가 선택 계좌와 다릅니다.")
+                    if self._selected_account_scope() != expected_scope:
+                        raise ValueError("조회 중 계좌 선택이 바뀌어 이전 응답을 저장하지 않았습니다. 다시 조회하세요.")
+                scopes = {
+                    value.origin_scope for value in (*fills, *costs)
+                }
+                if len(scopes) > 1:
+                    raise ValueError("체결·비용 저장 묶음에 서로 다른 계좌가 포함되었습니다.")
+                account_scope = next(iter(scopes), result[3].scope if len(result) == 4 else None)
+                if len(result) == 4 and account_scope != result[3].scope:
+                    raise ValueError("행의 계좌와 조회 완료 context가 다릅니다.")
+                if (
+                    account_scope is not None
+                    and expected_scope != LEGACY_ACCOUNT_SCOPE
+                    and account_scope != expected_scope
+                ):
+                    raise ValueError("선택한 계좌와 키움 응답 계좌가 달라 저장하지 않았습니다.")
+                self._repo.upsert_history_sync(
+                    fills, costs, account_scope=account_scope,
+                )
+                if account_scope is not None:
+                    refresh_accounts = getattr(self, "_refresh_account_choices", None)
+                    if callable(refresh_accounts):
+                        refresh_accounts(account_scope)
+            except Exception as error:
+                self._history_enrichment_failed(f"체결·비용 저장 실패: {error}")
+                return
+            enrichment_task_ids = getattr(self, "_history_enrichment_task_ids", {})
+            fill_task_id = enrichment_task_ids.get("fills")
+            if fill_task_id:
+                self._journal_enrichment.complete(fill_task_id, {"fill_count": len(fills)})
+            cost_task_id = enrichment_task_ids.get("costs")
+            if cost_task_id:
+                if cost_error:
+                    self._journal_enrichment.fail(cost_task_id, str(cost_error))
+                elif fills and not costs:
+                    self._journal_enrichment.partial(
+                        cost_task_id, {"cost_count": 0}, "체결 비용 정산 대기",
+                    )
+                else:
+                    self._journal_enrichment.complete(cost_task_id, {"cost_count": len(costs)})
+            if datetime.now().time() >= time(20, 5) and not cost_error and (costs or not fills):
                 self._journal_settings.setValue("last_history_sync_day", date.today().isoformat())
-            self._status.setText(
-                f"체결 {len(fills)}건 저장 · 비용조회 실패(다음에 재시도)" if cost_error
-                else f"조회 완료 · 체결 {len(fills)}건 · 실제비용 {len(costs)}묶음"
-            )
+            if cost_error:
+                status = f"체결 {len(fills)}건 저장 · 비용조회 실패(다음에 재시도)"
+            elif fills and not costs:
+                status = f"체결 {len(fills)}건 저장 · 실제비용 정산 대기(다음에 재시도)"
+            else:
+                status = f"조회 완료 · 체결 {len(fills)}건 · 실제비용 {len(costs)}묶음"
+            self._status.setText(status)
             self.reload_history()
+
+    def _history_enrichment_failed(self, message: str) -> None:
+        for task_id in getattr(self, "_history_enrichment_task_ids", {}).values():
+            self._journal_enrichment.fail(task_id, message)
+        self._status.setText(f"조회 실패 · {message}")
 
     def _history_finished(self) -> None:
         self._history_worker = None
+        self._history_enrichment_task_ids = {}
         if self._quit_after_history_sync:
             self._quit_after_history_sync = False
             self.shutdown()
@@ -854,14 +1007,209 @@ class JournalWindow(QMainWindow):
     def reload_history(self) -> None:
         start = datetime.combine(self._from_date.date().toPython(), time())
         end = datetime.combine(self._to_date.date().toPython() + timedelta(days=1), time())
-        result = self._trade_history_query.load(start, end)
+        account_scope = self._selected_account_scope()
+        result = self._trade_history_query.load(
+            start, end, account_scope=account_scope,
+        )
+        self._loaded_history_scope = account_scope
         self._visible_fills = result.fills
         self._visible_costs = result.costs
         self._all_episodes = result.episodes
         self._apply_history_filters()
         if not self._episodes:
             self._render_fills(result.fills)
+        self._history_followup_timer.start(0)
+
+    def _run_history_followups(self) -> None:
         self._refresh_backfill_table()
+        self._schedule_analysis_enrichment()
+
+    @staticmethod
+    def _account_label(scope: AccountScope) -> str:
+        if scope == LEGACY_ACCOUNT_SCOPE:
+            return "기존 자료 · 계좌 미확인"
+        environment = "실전" if scope.environment.value == "real" else "모의"
+        return f"{environment} · {scope.account_ref[:8]}"
+
+    def _selected_account_scope(self) -> AccountScope:
+        value = self._account_filter.currentData()
+        return value if isinstance(value, AccountScope) else LEGACY_ACCOUNT_SCOPE
+
+    def _refresh_account_choices(self, preferred: AccountScope | None = None) -> None:
+        selected = preferred
+        if selected is None and hasattr(self, "_account_filter"):
+            current = self._account_filter.currentData()
+            selected = current if isinstance(current, AccountScope) else None
+        if selected is None:
+            saved = self._journal_settings.value("selected_account_scope", "", type=str)
+        else:
+            saved = f"{selected.broker}|{selected.environment.value}|{selected.account_ref}"
+        scopes = tuple(dict.fromkeys((*self._repo.list_account_scopes(),
+            *(c.scope for c in getattr(self, "_available_account_contexts", ())))))
+        self._account_filter.blockSignals(True)
+        self._account_filter.clear()
+        selected_index = 0
+        for index, scope in enumerate(scopes):
+            self._account_filter.addItem(self._account_label(scope), scope)
+            identity = f"{scope.broker}|{scope.environment.value}|{scope.account_ref}"
+            if identity == saved:
+                selected_index = index
+        self._account_filter.setCurrentIndex(selected_index)
+        self._account_filter.blockSignals(False)
+
+    def _account_filter_changed(self) -> None:
+        scope = self._selected_account_scope()
+        self._journal_settings.setValue(
+            "selected_account_scope",
+            f"{scope.broker}|{scope.environment.value}|{scope.account_ref}",
+        )
+        self._history_followup_timer.stop()
+        self._account_reload_timer.start(20)
+
+    def _reload_selected_account(self) -> None:
+        if self._selected_account_scope() == self._loaded_history_scope:
+            return
+        self._active_episode = None
+        self.reload_history()
+
+    def _schedule_analysis_enrichment(self) -> None:
+        if self._shutting_down:
+            return
+        worker = self._analysis_enrichment_worker
+        if worker is not None and worker.isRunning():
+            return
+        tasks: list[tuple[object, tuple[tuple[object, ...], ...]]] = []
+        task_ids: dict[str, dict[str, str]] = {}
+        for episode in self._all_episodes:
+            inputs = {
+                "fills": tuple(trade_fill_key(fill) for fill in episode.fills),
+                "scheduled_day": date.today().isoformat(),
+            }
+            group_tasks = {
+                kind: self._journal_enrichment.register(
+                    "trade_group", episode.group_id, kind, inputs,
+                    account_scope=episode.summary.account_scope,
+                )
+                for kind in (
+                    "daily_bars", "market_index", "post_trade_news", "investor_flow",
+                    "derived_analysis",
+                )
+            }
+            eligible = {
+                kind: task.task_id
+                for kind, task in group_tasks.items()
+                if self._journal_enrichment.can_start(task)
+            }
+            if not eligible:
+                continue
+            rows = self._repo.load_chart_bars_range(
+                episode.summary.stock_code, episode.started_at.date(), episode.ended_at.date(),
+            )
+            tasks.append((episode, rows))
+            task_ids[episode.group_id] = eligible
+            if len(tasks) >= self._AUTO_BACKFILL_BATCH_SIZE:
+                break
+        if not tasks:
+            return
+        worker = AnalysisEnrichmentWorker(
+            self._trade_analysis_preparer,
+            tuple(tasks),
+            active_pack=self._active_strategy_pack,
+            strategy_packs=self._strategy_packs,
+            result_mode=self._strategy_result_mode,
+        )
+        worker.item_started.connect(self._analysis_enrichment_started)
+        worker.item_completed.connect(self._analysis_enrichment_completed)
+        worker.item_failed.connect(self._analysis_enrichment_failed)
+        worker.finished.connect(self._analysis_enrichment_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._analysis_enrichment_task_ids = task_ids
+        self._analysis_enrichment_worker = worker
+        worker.start()
+
+    def _analysis_enrichment_started(self, group_id: str) -> None:
+        for task_id in self._analysis_enrichment_task_ids.get(group_id, {}).values():
+            self._journal_enrichment.start(task_id)
+
+    def _analysis_enrichment_completed(self, group_id: str, prepared: object) -> None:
+        task_ids = self._analysis_enrichment_task_ids.get(group_id, {})
+        if not task_ids:
+            return
+        common_result = {
+            "analysis_revision_id": str(getattr(prepared, "analysis_revision_id", "")),
+            "snapshot_count": len(tuple(getattr(prepared, "entry_snapshots", ()))),
+            "research_link_count": len(tuple(getattr(prepared, "research_links", ()))),
+        }
+        derived_task = task_ids.get("derived_analysis")
+        if derived_task:
+            self._journal_enrichment.complete(derived_task, common_result)
+        daily_task = task_ids.get("daily_bars")
+        daily_count = int(getattr(prepared, "daily_bar_count", 0))
+        if daily_task:
+            if daily_count:
+                self._journal_enrichment.complete(daily_task, {"bar_count": daily_count})
+            else:
+                self._journal_enrichment.partial(daily_task, {"bar_count": 0}, "확정 일봉 대기")
+        market_task = task_ids.get("market_index")
+        if market_task:
+            cycles = tuple(getattr(prepared, "cycles", ()))
+            if cycles:
+                first_day = min(value.started_at.date() for value in cycles)
+                last_day = max(value.ended_at.date() for value in cycles)
+                market_counts = {
+                    market: len(self._repo.load_monitor_market_index_bars(
+                        self._monitor_db, market, first_day, last_day,
+                    ))
+                    for market in ("kospi", "kosdaq")
+                }
+            else:
+                market_counts = {"kospi": 0, "kosdaq": 0}
+            if all(market_counts.values()):
+                self._journal_enrichment.complete(market_task, market_counts)
+            else:
+                self._journal_enrichment.partial(
+                    market_task, market_counts, "시장지수 분봉 보완 대기",
+                )
+        snapshots = tuple(getattr(prepared, "entry_snapshots", ()))
+        news_task = task_ids.get("post_trade_news")
+        if news_task:
+            if snapshots:
+                self._journal_enrichment.complete(news_task, {
+                    "snapshot_count": len(snapshots),
+                    "news_item_count": sum(len(tuple(getattr(value, "news", ()))) for value in snapshots),
+                })
+            else:
+                self._journal_enrichment.unavailable(
+                    news_task, "실시간 진입 스냅샷 없음", {"snapshot_count": 0},
+                )
+        investor_task = task_ids.get("investor_flow")
+        if investor_task:
+            if not snapshots:
+                self._journal_enrichment.unavailable(
+                    investor_task, "실시간 진입 스냅샷 없음", {"snapshot_count": 0},
+                )
+            else:
+                available = sum(
+                    1 for value in snapshots
+                    if bool((getattr(value, "investor_flow", None) or {}).get("available"))
+                )
+                result = {"snapshot_count": len(snapshots), "available_count": available}
+                if available == len(snapshots):
+                    self._journal_enrichment.complete(investor_task, result)
+                else:
+                    self._journal_enrichment.partial(
+                        investor_task, result, "외국인·기관 수급 보완 대기",
+                    )
+
+    def _analysis_enrichment_failed(self, group_id: str, message: str) -> None:
+        for task_id in self._analysis_enrichment_task_ids.get(group_id, {}).values():
+            self._journal_enrichment.fail(task_id, message)
+
+    def _analysis_enrichment_finished(self) -> None:
+        self._analysis_enrichment_worker = None
+        self._analysis_enrichment_task_ids = {}
+        if not self._shutting_down:
+            QTimer.singleShot(0, self._schedule_analysis_enrichment)
 
     def _apply_history_filters(self, *args: object) -> None:
         query = self._stock_filter.text().strip().lower() if hasattr(self, "_stock_filter") else ""
@@ -983,16 +1331,42 @@ class JournalWindow(QMainWindow):
         if self._history_worker is not None and self._history_worker.isRunning():
             self._status.setText("체결내역 조회가 끝난 뒤 분봉을 보완하세요."); return
         tasks = tasks if tasks is not None else self._backfill_tasks(failed_only=failed_only)
+        force = not automatic
+        eligible: list[tuple[str, date]] = []
+        task_ids: dict[tuple[str, date], str] = {}
+        for code, day in tasks:
+            task = self._journal_enrichment.register(
+                "stock_day", f"{code}:{day.isoformat()}", "minute_bars",
+                {"stock_code": code, "trade_date": day.isoformat(), "source": "after_close_confirmed",
+                 "coverage_contract": "central-complete-v2"},
+                account_scope=self._selected_account_scope(),
+            )
+            if self._journal_enrichment.can_start(task, force=force):
+                eligible.append((code, day))
+                task_ids[(code, day)] = task.task_id
+        tasks = tuple(eligible)
         if not tasks:
+            if automatic:
+                return
             self._status.setText("재시도할 실패 분봉이 없습니다." if failed_only else "보완할 누락 분봉이 없습니다."); return
         worker = BackfillWorker(self._minute_service, tasks)
         worker.progress.connect(self._status.setText)
+        worker.item_started.connect(self._backfill_started)
         worker.item_completed.connect(self._backfill_received)
         worker.item_failed.connect(self._backfill_failed)
         worker.completed.connect(self._backfill_completed)
         worker.finished.connect(self._backfill_finished); worker.finished.connect(worker.deleteLater)
         self._automatic_backfill_running = automatic
+        self._backfill_enrichment_task_ids = task_ids
+        self._backfill_enrichment_force = force
         self._backfill_worker = worker; worker.start()
+
+    def _backfill_started(self, code: str, day: object) -> None:
+        if not isinstance(day, date):
+            return
+        task_id = getattr(self, "_backfill_enrichment_task_ids", {}).get((code, day))
+        if task_id:
+            self._journal_enrichment.start(task_id, force=self._backfill_enrichment_force)
 
     def _save_auto_backfill_setting(self, enabled: bool) -> None:
         QSettings("KiwoomMonitor", "TradingJournalWindow").setValue("auto_backfill", enabled)
@@ -1003,23 +1377,28 @@ class JournalWindow(QMainWindow):
     def _check_automatic_backfill(self) -> None:
         if not self._auto_backfill.isChecked() or self._backfill_worker is not None or self._history_worker is not None:
             return
-        today = date.today()
-        attempt_key = (today, datetime.now().hour >= 20)
-        if self._automatic_backfill_attempted_for == attempt_key:
-            return
         tasks = self._backfill_tasks(all_saved=True)
-        self._automatic_backfill_attempted_for = attempt_key
         if not tasks:
             return
         batch = tasks[:self._AUTO_BACKFILL_BATCH_SIZE]
         self._status.setText(f"자동 분봉 보완 준비 · {len(batch)}건" + (f" / 남은 {len(tasks)}건" if len(tasks) > len(batch) else ""))
         self._start_missing_backfill(tasks=batch, automatic=True)
 
-    def _backfill_received(self, code: str, day: object, bars: object) -> None:
+    def _backfill_received(
+        self, code: str, day: object, bars: object, coverage_complete: bool = True,
+    ) -> None:
         if not isinstance(day, date) or not isinstance(bars, tuple):
             return
-        if not self._repo.save_bar_backfill_result(code, day, bars, datetime.now()):
+        task_id = getattr(self, "_backfill_enrichment_task_ids", {}).get((code, day))
+        if not self._repo.save_bar_backfill_result(
+            code, day, bars, datetime.now(), coverage_complete=coverage_complete,
+        ):
+            if task_id:
+                state = self._repo.bar_backfill_state(code, day)
+                self._journal_enrichment.fail(task_id, state.message or "분봉 전체 범위가 확인되지 않았습니다.")
             return
+        if task_id:
+            self._journal_enrichment.complete(task_id, {"bar_count": len(bars)})
         if backfill_affects_history_selection(
             code,
             day,
@@ -1031,6 +1410,9 @@ class JournalWindow(QMainWindow):
     def _backfill_failed(self, code: str, day: object, message: str) -> None:
         if isinstance(day, date):
             self._repo.mark_bar_backfill(code, day, "실패", message)
+            task_id = getattr(self, "_backfill_enrichment_task_ids", {}).get((code, day))
+            if task_id:
+                self._journal_enrichment.fail(task_id, message)
 
     def _backfill_completed(self, success: int, failed: int) -> None:
         prefix = "자동 " if self._automatic_backfill_running else ""
@@ -1041,6 +1423,8 @@ class JournalWindow(QMainWindow):
     def _backfill_finished(self) -> None:
         self._backfill_worker = None
         self._automatic_backfill_running = False
+        self._backfill_enrichment_task_ids = {}
+        self._backfill_enrichment_force = False
 
     def _stop_backfill(self) -> None:
         if self._backfill_worker is not None and self._backfill_worker.isRunning():
@@ -1522,6 +1906,7 @@ class JournalWindow(QMainWindow):
             personal_rule_count=len(self._load_personal_rules()),
             draft_rule_counts=prepared.draft_rule_counts,
             total_return_rate=episode.summary.return_rate,
+            research_links=prepared.research_links,
         )
         self._setup_label.setPlainText(view_model.setup_summary_text)
         self._history_chart.set_setup_types(view_model.selected_types)
@@ -1558,11 +1943,16 @@ class JournalWindow(QMainWindow):
         episode = self._active_episode
         if episode is None:
             return
+        account_scope = getattr(episode.summary, "account_scope", LEGACY_ACCOUNT_SCOPE)
+        fills = tuple(getattr(episode, "fills", ()))
+        origin_scope = fills[0].origin_scope if fills else account_scope
         document = {
             "code": episode.summary.stock_code,
             "name": episode.summary.stock_name,
             "group_id": episode.group_id,
             "trade_date": episode.summary.trade_date.isoformat(),
+            "origin_scope": origin_scope.to_dict(),
+            "account_scope": account_scope.to_dict(),
         }
         try:
             self._journal_news_channel.send(document)
@@ -1584,30 +1974,42 @@ class JournalWindow(QMainWindow):
     def _load_active_review(self) -> None:
         if self._active_episode is None:
             return
-        review = self._repo.load_review(self._active_episode.group_id)
+        review = self._repo.load_review(
+            self._active_episode.group_id, self._active_episode.summary.account_scope,
+        )
         self._loading_review = True
         self._review_reason.setPlainText(review.reason); self._review_note.setPlainText(review.review)
         self._review_tags.setText(review.tags); self._review_rating.setCurrentText(review.rating or "보통")
         self._review_status.setCurrentText(review.status or "미작성")
         self._loading_review = False
+        self._review_dirty = False
         self._review_saved.setText("저장된 복기" if any((review.reason, review.review, review.tags)) else "아직 작성하지 않음")
 
     def _review_changed(self, *args: object) -> None:
         if self._loading_review or self._active_episode is None:
             return
+        self._review_dirty = True
         self._review_saved.setText("저장 대기…")
         self._review_save_timer.start(700)
 
     def _save_active_review(self) -> None:
-        if self._active_episode is None or self._loading_review:
+        if self._active_episode is None or self._loading_review or not self._review_dirty:
             return
         self._review_save_timer.stop()
+        origin_scope = self._active_episode.fills[0].origin_scope
+        canonical_scope = (
+            self._active_episode.summary.account_scope
+            if self._active_episode.summary.account_scope != origin_scope else None
+        )
         review = TradeReview(
             self._active_episode.group_id, self._review_reason.toPlainText().strip(),
             self._review_note.toPlainText().strip(), self._review_tags.text().strip(),
             self._review_rating.currentText(), self._review_status.currentText(),
+            origin_scope, canonical_scope,
         )
-        self._repo.save_review(review)
+        account_scope = None if review.origin_scope == LEGACY_ACCOUNT_SCOPE else review.origin_scope
+        self._repo.save_review(review, account_scope=account_scope)
+        self._review_dirty = False
         self._review_saved.setText("저장됨")
         row = self._summary_table.currentRow()
         if row >= 0:
@@ -1726,7 +2128,13 @@ class JournalWindow(QMainWindow):
             minute = datetime.fromisoformat(str(row[0]))
             values = (minute.strftime("%H:%M"), *row[1:6], f"{float(row[6]):,.2f}")
             source = str(row[7])
-            state = "장 종료 확정" if source == "after_close_confirmed" else ("확인" if source == "api_confirmed" else ("진행 중·임시" if minute >= current else "보완 대기"))
+            if source == "after_close_confirmed":
+                state = (
+                    "국내 전체일 종료 확정(20:00)"
+                    if minute.date() >= KRX_AFTER_MARKET_EFFECTIVE_DATE else "장 종료 확정"
+                )
+            else:
+                state = "확인" if source == "api_confirmed" else ("진행 중·임시" if minute >= current else "보완 대기")
             for column, value in enumerate((*values, state)):
                 self._table.setItem(row_index, column, QTableWidgetItem(str(value)))
         if rows:
@@ -1779,9 +2187,10 @@ class JournalWindow(QMainWindow):
                         QTimer.singleShot(0, self._detached_source_changed)
 
     def shutdown(self) -> None:
-        self._refresh_timer.stop(); self._confirm_timer.stop(); self._auto_backfill_timer.stop(); self._history_sync_timer.stop(); self._central_sync_timer.stop()
+        self._shutting_down = True
+        self._refresh_timer.stop(); self._confirm_timer.stop(); self._auto_backfill_timer.stop(); self._history_sync_timer.stop(); self._enrichment_timer.stop(); self._central_sync_timer.stop()
         self._pending_market_index_day = None
-        for attribute in ("_worker", "_history_worker", "_backfill_worker", "_daily_chart_worker", "_market_index_worker"):
+        for attribute in ("_worker", "_history_worker", "_analysis_enrichment_worker", "_backfill_worker", "_daily_chart_worker", "_market_index_worker"):
             worker = getattr(self, attribute, None)
             try:
                 if worker is not None and worker.isRunning():

@@ -146,10 +146,27 @@ class StockRepositoryTests(unittest.TestCase):
             Database(database_path).initialize()
             stocks = StockRepository(database_path)
             stocks.upsert("005930", "삼성전자")
-            stocks.update_fundamentals("005930", 2_000_000, 55.5, 72_000, 4_424_699_000)
+            stocks.update_fundamentals(
+                "005930", 2_000_000, 55.5, 72_000, 4_424_699_000, 91_900,
+            )
             saved = stocks.load_fundamentals(("005930",))
             self.assertEqual(2_000_000, saved["005930"].market_cap_eok)
             self.assertEqual(55.5, saved["005930"].float_ratio_percent)
             self.assertEqual(72_000, saved["005930"].high_250_price)
             self.assertEqual(4_424_699_000, saved["005930"].float_shares)
+            self.assertEqual(91_900, saved["005930"].upper_limit_price)
             self.assertEqual(72_000, stocks.load_high_250_price("005930"))
+
+    def test_missing_upper_limit_price_forces_one_daily_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            stocks = StockRepository(database_path)
+            stocks.upsert("005930", "삼성전자")
+            today = date.today().isoformat()
+
+            stocks.update_fundamentals("005930", 2_000_000, 55.5, 72_000)
+            self.assertEqual(("005930",), stocks.fundamentals_to_refresh(("005930",), today))
+
+            stocks.update_fundamentals("005930", 2_000_000, 55.5, 72_000, None, 91_900)
+            self.assertEqual((), stocks.fundamentals_to_refresh(("005930",), today))

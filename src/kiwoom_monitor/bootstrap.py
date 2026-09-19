@@ -16,6 +16,7 @@ from kiwoom_monitor.infrastructure.app_paths import AppPaths
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig, DataSourceSettings
 from kiwoom_monitor.infrastructure.central_server_process import LocalCentralServerProcess
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
+from kiwoom_monitor.infrastructure.central_operational_settings import CentralOperationalSettingsClient
 from kiwoom_monitor.infrastructure.central_content_sync import CentralContentSyncService
 from kiwoom_monitor.infrastructure.central_theme_sync import CentralThemeSyncDispatcher
 from kiwoom_monitor.infrastructure.central_settings_sync import CentralSettingsSyncService
@@ -90,6 +91,10 @@ def main() -> None:
         from kiwoom_monitor.news_process import main as news_main
         index = sys.argv.index("--news-process")
         raise SystemExit(news_main(sys.argv[index + 1:]))
+    if "--research-process" in sys.argv:
+        from kiwoom_monitor.research_process import main as research_main
+        index = sys.argv.index("--research-process")
+        raise SystemExit(research_main(sys.argv[index + 1:]))
     _set_taskbar_app_id()
     paths = AppPaths.for_current_user()
     configure_logging(paths.log_dir)
@@ -114,6 +119,8 @@ def main() -> None:
     migrate_legacy_news_database(paths.database_path, paths.news_database_path)
     central_theme_sync: CentralThemeSyncDispatcher | None = None
     central_settings_sync: CentralSettingsSyncService | None = None
+    candidate_client: CentralContentClient | None = None
+    candidate_settings_client: CentralOperationalSettingsClient | None = None
     if configured_data_source.mode in {"local_server", "personal_server"} and not (
         configured_data_source.mode == "local_server" and local_central_server is None
     ):
@@ -131,9 +138,17 @@ def main() -> None:
                 if central_theme_sync is not None and central_theme_sync.has_pending \
                         and not central_theme_sync.flush_pending():
                     return
-                pulled = central_content_service.pull(paths.database_path, paths.news_database_path)
                 seed_marker = paths.data_dir / ".central_content_seeded"
+                needs_manifest_seed = (
+                    seed_marker.exists()
+                    and not central_content_service.push_manifest_exists(paths.news_database_path)
+                )
+                pulled = central_content_service.pull(paths.database_path, paths.news_database_path)
                 if seed_marker.exists():
+                    if needs_manifest_seed:
+                        central_content_service.seed_push_manifest(
+                            paths.database_path, paths.news_database_path, allow_existing=True,
+                        )
                     logging.getLogger(__name__).info(
                         "중앙 콘텐츠 시작 동기화 완료: 내려받기 %s건 · 초기 업로드 생략", pulled.total,
                     )
@@ -150,6 +165,11 @@ def main() -> None:
         central_settings_sync = CentralSettingsSyncService(CentralContentClient(
             configured_data_source.server_url, configured_data_source.access_token,
         ))
+        candidate_client = CentralContentClient(
+            configured_data_source.server_url, configured_data_source.access_token,
+            timeout_seconds=5.0,
+        )
+        candidate_settings_client = CentralOperationalSettingsClient(configured_data_source)
     minute_bar_repository = MinuteBarRepository(paths.database_path)
     daily_bar_repository = DailyBarRepository(paths.database_path)
     google_drive_sync = GoogleDriveSyncService(paths.database_path, paths.news_database_path)
@@ -300,6 +320,9 @@ def main() -> None:
         monitor_database_path=paths.database_path,
         entry_investor_loader=api_runtime.get("entry_investor_loader"),
         program_trade_loader=api_runtime.get("program_trade_loader"),
+        candidate_client=candidate_client,
+        candidate_settings_client=candidate_settings_client,
+        research_data_dir=paths.data_dir / "research",
     )
     window.show()
 

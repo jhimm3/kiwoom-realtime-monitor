@@ -1,5 +1,37 @@
 # 기능개발서와 실제 구현 감사
 
+## 2026-09-16 자동 모의운영 연결 전 설계 재검토
+
+기존 admission 회귀 9개는 통과했지만 메모리 DB/가짜 transport 진단에서 중지 기록 뒤 제출,
+체결 전 flat 잔고 재사용으로 두 번째 제출, 완료 주문의 미체결 오판정, 손실 도달값 미차단과
+손익 미확인 시 EXIT 차단을 확인했다. 실제 주문이나 NAS 운영 장애를 재현한 것은 아니다.
+현재 O2-Md의 손익 출처 검사는 실제 비용 근거 검증과 다르며 runner도 연결 전이다.
+[상세 감사](reports/O2MD_SAFETY_AUDIT_20260916.md)와
+[설계 결정·Sol 구현 계약](reports/O2M_DESIGN_REVIEW_DECISIONS_20260916.md)에 따라
+완료 표시를 정정하고 O2-M0 안전 보완을 다음 단계로 지정했다. 제품 코드는 수정하지 않았다.
+
+## 2026-09-14 NAS 뉴스 분류 실자료 재감사
+
+실행 중인 NAS에서 최근 기사·본문·화면 projection·AI revision을 읽어 저장 판정과 현재 규칙을 비교했다. 저장 당시 관련 기사 1,864건 중 시세·시장 반응 481건을 제외하면서 환율·유가·금리 및 기업 실적 전망 자체의 변화는 보존하도록 문맥을 보완했다. 범용 `투자`, `전망` 카테고리 오분류도 좁혔다. 표본 범위, 수치, 원문 결합 한계와 배포 후 재확인 기준은 [뉴스 분류 감사](reports/NEWS_CLASSIFICATION_AUDIT_20260914.md)에 기록했다.
+
+## 2026-09-14 SOR 데이터 계약 재검토
+
+정적 코드 검토에서 `_AL`의 KRX 오표기, 중앙 차트의 KRX/NXT 전용 조회, 실제 REG와 수신 연속성 기록의 불일치를 확인했다. SOR↔상세 전환의 누적 baseline과 중복 합산도 회귀 대상으로 고정했다. 기존 `TradingVenue.SOR/COMBINED`와 market 복합키를 활용하므로 핵심 모델 교체는 필요 없다. [재검토 결정·S0~S5 구현 계약](reports/SOR_DATA_CONTRACT_REVIEW_20260914.md)을 따른다. 현재 전체 보유잔고가 모두 우선 수집된다는 이전 설명은 정정하며, 실제 입력은 TOP20 수집 코드와 계좌 매수 편입 코드다. 후속 구현으로 `_AL` SOR 보존, 승인 item 기준 전환 baseline, 통합 분봉 선택, 분봉 보완 거래대금 차이 기록을 추가했다. NAS SOR↔로컬 KRX/NXT 전환의 누적 기준 회귀와 완전·부분 비교를 나눈 요약 조회까지 추가했으며 운영 DB 영향 규모와 실수신은 NAS 배포 뒤 검증한다.
+
+## 2026-09-13 A4b 계좌 경계 추가 감사
+
+이번 감사는 직접 계좌 연결 설계와 실제 UI·API·동기화 경로만 대상으로 했다. 아래 2026-09-09 기록은 당시 검증이며 최신 계좌 기능의 완료 근거가 아니다. 제품 코드·운영 DB·NAS를 수정하지 않았다.
+
+**실행으로 확인:** 뉴스 명령 relay에서 scope 두 필드 유실, 검증 체결 수동 묶음의 legacy 저장, 실제 FastAPI의 `journal_sync_states` GET 404 및 전체 일지 sync 첫 요청 중단, 구 NAS의 새 뉴스 collection 404로 일반 기사 미반영, v1 삭제 표식 후 scoped override 재등장, v1 동일 key가 verified 행을 legacy로 덮어씀, 뉴스 unlink 후 원격 replay로 부활, v1 뉴스 key 변경, 잘못된 UUID 수락을 재현했다. 합성 값·임시 SQLite/FastAPI·fake client만 사용했고 재현 실행 종료 코드는 0이다. API 연결은 실제 서비스+TestClient adapter이며 urllib CentralContentClient의 실제 HTTP 전송은 시험하지 않았다. 기존 정상 저장소/migration/source 중복 검사 테스트 5개도 종료 코드 0으로 통과했다.
+
+**코드 경로로 확인:** 직접 REST는 현재 자격을 재확인하지 않고 저장 binding만 사용한다. 직접 WS는 resolver 없이 00을 해석하고 REST fallback과 별도 client를 만든다. DPAPI는 로컬 verifier/프로세스 간 잠금이 없고 범용 v1 query는 ka00001 원문을 전달할 수 있다. legacy 원장은 source owner를 구별하지 않으며 filled_at을 revision으로 사용한다. 실제 다른 키 교체·동시 DPAPI 쓰기·원문 API 호출은 실행하지 않았다.
+
+**판정:** 이전 A4b 뉴스 연결·삭제 방어 완료 판정을 철회한다. 직접 계좌 신원도 미완료다. 직전 879개 전체 회귀 통과는 누락된 실제 경계를 보장하지 않는다. 원인별 수정 대상·입출력·완료/회귀 기준은 [A4b 재검토 결정](reports/A4B_DIRECT_WEBSOCKET_SCOPE_REVIEW.md)의 B01~B08/I01~I04와 0a~5단계에 기록했다. 다음 작업은 **0a UI/수동 묶음 scope 복구**이며 오류 보완 전 A4b NAS 배포는 보류한다.
+
+**설계 결정과 미검증:** 신뢰하는 소유자 PC의 fresh 계좌값을 인증된 HTTPS로 기존 NAS registry와 대조하고 로컬 DPAPI 지문으로 재검증한다. 새 API/보호파일은 아직 미구현이다. 현재 앱 URL은 HTTP이고 NAS HTTPS 제공 여부, 변경 후 PostgreSQL/두 PC/장중 실수신은 확인하지 않았다. 이번 문서 수정으로 실제 문제가 해결됐다고 보고하지 않는다.
+
+## 2026-09-09 기준 감사 기록
+
 감사 기준: 2026-09-09 작업 트리. `README.md`, 기술명세서 v2.0, AI 인수인계서 v3.3, NAS 설계서, 릴리스 노트와 `src/`, `tests/`, `deploy/`를 대조했다.
 
 환경 확인: 2026-09-09 승인된 제한 밖 실행에서 Python 3.13.15, 원본 `.venv`의 PySide6 6.11.1과 FastAPI 0.141.1이 정상임을 재확인했다. 앞선 본체 삭제 진단을 정정한다. 제한 환경에서의 접근 거부가 실행 실패 원인이었으며 재설치는 필요하지 않다.
@@ -164,3 +196,19 @@
 ## 2026-09-12 최종 종료
 
 종료 단계에서 핵심 회귀는 477개로 확대되어 모두 통과했다. `2026.09.12-market-state-time-v1` NAS 배포 후 PostgreSQL v3 주요 저장소 왕복·롤백, WebSocket, `T88:88` 보정, 실제 NAS 중단 시 로컬 키움 전환과 NAS 자동 복귀를 확인했다. 최종 판정과 후속 운영 검증 범위는 `reports/REFACTORING_CLOSEOUT_REPORT.md`를 따른다.
+
+## 2026-09-13 연속 연구·계좌 범위 설계 감사
+
+기능 확장 설계 감사다. [결정문 F01~F12](reports/CONTINUOUS_RESEARCH_ACCOUNT_SCOPE_REVIEW.md)와 [수정 계획](reports/CONTINUOUS_RESEARCH_ACCOUNT_IMPLEMENTATION_PLAN.md)을 상세 원장으로 사용한다. 제품 코드는 수정하지 않았다.
+
+- 작은 stdout 재현: 취소 trial 영구 건너뜀, baseline/초기자금 변경에도 동일 search/job ID, 봉인 OOS 부적격 처리와 개방 OOS의 선택 점수 혼입, Cartesian 생성 후 뒤늦은 한도 검사.
+- 코드 경로 확인: GUI 예약 취소 누락, lease 소유권·heartbeat 부재, CPU/메모리 상한 부재, 계좌 없는 FIFO/비용/snapshot/query/sync. GUI 경합·동시성·CPU/RSS 실측은 미실행이다.
+- 실제 사용자 DB의 계좌 혼합 여부는 확인하지 않았다. 계좌 registry/context·v2 컬렉션·기존 키 보존 설계는 확정했으나 migration/배포 전이다.
+- CR0 정확성 수정 뒤 자동화를 진행한다. 기존 회귀 통과 기록을 이번 결함의 해결 증거로 쓰지 않는다.
+# 2026-09-14 SOR 실시간 구독 영향
+
+- 중앙 수집은 일반 NXT 가능 종목을 SOR(`_AL`)로, 우선 연구 종목을 KRX/NXT 상세로 받는 혼합 방식이다.
+- 공통 실시간 parser가 `_AL`을 KRX로 기록해 SOR 분·초봉이 strict KRX 연구 자료에 섞일 수 있는 의미 결함을 확인했다.
+- 중앙 구독기가 `0B`·`0w`·제어 type을 하나의 190 item 예산으로 합산하지만 공식 REST WebSocket 계약은 `data` 행별 item 100개와 type 2개를 별도로 정의한다. `0B`와 `0w`를 type별로 계산해야 하며, 현재 합산 제한 때문에 불필요하게 프로그램매매와 거래소 상세 수신을 줄이고 있다.
+- parser만 단독 수정하면 기존 KRX 전용 조회가 통합 봉을 잃으므로 화면용 통합 자료와 연구용 venue 원본의 소비 경계를 함께 바꿔야 한다.
+- 전체 영향과 최소 변경 순서는 `reports/SOR_REALTIME_SUBSCRIPTION_IMPACT_AUDIT_20260914.md`에 기록했다.

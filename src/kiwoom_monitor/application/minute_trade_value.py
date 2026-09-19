@@ -37,10 +37,12 @@ class MinuteTradeValueAggregator:
         self._bars: dict[str, deque[MinuteOhlcv]] = defaultdict(lambda: deque(maxlen=max_minutes))
         self._last_cumulative_volume: dict[tuple[str, str], int] = {}
         self._last_cumulative_trade_value: dict[tuple[str, str], int] = {}
+        self._source_mode_by_code: dict[str, str] = {}
 
     def ingest(self, tick: TradeTick, observed_at: datetime) -> MinuteOhlcv | None:
         if tick.current_price is None:
             return None
+        self._reset_baselines_on_source_mode_change(tick)
         minute = _trade_minute(tick, observed_at)
         bars = self._bars[tick.code]
         volume = self._trade_volume(tick)
@@ -88,6 +90,23 @@ class MinuteTradeValueAggregator:
         if len(bars) > 1 and bars[-1].minute < bars[-2].minute:
             self._bars[tick.code] = deque(sorted(bars, key=lambda value: value.minute)[-self._max_minutes :], maxlen=self._max_minutes)
         return bar
+
+    def _reset_baselines_on_source_mode_change(self, tick: TradeTick) -> None:
+        """SOR와 거래소 상세가 전환될 때 비수신 구간 누적분을 더하지 않는다."""
+        market = str(tick.market or "KRX").upper()
+        mode = "SOR" if market == "SOR" else "DETAIL"
+        previous = self._source_mode_by_code.get(tick.code)
+        self._source_mode_by_code[tick.code] = mode
+        if previous is None or previous == mode:
+            return
+        self._last_cumulative_volume = {
+            key: value for key, value in self._last_cumulative_volume.items()
+            if key[0] != tick.code
+        }
+        self._last_cumulative_trade_value = {
+            key: value for key, value in self._last_cumulative_trade_value.items()
+            if key[0] != tick.code
+        }
 
     def _trade_volume(self, tick: TradeTick) -> int | None:
         # 0B의 체결량은 한 건의 체결 수량이다. 누적거래량보다 우선해야

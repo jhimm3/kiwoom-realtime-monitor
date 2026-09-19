@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from contextlib import contextmanager
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 from dataclasses import dataclass
 from PIL import Image
+
+from kiwoom_monitor.infrastructure.app_paths import AppPaths
 
 
 @dataclass(frozen=True)
@@ -251,14 +252,17 @@ def _merge_theme_rows(rows: list[ImageThemeRow]) -> tuple[ImageThemeRow, ...]:
 class PaddleThemeOcr:
     """Lazy-load PaddleOCR so the main monitor starts without OCR overhead."""
 
-    # 개발 실행과 PyInstaller 폴더형 배포 모두에서 같은 data 경로를 사용한다.
-    _APP_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[4]
-    _MODEL_ROOT = _APP_ROOT / "data" / "ocr_models"
-    _DETECTION_MODEL = _MODEL_ROOT / "PP-OCRv5_mobile_det"
-    _KOREAN_RECOGNITION_MODEL = _MODEL_ROOT / "korean_PP-OCRv5_mobile_rec"
-
     def __init__(self) -> None:
         self._ocr = None
+        model_root = AppPaths.for_current_user().data_dir / "ocr_models"
+        self._detection_model = model_root / "PP-OCRv5_mobile_det"
+        self._korean_recognition_model = model_root / "korean_PP-OCRv5_mobile_rec"
+
+    @staticmethod
+    def _model_ready(model_path: Path) -> bool:
+        return all((model_path / filename).is_file() for filename in (
+            "inference.json", "inference.pdiparams", "inference.yml",
+        ))
 
     @staticmethod
     def _engine_model_path(model_path: Path) -> str:
@@ -289,13 +293,16 @@ class PaddleThemeOcr:
                 "use_doc_unwarping": False,
                 "use_textline_orientation": False,
             }
-            if self._DETECTION_MODEL.is_dir() and self._KOREAN_RECOGNITION_MODEL.is_dir():
-                options["text_detection_model_name"] = "PP-OCRv5_mobile_det"
-                options["text_recognition_model_name"] = "korean_PP-OCRv5_mobile_rec"
-                options["text_detection_model_dir"] = self._engine_model_path(self._DETECTION_MODEL)
-                options["text_recognition_model_dir"] = self._engine_model_path(self._KOREAN_RECOGNITION_MODEL)
+            # 기본 pipeline은 88MB server detector를 선택한다. 앱 데이터에 이미
+            # 보관된 모바일 detector/한국어 recognizer를 명시해 네트워크 확인과
+            # 불필요한 server 모델 로드를 만들지 않는다.
+            options["text_detection_model_name"] = "PP-OCRv5_mobile_det"
+            options["text_recognition_model_name"] = "korean_PP-OCRv5_mobile_rec"
+            if self._model_ready(self._detection_model) and self._model_ready(self._korean_recognition_model):
+                options["text_detection_model_dir"] = self._engine_model_path(self._detection_model)
+                options["text_recognition_model_dir"] = self._engine_model_path(self._korean_recognition_model)
             else:
-                # Korean PP-OCRv5 uses this exact detector/recognizer pair.
+                # 파일이 실제로 없을 때도 작은 모바일 모델 이름을 고정한다.
                 options["lang"] = "korean"
                 options["ocr_version"] = "PP-OCRv5"
             self._ocr = PaddleOCR(**options)

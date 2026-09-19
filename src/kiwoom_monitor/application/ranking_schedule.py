@@ -76,9 +76,13 @@ def decide_ranking_response(
     expected_count: int,
     retry_count: int,
     has_blocking_modal: bool,
+    *,
+    allow_partial_retry: bool = True,
 ) -> RankingResponseDecision:
     """부분 응답 재시도와 설정창 사용 중 반영 보류 정책을 결정한다."""
     if expected_count > 0 and actual_count < expected_count:
+        if not allow_partial_retry:
+            return RankingResponseDecision(RankingResponseAction.WAIT_NEXT, 0)
         next_retry_count = retry_count + 1
         action = (
             RankingResponseAction.RETRY_SOON

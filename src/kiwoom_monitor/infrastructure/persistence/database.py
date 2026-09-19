@@ -44,6 +44,7 @@ DEFAULT_SETTINGS = {
     "market_cap_highlight_high_eok": "100000",
     "market_cap_highlight_enabled": "1",
     "market_cap_highlight_badge_enabled": "0",
+    "upper_limit_highlight_enabled": "1",
     "market_cap_highlight_low_color": "#0070C0",
     "market_cap_highlight_middle_color": "#C55A11",
     "market_cap_highlight_high_color": "#C00000",
@@ -108,7 +109,7 @@ DEFAULT_COLUMNS = (
 )
 
 
-MAIN_SCHEMA_VERSION = 3
+MAIN_SCHEMA_VERSION = 4
 
 
 class Database:
@@ -286,6 +287,11 @@ class Database:
                         "market_data_observation_metadata",
                         create_market_data_metadata_table,
                     ),
+                    SQLiteMigration(
+                        4,
+                        "stock_upper_limit_price_cache",
+                        self._add_upper_limit_price_column,
+                    ),
                 )
             )
             connection.commit()
@@ -346,6 +352,12 @@ class Database:
             if name not in existing:
                 column_type = "TEXT" if name.endswith(("_on", "_at")) else "REAL"
                 connection.execute(f"ALTER TABLE stocks ADD COLUMN {name} {column_type}")
+
+    @staticmethod
+    def _add_upper_limit_price_column(connection: sqlite3.Connection) -> None:
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(stocks)")}
+        if "upper_limit_price" not in columns:
+            connection.execute("ALTER TABLE stocks ADD COLUMN upper_limit_price INTEGER")
 
     @staticmethod
     def _add_daily_bar_columns(connection: sqlite3.Connection) -> None:

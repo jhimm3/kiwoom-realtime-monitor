@@ -45,22 +45,80 @@ class YahooDelayedMarketCollector:
         self._task: asyncio.Task[None] | None = None
         self._last_daily_date = ""
         self._daily_reference_closes: dict[tuple[str, str], float] = {}
+        self._collection: asyncio.Task | None = None
+        self._collection_daily = False
+        self._updates: set[asyncio.Task] = set()
+        self._settings_lock = asyncio.Lock()
+        self._closing = False
+        self._shutdown = False
 
     async def start(self) -> None:
+        if self._shutdown:
+            raise RuntimeError("EXTERNAL_MARKET_CLOSED")
+        self._closing = False
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run(), name="yahoo-delayed-market-collector")
 
     async def close(self) -> None:
+        self._shutdown = True
+        if self._updates:
+            await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._updates)), return_exceptions=True)
+        await self._stop()
+
+    async def _stop(self) -> None:
+        self._closing = True
         task, self._task = self._task, None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        collection = self._collection
+        if collection is not None:
+            await asyncio.gather(asyncio.shield(collection), return_exceptions=True)
+
+    async def update_operational_settings(self, *, enabled: bool, poll_seconds: int,
+                                          auto_roll_enabled: bool, roll_confirmations: int) -> None:
+        if self._shutdown:
+            raise RuntimeError("EXTERNAL_MARKET_CLOSED")
+        task = asyncio.create_task(self._update_settings(enabled, poll_seconds, auto_roll_enabled, roll_confirmations))
+        self._updates.add(task)
+        task.add_done_callback(self._update_finished)
+        await asyncio.shield(task)
+
+    def _update_finished(self, task) -> None:
+        self._updates.discard(task)
+        if not task.cancelled(): task.exception()
+
+    async def _update_settings(self, enabled, poll_seconds, auto_roll_enabled, roll_confirmations):
+        async with self._settings_lock:
+            await self._stop()
+            self._poll_seconds = max(60, int(poll_seconds))
+            self._auto_roll_enabled = bool(auto_roll_enabled)
+            self._roll_confirmations = max(1, int(roll_confirmations))
+            if enabled and not self._shutdown:
+                await self.start()
 
     async def collect_once(self, *, include_daily: bool = True) -> dict[str, int]:
+        if self._closing or self._shutdown:
+            raise RuntimeError("EXTERNAL_MARKET_CLOSED")
+        task = self._collection
+        if task is not None and include_daily and not self._collection_daily:
+            await asyncio.shield(task)
+            return await self.collect_once(include_daily=True)
+        if task is None:
+            self._collection_daily = include_daily
+            task = asyncio.create_task(self._collect_once(include_daily=include_daily))
+            self._collection = task
+            task.add_done_callback(self._collection_finished)
+        return await asyncio.shield(task)
+
+    def _collection_finished(self, task) -> None:
+        if self._collection is task: self._collection = None
+        if not task.cancelled(): task.exception()
+
+    async def _collect_once(self, *, include_daily: bool) -> dict[str, int]:
         saved: dict[str, int] = {}
         for instrument, configured_contract in self._symbols.items():
             count = 0

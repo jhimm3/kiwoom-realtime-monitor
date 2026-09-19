@@ -17,13 +17,22 @@ class InvestorFlowService:
     def load(self, code: str, observed_at: datetime) -> dict[str, object]:
         day = observed_at.strftime("%Y%m%d")
         basis = "SOR"
-        try:
-            response = self._request(f"{code}_AL", day)
+        stored_loader = getattr(self._client, "load_stored_investor_flow", None)
+        stored = stored_loader(code, day) if callable(stored_loader) else None
+        if isinstance(stored, dict):
+            response = stored
             row = _same_day_row(response, day)
-            if row is None:
-                basis = "KRX"
-                response = self._request(code, day)
+            basis = "NAS"
+        else:
+            response, row = {}, None
+        try:
+            if stored is None:
+                response = self._request(f"{code}_AL", day)
                 row = _same_day_row(response, day)
+                if row is None:
+                    basis = "KRX"
+                    response = self._request(code, day)
+                    row = _same_day_row(response, day)
         except Exception:
             basis = "KRX"
             response = self._request(code, day)

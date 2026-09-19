@@ -8,6 +8,12 @@ from typing import Any, Protocol
 
 from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.application.trade_journal_summary import TradeEpisode
+from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
+from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import (
+    AccountBatchClient,
+    AccountQueryContext,
+    as_account_batch_client,
+)
 
 
 class RestClient(Protocol):
@@ -27,6 +33,20 @@ class DailyTradeCost:
     commission: int
     tax: int
     total_cost: int
+    origin_scope: AccountScope = LEGACY_ACCOUNT_SCOPE
+    canonical_scope: AccountScope | None = None
+
+    def __post_init__(self) -> None:
+        canonical = self.canonical_scope or self.origin_scope
+        if (
+            canonical.broker != self.origin_scope.broker
+            or canonical.environment != self.origin_scope.environment
+        ):
+            raise ValueError("canonical cost scope cannot cross broker or environment")
+
+    @property
+    def effective_scope(self) -> AccountScope:
+        return self.canonical_scope or self.origin_scope
 
 
 @dataclass(frozen=True)
@@ -35,6 +55,12 @@ class EpisodeTradeCost:
     net_realized_profit: int | None
     complete: bool
     allocated: bool
+
+
+@dataclass(frozen=True)
+class TradeCostBatch:
+    costs: tuple[DailyTradeCost, ...]
+    context: AccountQueryContext
 
 
 def estimate_episode_cost(
@@ -53,14 +79,17 @@ def estimate_episode_cost(
 def allocate_episode_cost(
     episode: TradeEpisode, all_fills: tuple[TradeFill, ...], costs: tuple[DailyTradeCost, ...],
 ) -> EpisodeTradeCost:
-    cost_map = {(value.fill_date, value.stock_code, value.side): value for value in costs}
-    all_amounts: dict[tuple[date, str, str], int] = {}
-    episode_amounts: dict[tuple[date, str, str], int] = {}
+    cost_map = {
+        (value.effective_scope, value.fill_date, value.stock_code, value.side): value
+        for value in costs
+    }
+    all_amounts: dict[tuple[AccountScope, date, str, str], int] = {}
+    episode_amounts: dict[tuple[AccountScope, date, str, str], int] = {}
     for fill in all_fills:
-        key = (fill.filled_at.date(), fill.stock_code, fill.side)
+        key = (fill.effective_scope, fill.filled_at.date(), fill.stock_code, fill.side)
         all_amounts[key] = all_amounts.get(key, 0) + fill.quantity * fill.price
     for fill in episode.fills:
-        key = (fill.filled_at.date(), fill.stock_code, fill.side)
+        key = (fill.effective_scope, fill.filled_at.date(), fill.stock_code, fill.side)
         episode_amounts[key] = episode_amounts.get(key, 0) + fill.quantity * fill.price
     total_cost = 0
     complete = bool(episode_amounts)
@@ -78,31 +107,30 @@ def allocate_episode_cost(
 
 
 class TradeCostService:
-    def __init__(self, client: RestClient) -> None:
-        self._client = client
+    def __init__(self, client: RestClient | AccountBatchClient, account_scope: AccountScope = LEGACY_ACCOUNT_SCOPE) -> None:
+        if account_scope != LEGACY_ACCOUNT_SCOPE:
+            raise ValueError("verified account scope must come from the account-query context")
+        self._client = as_account_batch_client(client)
 
     def load_period(self, start: date, end: date, today: date | None = None) -> tuple[DailyTradeCost, ...]:
+        return self.load_period_batch(start, end, today).costs
+
+    def load_period_batch(self, start: date, end: date, today: date | None = None) -> TradeCostBatch:
         today = today or date.today()
         settlement_end = min(today, end + timedelta(days=10))
         if settlement_end < start:
-            return ()
+            raise ValueError("account cost query period ends before it starts")
         body = {
             "strt_dt": start.strftime("%Y%m%d"), "end_dt": settlement_end.strftime("%Y%m%d"),
             "tp": "0", "stk_cd": "", "crnc_cd": "", "gds_tp": "1",
             "frgn_stex_code": "", "dmst_stex_tp": "%", "qry_sort_tp": "1",
         }
+        batch = self._client.query_account_pages("kt00015", "/api/dostk/acnt", body)
         records: list[dict[str, Any]] = []
-        cont_yn, next_key = "N", ""
-        for _ in range(20):
-            response, has_next, response_next_key = self._client.request_with_continuation(
-                "kt00015", "/api/dostk/acnt", body, cont_yn=cont_yn, next_key=next_key,
-            )
+        for response in batch.pages:
             values = response.get("trst_ovrl_trde_prps_array", [])
             if isinstance(values, list):
                 records.extend(value for value in values if isinstance(value, dict))
-            if not has_next or not response_next_key:
-                break
-            cont_yn, next_key = "Y", response_next_key
         grouped: dict[tuple[date, date, str, str], list[int]] = {}
         for record in records:
             value = self._to_cost(record)
@@ -112,9 +140,11 @@ class TradeCostService:
             totals = grouped.setdefault(key, [0, 0, 0, 0, 0])
             for index, amount in enumerate((value.gross_amount, value.settlement_amount, value.commission, value.tax, value.total_cost)):
                 totals[index] += amount
-        return tuple(
-            DailyTradeCost(*key, *totals) for key, totals in sorted(grouped.items())
+        costs = tuple(
+            DailyTradeCost(*key, *totals, origin_scope=batch.context.scope)
+            for key, totals in sorted(grouped.items())
         )
+        return TradeCostBatch(costs, batch.context)
 
     @staticmethod
     def _to_cost(record: dict[str, Any]) -> DailyTradeCost | None:

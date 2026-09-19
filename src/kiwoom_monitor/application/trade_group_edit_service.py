@@ -8,12 +8,19 @@ from typing import Callable, Protocol
 
 from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.application.trade_journal_summary import TradeEpisode, trade_fill_key
+from kiwoom_monitor.domain.order_contract import AccountScope
 
 
 class TradeGroupEditRepository(Protocol):
-    def assign_group(self, fill_keys: tuple[str, ...], group_id: str) -> None: ...
+    def assign_group(
+        self, fill_keys: tuple[str, ...], group_id: str, *,
+        account_scope: AccountScope, canonical_scope: AccountScope | None = None,
+    ) -> None: ...
 
-    def clear_group_assignments(self, fill_keys: tuple[str, ...]) -> None: ...
+    def clear_group_assignments(
+        self, fill_keys: tuple[str, ...], *, account_scope: AccountScope,
+        canonical_scope: AccountScope | None = None,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -38,8 +45,16 @@ class TradeGroupEditService:
             return TradeGroupEditResult(False, "합칠 매매 묶음을 두 개 이상 선택하세요.")
         if len({episode.summary.stock_code for episode in episodes}) != 1:
             return TradeGroupEditResult(False, "서로 같은 종목의 매매 묶음만 합칠 수 있습니다.")
-        keys = tuple(trade_fill_key(fill) for episode in episodes for fill in episode.fills)
-        self._repository.assign_group(keys, self._group_id_factory())
+        fills = tuple(fill for episode in episodes for fill in episode.fills)
+        scopes = {(fill.origin_scope, fill.effective_scope) for fill in fills}
+        if len(scopes) != 1:
+            return TradeGroupEditResult(False, "서로 같은 계좌의 매매 묶음만 합칠 수 있습니다.")
+        origin_scope, effective_scope = next(iter(scopes))
+        keys = tuple(trade_fill_key(fill) for fill in fills)
+        self._repository.assign_group(
+            keys, self._group_id_factory(), account_scope=origin_scope,
+            canonical_scope=effective_scope if effective_scope != origin_scope else None,
+        )
         return TradeGroupEditResult(True, f"매매 묶음 {len(episodes)}개를 합쳤습니다.")
 
     def split(self, fills: tuple[TradeFill, ...]) -> TradeGroupEditResult:
@@ -47,12 +62,28 @@ class TradeGroupEditService:
             return TradeGroupEditResult(False, "새 묶음으로 분리할 체결행을 선택하세요.")
         if len({fill.stock_code for fill in fills}) != 1:
             return TradeGroupEditResult(False, "같은 종목 체결만 하나의 묶음으로 만들 수 있습니다.")
-        self._repository.assign_group(tuple(trade_fill_key(fill) for fill in fills), self._group_id_factory())
+        scopes = {(fill.origin_scope, fill.effective_scope) for fill in fills}
+        if len(scopes) != 1:
+            return TradeGroupEditResult(False, "같은 계좌 체결만 하나의 묶음으로 만들 수 있습니다.")
+        origin_scope, effective_scope = next(iter(scopes))
+        self._repository.assign_group(
+            tuple(trade_fill_key(fill) for fill in fills), self._group_id_factory(),
+            account_scope=origin_scope,
+            canonical_scope=effective_scope if effective_scope != origin_scope else None,
+        )
         return TradeGroupEditResult(True, f"선택 체결 {len(fills)}건을 새 묶음으로 분리했습니다.")
 
     def reset(self, episodes: tuple[TradeEpisode, ...]) -> TradeGroupEditResult:
         if not episodes:
             return TradeGroupEditResult(False, "자동분류로 되돌릴 묶음을 선택하세요.")
-        keys = tuple(trade_fill_key(fill) for episode in episodes for fill in episode.fills)
-        self._repository.clear_group_assignments(keys)
+        fills = tuple(fill for episode in episodes for fill in episode.fills)
+        scopes = {(fill.origin_scope, fill.effective_scope) for fill in fills}
+        if len(scopes) != 1:
+            return TradeGroupEditResult(False, "같은 계좌 체결만 자동분류로 되돌릴 수 있습니다.")
+        origin_scope, effective_scope = next(iter(scopes))
+        keys = tuple(trade_fill_key(fill) for fill in fills)
+        self._repository.clear_group_assignments(
+            keys, account_scope=origin_scope,
+            canonical_scope=effective_scope if effective_scope != origin_scope else None,
+        )
         return TradeGroupEditResult(True, "선택 묶음을 자동분류로 되돌렸습니다.")

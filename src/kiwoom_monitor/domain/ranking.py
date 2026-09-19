@@ -18,3 +18,8 @@ class RankedStock:
     def new_high_label(self) -> str:
         labels = {5: "5일", 20: "20일", 250: "250일"}
         return ", ".join(labels[period] for period in sorted(self.new_high_periods) if period in labels) or "-"
+
+
+def normalize_stock_code(value: object) -> str:
+    """키움 순위/실시간 시장 접미사를 연구용 6자리 코드로 맞춘다."""
+    return str(value or "").strip().removeprefix("A").removesuffix("_NX").removesuffix("_AL")

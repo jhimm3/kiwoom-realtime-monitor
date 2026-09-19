@@ -24,6 +24,16 @@ class FakeResponse:
 
 
 class KiwoomRestClientTests(unittest.TestCase):
+    def test_real_and_mock_default_limiters_remain_independent(self) -> None:
+        real = KiwoomRestClient(KiwoomSettings("real-key", "real-secret", "real"))
+        mock = KiwoomRestClient(KiwoomSettings("mock-key", "mock-secret", "mock"))
+
+        self.assertEqual(0.2, real._base_request_interval_seconds)
+        self.assertEqual(1.0, mock._base_request_interval_seconds)
+        self.assertIsNot(real._request_lock, mock._request_lock)
+        self.assertIsNone(real._last_request_at)
+        self.assertIsNone(mock._last_request_at)
+
     def test_reuses_an_unexpired_token(self) -> None:
         requests = []
 
@@ -62,6 +72,20 @@ class KiwoomRestClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "ka00198"):
             client.request("ka00198", "/api/dostk/stkinfo", {"qry_tp": "1"})
+
+    def test_token_failure_preserves_provider_code_and_message(self) -> None:
+        client = KiwoomRestClient(
+            KiwoomSettings("key", "secret", "mock"),
+            opener=lambda request, timeout: FakeResponse({
+                "return_code": 9001, "return_msg": "등록 IP를 확인하세요",
+            }),
+            request_interval_seconds=0,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, r"CODE=9001, MESSAGE=등록 IP를 확인하세요",
+        ):
+            client.get_access_token()
 
     def test_waits_for_configured_request_interval(self) -> None:
         client = KiwoomRestClient(KiwoomSettings("key", "secret", "mock"), request_interval_seconds=2.0)

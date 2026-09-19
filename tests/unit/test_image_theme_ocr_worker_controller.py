@@ -17,6 +17,8 @@ class FakeImageThemeOcrWorker(ImageThemeOcrWorker):
         self.running = False
         self.priority: QThread.Priority | None = None
         self.interrupted = False
+        self.terminated = False
+        self.wait_result = True
 
     def start(self, priority: QThread.Priority = QThread.Priority.InheritPriority) -> None:
         self.running = True
@@ -27,6 +29,13 @@ class FakeImageThemeOcrWorker(ImageThemeOcrWorker):
 
     def requestInterruption(self) -> None:
         self.interrupted = True
+
+    def wait(self, _timeout: int = 0) -> bool:
+        return self.wait_result
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.running = False
 
 
 class InvalidWorker(QObject):
@@ -75,6 +84,18 @@ class ImageThemeOcrWorkerControllerTests(unittest.TestCase):
         controller.failed.connect(failures.append)
         self.assertFalse(controller.start((Path("theme.png"),), "both", "테마"))
         self.assertEqual(1, len(failures))
+
+    def test_shutdown_force_stops_native_ocr_call_after_grace_period(self) -> None:
+        worker = FakeImageThemeOcrWorker()
+        worker.wait_result = False
+        controller = ImageThemeOcrWorkerController(
+            worker_factory=lambda _paths, _mode, _header: worker,
+        )
+        controller.start((Path("theme.png"),), "both", "테마")
+
+        self.assertFalse(controller.stop_for_shutdown(timeout_ms=0))
+        self.assertTrue(worker.interrupted)
+        self.assertTrue(worker.terminated)
 
 
 if __name__ == "__main__":

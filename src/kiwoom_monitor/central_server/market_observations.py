@@ -5,6 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from kiwoom_monitor.application.market_session_schedule import (
+    KRX_AFTER_MARKET_EFFECTIVE_DATE,
+    session_window_at,
+)
 from kiwoom_monitor.domain.market_data_contract import (
     CandidateUniverse,
     DataCompleteness,
@@ -123,6 +127,45 @@ def minute_bar_observation(
             candidate_universe=CandidateUniverse.UNKNOWN,
         ),
     )
+
+
+def minute_bar_revision_payload(
+    value: dict[str, Any], *, window_closed: bool, capture_quality: str,
+    finalization_source: str, operation_id: str = "",
+) -> dict[str, Any]:
+    """현재 누적 봉을 연구 원장용의 명시적인 시간 계약으로 바꾼다."""
+    bar_start = snapshot_datetime(
+        f"{value['trading_date']}T{value['minute']}", _bar_available_at(value)
+    )
+    session_window = session_window_at(bar_start, venue=str(value.get("market", "")))
+    payload = {
+        name: value[name]
+        for name in (
+            "trading_date", "minute", "code", "market", "open", "high", "low",
+            "close", "volume", "trade_value_million_won",
+        )
+    }
+    payload.update({
+        "bar_start": bar_start.isoformat(),
+        "bar_end": (bar_start + timedelta(minutes=1)).isoformat(),
+        "price_unit": "won",
+        "volume_unit": "shares",
+        "trade_value_unit": "million_won",
+        "window_closed": bool(window_closed),
+        "session_finalized": bool(value.get("session_finalized", False)),
+        "capture_quality": str(capture_quality),
+        "finalization_source": str(finalization_source),
+    })
+    if bar_start.date() >= KRX_AFTER_MARKET_EFFECTIVE_DATE:
+        payload.update({
+            "session": session_window.session.value,
+            "phase": session_window.phase.value,
+            "schedule_version": session_window.schedule_version,
+            "session_support": session_window.support.value,
+        })
+    if operation_id:
+        payload["operation_id"] = operation_id
+    return payload
 
 
 def daily_bar_observation(

@@ -16,10 +16,15 @@ class ProgramTradeService:
 
     def load_day(self, code: str, trade_date: date) -> tuple[dict[str, object], ...]:
         day = trade_date.strftime("%Y%m%d")
-        try:
-            response = self._request(f"{code}_AL", day)
-        except Exception:
-            response = self._request(code, day)
+        stored_loader = getattr(self._client, "load_stored_program_flow", None)
+        stored = stored_loader(code, day) if callable(stored_loader) else None
+        if isinstance(stored, dict):
+            response = stored
+        else:
+            try:
+                response = self._request(f"{code}_AL", day)
+            except Exception:
+                response = self._request(code, day)
         rows = response.get("stk_tm_prm_trde_trnsn")
         if not isinstance(rows, list):
             return ()
@@ -28,12 +33,14 @@ class ProgramTradeService:
             if not isinstance(row, dict):
                 continue
             result.append({
-                "available": True, "source": "ka90008_after_close", "trade_time": str(row.get("tm", "")),
-                "market": str(row.get("stex_tp", "통합")),
-                "net_buy_amount_million_won": _integer(row.get("prm_netprps_amt")),
-                "net_buy_amount_change_million_won": _integer(row.get("prm_netprps_amt_irds")),
-                "net_buy_quantity": _integer(row.get("prm_netprps_qty")),
-                "net_buy_quantity_change": _integer(row.get("prm_netprps_qty_irds")),
+                "available": bool(row.get("available", True)),
+                "source": str(row.get("source", "ka90008_after_close")),
+                "trade_time": str(row.get("trade_time", row.get("tm", ""))),
+                "market": str(row.get("market", row.get("stex_tp", "통합"))),
+                "net_buy_amount_million_won": _integer(row.get("net_buy_amount_million_won", row.get("prm_netprps_amt"))),
+                "net_buy_amount_change_million_won": _integer(row.get("net_buy_amount_change_million_won", row.get("prm_netprps_amt_irds"))),
+                "net_buy_quantity": _integer(row.get("net_buy_quantity", row.get("prm_netprps_qty"))),
+                "net_buy_quantity_change": _integer(row.get("net_buy_quantity_change", row.get("prm_netprps_qty_irds"))),
             })
         return tuple(result)
 

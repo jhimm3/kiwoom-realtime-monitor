@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+import uuid
 from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime
@@ -16,10 +17,12 @@ from kiwoom_monitor.domain.market_data_contract import (
     MarketDatasetKind,
     ObservationOrigin,
 )
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 from kiwoom_monitor.application.trade_journal_summary import TradeReview
 from kiwoom_monitor.application.trade_cost_service import DailyTradeCost
 from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository, TradeEntrySnapshot
+from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import scoped_snapshot_execution_key
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
 from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import (
@@ -30,6 +33,79 @@ from kiwoom_monitor.application.personal_trade_rules import StructuredTradeRule
 
 
 class JournalRepositoryTests(unittest.TestCase):
+    def test_scoped_review_requires_matching_account_and_filters_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.sqlite3")
+            real = AccountScope("kiwoom", AccountEnvironment.REAL, str(uuid.uuid4()))
+            mock = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
+            review = TradeReview("fill:v2:real-group", "이유", "복기", origin_scope=real)
+
+            with self.assertRaisesRegex(ValueError, "explicit account_scope"):
+                repository.save_review(review)
+            repository.save_review(review, account_scope=real)
+
+            self.assertEqual(review, repository.load_review(review.group_id, real))
+            self.assertEqual("미작성", repository.load_review(review.group_id, mock).status)
+
+    def test_entry_snapshots_with_same_source_key_are_separate_by_account(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.sqlite3")
+            real = AccountScope("kiwoom", AccountEnvironment.REAL, str(uuid.uuid4()))
+            mock = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
+            source_key = "2026-09-13:005930:order-1:fill-1"
+            base = TradeEntrySnapshot(
+                scoped_snapshot_execution_key(source_key, real), "order-1", "005930", "삼성전자", "매수",
+                datetime(2026, 9, 13, 9, 1), 70_000, 1, "KRX", origin_scope=real,
+            )
+            other = replace(
+                base, execution_key=scoped_snapshot_execution_key(source_key, mock), origin_scope=mock,
+            )
+
+            with self.assertRaisesRegex(ValueError, "explicit account_scope"):
+                repository.save_entry_snapshot(base)
+            repository.save_entry_snapshot(base, account_scope=real)
+            repository.save_entry_snapshot(other, account_scope=mock)
+
+            start, end = datetime(2026, 9, 13), datetime(2026, 9, 14)
+            real_rows = repository.load_entry_snapshots("005930", start, end, real)
+            mock_rows = repository.load_entry_snapshots("005930", start, end, mock)
+            self.assertEqual((base.execution_key,), tuple(row.execution_key for row in real_rows))
+            self.assertEqual((other.execution_key,), tuple(row.execution_key for row in mock_rows))
+            self.assertEqual(real, real_rows[0].effective_scope)
+            self.assertEqual(mock, mock_rows[0].effective_scope)
+
+    def test_scoped_fills_and_costs_with_same_broker_identity_remain_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.sqlite3")
+            real = AccountScope("kiwoom", AccountEnvironment.REAL, str(uuid.uuid4()))
+            mock = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
+            base_fill = TradeFill(
+                "same-order", "005930", "삼성전자", "매수",
+                datetime(2026, 9, 13, 9, 1), 1, 70_000, "", "KRX", real,
+            )
+            mock_fill = replace(base_fill, origin_scope=mock)
+            real_cost = DailyTradeCost(
+                date(2026, 9, 13), date(2026, 9, 15), "005930", "매수",
+                70_000, 69_990, 10, 0, 10, real,
+            )
+            mock_cost = replace(real_cost, origin_scope=mock)
+
+            with self.assertRaisesRegex(ValueError, "explicit account_scope"):
+                repository.upsert_fills((base_fill,))
+            repository.upsert_history_sync(
+                (base_fill,), (real_cost,), account_scope=real,
+            )
+            repository.upsert_history_sync(
+                (mock_fill,), (mock_cost,), account_scope=mock,
+            )
+
+            start, end = datetime(2026, 9, 13), datetime(2026, 9, 14)
+            self.assertEqual((base_fill,), repository.load_fills(start, end, real))
+            self.assertEqual((mock_fill,), repository.load_fills(start, end, mock))
+            self.assertEqual((real_cost,), repository.load_trade_costs(start, end, real))
+            self.assertEqual((mock_cost,), repository.load_trade_costs(start, end, mock))
+            self.assertEqual(2, len(repository.load_fills(start, end)))
+
     def test_loads_market_index_bars_from_monitor_database(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             monitor = Path(directory) / "monitor.sqlite3"; Database(monitor).initialize()
@@ -278,6 +354,39 @@ class JournalRepositoryTests(unittest.TestCase):
             self.assertEqual({"fill-1": "manual:one", "fill-2": "manual:one"}, repository.load_group_overrides())
             repository.clear_group_assignments(("fill-1",))
             self.assertEqual({"fill-2": "manual:one"}, repository.load_group_overrides())
+            with closing(sqlite3.connect(repository._path)) as connection:
+                state = connection.execute(
+                    "SELECT collection,owner FROM journal_sync_states WHERE document_key='fill-1'"
+                ).fetchone()
+            self.assertEqual(("journal_group_overrides", "legacy"), state)
+
+    def test_verified_group_reset_records_v2_tombstone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            scope = AccountScope(
+                "kiwoom", AccountEnvironment.REAL,
+                "11111111-1111-4111-8111-111111111111",
+            )
+            repository.upsert_history_sync((TradeFill(
+                "1", "005930", "삼성전자", "매수", datetime(2026, 9, 13, 9, 1),
+                1, 70000, origin_scope=scope,
+            ),), (), account_scope=scope)
+            with closing(sqlite3.connect(path)) as connection:
+                key = connection.execute("SELECT fill_key FROM trade_fills").fetchone()[0]
+            repository.assign_group((key,), "manual:one", account_scope=scope)
+            repository.clear_group_assignments((key,), account_scope=scope)
+            with closing(sqlite3.connect(path)) as connection:
+                states = connection.execute(
+                    "SELECT collection,owner,is_deleted FROM journal_sync_states WHERE document_key=?",
+                    (key,),
+                ).fetchall()
+                legacy = connection.execute(
+                    "SELECT COUNT(*) FROM journal_sync_states WHERE collection='journal_group_overrides' "
+                    "AND document_key=?", (key,),
+                ).fetchone()[0]
+            self.assertEqual([("journal_v2_group_overrides", scope.account_ref, 1)], states)
+            self.assertEqual(0, legacy)
 
     def test_trade_review_is_persisted_by_group(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -353,8 +462,13 @@ class JournalRepositoryTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as connection:
                 with connection:
                     connection.execute(
-                        "INSERT INTO daily_trade_costs VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        ("2026-08-06", "2026-08-10", "00390", "매도", 719_590, 718_053, 100, 1_437, 1_537, "2026-08-30T00:00:00"),
+                        "INSERT INTO daily_trade_costs("
+                        "origin_broker,origin_environment,origin_account_ref,canonical_account_ref,"
+                        "fill_date,settlement_date,stock_code,side,gross_amount,settlement_amount,"
+                        "commission,tax,total_cost,confirmed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        ("legacy", "unknown", "legacy-unassigned", "legacy-unassigned",
+                         "2026-08-06", "2026-08-10", "00390", "매도", 719_590, 718_053,
+                         100, 1_437, 1_537, "2026-08-30T00:00:00"),
                     )
             JournalRepository(path)
             values = JournalRepository(path).load_trade_costs(datetime(2026, 8, 6), datetime(2026, 8, 7))
@@ -517,6 +631,34 @@ class JournalRepositoryTests(unittest.TestCase):
             self.assertFalse(saved)
             self.assertEqual("실패", state.state)
             self.assertEqual("해당 거래일의 분봉이 반환되지 않았습니다.", state.message)
+
+    def test_partial_post_change_day_is_not_kept_as_confirmed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.sqlite3")
+            day = date(2026, 9, 14)
+            partial = MinuteOhlcv(datetime(2026, 9, 14, 10, 42), 100, 110, 90, 105, 20)
+
+            saved = repository.save_bar_backfill_result(
+                "001210", day, (partial,), datetime(2026, 9, 15, 4, 40),
+                coverage_complete=False,
+            )
+
+            state = repository.bar_backfill_state("001210", day)
+            self.assertFalse(saved)
+            self.assertEqual("실패", state.state)
+            self.assertIn("완료 근거", state.message)
+
+    def test_legacy_partial_post_change_confirmation_is_downgraded_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.sqlite3")
+            day = date(2026, 9, 14)
+            partial = MinuteOhlcv(datetime(2026, 9, 14, 10, 42), 100, 110, 90, 105, 20)
+            repository.upsert_bars("001210", (partial,), "after_close_confirmed")
+            repository.mark_bar_backfill("001210", day, "확정")
+
+            state = repository.bar_backfill_state("001210", day)
+
+            self.assertEqual("일부", state.state)
 
     def test_bar_backfill_result_rolls_back_bars_and_state_together(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -23,6 +23,11 @@ class AppPaths:
         """실시간 표와 SQLite 잠금을 공유하지 않는 매매일지 전용 DB."""
         return self.data_dir / "journal.sqlite3"
 
+    @property
+    def account_binding_path(self) -> Path:
+        """현재 Windows 사용자에게만 복호화되는 검증 계좌 binding mirror."""
+        return self.data_dir / "account-bindings.dat"
+
     @classmethod
     def for_current_user(cls) -> "AppPaths":
         """프로그램 본체와 분리된 현재 사용자 데이터 위치를 돌려준다.
@@ -53,7 +58,10 @@ class AppPaths:
     @staticmethod
     def _migrate_legacy_personal_data(legacy_dir: Path, data_dir: Path) -> None:
         """기존 개발/구형 설치 폴더의 개인 데이터만 안전하게 복사한다."""
-        for filename in ("api.env", "monitor.sqlite3", "google_drive_client.json", "google_drive_token.dat"):
+        for filename in (
+            "api.env", "account-bindings.dat", "monitor.sqlite3",
+            "google_drive_client.json", "google_drive_token.dat",
+        ):
             source, destination = legacy_dir / filename, data_dir / filename
             if source.is_file() and not destination.exists():
                 try:

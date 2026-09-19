@@ -43,6 +43,20 @@ class TradeChartTests(unittest.TestCase):
         self.assertEqual((100, 110, 95, 105, 200, 3.5), rows[0][1:7])
         self.assertEqual("20260828", client.call[2]["base_dt"])
 
+    def test_daily_chart_uses_stored_nas_rows_without_tr(self) -> None:
+        class Client:
+            def load_stored_daily_bars(self, code, market, limit):
+                return ({
+                    "trading_date": "2026-08-28", "open": 100, "high": 110,
+                    "low": 95, "close": 105, "volume": 200,
+                    "trade_value_million_won": 350,
+                },)
+            def request(self, *args, **kwargs): raise AssertionError("TR must not run")
+
+        rows = DailyTradeChartService(Client()).load("005930", datetime(2026, 8, 28))
+
+        self.assertEqual((100, 110, 95, 105, 200, 3.5), rows[0][1:7])
+
     def test_aggregates_ohlcv_and_trade_value_into_five_minute_bars(self) -> None:
         rows = (
             ("2026-08-28T09:01", 100, 105, 99, 103, 10, 1.5, "after_close_confirmed"),

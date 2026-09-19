@@ -12,6 +12,9 @@ class StockFundamentals:
     high_250_price: int | None = None
     # ka10001 dstr_stk 원값은 실제 응답 검증 결과 천 주 단위다.
     float_shares: int | None = None
+    # 호가 단위 반올림 때문에 등락률이 정확히 30%가 아니어도 상한가일 수
+    # 있으므로 화면 판정은 ka10001의 실제 상한가 가격을 사용한다.
+    upper_limit_price: int | None = None
 
     @property
     def float_market_cap_eok(self) -> float:

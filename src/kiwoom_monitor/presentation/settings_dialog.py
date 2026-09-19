@@ -54,7 +54,7 @@ def selected_high_cycle_periods(value: str) -> tuple[str, ...]:
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None, drive_client_importer: Callable[[], None] | None = None, update_checker: Callable[[], None] | None = None, journal_backup_exporter: Callable[[], None] | None = None, journal_backup_importer: Callable[[], None] | None = None, news_api_settings_opener: Callable[[], None] | None = None) -> None:
+    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None, drive_client_importer: Callable[[], None] | None = None, update_checker: Callable[[], None] | None = None, journal_backup_exporter: Callable[[], None] | None = None, journal_backup_importer: Callable[[], None] | None = None, news_api_settings_opener: Callable[[], None] | None = None, shadow_settings_opener: Callable[[], None] | None = None, research_opener: Callable[[], None] | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
         self._api_path = api_path
@@ -88,6 +88,8 @@ class SettingsDialog(QDialog):
         self._journal_backup_exporter = journal_backup_exporter
         self._journal_backup_importer = journal_backup_importer
         self._news_api_settings_opener = news_api_settings_opener
+        self._shadow_settings_opener = shadow_settings_opener
+        self._research_opener = research_opener
         self._drive_status_label: QLabel | None = None
         self._google_drive_auto_download = QCheckBox("앱 시작 시 자동 다운로드")
         self._google_drive_auto_download.setChecked(settings.get("google_drive_auto_download") == "1")
@@ -220,6 +222,8 @@ class SettingsDialog(QDialog):
         self._market_cap_highlight_enabled.setChecked(settings.get("market_cap_highlight_enabled") == "1")
         self._market_cap_highlight_badge_enabled = QCheckBox("시가총액 강조 배지 표시")
         self._market_cap_highlight_badge_enabled.setChecked(settings.get("market_cap_highlight_badge_enabled") == "1")
+        self._upper_limit_highlight_enabled = QCheckBox("등락률 칸에 상한가 강조 표시")
+        self._upper_limit_highlight_enabled.setChecked(settings.get("upper_limit_highlight_enabled") == "1")
         self._market_cap_highlight_colors = {
             level: settings.get(f"market_cap_highlight_{level}_color")
             for level in ("low", "middle", "high")
@@ -396,6 +400,9 @@ class SettingsDialog(QDialog):
         display_form.addRow("테마 동률 정렬 기준", self._theme_group_sort_basis)
         display_form.addRow("제외 종목 목록", self._theme_trade_exclusion_row())
         display_form.addRow(self._section_separator())
+        display_form.addRow(self._section_title("상한가 강조"))
+        display_form.addRow(self._upper_limit_highlight_enabled)
+        display_form.addRow(self._section_separator())
         display_form.addRow(self._section_title("소수점 표시"))
         display_form.addRow("등락률 소수점", self._decimal_fields["change_rate"])
         display_form.addRow("거래대금 소수점", self._decimal_fields["trade_value"])
@@ -432,6 +439,22 @@ class SettingsDialog(QDialog):
             theme_tab = self._theme_manager_panel_factory(tabs)
             theme_tab.setWindowFlags(Qt.WindowType.Widget)
             tabs.addTab(theme_tab, "종목/테마")
+
+        if self._shadow_settings_opener is not None or self._research_opener is not None:
+            research_tab = QWidget(); research_form = QFormLayout(research_tab)
+            research_form.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+            research_form.addRow(QLabel("NAS를 끄지 않고 Shadow 후보 감지를 시작·중지하고 조건을 바꿉니다."))
+            if self._shadow_settings_opener is not None:
+                shadow_button = QPushButton("Shadow 후보 조건·상태")
+                shadow_button.setObjectName("shadow_settings_button")
+                shadow_button.clicked.connect(self._shadow_settings_opener)
+                research_form.addRow("실시간 후보", shadow_button)
+            if self._research_opener is not None:
+                research_button = QPushButton("전략 연구 열기")
+                research_button.setObjectName("research_settings_button")
+                research_button.clicked.connect(self._research_opener)
+                research_form.addRow("과거 반복 검증", research_button)
+            tabs.addTab(research_tab, "전략 연구")
 
         external_tab = QWidget(); external_form = QFormLayout(external_tab)
         external_form.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
@@ -663,6 +686,7 @@ class SettingsDialog(QDialog):
             self._update_market_cap_highlight_badge_color_button(level)
         self._market_cap_highlight_enabled.setChecked(DEFAULT_SETTINGS["market_cap_highlight_enabled"] == "1")
         self._market_cap_highlight_badge_enabled.setChecked(DEFAULT_SETTINGS["market_cap_highlight_badge_enabled"] == "1")
+        self._upper_limit_highlight_enabled.setChecked(DEFAULT_SETTINGS["upper_limit_highlight_enabled"] == "1")
         self._show_server_clock.setChecked(DEFAULT_SETTINGS["show_server_clock"] == "1")
         self._theme_trade_summary_enabled.setChecked(DEFAULT_SETTINGS["theme_trade_summary_enabled"] == "1")
         self._theme_trade_summary_period.setCurrentIndex(("1m", "5m", "60m", "day").index(DEFAULT_SETTINGS["theme_trade_summary_period"]))
@@ -1056,6 +1080,7 @@ class SettingsDialog(QDialog):
             self._settings.set(f"market_cap_highlight_{level}_badge_color", self._market_cap_highlight_badge_colors[level])
         self._settings.set("market_cap_highlight_enabled", "1" if self._market_cap_highlight_enabled.isChecked() else "0")
         self._settings.set("market_cap_highlight_badge_enabled", "1" if self._market_cap_highlight_badge_enabled.isChecked() else "0")
+        self._settings.set("upper_limit_highlight_enabled", "1" if self._upper_limit_highlight_enabled.isChecked() else "0")
         for key, field in self._decimal_fields.items():
             self._settings.set(f"decimal_{key}", field.currentText())
         self._settings.set("near_high_alert_enabled", "1" if self._near_high_enabled.isChecked() else "0")

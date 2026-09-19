@@ -20,6 +20,26 @@ class Client:
 
 
 class MarketIndexChartServiceTests(unittest.TestCase):
+    def test_uses_stored_nas_index_history_without_tr(self):
+        class StoredClient:
+            def load_stored_market_index(self, market, day):
+                return {
+                    "minutes": [{
+                        "cntr_tm": f"{day}152900", "open_pric": "259900",
+                        "high_pric": "260120", "low_pric": "259850", "cur_prc": "260050",
+                    }],
+                    "daily": [{
+                        "dt": day, "open_pric": "259900", "high_pric": "260120",
+                        "low_pric": "259850", "cur_prc": "260050",
+                        "trde_qty": "123", "trde_prica": "45600",
+                    }],
+                }
+            def request(self, *args, **kwargs): raise AssertionError("TR must not run")
+
+        service = MarketIndexChartService(StoredClient())
+        self.assertEqual(1, len(service.load("kospi", datetime(2026, 8, 28))))
+        self.assertEqual(1, len(service.load_daily("kospi", datetime(2026, 8, 28))))
+
     def test_reads_sector_minute_values_as_index_points(self):
         rows = MarketIndexChartService(Client()).load("kospi", datetime(2026, 8, 28))
         self.assertEqual((2599.0, 2601.2, 2598.5, 2600.5, None), next(iter(rows.values())))

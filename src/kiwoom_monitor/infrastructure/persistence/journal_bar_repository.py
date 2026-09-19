@@ -9,6 +9,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
+from kiwoom_monitor.application.market_session_schedule import KRX_AFTER_MARKET_EFFECTIVE_DATE
 from kiwoom_monitor.domain.market_data_contract import (
     DataCompleteness,
     DataValueKind,
@@ -29,6 +30,15 @@ class BarBackfillState:
     state: str
     bar_count: int
     message: str = ""
+
+
+def _confirmed_coverage_trusted(day: date, last_minute: str, message: str) -> bool:
+    if message == "coverage=complete" or day < KRX_AFTER_MARKET_EFFECTIVE_DATE:
+        return True
+    try:
+        return datetime.fromisoformat(last_minute).time() >= time(19, 59)
+    except ValueError:
+        return False
 
 class JournalBarRepositoryMixin:
     _path: Path
@@ -58,7 +68,7 @@ class JournalBarRepositoryMixin:
     def bar_backfill_state(self, code: str, day: date) -> BarBackfillState:
         with closing(sqlite3.connect(self._path)) as connection:
             bar_row = connection.execute(
-                "SELECT COUNT(*), SUM(CASE WHEN source='after_close_confirmed' THEN 1 ELSE 0 END) "
+                "SELECT COUNT(*), SUM(CASE WHEN source='after_close_confirmed' THEN 1 ELSE 0 END), MAX(minute) "
                 "FROM journal_minute_bars WHERE trade_date=? AND stock_code=?",
                 (day.isoformat(), code),
             ).fetchone()
@@ -68,7 +78,9 @@ class JournalBarRepositoryMixin:
             ).fetchone()
         count = int(bar_row[0] or 0) if bar_row else 0
         confirmed = int(bar_row[1] or 0) if bar_row else 0
-        if confirmed > 0:
+        last_minute = str(bar_row[2] or "") if bar_row else ""
+        status_message = str(status_row[1] or "") if status_row else ""
+        if confirmed > 0 and _confirmed_coverage_trusted(day, last_minute, status_message):
             return BarBackfillState(day, code, "확정", count)
         if status_row and status_row[0] == "실패":
             return BarBackfillState(day, code, "실패", count, str(status_row[1] or ""))
@@ -91,7 +103,7 @@ class JournalBarRepositoryMixin:
         with closing(sqlite3.connect(self._path)) as connection:
             bar_rows = connection.execute(
                 "SELECT trade_date,stock_code,COUNT(*),"
-                "SUM(CASE WHEN source='after_close_confirmed' THEN 1 ELSE 0 END) "
+                "SUM(CASE WHEN source='after_close_confirmed' THEN 1 ELSE 0 END),MAX(minute) "
                 "FROM journal_minute_bars WHERE trade_date>=? AND trade_date<=? "
                 f"AND stock_code IN ({placeholders}) GROUP BY trade_date,stock_code",
                 (first_day, last_day, *codes),
@@ -103,8 +115,8 @@ class JournalBarRepositoryMixin:
                 (first_day, last_day, *codes),
             ).fetchall()
         bars = {
-            (str(day), str(code)): (int(count or 0), int(confirmed or 0))
-            for day, code, count, confirmed in bar_rows
+            (str(day), str(code)): (int(count or 0), int(confirmed or 0), str(last_minute or ""))
+            for day, code, count, confirmed, last_minute in bar_rows
             if (str(code), str(day)) in wanted
         }
         statuses = {
@@ -114,9 +126,9 @@ class JournalBarRepositoryMixin:
         }
         result: dict[tuple[str, date], BarBackfillState] = {}
         for code, day in unique:
-            count, confirmed = bars.get((day.isoformat(), code), (0, 0))
+            count, confirmed, last_minute = bars.get((day.isoformat(), code), (0, 0, ""))
             state, message = statuses.get((day.isoformat(), code), ("", ""))
-            if confirmed > 0:
+            if confirmed > 0 and _confirmed_coverage_trusted(day, last_minute, message):
                 value = BarBackfillState(day, code, "확정", count)
             elif state == "실패":
                 value = BarBackfillState(day, code, "실패", count, message)
@@ -230,6 +242,8 @@ class JournalBarRepositoryMixin:
         day: date,
         bars: tuple[MinuteOhlcv, ...],
         confirmed_at: datetime | None = None,
+        *,
+        coverage_complete: bool = True,
     ) -> bool:
         """한 날짜의 보완 분봉과 완료 상태를 모두 저장하거나 모두 되돌린다."""
         matching = tuple(bar for bar in bars if bar.minute.date() == day)
@@ -246,18 +260,17 @@ class JournalBarRepositoryMixin:
                         saved_at.isoformat(timespec="seconds"),
                     )
                     return False
-                self._upsert_bars(
-                    connection, code, matching, "after_close_confirmed", saved_at, False,
-                )
+                source = "after_close_confirmed" if coverage_complete else "api_confirmed"
+                self._upsert_bars(connection, code, matching, source, saved_at, False)
                 self._mark_bar_backfill(
                     connection,
                     code,
                     day,
-                    "확정",
-                    "",
+                    "확정" if coverage_complete else "실패",
+                    "coverage=complete" if coverage_complete else "중앙 분봉 전체일 완료 근거가 없어 일부 자료만 저장했습니다.",
                     saved_at.isoformat(timespec="seconds"),
                 )
-        return True
+        return coverage_complete
 
     @staticmethod
     def _upsert_bars(

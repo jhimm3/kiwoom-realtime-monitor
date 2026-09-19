@@ -11,6 +11,9 @@ from kiwoom_monitor.application.minute_chart_service import MinuteChartService
 from kiwoom_monitor.application.trade_chart import DailyTradeChartService
 from kiwoom_monitor.application.trade_cost_service import TradeCostService
 from kiwoom_monitor.application.trade_history_service import TradeFill, TradeHistoryService
+from kiwoom_monitor.application.trade_analysis_preparation_service import TradeAnalysisPreparationService
+from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountScopeMismatchError
+from kiwoom_monitor.domain.order_contract import LEGACY_ACCOUNT_SCOPE
 
 
 class ConfirmWorker(QThread):
@@ -65,36 +68,66 @@ class HistoryWorker(QThread):
     progress = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, service: TradeHistoryService, cost_service: TradeCostService, start: date, end: date) -> None:
+    def __init__(self, service: TradeHistoryService, cost_service: TradeCostService, start: date, end: date,
+                 *, account_client=None, account_scope=None) -> None:
         super().__init__()
         self._service, self._cost_service, self._start, self._end = service, cost_service, start, end
+        self._account_client, self._expected_scope = account_client, account_scope
 
     def run(self) -> None:
         try:
             fills: list[TradeFill] = []
+            fills_context = None
+            service, cost_service = self._service, self._cost_service
+            if self._account_client is not None:
+                selector = getattr(self._account_client, "for_account_scope", None)
+                if callable(selector):
+                    client = selector(self._expected_scope)
+                    service, cost_service = TradeHistoryService(client), TradeCostService(client)
+                elif self._expected_scope != LEGACY_ACCOUNT_SCOPE:
+                    raise AccountScopeMismatchError("검증 계좌 조회 연결을 먼저 선택하세요.")
             day = self._end
             while day >= self._start:
                 if self.isInterruptionRequested():
                     return
                 if day.weekday() < 5:
                     self.progress.emit(f"과거 체결 조회 중 · {day:%Y-%m-%d}")
-                    fills.extend(self._service.load_day(day))
+                    history_batch = service.load_day_batch(day)
+                    if self._expected_scope is not None and history_batch.context.scope != self._expected_scope:
+                        raise AccountScopeMismatchError("선택 계좌와 체결 조회 계좌가 다릅니다.")
+                    if fills_context is None:
+                        fills_context = history_batch.context
+                    elif history_batch.context != fills_context:
+                        raise AccountScopeMismatchError("체결 조회 도중 계좌 context가 변경되었습니다.")
+                    fills.extend(history_batch.fills)
                 day -= timedelta(days=1)
             self.progress.emit("실제 수수료·세금 확인 중…")
             cost_error = ""
             try:
-                costs = self._cost_service.load_period(self._start, self._end)
+                cost_batch = cost_service.load_period_batch(self._start, self._end)
+                if self._expected_scope is not None and cost_batch.context.scope != self._expected_scope:
+                    raise AccountScopeMismatchError("선택 계좌와 비용 조회 계좌가 다릅니다.")
+                if fills_context is not None and cost_batch.context != fills_context:
+                    raise AccountScopeMismatchError("체결과 비용 조회의 계좌 context가 다릅니다.")
+                costs = cost_batch.costs
+                if fills_context is None: fills_context = cost_batch.context
+            except AccountScopeMismatchError:
+                raise
             except Exception as error:
                 costs = ()
                 cost_error = str(error)
-            self.completed.emit((tuple(fills), costs, cost_error), self._start, self._end)
+            if self.isInterruptionRequested(): return
+            result = (tuple(fills), costs, cost_error)
+            if self._account_client is not None: result += (fills_context,)
+            self.completed.emit(result, self._start, self._end)
         except Exception as error:
             self.failed.emit(str(error))
 
 
 class BackfillWorker(QThread):
     progress = Signal(str)
-    item_completed = Signal(str, object, object)
+    item_started = Signal(str, object)
+    item_completed = Signal(str, object, object, bool)
     item_failed = Signal(str, object, str)
     completed = Signal(int, int)
 
@@ -109,15 +142,25 @@ class BackfillWorker(QThread):
             if self.isInterruptionRequested():
                 break
             self.progress.emit(f"분봉 보완 {index}/{total} · {day:%Y-%m-%d} · {code}")
+            self.item_started.emit(code, day)
             try:
+                target = datetime.combine(day, time())
+                loader = getattr(self._service, "load_today_with_completion", None)
+                loaded, coverage_complete = (
+                    loader(code, target) if callable(loader)
+                    else (self._service.load_today(code, target), True)
+                )
                 bars = tuple(
-                    bar for bar in self._service.load_today(code, datetime.combine(day, time()))
+                    bar for bar in loaded
                     if bar.minute.date() == day
                 )
                 if not bars:
                     raise ValueError("해당 거래일의 분봉이 반환되지 않았습니다.")
-                self.item_completed.emit(code, day, bars)
-                success += 1
+                self.item_completed.emit(code, day, bars, bool(coverage_complete))
+                if coverage_complete:
+                    success += 1
+                else:
+                    failed += 1
             except Exception as error:
                 self.item_failed.emit(code, day, str(error))
                 failed += 1
@@ -138,3 +181,50 @@ class DailyChartWorker(QThread):
             self.completed.emit(self._code, rows, self._target)
         except Exception as error:
             self.failed.emit(str(error))
+
+
+class AnalysisEnrichmentWorker(QThread):
+    """화면에서 선택하지 않은 매매 회차도 저장 자료만으로 분석 보완한다."""
+
+    item_started = Signal(str)
+    item_completed = Signal(str, object)
+    item_failed = Signal(str, str)
+    completed = Signal(int, int)
+
+    def __init__(
+        self,
+        service: TradeAnalysisPreparationService,
+        tasks: tuple[tuple[object, tuple[tuple[object, ...], ...]], ...],
+        *,
+        active_pack: object,
+        strategy_packs: tuple[object, ...],
+        result_mode: str,
+    ) -> None:
+        super().__init__()
+        self._service = service
+        self._tasks = tasks
+        self._active_pack = active_pack
+        self._strategy_packs = strategy_packs
+        self._result_mode = result_mode
+
+    def run(self) -> None:
+        success = failed = 0
+        for episode, minute_rows in self._tasks:
+            if self.isInterruptionRequested():
+                break
+            group_id = str(getattr(episode, "group_id", ""))
+            self.item_started.emit(group_id)
+            try:
+                prepared = self._service.prepare(
+                    episode,
+                    minute_rows,
+                    active_pack=self._active_pack,
+                    strategy_packs=self._strategy_packs,
+                    result_mode=self._result_mode,
+                )
+                self.item_completed.emit(group_id, prepared)
+                success += 1
+            except Exception as error:
+                self.item_failed.emit(group_id, str(error))
+                failed += 1
+        self.completed.emit(success, failed)

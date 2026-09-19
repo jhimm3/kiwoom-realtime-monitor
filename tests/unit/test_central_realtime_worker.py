@@ -72,6 +72,54 @@ class CentralRealtimeWorkerTests(unittest.TestCase):
             worker._dispatch({"type": "connection_failed", "message": "키움 원본 연결 끊김"})
         self.assertEqual(2, worker._consecutive_failures)
 
+    def test_labels_client_and_upstream_subscription_counts_separately(self) -> None:
+        worker = CentralRealtimeWorker(
+            DataSourceSettings("personal_server", "https://nas.example", "token"),
+            ("005930", "000660"),
+        )
+        messages: list[str] = []
+        worker.status_changed.connect(messages.append)
+
+        worker._dispatch({
+            "type": "connection_opened", "scope": "client",
+            "codes": ["005930", "000660"],
+        })
+        worker._dispatch({
+            "type": "connection_opened", "scope": "upstream",
+            "codes": [f"{value:06d}" for value in range(110)],
+        })
+
+        self.assertEqual([
+            "나스 실시간 체결 구독 중 · 2종목",
+            "나스 실시간 체결 구독 중 · 110종목",
+        ], messages)
+
+    def test_validation_receives_central_envelope_metadata_without_changing_emitted_tick(self) -> None:
+        class Recorder:
+            def __init__(self) -> None:
+                self.values = []
+
+            def observe_central(self, event_type, value, *, metadata=None) -> None:
+                self.values.append((event_type, value, metadata))
+
+        recorder = Recorder()
+        worker = CentralRealtimeWorker(
+            DataSourceSettings("personal_server", "https://nas.example", "token"),
+            ("005930",), validation_recorder=recorder,
+        )
+        event = {
+            "type": "trade", "revision_id": "nas-r1",
+            "payload": {
+                "code": "005930", "current_price": 70000,
+                "cumulative_volume": 100, "cumulative_trade_value": 7000000,
+                "trade_volume": 10, "high_price": 70100, "trade_time": "101010",
+            },
+        }
+        worker._dispatch(event)
+        self.assertEqual("trade", recorder.values[0][0])
+        self.assertEqual("005930", recorder.values[0][1].code)
+        self.assertIs(event, recorder.values[0][2])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QToolBar
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
@@ -19,6 +19,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
 from kiwoom_monitor.application.daily_high_service import DailyHighTargets
 from kiwoom_monitor.application.trade_strength import StockFundamentals
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
 
 
 class FakeRankingLoader:
@@ -34,6 +35,63 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_ranking_timer_does_not_fire_before_the_scheduled_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings)
+
+            self.assertEqual(Qt.TimerType.PreciseTimer, window._ranking_timer.timerType())
+            window.close()
+
+    def test_journal_news_relay_preserves_late_request_scope_after_account_switch(self) -> None:
+        requested = AccountScope(
+            "kiwoom", AccountEnvironment.REAL,
+            "11111111-1111-4111-8111-111111111111",
+        )
+        current = AccountScope(
+            "kiwoom", AccountEnvironment.MOCK,
+            "22222222-2222-4222-8222-222222222222",
+        )
+        calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        owner = SimpleNamespace(
+            _journal_news_inbox=SimpleNamespace(read_new=lambda: {
+                "code": "005930", "name": "삼성전자", "group_id": "group-1",
+                "trade_date": "2026-09-13", "origin_scope": requested.to_dict(),
+                "account_scope": requested.to_dict(),
+            }),
+            _current_account_scope=current,
+            _ensure_news_process=lambda: None,
+            _send_news_command=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+        MainWindow._poll_journal_news_request(owner)
+
+        self.assertEqual(requested, calls[0][1]["origin_scope"])
+        self.assertEqual(requested, calls[0][1]["account_scope"])
+
+    def test_journal_news_relay_keeps_scope_free_legacy_and_rejects_partial_scope(self) -> None:
+        sent: list[dict[str, object]] = []
+        documents = iter((
+            {"code": "005930", "name": "삼성전자", "group_id": "legacy"},
+            {
+                "code": "005930", "name": "삼성전자", "group_id": "invalid",
+                "origin_scope": LEGACY_ACCOUNT_SCOPE.to_dict(),
+            },
+        ))
+        owner = SimpleNamespace(
+            _journal_news_inbox=SimpleNamespace(read_new=lambda: next(documents)),
+            _ensure_news_process=lambda: None,
+            _send_news_command=lambda *_args, **kwargs: sent.append(kwargs),
+        )
+
+        MainWindow._poll_journal_news_request(owner)
+        MainWindow._poll_journal_news_request(owner)
+
+        self.assertEqual(1, len(sent))
+        self.assertEqual(LEGACY_ACCOUNT_SCOPE, sent[0]["origin_scope"])
+        self.assertEqual(LEGACY_ACCOUNT_SCOPE, sent[0]["account_scope"])
+
     def test_theme_change_forces_google_settings_and_theme_backup(self) -> None:
         scheduled: list[str] = []
         refreshed: list[bool] = []
@@ -120,9 +178,17 @@ class MainWindowTest(unittest.TestCase):
             toolbar = window.findChild(QToolBar, "main_tools_toolbar")
             version_label = window.findChild(QLabel, "main_version_label")
             settings_button = window.findChild(QPushButton, "main_settings_button")
+            candidate_button = window.findChild(QPushButton, "candidate_monitor_button")
+            research_button = window.findChild(QPushButton, "research_button")
             widgets = [toolbar.widgetForAction(action) for action in toolbar.actions()]
             self.assertEqual(widgets.index(settings_button), widgets.index(version_label) + 1)
             self.assertEqual((settings_button.width(), settings_button.height()), (24, 22))
+            self.assertEqual(candidate_button.text(), "")
+            self.assertEqual(research_button.text(), "")
+            self.assertEqual((candidate_button.width(), candidate_button.height()), (14, 14))
+            self.assertEqual((research_button.width(), research_button.height()), (14, 14))
+            self.assertEqual(widgets.index(candidate_button) + 1, widgets.index(research_button))
+            self.assertEqual(widgets.index(research_button) + 1, widgets.index(window._rank_query_selector))
             window._refresh_rankings()
             window._ranking_worker.wait()
             QApplication.processEvents()
@@ -136,6 +202,62 @@ class MainWindowTest(unittest.TestCase):
             window._ranking_worker.wait()
             QApplication.processEvents()
             self.assertEqual("71,000", table.item(0, 5).text())
+            window.close()
+
+    def test_google_drive_upload_targets_exist_before_deferred_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings, FakeRankingLoader())
+
+            self.assertEqual("", window._google_drive_pending_target)
+            self.assertEqual("", window._google_drive_active_target)
+            window.close()
+
+    def test_upper_limit_uses_actual_limit_price_and_can_be_hidden(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings, FakeRankingLoader())
+            window._refresh_rankings()
+            window._ranking_worker.wait()
+            QApplication.processEvents()
+
+            window._fundamentals["005930"] = StockFundamentals(
+                1_000, 50, upper_limit_price=91_900,
+            )
+            window._current_prices["005930"] = 91_900
+            window._today_high_prices["005930"] = 91_900
+            window._last_change_rates["005930"] = 29.97
+            window._render_change_rate("005930")
+
+            item = window._table.item(0, 3)
+            self.assertEqual("+29.97%", item.text())
+            self.assertEqual(window.UPPER_LIMIT_BADGE_COLOR.casefold(), item.background().color().name().casefold())
+            self.assertTrue(item.font().bold())
+            self.assertIsNone(window._table.cellWidget(0, 3))
+
+            window._last_change_rates["005930"] = 0.0
+            window._render_change_rate("005930")
+            self.assertFalse(window._table.item(0, 3).font().bold())
+            self.assertNotEqual(
+                window.UPPER_LIMIT_BADGE_COLOR.casefold(),
+                window._table.item(0, 3).background().color().name().casefold(),
+            )
+
+            window._current_prices["005930"] = 90_000
+            window._last_change_rates["005930"] = 27.28
+            window._render_change_rate("005930")
+            self.assertEqual("+27.28%", window._table.item(0, 3).text())
+            self.assertFalse(window._table.item(0, 3).font().bold())
+            self.assertIsNone(window._table.cellWidget(0, 3))
+
+            window._current_prices["005930"] = 91_900
+            database.settings.set("upper_limit_highlight_enabled", "0")
+            window._render_change_rate("005930")
+            self.assertEqual("+27.28%", window._table.item(0, 3).text())
+            self.assertFalse(window._table.item(0, 3).font().bold())
+            self.assertIsNone(window._table.cellWidget(0, 3))
             window.close()
 
     def test_high_header_cycles_only_selected_periods(self) -> None:
@@ -177,6 +299,59 @@ class MainWindowTest(unittest.TestCase):
             self.assertEqual(bar, window._pending_minute_bars[("005930", minute)])
             self.assertIn(("kospi", minute), window._pending_market_index_bars)
             window.close()
+
+    def test_background_cache_failures_restore_work_without_overwriting_newer_values(self) -> None:
+        class Timer:
+            def __init__(self) -> None:
+                self.started = 0
+
+            def isActive(self) -> bool:
+                return False
+
+            def start(self) -> None:
+                self.started += 1
+
+        old_minute = datetime(2026, 9, 14, 10, 30)
+        new_minute = datetime(2026, 9, 14, 10, 31)
+        old_bar = MinuteOhlcv(old_minute, 100, 102, 99, 101, 10, 0.5)
+        newer_bar = MinuteOhlcv(old_minute, 100, 103, 99, 102, 20, 1.0)
+        minute_timer = Timer()
+        owner = SimpleNamespace(
+            _pending_minute_bars={("005930", old_minute): newer_bar},
+            _pending_market_index_bars={},
+            _pending_price_cache={"005930": 102},
+            _pending_today_high_cache={"005930": 103},
+            _minute_bar_save_timer=minute_timer,
+            _price_cache_timer=Timer(),
+            _closing=False,
+        )
+
+        MainWindow._on_minute_cache_write_failed(
+            owner,
+            {
+                ("005930", old_minute): old_bar,
+                ("000660", new_minute): MinuteOhlcv(
+                    new_minute, 200, 204, 198, 203, 30, 2.0,
+                ),
+            },
+            {("kospi", old_minute): (2800.0, 2801.0, 2799.0, 2800.5, 100.0)},
+            "temporary failure",
+        )
+        MainWindow._on_price_cache_write_failed(
+            owner,
+            {"005930": 101, "000660": 203},
+            {"005930": 102, "000660": 204},
+            object(),
+            "temporary failure",
+        )
+
+        self.assertEqual(newer_bar, owner._pending_minute_bars[("005930", old_minute)])
+        self.assertIn(("000660", new_minute), owner._pending_minute_bars)
+        self.assertIn(("kospi", old_minute), owner._pending_market_index_bars)
+        self.assertEqual({"005930": 102, "000660": 203}, owner._pending_price_cache)
+        self.assertEqual({"005930": 103, "000660": 204}, owner._pending_today_high_cache)
+        self.assertEqual(1, minute_timer.started)
+        self.assertEqual(1, owner._price_cache_timer.started)
 
     def test_failed_history_save_does_not_mark_code_as_loaded(self) -> None:
         class FailingRepository:

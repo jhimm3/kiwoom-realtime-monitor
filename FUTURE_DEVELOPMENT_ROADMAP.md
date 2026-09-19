@@ -30,6 +30,48 @@
 
 ## 4. 패턴·전략 연구
 
+2026-09-13 [지속 연구 설계](reports/CONTINUOUS_RESEARCH_ACCOUNT_SCOPE_REVIEW.md)와 [Sol 구현 순서](reports/CONTINUOUS_RESEARCH_ACCOUNT_IMPLEMENTATION_PLAN.md)를 확정했다. CR0 정확성 수정 → 다기간 bundle → 지속 campaign → 검증 분리 → 자동 가설 순서다. 같은 자료에서도 새 가설을 연구하고 새 거래일에는 검증을 넓힌다. 구현 완료 표시는 아니다.
+
+2026-09-16 CR1a는 명시 KST 날짜의 일별 export 생성/재사용과 불변 bundle index 검증을 구현했다.
+CR1b 실행 연결은 bundle을 기존 runner와 앱 연구 프로세스에 연결하고 시간순 소비/보유·현금/세션 경계를 검증했다.
+CR1b CPU batch 양보·RSS/preflight 제한과 1/5/20일 fixture 계측도 구현했다. 실제 NAS 전체 규모 성능은 V1에서 확인한다.
+CR2a는 캠페인 의도/설정 revision/job/cycle 영속 원장과 동시 예약·중단/복구 경계를 구현했다.
+CR2b1은 DB 동결 요청 실행, 캠페인 제어와 앱 시작 복원을 연결했다.
+CR2b2는 운영 예산 revision/완료 캐시 확대와 UI 예산 편집·명시 retry를 연결했다.
+CR2c1은 작업자 lease/실행 이력·영속 backoff·반복 crash 격리를 연결했다.
+CR2c2a는 같은 범위의 준비된 export/bundle 자동 등록·중복/무관 근거 차단을 연결했다.
+CR2c2b는 기존 NAS DB export의 같은 범위 자동 준비·signature cache·임시 검증/완성 게시를 연결했다.
+CR2c3a는 자동 생성 표시와 완료/다른 캠페인 참조를 포함한 읽기 전용 용량 진단을 연결했다.
+CR2c3b는 PC 폴더 cap/자료 준비 원장·직렬화·완성 게시 fence를 연결했다. 실제 삭제는 없다.
+CR2c3c1은 24시간 이상 지난 미완성 임시 자료의 원장/참조 재확인/부분 정리 재개를 연결했다.
+CR2c3c2는 기존 완성 자료를 NAS 준비 전에 등록하고, 대기열 갱신/동결 검증/완성 자료 보존을 연결했다.
+CR3a1은 불변 개발 근거를 통해 전체 보고서/OOS 상태가 개발 후보 선택에 섞이는 경로를 차단했다.
+CR3a2는 선택 개발 fold/warmup·과거 seed만 전달하는 독립 입력과 JSON/CLI 명시 실행을 연결했다.
+구간마다 새 현금/빈 상태·warmup 주문 금지/구간 내부 날짜 유지/경계 censor·선택 자료 품질 계산을 검증했다.
+CR3a3는 선택 구간의 유한 탐색·완료 cache·중단 재시도를 연결했다. 원본 identity 검증과 파생 scientific identity를 구분한다.
+CR3a4a는 불변 원본과 실행 spec을 연구 DB v17로 분리하고 별도 프로세스 등록·campaign/source를 연결했다.
+CR3a4b는 화면의 독립 구간 등록·취소·복원을 background process에 연결했다. 등록 중 UI의 전체 입력 로드는 없다.
+CR3b1은 명시 run의 동일 조건 검증/독립 구간 집계를 연결했다. 중복/겹침/자료 revision과 실패/표본 부족을 보존한다.
+CR3b2는 명시 비교 JSON/CLI와 연구 화면의 별도 읽기 전용 viewer를 연결했다. UI DB/원본 입력 로드는 없다.
+CR3b3은 고정 전략의 2~20개 개발 구간 순차 검증 JSON/CLI를 연결했다. 완료 캐시/취소 재개/원자 선점/부분 상태를 보존한다.
+CR3b4는 순차 검증 화면 실행/취소/250ms 진행 표시와 같은 snapshot의 명시 재개를 연결했다.
+CR3c1은 고정 종목 hash bucket 정책/v3 명시 partition/전체 시장 context 유지와 거래 대상 제한을 연결했다.
+CR3c2는 그룹×시간 v2 순차 요청/CLI·완료 캐시/취소 재개·그룹별 비교를 연결했다. 다른 bucket 손익은 합산하지 않는다.
+CR3c3는 순차 검증 창의 그룹×시간 실행/취소/진행·그룹별 결과와 불변 snapshot 재개를 연결했다. 시간 v1 화면도 유지한다.
+CR3d1은 최종 batch/기간 고정과 접근·노출 원장 기반을 연구 v18에 연결했고 CR3d2b는 후보 실행 소유권을 v19에 추가했다. 기존 기록과 v17/v18/v19/v20 read-only 비교를 보존한다.
+CR3d2a는 후보 scientific hash/동결 입력 검증·final 전용 입력 격리와 과거 개발 기간 검사/원장 선행 반환을 연결했다.
+CR3d2b는 소유권 claim을 가진 별도 final 실행과 완료/실패/취소 계약을 연결했다. 실패·취소는 자동 재시도하지 않는다.
+CR3d2c는 FAILED/CANCELLED 후보만 request ID·reason·generation 원장과 manifest 부재 확인 뒤 명시 복구한다. 자동 재시도와 RUNNING orphan 회수는 없다.
+CR3d3a는 locked batch/candidates/access/owner/recovery JSON과 --evaluate-final 별도 프로세스를 연결했다. 일반 연구 실행기에 OOS를 허용하지 않는다.
+CR3d3b는 불변 request snapshot/child를 전략 연구 화면에 연결했다. 후보별 종료 결과를 검증해 표시하고 FAILED/CANCELLED는 사용자 근거·새 request ID/owner로만 명시 복구한다.
+CR3d3c는 검증된 final 결과를 개발에 사용할 때 사용자 근거와 함께 EXPOSED_DEVELOPMENT로 원자 기록한다. UI는 별도 child를 쓰고 DB를 직접 열지 않는다.
+CR4a는 등록 Family·Factor와 호출자가 명시한 허용값으로 기준선 및 단일 파라미터 가설을 결정적으로 만들고 연구 DB v21에 부모 계보를 불변 저장한다. 같은 내용 재생성은 같은 ID다.
+CR4b는 campaign scope가 일치하는 READY 가설을 연구 DB v22 큐에 등록하고 기존 search job으로 한 번만 예약한다. worker 소유권, 두 Family 순환, baseline/no-trade 정확 실행과 범위 소진 대기를 연결했다.
+다음은 CR4c에서 개발 결과로 후속 가설을 자동 생성하고 자동 연구 설정·가설 근거 화면을 연결하는 단계다.
+자동 final 평가·영속 재개 정책과 그룹별 coverage/편중 분석은 후속이다.
+최종 접근 원장/새 날짜 확장과 순차 검증 자동 반복/영속 복구는 후속이며 실제 NAS 장시간 부하는 V1이다.
+자동 가설/일지 피드백/자동 모의운영은 후속이다.
+
 - 시장 수급 상태판과 거래대금 집중 구간
 - 일봉 매물대/Open Space
 - 1분봉 Base/M/W 및 돌파·눌림 타점
@@ -38,9 +80,30 @@
 
 ## 5. 실제 매매일지 비교
 
+A1~A4로 계좌 신원·조회 context·FIFO/비용·실시간·v2 sync를 분리한다. 기존 일지는 legacy로 보존한다. A5에서 O1 상세 체결을 증분 projection해 동결된 연구 근거로 사용한다. 자동 모의운영·실계좌 승격은 각각 별도 O2 계약이다.
+
 - 동일 시점의 모의 진입과 실제 체결 회차를 비교한다.
 - 실제 매매유형, 전략팩 원칙 준수, 수급·뉴스·시장상태 차이를 함께 복기한다.
 - 분석 결과와 실제 주문 실행은 계속 분리한다.
+
+## 6. NAS 인증·운영 설정을 앱에서 변경
+
+2026-09-15 [런타임 인증·설정 설계 검토](reports/RUNTIME_API_SETTINGS_DESIGN_REVIEW.md)를 완료했다.
+구현 순서는 R0 운영 설정 정확성/GUI 응답성 → R1 암호화 저장/활성화 원장 →
+R2 준비·적용 API/요청 교체 경계 → R3 모의계좌 → R4 앱 입력 UI →
+R5 뉴스·AI·운영값 → R6 실전 인증 → R7 누적 배포다. 아직 구현 완료를 뜻하지 않는다.
+R0의 운영 설정 충돌·저장 실패·설정창 비동기 처리는 로컬 구현 완료이며 NAS 동기화 전이다.
+R1의 암호화 저장·초기 env 이관·기동 합성·프로필/멱등 활성화 원장도 로컬 구현 완료다.
+다음은 R2 준비·적용 API와 요청 교체 경계다. R7에서 Linux 권한·실제 PostgreSQL과 누적 배포를 확인한다.
+R2a 공통 REST 후보 검증·실제 HTTP/DB/token drain·캐시 세대 보호를 로컬 구현했다.
+R2b의 operation/profile API·TTL·HTTPS·commit 조정이 다음이며 R2 전체 완료는 아니다.
+
+실전·모의 모두 복수 계좌를 등록한다. 같은 계좌의 키 교체는 기존 일지와 실행 회차를 유지하고,
+새 계좌는 기존 계좌 옆에 별도 프로필·신원·회차로 추가해 조회부터 시작한다.
+계좌별 조회·주문 대상은 명시하고, 시세 담당 계좌를 UI 선택과 분리해 순위·뉴스·봉을 한 번만 수집한다.
+요청 한도는 공식 계좌별(토큰별) 단위로 유지하며 같은 계좌의 키 갱신은 기존 간격을 이어받는다.
+API 키는 NAS 전용 암호화 파일에서 관리하고 DB·포트·NAS 접근 토큰·계좌 HMAC 등
+서버 초기 설정은 유지한다. 최초 기능 설치 이후 키 변경만으로 컨테이너를 다시 생성하지 않는다.
 
 ## 보류
 

@@ -5,6 +5,7 @@ import json
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
@@ -14,11 +15,43 @@ from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 
 
+class DartCredentialValidationError(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class DartDisclosureClient:
     def __init__(self, api_key: str, cache_path: Path, *, timeout_seconds: float = 10.0) -> None:
         self._api_key = api_key
         self._cache_path = cache_path
         self._timeout = timeout_seconds
+
+    def validate_credentials(self) -> None:
+        """Probe today's first disclosure without loading or changing the company-code cache."""
+        if not self._api_key:
+            raise DartCredentialValidationError("INVALID_CREDENTIAL")
+        today = datetime.now().strftime("%Y%m%d")
+        query = urlencode({"crtfc_key": self._api_key, "bgn_de": today, "end_de": today,
+                           "page_no": 1, "page_count": 1})
+        try:
+            payload = self._json(f"https://opendart.fss.or.kr/api/list.json?{query}")
+        except HTTPError as error:
+            code = "CREDENTIAL_VALIDATION_RETRYABLE" if error.code == 429 or error.code >= 500 else "CREDENTIAL_VALIDATION_FAILED"
+            raise DartCredentialValidationError(code) from None
+        except (OSError, TimeoutError):
+            raise DartCredentialValidationError("CREDENTIAL_VALIDATION_RETRYABLE") from None
+        except ValueError:
+            raise DartCredentialValidationError("CREDENTIAL_VALIDATION_FAILED") from None
+        if not isinstance(payload, dict):
+            raise DartCredentialValidationError("CREDENTIAL_VALIDATION_FAILED")
+        status = str(payload.get("status", ""))
+        if status == "013" or (status == "000" and isinstance(payload.get("list"), list)):
+            return
+        code = ("INVALID_CREDENTIAL" if status in {"010", "011", "901"} else
+                "CREDENTIAL_VALIDATION_RETRYABLE" if status in {"020", "800", "900"} else
+                "CREDENTIAL_VALIDATION_FAILED")
+        raise DartCredentialValidationError(code)
 
     def search(self, stock_code: str, stock_name: str, *, days: int = 30) -> tuple[StockNewsItem, ...]:
         if not self._api_key:

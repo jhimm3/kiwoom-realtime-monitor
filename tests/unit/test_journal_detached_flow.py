@@ -4,14 +4,137 @@ import sqlite3
 import unittest
 from datetime import date, datetime
 from types import SimpleNamespace
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
 from unittest.mock import patch
 
 from kiwoom_monitor.journal_process import JournalWindow
 from kiwoom_monitor.application.trade_history_service import TradeFill
-from kiwoom_monitor.application.trade_journal_summary import group_trade_episodes
+from kiwoom_monitor.application.trade_journal_summary import TradeReview, group_trade_episodes
 
 
 class JournalDetachedFlowTests(unittest.TestCase):
+    def test_account_change_debounces_reload_and_skips_same_scope(self) -> None:
+        scope = AccountScope(
+            "kiwoom", AccountEnvironment.REAL, "11111111-1111-4111-8111-111111111111",
+        )
+        calls: list[object] = []
+        owner = SimpleNamespace(
+            _selected_account_scope=lambda: scope,
+            _journal_settings=SimpleNamespace(setValue=lambda *args: calls.append(("setting", *args))),
+            _history_followup_timer=SimpleNamespace(stop=lambda: calls.append("stop-followup")),
+            _account_reload_timer=SimpleNamespace(start=lambda delay: calls.append(("start", delay))),
+            _loaded_history_scope=LEGACY_ACCOUNT_SCOPE,
+            _active_episode=object(),
+            reload_history=lambda: calls.append("reload"),
+        )
+
+        JournalWindow._account_filter_changed(owner)
+        JournalWindow._account_filter_changed(owner)
+        self.assertNotIn("reload", calls)
+        self.assertEqual(2, calls.count(("start", 20)))
+
+        JournalWindow._reload_selected_account(owner)
+        self.assertEqual(1, calls.count("reload"))
+        self.assertIsNone(owner._active_episode)
+        owner._loaded_history_scope = scope
+        owner._active_episode = object()
+        JournalWindow._reload_selected_account(owner)
+        self.assertEqual(1, calls.count("reload"))
+
+    def test_reload_history_defers_backfill_and_enrichment_to_followup_event(self) -> None:
+        calls: list[object] = []
+        selected_day = date(2026, 9, 13)
+        scope = LEGACY_ACCOUNT_SCOPE
+        result = SimpleNamespace(fills=(), costs=(), episodes=())
+        owner = SimpleNamespace(
+            _from_date=SimpleNamespace(date=lambda: SimpleNamespace(toPython=lambda: selected_day)),
+            _to_date=SimpleNamespace(date=lambda: SimpleNamespace(toPython=lambda: selected_day)),
+            _selected_account_scope=lambda: scope,
+            _trade_history_query=SimpleNamespace(
+                load=lambda *_args, **kwargs: calls.append(("query", kwargs["account_scope"])) or result,
+            ),
+            _episodes=(),
+            _apply_history_filters=lambda: calls.append("render"),
+            _render_fills=lambda fills: calls.append(("fills", fills)),
+            _history_followup_timer=SimpleNamespace(start=lambda delay: calls.append(("followup", delay))),
+            _refresh_backfill_table=lambda: calls.append("backfill"),
+            _schedule_analysis_enrichment=lambda: calls.append("enrichment"),
+        )
+
+        JournalWindow.reload_history(owner)
+
+        self.assertEqual(
+            [("query", scope), "render", ("fills", ()), ("followup", 0)], calls,
+        )
+        JournalWindow._run_history_followups(owner)
+        self.assertEqual(["backfill", "enrichment"], calls[-2:])
+
+    def test_loaded_legacy_review_is_not_autosaved_and_edits_use_legacy_write_contract(self) -> None:
+        saved: list[tuple[TradeReview, AccountScope | None]] = []
+        legacy_episode = group_trade_episodes((TradeFill(
+            "1", "005930", "삼성전자", "매수", datetime(2026, 9, 13, 9), 1, 70000,
+        ),))[0]
+
+        class TextValue:
+            def __init__(self, value: str = "") -> None:
+                self.value = value
+
+            def setPlainText(self, value: str) -> None:
+                self.value = value
+
+            def toPlainText(self) -> str:
+                return self.value
+
+            def setText(self, value: str) -> None:
+                self.value = value
+
+            def text(self) -> str:
+                return self.value
+
+            def setCurrentText(self, value: str) -> None:
+                self.value = value
+
+            def currentText(self) -> str:
+                return self.value
+
+        timer = SimpleNamespace(start=lambda _delay: None, stop=lambda: None)
+        owner = SimpleNamespace(
+            _active_episode=legacy_episode, _loading_review=False, _review_dirty=True,
+            _repo=SimpleNamespace(
+                load_review=lambda *_args: TradeReview(
+                    legacy_episode.group_id, "기존 이유", "기존 복기",
+                    origin_scope=LEGACY_ACCOUNT_SCOPE,
+                ),
+                save_review=lambda review, *, account_scope: saved.append((review, account_scope)),
+            ),
+            _review_reason=TextValue(), _review_note=TextValue(), _review_tags=TextValue(),
+            _review_rating=TextValue("보통"), _review_status=TextValue("미작성"),
+            _review_saved=TextValue(), _review_save_timer=timer,
+            _summary_table=SimpleNamespace(currentRow=lambda: -1),
+        )
+
+        JournalWindow._load_active_review(owner)
+        JournalWindow._save_active_review(owner)
+        self.assertEqual([], saved)
+
+        owner._review_note.setPlainText("수정한 복기")
+        JournalWindow._review_changed(owner)
+        JournalWindow._save_active_review(owner)
+        self.assertEqual(1, len(saved))
+        self.assertIsNone(saved[0][1])
+        self.assertEqual("수정한 복기", saved[0][0].review)
+
+        scoped = AccountScope(
+            "kiwoom", AccountEnvironment.REAL, "11111111-1111-4111-8111-111111111111",
+        )
+        owner._active_episode = group_trade_episodes((TradeFill(
+            "2", "005930", "삼성전자", "매수", datetime(2026, 9, 13, 10), 1, 71000,
+            origin_scope=scoped,
+        ),))[0]
+        owner._review_dirty = True
+        JournalWindow._save_active_review(owner)
+        self.assertEqual(scoped, saved[-1][1])
+
     def test_multiday_episode_daily_chart_uses_latest_available_day(self) -> None:
         fills = (
             TradeFill("1", "005930", "삼성전자", "매수", datetime(2026, 9, 7, 9, 10), 1, 100, "", "KRX"),
@@ -52,8 +175,8 @@ class JournalDetachedFlowTests(unittest.TestCase):
         calls: list[object] = []
         owner = SimpleNamespace(
             _repo=SimpleNamespace(
-                save_bar_backfill_result=lambda code, saved_day, saved_bars, checked_at: calls.append(
-                    (code, saved_day, saved_bars, isinstance(checked_at, datetime))
+                save_bar_backfill_result=lambda code, saved_day, saved_bars, checked_at, **options: calls.append(
+                    (code, saved_day, saved_bars, isinstance(checked_at, datetime), options)
                 ) or True,
             ),
             _selected_history_code="005930",
@@ -65,18 +188,20 @@ class JournalDetachedFlowTests(unittest.TestCase):
 
         JournalWindow._backfill_received(owner, "005930", day, bars)
 
-        self.assertEqual(("005930", day, bars, True), calls[0])
+        self.assertEqual(
+            ("005930", day, bars, True, {"coverage_complete": True}), calls[0],
+        )
         self.assertEqual(("refresh", "005930", True), calls[1])
 
     def test_history_result_uses_one_repository_write_before_refresh(self) -> None:
-        fills = (SimpleNamespace(order_no="1"),)
-        costs = (SimpleNamespace(total_cost=200),)
+        fills = (SimpleNamespace(order_no="1", origin_scope=LEGACY_ACCOUNT_SCOPE),)
+        costs = (SimpleNamespace(total_cost=200, origin_scope=LEGACY_ACCOUNT_SCOPE),)
         calls: list[tuple[str, object, object]] = []
         statuses: list[str] = []
         owner = SimpleNamespace(
             _repo=SimpleNamespace(
-                upsert_history_sync=lambda saved_fills, saved_costs: calls.append(
-                    ("save", saved_fills, saved_costs)
+                upsert_history_sync=lambda saved_fills, saved_costs, *, account_scope: calls.append(
+                    ("save", saved_fills, saved_costs, account_scope)
                 ),
             ),
             _journal_settings=SimpleNamespace(setValue=lambda *_args: None),
@@ -91,8 +216,26 @@ class JournalDetachedFlowTests(unittest.TestCase):
             date(2026, 9, 8),
         )
 
-        self.assertEqual([("save", fills, costs), ("reload", None, None)], calls)
+        self.assertEqual(
+            [("save", fills, costs, LEGACY_ACCOUNT_SCOPE), ("reload", None, None)], calls,
+        )
         self.assertEqual(["조회 완료 · 체결 1건 · 실제비용 1묶음"], statuses)
+
+    def test_history_result_does_not_call_delayed_same_day_costs_complete(self) -> None:
+        fills = (SimpleNamespace(order_no="1", origin_scope=LEGACY_ACCOUNT_SCOPE),)
+        statuses: list[str] = []
+        owner = SimpleNamespace(
+            _repo=SimpleNamespace(upsert_history_sync=lambda *_args, **_kwargs: None),
+            _journal_settings=SimpleNamespace(setValue=lambda *_args: None),
+            _status=SimpleNamespace(setText=statuses.append),
+            reload_history=lambda: None,
+        )
+
+        JournalWindow._history_received(
+            owner, (fills, (), ""), date(2026, 9, 14), date(2026, 9, 14),
+        )
+
+        self.assertEqual(["체결 1건 저장 · 실제비용 정산 대기(다음에 재시도)"], statuses)
 
     def test_open_active_news_uses_shared_command_channel_contract(self) -> None:
         documents: list[dict[str, object]] = []
@@ -119,6 +262,14 @@ class JournalDetachedFlowTests(unittest.TestCase):
                 "name": "삼성전자",
                 "group_id": "group-1",
                 "trade_date": "2026-09-08",
+                "origin_scope": {
+                    "broker": "legacy", "environment": "unknown",
+                    "account_ref": "legacy-unassigned",
+                },
+                "account_scope": {
+                    "broker": "legacy", "environment": "unknown",
+                    "account_ref": "legacy-unassigned",
+                },
             }],
             documents,
         )

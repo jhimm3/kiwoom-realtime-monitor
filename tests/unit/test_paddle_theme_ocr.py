@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
 from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import (
+    PaddleThemeOcr,
     _OcrToken,
     _badge_regions,
     _merge_badge_tokens,
@@ -15,6 +19,20 @@ from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import (
 
 
 class ThemeImageLayoutTests(unittest.TestCase):
+    def test_uses_current_app_data_directory_for_local_models(self) -> None:
+        data_dir = Path("C:/user-data")
+        with patch(
+            "kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr.AppPaths.for_current_user",
+            return_value=SimpleNamespace(data_dir=data_dir),
+        ):
+            ocr = PaddleThemeOcr()
+
+        self.assertEqual(data_dir / "ocr_models" / "PP-OCRv5_mobile_det", ocr._detection_model)
+        self.assertEqual(
+            data_dir / "ocr_models" / "korean_PP-OCRv5_mobile_rec",
+            ocr._korean_recognition_model,
+        )
+
     def test_reads_existing_theme_column_layout(self) -> None:
         tokens = (
             _OcrToken("종목명", 100, 20),

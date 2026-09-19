@@ -11,8 +11,10 @@ from kiwoom_monitor.infrastructure.persistence.schema_migrations import (
 )
 
 
-NEWS_SCHEMA_VERSION = 1
+NEWS_SCHEMA_VERSION = 3
 NEWS_SCHEMA_BASELINE_NAME = "current_news_schema_baseline"
+NEWS_ACCOUNT_SCOPE_NAME = "account_scoped_journal_news_links"
+NEWS_LINK_TOMBSTONE_NAME = "journal_news_link_tombstones"
 
 
 def initialize_news_schema(database_path: Path) -> None:
@@ -21,6 +23,8 @@ def initialize_news_schema(database_path: Path) -> None:
     try:
         SQLiteMigrationRunner(connection, "news_schema_migrations").apply((
             SQLiteMigration(1, NEWS_SCHEMA_BASELINE_NAME, _apply_v1_baseline),
+            SQLiteMigration(2, NEWS_ACCOUNT_SCOPE_NAME, _apply_v2_account_scope),
+            SQLiteMigration(3, NEWS_LINK_TOMBSTONE_NAME, _apply_v3_link_tombstones),
         ))
         connection.commit()
     finally:
@@ -70,3 +74,62 @@ def _apply_v1_baseline(connection: sqlite3.Connection) -> None:
     }
     if "naver_checked_at" not in columns:
         connection.execute("ALTER TABLE stock_news_sync ADD COLUMN naver_checked_at TEXT")
+
+
+def _apply_v2_account_scope(connection: sqlite3.Connection) -> None:
+    """기존 연결은 legacy로 보존하고 이후 연결은 계좌별로 분리한다."""
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(journal_news_links)")
+    }
+    if "origin_broker" in columns:
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_journal_news_links_scope_group ON journal_news_links("
+            "canonical_account_ref,origin_broker,origin_environment,group_id,stock_code)"
+        )
+        return
+    connection.execute("ALTER TABLE journal_news_links RENAME TO journal_news_links_v1")
+    connection.execute(
+        "CREATE TABLE journal_news_links ("
+        "group_id TEXT NOT NULL, stock_code TEXT NOT NULL, identity TEXT NOT NULL, "
+        "linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+        "origin_broker TEXT NOT NULL, origin_environment TEXT NOT NULL, "
+        "origin_account_ref TEXT NOT NULL, canonical_account_ref TEXT NOT NULL, "
+        "PRIMARY KEY(origin_broker, origin_environment, origin_account_ref, "
+        "group_id, stock_code, identity))"
+    )
+    connection.execute(
+        "INSERT INTO journal_news_links("
+        "group_id,stock_code,identity,linked_at,origin_broker,origin_environment,"
+        "origin_account_ref,canonical_account_ref) "
+        "SELECT group_id,stock_code,identity,linked_at,'legacy','unknown',"
+        "'legacy-unassigned','legacy-unassigned' FROM journal_news_links_v1"
+    )
+    connection.execute("DROP TABLE journal_news_links_v1")
+    connection.execute(
+        "CREATE INDEX idx_journal_news_links_scope_group ON journal_news_links("
+        "canonical_account_ref,origin_broker,origin_environment,group_id,stock_code)"
+    )
+
+
+def _apply_v3_link_tombstones(connection: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(journal_news_links)")
+    }
+    additions = (
+        ("is_deleted", "INTEGER NOT NULL DEFAULT 0"),
+        ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ("source_collection", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("source_owner", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("source_key", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("source_content_hash", "TEXT NOT NULL DEFAULT 'unknown'"),
+    )
+    for name, definition in additions:
+        if name not in columns:
+            connection.execute(f"ALTER TABLE journal_news_links ADD COLUMN {name} {definition}")
+    connection.execute(
+        "UPDATE journal_news_links SET updated_at=linked_at WHERE updated_at=''"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_journal_news_links_active_scope ON journal_news_links("
+        "canonical_account_ref,origin_broker,origin_environment,group_id,stock_code,is_deleted)"
+    )

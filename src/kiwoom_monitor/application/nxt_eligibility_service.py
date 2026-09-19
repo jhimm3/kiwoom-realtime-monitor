@@ -12,5 +12,9 @@ class NxtEligibilityService:
         self._client = client
 
     def is_enabled(self, code: str) -> bool:
-        response = self._client.request("ka10100", "/api/dostk/stkinfo", {"stk_cd": code})
+        stored_loader = getattr(self._client, "load_stored_nxt_eligibility", None)
+        stored = stored_loader(code) if callable(stored_loader) else None
+        response = stored if isinstance(stored, dict) else self._client.request(
+            "ka10100", "/api/dostk/stkinfo", {"stk_cd": code},
+        )
         return str(response.get("nxtEnable", "")).strip().upper() == "Y"

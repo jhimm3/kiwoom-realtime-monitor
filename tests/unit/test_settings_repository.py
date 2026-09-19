@@ -25,6 +25,7 @@ class SettingsRepositoryTest(unittest.TestCase):
             self.assertEqual(database.settings.get("theme_excel_import_custom_separators"), "")
             self.assertEqual(database.settings.get("theme_excel_import_exclusions"), "")
             self.assertEqual(database.settings.get("window_width"), "1160")
+            self.assertEqual(database.settings.get("upper_limit_highlight_enabled"), "1")
 
             database.settings.set("refresh_interval_seconds", "60")
             self.assertEqual(database.settings.get("refresh_interval_seconds"), "60")

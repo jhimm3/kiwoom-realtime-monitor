@@ -64,3 +64,16 @@ class ImageThemeOcrWorkerController(QObject):
     def request_interruption(self) -> None:
         if self._worker is not None and self._worker.isRunning():
             self._worker.requestInterruption()
+
+    def stop_for_shutdown(self, timeout_ms: int = 500) -> bool:
+        """OCR native call이 중단 요청을 못 받을 때 앱 종료만은 막지 않게 한다."""
+        worker = self._worker
+        if worker is None or not worker.isRunning():
+            return True
+        worker.requestInterruption()
+        if worker.wait(max(0, timeout_ms)):
+            return True
+        # Paddle 모델 준비/predict는 QThread interruption을 확인할 수 없는
+        # native 호출이다. 앱 종료 시에만 해당 보조 worker를 강제 종료한다.
+        worker.terminate()
+        return worker.wait(1_500)

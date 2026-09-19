@@ -43,6 +43,27 @@ class RealtimeSubscriptionCoordinatorTests(unittest.TestCase):
         self.coordinator.commit(decision)
         self.assertEqual(("B", "C"), self.coordinator.current_codes)
 
+    def test_venue_only_change_refreshes_running_subscription(self) -> None:
+        first = self.plan()
+        self.coordinator.commit(first)
+        decision = self.coordinator.plan(
+            ("A", "B"), {"A"}, closing=False, worker_available=True,
+            worker_exists=True, worker_running=True,
+        )
+        self.assertEqual(RealtimeSubscriptionAction.UPDATE, decision.action)
+        self.assertEqual(("A", "B"), decision.active_codes)
+        self.assertEqual(("A",), decision.nxt_codes)
+
+    def test_phase_boundary_refreshes_even_when_venue_codes_are_unchanged(self) -> None:
+        self.now = datetime(2026, 9, 14, 15, 29, 59)
+        first = self.plan()
+        self.coordinator.commit(first)
+        self.now = datetime(2026, 9, 14, 15, 30)
+        decision = self.plan(exists=True, running=True)
+        self.assertEqual(RealtimeSubscriptionAction.UPDATE, decision.action)
+        self.assertEqual(first.active_codes, decision.active_codes)
+        self.assertEqual(first.nxt_codes, decision.nxt_codes)
+
     def test_nxt_only_session_filters_non_nxt_codes(self) -> None:
         self.now = datetime(2026, 9, 10, 8, 30)
         decision = self.plan()

@@ -18,7 +18,13 @@ class MarketIndexChartService:
 
     def load(self, market: str, base: datetime, maximum: int = 1_500) -> dict[tuple[str, datetime], tuple[float, float, float, float, float | None]]:
         code = self.CODES[market]; body = {"inds_cd": code, "tic_scope": "1", "base_dt": base.strftime("%Y%m%d")}
-        response, has_next, next_key = self._request(body); records = self._records(response)
+        stored_loader = getattr(self._client, "load_stored_market_index", None)
+        stored = stored_loader(market, base.strftime("%Y%m%d")) if callable(stored_loader) else None
+        if isinstance(stored, dict):
+            response, has_next, next_key = {"inds_min_pole_qry": stored.get("minutes", [])}, False, ""
+        else:
+            response, has_next, next_key = self._request(body)
+        records = self._records(response)
         while has_next and next_key and len(records) < maximum:
             response, has_next, next_key = self._request(body, "Y", next_key); records.extend(self._records(response))
         result: dict[tuple[str, datetime], tuple[float, float, float, float, float | None]] = {}
@@ -34,7 +40,13 @@ class MarketIndexChartService:
 
     def load_daily(self, market: str, base: datetime) -> tuple[tuple[object, ...], ...]:
         body = {"inds_cd": self.CODES[market], "base_dt": base.strftime("%Y%m%d")}
-        response = self._client.request("ka20006", "/api/dostk/chart", body)
+        stored_loader = getattr(self._client, "load_stored_market_index", None)
+        stored = stored_loader(market, base.strftime("%Y%m%d")) if callable(stored_loader) else None
+        response = (
+            {"inds_dt_pole_qry": stored.get("daily", [])}
+            if isinstance(stored, dict)
+            else self._client.request("ka20006", "/api/dostk/chart", body)
+        )
         records = response.get("inds_dt_pole_qry", [])
         if not isinstance(records, list): raise ValueError("ka20006 업종 일봉 형식이 올바르지 않습니다.")
         rows = []

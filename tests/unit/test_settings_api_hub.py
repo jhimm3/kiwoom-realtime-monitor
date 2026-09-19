@@ -25,25 +25,36 @@ class SettingsApiHubTests(unittest.TestCase):
             database_path = Path(directory) / "monitor.sqlite3"
             Database(database_path).initialize()
             open_news_settings = Mock()
+            open_shadow_settings = Mock()
+            open_research = Mock()
             dialog = SettingsDialog(
                 SettingsRepository(database_path),
                 api_path=Path(directory) / "api.env",
                 news_api_settings_opener=open_news_settings,
+                shadow_settings_opener=open_shadow_settings,
+                research_opener=open_research,
             )
 
             buttons = {button.text(): button for button in dialog.findChildren(QPushButton)}
             self.assertIn("키움 API 설정", buttons)
             self.assertIn("NAS 연결 설정", buttons)
             self.assertIn("네이버·DART·AI API 연결", buttons)
+            self.assertIn("Shadow 후보 조건·상태", buttons)
+            self.assertIn("전략 연구 열기", buttons)
             tabs = dialog.findChild(QTabWidget)
             self.assertIsNotNone(tabs)
             self.assertIn("연결", tuple(tabs.tabText(index) for index in range(tabs.count())))
+            self.assertIn("전략 연구", tuple(tabs.tabText(index) for index in range(tabs.count())))
             self.assertEqual(
                 ("local", "personal_server"),
                 tuple(dialog._data_source_mode.itemData(index) for index in range(dialog._data_source_mode.count())),
             )
             buttons["네이버·DART·AI API 연결"].click()
             open_news_settings.assert_called_once_with()
+            buttons["Shadow 후보 조건·상태"].click()
+            buttons["전략 연구 열기"].click()
+            open_shadow_settings.assert_called_once_with()
+            open_research.assert_called_once_with()
 
 
 if __name__ == "__main__":

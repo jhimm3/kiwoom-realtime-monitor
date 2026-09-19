@@ -43,6 +43,13 @@ class RankingScheduleTests(unittest.TestCase):
         self.assertEqual(RankingResponseAction.WAIT_NEXT, third.action)
         self.assertEqual(3, third.retry_count)
 
+    def test_stored_partial_snapshot_waits_for_next_schedule_without_duplicate_reads(self) -> None:
+        decision = decide_ranking_response(
+            17, 20, 0, False, allow_partial_retry=False,
+        )
+        self.assertEqual(RankingResponseAction.WAIT_NEXT, decision.action)
+        self.assertEqual(0, decision.retry_count)
+
     def test_complete_response_is_deferred_while_modal_is_open(self) -> None:
         decision = decide_ranking_response(20, 20, 2, True)
         self.assertEqual(RankingResponseAction.DEFER_WHILE_MODAL, decision.action)

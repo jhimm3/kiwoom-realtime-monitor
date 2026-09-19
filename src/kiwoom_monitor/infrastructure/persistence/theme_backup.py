@@ -32,7 +32,7 @@ class ThemeBackupService:
             common = {
                 "format": self.FORMAT,
                 "version": self.VERSION,
-                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                 "active_profile": str(active_row[0]) if active_row is not None else "",
                 "aliases": [{"alias": alias, "code": code} for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")],
                 "stock_catalog": [{"code": code, "name": name, "market": market} for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")],

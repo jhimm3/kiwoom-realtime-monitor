@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.client import KiwoomApiError
 from kiwoom_monitor.infrastructure.kiwoom_rest.failover_client import FailoverKiwoomRestClient
 from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import CentralServerUnavailable
+from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import (
+    AccountQueryBatch,
+    AccountQueryContext,
+    AccountScopeMismatchError,
+    InterruptedAccountQueryError,
+)
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 
 
 class _Client:
@@ -42,6 +50,55 @@ class FailoverKiwoomRestClientTests(unittest.TestCase):
             client.request("ka00198", "/rank", {})
 
         self.assertEqual(0, fallback.calls)
+
+    def test_order_api_never_reaches_primary_or_fallback(self) -> None:
+        primary = _Client(result=({}, False, ""))
+        fallback = _Client(result=({}, False, ""))
+        client = FailoverKiwoomRestClient(primary, fallback)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "order APIs"):
+            client.request("kt10000", "/api/dostk/ordr", {})
+        self.assertEqual(0, primary.calls)
+        self.assertEqual(0, fallback.calls)
+
+    def test_account_batch_restarts_direct_and_rejects_different_account(self) -> None:
+        scope_a = AccountScope("kiwoom", AccountEnvironment.REAL, "11111111-1111-1111-1111-111111111111")
+        scope_b = AccountScope("kiwoom", AccountEnvironment.REAL, "22222222-2222-2222-2222-222222222222")
+        nas_context = AccountQueryContext(scope_a, "nas-real-default", 1, "nas")
+        direct_context = AccountQueryContext(scope_b, "local-real-default", 1, "direct")
+
+        class Primary(_Client):
+            def query_account_pages(self, *args, **kwargs):
+                raise InterruptedAccountQueryError("down after first page", nas_context)
+        class Direct(_Client):
+            def query_account_pages(self, *args, **kwargs):
+                self.calls += 1
+                return AccountQueryBatch(({"page": 1},), direct_context, 1, True)
+
+        direct = Direct()
+        client = FailoverKiwoomRestClient(Primary(), direct)
+        with self.assertRaises(AccountScopeMismatchError):
+            client.query_account_pages("kt00007", "/api/dostk/acnt", {})
+        self.assertEqual(1, direct.calls)
+
+    def test_account_batch_restarts_at_first_page_for_same_account(self) -> None:
+        scope = AccountScope("kiwoom", AccountEnvironment.REAL, "11111111-1111-1111-1111-111111111111")
+        nas_context = AccountQueryContext(scope, "nas-real-default", 1, "nas")
+        direct_context = AccountQueryContext(scope, "local-real-default", 4, "direct")
+
+        class Primary(_Client):
+            def query_account_pages(self, *args, **kwargs):
+                raise InterruptedAccountQueryError("down after first page", nas_context)
+        class Direct(_Client):
+            def query_account_pages(self, *args, **kwargs):
+                self.calls += 1
+                return AccountQueryBatch(({"fresh_page": 1},), direct_context, 1, True)
+
+        direct = Direct()
+        result = FailoverKiwoomRestClient(Primary(), direct).query_account_pages(
+            "kt00007", "/api/dostk/acnt", {},
+        )
+        self.assertEqual(({"fresh_page": 1},), result.pages)
+        self.assertEqual(1, direct.calls)
 
 
 if __name__ == "__main__":

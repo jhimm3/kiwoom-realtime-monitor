@@ -7,6 +7,23 @@ from kiwoom_monitor.application.historical_high_service import HistoricalHighCac
 
 
 class HistoricalHighServiceTests(unittest.TestCase):
+    def test_uses_stored_nas_target_without_chart_tr(self) -> None:
+        class Client:
+            def load_stored_historical_high(self, code):
+                return {
+                    "price": 90000, "first_year": 2020, "last_year": 2026,
+                    "occurred_on": "20260914", "evidence": [{
+                        "period": "day", "trade_date": "20260914", "high_price": 90000,
+                    }],
+                }
+            def request_with_continuation(self, *args, **kwargs):
+                raise AssertionError("chart TR must not run")
+
+        target = HistoricalHighService(Client()).load("005930")
+
+        self.assertEqual(90000, target.price)
+        self.assertEqual("20260914", target.evidence[0].trade_date)
+
     def test_reads_all_continuation_pages_using_adjusted_yearly_chart(self) -> None:
         class Client:
             def __init__(self) -> None:

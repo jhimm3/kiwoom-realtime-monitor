@@ -9,10 +9,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from collections.abc import Iterable, Mapping
+from enum import StrEnum
+
+from .market_session_schedule import KRX_AFTER_MARKET_EFFECTIVE_DATE
 
 
 MAX_FINALIZATION_ATTEMPTS = 2
 FINALIZATION_RETRY_DELAY = timedelta(minutes=5)
+
+
+class FinalizationScope(StrEnum):
+    REGULAR = "regular"
+    FULL_DAY = "full_day"
 
 
 def previous_business_day(day: date) -> date:
@@ -50,8 +58,10 @@ def finalization_candidates(
     nxt_enabled: Mapping[str, bool],
     attempts: Mapping[tuple[date, str], int],
     retry_after: Mapping[tuple[date, str], datetime],
+    *,
+    session_scope: FinalizationScope = FinalizationScope.FULL_DAY,
 ) -> tuple[str, ...]:
-    """NXT 종목 20:05, 그 외 종목 15:35 이후의 미확정 종목을 고른다."""
+    """요청 범위의 종료 뒤 미확정 종목을 고른다."""
     if target is None:
         return ()
     premarket_repair = target < now.date()
@@ -61,17 +71,52 @@ def finalization_candidates(
         if code not in finalized_codes
         and (
             premarket_repair
-            or current_minutes >= (20 * 60 + 5 if nxt_enabled.get(code, True) else 15 * 60 + 35)
+            or current_minutes >= _finalization_ready_minute(
+                target, nxt_enabled.get(code, True), session_scope
+            )
         )
         and finalization_retry_allowed(target, code, now, attempts, retry_after)
     )
 
 
-def minute_bars_complete(minutes: Iterable[datetime], target: date, nxt_enabled: bool) -> bool:
-    """대상일의 마지막 완료 분봉(KRX 15:29, NXT 19:59)이 들어왔는지 확인한다."""
-    required = time(19, 59) if nxt_enabled else time(15, 29)
+def minute_bars_complete(
+    minutes: Iterable[datetime],
+    target: date,
+    nxt_enabled: bool,
+    *,
+    session_scope: FinalizationScope = FinalizationScope.FULL_DAY,
+    query_completed: bool = True,
+) -> bool:
+    """성공한 조회가 대상일 자료를 반환했는지 확인한다.
+
+    시행일부터는 마지막 분 체결 유무가 전체일 조회 완료 근거가 아니다.
+    호출자의 조회 완료와 대상일 실제 봉 존재를 함께 사용한다. 시행 전
+    자료에는 기존 마지막 봉 기준을 그대로 적용한다.
+    """
+    if not query_completed:
+        return False
     received = [minute.time() for minute in minutes if minute.date() == target]
-    return bool(received) and max(received) >= required
+    if not received:
+        return False
+    if target >= KRX_AFTER_MARKET_EFFECTIVE_DATE:
+        return True
+    required = (
+        time(15, 29)
+        if session_scope is FinalizationScope.REGULAR
+        else time(19, 59) if nxt_enabled else time(15, 29)
+    )
+    return max(received) >= required
+
+
+def _finalization_ready_minute(
+    target: date, nxt_enabled: bool, session_scope: FinalizationScope
+) -> int:
+    if session_scope is FinalizationScope.REGULAR:
+        return 15 * 60 + 35
+    if target >= KRX_AFTER_MARKET_EFFECTIVE_DATE:
+        return 20 * 60 + 5
+    # 시행 전 전체일은 기존 NXT 여부별 확정 시각을 보존한다.
+    return 20 * 60 + 5 if nxt_enabled else 15 * 60 + 35
 
 
 @dataclass(frozen=True)

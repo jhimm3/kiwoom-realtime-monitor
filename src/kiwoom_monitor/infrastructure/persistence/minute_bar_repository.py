@@ -23,6 +23,10 @@ from kiwoom_monitor.infrastructure.persistence.market_data_metadata_schema impor
 )
 
 
+TOP20_REGULAR_START = "09:00"
+TOP20_REGULAR_END_EXCLUSIVE = "15:30"
+
+
 class MinuteBarRepository:
     """앱을 다시 열어도 당일 분봉 이력을 이어 쓸 수 있게 한다."""
 
@@ -286,9 +290,10 @@ class MinuteBarRepository:
                 "SUM(CASE WHEN kospi_trade_value_eok+kosdaq_trade_value_eok+unknown_trade_value_eok<=0 "
                 "THEN trade_value_eok ELSE unknown_trade_value_eok END) FROM top20_trade_value_index "
                 "WHERE capture_state='realtime_complete' AND strftime('%w',trade_date) NOT IN ('0','6') "
-                "AND substr(minute,12,5)>='09:00' AND substr(minute,12,5)<='15:29' "
+                "AND substr(minute,12,5)>=? AND substr(minute,12,5)<? "
                 "GROUP BY trade_date "
-                "ORDER BY trade_date DESC LIMIT ?", (max(1, int(limit)),),
+                "ORDER BY trade_date DESC LIMIT ?",
+                (TOP20_REGULAR_START, TOP20_REGULAR_END_EXCLUSIVE, max(1, int(limit))),
             ).fetchall()
         finally:
             connection.close()
@@ -317,15 +322,15 @@ class MinuteBarRepository:
             top20 = connection.execute(
                 "SELECT trade_date,SUM(trade_value_eok) FROM top20_trade_value_index "
                 "WHERE capture_state='realtime_complete' AND trade_date>=? "
-                "AND substr(minute,12,5)>='09:00' AND substr(minute,12,5)<='15:29' "
+                "AND substr(minute,12,5)>=? AND substr(minute,12,5)<? "
                 "GROUP BY trade_date ORDER BY trade_date",
-                (cutoff,),
+                (cutoff, TOP20_REGULAR_START, TOP20_REGULAR_END_EXCLUSIVE),
             ).fetchall()
             market = connection.execute(
                 "SELECT trade_date,market,MAX(trade_value_eok) FROM market_index_minute_bars "
-                "WHERE trade_date>=? AND substr(minute,12,5)>='09:00' AND substr(minute,12,5)<='15:29' "
+                "WHERE trade_date>=? AND substr(minute,12,5)>=? AND substr(minute,12,5)<? "
                 "GROUP BY trade_date,market",
-                (cutoff,),
+                (cutoff, TOP20_REGULAR_START, TOP20_REGULAR_END_EXCLUSIVE),
             ).fetchall()
         finally:
             connection.close()

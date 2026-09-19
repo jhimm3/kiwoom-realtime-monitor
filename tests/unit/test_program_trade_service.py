@@ -20,6 +20,22 @@ class _Client:
 
 
 class ProgramTradeTests(unittest.TestCase):
+    def test_uses_stored_nas_program_flow_without_requesting_kiwoom(self):
+        class StoredClient(_Client):
+            def load_stored_program_flow(self, code, day):
+                return {"stk_tm_prm_trde_trnsn": [{
+                    "source": "kiwoom_realtime_0w", "trade_time": "101530",
+                    "market": "SOR", "net_buy_amount_million_won": 1234,
+                    "net_buy_quantity": 5678,
+                }]}
+
+        client = StoredClient()
+        rows = ProgramTradeService(client).load_day("005930", date(2026, 9, 14))
+
+        self.assertEqual([], client.calls)
+        self.assertEqual("kiwoom_realtime_0w", rows[0]["source"])
+        self.assertEqual(1234, rows[0]["net_buy_amount_million_won"])
+
     def test_reads_realtime_0w(self):
         ticks = parse_program_trade_ticks({"trnm": "REAL", "data": [{
             "type": "0w", "item": "005930_AL", "values": {

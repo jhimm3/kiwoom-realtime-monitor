@@ -31,10 +31,10 @@ binaries += [(str(system32 / name), '.') for name in vc_runtime_names if (system
 
 a = Analysis(
     ['src/kiwoom_monitor/__main__.py'],
-    pathex=['src'],
+    pathex=['src', '.'],
     binaries=binaries,
     datas=datas,
-    hiddenimports=['paddleocr', 'paddlex', 'googleapiclient.discovery', 'google_auth_oauthlib.flow', *server_hiddenimports],
+    hiddenimports=['paddleocr', 'paddlex', 'googleapiclient.discovery', 'google_auth_oauthlib.flow', 'scripts.run_research', *server_hiddenimports],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

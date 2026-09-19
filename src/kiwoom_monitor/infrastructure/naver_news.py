@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html import unescape
 from pathlib import Path
+from typing import Callable
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -66,6 +67,14 @@ class StockNewsItem:
     original_link: str
     published_at: datetime | None
     assessment: NewsAssessment
+
+
+@dataclass(frozen=True)
+class NaverNewsPage:
+    items: tuple[StockNewsItem, ...]
+    total: int
+    start: int
+    display: int
 
 
 class LocalNaverNewsConfig:
@@ -212,7 +221,7 @@ def is_excluded_news(item: StockNewsItem, settings: NewsFilterSettings) -> bool:
         return True
     if not settings.provider_filter_enabled:
         return False
-    provider_text = f"{news_provider(item)} {_provider_domain(item)}".casefold()
+    provider_text = f"{news_provider(item)} {news_provider_domain(item)}".casefold()
     return any(provider.casefold() in provider_text for provider in settings.excluded_providers if provider)
 
 
@@ -228,21 +237,44 @@ _PROVIDER_NAMES = {
     "asiae.co.kr": "아시아경제",
     "etnews.com": "전자신문",
     "thebell.co.kr": "더벨",
+    "hansbiz.co.kr": "한스경제",
+    "news.einfomax.co.kr": "연합인포맥스",
+    "businesspost.co.kr": "비즈니스포스트",
+    "newdaily.co.kr": "뉴데일리",
+    "bigtanews.co.kr": "빅터뉴스",
+    "stoo.com": "스포츠투데이",
+    "newsprime.co.kr": "프라임경제",
+    "skyedaily.com": "스카이데일리",
+    "dnews.co.kr": "대한경제",
+    "peoplewatch.co.kr": "피플워치",
     "dart.fss.or.kr": "DART 공시",
 }
 
 
-def _provider_domain(item: StockNewsItem) -> str:
-    domain = urlparse(item.original_link or item.link).hostname or ""
+def news_provider_domain(item: StockNewsItem) -> str:
+    return provider_domain(item.original_link, item.link)
+
+
+def provider_domain(original_link: str, link: str = "") -> str:
+    domain = urlparse(original_link or link).hostname or ""
     return domain.casefold().removeprefix("www.")
 
 
-def news_provider(item: StockNewsItem) -> str:
-    domain = _provider_domain(item)
+def provider_name(domain: str) -> str:
+    normalized = domain.casefold().removeprefix("www.")
     for suffix, name in _PROVIDER_NAMES.items():
-        if domain == suffix or domain.endswith(f".{suffix}"):
+        if normalized == suffix or normalized.endswith(f".{suffix}"):
             return name
-    return domain or "제공처 미확인"
+    return normalized or "제공처 미확인"
+
+
+def news_provider(item: StockNewsItem) -> str:
+    return provider_name(news_provider_domain(item))
+
+
+def is_excluded_provider(domain: str, name: str, excluded: tuple[str, ...]) -> bool:
+    provider_text = f"{name} {domain}".casefold()
+    return any(value.strip().casefold() in provider_text for value in excluded if value.strip())
 
 
 class NaverNewsClient:
@@ -255,7 +287,7 @@ class NaverNewsClient:
 
     def search(
         self, stock_name: str, *, since: datetime | None = None, page_size: int = 100,
-        max_results: int = 1000,
+        max_results: int = 1000, request_claim: Callable[[], bool] | None = None,
     ) -> tuple[StockNewsItem, ...]:
         if not self._credentials.client_id or not self._credentials.client_secret:
             raise ValueError("네이버 뉴스 API Client ID와 Client Secret을 먼저 입력하세요.")
@@ -268,43 +300,63 @@ class NaverNewsClient:
         reached_cutoff = False
         while start <= max_results and not reached_cutoff:
             display = min(page_size, max_results - start + 1)
-            query = urlencode({"query": stock_name, "display": display, "start": start, "sort": "date"})
-            payload = self._fetch_with_legacy_fallback(query)
-            raw_items = payload.get("items", ())
-            if not isinstance(raw_items, list):
-                raise ValueError("네이버 뉴스 응답 형식이 올바르지 않습니다.")
-            for raw in raw_items:
-                if not isinstance(raw, dict):
-                    continue
-                published_at = _parse_published_at(str(raw.get("pubDate", "")))
-                # 날짜를 확인할 수 없는 결과는 저장하거나 AI 분석하지 않는다.
-                if published_at is None:
-                    continue
-                if cutoff is not None and published_at.astimezone(UTC) <= cutoff:
+            if request_claim is None:
+                page = self.search_page(stock_name, start=start, display=display)
+            else:
+                page = self.search_page(
+                    stock_name, start=start, display=display, request_claim=request_claim,
+                )
+            for item in page.items:
+                if cutoff is not None and item.published_at is not None and item.published_at.astimezone(UTC) <= cutoff:
                     reached_cutoff = True
                     break
-                title = _clean_html(str(raw.get("title", "")))
-                description = _clean_html(str(raw.get("description", "")))
-                link = str(raw.get("link", "")).strip()
-                original_link = str(raw.get("originallink", "")).strip()
-                identity = original_link or link or title
+                identity = item.original_link or item.link or item.title
                 if not identity or identity in seen:
                     continue
                 seen.add(identity)
-                results.append(StockNewsItem(
-                    title=title,
-                    description=description,
-                    link=link,
-                    original_link=original_link,
-                    published_at=published_at,
-                    assessment=assess_stock_news(stock_name, title, description),
-                ))
-            if len(raw_items) < display:
+                results.append(item)
+            if page.display < display:
                 break
             start += display
         return tuple(results)
 
-    def _fetch_with_legacy_fallback(self, query: str) -> dict[str, object]:
+    def search_page(
+        self, query_text: str, *, start: int = 1, display: int = 100,
+        request_claim: Callable[[], bool] | None = None,
+    ) -> NaverNewsPage:
+        if not self._credentials.client_id or not self._credentials.client_secret:
+            raise ValueError("네이버 뉴스 API Client ID와 Client Secret을 먼저 입력하세요.")
+        start, display = max(1, min(1000, int(start))), max(1, min(100, int(display)))
+        query = urlencode({"query": query_text, "display": display, "start": start, "sort": "date"})
+        payload = (
+            self._fetch_with_legacy_fallback(query)
+            if request_claim is None
+            else self._fetch_with_legacy_fallback(query, request_claim=request_claim)
+        )
+        raw_items = payload.get("items", ())
+        if not isinstance(raw_items, list):
+            raise ValueError("네이버 뉴스 응답 형식이 올바르지 않습니다.")
+        items: list[StockNewsItem] = []
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            published_at = _parse_published_at(str(raw.get("pubDate", "")))
+            if published_at is None:
+                continue
+            title = _clean_html(str(raw.get("title", "")))
+            description = _clean_html(str(raw.get("description", "")))
+            items.append(StockNewsItem(
+                title, description, str(raw.get("link", "")).strip(),
+                str(raw.get("originallink", "")).strip(), published_at,
+                assess_stock_news(query_text, title, description),
+            ))
+        return NaverNewsPage(tuple(items), int(payload.get("total") or 0),
+                             int(payload.get("start") or start), len(raw_items))
+
+    def _fetch_with_legacy_fallback(
+        self, query: str, *, request_claim: Callable[[], bool] | None = None,
+    ) -> dict[str, object]:
+        self._claim_request(request_claim)
         try:
             return self._fetch(
                 self.HUB_ENDPOINT, query, "X-NCP-APIGW-API-KEY-ID", "X-NCP-APIGW-API-KEY",
@@ -313,9 +365,15 @@ class NaverNewsClient:
             if error.code not in {401, 403}:
                 raise
             # 2026-07 이전에 발급한 개발자센터 키도 유예기간 동안 지원한다.
+            self._claim_request(request_claim)
             return self._fetch(
                 self.LEGACY_ENDPOINT, query, "X-Naver-Client-Id", "X-Naver-Client-Secret",
             )
+
+    @staticmethod
+    def _claim_request(request_claim: Callable[[], bool] | None) -> None:
+        if request_claim is not None and not request_claim():
+            raise RuntimeError("네이버 뉴스 일일 요청 예산을 모두 사용했습니다.")
 
     def _fetch(self, endpoint: str, query: str, id_header: str, secret_header: str) -> dict[str, object]:
         request = Request(

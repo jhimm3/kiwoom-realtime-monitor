@@ -291,6 +291,9 @@ class MinuteBarRepositoryTests(unittest.TestCase):
             while minute.weekday() >= 5:
                 minute -= timedelta(days=1)
             repository.upsert_top20_trade_value_index(minute, 30.0, ("005930",), "realtime_complete")
+            repository.upsert_top20_trade_value_index(
+                minute.replace(hour=16), 900.0, ("005930",), "realtime_complete"
+            )
             repository.upsert_market_index_minutes({
                 ("kospi", minute): (2600.0, 2600.0, 2600.0, 2600.0, 1_000.0),
                 ("kosdaq", minute): (800.0, 800.0, 800.0, 800.0, 500.0),
@@ -298,8 +301,8 @@ class MinuteBarRepositoryTests(unittest.TestCase):
 
             hourly, comparisons = repository.load_top20_statistics(7)
 
-            self.assertEqual("10:00", hourly[0][0])
-            self.assertEqual(30.0, hourly[0][1])
+            self.assertEqual(("16:00", 900.0), hourly[0][:2])
+            self.assertIn(("10:00", 30.0, 1), hourly)
             self.assertEqual((30.0, 1_000.0, 500.0), comparisons[-1][1:])
 
     def test_top20_statistics_and_history_hide_rows_outside_collection_hours(self) -> None:

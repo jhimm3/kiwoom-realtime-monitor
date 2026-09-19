@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 from kiwoom_monitor.domain.snapshot_provenance import mark_news_backfilled
+from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
 from kiwoom_monitor.domain.trade_snapshot_observations import entry_context_observations
 from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import (
     upsert_market_data_metadata,
@@ -37,15 +39,47 @@ class TradeEntrySnapshot:
     orderbook: dict[str, object] | None = None
     market_state: dict[str, object] | None = None
     capture_state: str = "realtime_partial"
+    origin_scope: AccountScope = LEGACY_ACCOUNT_SCOPE
+    canonical_scope: AccountScope | None = None
+
+    def __post_init__(self) -> None:
+        if self.canonical_scope is not None and (
+            self.canonical_scope.broker != self.origin_scope.broker
+            or self.canonical_scope.environment != self.origin_scope.environment
+        ):
+            raise ValueError("canonical snapshot scope cannot cross broker or environment")
+
+    @property
+    def effective_scope(self) -> AccountScope:
+        return self.canonical_scope or self.origin_scope
+
+
+def scoped_snapshot_execution_key(source_key: str, scope: AccountScope) -> str:
+    """legacy 키는 보존하고 신규 계좌 스냅샷에는 scope를 포함한 키를 만든다."""
+    if not source_key:
+        raise ValueError("snapshot source key is required")
+    if scope == LEGACY_ACCOUNT_SCOPE:
+        return source_key
+    payload = json.dumps(
+        {"version": 2, "origin_scope": scope.to_dict(), "source_key": source_key},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return "snapshot:v2:" + hashlib.sha256(payload).hexdigest()
 
 class JournalSnapshotRepositoryMixin:
     _path: Path
 
-    def save_entry_snapshot(self, value: TradeEntrySnapshot, now: datetime | None = None) -> None:
+    def save_entry_snapshot(
+        self, value: TradeEntrySnapshot, now: datetime | None = None, *,
+        account_scope: AccountScope | None = None,
+    ) -> None:
         """실시간 체결 시점 자료를 중복 체결번호 기준으로 안전하게 저장한다."""
         captured_at = (now or datetime.now()).isoformat(timespec="seconds")
+        _validate_snapshot_scope(account_scope, value)
         payload = (
-            value.execution_key, value.order_no, value.stock_code, value.stock_name, value.side,
+            value.execution_key, value.origin_scope.broker, value.origin_scope.environment.value,
+            value.origin_scope.account_ref, value.effective_scope.account_ref,
+            value.order_no, value.stock_code, value.stock_name, value.side,
             value.executed_at.isoformat(timespec="seconds"), value.price, value.quantity, value.market,
             value.rank, value.trade_value_1m_eok, value.trade_value_5m_eok,
             json.dumps(value.themes, ensure_ascii=False),
@@ -57,7 +91,12 @@ class JournalSnapshotRepositoryMixin:
         with closing(sqlite3.connect(self._path, timeout=0.2)) as connection:
             with connection:
                 connection.execute(
-                    "INSERT INTO trade_entry_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "INSERT INTO trade_entry_snapshots("
+                    "execution_key,origin_broker,origin_environment,origin_account_ref,canonical_account_ref,"
+                    "order_no,stock_code,stock_name,side,executed_at,price,quantity,market,rank,"
+                    "trade_value_1m_eok,trade_value_5m_eok,themes_json,theme_ranks_json,high_distance_percent,"
+                    "news_json,investor_flow_json,orderbook_json,market_state_json,capture_state,captured_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(execution_key) DO UPDATE SET "
                     "rank=COALESCE(excluded.rank,trade_entry_snapshots.rank), trade_value_1m_eok=COALESCE(excluded.trade_value_1m_eok,trade_entry_snapshots.trade_value_1m_eok), "
                     "trade_value_5m_eok=COALESCE(excluded.trade_value_5m_eok,trade_entry_snapshots.trade_value_5m_eok), themes_json=excluded.themes_json, "
@@ -76,12 +115,16 @@ class JournalSnapshotRepositoryMixin:
                         connection, stored, datetime.fromisoformat(captured_at)
                     )
 
-    def load_entry_snapshots(self, code: str, start: datetime, end: datetime) -> tuple[TradeEntrySnapshot, ...]:
+    def load_entry_snapshots(
+        self, code: str, start: datetime, end: datetime,
+        account_scope: AccountScope | None = None,
+    ) -> tuple[TradeEntrySnapshot, ...]:
+        scope_sql, scope_values = _snapshot_scope_filter(account_scope)
         with closing(sqlite3.connect(self._path)) as connection:
             rows = connection.execute(
                 f"SELECT {_SNAPSHOT_COLUMNS} FROM trade_entry_snapshots "
-                "WHERE stock_code=? AND executed_at>=? AND executed_at<? ORDER BY executed_at",
-                (code, start.isoformat(timespec="seconds"), end.isoformat(timespec="seconds")),
+                "WHERE stock_code=? AND executed_at>=? AND executed_at<?" + scope_sql + " ORDER BY executed_at",
+                (code, start.isoformat(timespec="seconds"), end.isoformat(timespec="seconds"), *scope_values),
             ).fetchall()
         return tuple(_snapshot_from_row(row) for row in rows)
 
@@ -216,7 +259,8 @@ class JournalSnapshotRepositoryMixin:
 _SNAPSHOT_COLUMNS = (
     "execution_key,order_no,stock_code,stock_name,side,executed_at,price,quantity,market,rank,"
     "trade_value_1m_eok,trade_value_5m_eok,themes_json,theme_ranks_json,high_distance_percent,"
-    "news_json,investor_flow_json,orderbook_json,market_state_json,capture_state"
+    "news_json,investor_flow_json,orderbook_json,market_state_json,capture_state,"
+    "origin_broker,origin_environment,origin_account_ref,canonical_account_ref"
 )
 
 
@@ -231,12 +275,41 @@ def _snapshot_for_key(
 
 
 def _snapshot_from_row(row: tuple[object, ...]) -> TradeEntrySnapshot:
+    from kiwoom_monitor.domain.order_contract import AccountEnvironment
+    origin = AccountScope(str(row[20]), AccountEnvironment(str(row[21])), str(row[22]))
+    canonical_ref = str(row[23])
+    canonical = None if canonical_ref == origin.account_ref else AccountScope(
+        origin.broker, origin.environment, canonical_ref,
+    )
     return TradeEntrySnapshot(
         str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]),
         datetime.fromisoformat(str(row[5])), int(row[6]), int(row[7]), str(row[8]), row[9],
         row[10], row[11], tuple(json.loads(str(row[12]))), dict(json.loads(str(row[13]))), row[14],
         tuple(json.loads(str(row[15]))), dict(json.loads(str(row[16]))),
-        dict(json.loads(str(row[17]))), dict(json.loads(str(row[18]))), str(row[19]),
+        dict(json.loads(str(row[17]))), dict(json.loads(str(row[18]))), str(row[19]), origin, canonical,
+    )
+
+
+def _validate_snapshot_scope(
+    expected: AccountScope | None, value: TradeEntrySnapshot,
+) -> None:
+    actual = value.origin_scope
+    if expected is None:
+        if actual != LEGACY_ACCOUNT_SCOPE:
+            raise ValueError("scoped snapshot writes require an explicit account_scope")
+        return
+    if expected == LEGACY_ACCOUNT_SCOPE or expected != actual:
+        raise ValueError("snapshot write scope does not match its origin scope")
+    if not value.execution_key.startswith("snapshot:v2:"):
+        raise ValueError("scoped snapshot writes require a snapshot:v2 execution key")
+
+
+def _snapshot_scope_filter(scope: AccountScope | None) -> tuple[str, tuple[str, ...]]:
+    if scope is None:
+        return "", ()
+    return (
+        " AND canonical_account_ref=? AND origin_broker=? AND origin_environment=?",
+        (scope.account_ref, scope.broker, scope.environment.value),
     )
 
 

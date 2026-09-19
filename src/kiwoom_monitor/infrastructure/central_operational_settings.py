@@ -11,21 +11,23 @@ from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 
 
 class CentralOperationalSettingsClient:
-    """NAS 뉴스·AI 운영 설정의 단일 HTTP 경계."""
+    """NAS 뉴스·AI·Shadow 운영 설정의 단일 HTTP 경계."""
 
     def __init__(self, source: DataSourceSettings) -> None:
         self._source = source
+        self._revision: int | None = None
 
     def load(self) -> dict[str, object]:
         return self._request("GET")
 
     def update(self, changes: dict[str, object]) -> dict[str, object]:
-        values = self.load()
-        values.update(changes)
-        return self._request("PUT", values)
+        return self.save(changes)
 
     def save(self, values: dict[str, object]) -> dict[str, object]:
-        return self._request("PUT", values)
+        body = dict(values)
+        if self._revision is not None:
+            body.setdefault("expected_revision", self._revision)
+        return self._request("PUT", body)
 
     def _request(self, method: str, body: dict[str, object] | None = None) -> dict[str, object]:
         if not self._source.server_url or not self._source.access_token:
@@ -42,10 +44,16 @@ class CentralOperationalSettingsClient:
         try:
             with urlopen(request, timeout=10, context=system_ssl_context()) as response:
                 result = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, OSError) as error:
+        except HTTPError as error:
+            if error.code == 409:
+                raise RuntimeError("NAS 설정이 다른 화면에서 변경되었습니다. 다시 불러온 뒤 저장하세요.") from error
+            raise RuntimeError(f"NAS 운영 설정을 처리하지 못했습니다: HTTP {error.code}") from error
+        except (URLError, TimeoutError, OSError) as error:
             raise RuntimeError(f"NAS 운영 설정을 처리하지 못했습니다: {error}") from error
         if not isinstance(result, dict):
             raise RuntimeError("NAS 운영 설정 응답 형식이 올바르지 않습니다.")
+        revision = result.get("revision")
+        self._revision = revision if isinstance(revision, int) and not isinstance(revision, bool) else None
         return result
 
 

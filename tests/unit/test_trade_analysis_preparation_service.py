@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from kiwoom_monitor.application.strategy_pack import default_strategy_pack
+from kiwoom_monitor.application.journal_enrichment import journal_research_link
 from kiwoom_monitor.application.trade_analysis_preparation_service import TradeAnalysisPreparationService
 from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.application.trade_journal_summary import group_trade_episodes
@@ -21,6 +22,8 @@ class FakeRepository:
         self.stored_setup: tuple[TradeSetupClassification, str] | None = None
         self.overrides: dict[int, str] = {}
         self.daily_rows = (("2026-09-09T00:00", 900, 1100, 800, 1000, 100, 1.0, "daily_confirmed"),)
+        self.analysis_revisions = []
+        self.research_links = ()
 
     def import_monitor_daily_bars(self, path: Path, code: str, day: object, limit: int = 250) -> int:
         self.imported.append((path, code, day, limit))
@@ -52,6 +55,14 @@ class FakeRepository:
         if legacy_override is not None:
             self.saved_overrides.append((group_id, *legacy_override))
 
+    def save_journal_analysis_revision(self, revision):
+        self.analysis_revisions.append(revision)
+        return revision
+
+    def load_journal_research_links(self, execution_refs):
+        self.execution_refs = execution_refs
+        return self.research_links
+
 
 def episode():
     at = datetime(2026, 9, 9, 9, 10)
@@ -81,6 +92,26 @@ class TradeAnalysisPreparationServiceTests(unittest.TestCase):
         self.assertEqual("", repository.saved_setups[0][2])
         self.assertEqual(1, len(result.cycles))
         self.assertEqual(("000001", episode().started_at, episode().ended_at), snapshots[0])
+        self.assertEqual(1, len(repository.analysis_revisions))
+        self.assertEqual(result.analysis_revision_id, repository.analysis_revisions[0].revision_id)
+        self.assertEqual("trade-analysis/v2", repository.analysis_revisions[0].analysis_version)
+
+    def test_loads_explicit_research_links_without_guessing_a_decision(self) -> None:
+        repository = FakeRepository()
+        repository.research_links = (journal_research_link(
+            "1|000001|2026-09-09T09:10:00|매수", run_id="run-1", snapshot_id="snapshot-1",
+            now=datetime(2026, 9, 9, 10),
+        ),)
+        service = TradeAnalysisPreparationService(
+            repository, Path("monitor.sqlite3"), lambda *_args: (), lambda *_args: (),
+        )
+
+        result = service.prepare(
+            episode(), (), active_pack=default_strategy_pack(), strategy_packs=(), result_mode="together",
+        )
+
+        self.assertEqual(repository.research_links, result.research_links)
+        self.assertIn(repository.research_links[0].execution_ref, repository.execution_refs)
 
     def test_migrates_legacy_single_manual_type_to_cycle_override(self) -> None:
         repository = FakeRepository()

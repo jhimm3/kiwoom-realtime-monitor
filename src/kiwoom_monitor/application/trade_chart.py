@@ -15,11 +15,22 @@ class DailyTradeChartService:
         self._client = client
 
     def load(self, code: str, base_day: datetime) -> tuple[tuple[object, ...], ...]:
-        response = self._client.request(
-            "ka10081", "/api/dostk/chart",
-            {"stk_cd": code, "base_dt": base_day.strftime("%Y%m%d"), "upd_stkpc_tp": "1"},
-        )
-        records = response.get("stk_dt_pole_chart_qry", response.get("stk_ddwkmm", []))
+        stored_loader = getattr(self._client, "load_stored_daily_bars", None)
+        stored = stored_loader(code, "KRX", 250) if callable(stored_loader) else None
+        if stored is not None:
+            records = [{
+                "date": str(value.get("trading_date", "")).replace("-", ""),
+                "open_pric": value.get("open"), "high_pric": value.get("high"),
+                "low_pric": value.get("low"), "cur_prc": value.get("close"),
+                "trde_qty": value.get("volume"),
+                "trde_prica": value.get("trade_value_million_won"),
+            } for value in stored]
+        else:
+            response = self._client.request(
+                "ka10081", "/api/dostk/chart",
+                {"stk_cd": code, "base_dt": base_day.strftime("%Y%m%d"), "upd_stkpc_tp": "1"},
+            )
+            records = response.get("stk_dt_pole_chart_qry", response.get("stk_ddwkmm", []))
         if not isinstance(records, list):
             raise ValueError("일봉 목록 형식이 올바르지 않습니다.")
         rows: list[tuple[object, ...]] = []

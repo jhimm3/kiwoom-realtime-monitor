@@ -84,6 +84,7 @@ class RankingExecutionCoordinator:
         *,
         expected_count: int,
         has_blocking_modal: bool,
+        allow_partial_retry: bool = True,
     ) -> RankingResponseOutcome:
         partial = expected_count > 0 and len(stocks) < expected_count
         decision = decide_ranking_response(
@@ -91,6 +92,7 @@ class RankingExecutionCoordinator:
             expected_count,
             self._partial_retry_count,
             has_blocking_modal if not partial else False,
+            allow_partial_retry=allow_partial_retry,
         )
         self._partial_retry_count = decision.retry_count
         if decision.action == RankingResponseAction.DEFER_WHILE_MODAL:

@@ -22,6 +22,18 @@ class RealtimeHubTests(unittest.TestCase):
         with self.assertRaises(asyncio.QueueEmpty):
             second.queue.get_nowait()
 
+    def test_program_codes_follow_explicit_priority_before_general_requests(self) -> None:
+        hub = RealtimeHub()
+        autonomous, desktop = hub.connect(), hub.connect()
+        hub.update_subscription(
+            autonomous, ["000003", "000002"], [],
+            program_codes=["000003", "000002"], priority_codes=["000003", "000002"],
+        )
+        hub.update_subscription(desktop, ["000001", "000003"], [])
+
+        self.assertEqual(("000003", "000002"), hub.requested_priority_codes())
+        self.assertEqual(("000003", "000002", "000001"), hub.requested_program_codes())
+
     def test_websocket_requires_token_and_accepts_subscription(self) -> None:
         settings = CentralServerSettings(
             database_url="sqlite:///:memory:", access_token="server-token",

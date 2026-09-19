@@ -71,7 +71,9 @@ class EntrySnapshotWriter(QThread):
                 continue
             for attempt in range(5):
                 try:
-                    repository.save_entry_snapshot(snapshot)
+                    repository.save_entry_snapshot(
+                        snapshot, account_scope=snapshot.origin_scope,
+                    )
                     break
                 except Exception as error:
                     if attempt == 4:
@@ -87,7 +89,9 @@ class EntrySnapshotWriter(QThread):
                 state = "realtime_enriched" if investor.get("available") else "realtime_partial"
                 enriched = replace(snapshot, news=news, investor_flow=investor, capture_state=state)
                 try:
-                    repository.save_entry_snapshot(enriched)
+                    repository.save_entry_snapshot(
+                        enriched, account_scope=enriched.origin_scope,
+                    )
                 except Exception as error:
                     self.failed.emit(f"진입 스냅샷 보충 저장 실패: {error}")
 

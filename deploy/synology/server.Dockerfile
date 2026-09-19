@@ -4,16 +4,20 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY scripts/check_postgres_integration.py ./scripts/check_postgres_integration.py
+COPY scripts/register_account_identity.py ./scripts/register_account_identity.py
 # 잘못된 구버전 소스를 재사용하면 컨테이너 실행 뒤 404가 나는 대신
 # 빌드 단계에서 즉시 발견한다.
 RUN grep -q '/api/v1/settings/operations' /app/src/kiwoom_monitor/central_server/app.py \
     && grep -q '/api/v1/diagnostics/resources' /app/src/kiwoom_monitor/central_server/app.py \
     && grep -q 'def update_operational_settings' /app/src/kiwoom_monitor/central_server/news_service.py \
-    && grep -q '2026.09.12-shared-backup-contract-v1' /app/src/kiwoom_monitor/central_server/app.py \
+    && grep -q '2026.09.16-ranking-metadata-freshness-v1' /app/src/kiwoom_monitor/central_server/app.py \
+    && test -f /app/src/kiwoom_monitor/central_server/credential_store.py \
+    && test -f /app/src/kiwoom_monitor/central_server/credential_runtime.py \
     && test -f /app/src/kiwoom_monitor/central_server/schema_migrations.py \
     && test -f /app/src/kiwoom_monitor/central_server/persistent_outbox.py \
     && test -f /app/src/kiwoom_monitor/infrastructure/krx/stock_catalog.py \
     && test -f /app/scripts/check_postgres_integration.py \
+    && test -f /app/scripts/register_account_identity.py \
     && grep -q '저장된 {market} 일봉이 없습니다' /app/src/kiwoom_monitor/central_server/autonomous_top20.py \
     && test -f /app/src/kiwoom_monitor/central_server/futures_roll.py \
     && grep -q 'next_futures_contract' /app/src/kiwoom_monitor/central_server/futures_roll.py
@@ -33,6 +37,7 @@ RUN pip install --no-cache-dir --no-deps . \
         "fastapi>=0.116,<1" \
         "uvicorn[standard]>=0.35,<1" \
         "psycopg[binary]>=3.2,<4" \
+        "cryptography>=46,<47" \
         "websockets==16.1.1"
 
 # 실행 시에도 이미지에 복사한 최신 소스를 우선 사용한다.

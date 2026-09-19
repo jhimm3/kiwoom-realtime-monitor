@@ -14,6 +14,7 @@ class RealtimeWorkerController(QObject):
     order_executed = Signal(object)
     market_state_received = Signal(object)
     program_trade_received = Signal(object)
+    stock_reference_received = Signal(object)
     diagnostics_changed = Signal(object)
     status_changed = Signal(str)
     connection_failed = Signal(str)
@@ -64,6 +65,9 @@ class RealtimeWorkerController(QObject):
         worker.order_executed.connect(self.order_executed.emit)
         worker.market_state_received.connect(self.market_state_received.emit)
         worker.program_trade_received.connect(self.program_trade_received.emit)
+        reference_signal = getattr(worker, "stock_reference_received", None)
+        if reference_signal is not None:
+            reference_signal.connect(self.stock_reference_received.emit)
         worker.diagnostics_changed.connect(self.diagnostics_changed.emit)
         worker.status_changed.connect(self.status_changed.emit)
         worker.connection_failed.connect(self.connection_failed.emit)

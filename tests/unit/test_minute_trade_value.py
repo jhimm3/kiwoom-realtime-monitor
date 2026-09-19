@@ -12,6 +12,16 @@ def tick(price: int, volume: int, trade_time: str = "101500") -> TradeTick:
 
 
 class MinuteTradeValueTests(unittest.TestCase):
+
+    def test_source_mode_change_resets_cumulative_baseline(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 9, 14, 10, 0)
+        aggregator.ingest(TradeTick("005930", 100, None, 100_000, 10, None, "100001", market="KRX"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 100_100, 10, None, "100002", market="KRX"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 500_000, 10, None, "100003", market="SOR"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 500_200, 10, None, "100004", market="SOR"), now)
+
+        self.assertEqual(3.0, aggregator.bucket_trade_value_eok("005930", 1, now))
     def test_uses_cumulative_trade_value_delta_when_available(self) -> None:
         aggregator = MinuteTradeValueAggregator()
         now = datetime(2026, 8, 14, 10, 0, 1)
@@ -177,3 +187,22 @@ class MinuteTradeValueTests(unittest.TestCase):
         aggregator.ingest(TradeTick("005930", 100, None, 20_200, 10, None, "100002", market="NXT"), now)
 
         self.assertEqual(5.0, aggregator.bucket_trade_value_eok("005930", 1, now))
+
+    def test_sor_local_failover_and_recovery_reset_each_source_baseline(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 8, 14, 10, 0, 1)
+
+        aggregator.ingest(TradeTick("005930", 100, None, 100_000, 10, None, "100001", market="SOR"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 100_200, 10, None, "100002", market="SOR"), now)
+
+        # NAS SOR에서 로컬 KRX+NXT로 바뀐 첫 값은 각각 기준점만 잡는다.
+        aggregator.ingest(TradeTick("005930", 100, None, 50_000, 10, None, "100003", market="KRX"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 10_000, 10, None, "100003", market="NXT"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 50_300, 10, None, "100004", market="KRX"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 10_200, 10, None, "100004", market="NXT"), now)
+
+        # NAS 복구 뒤 첫 SOR 누적값도 장애 구간을 현재 분에 더하지 않는다.
+        aggregator.ingest(TradeTick("005930", 100, None, 100_500, 10, None, "100005", market="SOR"), now)
+        aggregator.ingest(TradeTick("005930", 100, None, 100_600, 10, None, "100006", market="SOR"), now)
+
+        self.assertEqual(8.0, aggregator.bucket_trade_value_eok("005930", 1, now))

@@ -7,8 +7,11 @@ from types import SimpleNamespace
 from PySide6.QtCore import QCoreApplication
 
 from kiwoom_monitor.presentation.journal_workers import (
-    BackfillWorker, ConfirmWorker, DailyChartWorker, HistoryWorker, MarketIndexBackfillWorker,
+    AnalysisEnrichmentWorker, BackfillWorker, ConfirmWorker, DailyChartWorker, HistoryWorker,
+    MarketIndexBackfillWorker,
 )
+from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountQueryContext
+from kiwoom_monitor.domain.order_contract import LEGACY_ACCOUNT_SCOPE
 
 
 class JournalWorkerTests(unittest.TestCase):
@@ -41,9 +44,14 @@ class JournalWorkerTests(unittest.TestCase):
     def test_history_worker_skips_weekend_and_keeps_fills_when_cost_fails(self) -> None:
         class History:
             def __init__(self): self.days = []
-            def load_day(self, day): self.days.append(day); return (str(day),)
+            def load_day_batch(self, day):
+                self.days.append(day)
+                return SimpleNamespace(
+                    fills=(str(day),),
+                    context=AccountQueryContext(LEGACY_ACCOUNT_SCOPE, "legacy-unverified", 0, "legacy"),
+                )
         class Costs:
-            def load_period(self, start, end): raise RuntimeError("cost unavailable")
+            def load_period_batch(self, start, end): raise RuntimeError("cost unavailable")
         history = History(); received = []
         worker = HistoryWorker(history, Costs(), date(2026, 9, 4), date(2026, 9, 7))
         worker.completed.connect(lambda *values: received.append(values)); worker.run()
@@ -55,9 +63,25 @@ class JournalWorkerTests(unittest.TestCase):
         class Service:
             def load_today(self, code, target):
                 return () if code == "EMPTY" else (SimpleNamespace(minute=datetime.combine(target.date(), datetime.min.time())),)
-        completed = []; failed = []; worker = BackfillWorker(Service(), (("OK", date(2026, 9, 8)), ("EMPTY", date(2026, 9, 8))))
+        completed = []; failed = []; started = []; worker = BackfillWorker(Service(), (("OK", date(2026, 9, 8)), ("EMPTY", date(2026, 9, 8))))
+        worker.item_started.connect(lambda *values: started.append(values))
         worker.item_failed.connect(lambda *values: failed.append(values)); worker.completed.connect(lambda *values: completed.append(values)); worker.run()
         self.assertEqual((1, 1), completed[0]); self.assertEqual("EMPTY", failed[0][0])
+        self.assertEqual((("OK", date(2026, 9, 8)), ("EMPTY", date(2026, 9, 8))), tuple(started))
+
+    def test_backfill_worker_reports_incomplete_central_coverage_as_failure(self) -> None:
+        class Service:
+            def load_today_with_completion(self, _code, target):
+                return ((SimpleNamespace(minute=datetime.combine(target.date(), datetime.min.time())),), False)
+
+        items = []; totals = []
+        worker = BackfillWorker(Service(), (("001210", date(2026, 9, 14)),))
+        worker.item_completed.connect(lambda *values: items.append(values))
+        worker.completed.connect(lambda *values: totals.append(values))
+        worker.run()
+
+        self.assertFalse(items[0][3])
+        self.assertEqual((0, 1), totals[0])
 
     def test_daily_chart_worker_preserves_target(self) -> None:
         class Service:
@@ -65,6 +89,32 @@ class JournalWorkerTests(unittest.TestCase):
         received = []; worker = DailyChartWorker(Service(), "005930", date(2026, 9, 8), "detached")
         worker.completed.connect(lambda *values: received.append(values)); worker.run()
         self.assertEqual(("005930", (("005930", date(2026, 9, 8)),), "detached"), received[0])
+
+    def test_analysis_enrichment_worker_keeps_each_group_result_independent(self) -> None:
+        class Service:
+            def prepare(self, episode, rows, **kwargs):
+                if episode.group_id == "bad":
+                    raise RuntimeError("invalid data")
+                return SimpleNamespace(analysis_revision_id="revision-1")
+        tasks = (
+            (SimpleNamespace(group_id="ok"), (("bar",),)),
+            (SimpleNamespace(group_id="bad"), ()),
+        )
+        started = []; completed = []; failed = []; totals = []
+        worker = AnalysisEnrichmentWorker(
+            Service(), tasks, active_pack=object(), strategy_packs=(), result_mode="together",
+        )
+        worker.item_started.connect(started.append)
+        worker.item_completed.connect(lambda *values: completed.append(values))
+        worker.item_failed.connect(lambda *values: failed.append(values))
+        worker.completed.connect(lambda *values: totals.append(values))
+
+        worker.run()
+
+        self.assertEqual(["ok", "bad"], started)
+        self.assertEqual("ok", completed[0][0])
+        self.assertEqual(("bad", "invalid data"), failed[0])
+        self.assertEqual((1, 1), totals[0])
 
 
 if __name__ == "__main__":

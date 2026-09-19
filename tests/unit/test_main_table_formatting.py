@@ -7,6 +7,7 @@ from kiwoom_monitor.presentation.main_table_formatting import (
     decimal_places,
     format_market_cap_eok,
     format_trade_value_eok,
+    is_upper_limit_highlight,
     rank_highlight_duration_ms,
     row_background_color,
     theme_trade_summary_html,
@@ -75,6 +76,11 @@ class MainTableFormattingTests(unittest.TestCase):
         self.assertEqual("#0070C0", change_rate_text_color("-0.1%"))
         self.assertIsNone(change_rate_text_color("0%"))
         self.assertIsNone(change_rate_text_color("자료 없음"))
+
+    def test_upper_limit_highlight_rejects_mixed_change_rate_basis(self) -> None:
+        self.assertTrue(is_upper_limit_highlight(91_900, 91_900, 29.97))
+        self.assertFalse(is_upper_limit_highlight(91_900, 91_900, 0.0))
+        self.assertFalse(is_upper_limit_highlight(90_000, 91_900, 29.97))
 
 
 if __name__ == "__main__":

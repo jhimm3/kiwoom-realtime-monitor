@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import unittest
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, date, datetime
 from pathlib import Path
-from types import SimpleNamespace
+from time import monotonic
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QObject, QRect, QSettings, Signal
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from kiwoom_monitor.presentation.stock_news_window import StockNewsWindow
+from kiwoom_monitor.presentation.news_view_model import StoredNewsEvidence
+from kiwoom_monitor.presentation.news_workers import NewsEvidenceWorker
 from kiwoom_monitor.application.news_analysis import assess_stock_news
 from kiwoom_monitor.infrastructure.naver_news import NewsAISettings, StockNewsItem
 from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis
@@ -21,6 +26,11 @@ from kiwoom_monitor.application.news_grouping import NewsEventGroup
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import (
     StoredAINewsAnalysis, news_identity,
 )
+from kiwoom_monitor.application.trade_history_service import TradeFill
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+from kiwoom_monitor.journal_process import JournalWindow
+from kiwoom_monitor.news_process import _apply_show_command
+from kiwoom_monitor.presentation.main_window import MainWindow
 
 
 class StockNewsWindowTests(unittest.TestCase):
@@ -117,6 +127,75 @@ class StockNewsWindowTests(unittest.TestCase):
             self.assertLess(detail.index("<b>긍정 근거:</b>"), detail.index("<b>원문 요약:</b>"))
             window.shutdown()
 
+    def test_detail_orders_ai_then_final_judgment_reason_and_core_sentences(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            item = StockNewsItem(
+                "테스트기업 공급계약", "검색 요약", "https://example.com", "https://example.com",
+                datetime.now(UTC), assess_stock_news("테스트기업", "테스트기업 공급계약", "검색 요약"),
+            )
+            stored = StoredAINewsAnalysis(
+                AINewsAnalysis("AI 요약", "긍정", 87, "AI 판단 이유", ("수주",), (), "수주·계약"),
+                "gemini", "test-model", datetime.now(UTC),
+            )
+            evidence = StoredNewsEvidence(
+                identity=news_identity(item), title=item.title,
+                article_revision_id="article-r1", body_revision_id="body-r1",
+                body_status="fulltext", body_text="테스트기업이 공급계약을 체결했습니다.",
+            )
+            window._visible_items = (item,)
+            window._visible_groups = (NewsEventGroup(item, (item,)),)
+            window._ai_result_cache[news_identity(item)] = stored
+            window._stock_code = "000001"
+            key = window._evidence_key(item)
+            window._evidence_cache[key] = (monotonic(), evidence)
+            window._central_evidence_client = SimpleNamespace()
+
+            window._show_detail(0)
+            rendered = window._detail.toHtml()
+
+            self.assertLess(rendered.index("AI 원문 분석"), rendered.index("최종 판단:"))
+            self.assertLess(rendered.index("최종 판단:"), rendered.index("최종 판단 이유:"))
+            self.assertLess(rendered.index("최종 판단 이유:"), rendered.index("AI 없이 뽑은 핵심 문장"))
+            window.shutdown()
+
+    def test_same_article_detail_refresh_restores_scroll_position(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            item = StockNewsItem(
+                "테스트기업 실적 발표", "검색 요약", "https://example.com", "https://example.com",
+                datetime.now(UTC), assess_stock_news("테스트기업", "테스트기업 실적 발표", "검색 요약"),
+            )
+            evidence = StoredNewsEvidence(
+                identity=news_identity(item), title=item.title,
+                article_revision_id="article-r1", body_revision_id="body-r1", body_status="fulltext",
+                body_text=" ".join(f"테스트기업 본문 문장 {index}입니다." for index in range(300)),
+            )
+            window._visible_items = (item,)
+            window._visible_groups = (NewsEventGroup(item, (item,)),)
+            window._stock_code = "000001"
+            key = window._evidence_key(item)
+            window._evidence_cache[key] = (monotonic(), evidence)
+            window._central_evidence_client = SimpleNamespace()
+            window.resize(700, 500)
+            window.show()
+            self.app.processEvents()
+
+            window._show_detail(0)
+            self.app.processEvents()
+            scroll_bar = window._detail.verticalScrollBar()
+            self.assertGreater(scroll_bar.maximum(), 0)
+            expected = min(120, scroll_bar.maximum())
+            scroll_bar.setValue(expected)
+
+            window._show_detail(0)
+            self.app.processEvents()
+
+            self.assertEqual(expected, scroll_bar.value())
+            window.shutdown()
+
     def test_rapid_stock_changes_keep_only_last_prepare_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -131,6 +210,241 @@ class StockNewsWindowTests(unittest.TestCase):
             self.assertEqual((window._prepare_request_id, "000660"), window._pending_prepare)
             window._prepare_worker = None
             window.shutdown()
+
+    def test_footer_omits_obsolete_browser_and_basic_rule_explanation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+
+            notice = window._status_label.text()
+
+            self.assertNotIn("기본 판단은 제목·요약 규칙", notice)
+            self.assertNotIn("원문은 기본 브라우저에서 엽니다", notice)
+            window.shutdown()
+
+    def test_journal_sender_relay_receiver_persists_original_request_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            origin = AccountScope("kiwoom", AccountEnvironment.REAL, str(uuid.uuid4()))
+            canonical = AccountScope("kiwoom", AccountEnvironment.REAL, str(uuid.uuid4()))
+            current_after_switch = AccountScope(
+                "kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()),
+            )
+            request_documents: list[dict[str, object]] = []
+            fill = TradeFill(
+                "1", "005930", "삼성전자", "매수", datetime(2026, 9, 13, 9), 1, 70_000,
+                origin_scope=origin, canonical_scope=canonical,
+            )
+            journal = SimpleNamespace(
+                _active_episode=SimpleNamespace(
+                    group_id="same-group", fills=(fill,),
+                    summary=SimpleNamespace(
+                        stock_code="005930", stock_name="삼성전자",
+                        trade_date=date(2026, 9, 13), account_scope=canonical,
+                    ),
+                ),
+                _journal_news_channel=SimpleNamespace(send=request_documents.append),
+                _review_saved=SimpleNamespace(setText=lambda _value: None),
+            )
+            JournalWindow._open_active_news(journal)
+
+            relayed: list[dict[str, object]] = []
+            relay = SimpleNamespace(
+                _journal_news_inbox=SimpleNamespace(read_new=lambda: request_documents[0]),
+                _current_account_scope=current_after_switch,
+                _ensure_news_process=lambda: None,
+                _news_command_path=root / "news-command.json",
+                _news_command_channel=SimpleNamespace(send=relayed.append),
+                frameGeometry=lambda: QRect(10, 20, 800, 600),
+                _news_window_mode=lambda: "independent",
+            )
+            relay._send_news_command = MethodType(MainWindow._send_news_command, relay)
+            MainWindow._poll_journal_news_request(relay)
+
+            window = StockNewsWindow(root / "news.env", root / "news.sqlite3")
+            with patch.object(window, "_schedule_prepare"):
+                self.assertTrue(_apply_show_command(window, relayed[0]))
+            item = StockNewsItem(
+                "대표 기사", "요약", "https://n/1", "https://o/1", datetime.now(UTC),
+                assess_stock_news("삼성전자", "대표 기사", "요약"),
+            )
+            window._repository.upsert("005930", (item,))
+            window._visible_items = (item,)
+            window._visible_groups = (NewsEventGroup(item, (item,)),)
+            window._table.setRowCount(1)
+            window._table.setCurrentCell(0, 0)
+            window._toggle_journal_link()
+
+            self.assertEqual(origin, window._journal_origin_scope)
+            self.assertEqual(canonical, window._journal_account_scope)
+            self.assertEqual(
+                {news_identity(item)},
+                window._repository.journal_linked_identities("same-group", "005930", canonical),
+            )
+            self.assertEqual(
+                set(), window._repository.journal_linked_identities(
+                    "same-group", "005930", current_after_switch,
+                ),
+            )
+            window.shutdown()
+
+    def test_evidence_worker_keeps_only_latest_selection_and_rejects_stale_result(self) -> None:
+        class ControlledWorker(QObject):
+            completed = Signal(int, str, str, object)
+            finished = Signal()
+            instances: list["ControlledWorker"] = []
+
+            def __init__(self, request_id, stock_code, item, _client, parent=None):
+                super().__init__(parent)
+                self.request_id, self.stock_code, self.item = request_id, stock_code, item
+                self.started = False
+                self.instances.append(self)
+
+            def start(self): self.started = True
+            def isRunning(self): return self.started
+            def requestInterruption(self): self.started = False
+            def wait(self, *_args): return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            window._stock_code = "005930"
+            window._central_evidence_client = SimpleNamespace()
+            first = StockNewsItem(
+                "첫 기사", "첫 요약", "https://n/1", "https://o/1", datetime.now(UTC),
+                assess_stock_news("테스트기업", "첫 기사", "첫 요약"),
+            )
+            second = StockNewsItem(
+                "둘째 기사", "둘째 요약", "https://n/2", "https://o/2", datetime.now(UTC),
+                assess_stock_news("테스트기업", "둘째 기사", "둘째 요약"),
+            )
+            window._visible_items = (first, second)
+            window._visible_groups = (
+                NewsEventGroup(first, (first,)), NewsEventGroup(second, (second,)),
+            )
+            window._table.setRowCount(2)
+
+            with patch("kiwoom_monitor.presentation.stock_news_window.NewsEvidenceWorker", ControlledWorker):
+                window._schedule_evidence(first)
+                first_request = window._evidence_request_id
+                window._table.blockSignals(True)
+                window._table.setCurrentCell(1, 0)
+                window._table.blockSignals(False)
+                window._schedule_evidence(second)
+                latest_request = window._evidence_request_id
+
+                window._on_evidence_completed(
+                    first_request, "005930", news_identity(first),
+                    StoredNewsEvidence(news_identity(first), article_revision_id="stale"),
+                )
+                self.assertEqual({}, window._evidence_cache)
+                self.assertEqual(news_identity(second), news_identity(window._pending_evidence[2]))
+
+                ControlledWorker.instances[0].started = False
+                ControlledWorker.instances[0].finished.emit()
+                self.assertEqual(2, len(ControlledWorker.instances))
+                window._on_evidence_completed(
+                    latest_request, "005930", news_identity(second),
+                    StoredNewsEvidence(news_identity(second), article_revision_id="current"),
+                )
+                self.assertEqual("current", window._cached_evidence(window._evidence_key(second)).article_revision_id)
+                ControlledWorker.instances[1].started = False
+
+            window._evidence_worker = None
+            window.shutdown()
+
+    def test_keyboard_current_cell_change_loads_evidence_for_new_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            first = StockNewsItem(
+                "첫 기사", "요약", "https://n/1", "https://o/1", datetime.now(UTC),
+                assess_stock_news("테스트기업", "첫 기사", "요약"),
+            )
+            window._visible_items = (first,)
+            window._visible_groups = (NewsEventGroup(first, (first,)),)
+            window._table.setRowCount(1)
+
+            with patch.object(window, "_schedule_evidence") as schedule:
+                window._table.setCurrentCell(0, 1)
+
+            schedule.assert_called_once_with(first)
+            window.shutdown()
+
+    def test_background_refresh_preserves_selected_article_and_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            first = StockNewsItem(
+                "첫 기사", "첫 요약", "https://n/1", "https://o/1", datetime.now(UTC),
+                assess_stock_news("테스트기업", "첫 기사", "첫 요약"),
+            )
+            selected = StockNewsItem(
+                "선택 기사", "선택 요약", "https://n/2", "https://o/2", datetime.now(UTC),
+                assess_stock_news("테스트기업", "선택 기사", "선택 요약"),
+            )
+            window._stock_code = "005930"
+            window._central_evidence_client = SimpleNamespace()
+            window._visible_items = (first, selected)
+            window._visible_groups = (
+                NewsEventGroup(first, (first,)), NewsEventGroup(selected, (selected,)),
+            )
+            window._render_items()
+            self.app.processEvents()
+            key = window._evidence_key(selected)
+            window._evidence_cache[key] = (
+                monotonic(),
+                StoredNewsEvidence(
+                    news_identity(selected), title=selected.title,
+                    article_revision_id="article-2",
+                    body_status="fulltext", body_text="새로고침 뒤에도 보존할 본문입니다.",
+                ),
+            )
+            window._select_news_cell(1, 4)
+
+            window._visible_items = (selected, first)
+            window._visible_groups = (
+                NewsEventGroup(selected, (selected,)), NewsEventGroup(first, (first,)),
+            )
+            window._render_items()
+            self.app.processEvents()
+
+            self.assertEqual(0, window._table.currentRow())
+            self.assertEqual(news_identity(selected), window._selected_news_identity)
+            self.assertIn("새로고침 뒤에도 보존할 본문입니다.", window._detail.toPlainText())
+            window.shutdown()
+
+    def test_shutdown_waits_for_blocking_evidence_request_and_discards_result(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingClient:
+            def load_news_history(self, *_args, **_kwargs):
+                entered.set()
+                release.wait(2.0)
+                return {"known": False, "revisions": []}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            item = StockNewsItem(
+                "기사", "요약", "https://n/1", "https://o/1", datetime.now(UTC),
+                assess_stock_news("테스트기업", "기사", "요약"),
+            )
+            worker = NewsEvidenceWorker(1, "005930", item, BlockingClient(), window)  # type: ignore[arg-type]
+            completed: list[object] = []
+            worker.completed.connect(lambda *_args: completed.append(_args))
+            window._evidence_worker = worker
+            worker.start()
+            self.assertTrue(entered.wait(1.0))
+            timer = threading.Timer(0.1, release.set)
+            timer.start()
+
+            window.shutdown()
+            timer.join()
+
+            self.assertFalse(worker.isRunning())
+            self.assertEqual([], completed)
 
     def test_window_geometry_is_flushed_when_saved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

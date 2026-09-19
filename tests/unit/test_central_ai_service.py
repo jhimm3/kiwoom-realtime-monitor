@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import unittest
+import sqlite3
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from kiwoom_monitor.central_server.ai_service import CentralAIService, _prepare_events
 from kiwoom_monitor.central_server.config import CentralServerSettings
+from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.infrastructure.news_ai import ANALYSIS_PROMPT_VERSION, AINewsAnalysis, AIRequestUsage
 
 
@@ -76,6 +80,79 @@ class CentralAIServiceTests(unittest.IsolatedAsyncioTestCase):
                 await service.analyze("000660", "SK하이닉스", "gemini", "model", [{
                     "identity": "two", "title": "제목", "body": "본문", "body_hash": "two",
                 }], 1)
+
+    async def test_real_store_appends_ai_revision_and_usage_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "central.sqlite3"
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            store.upsert_documents("news_article", [{
+                "owner": "005930", "key": "article", "collector_id": "naver",
+                "collection_scope": "watchlist",
+                "document": {"stock_code": "005930", "identity": "article", "title": "제목"},
+            }])
+            article = store.load_news_history("article", target="005930")[0]
+            body_revision_id = store.save_news_body_revision({
+                "article_revision_id": article["article_revision_id"], "status": "fulltext",
+                "body_text": "본문", "extractor_version": "test-v1", "fetched_at": 100.0,
+            })
+            service = CentralAIService(
+                CentralServerSettings("sqlite:///:memory:", "token", gemini_api_key="key"), store,
+            )
+            analysis = AINewsAnalysis("요약", "긍정", 80, "이유")
+            event = {"identity": "article", "title": "제목", "body": "본문",
+                     "article_revision_id": article["article_revision_id"],
+                     "body_revision_id": body_revision_id}
+            with patch(
+                "kiwoom_monitor.central_server.ai_service.analyze_articles",
+                return_value=((analysis,), AIRequestUsage(3, 2, 5)),
+            ) as analyze:
+                result = await service.analyze("005930", "삼성전자", "gemini", "model", [event], 1)
+                second = await service.analyze(
+                    "005930", "삼성전자", "gemini", "model-v2", [event], 1,
+                )
+            revisions = store.load_news_history("ai", target="005930")
+            usage = store.load_documents("news_request_usage", limit=10)
+            latest = store.load_documents("news_ai", "005930", 10)
+            store.close()
+
+        self.assertEqual(2, analyze.call_count)
+        self.assertEqual(2, len(revisions))
+        self.assertEqual([revisions[1]["analysis_revision_id"]], result["analysis_revision_ids"])
+        self.assertEqual([revisions[0]["analysis_revision_id"]], second["analysis_revision_ids"])
+        self.assertTrue(all(
+            row["article_revision_id"] == article["article_revision_id"] for row in revisions
+        ))
+        self.assertTrue(all(row["body_revision_id"] == body_revision_id for row in revisions))
+        self.assertEqual("요약", revisions[0]["output"]["summary"])
+        self.assertEqual(5, revisions[0]["usage"]["total_tokens"])
+        self.assertEqual(2, len(usage))
+        self.assertEqual("요약", latest[0]["document"]["summary"])
+
+    def test_ai_projection_revision_and_usage_roll_back_together(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "central.sqlite3"
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            connection = sqlite3.connect(path)
+            connection.execute(
+                "CREATE TRIGGER reject_ai_usage BEFORE INSERT ON central_documents "
+                "WHEN NEW.collection='news_request_usage' "
+                "BEGIN SELECT RAISE(ABORT,'usage rejected'); END"
+            )
+            connection.commit(); connection.close()
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "usage rejected"):
+                store.save_news_ai_results(
+                    [{"owner": "005930", "key": "article", "document": {"summary": "요약"}}],
+                    [{"analysis_revision_id": "revision", "target_id": "005930",
+                      "article_revision_id": "article-revision", "provider": "gemini",
+                      "model": "model", "prompt_version": "prompt-v1", "input_hash": "hash",
+                      "output": {"summary": "요약"}, "usage": {"total_tokens": 5}}],
+                    [{"owner": "2026-09-12", "key": "request", "document": {"total_tokens": 5}}],
+                )
+            self.assertEqual([], store.load_documents("news_ai", "005930"))
+            self.assertEqual([], store.load_news_history("ai", target="005930"))
+            store.close()
 
 
 if __name__ == "__main__":

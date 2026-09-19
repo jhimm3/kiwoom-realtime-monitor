@@ -9,12 +9,21 @@ from pathlib import Path
 
 # 이 스크립트를 어느 가상환경에서 실행하더라도 현재 워크트리의 소스를
 # 메인·뉴스·매매일지 자식 프로세스가 동일하게 사용하도록 한다.
-SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = REPOSITORY_ROOT / "src"
 source_text = str(SOURCE_ROOT)
-if source_text not in sys.path:
-    sys.path.insert(0, source_text)
-existing_pythonpath = os.environ.get("PYTHONPATH", "")
-os.environ["PYTHONPATH"] = source_text + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+repository_text = str(REPOSITORY_ROOT)
+for path_text in (source_text, repository_text):
+    while path_text in sys.path:
+        sys.path.remove(path_text)
+sys.path[0:0] = [source_text, repository_text]
+existing_pythonpath = [
+    path_text for path_text in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+    if path_text and path_text not in {source_text, repository_text}
+]
+os.environ["PYTHONPATH"] = os.pathsep.join(
+    (source_text, repository_text, *existing_pythonpath)
+)
 
 from kiwoom_monitor.infrastructure.app_paths import AppPaths
 
