@@ -9,12 +9,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.historical_backfill import (
+    ArticleFetchAttempt,
     ArticlePublicationResult,
     NAVER_HISTORICAL_SEARCH_PROVIDER,
     NAVER_STOCK_NEWS_PROVIDER,
+    claim_news_backfill_job,
+    finish_news_backfill_job,
     import_daishin_backfill_ndjson,
     parse_naver_historical_search_page,
     parse_naver_stock_news_page,
+    seed_news_backfill_jobs,
     parse_article_publication_html,
     store_article_publication_result,
     store_naver_historical_search_page,
@@ -24,6 +28,55 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
 
 
 class HistoricalBackfillTest(unittest.TestCase):
+    def test_seeds_and_resumes_candidate_news_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.sqlite3"
+            with closing(sqlite3.connect(candidate)) as connection:
+                connection.executescript(
+                    "CREATE TABLE candidate_days(dt TEXT, code TEXT);"
+                    "CREATE TABLE stocks(code TEXT, name TEXT);"
+                    "CREATE TABLE stock_aliases(stock_code TEXT, stock_name TEXT, "
+                    "valid_from TEXT, valid_to TEXT, source TEXT, source_ref TEXT);"
+                    "INSERT INTO stocks VALUES('005930','삼성전자'),('004770','써니전자');"
+                    "INSERT INTO stock_aliases VALUES"
+                    "('004770','옛써니','2019-01-01','2020-01-02','KIND','D001'),"
+                    "('004770','새써니','2020-01-03',NULL,'KIND','D001');"
+                    "INSERT INTO candidate_days VALUES"
+                    "('2020-01-02','004770'),('2020-01-03','005930');"
+                )
+            output = root / "output.sqlite3"
+            self.assertEqual(3, seed_news_backfill_jobs(candidate, output))
+            self.assertEqual(0, seed_news_backfill_jobs(candidate, output))
+            job = claim_news_backfill_job(output)
+            self.assertIsNotNone(job)
+            assert job is not None
+            self.assertEqual(("005930", "2020-01-03", "삼성전자", "stocks.current", 1), (
+                job.code, job.target_date, job.query_text, job.name_source, job.attempts,
+            ))
+            finish_news_backfill_job(
+                output, job, state="complete", pages_observed=2,
+                items_observed=12, usable_articles=7, unreadable_articles=3,
+                missing_time_articles=2,
+            )
+            with closing(sqlite3.connect(output)) as connection:
+                state = connection.execute(
+                    "SELECT state, usable_articles, unreadable_articles, "
+                    "missing_time_articles FROM news_backfill_jobs WHERE code='005930'"
+                ).fetchone()
+                alias_rows = connection.execute(
+                    "SELECT query_text, name_source, name_source_ref "
+                    "FROM news_backfill_jobs WHERE code='004770' ORDER BY query_text"
+                ).fetchall()
+        self.assertEqual(("complete", 7, 3, 2), state)
+        self.assertEqual(
+            [
+                ("새써니", "name_transition_window:KIND", "D001"),
+                ("옛써니", "KIND", "D001"),
+            ],
+            alias_rows,
+        )
+
     def test_extracts_original_publication_time_with_source_and_precision(self) -> None:
         document = """
         <html><head>
@@ -168,12 +221,19 @@ class HistoricalBackfillTest(unittest.TestCase):
                 "2020-01-02T10:31+09:00", "minute", "meta:article:published_time",
                 "2020-01-02T10:31:00+09:00", page.items[0].original_url,
                 page.items[0].original_url, "2026-09-22T05:01:00+00:00",
+                (ArticleFetchAttempt(
+                    "publisher_original", page.items[0].original_url,
+                    page.items[0].original_url, "published_at_found", 200, "",
+                    "2020-01-02T10:31+09:00", "minute",
+                    "meta:article:published_time", "2020-01-02T10:31:00+09:00",
+                ),),
             )
             store_article_publication_result(path, result)
             with closing(sqlite3.connect(path)) as connection:
                 article_row = connection.execute(
                     "SELECT provider, published_at, published_precision, published_at_source, "
-                    "article_fetch_status FROM news_articles"
+                    "article_fetch_status, training_eligible, training_exclusion_reason "
+                    "FROM news_articles"
                 ).fetchone()
                 relation = connection.execute(
                     "SELECT source_date, query_text FROM news_search_observations"
@@ -181,13 +241,57 @@ class HistoricalBackfillTest(unittest.TestCase):
                 endpoint = connection.execute(
                     "SELECT endpoint FROM source_pages"
                 ).fetchone()[0]
+                attempt = connection.execute(
+                    "SELECT url_role, http_status, status FROM news_article_fetch_attempts"
+                ).fetchone()
         self.assertEqual((
             NAVER_HISTORICAL_SEARCH_PROVIDER, "2020-01-02T10:31+09:00", "minute",
-            "meta:article:published_time", "published_at_found",
+            "meta:article:published_time", "published_at_found", 1, "",
         ), article_row)
         self.assertEqual(("2020-01-02", "써니전자"), relation)
+        self.assertEqual(("publisher_original", 200, "published_at_found"), attempt)
         self.assertIn("query=%EC%8D%A8%EB%8B%88%EC%A0%84%EC%9E%90", endpoint)
         self.assertIn("from20200102to20200102", endpoint)
+
+    def test_records_readable_article_without_time_as_training_excluded(self) -> None:
+        article = {
+            "content": "요약", "contentHref": "https://example.test/article/2",
+            "sourceProfile": {"title": "매체"}, "title": "써니전자 시간 없는 기사",
+        }
+        bootstrap = {"body": {"props": {"children": [{"props": article}]}}}
+        payload = {"collection": [{"script": (
+            "entry.bootstrap(document.getElementById(\"root\"), "
+            + json.dumps(bootstrap, ensure_ascii=False) + ");"
+        )}]}
+        page = parse_naver_historical_search_page(
+            "004770", "써니전자", "2020-01-02", 1, payload,
+            observed_at=datetime(2026, 9, 22, 5, 0, tzinfo=UTC),
+        )
+        result = ArticlePublicationResult(
+            NAVER_HISTORICAL_SEARCH_PROVIDER, page.items[0].office_id,
+            page.items[0].article_id, "time_not_found", "", "", "", "",
+            page.items[0].original_url, page.items[0].original_url,
+            "2026-09-22T05:01:00+00:00",
+            (ArticleFetchAttempt(
+                "publisher_original", page.items[0].original_url,
+                page.items[0].original_url, "time_not_found", 200, "",
+                "", "", "", "",
+            ),),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.sqlite3"
+            store_naver_historical_search_page(path, page)
+            store_article_publication_result(path, result)
+            with closing(sqlite3.connect(path)) as connection:
+                article_state = connection.execute(
+                    "SELECT published_precision, article_fetch_status, training_eligible, "
+                    "training_exclusion_reason FROM news_articles"
+                ).fetchone()
+                attempt_state = connection.execute(
+                    "SELECT http_status, status FROM news_article_fetch_attempts"
+                ).fetchone()
+        self.assertEqual(("date", "time_not_found", 0, "time_not_found"), article_state)
+        self.assertEqual((200, "time_not_found"), attempt_state)
 
     def test_stores_daishin_bars_with_source_dimensions(self) -> None:
         payload = {

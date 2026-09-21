@@ -49,6 +49,16 @@ class CandidateRow:
 
 
 @dataclass(frozen=True)
+class NewsBackfillJob:
+    code: str
+    target_date: str
+    query_text: str
+    name_source: str
+    name_source_ref: str
+    attempts: int
+
+
+@dataclass(frozen=True)
 class NaverStockNewsItem:
     office_id: str
     article_id: str
@@ -101,6 +111,20 @@ class NaverHistoricalNewsPage:
 
 
 @dataclass(frozen=True)
+class ArticleFetchAttempt:
+    url_role: str
+    requested_url: str
+    final_url: str
+    status: str
+    http_status: int | None
+    error: str
+    published_at: str
+    published_precision: str
+    published_at_source: str
+    published_at_raw: str
+
+
+@dataclass(frozen=True)
 class ArticlePublicationResult:
     provider: str
     office_id: str
@@ -113,6 +137,7 @@ class ArticlePublicationResult:
     source_url: str
     final_url: str
     fetched_at: str
+    attempts: tuple[ArticleFetchAttempt, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -180,6 +205,214 @@ def latest_candidates(path: Path, limit: int = 5) -> tuple[CandidateRow, ...]:
         CandidateRow(str(row[0]), str(row[1]), str(row[2]), float(row[3]), str(row[4]))
         for row in rows
     )
+
+
+def seed_news_backfill_jobs(
+    candidate_database: Path,
+    output_database: Path,
+    *,
+    start_date: str = "",
+    end_date: str = "",
+    name_transition_days: int = 14,
+) -> int:
+    start = _iso_date(start_date) if start_date else "0000-01-01"
+    end = _iso_date(end_date) if end_date else "9999-12-31"
+    if start > end:
+        raise ValueError("start_date must not be after end_date")
+    if name_transition_days < 0 or name_transition_days > 365:
+        raise ValueError("name_transition_days must be between 0 and 365")
+    initialize_probe_database(output_database)
+    with closing(open_candidate_database(candidate_database)) as source:
+        has_aliases = source.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stock_aliases'"
+        ).fetchone() is not None
+        if has_aliases:
+            primary_rows = source.execute(
+                """
+                SELECT DISTINCT c.code, c.dt,
+                    TRIM(COALESCE(NULLIF(a.stock_name, ''), s.name, '')),
+                    CASE WHEN a.stock_name IS NULL THEN 'stocks.current'
+                         ELSE COALESCE(NULLIF(a.source, ''), 'stock_aliases') END,
+                    COALESCE(a.source_ref, '')
+                FROM candidate_days AS c
+                LEFT JOIN stocks AS s ON s.code = c.code
+                LEFT JOIN stock_aliases AS a
+                  ON a.stock_code = c.code
+                 AND (a.valid_from IS NULL OR a.valid_from = '' OR a.valid_from <= c.dt)
+                 AND (a.valid_to IS NULL OR a.valid_to = '' OR a.valid_to >= c.dt)
+                WHERE c.dt BETWEEN ? AND ?
+                  AND TRIM(COALESCE(NULLIF(a.stock_name, ''), s.name, '')) <> ''
+                ORDER BY c.dt DESC, c.code
+                """,
+                (start, end),
+            ).fetchall()
+            transition_rows = source.execute(
+                """
+                SELECT DISTINCT c.code, c.dt, TRIM(a.stock_name),
+                    'name_transition_window:' ||
+                        COALESCE(NULLIF(a.source, ''), 'stock_aliases'),
+                    COALESCE(a.source_ref, '')
+                FROM candidate_days AS c
+                JOIN stock_aliases AS a ON a.stock_code = c.code
+                WHERE c.dt BETWEEN ? AND ?
+                  AND TRIM(COALESCE(a.stock_name, '')) <> ''
+                  AND (
+                    (NULLIF(a.valid_from, '') IS NOT NULL AND
+                     c.dt BETWEEN date(a.valid_from, ?)
+                              AND date(a.valid_from, ?))
+                    OR
+                    (NULLIF(a.valid_to, '') IS NOT NULL AND
+                     c.dt BETWEEN date(a.valid_to, ?)
+                              AND date(a.valid_to, ?))
+                  )
+                ORDER BY c.dt DESC, c.code, a.stock_name
+                """,
+                (
+                    start, end,
+                    f"-{name_transition_days} days", f"+{name_transition_days} days",
+                    f"-{name_transition_days} days", f"+{name_transition_days} days",
+                ),
+            ).fetchall()
+            # Insert the date-valid name first. A transition-window duplicate then
+            # leaves the stronger provenance on the existing primary-key row.
+            rows = [*primary_rows, *transition_rows]
+        else:
+            rows = source.execute(
+                """
+                SELECT c.code, c.dt, TRIM(COALESCE(s.name, '')),
+                       'stocks.current', ''
+                FROM candidate_days AS c
+                LEFT JOIN stocks AS s ON s.code = c.code
+                WHERE c.dt BETWEEN ? AND ? AND TRIM(COALESCE(s.name, '')) <> ''
+                ORDER BY c.dt DESC, c.code
+                """,
+                (start, end),
+            ).fetchall()
+    now = datetime.now(UTC).isoformat()
+    inserted = 0
+    with closing(sqlite3.connect(output_database)) as connection:
+        with connection:
+            for row in rows:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO news_backfill_jobs
+                    (code, target_date, query_text, name_source, name_source_ref,
+                     state, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                    """,
+                    (
+                        str(row[0]), str(row[1]), str(row[2]), str(row[3]),
+                        str(row[4]), now,
+                    ),
+                )
+                inserted += max(0, cursor.rowcount)
+    return inserted
+
+
+def clear_news_backfill_jobs(output_database: Path) -> int:
+    initialize_probe_database(output_database)
+    with closing(sqlite3.connect(output_database)) as connection:
+        with connection:
+            cursor = connection.execute("DELETE FROM news_backfill_jobs")
+            return max(0, cursor.rowcount)
+
+
+def claim_news_backfill_job(output_database: Path) -> NewsBackfillJob | None:
+    initialize_probe_database(output_database)
+    now = datetime.now(UTC).isoformat()
+    with closing(sqlite3.connect(output_database)) as connection:
+        connection.row_factory = sqlite3.Row
+        with connection:
+            row = connection.execute(
+                """
+                SELECT code, target_date, query_text, name_source, name_source_ref, attempts
+                FROM news_backfill_jobs
+                WHERE state IN ('pending', 'failed') AND attempts < 3
+                ORDER BY target_date DESC, code
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            updated = connection.execute(
+                """
+                UPDATE news_backfill_jobs
+                SET state='running', attempts=attempts+1, last_error='', updated_at=?
+                WHERE code=? AND target_date=? AND query_text=?
+                  AND state IN ('pending', 'failed')
+                """,
+                (now, row["code"], row["target_date"], row["query_text"]),
+            )
+            if updated.rowcount != 1:
+                return None
+            return NewsBackfillJob(
+                str(row["code"]), str(row["target_date"]), str(row["query_text"]),
+                str(row["name_source"]), str(row["name_source_ref"]),
+                int(row["attempts"]) + 1,
+            )
+
+
+def finish_news_backfill_job(
+    output_database: Path,
+    job: NewsBackfillJob,
+    *,
+    state: str,
+    pages_observed: int = 0,
+    items_observed: int = 0,
+    usable_articles: int = 0,
+    unreadable_articles: int = 0,
+    missing_time_articles: int = 0,
+    error: str = "",
+) -> None:
+    if state not in {"complete", "failed", "truncated"}:
+        raise ValueError("news backfill job state must be complete, failed or truncated")
+    with closing(sqlite3.connect(output_database)) as connection:
+        with connection:
+            connection.execute(
+                """
+                UPDATE news_backfill_jobs SET
+                    state=?, pages_observed=?, items_observed=?, usable_articles=?,
+                    unreadable_articles=?, missing_time_articles=?, last_error=?, updated_at=?
+                WHERE code=? AND target_date=? AND query_text=?
+                """,
+                (
+                    state, pages_observed, items_observed, usable_articles,
+                    unreadable_articles, missing_time_articles, error,
+                    datetime.now(UTC).isoformat(), job.code, job.target_date, job.query_text,
+                ),
+            )
+
+
+def article_publication_is_resolved(
+    output_database: Path,
+    item: NaverHistoricalNewsItem,
+) -> bool:
+    initialize_probe_database(output_database)
+    with closing(sqlite3.connect(output_database)) as connection:
+        row = connection.execute(
+            """
+            SELECT article_fetch_status FROM news_articles
+            WHERE provider=? AND office_id=? AND article_id=?
+            """,
+            (NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id),
+        ).fetchone()
+    return row is not None and str(row[0]) not in {"", "not_fetched"}
+
+
+def article_publication_status(
+    output_database: Path,
+    item: NaverHistoricalNewsItem,
+) -> str:
+    initialize_probe_database(output_database)
+    with closing(sqlite3.connect(output_database)) as connection:
+        row = connection.execute(
+            """
+            SELECT article_fetch_status FROM news_articles
+            WHERE provider=? AND office_id=? AND article_id=?
+            """,
+            (NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id),
+        ).fetchone()
+    return str(row[0]) if row is not None else "not_fetched"
 
 
 def parse_naver_stock_news_page(
@@ -476,10 +709,19 @@ def fetch_article_publication(
     opener: Callable[..., Any] = urlopen,
 ) -> ArticlePublicationResult:
     fetched_at = datetime.now(UTC).isoformat()
-    urls = [url for url in (item.original_url, item.portal_url) if url]
-    last_status = "article_unavailable"
+    urls = [
+        (role, url) for role, url in (
+            ("publisher_original", item.original_url), ("naver_archive", item.portal_url),
+        ) if url
+    ]
+    attempts: list[ArticleFetchAttempt] = []
+    last_status = "no_source_url"
     last_url = ""
-    for source_url in dict.fromkeys(urls):
+    seen_urls: set[str] = set()
+    for url_role, source_url in urls:
+        if source_url in seen_urls:
+            continue
+        seen_urls.add(source_url)
         request = Request(source_url, headers={
             "Accept": "text/html,application/xhtml+xml",
             "Accept-Language": "ko-KR,ko;q=0.9",
@@ -491,36 +733,63 @@ def fetch_article_publication(
                 charset = response.headers.get_content_charset() or "utf-8"
                 document = body.decode(charset, errors="replace")
                 final_url = str(response.geturl())
+                http_status = getattr(response, "status", None)
         except Exception as error:
             code = getattr(error, "code", None)
             last_status = "blocked" if code in {401, 403, 429} else (
                 "article_unavailable" if code in {404, 410} else "fetch_error"
             )
             last_url = source_url
+            attempts.append(ArticleFetchAttempt(
+                url_role, source_url, source_url, last_status,
+                int(code) if isinstance(code, int) else None,
+                f"{type(error).__name__}: {error}", "", "", "", "",
+            ))
             continue
         lowered = document.lower()
         if any(marker in lowered for marker in ("captcha", "robots.txt", "비정상적인 접근")):
             last_status = "blocked"
             last_url = final_url
+            attempts.append(ArticleFetchAttempt(
+                url_role, source_url, final_url, last_status,
+                int(http_status) if isinstance(http_status, int) else None,
+                "blocked page marker", "", "", "", "",
+            ))
             continue
         if any(marker in document for marker in ("삭제된 기사", "페이지를 찾을 수 없습니다", "존재하지 않는 기사")):
             last_status = "article_unavailable"
             last_url = final_url
+            attempts.append(ArticleFetchAttempt(
+                url_role, source_url, final_url, last_status,
+                int(http_status) if isinstance(http_status, int) else None,
+                "unavailable page marker", "", "", "", "",
+            ))
             continue
         published_at, precision, source, raw_or_status = parse_article_publication_html(
             document, expected_title=item.title,
         )
         if published_at:
+            attempts.append(ArticleFetchAttempt(
+                url_role, source_url, final_url, "published_at_found",
+                int(http_status) if isinstance(http_status, int) else None, "",
+                published_at, precision, source, raw_or_status,
+            ))
             return ArticlePublicationResult(
                 NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id,
                 "published_at_found", published_at, precision, source, raw_or_status,
-                source_url, final_url, fetched_at,
+                source_url, final_url, fetched_at, tuple(attempts),
             )
         last_status = raw_or_status
         last_url = final_url
+        attempts.append(ArticleFetchAttempt(
+            url_role, source_url, final_url, last_status,
+            int(http_status) if isinstance(http_status, int) else None, "",
+            "", "", "", "",
+        ))
     return ArticlePublicationResult(
         NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id,
-        last_status, "", "", "", "", urls[0] if urls else "", last_url, fetched_at,
+        last_status, "", "", "", "", urls[0][1] if urls else "", last_url, fetched_at,
+        tuple(attempts),
     )
 
 
@@ -560,6 +829,8 @@ def initialize_probe_database(path: Path) -> None:
                     publication_source_url TEXT NOT NULL DEFAULT '',
                     article_fetch_status TEXT NOT NULL DEFAULT 'not_fetched',
                     article_fetched_at TEXT NOT NULL DEFAULT '',
+                    training_eligible INTEGER NOT NULL DEFAULT 0,
+                    training_exclusion_reason TEXT NOT NULL DEFAULT 'publication_time_unverified',
                     first_observed_at TEXT NOT NULL,
                     last_observed_at TEXT NOT NULL,
                     PRIMARY KEY (provider, office_id, article_id)
@@ -589,6 +860,44 @@ def initialize_probe_database(path: Path) -> None:
                         provider, office_id, article_id, code, source_date, query_text
                     )
                 );
+                CREATE TABLE IF NOT EXISTS news_article_fetch_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    office_id TEXT NOT NULL,
+                    article_id TEXT NOT NULL,
+                    attempted_at TEXT NOT NULL,
+                    url_role TEXT NOT NULL,
+                    requested_url TEXT NOT NULL,
+                    final_url TEXT NOT NULL,
+                    http_status INTEGER,
+                    status TEXT NOT NULL,
+                    error TEXT NOT NULL,
+                    published_at TEXT NOT NULL,
+                    published_precision TEXT NOT NULL,
+                    published_at_source TEXT NOT NULL,
+                    published_at_raw TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_news_article_fetch_attempts_article
+                    ON news_article_fetch_attempts(provider, office_id, article_id, attempted_at);
+                CREATE TABLE IF NOT EXISTS news_backfill_jobs (
+                    code TEXT NOT NULL,
+                    target_date TEXT NOT NULL,
+                    query_text TEXT NOT NULL,
+                    name_source TEXT NOT NULL DEFAULT 'stocks.current',
+                    name_source_ref TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    pages_observed INTEGER NOT NULL DEFAULT 0,
+                    items_observed INTEGER NOT NULL DEFAULT 0,
+                    usable_articles INTEGER NOT NULL DEFAULT 0,
+                    unreadable_articles INTEGER NOT NULL DEFAULT 0,
+                    missing_time_articles INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (code, target_date, query_text)
+                );
+                CREATE INDEX IF NOT EXISTS idx_news_backfill_jobs_state
+                    ON news_backfill_jobs(state, target_date, code);
                 CREATE TABLE IF NOT EXISTS market_bars (
                     provider TEXT NOT NULL,
                     code TEXT NOT NULL,
@@ -632,6 +941,8 @@ def initialize_probe_database(path: Path) -> None:
                 "publication_source_url": "TEXT NOT NULL DEFAULT ''",
                 "article_fetch_status": "TEXT NOT NULL DEFAULT 'not_fetched'",
                 "article_fetched_at": "TEXT NOT NULL DEFAULT ''",
+                "training_eligible": "INTEGER NOT NULL DEFAULT 0",
+                "training_exclusion_reason": "TEXT NOT NULL DEFAULT 'publication_time_unverified'",
             }
             for column, declaration in additions.items():
                 if column not in columns:
@@ -650,6 +961,18 @@ def initialize_probe_database(path: Path) -> None:
                 if column not in bar_columns:
                     connection.execute(
                         f"ALTER TABLE market_bars ADD COLUMN {column} {declaration}"
+                    )
+            job_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(news_backfill_jobs)")
+            }
+            job_additions = {
+                "name_source": "TEXT NOT NULL DEFAULT 'stocks.current'",
+                "name_source_ref": "TEXT NOT NULL DEFAULT ''",
+            }
+            for column, declaration in job_additions.items():
+                if column not in job_columns:
+                    connection.execute(
+                        f"ALTER TABLE news_backfill_jobs ADD COLUMN {column} {declaration}"
                     )
 
 
@@ -678,9 +1001,10 @@ def store_naver_stock_news_page(path: Path, page: NaverStockNewsPage) -> None:
                     INSERT INTO news_articles
                     (provider, office_id, article_id, published_at, published_precision,
                      office_name, title, summary, article_url, original_url, portal_url, image_url,
-                     published_at_source, published_at_raw, first_observed_at, last_observed_at)
+                     published_at_source, published_at_raw, training_eligible,
+                     training_exclusion_reason, first_observed_at, last_observed_at)
                     VALUES (?, ?, ?, ?, 'minute', ?, ?, ?, ?, '', ?, ?,
-                            'naver_stock_api:datetime', ?, ?, ?)
+                            'naver_stock_api:datetime', ?, 1, '', ?, ?)
                     ON CONFLICT(provider, office_id, article_id) DO UPDATE SET
                         published_at=excluded.published_at,
                         office_name=excluded.office_name,
@@ -691,6 +1015,8 @@ def store_naver_stock_news_page(path: Path, page: NaverStockNewsPage) -> None:
                         image_url=excluded.image_url,
                         published_at_source=excluded.published_at_source,
                         published_at_raw=excluded.published_at_raw,
+                        training_eligible=1,
+                        training_exclusion_reason='',
                         last_observed_at=excluded.last_observed_at
                     """,
                     (
@@ -796,7 +1122,8 @@ def store_article_publication_result(path: Path, result: ArticlePublicationResul
                     UPDATE news_articles SET
                         published_at=?, published_precision=?, published_at_source=?,
                         published_at_raw=?, publication_source_url=?, article_fetch_status=?,
-                        article_fetched_at=?
+                        article_fetched_at=?, training_eligible=1,
+                        training_exclusion_reason=''
                     WHERE provider=? AND office_id=? AND article_id=?
                     """,
                     (
@@ -810,12 +1137,36 @@ def store_article_publication_result(path: Path, result: ArticlePublicationResul
                 connection.execute(
                     """
                     UPDATE news_articles SET
-                        publication_source_url=?, article_fetch_status=?, article_fetched_at=?
+                        publication_source_url=?, article_fetch_status=?, article_fetched_at=?,
+                        training_eligible=0, training_exclusion_reason=?
                     WHERE provider=? AND office_id=? AND article_id=?
                     """,
                     (
                         result.final_url or result.source_url, result.status, result.fetched_at,
+                        result.status,
                         result.provider, result.office_id, result.article_id,
+                    ),
+                )
+            for position, attempt in enumerate(result.attempts):
+                identity = "|".join((
+                    result.provider, result.office_id, result.article_id, result.fetched_at,
+                    str(position), attempt.url_role, attempt.requested_url,
+                ))
+                attempt_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO news_article_fetch_attempts
+                    (attempt_id, provider, office_id, article_id, attempted_at, url_role,
+                     requested_url, final_url, http_status, status, error, published_at,
+                     published_precision, published_at_source, published_at_raw)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        attempt_id, result.provider, result.office_id, result.article_id,
+                        result.fetched_at, attempt.url_role, attempt.requested_url,
+                        attempt.final_url, attempt.http_status, attempt.status, attempt.error,
+                        attempt.published_at, attempt.published_precision,
+                        attempt.published_at_source, attempt.published_at_raw,
                     ),
                 )
 

@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -12,13 +13,18 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from kiwoom_monitor.infrastructure.historical_backfill import (
+    article_publication_status,
+    claim_news_backfill_job,
+    clear_news_backfill_jobs,
     fetch_article_publication,
     fetch_naver_historical_search_page,
     fetch_naver_stock_news_page,
+    finish_news_backfill_job,
     inspect_candidate_database,
     inspect_daishin_environment,
     import_daishin_backfill_ndjson,
     latest_candidates,
+    seed_news_backfill_jobs,
     store_daishin_probe_payload,
     store_article_publication_result,
     store_naver_historical_search_page,
@@ -29,7 +35,7 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
 DEFAULT_CANDIDATE_DB = Path(
     r"C:\Users\pc-1\Desktop\kiwoom_history_backfill\data\kiwoom_history.sqlite3"
 )
-DEFAULT_OUTPUT_DB = Path("data/historical_backfill_probe.sqlite3")
+DEFAULT_OUTPUT_DB = Path("data/historical_intelligence.sqlite3")
 
 
 def main() -> int:
@@ -61,6 +67,31 @@ def main() -> int:
     )
     history.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
 
+    news_seed = subparsers.add_parser(
+        "news-seed", help="후보 DB에서 날짜·종목별 과거 뉴스 작업을 생성합니다."
+    )
+    news_seed.add_argument("--database", type=Path, default=DEFAULT_CANDIDATE_DB)
+    news_seed.add_argument("--start-date", default="")
+    news_seed.add_argument("--end-date", default="")
+    news_seed.add_argument(
+        "--name-transition-days", type=int, default=14,
+        help="상호변경일 앞뒤로 구·신 종목명을 함께 검색할 일수(기본 14일)",
+    )
+    news_seed.add_argument(
+        "--reset-jobs", action="store_true",
+        help="기사·원문 기록은 보존하고 뉴스 작업 큐만 비운 뒤 다시 생성합니다.",
+    )
+    news_seed.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
+
+    news_run = subparsers.add_parser(
+        "news-run", help="대기 중인 과거 뉴스 작업을 재개 가능하게 실행합니다."
+    )
+    news_run.add_argument("--jobs", type=int, default=1)
+    news_run.add_argument("--max-pages", type=int, default=100)
+    news_run.add_argument("--request-delay", type=float, default=0.5)
+    news_run.add_argument("--article-delay", type=float, default=0.2)
+    news_run.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
+
     daishin = subparsers.add_parser("daishin-preflight", help="CREON Plus 조회 환경만 점검합니다.")
     daishin.add_argument("--no-connect", action="store_true")
 
@@ -87,6 +118,90 @@ def main() -> int:
             "latest_candidates": [asdict(item) for item in latest_candidates(args.database, args.limit)],
         }
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "news-seed":
+        cleared = clear_news_backfill_jobs(args.output) if args.reset_jobs else 0
+        inserted = seed_news_backfill_jobs(
+            args.database, args.output,
+            start_date=args.start_date, end_date=args.end_date,
+            name_transition_days=args.name_transition_days,
+        )
+        print(json.dumps({
+            "cleared_jobs": cleared,
+            "inserted": inserted,
+            "output": str(args.output.resolve()),
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "news-run":
+        if args.jobs < 1 or args.jobs > 10000:
+            parser.error("--jobs must be between 1 and 10000")
+        if args.max_pages < 1 or args.max_pages > 100:
+            parser.error("--max-pages must be between 1 and 100")
+        completed_jobs = 0
+        failed_jobs = 0
+        truncated_jobs = 0
+        for _ in range(args.jobs):
+            job = claim_news_backfill_job(args.output)
+            if job is None:
+                break
+            pages_observed = 0
+            items_observed = 0
+            usable = 0
+            unreadable = 0
+            missing_time = 0
+            try:
+                exhausted = False
+                for page_index in range(args.max_pages):
+                    page = fetch_naver_historical_search_page(
+                        job.code, job.query_text, job.target_date, 1 + page_index * 10,
+                    )
+                    store_naver_historical_search_page(args.output, page)
+                    pages_observed += 1
+                    items_observed += len(page.items)
+                    for item in page.items:
+                        status = article_publication_status(args.output, item)
+                        if status in {"", "not_fetched"}:
+                            result = fetch_article_publication(item)
+                            store_article_publication_result(args.output, result)
+                            status = result.status
+                            if args.article_delay > 0:
+                                time.sleep(args.article_delay)
+                        if status == "published_at_found":
+                            usable += 1
+                        elif status == "time_not_found":
+                            missing_time += 1
+                        else:
+                            unreadable += 1
+                    if not page.has_structured_news or len(page.items) < 10:
+                        exhausted = True
+                        break
+                    if args.request_delay > 0:
+                        time.sleep(args.request_delay)
+                state = "complete" if exhausted else "truncated"
+                finish_news_backfill_job(
+                    args.output, job, state=state, pages_observed=pages_observed,
+                    items_observed=items_observed, usable_articles=usable,
+                    unreadable_articles=unreadable, missing_time_articles=missing_time,
+                    error="" if exhausted else "page_limit_reached",
+                )
+                if exhausted:
+                    completed_jobs += 1
+                else:
+                    truncated_jobs += 1
+            except Exception as error:
+                finish_news_backfill_job(
+                    args.output, job, state="failed", pages_observed=pages_observed,
+                    items_observed=items_observed, usable_articles=usable,
+                    unreadable_articles=unreadable, missing_time_articles=missing_time,
+                    error=f"{type(error).__name__}: {error}",
+                )
+                failed_jobs += 1
+        print(json.dumps({
+            "completed_jobs": completed_jobs,
+            "failed_jobs": failed_jobs,
+            "truncated_jobs": truncated_jobs,
+            "output": str(args.output.resolve()),
+        }, ensure_ascii=False, indent=2))
         return 0
     if args.command == "daishin-preflight":
         result = inspect_daishin_environment(try_connection=False)

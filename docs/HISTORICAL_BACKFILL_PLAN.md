@@ -68,19 +68,26 @@
 
 기사 ID/URL, 매체, 제목, 발행/수정/수집시각, 시각 정밀도, 본문 상태, 원문 링크를 보존한다. 기사-종목/후보/테마 관계는 별도로 연결해 한 기사가 여러 종목에 나온 횟수를 독립 사건 수로 세지 않는다. 당시 상호는 종목코드·상호변경 근거로 연결한다.
 
+NAS 참조 DB의 `stock_aliases`는 종목코드별 상호와 `valid_from`/`valid_to`, KIND 근거 URL을 가진다. 후보일에는 유효한 당시 상호를 기본 검색어로 사용하고, 이전 대화에서 정한 상호변경일 앞뒤 14일에는 구·신 이름을 모두 작업으로 만든다. 기본 이름과 경계 보완 이름은 `name_source`로 구분하고 KIND `source_ref`를 보존한다. 현재 94,750개 후보 종목·일에서 기본 작업 94,750개와 경계 보완 340개, 합계 95,090개가 생성됐다.
+
+원문 조회는 언론사 원문과 제목이 검증된 네이버 보관 링크의 시도를 각각 기록한다. `published_at_found`만 현재 학습 적격이며 `time_not_found`, `blocked`, `article_unavailable`, `title_mismatch`, `fetch_error`, `not_fetched`는 원자료를 버리지 않고 학습 제외 사유와 함께 남긴다. 원문이 없거나 시각이 없는 건은 별도 집계할 수 있다.
+
 Npay 공식 도움말에는 서비스 화면 밖 개인 프로그램에서 증권정보를 재가공해 이용하는 것을 제한하는 안내가 있다. 뉴스 목록·본문의 보관과 학습 이용에 해당하는 범위를 확인해 수집 방식에 반영한다. 사이트 접근과 이용 범위는 별도 확인 항목이며 이 문서는 해당 이용 가능성을 확정하지 않는다. [공식 이용 안내](https://help.pay.naver.com/faq/content.help?faqId=17106)
 
 ## 표본 실행 위치
 
-표본 결과는 기본적으로 앱 원본 DB와 분리한 `data/historical_backfill_probe.sqlite3`에 저장한다. 이 파일은 원응답, 기사 메타데이터·종목 연결, 공급자·주기·거래소·세션·수정기준을 가진 봉을 분리해 보존한다.
+수집 결과는 앱 원본 DB와 분리한 `data/historical_intelligence.sqlite3`에 저장한다. 이 파일은 원응답, 기사 메타데이터·종목 연결·원문 확인 시도, 공급자·주기·거래소·세션·수정기준을 가진 봉, 재개 가능한 뉴스 작업을 분리해 보존한다.
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\probe_historical_backfill.py candidates
+.\.venv\Scripts\python.exe scripts\probe_historical_backfill.py news-seed --database <참조DB> --name-transition-days 14 --reset-jobs
 .\.venv\Scripts\python.exe scripts\probe_historical_backfill.py naver-history 004770 "써니전자" 2020-01-02 --pages 1
 .\.venv\Scripts\python.exe scripts\probe_historical_backfill.py daishin-sample 005930 --interval 1 --count 20
 ```
 
-마지막 명령은 CREON Plus 로그인과 같은 Windows 권한 수준에서 실행한다. 이 PC에서는 CREON이 관리자 권한이므로 실행 터미널도 관리자 권한이어야 한다. 1분·5분 첫 표본은 성공했지만 연속조회와 기간 경계 확인 전에는 전체 종목·전체 기간 수집을 시작하지 않는다.
+마지막 명령은 CREON Plus 로그인과 같은 Windows 권한 수준에서 실행한다. 이 PC에서는 CREON이 관리자 권한이므로 실행 터미널도 관리자 권한이어야 한다. 삼성전자 연속조회와 해상도 경계는 확인했으며, 전체 후보 확대 전에는 시세 작업 재개 원장과 종목별 완전성 보고를 추가한다.
+
+닫힌 SQLite 스냅샷과 원응답은 `scripts/publish_historical_intelligence_to_nas.py`로 `X:\kiwoom-monitor\deploy\synology\server-data\historical-intelligence\v1` 아래에 게시한다. 각 run은 내용 해시를 포함한 불변 디렉터리이고 `latest.json`만 새 run을 가리킨다. SQLite는 NAS 공유에서 직접 갱신하거나 검증하지 않고 로컬 snapshot/검증 복사본을 사용한다.
 
 ## 4. 수집 상태와 완료 기준
 
