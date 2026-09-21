@@ -45,7 +45,13 @@ Synology는 bind mount 원본 폴더가 없으면 이미지 빌드가 성공해�
 
 같은 네트워크의 PC 브라우저에서 `http://NAS주소:KIWOOM_MONITOR_PORT/health`를 열어 `status`가 `ok`인지 확인한다. 이 주소는 공개 상태 확인용이며 실제 데이터 API는 토큰 인증을 요구한다.
 
-`postgres-data`에는 PostgreSQL 원본이, `server-data`에는 DART 캐시 등 서버 파일이 남는다. 컨테이너를 업데이트해도 두 폴더는 삭제하지 않는다.
+`postgres-data`에는 PostgreSQL 원본이, `server-data`에는 DART 캐시와 `logs/server.log` 상세 로그가 남는다. 컨테이너를 업데이트해도 두 폴더는 삭제하지 않는다.
+HTTP 요청별 access log는 Container Manager 출력에 쓰지 않고 `server-data/logs/server.log`에만 기록한다.
+파일은 자정에 날짜 suffix를 붙여 회전하며 기본 14일 보존한다. 보존 기간은
+`CENTRAL_SERVER_LOG_RETENTION_DAYS`로 1~365일 안에서 조정한다. Container Manager에는 서버 시작·종료,
+운영 상태, 경고와 오류처럼 요청 한 건마다 반복되지 않는 로그가 남는다.
+같은 상세 파일의 `kiwoom_monitor.kiwoom_api` 줄은 캐시를 통과해 실제 NAS→키움 REST 전송까지 간
+요청만 기록한다. TR 코드, market/mock namespace, 연속조회 여부, 소요시간만 남기며 요청 본문·키·계좌는 남기지 않는다.
 
 ### PostgreSQL 실제 통합 검증
 
@@ -83,10 +89,12 @@ NAS 연결 설정의 `서버 사용량`에서 앱 프로세스 메모리, 서버
 DSM이 같은 호스트의 443을 사용하는 경우 API 프록시는 사용하지 않는 별도 포트(예: 8443)를 선택할 수 있다.
 이때 프록시 소스/공유기 전달/앱 주소 모두 해당 포트로 맞추고 대상 HTTP 8787은 유지한다.
 health 성공만으로 WSS와 비밀 쓰기까지 검증됐다고 보지 않는다. WebSocket 헤더/ready를 따로 확인한다.
-인증키 쓰기는 서버 접근 로그의 실제 프록시 peer IP를 `CREDENTIAL_TRUSTED_PROXIES`에 정확히 지정하고
-프록시가 단일 `X-Forwarded-Proto: https`를 보내야 한다. 최초 적용은 서버 컨테이너 설정 재적용이 필요하다.
-이는 최초 HTTPS 설치 조건이며 이후 키 변경마다 env/컨테이너를 수정하는 방식은 아니다.
-추정 gateway IP나 전체 네트워크를 허용하지 않고 TLS/peer 검증을 유지한다.
+인증키 쓰기는 프록시가 단일 `X-Forwarded-Proto: https`를 보내야 한다. Compose는
+`KIWOOM_DOCKER_SUBNET`으로 기본 네트워크를 고정하고 그 네트워크의 `KIWOOM_DOCKER_GATEWAY`만
+`CREDENTIAL_TRUSTED_PROXIES`로 전달한다. 따라서 컨테이너 재생성 뒤 peer 주소가 임의로 바뀌지 않고,
+신뢰 프록시와 실제 gateway도 같은 `.env` 값에서 나온다. 기본값은 현재 운영에서 확인한
+`172.18.0.0/24`, `172.18.0.1`이다. NAS의 다른 Docker 네트워크와 충돌하면 먼저 네트워크 목록을
+확인한 뒤 두 값을 같은 비사용 대역으로 함께 바꾸며, 전체 대역을 신뢰 프록시로 허용하지 않는다.
 
 공개 인터넷 대신 개인 장치에서만 쓸 경우에는 Tailscale/VPN이 공격 표면이 더 작다. 어느 방식을 쓰더라도 긴 `MONITOR_SERVER_ACCESS_TOKEN`은 유지한다.
 

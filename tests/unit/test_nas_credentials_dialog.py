@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QLineEdit
+from PySide6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMessageBox
 
 from kiwoom_monitor.infrastructure.central_credentials_client import CentralCredentialsClient
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig, DataSourceSettings
@@ -126,6 +126,53 @@ class NasCredentialsDialogTests(unittest.TestCase):
             apply.assert_not_called()
             self.assertIn("매매 이력은 유지", dialog._preview.text())
             self.assertTrue(dialog._apply_button.isEnabled())
+
+    def test_disconnected_account_is_hidden_by_default_and_can_be_shown(self):
+        old = {**self.profile, "profile_id": "nas-mock-default", "label": "", "disabled": True,
+               "configured": False, "runtime": "ACTIVE"}
+        active = {**self.profile, "profile_id": "new-mock", "label": "새 모의계좌",
+                  "account_ref": str(uuid.uuid4())}
+        self.metadata["profiles"] = [old, active]
+        dialog = self.open()
+
+        self.assertEqual(dialog._profiles.count(), 1)
+        self.assertEqual(dialog._profiles.itemData(0)["profile_id"], "new-mock")
+
+        dialog._show_disconnected.setChecked(True)
+        wait_until(lambda: dialog._worker is None and dialog._profiles.count() == 2)
+        labels = [dialog._profiles.itemText(index) for index in range(dialog._profiles.count())]
+        self.assertTrue(any("이전 모의계좌" in label and "연결 해제됨" in label for label in labels))
+
+    def test_delete_requires_disconnected_profile_and_preserves_history_message(self):
+        dialog = self.open()
+        disconnected = {**self.profile, "disabled": True, "configured": False}
+        dialog._profiles.setItemData(0, disconnected)
+        dialog._refresh()
+        self.assertTrue(dialog._delete_button.isEnabled())
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes), \
+             patch.object(self.client, "delete_account_profile", return_value={
+                 "provider": "kiwoom_mock", "profile_id": self.profile["profile_id"],
+                 "lifecycle_state": "archived",
+             }) as delete:
+            dialog._delete_button.click()
+            wait_until(lambda: delete.call_count == 1)
+            delete.assert_called_once_with(self.profile["profile_id"], 2)
+
+    def test_existing_account_name_can_be_changed_without_reconnecting(self):
+        dialog = self.open()
+
+        def rename(profile_id, revision, label):
+            self.profile["label"] = label
+            return {"provider": "kiwoom_mock", "profile_id": profile_id, "label": label}
+
+        with patch.object(QInputDialog, "getText", return_value=("단타 모의", True)), \
+             patch.object(self.client, "rename_account_profile", side_effect=rename) as request:
+            dialog._rename_button.click()
+            wait_until(lambda: dialog._worker is None and "단타 모의" in dialog._profiles.currentText())
+
+        request.assert_called_once_with("nas-mock-default", 2, "단타 모의")
+        self.assertTrue(dialog._monitor.isChecked())
+        self.assertTrue(dialog._orders.isChecked())
 
     def test_different_account_is_not_applied_and_failure_stays_visible(self):
         dialog = self.open()

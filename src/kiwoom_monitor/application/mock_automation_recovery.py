@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -16,6 +17,7 @@ from kiwoom_monitor.application.mock_automation_admission import (
 from kiwoom_monitor.domain.execution_activation import MockAutomationOperatingSpec
 from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
+from kiwoom_monitor.application.mock_automation_risk import MockAutomationRiskSnapshot
 
 
 MOCK_AUTOMATION_RECOVERY_VERSION = "mock_automation_recovery/v1"
@@ -24,6 +26,7 @@ MOCK_AUTOMATION_RECOVERY_VERSION = "mock_automation_recovery/v1"
 class MockAutomationRecoveryStatus(StrEnum):
     BLOCKED = "BLOCKED"
     CLEARED_ORDERS_DISABLED = "CLEARED_ORDERS_DISABLED"
+    MANAGE_ONLY_ORDERS_DISABLED = "MANAGE_ONLY_ORDERS_DISABLED"
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,8 @@ class MockAutomationRecoveryDecision:
     balance_mismatch_count: int
     status: MockAutomationRecoveryStatus
     reasons: tuple[str, ...]
+    risk_snapshot_id: str = ""
+    risk_reconciliation_revision: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -102,6 +107,8 @@ class MockAutomationRecoveryDecision:
             raise ValueError("blocked recovery decision requires reasons")
         if self.status is MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED and self.reasons:
             raise ValueError("cleared recovery decision cannot have blocking reasons")
+        if bool(self.risk_snapshot_id) != (self.risk_reconciliation_revision > 0):
+            raise ValueError("risk snapshot identity and revision must be provided together")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -126,6 +133,8 @@ class MockAutomationRecoveryDecision:
             "balance_mismatch_count": self.balance_mismatch_count,
             "status": self.status.value,
             "reasons": list(self.reasons),
+            "risk_snapshot_id": self.risk_snapshot_id,
+            "risk_reconciliation_revision": self.risk_reconciliation_revision,
         }
 
 
@@ -136,12 +145,21 @@ class MockAutomationRecoveryRepository(Protocol):
     def load_mock_automation_admissions(
         self, account_ref: str,
     ) -> tuple[MockAutomationAdmission, ...]: ...
+    def load_mock_automation_admission_for_spec(
+        self, account_ref: str, spec_id: str,
+    ) -> MockAutomationAdmission | None: ...
     def load_mock_automation_lease_receipts(
         self, account_ref: str,
     ) -> tuple[MockAutomationLeaseReceipt, ...]: ...
+    def load_mock_automation_lease_for_admission(
+        self, account_ref: str, admission_id: str,
+    ) -> MockAutomationLeaseReceipt | None: ...
     def save_mock_automation_recovery_decision(
         self, value: MockAutomationRecoveryDecision,
     ) -> bool: ...
+    def load_latest_mock_automation_risk(
+        self, account_ref: str,
+    ) -> MockAutomationRiskSnapshot | None: ...
 
 
 class DisabledOwnedRuntime(Protocol):
@@ -150,6 +168,7 @@ class DisabledOwnedRuntime(Protocol):
 
     def set_new_orders_enabled(self, enabled: bool) -> None: ...
     def heartbeat(self) -> None: ...
+    def automation_decision_guard(self) -> AbstractContextManager[None]: ...
 
 
 def assess_mock_automation_recovery(
@@ -174,7 +193,7 @@ def assess_mock_automation_recovery(
         reasons.append("DAILY_NET_PNL_UNKNOWN")
     elif (
         spec.maximum_daily_loss_won is not None
-        and metrics.daily_net_pnl_won < -spec.maximum_daily_loss_won
+        and metrics.daily_net_pnl_won <= -spec.maximum_daily_loss_won
     ):
         reasons.append("DAILY_LOSS_LIMIT_REACHED")
     if metrics.data_gap_seconds is None:
@@ -204,8 +223,6 @@ def assess_mock_automation_recovery(
             reasons.append(reason)
     if open_orders:
         reasons.append("BROKER_OPEN_ORDER_PRESENT")
-    if positions:
-        reasons.append("BROKER_POSITION_PRESENT")
     if account.reserved_open_buy_won > 0:
         reasons.append("BROKER_RESERVED_BUY_PRESENT")
     orderable_cash = account.available_cash_won - account.reserved_open_buy_won
@@ -228,7 +245,22 @@ def assess_mock_automation_recovery(
     ):
         reasons.append("BROKER_ORDER_SNAPSHOT_STALE")
 
+    manage_only_reasons = {
+        "DAILY_NET_PNL_UNKNOWN", "DAILY_LOSS_LIMIT_REACHED",
+        "DATA_GAP_UNKNOWN", "DATA_GAP_LIMIT_EXCEEDED",
+        "RECONNECT_LIMIT_EXCEEDED",
+    }
     unique_reasons = tuple(dict.fromkeys(reasons))
+    manage_only = bool(positions) and set(unique_reasons).issubset(manage_only_reasons)
+    if positions and not manage_only:
+        unique_reasons = tuple(dict.fromkeys((*unique_reasons, "BROKER_POSITION_PRESENT")))
+    status = (
+        MockAutomationRecoveryStatus.BLOCKED
+        if unique_reasons and not manage_only
+        else MockAutomationRecoveryStatus.MANAGE_ONLY_ORDERS_DISABLED
+        if positions
+        else MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED
+    )
     document = {
         "version": MOCK_AUTOMATION_RECOVERY_VERSION,
         "admission_id": admission.admission_id,
@@ -248,18 +280,16 @@ def assess_mock_automation_recovery(
         "submission_unknown_count": metrics.submission_unknown_count,
         "reconnect_count": metrics.reconnect_count,
         "balance_mismatch_count": metrics.balance_mismatch_count,
-        "status": (
-            MockAutomationRecoveryStatus.BLOCKED.value
-            if unique_reasons
-            else MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED.value
-        ),
+        "status": status.value,
         "reasons": list(unique_reasons),
+        "risk_snapshot_id": "",
+        "risk_reconciliation_revision": 0,
     }
     return MockAutomationRecoveryDecision(
         decision_id=_content_id("mock_automation_recovery", document),
         observed_at=metrics.observed_at,
         account_as_of=account.as_of,
-        status=MockAutomationRecoveryStatus(document["status"]),
+        status=status,
         reasons=unique_reasons,
         **{
             key: value for key, value in document.items()
@@ -276,31 +306,73 @@ def record_mock_automation_recovery(
     *,
     account_ref: str,
     spec_id: str,
+    risk_snapshot_id: str = "",
+    risk_reconciliation_revision: int = 0,
 ) -> MockAutomationRecoveryDecision:
     spec = repository.load_mock_automation_spec(account_ref, spec_id)
     if spec is None:
         raise ValueError("mock automation operating spec is not stored")
-    admissions = tuple(
-        item for item in repository.load_mock_automation_admissions(account_ref)
-        if item.spec_id == spec_id
+    admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id)
+    if admission is None:
+        raise ValueError("mock automation admission is missing")
+    receipt = repository.load_mock_automation_lease_for_admission(
+        account_ref, admission.admission_id,
     )
-    if len(admissions) != 1:
-        raise ValueError("mock automation admission is missing or ambiguous")
-    admission = admissions[0]
-    receipts = tuple(
-        item for item in repository.load_mock_automation_lease_receipts(account_ref)
-        if item.admission_id == admission.admission_id
-    )
-    if len(receipts) != 1:
-        raise ValueError("mock automation lease receipt is missing or ambiguous")
+    if receipt is None:
+        raise ValueError("mock automation lease receipt is missing")
     if runtime.account_ref != account_ref or runtime.run_id != admission.execution_run_id:
         raise ValueError("mock automation runtime does not match its admission")
     runtime.set_new_orders_enabled(False)
-    runtime.heartbeat()
-    decision = assess_mock_automation_recovery(
-        spec, admission, receipts[0], recovery, metrics,
+    with runtime.automation_decision_guard():
+        decision = assess_mock_automation_recovery(
+            spec, admission, receipt, recovery, metrics,
+        )
+        if risk_snapshot_id:
+            body = {
+                **{key: value for key, value in decision.to_dict().items() if key != "decision_id"},
+                "risk_snapshot_id": risk_snapshot_id,
+                "risk_reconciliation_revision": risk_reconciliation_revision,
+            }
+            decision = MockAutomationRecoveryDecision(**{
+                **decision.__dict__,
+                "decision_id": _content_id("mock_automation_recovery", body),
+                "risk_snapshot_id": risk_snapshot_id,
+                "risk_reconciliation_revision": risk_reconciliation_revision,
+            })
+        repository.save_mock_automation_recovery_decision(decision)
+    return decision
+
+
+def record_mock_automation_recovery_from_risk(
+    repository: MockAutomationRecoveryRepository,
+    runtime: DisabledOwnedRuntime,
+    recovery: MockAccountRecovery,
+    risk: MockAutomationRiskSnapshot,
+    *,
+    account_ref: str,
+    spec_id: str,
+) -> MockAutomationRecoveryDecision:
+    """Record recovery only from the latest immutable NAS risk revision."""
+    loader = getattr(repository, "load_latest_mock_automation_risk", None)
+    current = loader(account_ref) if callable(loader) else None
+    if current != risk:
+        raise RuntimeError("latest mock automation risk snapshot changed")
+    _validate_risk_snapshot(risk, recovery, account_ref, runtime.run_id)
+    metrics = MockAutomationRecoveryMetrics(
+        observed_at=risk.observed_at,
+        recovery_complete=risk.reconciliation_complete,
+        daily_net_pnl_won=risk.daily_net_pnl_won,
+        data_gap_seconds=risk.data_gap_seconds,
+        submission_unknown_count=risk.submission_unknown_count,
+        reconnect_count=risk.reconnect_count,
+        balance_mismatch_count=risk.balance_mismatch_count,
     )
-    repository.save_mock_automation_recovery_decision(decision)
+    decision = record_mock_automation_recovery(
+        repository, runtime, recovery, metrics,
+        account_ref=account_ref, spec_id=spec_id,
+        risk_snapshot_id=risk.snapshot_id,
+        risk_reconciliation_revision=risk.reconciliation_revision,
+    )
     return decision
 
 
@@ -335,13 +407,35 @@ def mock_automation_recovery_decision_from_dict(
         balance_mismatch_count=int(value["balance_mismatch_count"]),
         status=MockAutomationRecoveryStatus(str(value["status"])),
         reasons=tuple(str(item) for item in value.get("reasons", ())),
+        risk_snapshot_id=str(value.get("risk_snapshot_id") or ""),
+        risk_reconciliation_revision=int(value.get("risk_reconciliation_revision") or 0),
     )
-    expected = _content_id("mock_automation_recovery", {
+    expected_body = {
         key: item for key, item in decision.to_dict().items() if key != "decision_id"
+    }
+    expected = _content_id("mock_automation_recovery", expected_body)
+    legacy_expected = _content_id("mock_automation_recovery", {
+        key: item for key, item in expected_body.items()
+        if key not in {"risk_snapshot_id", "risk_reconciliation_revision"}
     })
-    if decision.decision_id != expected:
+    if decision.decision_id not in {expected, legacy_expected}:
         raise ValueError("mock automation recovery content does not match decision_id")
     return decision
+
+
+def _validate_risk_snapshot(
+    risk: MockAutomationRiskSnapshot,
+    recovery: MockAccountRecovery,
+    account_ref: str,
+    run_id: str,
+) -> None:
+    if (
+        risk.account_ref != account_ref
+        or risk.execution_run_id != run_id
+        or risk.account_as_of != recovery.account.as_of
+        or risk.observed_at < risk.broker_query_completed_at
+    ):
+        raise ValueError("mock automation risk snapshot does not match broker recovery")
 
 
 def _validate_lineage(

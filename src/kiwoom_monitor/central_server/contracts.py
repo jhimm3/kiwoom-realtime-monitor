@@ -29,6 +29,10 @@ class ServerCapabilities:
     account_contexts_v3: bool = False
     planned_reconnect_v1: bool = False
     execution_event_read_v1: bool = False
+    mock_automation_candidate_publish_v1: bool = False
+    mock_automation_candidate_read_v1: bool = False
+    mock_automation_spec_publish_v1: bool = False
+    mock_automation_runtime_v1: bool = False
 
     def as_document(self) -> dict[str, object]:
         return {

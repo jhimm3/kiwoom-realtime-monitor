@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,10 @@ WS_BASE_URLS = {
     "mock": "wss://mockapi.kiwoom.com:10000",
     "real": "wss://api.kiwoom.com:10000",
 }
+
+
+logger = logging.getLogger(__name__)
+SUBSCRIPTION_ACK_TIMEOUT_SECONDS = 15.0
 
 
 def market_session(now: datetime, environment: str) -> str | None:
@@ -112,6 +117,7 @@ class RealtimeTradeWorker(QThread):
             login = json.loads(await asyncio.wait_for(websocket.recv(), timeout=15))
             if login.get("return_code") not in (None, 0, "0"):
                 raise RuntimeError(f"WebSocket 로그인 실패: {login.get('return_msg', '')}")
+            logger.info("키움 로컬 실시간 로그인 성공: %s", session)
             subscribed_codes = initial_codes
             subscribed_nxt_codes = initial_nxt_codes
             target = realtime_subscription_target(
@@ -122,14 +128,10 @@ class RealtimeTradeWorker(QThread):
             await self._send_subscription(
                 websocket, session, target.active_codes, target.nxt_codes, self._environment,
             )
-            if self._connected_once and self._reconnect_pending:
-                self._reconnects += 1
-            self._connected_once = True
-            self._reconnect_pending = False
-            self._emit_diagnostics()
-            self.connection_opened.emit(subscribed_codes)
-            self.status_changed.emit(f"실시간 체결 구독 중 · {session} · {len(subscribed_codes)}종목")
-            self.subscription_ready.emit()
+            subscription_pending = True
+            subscription_deadline = time.monotonic() + SUBSCRIPTION_ACK_TIMEOUT_SECONDS
+            pending_added: tuple[str, ...] = ()
+            connection_approved = False
             while not self.isInterruptionRequested():
                 desired_codes = self._codes
                 desired_nxt_codes = self._nxt_codes
@@ -138,9 +140,12 @@ class RealtimeTradeWorker(QThread):
                     environment=self._environment,
                 )
                 if (
-                    desired_codes != subscribed_codes
-                    or desired_nxt_codes != subscribed_nxt_codes
-                    or target.signature != policy_signature
+                    not subscription_pending
+                    and (
+                        desired_codes != subscribed_codes
+                        or desired_nxt_codes != subscribed_nxt_codes
+                        or target.signature != policy_signature
+                    )
                 ):
                     if not desired_codes:
                         return
@@ -154,12 +159,14 @@ class RealtimeTradeWorker(QThread):
                     subscribed_codes = desired_codes
                     subscribed_nxt_codes = desired_nxt_codes
                     policy_signature = target.signature
-                    if added_codes:
-                        self.codes_added.emit(added_codes)
-                    self.status_changed.emit(f"실시간 체결 구독 변경 · {session} · {len(subscribed_codes)}종목")
+                    pending_added = added_codes
+                    subscription_pending = True
+                    subscription_deadline = time.monotonic() + SUBSCRIPTION_ACK_TIMEOUT_SECONDS
                 try:
                     raw = await asyncio.wait_for(websocket.recv(), timeout=1)
                 except TimeoutError:
+                    if subscription_pending and time.monotonic() >= subscription_deadline:
+                        raise RuntimeError("WebSocket 구독 승인 시간 초과")
                     if not realtime_subscription_target(
                         self._codes, set(self._nxt_codes), self._now_provider(),
                         environment=self._environment,
@@ -169,6 +176,37 @@ class RealtimeTradeWorker(QThread):
                 message = json.loads(raw)
                 if str(message.get("trnm", "")).upper() == "PING":
                     await websocket.send(json.dumps(message))
+                    continue
+                if str(message.get("trnm", "")).upper() == "REG":
+                    if message.get("return_code") not in (None, 0, "0"):
+                        detail = str(message.get("return_msg", "")).strip()
+                        raise RuntimeError(f"WebSocket 구독 실패: {detail}")
+                    if not subscription_pending:
+                        continue
+                    subscription_pending = False
+                    if self._connected_once and self._reconnect_pending:
+                        self._reconnects += 1
+                    self._connected_once = True
+                    self._reconnect_pending = False
+                    self._emit_diagnostics()
+                    initial_approval = not connection_approved
+                    if initial_approval:
+                        connection_approved = True
+                        self.connection_opened.emit(subscribed_codes)
+                    elif pending_added:
+                        self.codes_added.emit(pending_added)
+                    pending_added = ()
+                    logger.info(
+                        "키움 로컬 실시간 구독 승인: %s · %s종목",
+                        session, len(subscribed_codes),
+                    )
+                    self.status_changed.emit(
+                        f"실시간 체결 구독 중 · {session} · {len(subscribed_codes)}종목"
+                    )
+                    if initial_approval:
+                        # Initial approval starts deferred enrichment once. Later
+                        # code changes already have ranking-owned follow-ups.
+                        self.subscription_ready.emit()
                     continue
                 for tick in parse_trade_ticks(message):
                     self.trade_received.emit(tick)

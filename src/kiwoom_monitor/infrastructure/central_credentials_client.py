@@ -106,7 +106,8 @@ class CentralCredentialsClient:
         result = self._request("GET", "/api/v1/settings/credentials")
         if not isinstance(result.get("profiles"), list) or not isinstance(result.get("providers"), list):
             raise RuntimeError("NAS 계좌 목록 형식이 올바르지 않습니다.")
-        fields = {"provider", "profile_id", "label", "configured", "supported", "revision", "runtime", "disabled", "account_ref", "validation", "runtime_validation"}
+        fields = {"provider", "profile_id", "label", "lifecycle_state", "configured", "supported",
+                  "revision", "runtime", "disabled", "account_ref", "validation", "runtime_validation"}
         return {"profiles": [{k: v for k, v in p.items() if k in fields}
                              for p in result["profiles"] if isinstance(p, dict)],
                 "providers": [{"provider": p.get("provider"), "supported": p.get("supported") is True}
@@ -131,6 +132,34 @@ class CentralCredentialsClient:
             self._profile(result.get("profile_id"))
             self._create_request = None
             return result
+
+    def delete_account_profile(self, profile, revision):
+        if self.provider not in self.ACCOUNT_ENVIRONMENTS:
+            raise ValueError("계좌 공급자를 확인하세요.")
+        self._profile(profile); self._revision(revision)
+        result = self._request(
+            "DELETE", f"/api/v1/settings/credentials/{self.provider}/profiles/{profile}",
+            {"expected_revision": revision},
+        )
+        if result != {"provider": self.provider, "profile_id": profile,
+                      "lifecycle_state": "archived"}:
+            raise RuntimeError("NAS 계좌 삭제 결과를 확인하지 못했습니다.")
+        return result
+
+    def rename_account_profile(self, profile, revision, label):
+        if self.provider not in self.ACCOUNT_ENVIRONMENTS:
+            raise ValueError("계좌 공급자를 확인하세요.")
+        self._profile(profile); self._revision(revision)
+        label = label.strip() if isinstance(label, str) else ""
+        if not label or len(label) > 120:
+            raise ValueError("계좌 이름을 입력하세요. 최대 120자입니다.")
+        result = self._request(
+            "PUT", f"/api/v1/settings/credentials/{self.provider}/profiles/{profile}",
+            {"expected_revision": revision, "label": label},
+        )
+        if result != {"provider": self.provider, "profile_id": profile, "label": label}:
+            raise RuntimeError("NAS 계좌 이름 변경 결과를 확인하지 못했습니다.")
+        return result
 
     def prepare_mock(self, profile, revision, app_key="", secret_key="", *, disabled=False):
         if self.provider != "kiwoom_mock":

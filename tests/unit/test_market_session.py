@@ -59,3 +59,73 @@ class MarketSessionTests(unittest.TestCase):
                 asyncio.run(worker._receive("KRX"))
         registrations = [value for value in socket.sent if value.get("trnm") == "REG"]
         self.assertEqual(2, len(registrations))
+
+    def test_worker_reports_ready_only_after_registration_ack(self) -> None:
+        class Finished(Exception):
+            pass
+
+        class Socket:
+            def __init__(self):
+                self.received = 0
+
+            async def send(self, _raw):
+                return None
+
+            async def recv(self):
+                self.received += 1
+                if self.received == 1:
+                    return json.dumps({"return_code": 0})
+                if self.received == 2:
+                    return json.dumps({"trnm": "REG", "return_code": 0})
+                raise Finished
+
+        class Connection:
+            async def __aenter__(self): return Socket()
+            async def __aexit__(self, *_args): return False
+
+        worker = RealtimeTradeWorker(
+            lambda: "token", "real", ("005930",),
+            lambda: datetime(2026, 9, 14, 10, 0),
+        )
+        opened: list[tuple[str, ...]] = []
+        ready: list[bool] = []
+        worker.connection_opened.connect(opened.append)
+        worker.subscription_ready.connect(lambda: ready.append(True))
+        with patch(
+            "kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker.connect",
+            return_value=Connection(),
+        ):
+            with self.assertRaises(Finished):
+                asyncio.run(worker._receive("KRX"))
+        self.assertEqual([("005930",)], opened)
+        self.assertEqual([True], ready)
+
+    def test_worker_raises_registration_rejection_instead_of_looking_connected(self) -> None:
+        class Socket:
+            def __init__(self): self.received = 0
+            async def send(self, _raw): return None
+            async def recv(self):
+                self.received += 1
+                if self.received == 1:
+                    return json.dumps({"return_code": 0})
+                return json.dumps({
+                    "trnm": "REG", "return_code": 9, "return_msg": "등록 거절",
+                })
+
+        class Connection:
+            async def __aenter__(self): return Socket()
+            async def __aexit__(self, *_args): return False
+
+        worker = RealtimeTradeWorker(
+            lambda: "token", "real", ("005930",),
+            lambda: datetime(2026, 9, 14, 10, 0),
+        )
+        opened: list[object] = []
+        worker.connection_opened.connect(opened.append)
+        with patch(
+            "kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker.connect",
+            return_value=Connection(),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "WebSocket 구독 실패: 등록 거절"):
+                asyncio.run(worker._receive("KRX"))
+        self.assertEqual([], opened)

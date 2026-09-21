@@ -5,9 +5,11 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 
 from .app import create_app
 from .config import CentralServerSettings
+from .server_logging import configure_server_logging
 
 
 def main() -> None:
@@ -20,8 +22,13 @@ def main() -> None:
     parser.add_argument("--parent-pid", type=int, default=0)
     arguments, _ = parser.parse_known_args()
     settings = CentralServerSettings.from_environment()
+    configure_server_logging(
+        Path(os.environ.get("CENTRAL_SERVER_LOG_DIR", "data/logs")),
+        retention_days=_log_retention_days(),
+    )
     server = uvicorn.Server(uvicorn.Config(
-        create_app(settings), host=settings.host, port=settings.port, log_level="info", proxy_headers=False,
+        create_app(settings), host=settings.host, port=settings.port, log_level="info",
+        proxy_headers=False, log_config=None,
     ))
     if arguments.parent_pid > 0:
         threading.Thread(
@@ -29,6 +36,13 @@ def main() -> None:
             name="central-server-parent-watch",
         ).start()
     server.run()
+
+
+def _log_retention_days() -> int:
+    try:
+        return max(1, min(int(os.environ.get("CENTRAL_SERVER_LOG_RETENTION_DAYS", "14")), 365))
+    except ValueError:
+        return 14
 
 
 def _ensure_standard_streams() -> None:

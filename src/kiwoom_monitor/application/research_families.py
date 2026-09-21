@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
@@ -91,3 +93,26 @@ def family_for_config(config: object) -> ResearchFamilyDefinition:
     if len(matches) != 1:
         raise ValueError(f"unregistered research strategy config: {type(config).__name__}")
     return matches[0]
+
+
+def shadow_monitor_id_for_config(
+    family_id: str, config: object, session_profile: str,
+) -> str:
+    """Return the stable NAS shadow owner for one registered family configuration."""
+    definition = get_research_family(family_id)
+    if not isinstance(config, definition.config_type) or not hasattr(config, "to_dict"):
+        raise ValueError("shadow monitor config does not match its registered family")
+    config_document = config.to_dict()
+    identity_document = (
+        config_document
+        if session_profile == "krx-regular/v1"
+        else {"strategy": config_document, "session_profile": session_profile}
+    )
+    encoded = json.dumps(
+        identity_document, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    strategy_id, strategy_version = family_id.rsplit("/", 1)
+    return (
+        f"shadow:{strategy_id}:{strategy_version}:"
+        f"{hashlib.sha256(encoded).hexdigest()[:16]}"
+    )

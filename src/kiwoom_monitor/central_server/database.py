@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import sqlite3
 import uuid
+from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
-from time import time
+from time import monotonic, time
 from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
@@ -74,10 +76,97 @@ class StoredQuery:
     next_key: str
 
 
+def _top20_statistics_document(
+    top20_rows: list[tuple[object, object, object]],
+    market_rows: list[tuple[object, object]],
+) -> dict[str, object]:
+    """Aggregate stored NAS TOP20 minutes without sending raw yearly rows to the app."""
+    hourly_totals: dict[str, float] = defaultdict(float)
+    hourly_counts: dict[str, int] = defaultdict(int)
+    hourly_days: dict[str, set[str]] = defaultdict(set)
+    daily_values: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+    for subject, snapshot_key, raw_payload in top20_rows:
+        payload = raw_payload if isinstance(raw_payload, dict) else json.loads(str(raw_payload))
+        if not isinstance(payload, dict) or payload.get("capture_state") != "realtime_complete":
+            continue
+        minute = str(payload.get("minute") or snapshot_key)
+        clock = minute[11:16]
+        values = payload.get("market_values")
+        if not isinstance(values, (list, tuple)) or len(values) < 3:
+            continue
+        amounts = [float(values[index] or 0.0) for index in range(3)]
+        day = str(subject)
+        if "08:00" <= clock < "20:00":
+            hour = f"{clock[:2]}:00"
+            hourly_totals[hour] += sum(amounts)
+            hourly_counts[hour] += 1
+            hourly_days[hour].add(day)
+        # The 15:30 closing-auction execution belongs to the KRX regular day.
+        if "09:00" <= clock < "15:31":
+            for index, amount in enumerate(amounts):
+                daily_values[day][index] += amount
+
+    market_values: dict[str, dict[str, float]] = defaultdict(dict)
+    for subject, raw_payload in market_rows:
+        subject_text = str(subject)
+        raw_day, separator, market = subject_text.partition(":")
+        if not separator or market not in {"kospi", "kosdaq"}:
+            continue
+        payload = raw_payload if isinstance(raw_payload, dict) else json.loads(str(raw_payload))
+        daily = payload.get("daily") if isinstance(payload, dict) else None
+        if not isinstance(daily, list):
+            continue
+        record = next(
+            (value for value in daily if isinstance(value, dict) and str(value.get("dt", "")) == raw_day),
+            None,
+        )
+        if record is None:
+            continue
+        try:
+            market_values[f"{raw_day[:4]}-{raw_day[4:6]}-{raw_day[6:8]}"][market] = (
+                abs(float(str(record.get("trde_prica", 0)).replace(",", ""))) / 100
+            )
+        except (TypeError, ValueError):
+            continue
+
+    hourly = [
+        {
+            "hour": hour,
+            "average_eok": hourly_totals[hour] / hourly_counts[hour],
+            "day_count": len(hourly_days[hour]),
+        }
+        for hour in sorted(hourly_totals, key=lambda value: hourly_totals[value] / hourly_counts[value], reverse=True)
+    ]
+    comparisons = []
+    for day in sorted(daily_values):
+        top20 = daily_values[day]
+        market = market_values.get(day, {})
+        comparisons.append({
+            "trade_date": day,
+            "top20_eok": sum(top20),
+            "top20_market_values": top20,
+            "kospi_eok": float(market.get("kospi", 0.0)),
+            "kosdaq_eok": float(market.get("kosdaq", 0.0)),
+        })
+    return {"hourly": hourly, "comparisons": comparisons}
+
+
 _CREDENTIAL_ACTIVATION_COLUMNS = (
     "operation_id", "provider", "credential_revision", "request_id", "request_digest",
     "profile_id", "account_ref", "run_id", "binding_revision", "committed_at",
 )
+
+
+logger = logging.getLogger(__name__)
+
+
+def _credential_activation_row(row: tuple[object, ...]) -> dict[str, Any]:
+    document = dict(zip(_CREDENTIAL_ACTIVATION_COLUMNS, row, strict=True))
+    committed_at = document["committed_at"]
+    document["committed_at"] = (
+        committed_at.isoformat() if isinstance(committed_at, datetime) else str(committed_at)
+    )
+    return document
 
 
 def _register_credential_profile(cursor: Any, provider: str, profile_id: str, created_at: str, p: str) -> None:
@@ -102,7 +191,7 @@ def _load_credential_activations(cursor: Any, profile_id: str, placeholder: str)
     cursor.execute(f"SELECT {','.join(_CREDENTIAL_ACTIVATION_COLUMNS)} FROM "
                    f"central_credential_activations WHERE profile_id={placeholder} "
                    "ORDER BY credential_revision", (profile_id,))
-    return [dict(zip(_CREDENTIAL_ACTIVATION_COLUMNS, row, strict=True)) for row in cursor.fetchall()]
+    return [_credential_activation_row(row) for row in cursor.fetchall()]
 
 
 def _list_credential_profiles(cursor: Any) -> list[dict[str, Any]]:
@@ -111,13 +200,51 @@ def _list_credential_profiles(cursor: Any) -> list[dict[str, Any]]:
     return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
 
+def _archive_credential_profile(cursor: Any, provider: str, profile_id: str, p: str) -> dict[str, Any]:
+    cursor.execute(
+        f"SELECT provider,lifecycle_state FROM central_credential_profiles WHERE profile_id={p}",
+        (profile_id,),
+    )
+    row = cursor.fetchone()
+    if row is None or row[0] != provider:
+        raise ValueError("PROFILE_NOT_FOUND")
+    if row[1] != "archived":
+        cursor.execute(
+            "UPDATE central_credential_profiles SET lifecycle_state='archived',archived_at=" + p
+            + f" WHERE profile_id={p} AND provider={p}",
+            (datetime.now(timezone.utc).isoformat(), profile_id, provider),
+        )
+    return {"provider": provider, "profile_id": profile_id, "lifecycle_state": "archived"}
+
+
+def _rename_credential_profile(
+    cursor: Any, provider: str, profile_id: str, label: str, p: str,
+) -> dict[str, Any]:
+    label = label.strip() if isinstance(label, str) else ""
+    if not label or len(label) > 120:
+        raise ValueError("PROFILE_LABEL_INVALID")
+    cursor.execute(
+        f"SELECT provider,lifecycle_state,label FROM central_credential_profiles WHERE profile_id={p}",
+        (profile_id,),
+    )
+    row = cursor.fetchone()
+    if row is None or row[0] != provider or row[1] == "archived":
+        raise ValueError("PROFILE_NOT_FOUND")
+    if row[2] != label:
+        cursor.execute(
+            f"UPDATE central_credential_profiles SET label={p} WHERE profile_id={p} AND provider={p}",
+            (label, profile_id, provider),
+        )
+    return {"provider": provider, "profile_id": profile_id, "label": label}
+
+
 def _find_credential_activation(cursor: Any, operation_id: str, provider: str, profile_id: str,
                                 request_id: str, p: str) -> dict[str, Any] | None:
     where = f"operation_id={p}" if operation_id else f"provider={p} AND profile_id={p} AND request_id={p}"
     parameters = (operation_id,) if operation_id else (provider, profile_id, request_id)
     cursor.execute(f"SELECT {','.join(_CREDENTIAL_ACTIVATION_COLUMNS)} FROM central_credential_activations WHERE {where}", parameters)
     row = cursor.fetchone()
-    return dict(zip(_CREDENTIAL_ACTIVATION_COLUMNS, row, strict=True)) if row else None
+    return _credential_activation_row(row) if row else None
 
 
 def _create_credential_profile(cursor: Any, provider: str, request_id: str, label: str,
@@ -419,7 +546,7 @@ def _finalize_credential_activation(cursor: Any, value: dict[str, Any], p: str) 
         raise ValueError("invalid keyed request digest")
     if type(document["credential_revision"]) is not int or document["credential_revision"] < 1:
         raise ValueError("invalid credential revision")
-    datetime.fromisoformat(str(document["committed_at"]))
+    document["committed_at"] = datetime.fromisoformat(str(document["committed_at"])).isoformat()
     provider, profile_id = document["provider"], document["profile_id"]
     disabled = value.get("disabled", False)
     if type(disabled) is not bool:
@@ -486,7 +613,7 @@ def _finalize_credential_activation(cursor: Any, value: dict[str, Any], p: str) 
     return document
 
 
-def _require_execution_ownership(cursor: Any, ownership: dict[str, str] | None,
+def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
                                  value: dict[str, Any], p: str) -> None:
     if ownership is None:
         return  # Offline ledger/import callers keep the existing unowned contract.
@@ -500,6 +627,27 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, str] | None,
     expiry = row[1] if row and isinstance(row[1], datetime) else datetime.fromisoformat(str(row[1])) if row else None
     if not row or row[0] != ownership["owner_token"] or expiry <= datetime.now(timezone.utc):
         raise RuntimeError("EXECUTION_OWNERSHIP_LOST")
+    control_revision = ownership.get("control_revision")
+    if control_revision is not None:
+        cursor.execute(
+            "SELECT document_json FROM central_documents WHERE collection=" + p
+            + " AND owner=" + p + " AND document_key=" + p
+            + (" FOR UPDATE" if p == "%s" else ""),
+            (
+                "execution_mock_automation_control",
+                str(value.get("account_ref") or ""),
+                str(value.get("account_ref") or ""),
+            ),
+        )
+        control_row = cursor.fetchone()
+        control = _json_document(control_row[0]) if control_row else {}
+        if (
+            control.get("desired_state") != "RUNNING"
+            or int(control.get("control_revision", 0)) != int(control_revision)
+            or control.get("active_spec_id") != ownership.get("active_spec_id")
+            or control.get("execution_run_id") != ownership["run_id"]
+        ):
+            raise RuntimeError("MOCK_AUTOMATION_CONTROL_CHANGED")
     if "intent_id" in value:
         cursor.execute(f"SELECT environment,account_ref,run_id FROM central_execution_intents WHERE intent_id={p}",
                        (value["intent_id"],))
@@ -512,6 +660,8 @@ class QueryStore(Protocol):
     def find_credential_activation(self, *, operation_id: str = "", provider: str = "", profile_id: str = "", request_id: str = "") -> dict[str, Any] | None: ...
     def list_credential_profiles(self) -> list[dict[str, Any]]: ...
     def create_credential_profile(self, provider: str, request_id: str, label: str, digest: str) -> dict[str, Any]: ...
+    def archive_credential_profile(self, provider: str, profile_id: str) -> dict[str, Any]: ...
+    def rename_credential_profile(self, provider: str, profile_id: str, label: str) -> dict[str, Any]: ...
     def register_credential_profile(self, provider: str, profile_id: str, created_at: str) -> None: ...
     def finalize_credential_activation(self, value: dict[str, Any]) -> dict[str, Any]: ...
     def load_account_settings(self, scope: dict[str, str]) -> dict[str, Any]: ...
@@ -526,6 +676,7 @@ class QueryStore(Protocol):
     def save_query(self, cache_key: str, api_id: str, expires_at: float, value: StoredQuery) -> None: ...
     def save_realtime_snapshots(self, values: list[dict[str, Any]]) -> None: ...
     def load_realtime_snapshots(self, codes: list[str]) -> list[dict[str, Any]]: ...
+    def load_latest_market_caps(self, codes: list[str]) -> list[dict[str, Any]]: ...
     def save_minute_bars(
         self, values: list[dict[str, Any]], *,
         observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
@@ -547,6 +698,7 @@ class QueryStore(Protocol):
         *, observation: MarketDataObservation[object] | None = None,
     ) -> None: ...
     def load_dataset_snapshots(self, kind: str, subject: str = "", limit: int = 100) -> list[dict[str, Any]]: ...
+    def load_top20_statistics(self, start_date: str, end_date: str) -> dict[str, object]: ...
     def load_observation_revisions(
         self, kind: str, subject: str = "", limit: int = 100,
     ) -> list[dict[str, Any]]: ...
@@ -575,6 +727,9 @@ class QueryStore(Protocol):
     def replace_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
     def load_documents(self, collection: str, owner: str = "", limit: int = 1000, offset: int = 0,
                        updated_after: float = 0.0) -> list[dict[str, Any]]: ...
+    def load_document(
+        self, collection: str, owner: str, key: str,
+    ) -> dict[str, Any] | None: ...
     def load_theme_snapshots(self, *, available_at: float | None = None,
                              limit: int = 100) -> list[dict[str, Any]]: ...
     def enqueue_news_ai_jobs(self, values: list[dict[str, Any]]) -> int: ...
@@ -619,6 +774,9 @@ class QueryStore(Protocol):
     def create_execution_intent(self, value: dict[str, Any], *, ownership: dict[str, str] | None = None) -> bool: ...
     def append_execution_event(self, intent: dict[str, Any], event: dict[str, Any], *, ownership: dict[str, str] | None = None) -> bool: ...
     def load_execution_intent(self, intent_id: str) -> dict[str, Any] | None: ...
+    def load_active_execution_intents(
+        self, environment: str, account_ref: str, run_id: str,
+    ) -> list[dict[str, Any]]: ...
     def find_execution_intent_by_broker_order_id(
         self, environment: str, account_ref: str, run_id: str, broker_order_id: str,
     ) -> dict[str, Any] | None: ...
@@ -627,6 +785,10 @@ class QueryStore(Protocol):
         self, environment: str, account_ref: str, after_sequence: int, limit: int,
     ) -> list[dict[str, Any]]: ...
     def save_execution_account_snapshot(self, value: dict[str, Any], *, ownership: dict[str, str] | None = None) -> bool: ...
+    def load_mock_automation_control(self, account_ref: str) -> dict[str, Any] | None: ...
+    def save_mock_automation_control(
+        self, value: dict[str, Any], *, expected_revision: int,
+    ) -> bool: ...
     def register_account_identity(self, value: dict[str, Any]) -> str: ...
     def append_account_binding(self, value: dict[str, Any]) -> dict[str, Any]: ...
     def load_account_bindings(self) -> list[dict[str, Any]]: ...
@@ -638,6 +800,7 @@ class QueryStore(Protocol):
     def release_execution_runtime(self, owner_key: str, owner_token: str) -> bool: ...
     def close(self) -> None: ...
     def storage_size_bytes(self) -> int | None: ...
+    def storage_breakdown(self) -> list[dict[str, object]]: ...
 
 
 class SQLiteQueryStore:
@@ -662,6 +825,16 @@ class SQLiteQueryStore:
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             return _create_credential_profile(connection.cursor(), provider, request_id, label, digest, "?")
+
+    def archive_credential_profile(self, provider: str, profile_id: str) -> dict[str, Any]:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return _archive_credential_profile(connection.cursor(), provider, profile_id, "?")
+
+    def rename_credential_profile(self, provider: str, profile_id: str, label: str) -> dict[str, Any]:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return _rename_credential_profile(connection.cursor(), provider, profile_id, label, "?")
 
     def register_credential_profile(self, provider: str, profile_id: str, created_at: str) -> None:
         with self._lock, self._connection() as connection:
@@ -736,6 +909,31 @@ class SQLiteQueryStore:
         except OSError:
             return None
 
+    def storage_breakdown(self) -> list[dict[str, object]]:
+        with self._lock, self._connection() as connection:
+            tables = [str(row[0]) for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'central_%'"
+            ).fetchall()]
+            stats: list[tuple[str, int, int]] = []
+            for table in tables:
+                quoted = '"' + table.replace('"', '""') + '"'
+                rows = int(connection.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0])
+                try:
+                    size_row = connection.execute(
+                        "SELECT COALESCE(SUM(pgsize),0) FROM dbstat WHERE name=? OR name IN ("
+                        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?)",
+                        (table, table),
+                    ).fetchone()
+                    size = int(size_row[0]) if size_row else 0
+                except sqlite3.DatabaseError:
+                    size = 0
+                stats.append((table, rows, size))
+            shared = connection.execute(
+                "SELECT collection,COUNT(*),COALESCE(SUM(length(document_json)+length(collection)+"
+                "length(owner)+length(document_key)),0) FROM central_documents GROUP BY collection"
+            ).fetchall() if "central_documents" in tables else []
+        return _storage_breakdown_rows(stats, shared)
+
     def load_query(self, cache_key: str) -> StoredQuery | None:
         with self._lock, self._connection() as connection:
             row = connection.execute(
@@ -789,6 +987,19 @@ class SQLiteQueryStore:
                 "ORDER BY received_at", parameters,
             ).fetchall()
         return [value for row in rows if isinstance((value := json.loads(str(row[0]))), dict)]
+
+    def load_latest_market_caps(self, codes: list[str]) -> list[dict[str, Any]]:
+        """Return the last persisted 0B market cap without reviving stale prices."""
+        if not codes:
+            return []
+        placeholders = ",".join("?" for _ in codes)
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                "SELECT item_key,received_at,event_json FROM central_realtime_latest "
+                f"WHERE event_type='trade' AND item_key IN ({placeholders})",
+                codes,
+            ).fetchall()
+        return _latest_market_cap_rows(rows)
 
     def save_minute_bars(
         self, values: list[dict[str, Any]], *,
@@ -997,6 +1208,21 @@ class SQLiteQueryStore:
             rows = connection.execute(sql, parameters).fetchall()
         return dataset_snapshot_result_rows(rows)
 
+    def load_top20_statistics(self, start_date: str, end_date: str) -> dict[str, object]:
+        with self._lock, self._connection() as connection:
+            top20_rows = connection.execute(
+                "SELECT subject,snapshot_key,payload_json FROM central_dataset_snapshots "
+                "WHERE kind='top20_index' AND subject>=? AND subject<=? ORDER BY snapshot_key",
+                (start_date, end_date),
+            ).fetchall()
+            start_raw, end_raw = start_date.replace("-", ""), end_date.replace("-", "")
+            market_rows = connection.execute(
+                "SELECT subject,payload_json FROM central_dataset_snapshots "
+                "WHERE kind='market_index_chart' AND subject>=? AND subject<? ORDER BY subject",
+                (start_raw, end_raw + "~"),
+            ).fetchall()
+        return _top20_statistics_document(top20_rows, market_rows)
+
     def load_observation_revisions(
         self, kind: str, subject: str = "", limit: int = 100,
     ) -> list[dict[str, Any]]:
@@ -1192,6 +1418,17 @@ class SQLiteQueryStore:
         with self._lock, self._connection() as connection:
             rows = connection.execute(sql, parameters).fetchall()
         return document_result_rows(rows)
+
+    def load_document(
+        self, collection: str, owner: str, key: str,
+    ) -> dict[str, Any] | None:
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT owner,document_key,updated_at,document_json "
+                "FROM central_documents WHERE collection=? AND owner=? AND document_key=?",
+                (collection, owner, key),
+            ).fetchone()
+        return document_result_rows((row,))[0] if row is not None else None
 
     def load_theme_snapshots(
         self, *, available_at: float | None = None, limit: int = 100,
@@ -1702,6 +1939,54 @@ class SQLiteQueryStore:
             )
         return cursor.rowcount == 1
 
+    def load_mock_automation_control(self, account_ref: str) -> dict[str, Any] | None:
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT document_json FROM central_documents WHERE collection=? AND owner=? "
+                "AND document_key=?",
+                ("execution_mock_automation_control", account_ref, account_ref),
+            ).fetchone()
+        return _json_document(row[0]) if row else None
+
+    def load_active_execution_intents(
+        self, environment: str, account_ref: str, run_id: str,
+    ) -> list[dict[str, Any]]:
+        terminal = ("FILLED", "CANCELLED", "REJECTED", "EXPIRED")
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                "SELECT document_json FROM central_execution_intents WHERE environment=? "
+                "AND account_ref=? AND run_id=? AND state NOT IN (?,?,?,?) ORDER BY created_at",
+                (environment, account_ref, run_id, *terminal),
+            ).fetchall()
+        return [_json_document(row[0]) for row in rows]
+
+    def save_mock_automation_control(
+        self, value: dict[str, Any], *, expected_revision: int,
+    ) -> bool:
+        account_ref = str(value.get("account_ref") or "")
+        revision = int(value.get("control_revision") or 0)
+        if not account_ref or revision != expected_revision + 1:
+            raise ValueError("invalid mock automation control revision")
+        document = _event_document(value)
+        changed_at = datetime.fromisoformat(str(value["changed_at"])).timestamp()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT document_json FROM central_documents WHERE collection=? AND owner=? "
+                "AND document_key=?",
+                ("execution_mock_automation_control", account_ref, account_ref),
+            ).fetchone()
+            current = int(_json_document(row[0]).get("control_revision", 0)) if row else 0
+            if current != expected_revision:
+                return False
+            connection.execute(
+                "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
+                "updated_at=excluded.updated_at,document_json=excluded.document_json",
+                ("execution_mock_automation_control", account_ref, account_ref, changed_at, document),
+            )
+        return True
+
     def acquire_execution_runtime(
         self, owner_key: str, owner_token: str, now: str, lease_expires_at: str,
     ) -> bool:
@@ -1758,6 +2043,16 @@ class PostgresQueryStore:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
             return _create_credential_profile(cursor, provider, request_id, label, digest, "%s")
+
+    def archive_credential_profile(self, provider: str, profile_id: str) -> dict[str, Any]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
+            return _archive_credential_profile(cursor, provider, profile_id, "%s")
+
+    def rename_credential_profile(self, provider: str, profile_id: str, label: str) -> dict[str, Any]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
+            return _rename_credential_profile(cursor, provider, profile_id, label, "%s")
 
     def register_credential_profile(self, provider: str, profile_id: str, created_at: str) -> None:
         with self._connect() as connection, connection.cursor() as cursor:
@@ -1845,6 +2140,23 @@ class PostgresQueryStore:
             row = cursor.fetchone()
         return int(row[0]) if row else None
 
+    def storage_breakdown(self) -> list[dict[str, object]]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT relname,COALESCE(n_live_tup,0)::bigint,"
+                "pg_total_relation_size(relid)::bigint "
+                "FROM pg_stat_user_tables WHERE schemaname=current_schema() "
+                "AND relname LIKE 'central_%' ORDER BY relname"
+            )
+            stats = [(str(row[0]), int(row[1]), int(row[2])) for row in cursor.fetchall()]
+            cursor.execute(
+                "SELECT collection,COUNT(*)::bigint,COALESCE(SUM(pg_column_size(document_json)+"
+                "octet_length(collection)+octet_length(owner)+octet_length(document_key)),0)::bigint "
+                "FROM central_documents GROUP BY collection"
+            )
+            shared = [(str(row[0]), int(row[1]), int(row[2])) for row in cursor.fetchall()]
+        return _storage_breakdown_rows(stats, shared)
+
     def save_realtime_snapshots(self, values: list[dict[str, Any]]) -> None:
         if not values:
             return
@@ -1866,6 +2178,19 @@ class PostgresQueryStore:
             )
             rows = cursor.fetchall()
         return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+
+    def load_latest_market_caps(self, codes: list[str]) -> list[dict[str, Any]]:
+        """Return the last persisted 0B market cap without a freshness cutoff."""
+        if not codes:
+            return []
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT item_key,received_at,event_json FROM central_realtime_latest "
+                "WHERE event_type='trade' AND item_key=ANY(%s)",
+                (codes,),
+            )
+            rows = cursor.fetchall()
+        return _latest_market_cap_rows(rows)
 
     def save_minute_bars(
         self, values: list[dict[str, Any]], *,
@@ -2050,24 +2375,60 @@ class PostgresQueryStore:
         *, observation: MarketDataObservation[object] | None = None,
     ) -> None:
         saved_at = time()
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
-                "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
-                "saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json",
-                (kind, subject, snapshot_key, saved_at, json.dumps(payload, ensure_ascii=False)),
-            )
-            if observation is not None:
+        started_at = monotonic()
+        payload_json = json.dumps(payload, ensure_ascii=False)
+        serialized_at = monotonic()
+        connection = self._connect()
+        connected_at = monotonic()
+        snapshot_at = connected_at
+        metadata_at = connected_at
+        revision_at = connected_at
+        try:
+            with connection.cursor() as cursor:
                 cursor.execute(
-                    _market_metadata_upsert_sql("%s", "EXCLUDED"),
-                    market_metadata_storage_values(snapshot_key, observation),
+                    "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
+                    "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
+                    "saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json",
+                    (kind, subject, snapshot_key, saved_at, payload_json),
                 )
-                if self._observation_history_enabled and kind in RESEARCH_OBSERVATION_KINDS:
-                    _append_postgres_observation_revision(
-                        cursor, kind, subject, snapshot_key, payload, observation,
+                snapshot_at = monotonic()
+                metadata_at = snapshot_at
+                revision_at = snapshot_at
+                if observation is not None:
+                    cursor.execute(
+                        _market_metadata_upsert_sql("%s", "EXCLUDED"),
+                        market_metadata_storage_values(snapshot_key, observation),
                     )
+                    metadata_at = monotonic()
+                    revision_at = metadata_at
+                    if self._observation_history_enabled and kind in RESEARCH_OBSERVATION_KINDS:
+                        _append_postgres_observation_revision(
+                            cursor, kind, subject, snapshot_key, payload, observation,
+                        )
+                        revision_at = monotonic()
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        completed_at = monotonic()
+        elapsed_ms = round((completed_at - started_at) * 1000)
+        if elapsed_ms >= 1000:
+            logger.warning(
+                "slow PostgreSQL dataset snapshot save kind=%s subject=%s key=%s total_ms=%d "
+                "serialize_ms=%d connect_ms=%d snapshot_ms=%d metadata_ms=%d revision_ms=%d commit_close_ms=%d",
+                kind, subject, snapshot_key, elapsed_ms,
+                round((serialized_at - started_at) * 1000),
+                round((connected_at - serialized_at) * 1000),
+                round((snapshot_at - connected_at) * 1000),
+                round((metadata_at - snapshot_at) * 1000),
+                round((revision_at - metadata_at) * 1000),
+                round((completed_at - revision_at) * 1000),
+            )
 
     def load_dataset_snapshots(self, kind: str, subject: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        started_at = monotonic()
         sql = "SELECT subject,snapshot_key,saved_at,payload_json FROM central_dataset_snapshots WHERE kind=%s"
         parameters: list[object] = [kind]
         if subject:
@@ -2075,10 +2436,42 @@ class PostgresQueryStore:
             parameters.append(subject)
         sql += " ORDER BY snapshot_key DESC LIMIT %s"
         parameters.append(bounded_limit(limit, 5000))
+        connection_started_at = monotonic()
         with self._connect() as connection, connection.cursor() as cursor:
+            connected_at = monotonic()
             cursor.execute(sql, parameters)
             rows = cursor.fetchall()
+            fetched_at = monotonic()
+        completed_at = monotonic()
+        elapsed_ms = round((completed_at - started_at) * 1000)
+        if elapsed_ms >= 1000:
+            logger.warning(
+                "slow PostgreSQL dataset snapshot load kind=%s subject=%s limit=%d total_ms=%d "
+                "prepare_ms=%d connect_ms=%d query_ms=%d commit_close_ms=%d",
+                kind, subject, limit, elapsed_ms,
+                round((connection_started_at - started_at) * 1000),
+                round((connected_at - connection_started_at) * 1000),
+                round((fetched_at - connected_at) * 1000),
+                round((completed_at - fetched_at) * 1000),
+            )
         return dataset_snapshot_result_rows(rows)
+
+    def load_top20_statistics(self, start_date: str, end_date: str) -> dict[str, object]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT subject,snapshot_key,payload_json FROM central_dataset_snapshots "
+                "WHERE kind='top20_index' AND subject>=%s AND subject<=%s ORDER BY snapshot_key",
+                (start_date, end_date),
+            )
+            top20_rows = cursor.fetchall()
+            start_raw, end_raw = start_date.replace("-", ""), end_date.replace("-", "")
+            cursor.execute(
+                "SELECT subject,payload_json FROM central_dataset_snapshots "
+                "WHERE kind='market_index_chart' AND subject>=%s AND subject<%s ORDER BY subject",
+                (start_raw, end_raw + "~"),
+            )
+            market_rows = cursor.fetchall()
+        return _top20_statistics_document(top20_rows, market_rows)
 
     def load_observation_revisions(
         self, kind: str, subject: str = "", limit: int = 100,
@@ -2284,6 +2677,18 @@ class PostgresQueryStore:
             cursor.execute(sql, parameters)
             rows = cursor.fetchall()
         return document_result_rows(rows)
+
+    def load_document(
+        self, collection: str, owner: str, key: str,
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT owner,document_key,updated_at,document_json "
+                "FROM central_documents WHERE collection=%s AND owner=%s AND document_key=%s",
+                (collection, owner, key),
+            )
+            row = cursor.fetchone()
+        return document_result_rows((row,))[0] if row is not None else None
 
     def load_theme_snapshots(
         self, *, available_at: float | None = None, limit: int = 100,
@@ -2502,7 +2907,7 @@ class PostgresQueryStore:
                 cursor.execute(
                     "INSERT INTO central_vi_event_revisions(event_id,event_key,stock_code,event_kind,vi_type,"
                     "effective_at,received_at,available_at,price,direction,trigger_count,exchange,source,document_json) "
-                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(event_key) DO NOTHING",
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                     _vi_event_values(value),
                 )
                 inserted += max(0, cursor.rowcount)
@@ -2692,6 +3097,61 @@ class PostgresQueryStore:
             )
             return cursor.rowcount == 1
 
+    def load_mock_automation_control(self, account_ref: str) -> dict[str, Any] | None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT document_json FROM central_documents WHERE collection=%s AND owner=%s "
+                "AND document_key=%s",
+                ("execution_mock_automation_control", account_ref, account_ref),
+            )
+            row = cursor.fetchone()
+        return _json_document(row[0]) if row else None
+
+    def load_active_execution_intents(
+        self, environment: str, account_ref: str, run_id: str,
+    ) -> list[dict[str, Any]]:
+        terminal = ("FILLED", "CANCELLED", "REJECTED", "EXPIRED")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT document_json FROM central_execution_intents WHERE environment=%s "
+                "AND account_ref=%s AND run_id=%s AND state NOT IN (%s,%s,%s,%s) ORDER BY created_at",
+                (environment, account_ref, run_id, *terminal),
+            )
+            rows = cursor.fetchall()
+        return [_json_document(row[0]) for row in rows]
+
+    def save_mock_automation_control(
+        self, value: dict[str, Any], *, expected_revision: int,
+    ) -> bool:
+        account_ref = str(value.get("account_ref") or "")
+        revision = int(value.get("control_revision") or 0)
+        if not account_ref or revision != expected_revision + 1:
+            raise ValueError("invalid mock automation control revision")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (
+                f"mock-automation-control:{account_ref}",
+            ))
+            cursor.execute(
+                "SELECT document_json FROM central_documents WHERE collection=%s AND owner=%s "
+                "AND document_key=%s FOR UPDATE",
+                ("execution_mock_automation_control", account_ref, account_ref),
+            )
+            row = cursor.fetchone()
+            current = int(_json_document(row[0]).get("control_revision", 0)) if row else 0
+            if current != expected_revision:
+                return False
+            cursor.execute(
+                "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
+                "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
+                "updated_at=EXCLUDED.updated_at,document_json=EXCLUDED.document_json",
+                (
+                    "execution_mock_automation_control", account_ref, account_ref,
+                    datetime.fromisoformat(str(value["changed_at"])).timestamp(),
+                    json.dumps(value, ensure_ascii=False),
+                ),
+            )
+        return True
+
     def acquire_execution_runtime(
         self, owner_key: str, owner_token: str, now: str, lease_expires_at: str,
     ) -> bool:
@@ -2849,6 +3309,33 @@ def _json_document(value: object) -> dict[str, Any]:
     if not isinstance(decoded, dict):
         raise ValueError("stored execution document must be an object")
     return decoded
+
+
+def _latest_market_cap_rows(
+    rows: list[tuple[object, object, object]],
+) -> list[dict[str, Any]]:
+    """Decode only the durable market-cap field from latest 0B snapshots."""
+    result: list[dict[str, Any]] = []
+    for raw_code, raw_received_at, raw_event in rows:
+        try:
+            event = _json_document(raw_event)
+            payload = event.get("payload")
+            raw_market_cap = payload.get("market_cap_eok") if isinstance(payload, dict) else None
+            market_cap = float(raw_market_cap)
+            received_at = float(raw_received_at)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        code = str(raw_code).strip()
+        if not code or market_cap <= 0:
+            continue
+        result.append({
+            "code": code,
+            "market_cap_eok": market_cap,
+            "observed_at": datetime.fromtimestamp(
+                received_at, timezone.utc,
+            ).isoformat(),
+        })
+    return result
 
 
 def _execution_intent_values(value: dict[str, Any], document: str) -> tuple[object, ...]:
@@ -3125,6 +3612,96 @@ def create_query_store(
             database_url, observation_history_enabled=observation_history_enabled,
         )
     raise ValueError("중앙 DB 주소는 sqlite:/// 또는 postgresql:// 형식이어야 합니다.")
+
+
+_STORAGE_CATEGORY_LABELS = {
+    "news": "뉴스",
+    "market": "주식 누적자료",
+    "research": "연구·시뮬레이션",
+    "account": "계좌·주문",
+    "other": "설정·기타",
+}
+
+
+def _storage_category(name: str, *, collection: bool = False) -> str:
+    normalized = str(name).strip().lower()
+    if (
+        normalized.startswith("news_")
+        if collection
+        else normalized.startswith("central_news_")
+    ):
+        return "news"
+    if collection and normalized.startswith(("journal_", "execution_")):
+        return "account"
+    if collection and normalized.startswith(("research_", "shadow_")):
+        return "research"
+    if collection and normalized in {
+        "stock_fundamentals", "stock_nxt_eligibility", "historical_highs",
+        "top20_daily_entrants", "candidate_flow_capture", "candidate_flow_finalization",
+        "market_data_coverage", "market_data_coverage_daily", "market_data_coverage_intraday",
+        "market_index_chart_coverage", "condition_search_status", "market_event_sessions",
+    }:
+        return "market"
+    if not collection and normalized.startswith(("central_account_", "central_execution_")):
+        return "account"
+    if not collection and normalized.startswith(("central_research_", "central_shadow_")):
+        return "research"
+    if not collection and normalized in {
+        "central_second_trade_bars", "central_minute_bars", "central_daily_bars",
+        "central_dataset_snapshots", "central_realtime_latest", "central_external_bars",
+        "central_market_data_observation_meta", "central_observation_revisions",
+        "central_minute_bar_operations", "central_hot_cohort_current",
+        "central_hot_cohort_revisions", "central_upper_limit_fact_revisions",
+        "central_vi_event_revisions",
+    }:
+        return "market"
+    return "other"
+
+
+def _storage_breakdown_rows(
+    table_stats: list[tuple[str, int, int]],
+    shared_documents: list[tuple[object, object, object]],
+) -> list[dict[str, object]]:
+    totals = {
+        key: {"category": key, "label": label, "estimated_bytes": 0, "rows": 0, "tables": 0}
+        for key, label in _STORAGE_CATEGORY_LABELS.items()
+    }
+    shared_table_bytes = 0
+    for table, rows, size in table_stats:
+        if table == "central_documents":
+            shared_table_bytes = max(0, int(size))
+            continue
+        category = _storage_category(table)
+        totals[category]["estimated_bytes"] += max(0, int(size))
+        totals[category]["rows"] += max(0, int(rows))
+        totals[category]["tables"] += 1
+
+    documents = []
+    logical_total = 0
+    for collection, rows, logical_bytes in shared_documents:
+        category = _storage_category(str(collection), collection=True)
+        count = max(0, int(rows))
+        amount = max(0, int(logical_bytes))
+        documents.append((category, count, amount))
+        logical_total += amount
+    allocated = 0
+    document_categories: set[str] = set()
+    for index, (category, count, amount) in enumerate(documents):
+        document_categories.add(category)
+        if shared_table_bytes and logical_total:
+            share = (
+                shared_table_bytes - allocated
+                if index == len(documents) - 1
+                else round(shared_table_bytes * amount / logical_total)
+            )
+            allocated += share
+            totals[category]["estimated_bytes"] += max(0, share)
+        totals[category]["rows"] += count
+    if shared_table_bytes and not logical_total:
+        totals["other"]["estimated_bytes"] += shared_table_bytes
+    for category in document_categories:
+        totals[category]["tables"] += 1
+    return [totals[key] for key in ("news", "market", "research", "account", "other")]
 
 
 def _external_bar_values(value: dict[str, Any]) -> tuple[object, ...]:

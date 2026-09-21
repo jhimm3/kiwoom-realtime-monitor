@@ -25,6 +25,7 @@ class ExecutionRuntime:
     def __init__(
         self, lifecycle: OrderLifecycle, repository: ExecutionRepository,
         *, account_ref: str, run_id: str, owner_token: str,
+        now_provider: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         if not account_ref.strip() or not run_id.strip() or not owner_token.strip():
             raise ValueError("account_ref, run_id and owner_token are required")
@@ -33,6 +34,7 @@ class ExecutionRuntime:
         self.account_ref = account_ref
         self.run_id = run_id
         self.owner_token = owner_token
+        self._now = now_provider
         self._active = False
         self._lease_seconds = 60
         self._operation_lock = RLock()
@@ -101,6 +103,15 @@ class ExecutionRuntime:
         """Read a deterministic intent before deciding whether a retry may submit."""
         return self._repository.load(intent_id)
 
+    def load_active_intents(self) -> tuple[ExecutionRecord, ...]:
+        return self._repository.active_intents("mock", self.account_ref, self.run_id)
+
+    def server_now(self) -> datetime:
+        value = self._now()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("execution runtime clock must be timezone-aware")
+        return value
+
     @contextmanager
     def automation_decision_guard(self) -> Iterator[None]:
         """Serialize one safety check and submission while keeping manual entry closed."""
@@ -115,16 +126,25 @@ class ExecutionRuntime:
 
     def submit_automation_intent(
         self, intent: OrderIntent, account: AccountSnapshot, *, reference_price: int | None = None,
+        spec_id: str, control_revision: int,
     ) -> ExecutionRecord:
         """Submit one approved automation intent without leaving the account gate open."""
         with self._operation_lock:
             self._require_active(intent)
             if self._new_orders_enabled:
                 raise RuntimeError("MOCK_AUTOMATION_REQUIRES_CLOSED_ORDER_GATE")
+            self._repository.bind_automation_control(
+                spec_id=spec_id, control_revision=control_revision,
+            )
             self._new_orders_enabled = True
             try:
-                self._repository.save_account_snapshot("mock", account, datetime.now(timezone.utc))
-                self._lifecycle.queue(intent)
+                try:
+                    self._repository.save_account_snapshot("mock", account, self.server_now())
+                    self._lifecycle.queue(intent)
+                finally:
+                    # The control revision is consumed by the durable QUEUED claim.
+                    # Broker submission/reconciliation must continue when a later STOP arrives.
+                    self._repository.clear_automation_control()
                 return self._lifecycle.submit(
                     intent.intent_id, account, reference_price=reference_price,
                 )
@@ -181,6 +201,10 @@ class ManualMockOrderGateway:
         self._commands: set[asyncio.Task[ExecutionRecord]] = set()
         self._drain_task: asyncio.Task[None] | None = None
         self._closed = False
+        self._manual_submit_enabled = True
+
+    def set_manual_submit_enabled(self, enabled: bool) -> None:
+        self._manual_submit_enabled = bool(enabled)
 
     async def begin_credential_change(self) -> None:
         self._accepting = False
@@ -227,6 +251,8 @@ class ManualMockOrderGateway:
         expires_seconds: int,
         scoped: bool = False,
     ) -> ExecutionRecord:
+        if not self._manual_submit_enabled:
+            raise RuntimeError("MOCK_ACCOUNT_AUTOMATIC_MODE")
         return await self._command(lambda: self._submit_limit(request_id=request_id, symbol=symbol, side=side,
             quantity=quantity, limit_price=limit_price, expires_seconds=expires_seconds, scoped=scoped))
 

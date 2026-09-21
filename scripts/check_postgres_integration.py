@@ -26,6 +26,7 @@ from kiwoom_monitor.central_server.database import (
     _save_postgres_news_body,
     _save_postgres_news_event,
     _save_postgres_news_source_page,
+    _save_postgres_shadow_evaluation,
     _load_market_profile_settings,
     _save_market_profile_settings,
     _load_account_settings,
@@ -53,6 +54,36 @@ _A4B_COLLECTIONS = (
     "journal_v2_news_links",
     "journal_v2_sync_states",
 )
+
+
+class _EphemeralVaultMetadata:
+    """Keep a temporary vault's recovery fence out of the live metadata store."""
+
+    def __init__(self, delegate: object):
+        self._delegate = delegate
+        self._documents: dict[tuple[str, str], dict[str, object]] = {}
+
+    def load_documents(
+        self, collection: str, owner: str = "", limit: int = 1000, offset: int = 0,
+    ) -> list[dict[str, object]]:
+        if collection != "credential_vault_state":
+            return self._delegate.load_documents(collection, owner, limit, offset)
+        rows = [
+            {"owner": row_owner, "key": key, "document": dict(document)}
+            for (row_owner, key), document in self._documents.items()
+            if not owner or row_owner == owner
+        ]
+        return rows[offset:offset + limit]
+
+    def upsert_documents(self, collection: str, values: list[dict[str, object]]) -> None:
+        if collection != "credential_vault_state":
+            self._delegate.upsert_documents(collection, values)
+            return
+        for value in values:
+            self._documents[(str(value["owner"]), str(value["key"]))] = dict(value["document"])
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._delegate, name)
 
 
 def _journal_news_link_key(document: dict[str, object]) -> str:
@@ -258,6 +289,56 @@ def _exercise_real_recovery_transaction(store, profile_id):
     checks["real_account_recovery_rollback_preserved"] = before == store.load_documents("real_account_recovery", owner)
     checks["real_account_event_rollback_preserved"] = before_events == store.load_documents("real_account_event", owner)
     return checks
+
+
+def _exercise_shadow_transaction(store, marker: str, observed_at: datetime) -> bool:
+    """Verify a candidate entirely inside rollback so live pollers cannot observe it."""
+    decision = {
+        "decision_id": f"decision-{marker}", "decided_at": observed_at.isoformat(),
+        "final_action": "ENTER",
+    }
+    candidate = {
+        "event_id": f"candidate-{marker}", "symbol": marker,
+        "available_at": observed_at.isoformat(),
+    }
+    visible_inside = False
+    with store._connect() as connection, connection.cursor() as cursor:
+        try:
+            cursor.execute(
+                "INSERT INTO central_shadow_monitor_state VALUES(%s,%s,%s) "
+                "ON CONFLICT(monitor_id) DO UPDATE SET "
+                "updated_at=EXCLUDED.updated_at,document_json=EXCLUDED.document_json",
+                (marker, observed_at, json.dumps({"cursor": 1, "quality": {"status": "READY"}})),
+            )
+            _save_postgres_shadow_evaluation(
+                cursor, marker, decision, candidate,
+                (observed_at + timedelta(minutes=1)).isoformat(),
+            )
+            cursor.execute(
+                "SELECT count(*) FROM central_shadow_monitor_state WHERE monitor_id=%s",
+                (marker,),
+            )
+            state_count = int(cursor.fetchone()[0])
+            cursor.execute(
+                "SELECT count(*) FROM central_shadow_candidate_events "
+                "WHERE monitor_id=%s AND event_id=%s",
+                (marker, candidate["event_id"]),
+            )
+            visible_inside = state_count == 1 and int(cursor.fetchone()[0]) == 1
+        finally:
+            connection.rollback()
+    with store._connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM central_shadow_monitor_state WHERE monitor_id=%s",
+            (marker,),
+        )
+        state_after = int(cursor.fetchone()[0])
+        cursor.execute(
+            "SELECT count(*) FROM central_shadow_candidate_events WHERE monitor_id=%s",
+            (marker,),
+        )
+        candidate_after = int(cursor.fetchone()[0])
+    return visible_inside and state_after == 0 and candidate_after == 0
 
 
 def main() -> int:
@@ -638,23 +719,8 @@ def main() -> int:
             "updated_at": now,
         }])
         checks["external_bars"] = store.load_external_bars(marker, "5m", 1)[0]["close"] == 1.5
-        shadow_decision = {
-            "decision_id": f"decision-{marker}", "decided_at": observed_at.isoformat(),
-            "final_action": "ENTER",
-        }
-        shadow_candidate = {
-            "event_id": f"candidate-{marker}", "symbol": marker,
-            "available_at": observed_at.isoformat(),
-        }
-        store.save_shadow_monitor_state(marker, {"cursor": 1, "quality": {"status": "READY"}})
-        store.save_shadow_evaluation(
-            marker, shadow_decision, shadow_candidate,
-            (observed_at + timedelta(minutes=1)).isoformat(),
-        )
-        shadow_page = store.load_shadow_candidates(0, 1000)
-        checks["shadow_candidates"] = (
-            store.load_shadow_monitor_state(marker)["cursor"] == 1
-            and any(value.get("event_id") == shadow_candidate["event_id"] for value in shadow_page["events"])
+        checks["shadow_candidates"] = _exercise_shadow_transaction(
+            store, marker, observed_at,
         )
         execution_intent_id = f"intent-{marker}"
         execution_intent = {
@@ -741,7 +807,9 @@ def main() -> int:
         )
         from kiwoom_monitor.central_server.credential_store import CredentialStore
         with tempfile.TemporaryDirectory(prefix="credential-integration-") as directory:
-            vault = CredentialStore(directory, store)
+            # A temporary key directory must not share the live vault recovery fence.
+            # Account/profile activation still exercises the real PostgreSQL store.
+            vault = CredentialStore(directory, _EphemeralVaultMetadata(store))
             try:
                 # Generate ephemeral credentials; output contains only boolean check results.
                 credentials = {"app_key": uuid.uuid4().hex, "secret_key": uuid.uuid4().hex}

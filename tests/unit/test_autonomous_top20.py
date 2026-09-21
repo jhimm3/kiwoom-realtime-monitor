@@ -31,15 +31,24 @@ class _Broker:
     async def request(self, api_id, path, body, **kwargs):
         self.calls.append((api_id, body, kwargs))
         if api_id == "ka00198":
-            return BrokerResult({"item_inq_rank": [
-                {"dt": "20260910", "tm": "090000", "stk_cd": "A005930", "bigd_rank": "1"},
-                {"dt": "20260910", "tm": "090000", "stk_cd": "000660_AL", "bigd_rank": "2"},
-            ]}, False, "")
+            return BrokerResult({"item_inq_rank": _ranking_rows("090000")}, False, "")
         if api_id == "ka10100":
             return BrokerResult({"nxtEnable": "Y" if body["stk_cd"] == "005930" else "N"}, False, "")
         if api_id == "ka10001":
             return BrokerResult({"mac": "1000", "dstr_rt": "40"}, False, "")
         raise AssertionError(api_id)
+
+
+def _ranking_rows(clock: str) -> list[dict[str, str]]:
+    rows = [
+        {"dt": "20260910", "tm": clock, "stk_cd": "A005930", "stk_nm": "삼성전자", "bigd_rank": "1"},
+        {"dt": "20260910", "tm": clock, "stk_cd": "000660_AL", "stk_nm": "SK하이닉스", "bigd_rank": "2"},
+    ]
+    rows.extend({
+        "dt": "20260910", "tm": clock, "stk_cd": f"{100000 + rank:06d}",
+        "stk_nm": f"종목{rank}", "bigd_rank": str(rank),
+    } for rank in range(3, 21))
+    return rows
 
 
 class _FlakyIndexStore:
@@ -118,16 +127,69 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             [call.args[0] for call in service.refresh_ranking_once.await_args_list],
         )
 
+    async def test_after_close_backfill_does_not_block_next_ranking_slot(self) -> None:
+        moments = iter((
+            datetime(2026, 9, 21, 20, 19, 10),
+            datetime(2026, 9, 21, 20, 19, 30),
+        ))
+        current = datetime(2026, 9, 21, 20, 19, 30)
+
+        def now_provider() -> datetime:
+            nonlocal current
+            current = next(moments, current)
+            return current
+
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), object(), now_provider=now_provider,
+        )  # type: ignore[arg-type]
+        service.refresh_ranking_once = AsyncMock(return_value=())  # type: ignore[method-assign]
+        backfill_started = asyncio.Event()
+
+        async def blocked_backfill(_day: str) -> None:
+            backfill_started.set()
+            await asyncio.Event().wait()
+
+        service.backfill_day = blocked_backfill  # type: ignore[method-assign]
+        sleep_count = 0
+
+        async def stop_after_two_iterations(_delay: float) -> None:
+            nonlocal sleep_count
+            sleep_count += 1
+            await asyncio.sleep(0)
+            if sleep_count >= 2:
+                raise asyncio.CancelledError()
+
+        real_sleep = asyncio.sleep
+
+        async def controlled_sleep(delay: float) -> None:
+            if delay == 0:
+                await real_sleep(0)
+                return
+            await stop_after_two_iterations(delay)
+
+        with patch(
+            "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
+            side_effect=controlled_sleep,
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await service._schedule_loop()
+
+        self.assertTrue(backfill_started.is_set())
+        self.assertEqual(2, service.refresh_ranking_once.await_count)
+        for task in tuple(service._fundamentals_tasks):
+            task.cancel()
+        await asyncio.gather(*tuple(service._fundamentals_tasks), return_exceptions=True)
+
     async def test_stale_kiwoom_ranking_retries_with_adaptive_delay(self) -> None:
         class StaleRankingBroker(_Broker):
             async def request(self, api_id, path, body, **kwargs):
                 self.calls.append((api_id, body, kwargs))
                 attempt = len(self.calls)
                 clock = "010530" if attempt >= 5 else "010500"
-                return BrokerResult({"item_inq_rank": [{
-                    "dt": "20260915", "tm": clock,
-                    "stk_cd": "005930", "bigd_rank": "1",
-                }]}, False, "")
+                rows = _ranking_rows(clock)
+                for row in rows:
+                    row["dt"] = "20260915"
+                return BrokerResult({"item_inq_rank": rows}, False, "")
 
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
@@ -165,6 +227,40 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
             broker = PartialRankingBroker()
+            service = AutonomousTop20Service(broker, RealtimeHub(), store)
+            with patch(
+                "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
+                new=AsyncMock(),
+            ) as sleeper:
+                codes = await service.refresh_ranking_once(
+                    datetime(2026, 9, 15, 1, 5, 30),
+                )
+            if service._market_catalog_task is not None:
+                await service._market_catalog_task
+            snapshots = store.load_dataset_snapshots(
+                "top20_membership", "2026-09-15", 1,
+            )
+            store.close()
+
+        self.assertEqual(20, len(codes))
+        self.assertEqual(3, len(broker.calls))
+        self.assertEqual([0.25, 0.25], [call.args[0] for call in sleeper.await_args_list])
+        self.assertEqual(20, len(snapshots[0]["payload"]["items"]))
+
+    async def test_latest_timestamp_with_short_rank_list_is_retried_before_storage(self) -> None:
+        class ShortRankingBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                self.calls.append((api_id, body, kwargs))
+                count = 20 if len(self.calls) >= 3 else 3
+                return BrokerResult({"item_inq_rank": [{
+                    "dt": "20260915", "tm": "010530", "bigd_rank": str(rank),
+                    "stk_cd": f"{rank:06d}", "stk_nm": f"종목{rank}",
+                } for rank in range(1, count + 1)]}, False, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            broker = ShortRankingBroker()
             service = AutonomousTop20Service(broker, RealtimeHub(), store)
             with patch(
                 "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
@@ -528,14 +624,15 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             entrants = store.load_documents("top20_daily_entrants", "2026-09-10")
             requested, nxt = hub.requested_codes()
             store.close()
-        self.assertEqual(("005930", "000660"), codes)
-        self.assertEqual(["005930", "000660"], snapshots[0]["payload"]["codes"])
+        self.assertEqual(("005930", "000660"), codes[:2])
+        self.assertEqual(20, len(codes))
+        self.assertEqual(["005930", "000660"], snapshots[0]["payload"]["codes"][:2])
         self.assertIsNotNone(metadata)
         assert metadata is not None
         self.assertEqual(DataCompleteness.COMPLETE, metadata.completeness)
         self.assertEqual(ObservationOrigin.QUERY, metadata.origin)
-        self.assertEqual({"005930", "000660"}, {row["key"] for row in entrants})
-        self.assertEqual({"005930", "000660"}, set(requested))
+        self.assertEqual(set(codes), {row["key"] for row in entrants})
+        self.assertEqual(set(codes), set(requested))
         self.assertEqual(("005930",), nxt)
         self.assertEqual("KOSPI", service._markets["005930"])
 
@@ -552,10 +649,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                     clock = "090030" if len([
                         call for call in self.calls if call[0] == "ka00198"
                     ]) >= 2 else "090000"
-                    return BrokerResult({"item_inq_rank": [
-                        {"dt": "20260910", "tm": clock, "stk_cd": "A005930", "bigd_rank": "1"},
-                        {"dt": "20260910", "tm": clock, "stk_cd": "000660_AL", "bigd_rank": "2"},
-                    ]}, False, "")
+                    return BrokerResult({"item_inq_rank": _ranking_rows(clock)}, False, "")
                 return await super().request(api_id, path, body, **kwargs)
 
         def slow_catalog():
@@ -583,7 +677,8 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                 ranking_calls = [call for call in broker.calls if call[0] == "ka00198"]
                 requested, _nxt = hub.requested_codes()
                 self.assertEqual(2, len(ranking_calls))
-                self.assertEqual({"005930", "000660"}, set(requested))
+                self.assertEqual(20, len(requested))
+                self.assertEqual({"005930", "000660"}, set(requested[:2]))
             finally:
                 release_catalog.set()
                 release_nxt.set()

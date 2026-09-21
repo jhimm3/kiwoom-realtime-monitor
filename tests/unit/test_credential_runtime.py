@@ -16,6 +16,62 @@ from kiwoom_monitor.central_server.credential_store import CredentialStore
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 
 
+class CredentialArchiveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_renames_account_profile_without_changing_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "central.sqlite")
+            store.initialize()
+            profile = store.create_credential_profile(
+                "kiwoom_mock", str(uuid.uuid4()), "이전 이름", "digest",
+            )["profile_id"]
+
+            class Vault:
+                record = type("Record", (), {"revision": 3, "disabled": False})()
+                def load(self, provider, profile_id):
+                    return self.record
+
+            runtime = CredentialRuntime(Vault(), store)
+            renamed = await runtime.rename_profile("kiwoom_mock", profile, 3, "새 이름")
+            stored = next(
+                value for value in store.list_credential_profiles()
+                if value["profile_id"] == profile
+            )
+            with self.assertRaises(CredentialOperationError) as stale:
+                await runtime.rename_profile("kiwoom_mock", profile, 2, "잘못된 이름")
+
+            self.assertEqual("새 이름", renamed["label"])
+            self.assertEqual("새 이름", stored["label"])
+            self.assertEqual("CREDENTIAL_REVISION_CONFLICT", stale.exception.code)
+            await runtime.close(); store.close()
+
+    async def test_runtime_archives_only_disabled_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "central.sqlite")
+            store.initialize()
+            profile = store.create_credential_profile(
+                "kiwoom_mock", str(uuid.uuid4()), "이전 계좌", "digest",
+            )["profile_id"]
+
+            class Vault:
+                record = type("Record", (), {"revision": 1, "disabled": False})()
+                def load(self, provider, profile_id):
+                    return self.record
+
+            vault = Vault()
+            runtime = CredentialRuntime(vault, store)
+            with self.assertRaises(CredentialOperationError) as active:
+                await runtime.archive_profile("kiwoom_mock", profile, 1)
+            self.assertEqual("PROFILE_MUST_BE_DISABLED", active.exception.code)
+
+            vault.record = type("Record", (), {"revision": 2, "disabled": True})()
+            archived = await runtime.archive_profile("kiwoom_mock", profile, 2)
+            self.assertEqual("archived", archived["lifecycle_state"])
+            self.assertFalse(any(
+                value["profile_id"] == profile for value in (await runtime.profiles())["profiles"]
+            ))
+            await runtime.close(); store.close()
+
+
 class CredentialRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -58,6 +114,24 @@ class CredentialRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.runtime.create_profile("openai", request_id, "다른 내용")
         profile = next(p for p in self.store.list_credential_profiles() if p["profile_id"] == first["profile_id"])
         self.assertEqual("draft", profile["lifecycle_state"])
+
+    async def test_only_disconnected_profile_can_be_archived_and_history_is_retained(self):
+        op = await self.ready()
+        await self.runtime.apply(op.operation_id, 0, None); await op.task
+        with self.assertRaises(CredentialOperationError) as active:
+            await self.runtime.archive_profile("openai", self.profile, 1)
+        self.assertEqual("PROFILE_MUST_BE_DISABLED", active.exception.code)
+
+        disabled = self.vault.save(
+            "openai", self.profile, {}, expected_revision=1, disabled=True,
+        )
+        archived = await self.runtime.archive_profile("openai", self.profile, disabled.revision)
+
+        self.assertEqual("archived", archived["lifecycle_state"])
+        self.assertFalse(any(
+            value["profile_id"] == self.profile for value in (await self.runtime.profiles())["profiles"]
+        ))
+        self.assertEqual(1, len(self.store.load_credential_activations(self.profile)))
 
     async def test_prepare_apply_duplicate_digest_revision_and_secret_free_status(self):
         request_id = str(uuid.uuid4())
@@ -279,6 +353,23 @@ class CredentialAPITests(unittest.TestCase):
         result = self.poll(operation, {"ACTIVE", "RECOVERY_REQUIRED"})
         self.assertEqual("ACTIVE", result["state"])
         self.assertNotIn(self.key, json.dumps(result))
+
+    def test_profile_delete_requires_disabled_credential(self):
+        self.runtime.vault.save(
+            "openai", self.profile, {"api_key": self.key}, expected_revision=0,
+        )
+        path = f"/api/v1/settings/credentials/openai/profiles/{self.profile}"
+        active = self.client.request("DELETE", path, headers=self.headers,
+                                     json={"expected_revision": 1})
+        self.assertEqual(409, active.status_code)
+        self.assertEqual("PROFILE_MUST_BE_DISABLED", active.json()["detail"]["code"])
+        self.runtime.vault.save("openai", self.profile, {}, expected_revision=1, disabled=True)
+        deleted = self.client.request("DELETE", path, headers=self.headers,
+                                      json={"expected_revision": 2})
+        self.assertEqual(200, deleted.status_code)
+        self.assertEqual("archived", deleted.json()["lifecycle_state"])
+        profiles = self.client.get("/api/v1/settings/credentials", headers=self.headers).json()
+        self.assertFalse(any(value["profile_id"] == self.profile for value in profiles["profiles"]))
 
     def test_http_and_spoofed_forwarded_header_cannot_send_keys(self):
         payload = self.payload()

@@ -35,6 +35,100 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_price_cache_flush_includes_latest_realtime_market_cap(self) -> None:
+        queued = []
+        writer = SimpleNamespace(
+            enqueue_price_cache=lambda *args: queued.append(args),
+        )
+        now = datetime(2026, 9, 21, 10, 15)
+        owner = SimpleNamespace(
+            _pending_price_cache={"005930": 71_000},
+            _pending_today_high_cache={"005930": 72_000},
+            _pending_market_cap_cache={"005930": 4_200_000.0},
+            _market_cache_writer=writer,
+            _ranking_now=lambda: now,
+        )
+
+        MainWindow._save_current_price_cache(owner)
+
+        self.assertEqual(
+            [(
+                {"005930": 71_000}, {"005930": 72_000},
+                {"005930": 4_200_000.0}, now.date(),
+            )],
+            queued,
+        )
+        self.assertEqual({}, owner._pending_price_cache)
+        self.assertEqual({}, owner._pending_today_high_cache)
+        self.assertEqual({}, owner._pending_market_cap_cache)
+
+    def test_api_label_prioritizes_actual_ranking_local_fallback(self) -> None:
+        shown = []
+        owner = SimpleNamespace(
+            _active_api_route="central",
+            _ranking_uses_local_fallback=True,
+            _set_api_status=lambda text, color: shown.append((text, color)),
+        )
+
+        MainWindow._set_connected_api_status(owner)
+
+        self.assertEqual(("API: 로컬 전환", "#B36B00"), shown[-1])
+
+    def test_api_label_keeps_nas_source_while_realtime_is_waiting(self) -> None:
+        shown = []
+        owner = SimpleNamespace(
+            _active_api_route="central_waiting",
+            _ranking_uses_local_fallback=False,
+            _set_api_status=lambda text, color: shown.append((text, color)),
+        )
+
+        MainWindow._set_connected_api_status(owner)
+
+        self.assertEqual(("API: NAS", "#008000"), shown[-1])
+
+    def test_stored_market_cap_does_not_overwrite_newer_live_tick(self) -> None:
+        rendered = []
+        owner = SimpleNamespace(
+            _market_cap_reference_pending={"005930", "000660"},
+            _market_cap_reference_codes=set(),
+            _realtime_market_caps={"005930": 5_000_000.0},
+            _render_market_cap=lambda code: rendered.append(code),
+        )
+
+        MainWindow._apply_market_cap_references(owner, ("005930", "000660"), {
+            "005930": {"market_cap_eok": 4_000_000},
+            "000660": {"market_cap_eok": 900_000},
+        })
+
+        self.assertEqual(5_000_000.0, owner._realtime_market_caps["005930"])
+        self.assertEqual(900_000.0, owner._realtime_market_caps["000660"])
+        self.assertEqual({"005930", "000660"}, owner._market_cap_reference_codes)
+        self.assertEqual(set(), owner._market_cap_reference_pending)
+        self.assertEqual(["005930", "000660"], rendered)
+
+    def test_stored_market_cap_from_previous_api_runtime_is_discarded(self) -> None:
+        old_client, current_client = object(), object()
+        owner = SimpleNamespace(
+            _market_data_client=current_client,
+            _market_cap_reference_pending=set(),
+            _market_cap_reference_codes=set(),
+            _realtime_market_caps={},
+            _render_market_cap=lambda _code: self.fail("old runtime result was rendered"),
+        )
+
+        MainWindow._apply_market_cap_references(
+            owner, ("005930",), {"005930": {"market_cap_eok": 4_000_000}}, old_client,
+        )
+
+        self.assertEqual({}, owner._realtime_market_caps)
+
+    def test_api_reload_discards_late_ranking_response(self) -> None:
+        owner = SimpleNamespace(_api_reloading=True)
+
+        MainWindow._on_ranking_loaded(owner, (object(),))
+
+        self.assertTrue(owner._api_reloading)
+
     def test_ranking_timer_does_not_fire_before_the_scheduled_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
@@ -95,8 +189,10 @@ class MainWindowTest(unittest.TestCase):
     def test_theme_change_forces_google_settings_and_theme_backup(self) -> None:
         scheduled: list[str] = []
         refreshed: list[bool] = []
+        badge_refreshes: list[bool] = []
         owner = SimpleNamespace(
             _theme_store=SimpleNamespace(all_by_name=lambda: {"005930": ("반도체",)}),
+            _refresh_theme_badges=lambda: badge_refreshes.append(True),
             _refresh_rankings=lambda: refreshed.append(True),
             _schedule_google_drive_upload=scheduled.append,
         )
@@ -104,6 +200,7 @@ class MainWindowTest(unittest.TestCase):
         MainWindow._on_themes_changed(owner)
 
         self.assertEqual({"005930": ("반도체",)}, owner._themes)
+        self.assertEqual([True], badge_refreshes)
         self.assertEqual([True], refreshed)
         self.assertEqual(["both"], scheduled)
 
@@ -180,15 +277,19 @@ class MainWindowTest(unittest.TestCase):
             settings_button = window.findChild(QPushButton, "main_settings_button")
             candidate_button = window.findChild(QPushButton, "candidate_monitor_button")
             research_button = window.findChild(QPushButton, "research_button")
+            automation_button = window.findChild(QPushButton, "mock_automation_button")
             widgets = [toolbar.widgetForAction(action) for action in toolbar.actions()]
             self.assertEqual(widgets.index(settings_button), widgets.index(version_label) + 1)
             self.assertEqual((settings_button.width(), settings_button.height()), (24, 22))
             self.assertEqual(candidate_button.text(), "")
             self.assertEqual(research_button.text(), "")
+            self.assertEqual(automation_button.text(), "")
             self.assertEqual((candidate_button.width(), candidate_button.height()), (14, 14))
             self.assertEqual((research_button.width(), research_button.height()), (14, 14))
+            self.assertEqual((automation_button.width(), automation_button.height()), (14, 14))
             self.assertEqual(widgets.index(candidate_button) + 1, widgets.index(research_button))
-            self.assertEqual(widgets.index(research_button) + 1, widgets.index(window._rank_query_selector))
+            self.assertEqual(widgets.index(research_button) + 1, widgets.index(automation_button))
+            self.assertEqual(widgets.index(automation_button) + 1, widgets.index(window._rank_query_selector))
             window._refresh_rankings()
             window._ranking_worker.wait()
             QApplication.processEvents()
@@ -320,6 +421,7 @@ class MainWindowTest(unittest.TestCase):
             _pending_minute_bars={("005930", old_minute): newer_bar},
             _pending_market_index_bars={},
             _pending_price_cache={"005930": 102},
+            _pending_market_cap_cache={"005930": 2_100_000.0},
             _pending_today_high_cache={"005930": 103},
             _minute_bar_save_timer=minute_timer,
             _price_cache_timer=Timer(),
@@ -341,6 +443,7 @@ class MainWindowTest(unittest.TestCase):
             owner,
             {"005930": 101, "000660": 203},
             {"005930": 102, "000660": 204},
+            {"005930": 2_000_000.0, "000660": 900_000.0},
             object(),
             "temporary failure",
         )
@@ -350,6 +453,10 @@ class MainWindowTest(unittest.TestCase):
         self.assertIn(("kospi", old_minute), owner._pending_market_index_bars)
         self.assertEqual({"005930": 102, "000660": 203}, owner._pending_price_cache)
         self.assertEqual({"005930": 103, "000660": 204}, owner._pending_today_high_cache)
+        self.assertEqual(
+            {"005930": 2_100_000.0, "000660": 900_000.0},
+            owner._pending_market_cap_cache,
+        )
         self.assertEqual(1, minute_timer.started)
         self.assertEqual(1, owner._price_cache_timer.started)
 
@@ -468,6 +575,45 @@ class MainWindowTest(unittest.TestCase):
             ],
             MainWindow._aggregate_top20_rows(rows, 5),
         )
+
+    def test_nas_top20_rows_keep_only_completed_market_splits(self) -> None:
+        rows = MainWindow._nas_top20_rows((
+            {"minute": "2026-09-08T09:01", "market_values": [1, 2, 3], "capture_state": "realtime_complete"},
+            {"minute": "2026-09-08T09:00", "market_values": [9, 9, 9], "capture_state": "partial"},
+        ))
+
+        self.assertEqual([(datetime(2026, 9, 8, 9, 1), 1.0, 2.0, 3.0)], rows)
+
+    def test_nas_market_data_is_available_before_realtime_subscription_opens(self) -> None:
+        owner = SimpleNamespace(
+            _active_api_route="central_waiting",
+            _market_data_client=SimpleNamespace(load_stored_minute_bars=lambda *_args: ()),
+        )
+
+        self.assertTrue(MainWindow._uses_nas_market_data_source(owner))
+        owner._active_api_route = "local_fallback"
+        self.assertFalse(MainWindow._uses_nas_market_data_source(owner))
+
+    def test_nas_recovery_forces_current_top20_minute_history_reload(self) -> None:
+        class StatusBar:
+            def showMessage(self, _message):
+                pass
+
+        requests = []
+        owner = SimpleNamespace(
+            _active_api_route="local_fallback",
+            _minute_history_codes={"005930"},
+            _row_by_code={"005930": 0, "000660": 1},
+            statusBar=lambda: StatusBar(),
+            _set_connected_api_status=lambda: None,
+            _start_minute_history_loading=lambda codes, force=False: requests.append((codes, force)),
+        )
+
+        MainWindow._on_realtime_status_changed(owner, "나스 실시간 체결 구독 중 · 2종목")
+
+        self.assertEqual("central", owner._active_api_route)
+        self.assertEqual(set(), owner._minute_history_codes)
+        self.assertEqual([(("005930", "000660"), True)], requests)
 
     def test_top20_collection_continues_while_five_minute_chart_is_selected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -31,6 +31,17 @@ class ApiSettingsDialogTests(unittest.TestCase):
     def tearDown(self):
         dispose_dialogs()
 
+    def test_central_waiting_route_is_presented_as_nas_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dialog = ApiSettingsDialog(
+                Path(directory) / "api.env",
+                section="nas",
+                active_route="central_waiting",
+            )
+
+            self.assertEqual("NAS", dialog._active_route_status.text())
+            self.assertIn("#008000", dialog._active_route_status.styleSheet())
+
     def test_personal_server_failover_can_be_toggled_and_saved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             api_path = Path(directory) / "api.env"
@@ -47,6 +58,47 @@ class ApiSettingsDialogTests(unittest.TestCase):
             dialog._validate_and_accept()
             self.assertTrue(source_config.load().local_fallback_enabled)
             self.assertTrue(source_config.load().parallel_validation_enabled)
+
+    def test_nas_resource_usage_shows_storage_categories_and_unlimited_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dialog = ApiSettingsDialog(Path(directory) / "api.env", section="nas")
+            dialog._show_nas_resource_usage({
+                "process_memory_bytes": 1024,
+                "container_memory_bytes": 2048,
+                "container_memory_limit_bytes": None,
+                "database_size_bytes": 4096,
+                "data_disk_used_bytes": 8192,
+                "data_disk_total_bytes": 16384,
+                "storage_categories": [
+                    {"category": "news", "label": "뉴스", "estimated_bytes": 3072, "rows": 1234},
+                    {"category": "market", "label": "주식 누적자료", "estimated_bytes": 1024, "rows": 20},
+                ],
+                "retention_policy": {"mode": "unlimited", "automatic_deletion_enabled": False},
+            })
+            text = dialog._nas_resource_status.text()
+
+        self.assertIn("뉴스 3.0KB · 1,234건", text)
+        self.assertIn("주식 누적자료 1.0KB · 20건", text)
+        self.assertIn("자동 정리: 무제한 저장", text)
+
+    def test_pc_resource_usage_shows_separate_categories_and_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dialog = ApiSettingsDialog(Path(directory) / "api.env", section="kiwoom")
+            dialog._show_local_resource_usage({
+                "complete": True,
+                "total_bytes": 7168,
+                "categories": [
+                    {"category": "market", "label": "주식·설정 DB", "bytes": 4096, "files": 2},
+                    {"category": "news", "label": "뉴스 DB", "bytes": 3072, "files": 1},
+                ],
+                "retention": ["분봉: 30일 초과분을 앱 시작 뒤 정리"],
+            })
+            text = dialog._local_resource_status.text()
+
+        self.assertIn("전체 7.0KB", text)
+        self.assertIn("주식·설정 DB 4.0KB · 2개 파일", text)
+        self.assertIn("뉴스 DB 3.0KB · 1개 파일", text)
+        self.assertIn("분봉: 30일", text)
 
     def test_direct_mode_does_not_offer_failover(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

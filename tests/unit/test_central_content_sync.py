@@ -52,6 +52,35 @@ class _Client:
 
 
 class CentralContentSyncServiceTest(unittest.TestCase):
+    def test_nas_mode_skips_bulk_news_catalog_but_keeps_local_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            news = root / "news.sqlite3"
+            self._news_database(news, count=3)
+            client = _Client()
+            client.saved["news_article"] = [{
+                "owner": "005930", "key": "nas-article", "updated_at": 10.0,
+                "document": {
+                    "stock_code": "005930", "identity": "nas-article", "title": "NAS 뉴스",
+                },
+            }]
+
+            service = CentralContentSyncService(client)
+            pulled = service.pull(root / "missing-main", news, sync_news_catalog=False)
+            pushed = service.push(root / "missing-main", news, sync_news_catalog=False)
+
+            requested = {name for name, _cursor in client.updated_after}
+            self.assertNotIn("news_article", requested)
+            self.assertNotIn("news_ai", requested)
+            self.assertNotIn("news_ai_shared", requested)
+            self.assertEqual(0, pulled.news_articles)
+            self.assertEqual(0, pushed.news_articles)
+            connection = sqlite3.connect(news)
+            try:
+                self.assertEqual(3, connection.execute("SELECT count(*) FROM stock_news").fetchone()[0])
+            finally:
+                connection.close()
+
     def test_noop_pull_does_not_rewrite_cursor_or_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

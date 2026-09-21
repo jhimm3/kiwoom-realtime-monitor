@@ -632,10 +632,11 @@ Decision/account/order freshness, 당일 순손익 scalar와 FIFO/broker 비용 
 손실 도달값·평가기간 누락을 확인했다. 출처 문자열은 실제 손익 근거 검증이 아니다.
 [감사 결과](O2MD_SAFETY_AUDIT_20260916.md)를 따라 위 설명을 안전 완료로 해석하지 않는다.
 
-**현재 다음: O2-M0 안전 보완.** [설계 결정·단계별 계약](O2M_DESIGN_REVIEW_DECISIONS_20260916.md)을
-따른다. PC 연구/일지 유지, NAS 제한된 runner와 최소 위험 projection, 별도 불변 candidate package,
-기존 account bundle의 단일 owner를 채택했다. O2-M0 → Me1 후보 게시/합격 → Me2 위험 근거/owner
-→ Me3 runner/UI → V1 순서이며 shadow monitor에 직접 주문권한을 붙이지 않는다.
+**2026-09-21 O2-M 완료:** M0의 영속 control/stop/resume/ENTER·EXIT 안전 gate, Me1의 동결 후보
+게시, Me2의 실제 risk snapshot과 account bundle 단일 owner, Me3의 지속 runner·supervisor·운영 UI와
+READY 명세 게시까지 연결했다. 게시→입장→위험 대사→가짜 매수·매도 체결→A5 계좌별 매매일지
+투영을 실제 저장소/runtime으로 검증했다. shadow monitor 자체에는 주문권한을 붙이지 않았고 게시만으로
+주문이 시작되지 않는다. **현재 다음은 V1 누적·장시간 검증**이다.
 
 ## 14. V1 — 연속 운전 완료 판정
 

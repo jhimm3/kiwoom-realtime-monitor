@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
@@ -126,6 +126,125 @@ class CentralContentClient:
             "limit": max(1, min(int(limit), 1000)),
         })
         return self._request("GET", f"/api/v1/research/candidates?{query}")
+
+    def publish_mock_automation_candidate(
+        self,
+        *,
+        account_ref: str,
+        credential_profile_id: str,
+        expected_binding_revision: int,
+        package: dict[str, Any],
+        eligibility_policy: dict[str, Any],
+        eligibility_receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/research/mock-automation-candidates", {
+            "account_ref": account_ref,
+            "credential_profile_id": credential_profile_id,
+            "expected_binding_revision": expected_binding_revision,
+            "package": package,
+            "eligibility_policy": eligibility_policy,
+            "eligibility_receipt": eligibility_receipt,
+        })
+
+    def load_mock_automation_candidates(
+        self, account_ref: str, *, credential_profile_id: str,
+    ) -> dict[str, Any]:
+        encoded_ref = quote(account_ref, safe="")
+        query = urlencode({"credential_profile_id": credential_profile_id})
+        return self._request(
+            "GET", f"/api/v1/research/mock-automation-candidates/{encoded_ref}?{query}",
+        )
+
+    def publish_mock_automation_spec(
+        self,
+        *,
+        account_ref: str,
+        credential_profile_id: str,
+        expected_binding_revision: int,
+        shadow_event_id: str,
+        forward_profile: dict[str, Any],
+        stage_revisions: list[dict[str, Any]],
+        operating_spec: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/research/mock-automation-specs", {
+            "account_ref": account_ref,
+            "credential_profile_id": credential_profile_id,
+            "expected_binding_revision": expected_binding_revision,
+            "shadow_event_id": shadow_event_id,
+            "forward_profile": forward_profile,
+            "stage_revisions": stage_revisions,
+            "operating_spec": operating_spec,
+        })
+
+    def load_mock_automation_specs(self, account_ref: str) -> dict[str, Any]:
+        encoded_ref = quote(account_ref, safe="")
+        return self._request(
+            "GET", f"/api/v1/research/mock-automation-specs/{encoded_ref}",
+        )
+
+    def load_mock_automation_status(
+        self, account_ref: str, *, credential_profile_id: str,
+    ) -> dict[str, Any]:
+        encoded_ref = quote(account_ref, safe="")
+        query = urlencode({"credential_profile_id": credential_profile_id})
+        return self._request(
+            "GET", f"/api/v1/mock-automation/accounts/{encoded_ref}?{query}",
+        )
+
+    def start_mock_automation(
+        self,
+        *,
+        account_ref: str,
+        credential_profile_id: str,
+        spec_id: str,
+        expected_settings_revision: int,
+        credential_revision: int,
+    ) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/mock-automation/start", {
+            "account_ref": account_ref,
+            "credential_profile_id": credential_profile_id,
+            "spec_id": spec_id,
+            "expected_settings_revision": expected_settings_revision,
+            "credential_revision": credential_revision,
+        })
+
+    def stop_mock_automation(
+        self,
+        *,
+        account_ref: str,
+        credential_profile_id: str,
+        spec_id: str,
+        expected_control_revision: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/mock-automation/stop", {
+            "account_ref": account_ref,
+            "credential_profile_id": credential_profile_id,
+            "spec_id": spec_id,
+            "expected_control_revision": expected_control_revision,
+            "reason": reason,
+        })
+
+    def resume_mock_automation(
+        self,
+        *,
+        account_ref: str,
+        credential_profile_id: str,
+        spec_id: str,
+        expected_control_revision: int,
+        expected_settings_revision: int,
+        credential_revision: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/mock-automation/resume", {
+            "account_ref": account_ref,
+            "credential_profile_id": credential_profile_id,
+            "spec_id": spec_id,
+            "expected_control_revision": expected_control_revision,
+            "expected_settings_revision": expected_settings_revision,
+            "credential_revision": credential_revision,
+            "reason": reason,
+        })
 
     def capabilities(self) -> dict[str, bool]:
         document = self._request("GET", "/api/v1/capabilities")

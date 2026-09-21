@@ -28,6 +28,24 @@ class CentralServerUnavailable(KiwoomApiError):
     """중앙 서버 자체에 연결할 수 없어 선택적 로컬 전환이 가능한 오류."""
 
 
+_CENTRAL_GATEWAY_UNAVAILABLE_STATUS = frozenset({502, 503, 504})
+
+
+def _http_error_detail(error: HTTPError) -> object:
+    try:
+        return json.loads(error.read().decode("utf-8")).get("detail", "")
+    except (ValueError, AttributeError):
+        return ""
+
+
+def _raise_central_http_error(error: HTTPError, detail: object) -> None:
+    if error.code in _CENTRAL_GATEWAY_UNAVAILABLE_STATUS:
+        raise CentralServerUnavailable(
+            f"개인 중앙 서버에 연결할 수 없습니다. (HTTP {error.code})"
+        ) from error
+    raise KiwoomApiError(f"개인 중앙 서버 오류: HTTP {error.code} {detail}".strip()) from error
+
+
 def planned_reconnect_remaining(status: Any) -> float | None:
     """Only explicit, bounded server reconnect metadata may defer failover."""
     if not isinstance(status, dict) or status.get("planned_reconnect") is not True:
@@ -208,14 +226,11 @@ class RemoteKiwoomRestClient:
             with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
                 document = json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
-            try:
-                detail = json.loads(error.read().decode("utf-8")).get("detail", "")
-            except (ValueError, AttributeError):
-                detail = ""
+            detail = _http_error_detail(error)
             if (error.code == 503 and isinstance(detail, dict) and detail.get("code") == "REALTIME_RECONNECTING"
                     and planned_reconnect_remaining(detail.get("connection_status")) is not None):
                 raise CentralPlannedReconnect(detail["connection_status"]) from None
-            raise KiwoomApiError(f"개인 중앙 서버 오류: HTTP {error.code} {detail}".strip()) from error
+            _raise_central_http_error(error, detail)
         except (URLError, TimeoutError, ConnectionError, OSError) as error:
             raise CentralServerUnavailable("개인 중앙 서버에 연결할 수 없습니다.") from error
         if not isinstance(document, dict) or not isinstance(document.get("payload"), dict):
@@ -247,11 +262,7 @@ class RemoteKiwoomRestClient:
             with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
                 document = json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
-            try:
-                detail = json.loads(error.read().decode("utf-8")).get("detail", "")
-            except (ValueError, AttributeError):
-                detail = ""
-            raise KiwoomApiError(f"개인 중앙 서버 오류: HTTP {error.code} {detail}".strip()) from error
+            _raise_central_http_error(error, _http_error_detail(error))
         except (URLError, TimeoutError, ConnectionError, OSError) as error:
             raise CentralServerUnavailable("개인 중앙 서버에 연결할 수 없습니다.") from error
         bars = document.get("bars") if isinstance(document, dict) else None
@@ -278,6 +289,37 @@ class RemoteKiwoomRestClient:
         if not isinstance(bars, list) or any(not isinstance(value, dict) for value in bars):
             raise KiwoomApiError("개인 중앙 서버 최근 분봉 응답 형식이 올바르지 않습니다.")
         return tuple(bars)
+
+    def load_stored_market_caps(
+        self, codes: tuple[str, ...],
+    ) -> dict[str, dict[str, Any]]:
+        """Read last persisted 0B market caps without issuing a Kiwoom TR."""
+        normalized = tuple(dict.fromkeys(str(code).strip() for code in codes if code))
+        if not normalized:
+            return {}
+        request = Request(
+            f"{self._server_url}/api/v1/market/latest-market-caps?"
+            + urlencode({"codes": normalized}, doseq=True),
+            headers={"Authorization": f"Bearer {self._access_token}"},
+            method="GET",
+        )
+        document = self._read_central_document(request, "최근 0B 시가총액")
+        rows = document.get("market_caps")
+        if not isinstance(rows, list) or any(not isinstance(value, dict) for value in rows):
+            raise KiwoomApiError("개인 중앙 서버 시가총액 응답 형식이 올바르지 않습니다.")
+        result: dict[str, dict[str, Any]] = {}
+        for value in rows:
+            code = str(value.get("code", "")).strip()
+            try:
+                market_cap = float(value.get("market_cap_eok"))
+            except (TypeError, ValueError):
+                continue
+            if code and market_cap > 0:
+                result[code] = {
+                    "market_cap_eok": market_cap,
+                    "observed_at": str(value.get("observed_at", "")),
+                }
+        return result
 
     def load_stored_ranking(self, query_type: str = "5") -> dict[str, Any] | None:
         kind = "top20_membership" if query_type == "5" else "ranking"
@@ -415,6 +457,27 @@ class RemoteKiwoomRestClient:
         payload = snapshots[0].get("payload")
         return payload if isinstance(payload, dict) else {"minutes": [], "daily": []}
 
+    def load_stored_top20_index(self, trading_date: str) -> tuple[dict[str, Any], ...]:
+        day = trading_date[:10]
+        snapshots = self._load_market_snapshots("top20_index", day, 1_440, "TOP20 지수")
+        values = []
+        for snapshot in reversed(snapshots):
+            payload = snapshot.get("payload")
+            if isinstance(payload, dict):
+                values.append(payload)
+        return tuple(values)
+
+    def load_stored_top20_statistics(self, start_date: str, end_date: str) -> dict[str, Any]:
+        query = urlencode({"start_date": start_date[:10], "end_date": end_date[:10]})
+        request = Request(
+            f"{self._server_url}/api/v1/market/top20-statistics?{query}",
+            headers={"Authorization": f"Bearer {self._access_token}"}, method="GET",
+        )
+        document = self._read_central_document(request, "TOP20 통계")
+        if not isinstance(document.get("hourly"), list) or not isinstance(document.get("comparisons"), list):
+            raise KiwoomApiError("개인 중앙 서버 TOP20 통계 응답 형식이 올바르지 않습니다.")
+        return document
+
     def _load_market_snapshots(
         self, kind: str, subject: str, limit: int, label: str,
     ) -> list[dict[str, Any]]:
@@ -434,11 +497,7 @@ class RemoteKiwoomRestClient:
             with self._opener(request, timeout=self._timeout if timeout_seconds is None else timeout_seconds, context=system_ssl_context()) as response:
                 document = json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
-            try:
-                detail = json.loads(error.read().decode("utf-8")).get("detail", "")
-            except (ValueError, AttributeError):
-                detail = ""
-            raise KiwoomApiError(f"개인 중앙 서버 오류: HTTP {error.code} {detail}".strip()) from error
+            _raise_central_http_error(error, _http_error_detail(error))
         except (URLError, TimeoutError, ConnectionError, OSError) as error:
             raise CentralServerUnavailable("개인 중앙 서버에 연결할 수 없습니다.") from error
         if not isinstance(document, dict):
@@ -472,13 +531,14 @@ class RemoteKiwoomRestClient:
                 with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
                     document = json.loads(response.read().decode("utf-8"))
             except HTTPError as error:
-                try:
-                    detail = json.loads(error.read().decode("utf-8")).get("detail", "")
-                except (ValueError, AttributeError):
-                    detail = ""
+                detail = _http_error_detail(error)
                 if error.code in {404, 405, 501}:
                     raise AccountQueryCapabilityError(
                         "중앙 서버가 검증 계좌 조회 v2를 지원하지 않습니다."
+                    ) from error
+                if error.code in _CENTRAL_GATEWAY_UNAVAILABLE_STATUS:
+                    raise InterruptedAccountQueryError(
+                        "개인 중앙 서버 계좌 조회가 중단되었습니다.", context,
                     ) from error
                 raise KiwoomApiError(f"개인 중앙 서버 오류: HTTP {error.code} {detail}".strip()) from error
             except (URLError, TimeoutError, ConnectionError, OSError) as error:
@@ -535,6 +595,7 @@ class RemoteKiwoomRestClient:
                 credential_profile_id=str(value["credential_profile_id"]),
                 binding_revision=int(value["binding_revision"]),
                 transport="nas",
+                display_label=str(value.get("display_label", "")).strip(),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise KiwoomApiError("개인 중앙 서버 계좌 context가 올바르지 않습니다.") from error

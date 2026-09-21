@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 from dataclasses import asdict
@@ -18,6 +17,10 @@ from kiwoom_monitor.application.breakout_strategy import (
     BreakoutStrategyConfig,
     StrategyState,
     evaluate_breakout_bar,
+)
+from kiwoom_monitor.application.research_families import (
+    BREAKOUT_FAMILY_ID,
+    shadow_monitor_id_for_config,
 )
 from kiwoom_monitor.application.research_replay import (
     CandidateUniverseFrame,
@@ -52,16 +55,9 @@ class CandidateMonitor:
         if session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES:
             raise ValueError(f"unsupported research session profile: {session_profile}")
         self._session_profile = session_profile
-        config_json = json.dumps(config.to_dict(), sort_keys=True, separators=(",", ":"))
-        identity_json = (
-            config_json if session_profile == KRX_REGULAR_RESEARCH_PROFILE
-            else json.dumps(
-                {"strategy": config.to_dict(), "session_profile": session_profile},
-                sort_keys=True, separators=(",", ":"),
-            )
+        self.monitor_id = shadow_monitor_id_for_config(
+            BREAKOUT_FAMILY_ID, config, session_profile,
         )
-        digest = hashlib.sha256(identity_json.encode("utf-8")).hexdigest()[:16]
-        self.monitor_id = f"shadow:krx_bar_close_breakout:v1:{digest}"
         self._cursor = 0
         self._state = StrategyState()
         self._bars: dict[tuple[str, str], KrxMinuteBarFrame] = {}

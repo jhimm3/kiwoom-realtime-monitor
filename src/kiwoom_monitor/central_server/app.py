@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import uuid
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -33,7 +34,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.09.16-ranking-metadata-freshness-v1"
+SERVER_BUILD = "2026.09.21-market-cap-reference-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +71,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     mock_order_gateway = None
     mock_bundle = None
     mock_owner = None
+    mock_automation_supervisor = None
     real_owner = None
     main_identity_reader = None
     main_binding = None
@@ -352,6 +354,9 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         )
     if news_service is not None:
         news_service.set_ai_service(ai_service)
+    if mock_owner is not None:
+        from .mock_automation_supervisor import MockAutomationSupervisor
+        mock_automation_supervisor = MockAutomationSupervisor(store, mock_owner)
 
     @asynccontextmanager
     async def service_lifespan(_app: Any):
@@ -388,6 +393,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                 mock_owner.reserved_accounts.add(main_binding.scope.account_ref)
                 mock_owner.reserved_profiles.add(main_binding.credential_profile_id)
             await mock_owner.start()
+            await mock_automation_supervisor.start()
         elif mock_bundle is not None:
             try:
                 await mock_bundle.start()
@@ -430,6 +436,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         yield
         if credential_runtime is not None:
             await credential_runtime.close()
+        if mock_automation_supervisor is not None:
+            await mock_automation_supervisor.close()
         if real_owner is not None:
             await real_owner.close()
         if mock_owner is not None:
@@ -468,6 +476,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         finally:
             if credential_runtime is not None:
                 await credential_runtime.close()
+            if mock_automation_supervisor is not None:
+                await mock_automation_supervisor.close()
             if real_owner is not None:
                 await real_owner.close()
             if mock_owner is not None:
@@ -491,6 +501,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     app.state.mock_order_gateway = mock_order_gateway
     app.state.mock_account_bundle = mock_bundle
     app.state.mock_credential_owner = mock_owner
+    app.state.mock_automation_supervisor = mock_automation_supervisor
     app.state.real_credential_owner = real_owner
     app.state.mock_account_startup_error = ""
     app.state.verified_account_bindings = ()
@@ -586,6 +597,45 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         model: str = Field(default="", max_length=100)
         events: list[AIEventInput] = Field(min_length=1, max_length=20)
         article_count: int = Field(default=0, ge=0, le=10_000)
+
+    class MockAutomationCandidatePublicationRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        account_ref: str = Field(min_length=36, max_length=36)
+        credential_profile_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,96}$")
+        expected_binding_revision: int = Field(strict=True, ge=1)
+        package: dict[str, Any]
+        eligibility_policy: dict[str, Any]
+        eligibility_receipt: dict[str, Any]
+
+    class MockAutomationSpecPublicationRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        account_ref: str = Field(min_length=36, max_length=36)
+        credential_profile_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,96}$")
+        expected_binding_revision: int = Field(strict=True, ge=1)
+        shadow_event_id: str = Field(min_length=1, max_length=128)
+        forward_profile: dict[str, Any]
+        stage_revisions: list[dict[str, Any]] = Field(min_length=3, max_length=3)
+        operating_spec: dict[str, Any]
+
+    class MockAutomationStartRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        account_ref: str = Field(min_length=36, max_length=36)
+        credential_profile_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,96}$")
+        spec_id: str = Field(min_length=1, max_length=128)
+        expected_settings_revision: int = Field(strict=True, ge=1)
+        credential_revision: int = Field(strict=True, ge=1)
+
+    class MockAutomationControlRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        account_ref: str = Field(min_length=36, max_length=36)
+        credential_profile_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,96}$")
+        spec_id: str = Field(min_length=1, max_length=128)
+        expected_control_revision: int = Field(strict=True, ge=1)
+        reason: str = Field(min_length=1, max_length=500)
+
+    class MockAutomationResumeRequest(MockAutomationControlRequest):
+        expected_settings_revision: int = Field(strict=True, ge=1)
+        credential_revision: int = Field(strict=True, ge=1)
 
     class OperationalSettingsUpdate(BaseModel):
         expected_revision: int | None = Field(default=None, ge=0)
@@ -733,6 +783,10 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             combined_minute_bars=True,
             trade_value_comparisons=True,
             planned_reconnect_v1=collector is not None,
+            mock_automation_candidate_publish_v1=True,
+            mock_automation_candidate_read_v1=True,
+            mock_automation_spec_publish_v1=True,
+            mock_automation_runtime_v1=mock_automation_supervisor is not None,
         ).as_document()
         document["realtime_connection"] = collector.credential_connection_status() if collector is not None else None
         return document
@@ -827,7 +881,19 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             bindings.extend(real_owner.account_bindings())
         if account_query_manager is not None and main_binding is not None:
             if main_binding not in bindings: bindings.insert(0, main_binding)
-        return {"accounts": [scoped_context(binding) for binding in bindings]}
+        labels = {
+            profile["profile_id"]: str(profile.get("label", "")).strip()
+            for profile in store.list_credential_profiles()
+            if profile.get("lifecycle_state") != "archived"
+        }
+        accounts = []
+        for binding in bindings:
+            document = scoped_context(binding)
+            label = labels.get(binding.credential_profile_id, "")
+            if label:
+                document["display_label"] = label
+            accounts.append(document)
+        return {"accounts": accounts}
 
     async def scoped_order_record(bundle, intent_id):
         record = await asyncio.to_thread(bundle.repository.load, intent_id)
@@ -922,8 +988,19 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
 
     @app.get("/api/v1/diagnostics/resources", dependencies=[Depends(authorize)])
     async def diagnostics_resources() -> dict[str, object]:
-        database_size = await asyncio.to_thread(store.storage_size_bytes)
-        return resource_usage("/app/data", database_size)
+        database_size, storage_categories = await asyncio.gather(
+            asyncio.to_thread(store.storage_size_bytes),
+            asyncio.to_thread(store.storage_breakdown),
+        )
+        return {
+            **resource_usage("/app/data", database_size),
+            "storage_categories": storage_categories,
+            "storage_category_bytes_are_estimates": True,
+            "retention_policy": {
+                "mode": "unlimited",
+                "automatic_deletion_enabled": False,
+            },
+        }
 
     @app.put("/api/v1/settings/operations", dependencies=[Depends(authorize)])
     async def put_operational_settings(values: OperationalSettingsUpdate) -> dict[str, object]:
@@ -1235,6 +1312,22 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             "trading_days": sorted(found_days), "bars": values,
         }
 
+    @app.get("/api/v1/market/latest-market-caps", dependencies=[Depends(authorize)])
+    async def latest_market_caps(
+        codes: list[str] = Query(default=[]),
+    ) -> dict[str, object]:
+        """Return only durable 0B market-cap references, regardless of tick age."""
+        normalized = list(dict.fromkeys(str(code).strip() for code in codes))
+        if not normalized or len(normalized) > 200 or any(
+            re.fullmatch(r"\d{6}", code) is None for code in normalized
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="종목코드는 1~200개의 6자리 값이어야 합니다.",
+            )
+        values = await asyncio.to_thread(store.load_latest_market_caps, normalized)
+        return {"market_caps": values}
+
     @app.get("/api/v1/market/trade-value-comparisons", dependencies=[Depends(authorize)])
     async def trade_value_comparisons(
         code: str = Query(min_length=6, max_length=12),
@@ -1414,6 +1507,296 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         )
         return page
 
+    @app.post(
+        "/api/v1/research/mock-automation-candidates",
+        dependencies=[Depends(authorize)],
+    )
+    async def publish_mock_automation_candidate(
+        request: MockAutomationCandidatePublicationRequest,
+    ) -> dict[str, object]:
+        from kiwoom_monitor.application.mock_automation_candidate import (
+            candidate_package_from_dict,
+            eligibility_policy_from_dict,
+            eligibility_receipt_from_dict,
+            validate_publication_size,
+        )
+        from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
+            ForwardEvaluationRepository,
+        )
+        from kiwoom_monitor.application.research_implementation import research_implementation_hash
+        try:
+            validate_publication_size(
+                request.package, request.eligibility_policy, request.eligibility_receipt,
+            )
+            package = candidate_package_from_dict(request.package)
+            policy = eligibility_policy_from_dict(request.eligibility_policy)
+            receipt = eligibility_receipt_from_dict(request.eligibility_receipt)
+            if receipt.account_ref != request.account_ref:
+                raise ValueError("candidate publication account_ref conflict")
+            session = package.candidate_spec.get("session_profile", {})
+            profile = str(session.get("profile", "")) if isinstance(session, dict) else ""
+            if package.scientific_implementation_hash != research_implementation_hash(profile):
+                raise ValueError("candidate scientific implementation hash does not match this server")
+            saved = await asyncio.to_thread(
+                ForwardEvaluationRepository(store).publish_mock_automation_candidate,
+                package, policy, receipt,
+                credential_profile_id=request.credential_profile_id,
+                expected_binding_revision=request.expected_binding_revision,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            detail = str(error)
+            status = 409 if any(token in detail for token in (
+                "conflict", "current verified mock binding", "does not match this server",
+                "immutable document",
+            )) else 400
+            raise HTTPException(status_code=status, detail=detail) from error
+        return {
+            "status": "saved" if saved else "unchanged",
+            "package_hash": package.package_hash,
+            "policy_id": policy.policy_id,
+            "receipt_id": receipt.receipt_id,
+            "eligibility_status": receipt.status.value,
+            "orders_started": False,
+        }
+
+    def current_mock_binding(credential_profile_id: str) -> dict[str, Any] | None:
+        bindings = [
+            row for row in store.load_account_bindings()
+            if str(row.get("credential_profile_id", "")) == credential_profile_id
+            and str(row.get("broker", "")) == "kiwoom"
+            and str(row.get("environment", "")) == "mock"
+        ]
+        return max(
+            bindings, key=lambda row: int(row.get("binding_revision", 0)), default=None,
+        )
+
+    @app.get(
+        "/api/v1/research/mock-automation-candidates/{account_ref}",
+        dependencies=[Depends(authorize)],
+    )
+    async def list_mock_automation_candidates(
+        account_ref: str,
+        credential_profile_id: str = Query(
+            min_length=1, max_length=96, pattern=r"^[A-Za-z0-9_-]+$",
+        ),
+    ) -> dict[str, object]:
+        from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
+            ForwardEvaluationRepository,
+        )
+        binding = await asyncio.to_thread(current_mock_binding, credential_profile_id)
+        if binding is None or str(binding.get("account_ref", "")) != account_ref:
+            raise HTTPException(status_code=409, detail="current verified mock binding mismatch")
+        repository = ForwardEvaluationRepository(store)
+        try:
+            publications = await asyncio.to_thread(
+                repository.load_mock_automation_candidate_publications, account_ref,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+        return {
+            "account_ref": account_ref,
+            "binding": {
+                "credential_profile_id": credential_profile_id,
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": account_ref,
+                "binding_revision": int(binding["binding_revision"]),
+                "verified_at": str(binding["verified_at"]),
+                "verification_method": str(binding["verification_method"]),
+            },
+            "candidates": [{
+                "package": package.to_dict(),
+                "eligibility_policy": policy.to_dict(),
+                "eligibility_receipt": receipt.to_dict(),
+            } for package, policy, receipt in publications],
+        }
+
+    def find_shadow_candidate(event_id: str) -> dict[str, Any] | None:
+        cursor = 0
+        for _ in range(100):
+            page = store.load_shadow_candidates(cursor, 1000)
+            for event in page["events"]:
+                if str(event.get("event_id", "")) == event_id:
+                    return event
+            if not page.get("has_more") or page.get("next_cursor") is None:
+                return None
+            cursor = int(page["next_cursor"])
+        raise ValueError("shadow evidence search exceeded 100,000 events")
+
+    @app.post(
+        "/api/v1/research/mock-automation-specs",
+        dependencies=[Depends(authorize)],
+    )
+    async def publish_mock_automation_spec(
+        request: MockAutomationSpecPublicationRequest,
+    ) -> dict[str, object]:
+        from kiwoom_monitor.application.mock_automation_specification import (
+            publish_ready_mock_automation_spec,
+        )
+        from kiwoom_monitor.domain.execution_activation import (
+            forward_spec_from_dict,
+            mock_automation_spec_from_dict,
+            stage_revision_from_dict,
+        )
+        from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
+            ForwardEvaluationRepository,
+        )
+        try:
+            encoded = json.dumps(
+                request.model_dump(), ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if len(encoded) > 256 * 1024:
+                raise ValueError("mock automation spec publication is too large")
+            profile = forward_spec_from_dict(request.forward_profile)
+            stages = tuple(stage_revision_from_dict(value) for value in request.stage_revisions)
+            spec = mock_automation_spec_from_dict(request.operating_spec)
+            if (
+                request.account_ref != spec.account_scope.account_ref
+                or request.credential_profile_id != spec.credential_profile_id
+                or request.expected_binding_revision != spec.binding_revision
+            ):
+                raise ValueError("mock automation spec request scope conflict")
+            binding = await asyncio.to_thread(
+                current_mock_binding, request.credential_profile_id,
+            )
+            if binding is None:
+                raise ValueError("current verified mock binding is missing")
+            shadow_event = await asyncio.to_thread(
+                find_shadow_candidate, request.shadow_event_id,
+            )
+            if shadow_event is None:
+                raise ValueError("stored shadow evidence event is missing")
+            repository = ForwardEvaluationRepository(store)
+            readiness, changed = await asyncio.to_thread(
+                publish_ready_mock_automation_spec,
+                repository,
+                profile=profile,
+                stage_revisions=stages,
+                spec=spec,
+                shadow_event=shadow_event,
+                current_binding=binding,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            detail = str(error)
+            status = 409 if any(token in detail for token in (
+                "conflict", "current verified mock binding", "stored strategy stage",
+                "request scope",
+            )) else 400
+            raise HTTPException(status_code=status, detail=detail) from None
+        return {
+            "status": "saved" if changed else "unchanged",
+            "spec_id": spec.spec_id,
+            "readiness": readiness.status.value,
+            "reasons": list(readiness.reasons),
+            "orders_started": False,
+        }
+
+    @app.get(
+        "/api/v1/research/mock-automation-specs/{account_ref}",
+        dependencies=[Depends(authorize)],
+    )
+    async def list_mock_automation_specs(account_ref: str) -> dict[str, object]:
+        from kiwoom_monitor.domain.execution_activation import assess_mock_automation_readiness
+        from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
+            ForwardEvaluationRepository,
+        )
+        repository = ForwardEvaluationRepository(store)
+        specs = await asyncio.to_thread(repository.load_mock_automation_specs, account_ref)
+        values = []
+        for spec in specs:
+            profile = await asyncio.to_thread(
+                repository.load_profile, spec.strategy_ref, spec.forward_profile_id,
+            )
+            stage = await asyncio.to_thread(repository.latest_stage, spec.strategy_ref)
+            readiness = (
+                assess_mock_automation_readiness(spec, profile, strategy_stage=stage)
+                if profile is not None else None
+            )
+            values.append({
+                "spec": spec.to_dict(),
+                "readiness": readiness.status.value if readiness is not None else "BLOCKED",
+                "reasons": list(readiness.reasons) if readiness is not None else ["FORWARD_PROFILE_MISSING"],
+            })
+        return {"account_ref": account_ref, "specs": values}
+
+    def require_mock_automation_supervisor():
+        if mock_automation_supervisor is None:
+            raise HTTPException(status_code=503, detail="MOCK_AUTOMATION_RUNTIME_UNAVAILABLE")
+        return mock_automation_supervisor
+
+    @app.get(
+        "/api/v1/mock-automation/accounts/{account_ref}",
+        dependencies=[Depends(authorize)],
+    )
+    async def mock_automation_status(
+        account_ref: str,
+        credential_profile_id: str = Query(
+            min_length=1, max_length=96, pattern=r"^[A-Za-z0-9_-]+$",
+        ),
+    ) -> dict[str, object]:
+        supervisor = require_mock_automation_supervisor()
+        return await asyncio.to_thread(
+            supervisor.status,
+            account_ref,
+            credential_profile_id=credential_profile_id,
+        )
+
+    async def run_mock_automation_operation(operation: Any) -> dict[str, object]:
+        from .credential_runtime import CredentialOperationError
+        from .mock_automation_supervisor import MockAutomationSupervisorError
+        try:
+            return await operation
+        except MockAutomationSupervisorError as error:
+            raise HTTPException(status_code=error.status, detail=error.code) from None
+        except CredentialOperationError as error:
+            raise HTTPException(status_code=error.status, detail=error.code) from None
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+
+    @app.post("/api/v1/mock-automation/start", dependencies=[Depends(authorize)])
+    async def start_mock_automation(
+        request: MockAutomationStartRequest,
+    ) -> dict[str, object]:
+        supervisor = require_mock_automation_supervisor()
+        return await run_mock_automation_operation(supervisor.activate(
+            credential_profile_id=request.credential_profile_id,
+            account_ref=request.account_ref,
+            spec_id=request.spec_id,
+            expected_settings_revision=request.expected_settings_revision,
+            credential_revision=request.credential_revision,
+        ))
+
+    @app.post("/api/v1/mock-automation/stop", dependencies=[Depends(authorize)])
+    async def stop_mock_automation(
+        request: MockAutomationControlRequest,
+    ) -> dict[str, object]:
+        supervisor = require_mock_automation_supervisor()
+        return await run_mock_automation_operation(supervisor.stop(
+            credential_profile_id=request.credential_profile_id,
+            account_ref=request.account_ref,
+            spec_id=request.spec_id,
+            expected_control_revision=request.expected_control_revision,
+            reason=request.reason,
+        ))
+
+    @app.post("/api/v1/mock-automation/resume", dependencies=[Depends(authorize)])
+    async def resume_mock_automation_runtime(
+        request: MockAutomationResumeRequest,
+    ) -> dict[str, object]:
+        supervisor = require_mock_automation_supervisor()
+        return await run_mock_automation_operation(supervisor.resume(
+            credential_profile_id=request.credential_profile_id,
+            account_ref=request.account_ref,
+            spec_id=request.spec_id,
+            expected_control_revision=request.expected_control_revision,
+            expected_settings_revision=request.expected_settings_revision,
+            credential_revision=request.credential_revision,
+            reason=request.reason,
+        ))
+
     @app.get("/api/v1/market/snapshots/{kind}", dependencies=[Depends(authorize)])
     async def dataset_snapshots(
         kind: str, subject: str = Query(default="", max_length=32),
@@ -1428,6 +1811,20 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             raise HTTPException(status_code=404, detail="지원하지 않는 중앙 시장 자료입니다.")
         values = await asyncio.to_thread(store.load_dataset_snapshots, kind, subject, limit)
         return {"kind": kind, "subject": subject, "snapshots": values}
+
+    @app.get("/api/v1/market/top20-statistics", dependencies=[Depends(authorize)])
+    async def top20_statistics(start_date: str, end_date: str) -> dict[str, object]:
+        try:
+            start = datetime.fromisoformat(start_date).date()
+            end = datetime.fromisoformat(end_date).date()
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="TOP20 통계 날짜 형식이 올바르지 않습니다.") from error
+        if end < start or (end - start).days > 366:
+            raise HTTPException(status_code=422, detail="TOP20 통계 범위는 최대 367일입니다.")
+        result = await asyncio.to_thread(
+            store.load_top20_statistics, start.isoformat(), end.isoformat(),
+        )
+        return {"start_date": start.isoformat(), "end_date": end.isoformat(), **result}
 
     content_collections = {
         "news_article", "news_ai", "news_ai_shared", "news_request_usage", "journal_news_link", "journal_v2_news_links", "news_sync", "news_watchlist",

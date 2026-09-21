@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import sqlite3
+from contextlib import closing
 from datetime import date
 from pathlib import Path
 
@@ -11,6 +13,30 @@ from kiwoom_monitor.application.historical_high_service import HistoricalHighEvi
 
 
 class StockRepositoryTests(unittest.TestCase):
+    def test_last_realtime_market_cap_preserves_fundamentals_refresh_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            repository = StockRepository(database_path)
+            repository.upsert("005930", "삼성전자", "KOSPI")
+            repository.update_fundamentals("005930", 4_000_000, 55.0)
+            with closing(sqlite3.connect(database_path)) as connection:
+                connection.execute(
+                    "UPDATE stocks SET fundamentals_updated_at=? WHERE code=?",
+                    ("2026-09-20 08:00:00", "005930"),
+                )
+                connection.commit()
+
+            repository.update_last_market_caps({"005930": 4_200_000.0})
+
+            with closing(sqlite3.connect(database_path)) as connection:
+                saved = connection.execute(
+                    "SELECT market_cap,circulating_market_cap,fundamentals_updated_at "
+                    "FROM stocks WHERE code=?",
+                    ("005930",),
+                ).fetchone()
+            self.assertEqual((4_200_000.0, 2_310_000.0, "2026-09-20 08:00:00"), saved)
+
     def test_blank_market_update_preserves_catalog_market(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "monitor.sqlite3"

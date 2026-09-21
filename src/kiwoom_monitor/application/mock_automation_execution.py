@@ -14,14 +14,21 @@ from kiwoom_monitor.application.breakout_strategy import StrategyDecision
 from kiwoom_monitor.application.market_session_schedule import mock_order_entry_decision
 from kiwoom_monitor.application.mock_automation_admission import (
     MockAutomationAdmission,
+    MockAutomationControl,
+    MockAutomationDesiredState,
     MockAutomationLeaseReceipt,
+    MOCK_AUTOMATION_CONTROL_VERSION,
 )
 from kiwoom_monitor.application.mock_automation_recovery import (
     MockAutomationRecoveryDecision,
     MockAutomationRecoveryStatus,
     mock_account_recovery_fingerprint,
 )
-from kiwoom_monitor.domain.execution_activation import MockAutomationOperatingSpec
+from kiwoom_monitor.application.mock_automation_risk import (
+    MockAutomationRiskSnapshot,
+    VERIFIED_DAILY_PNL_SOURCE,
+)
+from kiwoom_monitor.domain.execution_activation import ForwardEvaluationSpec, MockAutomationOperatingSpec
 from kiwoom_monitor.domain.order_contract import (
     TERMINAL_ORDER_STATES,
     AccountSnapshot,
@@ -33,10 +40,10 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRe
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRecord
 
 
-MOCK_AUTOMATION_DECISION_GATE_VERSION = "mock_automation_decision_gate/v1"
+MOCK_AUTOMATION_DECISION_GATE_VERSION = "mock_automation_decision_gate/v2"
+MOCK_AUTOMATION_DECISION_GATE_LEGACY_VERSION = "mock_automation_decision_gate/v1"
 MOCK_AUTOMATION_DISPATCH_RECEIPT_VERSION = "mock_automation_dispatch_receipt/v1"
 MOCK_AUTOMATION_STOP_VERSION = "mock_automation_stop/v1"
-VERIFIED_DAILY_PNL_SOURCE = "account_scoped_fifo_broker_cost/v1"
 
 
 class MockAutomationGateStatus(StrEnum):
@@ -55,6 +62,9 @@ class MockAutomationLiveMetrics:
     reconnect_count: int
     balance_mismatch_count: int
     data_path: str
+    reconciliation_pending: bool = False
+    owned_position_quantities: tuple[tuple[str, int], ...] = ()
+    pending_sell_quantities: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         _require_aware(self.observed_at, "observed_at")
@@ -75,6 +85,15 @@ class MockAutomationLiveMetrics:
             raise ValueError("mock automation fault counters must be non-negative integers")
         if self.data_path not in {"nas", "direct"}:
             raise ValueError("data_path must be nas or direct")
+        if type(self.reconciliation_pending) is not bool:
+            raise ValueError("reconciliation_pending must be a boolean")
+        for name in ("owned_position_quantities", "pending_sell_quantities"):
+            values = getattr(self, name)
+            if any(not str(symbol).strip() or type(quantity) is not int or quantity < 0
+                   for symbol, quantity in values):
+                raise ValueError(f"{name} must contain non-negative symbol quantities")
+            if len({str(symbol) for symbol, _ in values}) != len(values):
+                raise ValueError(f"{name} must not contain duplicate symbols")
 
 
 @dataclass(frozen=True)
@@ -97,6 +116,7 @@ class MockAutomationDecisionGate:
     decided_at: datetime
     observed_at: datetime
     account_as_of: datetime
+    server_now: datetime
     recovery_fingerprint: str
     session_evidence: str
     daily_net_pnl_won: int | None
@@ -106,8 +126,11 @@ class MockAutomationDecisionGate:
     reconnect_count: int
     balance_mismatch_count: int
     in_flight_order_count: int
+    control_revision: int
     status: MockAutomationGateStatus
     reasons: tuple[str, ...]
+    risk_snapshot_id: str = ""
+    risk_reconciliation_revision: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -118,21 +141,33 @@ class MockAutomationDecisionGate:
         ):
             if not str(getattr(self, name)).strip():
                 raise ValueError(f"{name} is required")
-        if self.version != MOCK_AUTOMATION_DECISION_GATE_VERSION:
+        if self.version not in {
+            MOCK_AUTOMATION_DECISION_GATE_VERSION,
+            MOCK_AUTOMATION_DECISION_GATE_LEGACY_VERSION,
+        }:
             raise ValueError("unsupported mock automation decision gate")
         if not self.action:
             raise ValueError("mock automation gate action is required")
         if self.quantity < 0 or self.limit_price <= 0 or self.in_flight_order_count < 0:
             raise ValueError("mock automation order quantity must be non-negative and price positive")
+        if type(self.control_revision) is not int or self.control_revision < 0:
+            raise ValueError("control_revision must be non-negative")
         _require_aware(self.decided_at, "decided_at")
         _require_aware(self.observed_at, "observed_at")
         _require_aware(self.account_as_of, "account_as_of")
+        _require_aware(self.server_now, "server_now")
         if self.status is MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION and self.reasons:
             raise ValueError("approved mock automation gate cannot contain blocking reasons")
         if self.status is MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION and (
             self.action not in {"ENTER", "EXIT"} or self.quantity <= 0
+            or (
+                self.version == MOCK_AUTOMATION_DECISION_GATE_VERSION
+                and self.control_revision <= 0
+            )
         ):
             raise ValueError("only actionable positive-quantity Decisions may be approved")
+        if bool(self.risk_snapshot_id) != (self.risk_reconciliation_revision > 0):
+            raise ValueError("risk snapshot identity and revision must be provided together")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -154,6 +189,7 @@ class MockAutomationDecisionGate:
             "decided_at": self.decided_at.isoformat(),
             "observed_at": self.observed_at.isoformat(),
             "account_as_of": self.account_as_of.isoformat(),
+            "server_now": self.server_now.isoformat(),
             "recovery_fingerprint": self.recovery_fingerprint,
             "session_evidence": self.session_evidence,
             "daily_net_pnl_won": self.daily_net_pnl_won,
@@ -163,8 +199,11 @@ class MockAutomationDecisionGate:
             "reconnect_count": self.reconnect_count,
             "balance_mismatch_count": self.balance_mismatch_count,
             "in_flight_order_count": self.in_flight_order_count,
+            "control_revision": self.control_revision,
             "status": self.status.value,
             "reasons": list(self.reasons),
+            "risk_snapshot_id": self.risk_snapshot_id,
+            "risk_reconciliation_revision": self.risk_reconciliation_revision,
         }
 
 
@@ -248,16 +287,28 @@ class MockAutomationExecutionRepository(Protocol):
     def load_mock_automation_spec(
         self, account_ref: str, spec_id: str,
     ) -> MockAutomationOperatingSpec | None: ...
+    def load_profile(
+        self, strategy_ref: str, profile_id: str,
+    ) -> ForwardEvaluationSpec | None: ...
     def save_mock_automation_spec(self, value: MockAutomationOperatingSpec) -> bool: ...
     def load_mock_automation_admissions(
         self, account_ref: str,
     ) -> tuple[MockAutomationAdmission, ...]: ...
+    def load_mock_automation_admission_for_spec(
+        self, account_ref: str, spec_id: str,
+    ) -> MockAutomationAdmission | None: ...
     def load_mock_automation_lease_receipts(
         self, account_ref: str,
     ) -> tuple[MockAutomationLeaseReceipt, ...]: ...
+    def load_mock_automation_lease_for_admission(
+        self, account_ref: str, admission_id: str,
+    ) -> MockAutomationLeaseReceipt | None: ...
     def load_mock_automation_recovery_decisions(
         self, account_ref: str,
     ) -> tuple[MockAutomationRecoveryDecision, ...]: ...
+    def load_latest_mock_automation_recovery(
+        self, account_ref: str, admission_id: str,
+    ) -> MockAutomationRecoveryDecision | None: ...
     def save_mock_automation_decision_gate(self, value: MockAutomationDecisionGate) -> bool: ...
     def save_mock_automation_dispatch_receipt(
         self, value: MockAutomationDispatchReceipt,
@@ -265,13 +316,29 @@ class MockAutomationExecutionRepository(Protocol):
     def load_mock_automation_dispatch_receipts(
         self, account_ref: str,
     ) -> tuple[MockAutomationDispatchReceipt, ...]: ...
+    def load_mock_automation_dispatch_receipt(
+        self, account_ref: str, intent_id: str,
+    ) -> MockAutomationDispatchReceipt | None: ...
     def load_mock_automation_decision_gates(
         self, account_ref: str,
     ) -> tuple[MockAutomationDecisionGate, ...]: ...
+    def load_mock_automation_approved_gate(
+        self, account_ref: str, intent_id: str,
+    ) -> MockAutomationDecisionGate | None: ...
     def save_mock_automation_stop_revision(self, value: MockAutomationStopRevision) -> bool: ...
     def load_mock_automation_stop_revisions(
         self, account_ref: str,
     ) -> tuple[MockAutomationStopRevision, ...]: ...
+    def load_latest_mock_automation_stop(
+        self, account_ref: str, admission_id: str,
+    ) -> MockAutomationStopRevision | None: ...
+    def load_mock_automation_control(self, account_ref: str) -> MockAutomationControl | None: ...
+    def save_mock_automation_control(
+        self, value: MockAutomationControl, *, expected_revision: int,
+    ) -> bool: ...
+    def load_latest_mock_automation_risk(
+        self, account_ref: str,
+    ) -> MockAutomationRiskSnapshot | None: ...
 
 
 class ClosedGateMockRuntime(Protocol):
@@ -279,11 +346,14 @@ class ClosedGateMockRuntime(Protocol):
     run_id: str
 
     def heartbeat(self) -> None: ...
+    def server_now(self) -> datetime: ...
     def set_new_orders_enabled(self, enabled: bool) -> None: ...
     def automation_decision_guard(self) -> AbstractContextManager[None]: ...
     def load_intent(self, intent_id: str) -> ExecutionRecord | None: ...
+    def load_active_intents(self) -> tuple[ExecutionRecord, ...]: ...
     def submit_automation_intent(
         self, intent: OrderIntent, account: AccountSnapshot, *, reference_price: int | None = None,
+        spec_id: str, control_revision: int,
     ) -> ExecutionRecord: ...
 
 
@@ -305,51 +375,91 @@ def assess_mock_automation_decision(
     *,
     strategy_ref: str,
     latest_stop: MockAutomationStopRevision | None = None,
+    control: MockAutomationControl | None = None,
     in_flight_order_count: int = 0,
+    profile: ForwardEvaluationSpec | None = None,
+    server_now: datetime | None = None,
+    risk_snapshot_id: str = "",
+    risk_reconciliation_revision: int = 0,
 ) -> MockAutomationDecisionGate:
     _validate_decision_identity(decision)
     _validate_lineage(spec, admission, lease_receipt, recovery_decision, recovery)
     decided_at = datetime.fromisoformat(decision.decided_at)
+    effective_now = server_now or metrics.observed_at
+    _require_aware(effective_now, "server_now")
     intent_id = mock_automation_intent_id(spec.spec_id, decision.decision_id)
     reasons: list[str] = []
+    is_exit = decision.final_action == "EXIT"
     if strategy_ref != spec.strategy_ref:
         reasons.append("STRATEGY_REF_MISMATCH")
     if decision.run_id != admission.execution_run_id:
         reasons.append("EXECUTION_RUN_MISMATCH")
-    if recovery_decision.status is not MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED:
+    allowed_recovery = {
+        MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED,
+        *({MockAutomationRecoveryStatus.MANAGE_ONLY_ORDERS_DISABLED} if is_exit else set()),
+    }
+    if recovery_decision.status not in allowed_recovery:
         reasons.append("LATEST_RECOVERY_NOT_CLEARED")
     if metrics.observed_at < recovery_decision.observed_at:
         reasons.append("LIVE_OBSERVATION_PREDATES_RECOVERY")
+    if metrics.observed_at > effective_now:
+        reasons.append("LIVE_OBSERVATION_FROM_FUTURE")
+    elif spec.maximum_data_gap_seconds is not None and (
+        effective_now - metrics.observed_at
+    ).total_seconds() > spec.maximum_data_gap_seconds:
+        reasons.append("LIVE_OBSERVATION_STALE")
+    if profile is None:
+        reasons.append("FORWARD_PROFILE_MISSING")
+    elif not is_exit:
+        if effective_now < profile.evaluation_start:
+            reasons.append("EVALUATION_NOT_STARTED")
+        elif effective_now > profile.evaluation_end:
+            reasons.append("EVALUATION_ENDED")
     if latest_stop is not None and latest_stop.stopped_at >= recovery_decision.observed_at:
         reasons.append("EMERGENCY_STOP_REQUIRES_NEW_RECOVERY")
+    if control is None:
+        reasons.append("AUTOMATION_CONTROL_MISSING")
+    elif (
+        control.desired_state is not MockAutomationDesiredState.RUNNING
+        or control.active_spec_id != spec.spec_id
+        or control.execution_run_id != admission.execution_run_id
+    ):
+        reasons.append("AUTOMATION_CONTROL_NOT_RUNNING")
     if not metrics.recovery_complete:
         reasons.append("BROKER_RECOVERY_INCOMPLETE")
-    if metrics.daily_net_pnl_won is None:
-        reasons.append("DAILY_NET_PNL_UNKNOWN")
-    if metrics.daily_net_pnl_source != VERIFIED_DAILY_PNL_SOURCE:
-        reasons.append("DAILY_NET_PNL_SOURCE_UNVERIFIED")
-    if metrics.data_gap_seconds is None:
-        reasons.append("DATA_GAP_UNKNOWN")
+    if metrics.reconciliation_pending:
+        reasons.append("RECONCILIATION_PENDING")
+    if not is_exit:
+        if metrics.daily_net_pnl_won is None:
+            reasons.append("DAILY_NET_PNL_UNKNOWN")
+        if metrics.daily_net_pnl_source != VERIFIED_DAILY_PNL_SOURCE:
+            reasons.append("DAILY_NET_PNL_SOURCE_UNVERIFIED")
+        if metrics.data_gap_seconds is None:
+            reasons.append("DATA_GAP_UNKNOWN")
     if metrics.data_path != spec.data_path:
         reasons.append("DATA_PATH_MISMATCH")
 
-    _append_limit_reason(
-        reasons, metrics.daily_net_pnl_won, spec.maximum_daily_loss_won,
-        lambda value, limit: value < -limit, "DAILY_LOSS_LIMIT_REACHED",
-    )
-    _append_limit_reason(
-        reasons, metrics.data_gap_seconds, spec.maximum_data_gap_seconds,
-        lambda value, limit: value > limit, "DATA_GAP_LIMIT_EXCEEDED",
-    )
+    if not is_exit:
+        _append_limit_reason(
+            reasons, metrics.daily_net_pnl_won, spec.maximum_daily_loss_won,
+            lambda value, limit: value <= -limit, "DAILY_LOSS_LIMIT_REACHED",
+        )
+        _append_limit_reason(
+            reasons, metrics.data_gap_seconds, spec.maximum_data_gap_seconds,
+            lambda value, limit: value > limit, "DATA_GAP_LIMIT_EXCEEDED",
+        )
     for value, limit, reason in (
         (metrics.submission_unknown_count, spec.maximum_submission_unknown_count,
          "SUBMISSION_UNKNOWN_LIMIT_EXCEEDED"),
-        (metrics.reconnect_count, spec.maximum_reconnect_count,
-         "RECONNECT_LIMIT_EXCEEDED"),
         (metrics.balance_mismatch_count, spec.maximum_balance_mismatch_count,
          "BALANCE_MISMATCH_LIMIT_EXCEEDED"),
     ):
         _append_limit_reason(reasons, value, limit, lambda item, maximum: item > maximum, reason)
+    if not is_exit:
+        _append_limit_reason(
+            reasons, metrics.reconnect_count, spec.maximum_reconnect_count,
+            lambda item, maximum: item > maximum, "RECONNECT_LIMIT_EXCEEDED",
+        )
 
     max_gap = spec.maximum_data_gap_seconds
     if decided_at > metrics.observed_at:
@@ -369,7 +479,7 @@ def assess_mock_automation_decision(
         for order in recovery.orders
     ):
         reasons.append("BROKER_ORDER_SNAPSHOT_STALE")
-    if recovery.orders:
+    if any(order.state not in TERMINAL_ORDER_STATES for order in recovery.orders):
         reasons.append("BROKER_OPEN_ORDER_PRESENT")
     if in_flight_order_count:
         reasons.append("EXECUTION_ORDER_IN_FLIGHT")
@@ -397,13 +507,19 @@ def assess_mock_automation_decision(
         if decision.required_capital_won > available:
             reasons.append("INSUFFICIENT_AVAILABLE_CASH")
     elif decision.final_action == "EXIT":
-        if int(positions.get(decision.symbol, 0)) < decision.quantity:
+        owned_positions = dict(metrics.owned_position_quantities)
+        pending_sells = dict(metrics.pending_sell_quantities)
+        owned = owned_positions.get(decision.symbol)
+        if owned is None:
+            reasons.append("RUN_POSITION_UNVERIFIED")
+        elif max(0, min(int(positions.get(decision.symbol, 0)), owned)
+                 - pending_sells.get(decision.symbol, 0)) < decision.quantity:
             reasons.append("INSUFFICIENT_POSITION")
     else:
         reasons.append("NON_ACTION_DECISION")
 
     session = mock_order_entry_decision(
-        metrics.observed_at,
+        effective_now,
         environment="mock",
         venue=spec.supported_venue or "",
         order_type=OrderType.LIMIT.value,
@@ -431,6 +547,7 @@ def assess_mock_automation_decision(
         "decided_at": decided_at.isoformat(),
         "observed_at": metrics.observed_at.isoformat(),
         "account_as_of": recovery.account.as_of.isoformat(),
+        "server_now": effective_now.isoformat(),
         "recovery_fingerprint": mock_account_recovery_fingerprint(recovery),
         "session_evidence": session.evidence,
         "daily_net_pnl_won": metrics.daily_net_pnl_won,
@@ -440,22 +557,29 @@ def assess_mock_automation_decision(
         "reconnect_count": metrics.reconnect_count,
         "balance_mismatch_count": metrics.balance_mismatch_count,
         "in_flight_order_count": in_flight_order_count,
+        "control_revision": control.control_revision if control is not None else 0,
         "status": (
             MockAutomationGateStatus.BLOCKED.value
             if unique_reasons else MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION.value
         ),
         "reasons": list(unique_reasons),
+        "risk_snapshot_id": risk_snapshot_id,
+        "risk_reconciliation_revision": risk_reconciliation_revision,
     }
     return MockAutomationDecisionGate(
         gate_id=_content_id("mock_automation_gate", body),
         decided_at=decided_at,
         observed_at=metrics.observed_at,
         account_as_of=recovery.account.as_of,
+        server_now=effective_now,
         status=MockAutomationGateStatus(body["status"]),
         reasons=unique_reasons,
         **{
             key: value for key, value in body.items()
-            if key not in {"decided_at", "observed_at", "account_as_of", "status", "reasons"}
+            if key not in {
+                "decided_at", "observed_at", "account_as_of", "server_now",
+                "status", "reasons",
+            }
         },
     )
 
@@ -470,14 +594,18 @@ def dispatch_mock_automation_decision(
     account_ref: str,
     spec_id: str,
     strategy_ref: str,
+    risk_snapshot_id: str = "",
+    risk_reconciliation_revision: int = 0,
 ) -> tuple[MockAutomationDecisionGate, ExecutionRecord | None, MockAutomationDispatchReceipt | None]:
-    spec, admission, lease, recovered, latest_stop = _load_context(
+    spec, profile, admission, lease, recovered, latest_stop, control = _load_context(
         repository, account_ref, spec_id,
     )
     if runtime.account_ref != account_ref or runtime.run_id != admission.execution_run_id:
         raise ValueError("mock automation runtime does not match its admission")
     runtime.set_new_orders_enabled(False)
     with runtime.automation_decision_guard():
+        server_now = runtime.server_now()
+        control = repository.load_mock_automation_control(account_ref)
         repository.save_mock_automation_spec(spec)  # Revalidate binding for every new Decision.
         _validate_decision_identity(decision)
         if strategy_ref != spec.strategy_ref:
@@ -487,37 +615,38 @@ def dispatch_mock_automation_decision(
         if decision.final_action not in {"ENTER", "EXIT"}:
             gate = assess_mock_automation_decision(
                 spec, admission, lease, recovered, decision, recovery, metrics,
-                strategy_ref=strategy_ref, latest_stop=latest_stop,
+                strategy_ref=strategy_ref, latest_stop=latest_stop, control=control,
+                profile=profile, server_now=server_now,
+                risk_snapshot_id=risk_snapshot_id,
+                risk_reconciliation_revision=risk_reconciliation_revision,
             )
             repository.save_mock_automation_decision_gate(gate)
             return gate, None, None
         expected_intent = _intent_for_decision(spec, admission, decision)
         existing = runtime.load_intent(expected_intent.intent_id)
-        approved_gates = tuple(
-            gate for gate in repository.load_mock_automation_decision_gates(account_ref)
-            if gate.admission_id == admission.admission_id
-            and gate.status is MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION
-        )
         if existing is not None:
             if existing.intent != expected_intent:
                 raise ValueError("deterministic mock automation intent has conflicting content")
-            matching = tuple(gate for gate in approved_gates if gate.intent_id == existing.intent.intent_id)
-            if not matching:
+            gate = repository.load_mock_automation_approved_gate(
+                account_ref, existing.intent.intent_id,
+            )
+            if gate is None or gate.admission_id != admission.admission_id:
                 raise RuntimeError("existing automation intent has no approved decision gate")
-            gate = matching[-1]
-            receipt = _dispatch_receipt(gate, existing, metrics.observed_at)
-            repository.save_mock_automation_dispatch_receipt(receipt)
+            receipt = repository.load_mock_automation_dispatch_receipt(
+                account_ref, existing.intent.intent_id,
+            )
+            if receipt is None:
+                raise RuntimeError("existing automation intent has no dispatch receipt")
             return gate, existing, receipt
 
-        in_flight = 0
-        for intent_id in dict.fromkeys(gate.intent_id for gate in approved_gates):
-            record = runtime.load_intent(intent_id)
-            if record is not None and record.state not in TERMINAL_ORDER_STATES:
-                in_flight += 1
+        in_flight = len(runtime.load_active_intents())
         gate = assess_mock_automation_decision(
             spec, admission, lease, recovered, decision, recovery, metrics,
-            strategy_ref=strategy_ref, latest_stop=latest_stop,
+            strategy_ref=strategy_ref, latest_stop=latest_stop, control=control,
             in_flight_order_count=in_flight,
+            profile=profile, server_now=server_now,
+            risk_snapshot_id=risk_snapshot_id,
+            risk_reconciliation_revision=risk_reconciliation_revision,
         )
         repository.save_mock_automation_decision_gate(gate)
         if gate.status is MockAutomationGateStatus.BLOCKED:
@@ -525,10 +654,66 @@ def dispatch_mock_automation_decision(
 
         record = runtime.submit_automation_intent(
             expected_intent, recovery.account, reference_price=decision.signal_reference_price,
+            spec_id=spec.spec_id, control_revision=gate.control_revision,
         )
         receipt = _dispatch_receipt(gate, record, metrics.observed_at)
         repository.save_mock_automation_dispatch_receipt(receipt)
         return gate, record, receipt
+
+
+def dispatch_mock_automation_decision_from_risk(
+    repository: MockAutomationExecutionRepository,
+    runtime: ClosedGateMockRuntime,
+    decision: StrategyDecision,
+    recovery: MockAccountRecovery,
+    risk: MockAutomationRiskSnapshot,
+    *,
+    account_ref: str,
+    spec_id: str,
+    strategy_ref: str,
+) -> tuple[MockAutomationDecisionGate, ExecutionRecord | None, MockAutomationDispatchReceipt | None]:
+    """Dispatch only from the latest stored NAS risk revision."""
+    loader = getattr(repository, "load_latest_mock_automation_risk", None)
+    current = loader(account_ref) if callable(loader) else None
+    if current != risk:
+        raise RuntimeError("latest mock automation risk snapshot changed")
+    admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id)
+    if admission is None:
+        raise ValueError("mock automation admission is missing")
+    recovered = repository.load_latest_mock_automation_recovery(
+        account_ref, admission.admission_id,
+    )
+    if recovered is None or (
+        recovered.risk_snapshot_id != risk.snapshot_id
+        or recovered.risk_reconciliation_revision != risk.reconciliation_revision
+    ):
+        raise RuntimeError("latest broker recovery is not linked to this risk snapshot")
+    if (
+        risk.account_ref != account_ref
+        or risk.execution_run_id != runtime.run_id
+        or risk.account_as_of != recovery.account.as_of
+    ):
+        raise ValueError("mock automation risk snapshot does not match dispatch context")
+    metrics = MockAutomationLiveMetrics(
+        observed_at=risk.observed_at,
+        recovery_complete=risk.reconciliation_complete,
+        daily_net_pnl_won=risk.daily_net_pnl_won,
+        daily_net_pnl_source=risk.daily_net_pnl_source,
+        data_gap_seconds=risk.data_gap_seconds,
+        submission_unknown_count=risk.submission_unknown_count,
+        reconnect_count=risk.reconnect_count,
+        balance_mismatch_count=risk.balance_mismatch_count,
+        data_path=risk.data_path,
+        reconciliation_pending=not risk.reconciliation_complete,
+        owned_position_quantities=risk.owned_position_quantities,
+        pending_sell_quantities=risk.pending_sell_quantities,
+    )
+    return dispatch_mock_automation_decision(
+        repository, runtime, decision, recovery, metrics,
+        account_ref=account_ref, spec_id=spec_id, strategy_ref=strategy_ref,
+        risk_snapshot_id=risk.snapshot_id,
+        risk_reconciliation_revision=risk.reconciliation_revision,
+    )
 
 
 def emergency_stop_mock_automation(
@@ -543,9 +728,38 @@ def emergency_stop_mock_automation(
     _require_aware(stopped_at, "stopped_at")
     if not reason.strip():
         raise ValueError("emergency stop reason is required")
-    spec, admission, _, _, _ = _load_context(repository, account_ref, spec_id)
+    spec = repository.load_mock_automation_spec(account_ref, spec_id)
+    if spec is None:
+        raise ValueError("mock automation operating spec is not stored")
+    admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id)
+    if admission is None:
+        raise ValueError("mock automation admission is missing")
+    control = repository.load_mock_automation_control(account_ref)
     if runtime.account_ref != account_ref or runtime.run_id != admission.execution_run_id:
         raise ValueError("mock automation runtime does not match its admission")
+    if control is None:
+        runtime.set_new_orders_enabled(False)
+        raise RuntimeError("mock automation control is missing")
+    stopped_control = MockAutomationControl(
+        version=MOCK_AUTOMATION_CONTROL_VERSION,
+        account_ref=account_ref,
+        desired_state=MockAutomationDesiredState.STOPPED,
+        control_revision=control.control_revision + 1,
+        active_spec_id=spec.spec_id,
+        execution_run_id=admission.execution_run_id,
+        changed_at=stopped_at,
+        reason=reason.strip(),
+    )
+    try:
+        saved = repository.save_mock_automation_control(
+            stopped_control, expected_revision=control.control_revision,
+        )
+    except Exception:
+        runtime.set_new_orders_enabled(False)
+        raise
+    if not saved:
+        runtime.set_new_orders_enabled(False)
+        raise RuntimeError("mock automation control changed before stop")
     runtime.set_new_orders_enabled(False)
     body = {
         "version": MOCK_AUTOMATION_STOP_VERSION,
@@ -566,6 +780,66 @@ def emergency_stop_mock_automation(
     return revision
 
 
+def resume_mock_automation(
+    repository: MockAutomationExecutionRepository,
+    runtime: ClosedGateMockRuntime,
+    *,
+    account_ref: str,
+    spec_id: str,
+    resumed_at: datetime,
+    reason: str,
+) -> MockAutomationControl:
+    """Resume a stopped run only after a newer broker reconciliation was recorded."""
+    _require_aware(resumed_at, "resumed_at")
+    if not reason.strip():
+        raise ValueError("mock automation resume reason is required")
+    spec = repository.load_mock_automation_spec(account_ref, spec_id)
+    if spec is None:
+        raise ValueError("mock automation operating spec is not stored")
+    admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id)
+    if admission is None:
+        raise ValueError("mock automation admission is missing")
+    if runtime.account_ref != account_ref or runtime.run_id != admission.execution_run_id:
+        raise ValueError("mock automation runtime does not match its admission")
+    runtime.set_new_orders_enabled(False)
+    control = repository.load_mock_automation_control(account_ref)
+    if control is None:
+        raise RuntimeError("mock automation control is missing")
+    if (
+        control.active_spec_id != spec.spec_id
+        or control.execution_run_id != admission.execution_run_id
+    ):
+        raise RuntimeError("mock automation control does not belong to this run")
+    if control.desired_state is not MockAutomationDesiredState.STOPPED:
+        raise RuntimeError("mock automation is not stopped")
+    repository.save_mock_automation_spec(spec)  # Revalidate the current account binding.
+    recovery = repository.load_latest_mock_automation_recovery(
+        account_ref, admission.admission_id,
+    )
+    if recovery is None or recovery.observed_at < control.changed_at:
+        raise RuntimeError("a fresh broker reconciliation is required before resume")
+    if recovery.status not in {
+        MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED,
+        MockAutomationRecoveryStatus.MANAGE_ONLY_ORDERS_DISABLED,
+    }:
+        raise RuntimeError("latest broker reconciliation does not permit resume")
+    resumed = MockAutomationControl(
+        version=MOCK_AUTOMATION_CONTROL_VERSION,
+        account_ref=account_ref,
+        desired_state=MockAutomationDesiredState.RUNNING,
+        control_revision=control.control_revision + 1,
+        active_spec_id=spec.spec_id,
+        execution_run_id=admission.execution_run_id,
+        changed_at=resumed_at,
+        reason=reason.strip(),
+    )
+    if not repository.save_mock_automation_control(
+        resumed, expected_revision=control.control_revision,
+    ):
+        raise RuntimeError("mock automation control changed before resume")
+    return resumed
+
+
 def mock_automation_decision_gate_from_dict(value: Mapping[str, Any]) -> MockAutomationDecisionGate:
     gate = MockAutomationDecisionGate(
         gate_id=str(value["gate_id"]), version=str(value["version"]),
@@ -579,6 +853,7 @@ def mock_automation_decision_gate_from_dict(value: Mapping[str, Any]) -> MockAut
         limit_price=int(value["limit_price"]), decided_at=datetime.fromisoformat(str(value["decided_at"])),
         observed_at=datetime.fromisoformat(str(value["observed_at"])),
         account_as_of=datetime.fromisoformat(str(value["account_as_of"])),
+        server_now=datetime.fromisoformat(str(value.get("server_now", value["observed_at"]))),
         recovery_fingerprint=str(value["recovery_fingerprint"]),
         session_evidence=str(value["session_evidence"]),
         daily_net_pnl_won=(int(value["daily_net_pnl_won"]) if value.get("daily_net_pnl_won") is not None else None),
@@ -588,10 +863,13 @@ def mock_automation_decision_gate_from_dict(value: Mapping[str, Any]) -> MockAut
         reconnect_count=int(value["reconnect_count"]),
         balance_mismatch_count=int(value["balance_mismatch_count"]),
         in_flight_order_count=int(value.get("in_flight_order_count", 0)),
+        control_revision=int(value.get("control_revision", 0)),
         status=MockAutomationGateStatus(str(value["status"])),
         reasons=tuple(str(item) for item in value.get("reasons", ())),
+        risk_snapshot_id=str(value.get("risk_snapshot_id") or ""),
+        risk_reconciliation_revision=int(value.get("risk_reconciliation_revision") or 0),
     )
-    _verify_content_id("mock_automation_gate", gate.gate_id, gate.to_dict(), "gate_id")
+    _verify_content_id("mock_automation_gate", gate.gate_id, dict(value), "gate_id")
     return gate
 
 
@@ -626,20 +904,25 @@ def _load_context(repository, account_ref: str, spec_id: str):
     spec = repository.load_mock_automation_spec(account_ref, spec_id)
     if spec is None:
         raise ValueError("mock automation operating spec is not stored")
-    admissions = tuple(item for item in repository.load_mock_automation_admissions(account_ref) if item.spec_id == spec_id)
-    if len(admissions) != 1:
-        raise ValueError("mock automation admission is missing or ambiguous")
-    admission = admissions[0]
-    leases = tuple(item for item in repository.load_mock_automation_lease_receipts(account_ref) if item.admission_id == admission.admission_id)
-    if len(leases) != 1:
-        raise ValueError("mock automation lease receipt is missing or ambiguous")
-    recoveries = tuple(item for item in repository.load_mock_automation_recovery_decisions(account_ref) if item.admission_id == admission.admission_id)
-    if not recoveries:
+    profile = repository.load_profile(spec.strategy_ref, spec.forward_profile_id)
+    admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id)
+    if admission is None:
+        raise ValueError("mock automation admission is missing")
+    lease = repository.load_mock_automation_lease_for_admission(
+        account_ref, admission.admission_id,
+    )
+    if lease is None:
+        raise ValueError("mock automation lease receipt is missing")
+    recovery = repository.load_latest_mock_automation_recovery(
+        account_ref, admission.admission_id,
+    )
+    if recovery is None:
         raise ValueError("mock automation recovery decision is missing")
-    recovery = max(recoveries, key=lambda item: (item.observed_at, item.decision_id))
-    stops = tuple(item for item in repository.load_mock_automation_stop_revisions(account_ref) if item.admission_id == admission.admission_id)
-    latest_stop = max(stops, key=lambda item: (item.stopped_at, item.revision_id)) if stops else None
-    return spec, admission, leases[0], recovery, latest_stop
+    latest_stop = repository.load_latest_mock_automation_stop(
+        account_ref, admission.admission_id,
+    )
+    control = repository.load_mock_automation_control(account_ref)
+    return spec, profile, admission, lease, recovery, latest_stop, control
 
 
 def _validate_lineage(spec, admission, lease, recovery_decision, recovery) -> None:

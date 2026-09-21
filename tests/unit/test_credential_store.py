@@ -8,6 +8,7 @@ import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import datetime
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -16,7 +17,9 @@ from kiwoom_monitor.central_server.config import CentralServerSettings
 from kiwoom_monitor.central_server.credential_store import (
     CredentialStore, CredentialStoreError, compose_credential_settings,
 )
-from kiwoom_monitor.central_server.database import SQLiteQueryStore, _finalize_credential_activation
+from kiwoom_monitor.central_server.database import (
+    SQLiteQueryStore, _credential_activation_row, _finalize_credential_activation,
+)
 from kiwoom_monitor.central_server.central_schema import central_schema_migrations
 from kiwoom_monitor.central_server.schema_migrations import CentralSchemaMigrationRunner
 
@@ -187,6 +190,17 @@ class CredentialStoreTests(unittest.TestCase):
             self.database.finalize_credential_activation({**value, "secret_key": self.credentials["secret_key"]})
         for secret in self.credentials.values():
             self.assertNotIn(secret, str(one))
+
+    def test_postgres_activation_timestamp_is_normalized_to_iso_text(self):
+        committed_at = datetime.fromisoformat("2026-09-15T12:00:00+09:00")
+        row = (
+            "operation", "kiwoom_mock", 1, "request", "a" * 64,
+            "profile", None, None, None, committed_at,
+        )
+        self.assertEqual(
+            "2026-09-15T12:00:00+09:00",
+            _credential_activation_row(row)["committed_at"],
+        )
 
     def test_activation_failure_rolls_back_binding_and_profile(self):
         value = self._activation()

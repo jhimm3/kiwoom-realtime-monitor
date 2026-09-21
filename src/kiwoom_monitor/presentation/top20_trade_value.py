@@ -325,3 +325,36 @@ class Top20MarketRepairWorker(QThread):
             self.completed.emit(self._repository.repair_top20_market_splits())
         except Exception as error:
             self.failed.emit(str(error))
+
+
+class Top20NasDataWorker(QThread):
+    """Read TOP20 history/statistics from NAS without blocking the GUI thread."""
+
+    completed = Signal(object, object)
+    failed = Signal(object, str)
+
+    def __init__(self, client: object, request: tuple[str, object]) -> None:
+        super().__init__()
+        self._client = client
+        self._request = request
+
+    def run(self) -> None:
+        kind, value = self._request
+        try:
+            if kind == "date":
+                loader = getattr(self._client, "load_stored_top20_index")
+                result = loader(str(value))
+            elif kind in {"statistics", "daily"}:
+                start_date, end_date = value  # type: ignore[misc]
+                loader = getattr(self._client, "load_stored_top20_statistics")
+                result = loader(str(start_date), str(end_date))
+            elif kind == "market_caps":
+                loader = getattr(self._client, "load_stored_market_caps")
+                result = loader(tuple(str(code) for code in value))  # type: ignore[arg-type]
+            else:
+                raise ValueError("지원하지 않는 TOP20 NAS 조회입니다.")
+            if result is None:
+                raise RuntimeError("NAS TOP20 저장 자료를 불러오지 못했습니다.")
+            self.completed.emit(self._request, result)
+        except Exception as error:
+            self.failed.emit(self._request, str(error))

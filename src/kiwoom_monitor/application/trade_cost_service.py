@@ -126,45 +126,59 @@ class TradeCostService:
             "frgn_stex_code": "", "dmst_stex_tp": "%", "qry_sort_tp": "1",
         }
         batch = self._client.query_account_pages("kt00015", "/api/dostk/acnt", body)
-        records: list[dict[str, Any]] = []
-        for response in batch.pages:
-            values = response.get("trst_ovrl_trde_prps_array", [])
-            if isinstance(values, list):
-                records.extend(value for value in values if isinstance(value, dict))
-        grouped: dict[tuple[date, date, str, str], list[int]] = {}
-        for record in records:
-            value = self._to_cost(record)
-            if value is None or not start <= value.fill_date <= end:
-                continue
-            key = (value.fill_date, value.settlement_date, value.stock_code, value.side)
-            totals = grouped.setdefault(key, [0, 0, 0, 0, 0])
-            for index, amount in enumerate((value.gross_amount, value.settlement_amount, value.commission, value.tax, value.total_cost)):
-                totals[index] += amount
-        costs = tuple(
-            DailyTradeCost(*key, *totals, origin_scope=batch.context.scope)
-            for key, totals in sorted(grouped.items())
-        )
+        costs = trade_costs_from_pages(batch.pages, start, end, batch.context.scope)
         return TradeCostBatch(costs, batch.context)
 
     @staticmethod
     def _to_cost(record: dict[str, Any]) -> DailyTradeCost | None:
-        try:
-            fill_date = _date(record.get("cntr_dt"))
-            settlement_date = _date(record.get("trde_dt"))
-        except ValueError:
-            return None
-        code = _stock_code(record.get("stk_cd"))
-        side_text = str(record.get("io_tp_nm", ""))
-        side = "매도" if "매도" in side_text else ("매수" if "매수" in side_text else "")
-        if not code or not side:
-            return None
-        commission = _number(record.get("cmsn"))
-        tax = _number(record.get("trde_agri_tax"))
-        combined = _number(record.get("tax_sum_cmsn"))
-        return DailyTradeCost(
-            fill_date, settlement_date, code, side, _number(record.get("trde_amt")),
-            _number(record.get("exct_amt")), commission, tax, combined or commission + tax,
-        )
+        return _trade_cost_from_record(record)
+
+
+def trade_costs_from_pages(
+    pages: tuple[dict[str, Any], ...],
+    start: date,
+    end: date,
+    account_scope: AccountScope,
+) -> tuple[DailyTradeCost, ...]:
+    """Parse a completed broker page set for GUI and NAS risk projection alike."""
+    records: list[dict[str, Any]] = []
+    for response in pages:
+        values = response.get("trst_ovrl_trde_prps_array", [])
+        if isinstance(values, list):
+            records.extend(value for value in values if isinstance(value, dict))
+    grouped: dict[tuple[date, date, str, str], list[int]] = {}
+    for record in records:
+        value = _trade_cost_from_record(record)
+        if value is None or not start <= value.fill_date <= end:
+            continue
+        key = (value.fill_date, value.settlement_date, value.stock_code, value.side)
+        totals = grouped.setdefault(key, [0, 0, 0, 0, 0])
+        for index, amount in enumerate((value.gross_amount, value.settlement_amount, value.commission, value.tax, value.total_cost)):
+            totals[index] += amount
+    return tuple(
+        DailyTradeCost(*key, *totals, origin_scope=account_scope)
+        for key, totals in sorted(grouped.items())
+    )
+
+
+def _trade_cost_from_record(record: dict[str, Any]) -> DailyTradeCost | None:
+    try:
+        fill_date = _date(record.get("cntr_dt"))
+        settlement_date = _date(record.get("trde_dt"))
+    except ValueError:
+        return None
+    code = _stock_code(record.get("stk_cd"))
+    side_text = str(record.get("io_tp_nm", ""))
+    side = "매도" if "매도" in side_text else ("매수" if "매수" in side_text else "")
+    if not code or not side:
+        return None
+    commission = _number(record.get("cmsn"))
+    tax = _number(record.get("trde_agri_tax"))
+    combined = _number(record.get("tax_sum_cmsn"))
+    return DailyTradeCost(
+        fill_date, settlement_date, code, side, _number(record.get("trde_amt")),
+        _number(record.get("exct_amt")), commission, tax, combined or commission + tax,
+    )
 
 
 def _digits(value: object) -> str:

@@ -22,6 +22,32 @@ class FakeClient:
 
 
 class RankingServiceTests(unittest.TestCase):
+    def test_direct_fallback_retries_stale_snapshot_until_current(self) -> None:
+        class DirectRankingClient(FakeClient):
+            def __init__(self) -> None:
+                self.requests = 0
+
+            def server_now(self):
+                return datetime(2026, 9, 21, 15, 53, 30, 250000)
+
+            def request(self, api_id, path, body):
+                self.requests += 1
+                clock = "155330" if self.requests >= 5 else "155300"
+                return {"item_inq_rank": [{
+                    "dt": "20260921", "tm": clock,
+                    "bigd_rank": str(index + 1),
+                    "stk_cd": f"{index + 1:06d}", "stk_nm": f"종목{index + 1}",
+                    "base_comp_chgr": "1.25", "cur_prc": "72000",
+                } for index in range(20)]}
+
+        client = DirectRankingClient()
+        with patch("kiwoom_monitor.application.ranking_service.time.sleep") as sleeper:
+            stocks = RankingService(client, query_type="5").load_top_stocks()
+
+        self.assertEqual(20, len(stocks))
+        self.assertEqual(5, client.requests)
+        self.assertEqual([0.25, 0.25, 0.5, 0.5], [call.args[0] for call in sleeper.call_args_list])
+
     def test_nas_stale_snapshot_poll_uses_bounded_adaptive_delays(self) -> None:
         class StoredRankingClient(FakeClient):
             def __init__(self) -> None:

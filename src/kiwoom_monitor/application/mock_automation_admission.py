@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Mapping, Protocol
 
 from kiwoom_monitor.domain.execution_activation import (
@@ -16,10 +17,52 @@ from kiwoom_monitor.domain.execution_activation import (
     StrategyStageRevision,
     assess_mock_automation_readiness,
 )
+from kiwoom_monitor.application.mock_automation_candidate import CandidateEligibilityStatus
 
 
 MOCK_AUTOMATION_ADMISSION_VERSION = "mock_automation_admission/v1"
 MOCK_AUTOMATION_LEASE_RECEIPT_VERSION = "mock_automation_lease_receipt/v1"
+MOCK_AUTOMATION_CONTROL_VERSION = "mock_automation_control/v1"
+
+
+class MockAutomationDesiredState(StrEnum):
+    RUNNING = "RUNNING"
+    STOPPED = "STOPPED"
+
+
+@dataclass(frozen=True)
+class MockAutomationControl:
+    version: str
+    account_ref: str
+    desired_state: MockAutomationDesiredState
+    control_revision: int
+    active_spec_id: str
+    execution_run_id: str
+    changed_at: datetime
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.version != MOCK_AUTOMATION_CONTROL_VERSION:
+            raise ValueError("unsupported mock automation control version")
+        if not all(str(getattr(self, name)).strip() for name in (
+            "account_ref", "active_spec_id", "execution_run_id", "reason",
+        )):
+            raise ValueError("mock automation control identity and reason are required")
+        if type(self.control_revision) is not int or self.control_revision <= 0:
+            raise ValueError("control_revision must be a positive integer")
+        _require_aware(self.changed_at, "changed_at")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "account_ref": self.account_ref,
+            "desired_state": self.desired_state.value,
+            "control_revision": self.control_revision,
+            "active_spec_id": self.active_spec_id,
+            "execution_run_id": self.execution_run_id,
+            "changed_at": self.changed_at.isoformat(),
+            "reason": self.reason,
+        }
 
 
 @dataclass(frozen=True)
@@ -117,15 +160,34 @@ class MockAutomationRepository(Protocol):
     def load_mock_automation_admissions(
         self, account_ref: str,
     ) -> tuple[MockAutomationAdmission, ...]: ...
+    def load_mock_automation_admission_for_spec(
+        self, account_ref: str, spec_id: str,
+    ) -> MockAutomationAdmission | None: ...
     def save_mock_automation_lease_receipt(self, value: MockAutomationLeaseReceipt) -> bool: ...
     def load_mock_automation_lease_receipts(
         self, account_ref: str,
     ) -> tuple[MockAutomationLeaseReceipt, ...]: ...
+    def load_mock_automation_lease_for_admission(
+        self, account_ref: str, admission_id: str,
+    ) -> MockAutomationLeaseReceipt | None: ...
+    def load_mock_automation_control(
+        self, account_ref: str,
+    ) -> MockAutomationControl | None: ...
+    def save_mock_automation_control(
+        self, value: MockAutomationControl, *, expected_revision: int,
+    ) -> bool: ...
 
 
 class FinalCandidateRepository(Protocol):
-    def load_final_holdout_executions(self, batch_id: str) -> tuple[dict[str, Any], ...]: ...
-    def load_run(self, run_id: str) -> dict[str, Any] | None: ...
+    def load_mock_automation_candidate_package(
+        self, strategy_ref: str, package_hash: str,
+    ) -> Any | None: ...
+    def load_mock_automation_eligibility_policy(
+        self, strategy_ref: str, package_hash: str,
+    ) -> Any | None: ...
+    def load_mock_automation_eligibility_receipt(
+        self, account_ref: str, package_hash: str,
+    ) -> Any | None: ...
 
 
 class DisabledMockRuntime(Protocol):
@@ -226,25 +288,63 @@ def admit_mock_automation(
     if runtime.account_ref != account_ref or runtime.run_id != expected_run_id:
         raise ValueError("mock automation runtime does not match the admitted spec")
 
-    existing = tuple(
-        value for value in repository.load_mock_automation_admissions(account_ref)
-        if value.spec_id == spec.spec_id
-    )
-    admission = existing[0] if existing else build_mock_automation_admission(
+    existing = repository.load_mock_automation_admission_for_spec(account_ref, spec.spec_id)
+    admission = existing if existing is not None else build_mock_automation_admission(
         spec, requested_at=requested_at,
     )
     repository.save_mock_automation_admission(admission)
 
+    existing_control = repository.load_mock_automation_control(account_ref)
+    if existing_control is not None and (
+        existing_control.desired_state is not MockAutomationDesiredState.RUNNING
+        or existing_control.active_spec_id != spec.spec_id
+        or existing_control.execution_run_id != admission.execution_run_id
+    ):
+        raise RuntimeError("mock automation control requires explicit resume or handoff")
+
     runtime.start(lease_seconds=lease_seconds, new_orders_enabled=False)
-    receipts = tuple(
-        value for value in repository.load_mock_automation_lease_receipts(account_ref)
-        if value.admission_id == admission.admission_id
+    existing_receipt = repository.load_mock_automation_lease_for_admission(
+        account_ref, admission.admission_id,
     )
-    if receipts:
-        return admission, receipts[0]
-    receipt = build_mock_automation_lease_receipt(admission, admitted_at=requested_at)
-    repository.save_mock_automation_lease_receipt(receipt)
+    if existing_receipt is not None:
+        receipt = existing_receipt
+    else:
+        receipt = build_mock_automation_lease_receipt(admission, admitted_at=requested_at)
+        repository.save_mock_automation_lease_receipt(receipt)
+    control = existing_control
+    if control is None:
+        control = MockAutomationControl(
+            version=MOCK_AUTOMATION_CONTROL_VERSION,
+            account_ref=account_ref,
+            desired_state=MockAutomationDesiredState.RUNNING,
+            control_revision=1,
+            active_spec_id=spec.spec_id,
+            execution_run_id=admission.execution_run_id,
+            changed_at=requested_at,
+            reason="initial admission",
+        )
+        if not repository.save_mock_automation_control(control, expected_revision=0):
+            raise RuntimeError("mock automation control changed during admission")
+    elif (
+        control.desired_state is not MockAutomationDesiredState.RUNNING
+        or control.active_spec_id != spec.spec_id
+        or control.execution_run_id != admission.execution_run_id
+    ):
+        raise RuntimeError("mock automation control requires explicit resume or handoff")
     return admission, receipt
+
+
+def mock_automation_control_from_dict(value: Mapping[str, Any]) -> MockAutomationControl:
+    return MockAutomationControl(
+        version=str(value["version"]),
+        account_ref=str(value["account_ref"]),
+        desired_state=MockAutomationDesiredState(str(value["desired_state"])),
+        control_revision=int(value["control_revision"]),
+        active_spec_id=str(value["active_spec_id"]),
+        execution_run_id=str(value["execution_run_id"]),
+        changed_at=datetime.fromisoformat(str(value["changed_at"])),
+        reason=str(value["reason"]),
+    )
 
 
 def mock_automation_admission_from_dict(value: Mapping[str, Any]) -> MockAutomationAdmission:
@@ -298,25 +398,32 @@ def _verify_final_candidate(
     repository: FinalCandidateRepository,
     spec: MockAutomationOperatingSpec,
 ) -> None:
-    matches = [
-        row for row in repository.load_final_holdout_executions(spec.final_batch_id)
-        if str(row.get("candidate_spec_hash", "")) == spec.candidate_package_hash
-    ]
-    if len(matches) != 1:
-        raise ValueError("mock automation candidate is not uniquely present in the final ledger")
-    execution = matches[0]
+    package = repository.load_mock_automation_candidate_package(
+        spec.strategy_ref, spec.candidate_package_hash,
+    )
+    if package is None:
+        raise ValueError("mock automation candidate package is not stored")
     if (
-        str(execution.get("state", "")) != "COMPLETED"
-        or str(execution.get("run_id", "")) != spec.final_run_id
-        or str(execution.get("logical_result_hash", "")) != spec.final_result_hash
+        package.source_final_batch_id != spec.final_batch_id
+        or package.source_final_run_id != spec.final_run_id
+        or package.source_final_result_hash != spec.final_result_hash
     ):
-        raise ValueError("mock automation candidate does not have the required completed final result")
-    run = repository.load_run(spec.final_run_id)
-    if run is None or (
-        str(run.get("status", "")) != "completed"
-        or str(run.get("logical_result_hash", "")) != spec.final_result_hash
+        raise ValueError("mock automation candidate package lineage does not match the operating spec")
+    receipt = repository.load_mock_automation_eligibility_receipt(
+        spec.account_scope.account_ref, package.package_hash,
+    )
+    if receipt is None or receipt.status is not CandidateEligibilityStatus.ELIGIBLE:
+        raise ValueError("mock automation candidate does not have an ELIGIBLE receipt")
+    policy = repository.load_mock_automation_eligibility_policy(
+        spec.strategy_ref, package.package_hash,
+    )
+    if policy is None or (
+        policy.candidate_spec_hash != package.candidate_spec_hash
+        or policy.policy_id != receipt.policy_id
+        or policy.tbd_fields
+        or receipt.candidate_spec_hash != package.candidate_spec_hash
     ):
-        raise ValueError("mock automation final run evidence is missing or inconsistent")
+        raise ValueError("mock automation eligibility policy is missing or incomplete")
 
 
 def _content_id(prefix: str, value: Mapping[str, Any]) -> str:

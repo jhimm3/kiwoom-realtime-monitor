@@ -144,6 +144,8 @@ class CredentialRuntime:
         result = []
         bindings = await asyncio.to_thread(self.store.load_account_bindings)
         for profile in await asyncio.to_thread(self.store.list_credential_profiles):
+            if profile["lifecycle_state"] == "archived":
+                continue
             provider, profile_id = profile["provider"], profile["profile_id"]
             try:
                 record = await asyncio.to_thread(self.vault.load, provider, profile_id)
@@ -173,6 +175,57 @@ class CredentialRuntime:
             return await asyncio.to_thread(self.store.create_credential_profile, provider, request_id, label, digest)
         except ValueError:
             raise CredentialOperationError("PROFILE_REQUEST_CONFLICT") from None
+
+    async def archive_profile(
+        self, provider: str, profile_id: str, expected_revision: int,
+    ) -> dict[str, Any]:
+        """Hide a disconnected profile while retaining account identity and history."""
+        self._provider(provider)
+        if type(expected_revision) is not int or not 0 <= expected_revision < 2**63:
+            raise CredentialOperationError("INVALID_CREDENTIAL_REQUEST", 422)
+        async with self._guard:
+            self._expire()
+            if any(op.profile_id == profile_id and (
+                    op.state in {"VALIDATING", "READY", "DRAINING", "BUSY", "COMMITTING"}
+                    or (op.task is not None and not op.task.done())) for op in self._operations.values()):
+                raise CredentialOperationError("PROFILE_BUSY")
+            record = await asyncio.to_thread(self.vault.load, provider, profile_id)
+            current_revision = record.revision if record is not None else 0
+            if current_revision != expected_revision:
+                raise CredentialOperationError("CREDENTIAL_REVISION_CONFLICT")
+            if record is not None and not record.disabled:
+                raise CredentialOperationError("PROFILE_MUST_BE_DISABLED")
+            try:
+                return await asyncio.to_thread(
+                    self.store.archive_credential_profile, provider, profile_id,
+                )
+            except ValueError as error:
+                code = str(error) if str(error) == "PROFILE_NOT_FOUND" else "PROFILE_ARCHIVE_FAILED"
+                raise CredentialOperationError(code, 404 if code == "PROFILE_NOT_FOUND" else 409) from None
+
+    async def rename_profile(
+        self, provider: str, profile_id: str, expected_revision: int, label: str,
+    ) -> dict[str, Any]:
+        self._provider(provider)
+        if provider not in {"kiwoom_mock", "kiwoom_real"}:
+            raise CredentialOperationError("UNSUPPORTED_PROVIDER", 404)
+        label = label.strip() if isinstance(label, str) else ""
+        if not label or len(label) > 120:
+            raise CredentialOperationError("INVALID_CREDENTIAL_REQUEST", 422)
+        async with self._guard:
+            current = await asyncio.to_thread(self.vault.load, provider, profile_id)
+            if expected_revision != (current.revision if current else 0):
+                raise CredentialOperationError("CREDENTIAL_REVISION_CONFLICT")
+            try:
+                return await asyncio.to_thread(
+                    self.store.rename_credential_profile, provider, profile_id, label,
+                )
+            except ValueError as error:
+                code = str(error)
+                if code not in {"PROFILE_NOT_FOUND", "PROFILE_LABEL_INVALID"}:
+                    code = "PROFILE_RENAME_FAILED"
+                status = 404 if code == "PROFILE_NOT_FOUND" else 422 if code == "PROFILE_LABEL_INVALID" else 409
+                raise CredentialOperationError(code, status) from None
 
     def _provider(self, provider: str) -> None:
         if provider not in PROVIDER_FIELDS:
@@ -487,6 +540,22 @@ def install_credential_routes(app: Any, runtime: CredentialRuntime | None, autho
         if not isinstance(value["label"], str) or len(value["label"]) > 120:
             raise CredentialOperationError("INVALID_CREDENTIAL_REQUEST", 422)
         return await safe_call(enabled().create_profile(provider, identifier(value["request_id"]), value["label"]))
+
+    @app.delete(prefix + "/{provider}/profiles/{profile_id}", dependencies=[Depends(authorize)])
+    async def archive_profile(provider: str, profile_id: str, request: Request):
+        value = await body(request, {"expected_revision"}, {"expected_revision"})
+        return await safe_call(enabled().archive_profile(
+            provider, profile_id, revision(value["expected_revision"]),
+        ))
+
+    @app.put(prefix + "/{provider}/profiles/{profile_id}", dependencies=[Depends(authorize)])
+    async def rename_profile(provider: str, profile_id: str, request: Request):
+        value = await body(request, {"expected_revision", "label"}, {"expected_revision", "label"})
+        if not isinstance(value["label"], str):
+            raise CredentialOperationError("INVALID_CREDENTIAL_REQUEST", 422)
+        return await safe_call(enabled().rename_profile(
+            provider, profile_id, revision(value["expected_revision"]), value["label"],
+        ))
 
     @app.post(prefix + "/{provider}/profiles/{profile_id}/prepare", dependencies=[Depends(authorize)], status_code=202)
     async def prepare(provider: str, profile_id: str, request: Request):

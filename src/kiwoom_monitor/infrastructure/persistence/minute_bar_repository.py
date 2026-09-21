@@ -24,7 +24,7 @@ from kiwoom_monitor.infrastructure.persistence.market_data_metadata_schema impor
 
 
 TOP20_REGULAR_START = "09:00"
-TOP20_REGULAR_END_EXCLUSIVE = "15:30"
+TOP20_REGULAR_END_EXCLUSIVE = "15:31"
 
 
 class MinuteBarRepository:
@@ -332,10 +332,19 @@ class MinuteBarRepository:
                 "GROUP BY trade_date,market",
                 (cutoff, TOP20_REGULAR_START, TOP20_REGULAR_END_EXCLUSIVE),
             ).fetchall()
+            finalized_market = connection.execute(
+                "SELECT trade_date,market,trade_value_eok FROM market_index_daily_bars "
+                "WHERE trade_date>=?",
+                (cutoff,),
+            ).fetchall()
         finally:
             connection.close()
         market_by_day: dict[str, dict[str, float]] = defaultdict(dict)
         for day, name, value in market:
+            market_by_day[str(day)][str(name)] = float(value or 0)
+        # Closed days use ka20006. Today's not-yet-finalized row naturally falls
+        # back to the latest 0J/0U cumulative amount above.
+        for day, name, value in finalized_market:
             market_by_day[str(day)][str(name)] = float(value or 0)
         comparisons = tuple(
             (

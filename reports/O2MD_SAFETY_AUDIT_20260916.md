@@ -72,5 +72,7 @@ receipt ID에 새 observed_at이 포함되어 같은 Decision도 조회시각이
 O1의 전송 전 UNKNOWN 원장, account lease, scope 분리, credential drain, 결정적 ID,
 기존 family와 A5 피드백을 재사용한다. 새 주문 엔진·전체 일지 NAS 이전·범용 framework는 불필요하다.
 
-현재 상태는 **O2-Md 기본 구현 존재/안전 보완 미완료, Me 운영 연결 미구현, V1 미검증**이다.
-[설계 결정과 구현 계약](O2M_DESIGN_REVIEW_DECISIONS_20260916.md)에 따라 O2-M0부터 진행한다.
+2026-09-21 갱신: 위 감사에서 확인한 O2-M0 범위의 중지 경합, 손실 포함 경계, EXIT 축소,
+terminal 주문, dirty 대사, server-now/평가기간, 반복 조회·receipt 문제를 보완했다. 현재 상태는
+**O2-M0과 Me1~Me3 구현 완료, V1 미검증**이다. 실제 손익/비용 risk snapshot producer는
+O2-Me2 경계로 연결했으며 임의 scalar 입력을 운영 runner에 연결하지 않는다.

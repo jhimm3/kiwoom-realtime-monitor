@@ -7,10 +7,13 @@ import json
 import logging
 from datetime import datetime, time as clock_time, timezone
 from typing import Awaitable, Callable, TypeVar
+from zoneinfo import ZoneInfo
 
 from websockets.asyncio.client import connect
 
 from kiwoom_monitor.central_server.execution_runtime import ExecutionRuntime
+from kiwoom_monitor.application.mock_automation_risk import build_mock_automation_risk_snapshot
+from kiwoom_monitor.application.trade_cost_service import trade_costs_from_pages
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import (
     KiwoomMockAccountReader,
     MockAccountRecovery,
@@ -28,6 +31,7 @@ from kiwoom_monitor.domain.order_contract import AccountScope, AccountSnapshot
 
 logger = logging.getLogger(__name__)
 MOCK_WS_URL = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
+KST = ZoneInfo("Asia/Seoul")
 _Result = TypeVar("_Result")
 
 
@@ -242,6 +246,10 @@ class MockAccountMonitor:
         now_provider: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         lease_seconds: int = 60,
         read_limiter: asyncio.Semaphore | None = None,
+        automation_risk_repository: object | None = None,
+        automation_binding_revision: int = 0,
+        automation_account_scope: AccountScope | None = None,
+        new_orders_enabled_on_start: bool = True,
     ) -> None:
         self._reader = reader
         self._read_limiter = read_limiter
@@ -261,6 +269,19 @@ class MockAccountMonitor:
         self._heartbeat_stop = asyncio.Event()
         self._work: set[asyncio.Task[object]] = set()
         self._accepting = True
+        self._risk_repository = automation_risk_repository
+        self._binding_revision = automation_binding_revision
+        self._account_scope = automation_account_scope
+        self._reconciliation_revision = 0
+        self._risk_revision_initialized = False
+        self._reconnect_count = 0
+        self._balance_mismatch_count = 0
+        self._new_orders_enabled_on_start = new_orders_enabled_on_start
+        self._risk_costs: dict[tuple[object, str, str], object] = {}
+        self._risk_costs_initialized = False
+        self._risk_cost_day = None
+        self._risk_events = []
+        self._risk_event_cursor = 0
 
     async def start(self, *, initial_read: bool = False) -> None:
         if not self._accepting: raise RuntimeError("MOCK_MONITOR_CLOSED")
@@ -271,7 +292,11 @@ class MockAccountMonitor:
     async def _start(self, initial_read: bool) -> None:
         if self._task is not None:
             return
-        await asyncio.to_thread(self._runtime.start, lease_seconds=self._lease_seconds)
+        await asyncio.to_thread(
+            self._runtime.start,
+            lease_seconds=self._lease_seconds,
+            new_orders_enabled=self._new_orders_enabled_on_start,
+        )
         self._task = asyncio.create_task(self._run(), name="kiwoom-mock-account-monitor")
         self._heartbeat_task = asyncio.create_task(self._heartbeat(), name="mock-monitor-heartbeat")
         if initial_read:
@@ -318,11 +343,18 @@ class MockAccountMonitor:
             event_type == "account_balance" and isinstance(value, AccountBalanceChange)
         ) or event_type in {"account_balance_changed", "order_changed", "connected"}:
             self._request_recovery()
+        elif event_type == "disconnected":
+            self._reconnect_count += 1
 
     async def refresh_account(self) -> AccountSnapshot:
         if not self._accepting: raise RuntimeError("MOCK_MONITOR_CLOSED")
         recovery = await self._recover()
         return recovery.account
+
+    async def refresh_recovery(self) -> MockAccountRecovery:
+        if not self._accepting:
+            raise RuntimeError("MOCK_MONITOR_CLOSED")
+        return await self._recover()
 
     def _request_recovery(self) -> None:
         if self._accepting and not self._recovery_queued:
@@ -365,6 +397,7 @@ class MockAccountMonitor:
 
     async def _recover_once(self) -> MockAccountRecovery:
         async with self._recovery_lock:
+            query_started_at = self._aware_now()
             if self._read_limiter is None:
                 recovery = await self._reader.read()
             else:
@@ -381,8 +414,79 @@ class MockAccountMonitor:
                 )
                 if record is not None and record.intent.run_id == self._runtime.run_id:
                     await asyncio.to_thread(self._runtime.reconcile, record.intent.intent_id, snapshot)
+            if self._risk_repository is not None:
+                await self._publish_risk(recovery, query_started_at)
             self._recovered_once = True
             return recovery
+
+    async def _publish_risk(
+        self, recovery: MockAccountRecovery, query_started_at: datetime,
+    ) -> None:
+        if self._account_scope is None or self._account_scope.account_ref != self._runtime.account_ref:
+            raise RuntimeError("MOCK_AUTOMATION_RISK_SCOPE_MISSING")
+        cursor = self._risk_event_cursor
+        while True:
+            page = await asyncio.to_thread(
+                self._repository.account_events,
+                "mock", self._runtime.account_ref, after_sequence=cursor, limit=1000,
+            )
+            self._risk_events.extend(page.events)
+            cursor = page.next_cursor
+            if not page.has_more:
+                break
+            if len(self._risk_events) >= 100_000:
+                raise RuntimeError("MOCK_AUTOMATION_EVENT_HISTORY_LIMIT")
+        self._risk_event_cursor = cursor
+        events = tuple(self._risk_events)
+        now = self._aware_now()
+        kst_today = now.astimezone(KST).date()
+        fill_days = [
+            event.occurred_at.astimezone(KST).date()
+            for event in events if event.event_type == "FILL"
+        ]
+        full_cost_refresh = not self._risk_costs_initialized or self._risk_cost_day != kst_today
+        start = min(fill_days, default=kst_today) if full_cost_refresh else kst_today
+        if self._read_limiter is None:
+            cost_pages = await self._reader.read_trade_cost_pages(start, kst_today)
+        else:
+            async with self._read_limiter:
+                cost_pages = await self._reader.read_trade_cost_pages(start, kst_today)
+        refreshed_costs = trade_costs_from_pages(cost_pages, start, kst_today, self._account_scope)
+        if full_cost_refresh:
+            self._risk_costs.clear()
+        for cost in refreshed_costs:
+            self._risk_costs[(cost.fill_date, cost.stock_code, cost.side)] = cost
+        self._risk_costs_initialized = True
+        self._risk_cost_day = kst_today
+        costs = tuple(self._risk_costs.values())
+        active = await asyncio.to_thread(
+            self._repository.active_intents,
+            "mock", self._runtime.account_ref, self._runtime.run_id,
+        )
+        if not self._risk_revision_initialized:
+            current = await asyncio.to_thread(
+                self._risk_repository.load_latest_mock_automation_risk,
+                self._runtime.account_ref,
+            )
+            if current is not None:
+                self._reconciliation_revision = current.reconciliation_revision
+            self._risk_revision_initialized = True
+        self._reconciliation_revision += 1
+        snapshot = build_mock_automation_risk_snapshot(
+            recovery, events, costs, active,
+            execution_run_id=self._runtime.run_id,
+            binding_revision=self._binding_revision,
+            reconciliation_revision=self._reconciliation_revision,
+            observed_at=now,
+            broker_query_started_at=query_started_at,
+            broker_query_completed_at=now,
+            reconnect_count=self._reconnect_count,
+            balance_mismatch_count=self._balance_mismatch_count,
+        )
+        self._balance_mismatch_count = snapshot.balance_mismatch_count
+        await asyncio.to_thread(
+            self._risk_repository.save_mock_automation_risk_snapshot, snapshot,
+        )
 
     async def _reconcile_execution(self, execution: OrderExecution) -> None:
         await self._owned(lambda: self._reconcile_execution_once(execution))

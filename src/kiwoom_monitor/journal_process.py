@@ -1025,10 +1025,20 @@ class JournalWindow(QMainWindow):
         self._schedule_analysis_enrichment()
 
     @staticmethod
-    def _account_label(scope: AccountScope) -> str:
+    def _account_label(
+        scope: AccountScope,
+        contexts: tuple[AccountQueryContext, ...] = (),
+    ) -> str:
         if scope == LEGACY_ACCOUNT_SCOPE:
             return "기존 자료 · 계좌 미확인"
         environment = "실전" if scope.environment.value == "real" else "모의"
+        display_label = next((
+            context.display_label.strip()
+            for context in contexts
+            if context.scope == scope and context.display_label.strip()
+        ), "")
+        if display_label:
+            return f"{environment} · {display_label}"
         return f"{environment} · {scope.account_ref[:8]}"
 
     def _selected_account_scope(self) -> AccountScope:
@@ -1050,7 +1060,12 @@ class JournalWindow(QMainWindow):
         self._account_filter.clear()
         selected_index = 0
         for index, scope in enumerate(scopes):
-            self._account_filter.addItem(self._account_label(scope), scope)
+            self._account_filter.addItem(
+                self._account_label(
+                    scope, getattr(self, "_available_account_contexts", ()),
+                ),
+                scope,
+            )
             identity = f"{scope.broker}|{scope.environment.value}|{scope.account_ref}"
             if identity == saved:
                 selected_index = index

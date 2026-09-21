@@ -1,5 +1,142 @@
 # NAS 배포 및 잔여 검증 상태
 
+## 2026-09-21 NAS 마지막 0B 시가총액 복원 — 재빌드 전
+
+- 누적 배포 후보 build는 `2026.09.21-market-cap-reference-v1`이다.
+- NAS의 기존 `central_realtime_latest`에서 종목별 마지막 0B 시가총액과 관측시각만 읽는 인증 GET API를 추가했다. 앱은 순위 표시 뒤 이를 백그라운드에서 한 번 복원하며 과거 현재가·등락률은 적용하지 않는다.
+- PC 직접 연결도 마지막 0B 시가총액을 로컬 DB에 비동기 저장하도록 같은 화면 계약을 맞췄다. 이 추가분은 서버 API·이미지 계약을 바꾸지 않는다.
+- 저장된 0B가 없는 신규 종목은 기존 당일 `ka10001`을 사용하고, 복원 중 실제 0B가 도착하면 실제 체결값이 우선한다.
+- 관련 DB·API·클라이언트·메인 UI 회귀 130개가 통과했다. 관련 누적 파일 20개를 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일은 `X:\kiwoom-monitor-backups\20260921-224057-market-cap-reference-v1`에 보존했다. 이미지 재빌드와 `/health.server_build` 확인이 남아 있다.
+- 직접 연결 로컬 캐시 확장 회귀 16개와 Python 문법 검사가 추가로 통과했다. 변경 파일 10개를 다시 동기화했고 SHA-256 불일치는 0개이며 직전 NAS 파일은 `X:\kiwoom-monitor-backups\20260921-225447-direct-market-cap-cache-v1`에 보존했다.
+
+## 2026-09-21 기존 계좌 표시 이름 변경 — 재빌드 전
+
+- NAS 계좌 관리창에 `계좌 이름 변경`을 추가했다. 실전·모의계좌 모두 현재 credential revision을 확인한 뒤 `central_credential_profiles.label`만 변경하며 계좌 UUID, binding, 인증키, 조회·주문 설정, 매매 이력은 유지한다.
+- DB·런타임·HTTPS 클라이언트·UI와 API 경로 계약 회귀 41개가 통과했다.
+- 누적 배포 후보 build는 `2026.09.21-account-label-edit-v1`이다. NAS 소스 동기화, 이미지 재빌드, `/health.server_build` 확인과 실제 이름 변경 확인이 남아 있다.
+
+## 2026-09-21 이전 모의계좌 연결 해제 보완 — 재빌드 전
+
+- v1 재빌드 후에도 실제 작업 `65cc197a-eaa9-4eab-94b6-aa23e7873157`이 PREPARE 단계 `CREDENTIAL_VALIDATION_FAILED`로 끝나는 것을 확인했다. 운영 구형 상태를 `account_ref`만 든 부분 activation으로 재현하자 v1 코드가 같은 FAILED를 만들었다. 부분 activation을 완성 receipt로 DB finalize한 것이 재실패의 확인된 원인이다.
+- v2는 필수 receipt 필드가 모두 있는 activation만 기존 기록으로 finalize하고, 부분 activation은 검증된 binding과 결정적 migration run ID를 사용한다. 동일 실패 재현과 인접 연결 해제·재부팅·클라이언트 회귀 22개가 통과했다.
+- 현재 누적 배포 후보 build는 `2026.09.21-legacy-account-disconnect-v3`다. v2 운영 실패에서 NAS `MOCK_EXECUTION_RUN_ID`가 UUID가 아닌 15자 구형 문자열임을 확인했다. 연결 해제는 새 주문 실행을 만들지 않으므로 UUID가 아닌 구형 run ID를 profile/account 기반 결정적 UUID로 정규화한다. 실제 구형 번들 형태의 prepare→apply 회귀를 추가했다. v3 NAS 동기화·이미지 재빌드·`/health.server_build` 확인과 실제 이전 계좌 연결 해제 재검증이 남아 있다. v2 관련 파일 7개는 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개였으며 기존 파일은 `X:\kiwoom-monitor-backups\20260921-214207-legacy-account-disconnect-v2`에 보존했다.
+
+- 실제 실패 작업 두 건을 NAS API로 조회해 모두 `nas-mock-default`, revision 1, `disabled=true`, `CREDENTIAL_VALIDATION_FAILED`임을 확인했다. 프로필 상태는 `RECOVERY_REQUIRED`이지만 검증된 account binding과 `account_ref`가 남아 있고 계좌 설정은 조회·주문 모두 OFF였다.
+- 초기 ENV 이관 vault에는 activation receipt와 run ID가 없고, 연결 해제 준비가 활성 runtime 또는 activation만 읽어 영속 account binding을 사용하지 못한 것이 확인된 원인이다.
+- 연결 해제에 한해 최신 검증 binding을 fallback으로 읽고, run ID가 없는 구형 이관 profile에는 profile/account 기반의 결정적 migration ID를 사용한다. 새 계좌 신원·주문 runtime은 만들지 않고 기존 binding과 매매 이력을 보존한다.
+- 누적 배포 후보 build는 `2026.09.21-legacy-account-disconnect-v1`이다. 해당 구형 이관 재현 회귀는 통과했다. 혼합 테스트 환경의 FastAPI 바이너리 의존성 충돌로 API 포함 전체 묶음 중 10개는 실행 환경 오류였고, 나머지 76개는 통과했다. 관련 파일 7개를 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일은 `X:\kiwoom-monitor-backups\20260921-213203-legacy-account-disconnect-v1`에 보존했다.
+
+## 2026-09-21 TOP20 저장 대기 단계별 계측 — 재빌드 전
+
+- **확인된 사실:** 운영 로그에서 `ka00198` 최신 20종목은 약 0.61초에 확보됐고, 그 직후 `asyncio.to_thread(store.save_dataset_snapshot, ...)`를 기다린 전체 구간이 6.91초였다. 다음 두 회차의 같은 전체 구간은 각각 0.87초, 0.54초였다.
+- **아직 확인되지 않은 범위:** 6.91초가 기본 executor의 작업 시작 대기인지, PostgreSQL 연결·SQL 실행·commit 중 지연인지 현재 로그만으로는 구분할 수 없다. 따라서 PostgreSQL 내부 지연이라고 확정하지 않는다.
+- `PostgresQueryStore.save_dataset_snapshot`은 실제 함수가 실행된 뒤 1초 이상 걸릴 때 serialize, connect, snapshot upsert, metadata upsert, observation revision, commit/close 시간을 한 줄에 기록한다. 외부 `저장_ms`가 느린데 이 내부 경고가 없다면 executor 작업 시작 전 대기가 포함됐다는 증거가 된다. `load_dataset_snapshots`도 prepare, connect, query, commit/close 시간을 같은 기준으로 기록한다. 정상 회차에는 추가 경고를 남기지 않는다.
+- 누적 배포 후보 build는 `2026.09.21-top20-db-timing-v1`이다. 관련 회귀 61개가 통과했다. 관련 파일 6개를 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일은 `X:\kiwoom-monitor-backups\20260921-211737-top20-db-timing-v1`에 보존했다. 이미지 재빌드 뒤 외부 `저장_ms`와 내부 `slow PostgreSQL dataset snapshot ...` 로그를 함께 비교해 병목 단계를 확정해야 한다.
+
+## 2026-09-21 변경 없는 공통설정 반복 POST 제거 — PC 앱 재시작 전
+
+- 21:03:30 회차에서 `ka00198` 최신 응답은 약 2.9초에 확보됐지만 TOP20 PostgreSQL 저장이 7.942초 걸렸고, 같은 시각 매분 설정 동기화의 `app_settings` POST도 함께 끝났다. 앱은 로컬 변경이 없어도 모든 공유 설정과 열 설정을 매분 POST하고 있었다.
+- 이미 GET으로 받은 원격 `(owner,key,document)`와 로컬 문서가 같으면 POST하지 않고, 새 문서나 실제 변경 문서만 보낸다. 서버 API·DB 스키마 변경은 없으며 이 PC 앱 재시작으로 적용된다.
+- 관련 변경 4개 파일을 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일은 `X:\kiwoom-monitor-backups\20260921-210744-settings-delta-sync-v1`에 보존했다.
+
+## 2026-09-21 PostgreSQL activation 시각 계약 보완 — 재빌드 전
+
+- 배포 후보 build는 `2026.09.21-postgres-activation-time-v1`이다.
+- 통합 검사에서 activation 최초 반환의 `committed_at`은 ISO 문자열이지만 PostgreSQL 재조회는 `datetime` 객체여서, 같은 레코드가 다른 값으로 비교됐다. 이 때문에 activation idempotency·lookup·disable replay·real replacement replay 네 검사가 함께 실패했다.
+- activation 저장 입력과 SQLite/PostgreSQL 조회 결과를 모두 ISO 문자열로 정규화한다. 운영 활성화·계좌 설정 값의 손상이나 실제 재실행 실패가 아니라 저장소 반환 형식 불일치다.
+- 관련 누적 파일 7개를 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일은 `X:\kiwoom-monitor-backups\20260921-205508-postgres-activation-time-v1`에 보존했다. 이미지 재빌드 뒤 PostgreSQL 통합 검사 재실행이 남아 있다.
+- 사용자 재빌드 뒤 PostgreSQL 통합 검사의 schema 19 전체 항목이 통과했고 `rollback=true`를 확인했다. 검사 실행 중 임시 대량 쓰기와 겹친 TOP20 저장은 7.641초·9.479초가 걸렸지만, 검사 종료 뒤에는 1.005초·0.508초로 회복됐다. 같은 시각 `ka00198` queue wait는 주 회차에서 0~41ms로 비차단 수정이 작동했다.
+
+## 2026-09-21 순위 예약 비차단 보완 — 재빌드 전
+
+- 배포 후보 build는 `2026.09.21-ranking-reservation-nonblocking-v1`이다.
+- 직전 예약 보완 뒤 20:49 회차에서 `ka00198 queue_wait_ms=32,539`가 관측됐다. 저우선순위 job을 경계 밖으로 미루는 코드가 job을 큐에 되돌리기 전에 단일 broker worker를 sleep시켜 새 순위 요청까지 예약시간 전체를 기다리게 한 것이 원인이다.
+- 저우선순위 job을 즉시 priority queue에 되돌리고 최대 50ms만 yield하도록 바꿨다. 예약 중 새 `ka00198`이 들어오면 다음 dequeue에서 우선 실행된다.
+- 관련 변경 7개 파일을 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일은 `X:\kiwoom-monitor-backups\20260921-205125-ranking-reservation-nonblocking-v1`에 보존했다. 이미지 재빌드 뒤 `ka00198 queue_wait_ms` 재확인이 남아 있다.
+
+## 2026-09-21 순위 재조회 우선권 보완 — 재빌드 전
+
+- 배포 후보 build는 `2026.09.21-ranking-retry-reservation-v1`이다.
+- 20:35:30 회차에서 첫 `ka00198`은 31ms 만에 직전 20:35:00 스냅샷을 반환했지만, 0.25초 재조회 사이에 장후 수급 `ka10045`가 시작되어 응답 저장 통로를 점유했다. 새 `ka00198`의 실제 키움 응답은 33ms였으나 중앙 broker queue에서 28,135ms 기다렸고 앱 표 적용은 103ms였다.
+- 30초 경계 전 5초뿐 아니라 경계 후 5초까지 저우선순위 TR 시작을 보류해 최신 순위의 0.25/0.5/0.75초 재조회가 먼저 처리되게 했다. 키움 실전 초당 5회 제한과 단일 중앙 broker는 그대로 유지한다.
+- 관련 변경 7개 파일을 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일은 `X:\kiwoom-monitor-backups\20260921-204338-ranking-retry-reservation-v1`에 보존했다. 이미지 재빌드 뒤 30초 경계의 `ka00198 queue_wait_ms` 실환경 확인이 남아 있다.
+
+## 2026-09-21 장후 TOP20 우선순위 복구 — NAS 동기화 완료·재빌드 전
+
+- 누적 배포 후보 build는 `2026.09.21-top20-backfill-priority-v1`이다.
+- 실환경 로그에서 재기동 직후 `20:19:00` TOP20 20종목을 저장한 뒤 새 `ka00198` 호출이 사라지고, 앱은 같은 스냅샷을 매 회차 20번 재확인한 사실을 확인했다.
+- 원인은 20:05 이후 전체일 분봉·일봉·수급 보완을 30초 순위 schedule loop가 직접 `await`한 것이다. 장후 보완을 서비스가 소유하는 별도 task로 실행해 다음 순위 회차가 계속 진행되게 했다.
+- 20:00 이후 중앙 실시간 상태 `WAITING_MARKET`, `observation_expected=false`와 체결 미수신은 정상이다. 이번 수정 대상은 장후에도 계속 변하는 순위 수집이다.
+- 관련 누적 변경 12개 파일을 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일은 `X:\kiwoom-monitor-backups\20260921-202913-top20-backfill-priority-v1`에 보존했다. 이미지 재빌드 뒤 `/health.server_build`와 30초 간격 TOP20 저장 재개 확인이 남아 있다.
+
+## 2026-09-21 PostgreSQL 검사 격리 보완 — 재빌드 전
+
+- 누적 배포 후보 build는 `2026.09.21-postgres-check-isolation-v1`이다.
+- 통합 검사의 Shadow 후보는 운영 앱에 보이지 않도록 rollback하며, 임시 credential vault는 운영 `credential_vault_state`와 분리한다.
+- 운영 `master.key`, 운영 vault fence, 실제 저장 인증정보는 변경하지 않는다. 변경 7개 파일을 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일은 `X:\kiwoom-monitor-backups\20260921-203500-postgres-check-isolation-v1`에 보존했다. NAS 이미지 재빌드 뒤 통합 검사 재실행이 남아 있다.
+- 20:17 이후 앱 로그에서 NAS HTTP 502와 동시에 순위 조회는 로컬 API로 성공했지만, 상단 API 문구는 중앙 실시간 경로만 반영해 `NAS`로 남는 표시 오류를 확인했다. 순위 failover client의 실제 사용 경로를 읽어 로컬 조회 중에는 `API: 로컬 전환`을 우선 표시하고, NAS 조회가 성공한 다음 순위 회차에만 `API: NAS`로 복귀하도록 PC 앱을 보완했다. 이 PC 앱 재시작이 필요하며 NAS 재빌드와는 무관하다.
+
+## 2026-09-21 누적 저장량 진단 빌드 — 동기화 준비
+
+- 누적 배포 후보 build는 `2026.09.21-storage-diagnostics-v1`이다.
+- O2-M0·O2-Me1~Me3 구현, 고정 프록시와 일별 상세 로그, 순위 수락 지연 보완을 포함한 현재 워크트리 누적분을 함께 빌드한다.
+- NAS 진단 API와 NAS 연결 설정은 뉴스·시장 누적자료·연구·계좌·기타별 저장량을 읽기 전용으로 표시한다. PC 직접 연결의 키움 API 설정은 로컬 데이터 폴더를 주식·뉴스·매매일지·연구·로그·기타로 나누어 표시한다.
+- 자동 삭제는 사용자 결정으로 보류했다. 기존 PC 분봉 30일·일봉 종목별 250개 정리만 유지하며, NAS 보호자료 자동 삭제는 `reports/NAS_STORAGE_RETENTION_DESIGN_REVIEW_20260921.md`의 Astra Ultra 재검토 전까지 OFF다.
+- 누적 파일 863개를 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일 860개는 `X:\kiwoom-monitor-backups\20260921-194721-storage-diagnostics-v1`에 백업했으며 운영 `.env`, `postgres-data`, `server-data`, `server-secrets`는 복사·변경하지 않았다.
+- 이미지 재빌드·프로젝트 재생성 뒤 `/health.server_build` 일치와 인증된 `/api/v1/diagnostics/resources` 응답 확인이 남아 있다.
+- 사용자 재빌드 뒤 `/health.server_build=2026.09.21-storage-diagnostics-v1`을 확인했다. 인증 중앙 조회에서 TOP20 20종목과 표본 종목 005930의 당일 COMBINED 분봉 630개, 최근 19:53~19:55 분봉까지 확인했다.
+- 실행 중 PC 앱은 NAS 재기동 뒤 중앙 경로가 복구되어도 이미 읽은 종목 표식을 유지해 저장 분봉을 다시 불러오지 않는 문제가 있었다. 로컬 대체/재연결 경로에서 NAS 실시간으로 복구될 때 현재 TOP20 분봉을 강제로 다시 읽도록 보완했다. 서버 변경은 아니므로 추가 NAS 이미지 빌드는 필요 없고 PC 앱 재시작 후 적용된다.
+- PostgreSQL 통합 검사 중 Shadow 후보 창이 열린 원인은 검사기가 임시 ACTIVE 후보를 운영 DB에 commit한 뒤 마지막에 삭제하여 앱의 2초 폴링에 노출된 것이다. 실제 후보·주문은 아니며 기존 검사는 종료 시 삭제한다. 후속 검사기는 Shadow 상태·decision·candidate 왕복을 한 PostgreSQL 트랜잭션 안에서 확인하고 rollback하도록 바꿔 사용자 화면과 자동운용 입력에 노출되지 않게 했다. 이 검사기 변경은 다음 이미지 빌드부터 적용한다.
+- 기존 검사기는 임시 key 디렉터리와 운영 PostgreSQL의 `credential_vault_state`를 함께 사용해, 운영 vault가 이미 초기화된 정상 서버에서 `RECOVERY_REQUIRED`로 중단됐다. 후속 검사기는 임시 vault의 복구 fence만 메모리에 격리하고 계좌·활성화 원장 검사는 실제 PostgreSQL에서 계속 수행한다. 운영 `master.key`와 복구 fence는 변경하지 않는다.
+
+## 2026-09-21 실시간 순위 수락 경로 지연 보완 — 재빌드 전
+
+- 배포 후보 build는 `2026.09.21-ranking-accept-fastpath-v1`이다.
+- 15:18~15:21 실환경 로그에서 키움 호출은 대체로 수십~수백 ms였지만, 15:20:01.859 응답 뒤
+  stale/partial 판정 로그가 15:20:06.443에 남아 폐기 후보의 일반 ranking/캐시 저장 경로가 약
+  4.6초를 점유한 회차를 확인했다. 완전한 20종목은 15:20:08 무렵 저장되어 앱의 8초 지연과
+  일치했다.
+- NAS 자동 TOP20은 직전·부분 후보를 영속화하지 않고 검증하며 최신 완성본만 기존 원장에 저장한다.
+  앱에는 수락 후 표 적용 시간 로그를 추가했다. 관련 순위 회귀 56개가 통과했다.
+- 변경 10개 파일을 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일은
+  `X:\kiwoom-monitor-backups\20260921-155140-ranking-accept-fastpath-v1`에 보존했다. 이미지 재빌드와
+  장중 `kiwoom_api`/`순위 표 적용 완료` 로그 비교가 남아 있다.
+
+## 2026-09-21 O2-M0 + O2-Me1~Me3 로컬 구현 — 배포 보류
+
+- 로컬 누적 build 식별자는 `2026.09.21-o2me3-fake-cycle-v1`로 갱신했다.
+- V1 반복 검사기를 추가했고 30분 동안 151회·핵심 9,362개가 실패 없이 통과했다. RSS는 최고
+  72,097,792 bytes에서 종료 시 54,403,072 bytes로 내려와 반복마다 제한 없이 증가하는 형태가
+  관측되지 않았다.
+- 누적 소스·문서 860개를 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일
+  839개는 `X:\kiwoom-monitor-backups\20260921-150747-o2me3-fake-cycle-v1`에 보존했다. 운영 `.env`,
+  `postgres-data`, `server-data`, `server-secrets`는 유지했다. 사용자 이미지 빌드와 프로젝트 시작 뒤
+  외부 HTTPS와 내부 HTTP `/health`에서 `2026.09.21-o2me3-fake-cycle-v1`, `status=ok`를 확인했다.
+- O2-Me1의 후보 package/eligibility receipt 전용 인증 API와 비공개 중앙 문서 컬렉션이 포함된다.
+  게시만으로 runtime 또는 주문은 시작되지 않으며 V1 누적 배포 전까지 NAS에는 반영하지 않는다.
+- 영속 stop/control revision, ENTER/EXIT 분리, terminal·dirty 대사, server-now/평가기간,
+  단건/current/active 조회를 구현하고 관련 회귀 118개와 기존 계좌 경계 회귀 19개를 통과했다.
+- O2-Me2의 실제 risk producer와 수동/자동 account bundle 단일 owner 전환까지 로컬에 구현했다.
+  O2-Me3의 지속 runner, supervisor, 제어 API, READY 명세 게시/조회와 계좌별 게시 후보·현재 검증
+  바인딩 조회 경계, PC 후보 선택·한도 동결·게시 UI까지 로컬에 구현했다. 게시→입장→위험 대사→가짜
+  매수·매도 체결→계좌별 A5 매매일지 투영 전체 통합 회귀도 통과했다. 상세 체결 뒤 발생하던 0수량
+  broker 집계 event를 제거하고 누적 broker 수량은 reconciliation 상태로 보존한다.
+  V1 누적 검증 뒤 NAS 소스 동기화를 완료했으며 이미지 재빌드는 아직 하지 않았다.
+- 직전 NAS 동기화 상태는 아래 `2026.09.21-api-audit-logging-v1`이며 그 배포/실환경 확인 상태를
+  O2-M0 로컬 완료와 혼동하지 않는다.
+
+## 2026-09-21 고정 프록시 네트워크·일별 상세/API 감사 로그 배포 후보
+
+- 배포 후보 build: `2026.09.21-api-audit-logging-v1`.
+- 확인된 원인은 Compose 재생성 뒤 기본 gateway가 `172.23.0.1`에서 `172.18.0.1`로 바뀌었지만 운영 `.env`의 신뢰 프록시는 이전 주소에 남아 인증키·계좌 비활성화 요청이 HTTP 426으로 거부된 것이다.
+- Compose가 고정 subnet/gateway를 만들고 신뢰 프록시도 같은 gateway 변수에서 받도록 수정했다. 운영 `.env`에는 `KIWOOM_DOCKER_SUBNET=172.18.0.0/24`, `KIWOOM_DOCKER_GATEWAY=172.18.0.1`을 적용하고 기존 `CREDENTIAL_TRUSTED_PROXIES` 복제값은 제거한다.
+- 앞선 고정 네트워크 변경 파일 11개의 NAS 동기화와 SHA-256 일치, 보호 경계 안의 운영 `.env` 백업, 두 네트워크 값의 최소 수정을 완료했다.
+- 후속 로그 변경은 Uvicorn access 상세를 `server-data/logs/server.log`에만 남겨 자정 회전·기본 14일 보존하고, Container Manager에는 반복 요청 줄을 제외한 서버 상태·경고·오류를 남긴다. 관련 회귀 73개와 문법·Compose YAML 검사가 통과했다.
+- 변경 파일 14개를 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 기존 파일은 `X:\kiwoom-monitor-backups\20260921-103518-file-logging-v1`에 백업했으며 운영 `.env`, `postgres-data`, `server-data`, `server-secrets`는 보존했다. 이미지 재빌드와 프로젝트 재생성·`/health.server_build` 및 인증 쓰기 재확인이 남아 있다.
+- 후속 감사에서 최근 Docker 1,000줄 중 후보 DB 확인 489건, TOP20 DB 확인 222건, health 31건을 확인했다. TOP20 반복은 앱이 30초 경계에 직전 snapshot을 받은 뒤 NAS의 새 회차 저장까지 0.25/0.5/0.75초로 재확인한 것이며 키움 TR 중복이 아니다.
+- 실제 broker 전송만 본문 없이 `kiwoom_monitor.kiwoom_api`로 상세 파일에 남기고, 동일 VI event의 PostgreSQL `event_id` 충돌도 중복 무시하도록 후속 수정했다. 관련·인접 회귀 119개와 문법 검사가 통과했다.
+- 후속 변경 파일 18개를 `X:\kiwoom-monitor`에 동기화했고 SHA-256 불일치는 0개다. 직전 파일은 `X:\kiwoom-monitor-backups\20260921-104926-api-audit-logging-v1`에 백업했으며 보호 경로는 유지했다. 이미지 재빌드·프로젝트 재생성과 새 상세 로그 실환경 확인이 남아 있다.
+
 ## 2026-09-16 누적 빌드 — 순위·신고가·기본정보 성능 보완
 
 - 배포 후보 build: `2026.09.16-ranking-metadata-freshness-v1`.

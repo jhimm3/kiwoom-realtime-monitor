@@ -139,6 +139,49 @@ class MinuteTradeValueTests(unittest.TestCase):
 
         self.assertAlmostEqual((1_000 + 2_000) / 100_000_000, aggregator.trade_value_eok("005930", 5))
 
+    def test_nas_seed_restores_current_minute_without_adding_overlapping_live_value(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 8, 14, 10, 15, 33)
+        aggregator.ingest(tick(200, 10, "101530"), now)
+
+        aggregator.seed(
+            "005930",
+            (
+                MinuteOhlcv(
+                    now.replace(second=0), 100, 220, 100, 220, 100,
+                    trade_value_eok_override=3.5,
+                ),
+            ),
+            now,
+            include_current_snapshot=True,
+        )
+
+        self.assertEqual(3.5, aggregator.bucket_trade_value_eok("005930", 1, now))
+
+    def test_nas_seed_keeps_newer_live_current_minute_when_it_is_larger(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 8, 14, 10, 15, 33)
+        aggregator._bars["005930"].append(
+            MinuteOhlcv(
+                now.replace(second=0), 100, 200, 100, 200, 10,
+                trade_value_eok_override=5.0,
+            )
+        )
+
+        aggregator.seed(
+            "005930",
+            (
+                MinuteOhlcv(
+                    now.replace(second=0), 100, 180, 100, 180, 8,
+                    trade_value_eok_override=3.0,
+                ),
+            ),
+            now,
+            include_current_snapshot=True,
+        )
+
+        self.assertEqual(5.0, aggregator.bucket_trade_value_eok("005930", 1, now))
+
     def test_uses_cumulative_volume_when_trade_volume_is_missing(self) -> None:
         aggregator = MinuteTradeValueAggregator()
         now = datetime(2026, 8, 14, 10, 0, 1)

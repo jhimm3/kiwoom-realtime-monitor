@@ -12,6 +12,24 @@ from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 
 
 class CentralServerSettingsTests(unittest.TestCase):
+    def test_synology_compose_pins_proxy_gateway_as_single_trust_source(self) -> None:
+        compose = (
+            Path(__file__).resolve().parents[2] / "deploy" / "synology" / "docker-compose.yml"
+        ).read_text(encoding="utf-8")
+        env_example = (
+            Path(__file__).resolve().parents[2] / "deploy" / "synology" / ".env.example"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            'CREDENTIAL_TRUSTED_PROXIES: "${KIWOOM_DOCKER_GATEWAY:-172.18.0.1}"',
+            compose,
+        )
+        self.assertIn('subnet: "${KIWOOM_DOCKER_SUBNET:-172.18.0.0/24}"', compose)
+        self.assertIn('gateway: "${KIWOOM_DOCKER_GATEWAY:-172.18.0.1}"', compose)
+        self.assertNotIn("${CREDENTIAL_TRUSTED_PROXIES", compose)
+        self.assertIn("KIWOOM_DOCKER_SUBNET=172.18.0.0/24", env_example)
+        self.assertIn("KIWOOM_DOCKER_GATEWAY=172.18.0.1", env_example)
+
     def test_synology_compose_passes_all_query_set_controls_with_defaults(self) -> None:
         compose = (
             Path(__file__).resolve().parents[2] / "deploy" / "synology" / "docker-compose.yml"
@@ -37,6 +55,7 @@ class CentralServerSettingsTests(unittest.TestCase):
             "ACCOUNT_IDENTITY_HMAC_KEY": "",
             "ACCOUNT_IDENTITY_REGISTRY_ENABLED": "0",
             "MOCK_EXECUTION_RUN_ID": "",
+            "CENTRAL_SERVER_LOG_RETENTION_DAYS": "14",
         }
         for key, default in expected.items():
             self.assertIn(f"${{{key}:-{default}}}", compose)

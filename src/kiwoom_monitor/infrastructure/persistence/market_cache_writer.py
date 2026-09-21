@@ -1,4 +1,4 @@
-"""실시간 분봉과 현재가 캐시를 GUI 스레드 밖에서 저장한다."""
+"""실시간 분봉·현재가·시가총액 캐시를 GUI 스레드 밖에서 저장한다."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ class MarketCacheWriter(QThread):
 
     minute_saved = Signal()
     minute_failed = Signal(object, object, str)
-    price_failed = Signal(object, object, object, str)
+    price_failed = Signal(object, object, object, object, str)
     history_saved = Signal(str)
     history_failed = Signal(str, str)
 
@@ -38,10 +38,13 @@ class MarketCacheWriter(QThread):
             self._queue.put(("minute", dict(bars), dict(market_bars)))
 
     def enqueue_price_cache(
-        self, prices: dict[str, int], highs: dict[str, int], trade_date: date,
+        self, prices: dict[str, int], highs: dict[str, int],
+        market_caps: dict[str, float], trade_date: date,
     ) -> None:
-        if prices or highs:
-            self._queue.put(("price", dict(prices), dict(highs), trade_date))
+        if prices or highs or market_caps:
+            self._queue.put(
+                ("price", dict(prices), dict(highs), dict(market_caps), trade_date)
+            )
 
     def enqueue_history_bars(
         self, code: str, bars: tuple[MinuteOhlcv, ...], trade_date: date,
@@ -65,7 +68,7 @@ class MarketCacheWriter(QThread):
             if job[0] == "minute":
                 self._save_minute(minute_repository, job[1], job[2])
             elif job[0] == "price":
-                self._save_prices(stock_repository, job[1], job[2], job[3])
+                self._save_prices(stock_repository, job[1], job[2], job[3], job[4])
             elif job[0] == "history":
                 self._save_history(minute_repository, job[1], job[2], job[3], job[4])
 
@@ -93,13 +96,15 @@ class MarketCacheWriter(QThread):
         repository: StockRepository,
         prices: dict[str, int],
         highs: dict[str, int],
+        market_caps: dict[str, float],
         trade_date: date,
     ) -> None:
         try:
             repository.update_last_prices(prices)
+            repository.update_last_market_caps(market_caps)
             repository.update_intraday_highs(highs, trade_date)
         except Exception as error:
-            self.price_failed.emit(prices, highs, trade_date, str(error))
+            self.price_failed.emit(prices, highs, market_caps, trade_date, str(error))
 
     def _save_history(
         self, repository: MinuteBarRepository, code: str,

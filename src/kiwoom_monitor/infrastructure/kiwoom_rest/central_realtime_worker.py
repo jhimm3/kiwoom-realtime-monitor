@@ -10,7 +10,7 @@ from dataclasses import fields
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 from urllib.parse import urlsplit, urlunsplit
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, Qt
 from websockets.asyncio.client import connect
 
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
@@ -53,7 +53,9 @@ class CentralRealtimeWorker(QThread):
         self._fallback_factory = fallback_factory
         self._validation_factory = validation_factory
         self._validation_recorder = validation_recorder
-        self._fallback_probe_seconds = max(10.0, float(fallback_probe_seconds))
+        # 이전 호출자의 인자 호환만 유지한다. 로컬 수신 수명은 더 이상
+        # 고정 probe 시간이 아니라 중앙 상류 구독의 실제 복구 신호가 정한다.
+        del fallback_probe_seconds
         self._fallback_worker: RealtimeTradeWorker | None = None
         self._validation_worker: RealtimeTradeWorker | None = None
         self._consecutive_failures = 0
@@ -73,7 +75,8 @@ class CentralRealtimeWorker(QThread):
 
     def run(self) -> None:
         while not self.isInterruptionRequested():
-            self._ensure_validation_worker()
+            if self._fallback_worker is None:
+                self._ensure_validation_worker()
             try:
                 asyncio.run(self._receive())
                 self._consecutive_failures = 0
@@ -82,7 +85,7 @@ class CentralRealtimeWorker(QThread):
                 self.connection_failed.emit(str(error))
             if self._fallback_factory is not None and self._consecutive_failures >= 3 \
                     and not self.isInterruptionRequested():
-                self._run_local_fallback()
+                self._ensure_local_fallback()
                 self._consecutive_failures = 0
             if not self.isInterruptionRequested():
                 self._wait_or_stop(3)
@@ -164,6 +167,8 @@ class CentralRealtimeWorker(QThread):
             self._planned_deadline = 0.0
             self._planned_finished_generation = self._planned_generation
             codes = tuple(str(code) for code in event.get("codes", []) if code)
+            if self._central_subscription_covers_requested_codes(event, codes):
+                self._stop_local_fallback("나스 키움 실시간 구독 복구 확인")
             self.connection_opened.emit(codes)
             self.status_changed.emit(f"나스 실시간 체결 구독 중 · {len(codes)}종목")
         elif event_type == "central_ready":
@@ -233,20 +238,25 @@ class CentralRealtimeWorker(QThread):
 
     def stop(self, timeout_ms: int = 3000) -> bool:
         self.requestInterruption()
-        if self._fallback_worker is not None:
-            self._fallback_worker.stop(timeout_ms)
+        self._stop_local_fallback("앱 실시간 worker 종료", timeout_ms=timeout_ms, notify=False)
         if self._validation_worker is not None:
             self._validation_worker.stop(timeout_ms)
         return self.wait(timeout_ms)
 
-    def _run_local_fallback(self) -> None:
+    def _ensure_local_fallback(self) -> None:
+        current = self._fallback_worker
+        if current is not None and current.isRunning():
+            current.update_codes(self._codes, self._nxt_codes)
+            return
+        if current is not None:
+            self._fallback_worker = None
         self._stop_validation_worker()
         worker = self._fallback_factory(self._codes, self._nxt_codes) if self._fallback_factory else None
         if worker is None:
             return
         logger.warning(
-            "실시간 데이터를 로컬 경로로 임시 수신: %s종목 · %s초",
-            len(self._codes), round(self._fallback_probe_seconds),
+            "실시간 데이터를 로컬 경로로 계속 수신: %s종목 · 나스 상류 구독 복구까지 유지",
+            len(self._codes),
         )
         self._fallback_worker = worker
         for name in (
@@ -254,19 +264,40 @@ class CentralRealtimeWorker(QThread):
             "stock_reference_received",
             "connection_failed", "subscription_ready", "connection_opened", "codes_added", "diagnostics_changed",
         ):
-            getattr(worker, name).connect(getattr(self, name).emit)
-        worker.status_changed.connect(lambda value: self.status_changed.emit(f"로컬 경로로 임시 수신 중 · {value}"))
+            # 이 worker는 CentralRealtimeWorker.run() 안에서 생성되므로 Qt
+            # 객체 affinity가 이벤트 루프 없는 중앙 작업 스레드에 속한다.
+            # AutoConnection이면 신호가 그 큐에 갇혀 GUI까지 전달되지 않는다.
+            # 중계 신호 emit만 송신 스레드에서 즉시 실행하고, 최종 GUI slot은
+            # Qt가 수신 객체의 main thread로 다시 queue한다.
+            getattr(worker, name).connect(
+                getattr(self, name).emit, Qt.ConnectionType.DirectConnection,
+            )
+        worker.status_changed.connect(
+            lambda value: self.status_changed.emit(f"로컬 경로로 임시 수신 중 · {value}"),
+            Qt.ConnectionType.DirectConnection,
+        )
         self.status_changed.emit("실시간 데이터를 로컬 경로로 임시 수신 중입니다")
         worker.start()
-        deadline = time.monotonic() + self._fallback_probe_seconds
-        while not self.isInterruptionRequested() and time.monotonic() < deadline and worker.isRunning():
-            worker.update_codes(self._codes, self._nxt_codes)
-            time.sleep(0.2)
-        worker.stop(3000)
-        self._fallback_worker = None
-        if not self.isInterruptionRequested():
-            logger.info("로컬 실시간 대체 수신 종료 · 시놀로지 연결 복구 확인")
-            self.status_changed.emit("시놀로지 연결 복구 여부를 다시 확인합니다")
+
+    def _stop_local_fallback(self, reason: str, *, timeout_ms: int = 3000, notify: bool = True) -> None:
+        worker, self._fallback_worker = self._fallback_worker, None
+        if worker is None:
+            return
+        worker.stop(timeout_ms)
+        logger.info("로컬 실시간 대체 수신 종료 · %s", reason)
+        if notify and not self.isInterruptionRequested():
+            self.status_changed.emit(reason)
+
+    def _central_subscription_covers_requested_codes(
+        self, event: dict[str, object], codes: tuple[str, ...],
+    ) -> bool:
+        requested = set(self._codes)
+        if not requested:
+            return True
+        scope = str(event.get("scope", "")).casefold()
+        # 구버전 서버에는 scope가 없었고, upstream 알림은 전체 중앙 구독을
+        # 담는다. 어느 경우든 현재 앱 종목이 모두 승인된 때만 로컬을 끊는다.
+        return scope in {"", "client", "upstream"} and requested.issubset(codes)
 
     def _record_central(
         self, event_type: str, value: object, metadata: dict[str, object] | None = None,
@@ -280,10 +311,22 @@ class CentralRealtimeWorker(QThread):
         worker = self._validation_factory(self._codes, self._nxt_codes)
         self._validation_worker = worker
         if self._validation_recorder is not None:
-            worker.trade_received.connect(lambda value: self._validation_recorder.observe_local("trade", value))
-            worker.order_executed.connect(lambda value: self._validation_recorder.observe_local("order_execution", value))
-            worker.market_state_received.connect(lambda value: self._validation_recorder.observe_local("market_state", value))
-            worker.program_trade_received.connect(lambda value: self._validation_recorder.observe_local("program_trade", value))
+            worker.trade_received.connect(
+                lambda value: self._validation_recorder.observe_local("trade", value),
+                Qt.ConnectionType.DirectConnection,
+            )
+            worker.order_executed.connect(
+                lambda value: self._validation_recorder.observe_local("order_execution", value),
+                Qt.ConnectionType.DirectConnection,
+            )
+            worker.market_state_received.connect(
+                lambda value: self._validation_recorder.observe_local("market_state", value),
+                Qt.ConnectionType.DirectConnection,
+            )
+            worker.program_trade_received.connect(
+                lambda value: self._validation_recorder.observe_local("program_trade", value),
+                Qt.ConnectionType.DirectConnection,
+            )
         worker.start()
 
     def _stop_validation_worker(self) -> None:

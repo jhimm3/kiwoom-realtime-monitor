@@ -7,10 +7,20 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from kiwoom_monitor.application.account_identity import prepare_verified_account_identity
+from kiwoom_monitor.application.account_identity import (
+    bind_verified_account_identity,
+    prepare_verified_account_identity,
+)
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
-from kiwoom_monitor.central_server.mock_runtime import MockAccountBundle
-from kiwoom_monitor.domain.order_contract import AccountEnvironment
+from kiwoom_monitor.central_server.mock_runtime import (
+    MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION,
+    MockAccountBundle,
+    MockAccountRuntimeMode,
+    MockAutomationRuntimeContext,
+    MockCredentialOwner,
+)
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, OrderSide
+from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository
 from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomSettings
 from kiwoom_monitor.infrastructure.kiwoom_rest.account_identity import (
     VerifiedAccountIdentity, account_identity_fingerprint,
@@ -20,6 +30,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.account_identity import (
 class FakeClient:
     def __init__(self, settings):
         self.environment = settings.environment
+        self._settings = settings
 
     def server_now(self):
         return datetime(2026, 9, 15, 9)
@@ -32,6 +43,7 @@ class FakeClient:
             "ka10075": {"oso": []}, "ka10076": {"cntr": []},
             "kt00018": {"acnt_evlt_remn_indv_tot": []},
             "kt00001": {"ord_alow_amt": "1000000"},
+            "kt00015": {"trst_ovrl_trde_prps_array": []},
         }[api_id], False, ""
 
 
@@ -153,3 +165,78 @@ class MockAccountBundleTests(unittest.IsolatedAsyncioTestCase):
                 self.store, settings=KiwoomSettings("fake", "fake", "real"),
                 account_ref="account", run_id="run",
             )
+
+    async def test_owner_drains_manual_bundle_before_automatic_owner_replaces_it(self):
+        identity = self.identity("1234567890")
+        self.store.register_credential_profile(
+            "kiwoom_mock", "profile-a", datetime.now(timezone.utc).isoformat(),
+        )
+        prepared = prepare_verified_account_identity(
+            identity, self.store, credential_profile_id="profile-a",
+        )
+        binding = bind_verified_account_identity(
+            identity, self.store, credential_profile_id="profile-a",
+        )
+        settings = self.store.save_account_settings({
+            "scope": binding.scope.to_dict(), "active_profile_id": "profile-a",
+            "monitor_enabled": True, "mock_order_enabled": True,
+        }, expected_revision=0)
+        old = MockAccountBundle(
+            self.store, settings=KiwoomSettings("fake", "fake", "mock"),
+            account_ref=prepared["account_ref"], run_id="manual-run",
+            credential_profile_id="profile-a", identity_hmac_key=self.hmac_key,
+            order_transport_enabled=True, identity=identity, binding=binding,
+        )
+        self.bundles.append(old)
+        await old.start(); await asyncio.wait_for(old.monitor._queue.join(), 2)
+        owner = MockCredentialOwner(self.store, object(), hmac_key=self.hmac_key)
+        owner._contexts["profile-a"] = owner._bundles["profile-a"] = old
+        owner._revisions["profile-a"] = 1
+        owner._settings_revisions["profile-a"] = settings["revision"]
+        context = MockAutomationRuntimeContext(
+            MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION, old.account_ref,
+            "mock_auto_run_" + "a" * 64, "spec-a", "admission-a", 1, 1,
+        )
+        new = await owner.switch_execution_mode(
+            "profile-a", MockAccountRuntimeMode.AUTOMATIC,
+            expected_settings_revision=settings["revision"], credential_revision=1,
+            automation_context=context,
+        )
+        self.bundles.append(new)
+        self.assertFalse(old.runtime._active)
+        self.assertTrue(new.runtime._active)
+        self.assertEqual(MockAccountRuntimeMode.AUTOMATIC, new.runtime_mode)
+        self.assertFalse(new.runtime._new_orders_enabled)
+        with self.assertRaisesRegex(RuntimeError, "AUTOMATIC_MODE"):
+            await new.gateway.submit_limit(
+                request_id="manual-during-auto", symbol="005930",
+                side=OrderSide.BUY,
+                quantity=1, limit_price=1000, expires_seconds=30,
+            )
+        self.assertIsNotNone(
+            ForwardEvaluationRepository(self.store).load_latest_mock_automation_risk(old.account_ref)
+        )
+        first_risk = ForwardEvaluationRepository(
+            self.store
+        ).load_latest_mock_automation_risk(old.account_ref)
+        await new.close(close_broker=False)
+        restarted = MockAccountBundle(
+            self.store, settings=new.client._settings,
+            account_ref=new.account_ref, run_id=new.run_id,
+            credential_profile_id="profile-a", identity_hmac_key=self.hmac_key,
+            order_transport_enabled=True, client=new.client, broker=new.broker,
+            identity=identity, binding=binding, require_initial_read=True,
+            runtime_mode=MockAccountRuntimeMode.AUTOMATIC,
+            automation_context=context,
+        )
+        self.bundles.append(restarted)
+        await restarted.start()
+        second_risk = ForwardEvaluationRepository(
+            self.store
+        ).load_latest_mock_automation_risk(old.account_ref)
+        self.assertEqual(
+            first_risk.reconciliation_revision + 1,
+            second_risk.reconciliation_revision,
+        )
+        owner._bundles.clear(); owner._contexts.clear()
+        await owner._probe.close()

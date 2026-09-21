@@ -3,8 +3,12 @@ from __future__ import annotations
 import io
 import json
 import unittest
+from urllib.error import HTTPError
 
-from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import RemoteKiwoomRestClient
+from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import (
+    CentralServerUnavailable,
+    RemoteKiwoomRestClient,
+)
 
 
 class Response:
@@ -17,6 +21,84 @@ class Response:
 
 
 class RemoteKiwoomRestClientTests(unittest.TestCase):
+    def test_loads_last_nas_0b_market_caps_without_kiwoom_query(self) -> None:
+        captured = {}
+
+        def opener(request, **_kwargs):
+            captured["url"] = request.full_url
+            return Response({"market_caps": [{
+                "code": "005930", "market_cap_eok": 4_321_000,
+                "observed_at": "2026-09-21T06:20:00+00:00",
+            }]})
+
+        values = RemoteKiwoomRestClient(
+            "https://nas.example.test", "secret", opener=opener,
+        ).load_stored_market_caps(("005930", "000660"))
+
+        self.assertIn("/api/v1/market/latest-market-caps?", captured["url"])
+        self.assertNotIn("/api/v1/kiwoom/query", captured["url"])
+        self.assertEqual(4_321_000, values["005930"]["market_cap_eok"])
+
+    def test_loads_nas_top20_rows_and_statistics_without_kiwoom_query(self) -> None:
+        urls = []
+
+        def opener(request, **_kwargs):
+            urls.append(request.full_url)
+            if "top20-statistics" in request.full_url:
+                return Response({"hourly": [], "comparisons": [{"trade_date": "2026-09-08"}]})
+            return Response({"snapshots": [
+                {"payload": {"minute": "2026-09-08T09:01", "capture_state": "realtime_complete"}},
+                {"payload": {"minute": "2026-09-08T09:00", "capture_state": "realtime_complete"}},
+            ]})
+
+        client = RemoteKiwoomRestClient("https://nas.example.test", "secret", opener=opener)
+        rows = client.load_stored_top20_index("2026-09-08")
+        statistics = client.load_stored_top20_statistics("2026-09-01", "2026-09-08")
+
+        self.assertEqual("2026-09-08T09:00", rows[0]["minute"])
+        self.assertEqual("2026-09-08", statistics["comparisons"][0]["trade_date"])
+        self.assertTrue(all("/api/v1/kiwoom/query" not in url for url in urls))
+
+    def test_account_discovery_preserves_profile_display_label(self) -> None:
+        def opener(_request, **_kwargs):
+            return Response({"accounts": [{
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "11111111-1111-1111-1111-111111111111",
+                "credential_profile_id": "mock-profile",
+                "binding_revision": 2,
+                "display_label": "연습 계좌",
+            }]})
+
+        contexts = RemoteKiwoomRestClient(
+            "https://nas.example.test", "secret", opener=opener,
+        ).load_account_contexts()
+
+        self.assertEqual("연습 계좌", contexts[0].display_label)
+
+    def test_gateway_failure_is_reported_as_central_unavailable_for_failover(self) -> None:
+        def opener(request, **_kwargs):
+            raise HTTPError(request.full_url, 502, "Bad Gateway", {}, io.BytesIO(b""))
+
+        client = RemoteKiwoomRestClient(
+            "https://nas.example.test", "secret", opener=opener,
+        )
+        with self.assertRaises(CentralServerUnavailable):
+            client.load_stored_ranking("5")
+        with self.assertRaises(CentralServerUnavailable):
+            client.request("ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"})
+
+    def test_authentication_failure_does_not_allow_local_failover(self) -> None:
+        def opener(request, **_kwargs):
+            raise HTTPError(request.full_url, 401, "Unauthorized", {}, io.BytesIO(b""))
+
+        client = RemoteKiwoomRestClient(
+            "https://nas.example.test", "secret", opener=opener,
+        )
+        with self.assertRaisesRegex(Exception, "HTTP 401") as raised:
+            client.load_stored_ranking("5")
+        self.assertNotIsInstance(raised.exception, CentralServerUnavailable)
+
     def test_loads_recent_stored_minute_bars_without_kiwoom_query(self) -> None:
         captured = {}
 

@@ -7,7 +7,7 @@ a completed account import.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from kiwoom_monitor.domain.order_contract import AccountBinding, AccountScope, LEGACY_ACCOUNT_SCOPE
@@ -43,6 +43,7 @@ class AccountQueryContext:
     credential_profile_id: str
     binding_revision: int
     transport: str
+    display_label: str = field(default="", compare=False)
 
     def __post_init__(self) -> None:
         if not self.credential_profile_id.strip():
@@ -51,6 +52,8 @@ class AccountQueryContext:
             raise ValueError("binding_revision cannot be negative")
         if self.transport not in {"legacy", "nas", "direct"}:
             raise ValueError("unsupported account query transport")
+        if not isinstance(self.display_label, str) or len(self.display_label) > 120:
+            raise ValueError("display_label is invalid")
 
 
 @dataclass(frozen=True)

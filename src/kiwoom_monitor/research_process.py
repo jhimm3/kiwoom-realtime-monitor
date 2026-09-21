@@ -90,8 +90,10 @@ class ResearchProcessRequest:
     development_partition: DevelopmentPartitionSpec | None = None
 
 
-def final_candidate_spec_hash(request: ResearchProcessRequest, implementation_hash: str) -> str:
-    """Scientific identity excludes dates, source paths and operating budgets."""
+def final_candidate_spec_document(
+    request: ResearchProcessRequest, implementation_hash: str,
+) -> dict[str, Any]:
+    """Return the existing final_candidate/v1 identity document unchanged."""
     if (not isinstance(request, ResearchProcessRequest) or request.mode != 'single_run'
             or request.search is not None or request.development_partition is not None
             or request.session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES):
@@ -111,11 +113,65 @@ def final_candidate_spec_hash(request: ResearchProcessRequest, implementation_ha
             or not costs.source.strip() or not costs.valid_from or not costs.valid_to
             or any(type(rate) is not int for rate in (costs.commission_bps, costs.sell_tax_bps, costs.slippage_bps))):
         raise ValueError('final candidate requires explicit cost provenance and validity')
-    document = {'version': 'final_candidate/v1', 'family': request.family, 'parameters': parameters,
-                'execution_model': execution.to_dict(),
-                'session_profile': research_session_profile_document(request.session_profile),
-                'implementation_hash': implementation_hash}
+    return {'version': 'final_candidate/v1', 'family': request.family, 'parameters': parameters,
+            'execution_model': execution.to_dict(),
+            'session_profile': research_session_profile_document(request.session_profile),
+            'implementation_hash': implementation_hash}
+
+
+def final_candidate_spec_hash(request: ResearchProcessRequest, implementation_hash: str) -> str:
+    """Scientific identity excludes dates, source paths and operating budgets."""
+    document = final_candidate_spec_document(request, implementation_hash)
     return hashlib.sha256(json.dumps(document, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+
+
+def prepare_mock_automation_candidate_publication(
+    repository: ResearchRepository,
+    request: ResearchProcessRequest,
+    *,
+    implementation_hash: str,
+    strategy_ref: str,
+    account_ref: str,
+    final_batch_id: str,
+    final_run_id: str,
+    eligibility_policy: Any,
+) -> dict[str, Any]:
+    """Build the bounded publication documents; this performs no network or order call."""
+    from kiwoom_monitor.application.mock_automation_candidate import (
+        build_candidate_package,
+        evaluate_candidate_eligibility,
+        validate_publication_size,
+    )
+
+    candidate_spec = final_candidate_spec_document(request, implementation_hash)
+    candidate_hash = final_candidate_spec_hash(request, implementation_hash)
+    matches = [
+        row for row in repository.load_final_holdout_executions(final_batch_id)
+        if str(row.get("candidate_spec_hash", "")) == candidate_hash
+    ]
+    if len(matches) != 1:
+        raise ValueError("candidate is not uniquely present in the final holdout ledger")
+    run = repository.load_run(final_run_id)
+    report = repository.load_research_report(final_run_id)
+    if run is None or report is None:
+        raise ValueError("final run or research report evidence is missing")
+    package = build_candidate_package(
+        strategy_ref=strategy_ref, candidate_spec=candidate_spec,
+        batch_id=final_batch_id, run=run, execution=matches[0], report=report,
+    )
+    receipt = evaluate_candidate_eligibility(
+        package, eligibility_policy, account_ref=account_ref,
+    )
+    documents = {
+        "package": package.to_dict(),
+        "eligibility_policy": eligibility_policy.to_dict(),
+        "eligibility_receipt": receipt.to_dict(),
+    }
+    validate_publication_size(
+        documents["package"], documents["eligibility_policy"],
+        documents["eligibility_receipt"],
+    )
+    return documents
 
 
 @dataclass(frozen=True)

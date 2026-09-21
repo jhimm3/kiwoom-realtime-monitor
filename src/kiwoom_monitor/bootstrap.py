@@ -16,6 +16,7 @@ from kiwoom_monitor.infrastructure.app_paths import AppPaths
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig, DataSourceSettings
 from kiwoom_monitor.infrastructure.central_server_process import LocalCentralServerProcess
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
+from kiwoom_monitor.infrastructure.central_credentials_client import CentralCredentialsClient
 from kiwoom_monitor.infrastructure.central_operational_settings import CentralOperationalSettingsClient
 from kiwoom_monitor.infrastructure.central_content_sync import CentralContentSyncService
 from kiwoom_monitor.infrastructure.central_theme_sync import CentralThemeSyncDispatcher
@@ -23,7 +24,6 @@ from kiwoom_monitor.infrastructure.central_settings_sync import CentralSettingsS
 from kiwoom_monitor.infrastructure.logging_config import configure_logging
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import LocalApiConfig
-from kiwoom_monitor.infrastructure.kiwoom_rest.client import KiwoomRestClient
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker import RealtimeTradeWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.central_realtime_worker import CentralRealtimeWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.validation_client import RealtimeValidationRecorder
@@ -121,6 +121,7 @@ def main() -> None:
     central_settings_sync: CentralSettingsSyncService | None = None
     candidate_client: CentralContentClient | None = None
     candidate_settings_client: CentralOperationalSettingsClient | None = None
+    mock_automation_credentials_client: CentralCredentialsClient | None = None
     if configured_data_source.mode in {"local_server", "personal_server"} and not (
         configured_data_source.mode == "local_server" and local_central_server is None
     ):
@@ -133,6 +134,7 @@ def main() -> None:
 
         def sync_central_content() -> None:
             try:
+                sync_news_catalog = configured_data_source.mode != "personal_server"
                 # 이전 실행의 로컬 대기 변경과 NAS 완료본의 수정 시각을 비교해
                 # 더 최신인 테마를 먼저 확정한 뒤 나머지 콘텐츠를 내려받는다.
                 if central_theme_sync is not None and central_theme_sync.has_pending \
@@ -143,17 +145,24 @@ def main() -> None:
                     seed_marker.exists()
                     and not central_content_service.push_manifest_exists(paths.news_database_path)
                 )
-                pulled = central_content_service.pull(paths.database_path, paths.news_database_path)
+                pulled = central_content_service.pull(
+                    paths.database_path, paths.news_database_path,
+                    sync_news_catalog=sync_news_catalog,
+                )
                 if seed_marker.exists():
                     if needs_manifest_seed:
                         central_content_service.seed_push_manifest(
                             paths.database_path, paths.news_database_path, allow_existing=True,
+                            sync_news_catalog=sync_news_catalog,
                         )
                     logging.getLogger(__name__).info(
                         "중앙 콘텐츠 시작 동기화 완료: 내려받기 %s건 · 초기 업로드 생략", pulled.total,
                     )
                 else:
-                    pushed = central_content_service.push(paths.database_path, paths.news_database_path)
+                    pushed = central_content_service.push(
+                        paths.database_path, paths.news_database_path,
+                        sync_news_catalog=sync_news_catalog,
+                    )
                     seed_marker.write_text("1\n", encoding="utf-8")
                     logging.getLogger(__name__).info(
                         "중앙 콘텐츠 최초 이전 완료: 내려받기 %s건, 보존 %s건", pulled.total, pushed.total,
@@ -170,6 +179,10 @@ def main() -> None:
             timeout_seconds=5.0,
         )
         candidate_settings_client = CentralOperationalSettingsClient(configured_data_source)
+        if configured_data_source.mode == "personal_server":
+            mock_automation_credentials_client = CentralCredentialsClient(
+                configured_data_source, provider="kiwoom_mock",
+            )
     minute_bar_repository = MinuteBarRepository(paths.database_path)
     daily_bar_repository = DailyBarRepository(paths.database_path)
     google_drive_sync = GoogleDriveSyncService(paths.database_path, paths.news_database_path)
@@ -208,15 +221,15 @@ def main() -> None:
             local_settings = LocalApiConfig(local_api).load()
             if local_settings.app_key and local_settings.secret_key:
                 # 중앙 서버와 로컬 WebSocket을 동시에 열지 않는다. 중앙 연결이
-                # 연속 실패한 동안에만 전용 직접 연결 객체를 잠시 실행한다.
-                direct_client = KiwoomRestClient(local_settings)
+                # 연속 실패한 동안에만 직접 연결을 잠시 실행한다. 조회 fallback과
+                # 같은 로컬 client를 써야 OAuth 토큰과 요청 잠금도 한 벌로 유지된다.
 
                 def create_direct_realtime(codes, nxt_codes=()):
                     return RealtimeTradeWorker(
-                        direct_client.get_access_token,
+                        client.get_access_token,
                         local_settings.environment,
                         codes,
-                        direct_client.server_now,
+                        client.server_now,
                         nxt_codes,
                     )
 
@@ -239,6 +252,8 @@ def main() -> None:
         else:
             realtime_factory = lambda codes: CentralRealtimeWorker(source, codes)
         return {
+            "source_mode": source.mode,
+            "market_data_client": client,
             "ranking_loader": RankingService(client, stocks=StockRepository(paths.database_path), query_type=database.settings.get("rank_query_type")),
             "realtime_worker_factory": realtime_factory,
             "minute_history_worker_factory": lambda codes: MinuteHistoryWorker(
@@ -322,6 +337,8 @@ def main() -> None:
         program_trade_loader=api_runtime.get("program_trade_loader"),
         candidate_client=candidate_client,
         candidate_settings_client=candidate_settings_client,
+        mock_automation_credentials_client=mock_automation_credentials_client,
+        market_data_client=api_runtime.get("market_data_client"),
         research_data_dir=paths.data_dir / "research",
     )
     window.show()

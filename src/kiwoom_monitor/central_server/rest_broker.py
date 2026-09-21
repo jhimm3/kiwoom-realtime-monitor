@@ -14,9 +14,10 @@ from .database import QueryStore, StoredQuery
 
 
 logger = logging.getLogger(__name__)
+api_audit_logger = logging.getLogger("kiwoom_monitor.kiwoom_api")
 MAX_MEMORY_CACHE_ENTRIES = 2_048
 RANKING_RESERVATION_LEAD_SECONDS = 5.0
-RANKING_RESERVATION_RELEASE_SECONDS = 0.35
+RANKING_RESERVATION_RELEASE_SECONDS = 5.0
 
 
 class RestClient(Protocol):
@@ -88,8 +89,10 @@ REQUEST_PRIORITIES = {
 
 
 def ranking_reservation_delay(epoch_seconds: float) -> float:
-    """Keep the market broker free just before each 30-second ranking boundary."""
+    """Keep the market broker free around each 30-second ranking boundary."""
     phase = float(epoch_seconds) % 30.0
+    if phase < RANKING_RESERVATION_RELEASE_SECONDS:
+        return RANKING_RESERVATION_RELEASE_SECONDS - phase
     remaining = 30.0 - phase
     if 0.0 < remaining <= RANKING_RESERVATION_LEAD_SECONDS:
         return remaining + RANKING_RESERVATION_RELEASE_SECONDS
@@ -129,6 +132,8 @@ class _Job:
     cont_yn: str
     next_key: str
     future: asyncio.Future[BrokerResult]
+    record_response: bool = True
+    queued_at: float = field(default_factory=time.monotonic)
 
 
 @dataclass
@@ -306,9 +311,33 @@ class CentralRestBroker:
     async def request(
         self, api_id: str, path: str, body: dict[str, Any], *, cont_yn: str = "N", next_key: str = ""
     ) -> BrokerResult:
+        return await self._request(
+            api_id, path, body, cont_yn=cont_yn, next_key=next_key,
+            record_response=True,
+        )
+
+    async def request_unrecorded(
+        self, api_id: str, path: str, body: dict[str, Any], *, cont_yn: str = "N", next_key: str = ""
+    ) -> BrokerResult:
+        """Return a brokered response without writing rejected collector candidates.
+
+        Autonomous collectors use this while validating freshness and completeness,
+        then persist only the accepted canonical dataset themselves.
+        """
+        return await self._request(
+            api_id, path, body, cont_yn=cont_yn, next_key=next_key,
+            record_response=False,
+        )
+
+    async def _request(
+        self, api_id: str, path: str, body: dict[str, Any], *, cont_yn: str,
+        next_key: str, record_response: bool,
+    ) -> BrokerResult:
         self._validate(api_id, path, cont_yn, next_key)
         await self.start()
         key = self._fingerprint(api_id, path, body, cont_yn, next_key)
+        if not record_response:
+            key = f"unrecorded:{key}"
         async with self._guard:
             if self._credential_paused:
                 raise BrokerCredentialBusyError("CREDENTIAL_CHANGE_IN_PROGRESS")
@@ -318,7 +347,7 @@ class CentralRestBroker:
                 value = cached[1]
                 return BrokerResult(copy.deepcopy(value.payload), value.has_next, value.next_key, True)
             ttl = CACHE_SECONDS.get(api_id, 0.0) if cont_yn == "N" else 0.0
-            if ttl > 0 and self._store is not None:
+            if record_response and ttl > 0 and self._store is not None:
                 stored = await asyncio.to_thread(self._store.load_query, key)
                 if stored is not None:
                     if self._response_handler is not None:
@@ -335,7 +364,10 @@ class CentralRestBroker:
             if existing is None:
                 future = asyncio.get_running_loop().create_future()
                 self._inflight[key] = future
-                job = _Job(key, api_id, path, copy.deepcopy(body), cont_yn, next_key, future)
+                job = _Job(
+                    key, api_id, path, copy.deepcopy(body), cont_yn, next_key,
+                    future, record_response,
+                )
                 await self._queue.put((REQUEST_PRIORITIES.get(api_id, 50), next(self._sequence), job))
                 existing = future
         return await asyncio.shield(existing)
@@ -364,19 +396,27 @@ class CentralRestBroker:
                     and priority > REQUEST_PRIORITIES["ka00198"]
                     and (delay := ranking_reservation_delay(time.time())) > 0
                 ):
-                    # The running HTTP call cannot be preempted. Delay starting a new
-                    # low-priority call near the boundary, then requeue it so ka00198
-                    # can overtake it as soon as the scheduler publishes the slot.
-                    await asyncio.sleep(delay)
+                    # Put the low-priority job back before yielding. Sleeping first
+                    # would occupy the only broker worker and make a newly queued
+                    # ka00198 wait for the whole reservation window.
                     await self._queue.put((priority, next(self._sequence), job))
+                    await asyncio.sleep(min(delay, 0.05))
                     continue
                 try:
+                    started_at = time.monotonic()
+                    queue_wait_ms = round((started_at - job.queued_at) * 1000)
                     payload, has_next, next_key = await asyncio.to_thread(
                         self._client.request_with_continuation,
                         job.api_id, job.path, job.body, cont_yn=job.cont_yn, next_key=job.next_key,
                     )
+                    api_audit_logger.info(
+                        "request completed namespace=%s api_id=%s continuation=%s queue_wait_ms=%d duration_ms=%d",
+                        self._namespace, job.api_id, job.cont_yn,
+                        queue_wait_ms,
+                        round((time.monotonic() - started_at) * 1000),
+                    )
                     result = BrokerResult(payload, has_next, next_key)
-                    if self._response_handler is not None:
+                    if job.record_response and self._response_handler is not None:
                         try:
                             await asyncio.to_thread(self._response_handler, job.api_id, job.body, payload)
                         except Exception:
@@ -389,7 +429,7 @@ class CentralRestBroker:
                         async with self._guard:
                             self._cache[job.key] = (time.monotonic() + ttl, result)
                             self._prune_memory_cache()
-                        if self._store is not None:
+                        if job.record_response and self._store is not None:
                             await asyncio.to_thread(
                                 self._store.save_query, job.key, job.api_id, time.time() + ttl,
                                 StoredQuery(result.payload, result.has_next, result.next_key),
@@ -397,6 +437,10 @@ class CentralRestBroker:
                     if not job.future.done():
                         job.future.set_result(result)
                 except Exception as error:
+                    api_audit_logger.warning(
+                        "request failed namespace=%s api_id=%s continuation=%s error_type=%s",
+                        self._namespace, job.api_id, job.cont_yn, type(error).__name__,
+                    )
                     if not job.future.done():
                         job.future.set_exception(error)
                 finally:

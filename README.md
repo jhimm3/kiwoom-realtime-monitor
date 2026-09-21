@@ -1,15 +1,16 @@
 # 키움 실시간 종목순위·테마·거래강도 모니터
 
-키움 REST·WebSocket `0B` 기반의 Windows 상위 20종목 모니터입니다. 실시간 순위·현재가·기간 거래대금·거래강도와 최고가 근접 알림, NXT 표시, 테마·뉴스·자동 매매일지, TOP20 지수를 제공합니다. 선택형 개인 NAS 서버는 앱이 꺼져도 시장 자료를 수집하고 여러 PC에 같은 설정·테마·AI 분석 자료를 제공하며, NAS를 쓰지 않는 로컬 모드도 그대로 지원합니다.
+키움 REST·WebSocket `0B` 기반의 Windows 상위 20종목 모니터입니다. 실시간 순위·현재가·기간 거래대금·거래강도와 최고가 근접 알림, NXT 표시, 테마·뉴스·자동 매매일지, TOP20 지수를 제공합니다. 저장된 자료로 전략 연구와 Shadow 후보 검증을 반복하고, 검증된 후보를 계좌별 안전 gate를 거쳐 모의운용할 수 있습니다. 선택형 개인 NAS 서버는 앱이 꺼져도 시장·뉴스·계좌 자료를 수집하고 여러 PC에 같은 설정과 분석 자료를 제공하며, NAS를 쓰지 않는 로컬 모드도 그대로 지원합니다.
 
 ## 현재 버전
 
-- **2.0.0**
-- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v2.0.0)
+- **2.1.0**
+- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v2.1.0)
 - [소개 페이지](docs/index.html) · [개인정보처리방침](docs/privacy.html)
 
 ## 변경 내역
 
+- [2.1.0](docs/RELEASE_NOTES_v2.1.0.md) — 자동 모의운용 기반, 다중 계좌 인증, NAS 수집·장애전환·뉴스·시장자료 안정화
 - [2.0.0](docs/RELEASE_NOTES_v2.0.0.md) — 개인 NAS 중앙 수집·장애전환, 공통 백업, 시점별 데이터 계약과 대규모 안정성 리팩터링
 - [1.1.20](docs/RELEASE_NOTES_v1.1.20.md) — 자동 매매일지·전략팩, 다중 차트, 진입 스냅샷, TOP20 거래대금 지수와 실시간 안정성 개선
 - [1.1.19](docs/RELEASE_NOTES_v1.1.19.md) — AI 단건·묶음 요청, 호출량 추적, 뉴스창 배치·복원과 뉴스 설정 백업 개선

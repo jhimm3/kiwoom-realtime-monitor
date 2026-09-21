@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import asdict
 from datetime import datetime, time as clock_time, timedelta, timezone
 from pathlib import Path
@@ -68,6 +69,7 @@ class AutonomousTop20Service:
         self._last_new_high_slot = ""
         self._last_aux_ranking_slots: dict[str, str] = {}
         self._last_backfill_day = ""
+        self._backfill_task: asyncio.Task[None] | None = None
         self._entrants_day = ""
         self._entrant_first_seen: dict[str, str] = {}
         self._account_entry_codes: tuple[str, ...] = ()
@@ -116,13 +118,18 @@ class AutonomousTop20Service:
     async def refresh_ranking_once(self, observed_at: datetime | None = None) -> tuple[str, ...]:
         now = observed_at or self._now()
         expected_at = _ranking_expected_at(now)
+        refresh_started_at = time.monotonic()
         self._schedule_market_catalog(now.date().isoformat())
         items: list[dict[str, Any]] = []
         result = None
         stale_response = False
         partial_response = False
+        request = getattr(self._broker, "request_unrecorded", self._broker.request)
         for retry_index in range(self.STALE_RANKING_RETRY_LIMIT + 1):
-            result = await self._broker.request("ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"})
+            # Freshness/20-slot validation comes before persistence. Persisting every
+            # stale or partial candidate here used to block the next retry on the
+            # PostgreSQL ingest path and made the desktop ranking appear seconds late.
+            result = await request("ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"})
             raw_items = result.payload.get("item_inq_rank", result.payload.get("result_list", []))
             items = [row for row in raw_items if isinstance(row, dict)] if isinstance(raw_items, list) else []
             snapshot_at = _ranking_snapshot_at(items, result.payload)
@@ -162,6 +169,7 @@ class AutonomousTop20Service:
         membership = {
             "observed_at": snapshot_key, "codes": list(codes), "items": items,
         }
+        persistence_started_at = time.monotonic()
         await asyncio.to_thread(
             self._store.save_dataset_snapshot,
             "top20_membership",
@@ -175,6 +183,12 @@ class AutonomousTop20Service:
                 self._now(),
                 source="nas-autonomous-ka00198",
             ),
+        )
+        logger.info(
+            "NAS TOP20 최신 순위 저장 완료: 회차=%s 종목=%d 조회후_ms=%d 저장_ms=%d",
+            snapshot_key, len(codes),
+            round((persistence_started_at - refresh_started_at) * 1000),
+            round((time.monotonic() - persistence_started_at) * 1000),
         )
         if codes:
             if self._entrants_day != day:
@@ -427,13 +441,34 @@ class AutonomousTop20Service:
                 day = now.date().isoformat()
                 if self._last_backfill_day != day:
                     self._last_backfill_day = day
-                    await self.backfill_day(day)
+                    self._schedule_backfill(day)
             elif now.weekday() < 5 and now.time().replace(tzinfo=None) < clock_time(7, 40):
                 day = _previous_trading_day(now).date().isoformat()
                 if self._last_backfill_day != day:
                     self._last_backfill_day = day
-                    await self.backfill_day(day)
+                    self._schedule_backfill(day)
             await asyncio.sleep(0.25)
+
+    def _schedule_backfill(self, day: str) -> None:
+        task = self._backfill_task
+        if task is not None and not task.done():
+            return
+        task = asyncio.create_task(
+            self.backfill_day(day), name=f"nas-top20-backfill-{day}",
+        )
+        self._backfill_task = task
+        self._fundamentals_tasks.add(task)
+        task.add_done_callback(self._backfill_done)
+
+    def _backfill_done(self, task: asyncio.Task[None]) -> None:
+        self._fundamentals_tasks.discard(task)
+        if self._backfill_task is task:
+            self._backfill_task = None
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning("TOP20 장후 보완 실패(다음 거래일 재확인): %s", error)
 
     async def _event_loop(self) -> None:
         while True:
@@ -964,7 +999,7 @@ def _ranking_expected_at(value: datetime) -> datetime:
 def _ranking_response_has_empty_slots(items: list[dict[str, Any]]) -> bool:
     """20행 응답 안의 빈 순위 자리를 키움 갱신 중 부분 응답으로 판정한다."""
     if len(items) < 20:
-        return False
+        return True
     valid_count = sum(
         bool(_stock_code(row) and str(row.get("stk_nm", "")).strip())
         for row in items[:20]

@@ -55,6 +55,10 @@ from kiwoom_monitor.application.research_replay import (
 )
 from kiwoom_monitor.application.research_splits import ResearchEvaluationSpec, DevelopmentPartitionSpec, DEVELOPMENT_PARTITION_VERSION
 from kiwoom_monitor.application.research_resources import ResearchResourceGuard, ResearchResourceLimits, ResearchResourceBlocked
+from kiwoom_monitor.application.research_implementation import (
+    LEGACY_RESEARCH_IMPLEMENTATION_HASH,
+    research_implementation_hash,
+)
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.research_data_source import (
     FrozenResearchDataset,
@@ -64,9 +68,6 @@ from kiwoom_monitor.infrastructure.research_data_source import (
     prepare_development_partition, development_partition_start, final_holdout_partition_start,
     DEVELOPMENT_INPUT_VERSION, FINAL_INPUT_VERSION,
 )
-
-
-LEGACY_RESEARCH_IMPLEMENTATION_HASH = "a7f4d77894d29723bad8b3d7a22ad4c0d35b88c2f9e7f182c81a606914e8db5f"
 
 
 @dataclass(frozen=True)
@@ -472,39 +473,6 @@ def _run_spec(
     if session_profile is not None:
         document["session_profile"] = research_session_profile_document(session_profile)
     return document
-
-
-def research_implementation_hash(session_profile: str | None = None) -> str:
-    # Requests created before S5 had no session_profile. Their content-addressed
-    # run IDs must continue to resolve to the completed legacy evidence.
-    if session_profile is None:
-        return LEGACY_RESEARCH_IMPLEMENTATION_HASH
-    if session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES:
-        raise ValueError(f"unsupported research session profile: {session_profile}")
-    root = Path(__file__).resolve().parents[1]
-    paths = (
-        root / "src/kiwoom_monitor/application/market_session_schedule.py",
-        root / "src/kiwoom_monitor/application/research_factors.py",
-        root / "src/kiwoom_monitor/application/research_replay.py",
-        root / "src/kiwoom_monitor/application/market_research_features.py",
-        root / "src/kiwoom_monitor/application/breakout_strategy.py",
-        root / "src/kiwoom_monitor/application/pullback_reacceleration_strategy.py",
-        root / "src/kiwoom_monitor/application/research_families.py",
-        root / "src/kiwoom_monitor/infrastructure/persistence/research_repository.py",
-        root / "src/kiwoom_monitor/infrastructure/research_data_source.py",
-        root / "src/kiwoom_monitor/application/research_execution.py",
-        root / "src/kiwoom_monitor/application/research_evaluation.py",
-        root / "src/kiwoom_monitor/application/research_splits.py",
-        root / "src/kiwoom_monitor/domain/ranking.py",
-        Path(__file__).resolve(),
-    )
-    digest = hashlib.sha256()
-    for path in paths:
-        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
 
 
 def _final_market_regime(

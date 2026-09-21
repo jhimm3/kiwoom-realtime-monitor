@@ -28,6 +28,11 @@ class FailoverKiwoomRestClient:
         self._primary_retry_at = 0.0
         self._using_fallback = False
 
+    @property
+    def using_fallback(self) -> bool:
+        """Whether recent query traffic is using this PC's direct API client."""
+        return self._using_fallback
+
     def request(self, api_id: str, path: str, body: dict[str, Any]) -> dict[str, Any]:
         payload, _, _ = self.request_with_continuation(api_id, path, body)
         return payload
@@ -117,9 +122,17 @@ class FailoverKiwoomRestClient:
         if time.monotonic() < self._primary_retry_at:
             return None
         try:
-            return self._primary.load_stored_ranking(query_type)
+            result = self._primary.load_stored_ranking(query_type)
+            self._primary_retry_at = 0.0
+            if self._using_fallback:
+                logger.info("시놀로지 순위 조회 연결 복구 · 중앙 저장 순위 사용 재개")
+                self._using_fallback = False
+            return result
         except CentralServerUnavailable:
             self._primary_retry_at = time.monotonic() + self._retry_primary_seconds
+            if not self._using_fallback:
+                logger.warning("시놀로지 순위 조회 연결 실패 · 이 PC의 키움 API로 자동 전환")
+                self._using_fallback = True
             return None
 
     def load_stored_daily_bars(
@@ -177,6 +190,15 @@ class FailoverKiwoomRestClient:
 
     def load_stored_market_index(self, market: str, trading_date: str):
         return self._stored_primary("load_stored_market_index", market, trading_date)
+
+    def load_stored_top20_index(self, trading_date: str):
+        return self._stored_primary("load_stored_top20_index", trading_date)
+
+    def load_stored_top20_statistics(self, start_date: str, end_date: str):
+        return self._stored_primary("load_stored_top20_statistics", start_date, end_date)
+
+    def load_stored_market_caps(self, codes: tuple[str, ...]):
+        return self._stored_primary("load_stored_market_caps", codes)
 
     def _stored_primary(self, method: str, *args):
         if time.monotonic() < self._primary_retry_at:

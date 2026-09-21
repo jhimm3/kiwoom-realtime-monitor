@@ -6,23 +6,30 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from kiwoom_monitor.application.mock_automation_admission import (
+    MockAutomationDesiredState,
     admit_mock_automation,
     execution_run_id_for_spec,
 )
+from kiwoom_monitor.application.mock_automation_candidate import CandidateEligibilityStatus
 from kiwoom_monitor.application.mock_automation_recovery import (
     MockAutomationRecoveryMetrics,
     MockAutomationRecoveryStatus,
     record_mock_automation_recovery,
+    record_mock_automation_recovery_from_risk,
 )
 from kiwoom_monitor.application.mock_automation_execution import (
     MockAutomationGateStatus,
     MockAutomationLiveMetrics,
     VERIFIED_DAILY_PNL_SOURCE,
     dispatch_mock_automation_decision,
+    dispatch_mock_automation_decision_from_risk,
     emergency_stop_mock_automation,
+    resume_mock_automation,
 )
+from kiwoom_monitor.application.mock_automation_risk import build_mock_automation_risk_snapshot
 from kiwoom_monitor.application.breakout_strategy import StrategyDecision
 from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
@@ -73,6 +80,30 @@ class _ResearchRepository:
             "status": "completed",
             "logical_result_hash": result_hash,
         }
+
+    def load_mock_automation_candidate_package(self, strategy_ref: str, package_hash: str):
+        if self.execution["state"] != "COMPLETED" or package_hash != CANDIDATE_HASH:
+            return None
+        return SimpleNamespace(
+            package_hash=CANDIDATE_HASH, candidate_spec_hash="c" * 64,
+            source_final_batch_id="final-batch-1", source_final_run_id="final-run-1",
+            source_final_result_hash=self.execution["logical_result_hash"],
+        )
+
+    def load_mock_automation_eligibility_receipt(self, account_ref: str, package_hash: str):
+        if account_ref != ACCOUNT_REF or package_hash != CANDIDATE_HASH:
+            return None
+        return SimpleNamespace(
+            status=CandidateEligibilityStatus.ELIGIBLE,
+            policy_id="policy-1", candidate_spec_hash="c" * 64,
+        )
+
+    def load_mock_automation_eligibility_policy(self, strategy_ref: str, package_hash: str):
+        if strategy_ref != "strategy-1" or package_hash != CANDIDATE_HASH:
+            return None
+        return SimpleNamespace(
+            policy_id="policy-1", candidate_spec_hash="c" * 64, tbd_fields=(),
+        )
 
     def load_final_holdout_executions(self, batch_id: str):
         return (self.execution,) if batch_id == "final-batch-1" else ()
@@ -167,7 +198,7 @@ class MockAutomationAdmissionTests(unittest.TestCase):
             strategy_ref="strategy-1", family_version="family/v1",
             factor_versions=("factor/v1",), policy_version="policy/v1",
             data_path="nas", account_ref=ACCOUNT_REF, environment="mock",
-            evaluation_start=NOW + timedelta(days=1),
+            evaluation_start=NOW,
             evaluation_end=NOW + timedelta(days=8), frozen_at=NOW,
             criteria=_criteria(), session_profile="krx-regular/v1",
         )
@@ -213,6 +244,7 @@ class MockAutomationAdmissionTests(unittest.TestCase):
         *,
         spec: MockAutomationOperatingSpec | None = None,
         owner_token: str = "automation-owner",
+        now_provider=None,
     ) -> tuple[ExecutionRuntime, ExecutionRepository]:
         repository = ExecutionRepository(self.store)
         selected = spec or self.spec
@@ -222,6 +254,7 @@ class MockAutomationAdmissionTests(unittest.TestCase):
             account_ref=ACCOUNT_REF,
             run_id=execution_run_id_for_spec(selected.spec_id),
             owner_token=owner_token,
+            now_provider=now_provider or (lambda: NOW + timedelta(seconds=1)),
         )
         return runtime, repository
 
@@ -253,6 +286,10 @@ class MockAutomationAdmissionTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(1, len(self.forward.load_mock_automation_admissions(ACCOUNT_REF)))
         self.assertEqual(1, len(self.forward.load_mock_automation_lease_receipts(ACCOUNT_REF)))
+        control = self.forward.load_mock_automation_control(ACCOUNT_REF)
+        self.assertIsNotNone(control)
+        self.assertEqual(MockAutomationDesiredState.RUNNING, control.desired_state)
+        self.assertEqual(1, control.control_revision)
         intent = OrderIntent(
             "intent-1", runtime.run_id, "decision-1", ACCOUNT_REF, "mock", "005930",
             "KRX", OrderSide.BUY, 1, OrderType.LIMIT, 70_000,
@@ -286,7 +323,7 @@ class MockAutomationAdmissionTests(unittest.TestCase):
             _ResearchRepository(result_hash="d" * 64),
         ):
             with self.subTest(research=research.execution), self.assertRaisesRegex(
-                ValueError, "completed final result",
+                ValueError, "candidate package|lineage",
             ):
                 admit_mock_automation(
                     self.forward, research, runtime,
@@ -351,6 +388,35 @@ class MockAutomationAdmissionTests(unittest.TestCase):
         self.assertIsNone(execution.load(intent.intent_id))
         self.assertEqual(0, transport.calls)
 
+    def test_operational_recovery_and_dispatch_require_same_stored_risk_revision(self) -> None:
+        transport = _AcceptTransport()
+        runtime, execution = self._runtime(transport)
+        admit_mock_automation(
+            self.forward, _ResearchRepository(), runtime,
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id, requested_at=NOW,
+        )
+        self.addCleanup(runtime.stop)
+        recovery = MockAccountRecovery(AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {}, NOW), ())
+        risk = build_mock_automation_risk_snapshot(
+            recovery, (), (), (), execution_run_id=runtime.run_id,
+            binding_revision=self.binding["binding_revision"], reconciliation_revision=1,
+            observed_at=NOW, broker_query_started_at=NOW, broker_query_completed_at=NOW,
+        )
+        self.forward.save_mock_automation_risk_snapshot(risk)
+        recovered = record_mock_automation_recovery_from_risk(
+            self.forward, runtime, recovery, risk,
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+        )
+        self.assertEqual(risk.snapshot_id, recovered.risk_snapshot_id)
+        gate, record, receipt = dispatch_mock_automation_decision_from_risk(
+            self.forward, runtime, _strategy_decision(runtime.run_id), recovery, risk,
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id, strategy_ref="strategy-1",
+        )
+        self.assertEqual(MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION, gate.status)
+        self.assertEqual(risk.snapshot_id, gate.risk_snapshot_id)
+        self.assertIsNotNone(record); self.assertIsNotNone(receipt)
+        self.assertEqual(1, transport.calls)
+
     def test_recovery_blocks_open_state_loss_and_fault_limits(self) -> None:
         runtime, execution, _ = self._admitted_runtime()
         recovery = MockAccountRecovery(
@@ -384,6 +450,169 @@ class MockAutomationAdmissionTests(unittest.TestCase):
             "BROKER_POSITION_PRESENT", "BROKER_RESERVED_BUY_PRESENT",
             "BROKER_ACCOUNT_SNAPSHOT_STALE", "BROKER_ORDER_SNAPSHOT_STALE",
         }.issubset(set(decision.reasons)))
+
+    def test_daily_loss_blocks_at_the_exact_frozen_limit(self) -> None:
+        runtime, _, _ = self._admitted_runtime()
+        recovery = MockAccountRecovery(
+            AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {}, NOW), (),
+        )
+        decision = record_mock_automation_recovery(
+            self.forward, runtime, recovery,
+            MockAutomationRecoveryMetrics(
+                observed_at=NOW, recovery_complete=True, daily_net_pnl_won=-300_000,
+                data_gap_seconds=0, submission_unknown_count=0,
+                reconnect_count=0, balance_mismatch_count=0,
+            ),
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+        )
+        self.assertEqual(MockAutomationRecoveryStatus.BLOCKED, decision.status)
+        self.assertIn("DAILY_LOSS_LIMIT_REACHED", decision.reasons)
+
+    def test_terminal_broker_history_is_not_treated_as_an_open_order(self) -> None:
+        runtime, _, _ = self._admitted_runtime()
+        terminal = BrokerOrderSnapshot(
+            "broker-filled", ACCOUNT_REF, "005930", OrderState.FILLED,
+            1, 1, NOW,
+        )
+        decision = record_mock_automation_recovery(
+            self.forward, runtime,
+            MockAccountRecovery(
+                AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {}, NOW), (terminal,),
+            ),
+            MockAutomationRecoveryMetrics(
+                observed_at=NOW, recovery_complete=True, daily_net_pnl_won=0,
+                data_gap_seconds=0, submission_unknown_count=0,
+                reconnect_count=0, balance_mismatch_count=0,
+            ),
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+        )
+        self.assertEqual(MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED, decision.status)
+        self.assertEqual(0, decision.open_order_count)
+
+    def test_persisted_stop_rejects_an_older_control_revision_at_intent_claim(self) -> None:
+        runtime, execution, _ = self._admitted_runtime()
+        running = self.forward.load_mock_automation_control(ACCOUNT_REF)
+        self.assertIsNotNone(running)
+        emergency_stop_mock_automation(
+            self.forward, runtime, account_ref=ACCOUNT_REF,
+            spec_id=self.spec.spec_id, stopped_at=NOW + timedelta(seconds=1),
+            reason="operator stop",
+        )
+        stopped = ForwardEvaluationRepository(self.store).load_mock_automation_control(ACCOUNT_REF)
+        self.assertEqual(MockAutomationDesiredState.STOPPED, stopped.desired_state)
+        self.assertEqual(running.control_revision + 1, stopped.control_revision)
+
+        execution.bind_automation_control(
+            spec_id=self.spec.spec_id, control_revision=running.control_revision,
+        )
+        self.assertTrue(execution.claim_runtime(
+            "mock", ACCOUNT_REF, runtime.run_id, runtime.owner_token,
+            datetime.now(timezone.utc), lease_seconds=60,
+        ))
+        intent = OrderIntent(
+            "intent-after-stop", runtime.run_id, "decision-after-stop", ACCOUNT_REF,
+            "mock", "005930", "KRX", OrderSide.BUY, 1, OrderType.LIMIT, 70_000,
+            NOW, NOW + timedelta(minutes=1), "policy-v1",
+        )
+        with self.assertRaisesRegex(RuntimeError, "MOCK_AUTOMATION_CONTROL_CHANGED"):
+            execution.create(intent)
+        self.assertIsNone(execution.load(intent.intent_id))
+
+    def test_failed_stop_persistence_closes_the_in_memory_order_gate(self) -> None:
+        runtime, _, _ = self._admitted_runtime()
+        runtime.set_new_orders_enabled(True)
+        original = self.forward.save_mock_automation_control
+
+        def fail_save(*args, **kwargs):
+            raise OSError("simulated database failure")
+
+        self.forward.save_mock_automation_control = fail_save
+        self.addCleanup(setattr, self.forward, "save_mock_automation_control", original)
+        with self.assertRaisesRegex(OSError, "simulated database failure"):
+            emergency_stop_mock_automation(
+                self.forward, runtime, account_ref=ACCOUNT_REF,
+                spec_id=self.spec.spec_id, stopped_at=NOW + timedelta(seconds=1),
+                reason="operator stop",
+            )
+        intent = OrderIntent(
+            "intent-after-failed-stop", runtime.run_id, "decision-after-failed-stop",
+            ACCOUNT_REF, "mock", "005930", "KRX", OrderSide.BUY, 1,
+            OrderType.LIMIT, 70_000, NOW, NOW + timedelta(minutes=1), "policy-v1",
+        )
+        with self.assertRaisesRegex(RuntimeError, "NEW_ORDERS_DISABLED"):
+            runtime.submit(
+                intent, AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {}, NOW),
+            )
+
+    def test_stopped_run_requires_fresh_recovery_before_explicit_resume(self) -> None:
+        runtime, _, _ = self._admitted_runtime()
+        emergency_stop_mock_automation(
+            self.forward, runtime, account_ref=ACCOUNT_REF,
+            spec_id=self.spec.spec_id, stopped_at=NOW + timedelta(seconds=1),
+            reason="operator stop",
+        )
+        with self.assertRaisesRegex(RuntimeError, "fresh broker reconciliation"):
+            resume_mock_automation(
+                self.forward, runtime, account_ref=ACCOUNT_REF,
+                spec_id=self.spec.spec_id, resumed_at=NOW + timedelta(seconds=2),
+                reason="operator resume",
+            )
+
+        reconciled_at = NOW + timedelta(seconds=2)
+        record_mock_automation_recovery(
+            self.forward, runtime,
+            MockAccountRecovery(
+                AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {}, reconciled_at), (),
+            ),
+            MockAutomationRecoveryMetrics(
+                observed_at=reconciled_at, recovery_complete=True, daily_net_pnl_won=0,
+                data_gap_seconds=0, submission_unknown_count=0,
+                reconnect_count=0, balance_mismatch_count=0,
+            ),
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+        )
+        resumed = resume_mock_automation(
+            self.forward, runtime, account_ref=ACCOUNT_REF,
+            spec_id=self.spec.spec_id, resumed_at=NOW + timedelta(seconds=3),
+            reason="operator resume",
+        )
+        self.assertEqual(MockAutomationDesiredState.RUNNING, resumed.desired_state)
+        self.assertEqual(3, resumed.control_revision)
+
+    def test_server_clock_blocks_observation_from_the_future(self) -> None:
+        runtime, _ = self._runtime(now_provider=lambda: NOW + timedelta(seconds=1))
+        admit_mock_automation(
+            self.forward, _ResearchRepository(), runtime,
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id, requested_at=NOW,
+        )
+        self.addCleanup(runtime.stop)
+        recovery = MockAccountRecovery(
+            AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {}, NOW), (),
+        )
+        record_mock_automation_recovery(
+            self.forward, runtime, recovery,
+            MockAutomationRecoveryMetrics(
+                observed_at=NOW, recovery_complete=True, daily_net_pnl_won=0,
+                data_gap_seconds=0, submission_unknown_count=0,
+                reconnect_count=0, balance_mismatch_count=0,
+            ),
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+        )
+        gate, record, receipt = dispatch_mock_automation_decision(
+            self.forward, runtime, _strategy_decision(runtime.run_id), recovery,
+            MockAutomationLiveMetrics(
+                observed_at=NOW + timedelta(seconds=2), recovery_complete=True,
+                daily_net_pnl_won=0, daily_net_pnl_source=VERIFIED_DAILY_PNL_SOURCE,
+                data_gap_seconds=0, submission_unknown_count=0,
+                reconnect_count=0, balance_mismatch_count=0, data_path="nas",
+            ),
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+            strategy_ref=self.spec.strategy_ref,
+        )
+        self.assertEqual(MockAutomationGateStatus.BLOCKED, gate.status)
+        self.assertIn("LIVE_OBSERVATION_FROM_FUTURE", gate.reasons)
+        self.assertIsNone(record)
+        self.assertIsNone(receipt)
 
     def test_unknown_daily_result_or_lost_lease_cannot_clear_recovery(self) -> None:
         runtime, execution, _ = self._admitted_runtime()
@@ -468,13 +697,15 @@ class MockAutomationAdmissionTests(unittest.TestCase):
             strategy_ref=self.spec.strategy_ref,
         )
         second = dispatch_mock_automation_decision(
-            self.forward, runtime, decision, current, metrics,
+            self.forward, runtime, decision, current,
+            replace(metrics, observed_at=NOW + timedelta(seconds=2)),
             account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
             strategy_ref=self.spec.strategy_ref,
         )
 
         self.assertEqual(MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION, first[0].status)
         self.assertEqual(first[1], second[1])
+        self.assertEqual(first[2], second[2])
         self.assertEqual(1, transport.calls)
         self.assertIsNotNone(execution.load(first[0].intent_id))
         self.assertEqual(1, len(self.forward.load_mock_automation_decision_gates(ACCOUNT_REF)))
@@ -539,6 +770,82 @@ class MockAutomationAdmissionTests(unittest.TestCase):
         self.assertIsNone(receipt)
         self.assertEqual(0, transport.calls)
         self.assertEqual(1, len(self.forward.load_mock_automation_stop_revisions(ACCOUNT_REF)))
+
+    def test_manage_only_allows_verified_reduce_only_exit_with_unknown_pnl(self) -> None:
+        transport = _AcceptTransport()
+        runtime, _ = self._runtime(transport)
+        admit_mock_automation(
+            self.forward, _ResearchRepository(), runtime,
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id, requested_at=NOW,
+        )
+        self.addCleanup(runtime.stop)
+        recovery = MockAccountRecovery(
+            AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {"005930": 1}, NOW), (),
+        )
+        recovered = record_mock_automation_recovery(
+            self.forward, runtime, recovery,
+            MockAutomationRecoveryMetrics(
+                observed_at=NOW, recovery_complete=True, daily_net_pnl_won=None,
+                data_gap_seconds=10, submission_unknown_count=0,
+                reconnect_count=0, balance_mismatch_count=0,
+            ),
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+        )
+        self.assertEqual(
+            MockAutomationRecoveryStatus.MANAGE_ONLY_ORDERS_DISABLED,
+            recovered.status,
+        )
+
+        gate, record, _ = dispatch_mock_automation_decision(
+            self.forward, runtime,
+            _strategy_decision(runtime.run_id, action="EXIT"),
+            recovery,
+            MockAutomationLiveMetrics(
+                observed_at=NOW + timedelta(seconds=1), recovery_complete=True,
+                daily_net_pnl_won=None, daily_net_pnl_source=None,
+                data_gap_seconds=10, submission_unknown_count=0,
+                reconnect_count=0, balance_mismatch_count=0, data_path="nas",
+                owned_position_quantities=(("005930", 1),),
+            ),
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+            strategy_ref=self.spec.strategy_ref,
+        )
+        self.assertEqual(MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION, gate.status)
+        self.assertIsNotNone(record)
+        self.assertEqual(1, transport.calls)
+
+    def test_reconciliation_pending_blocks_reduce_only_exit(self) -> None:
+        runtime, _, _ = self._admitted_runtime()
+        recovery = MockAccountRecovery(
+            AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {"005930": 1}, NOW), (),
+        )
+        record_mock_automation_recovery(
+            self.forward, runtime, recovery,
+            MockAutomationRecoveryMetrics(
+                observed_at=NOW, recovery_complete=True, daily_net_pnl_won=None,
+                data_gap_seconds=0, submission_unknown_count=0,
+                reconnect_count=0, balance_mismatch_count=0,
+            ),
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+        )
+        gate, record, receipt = dispatch_mock_automation_decision(
+            self.forward, runtime,
+            _strategy_decision(runtime.run_id, action="EXIT"), recovery,
+            MockAutomationLiveMetrics(
+                observed_at=NOW + timedelta(seconds=1), recovery_complete=True,
+                daily_net_pnl_won=None, daily_net_pnl_source=None,
+                data_gap_seconds=0, submission_unknown_count=0,
+                reconnect_count=0, balance_mismatch_count=0, data_path="nas",
+                reconciliation_pending=True,
+                owned_position_quantities=(("005930", 1),),
+            ),
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+            strategy_ref=self.spec.strategy_ref,
+        )
+        self.assertEqual(MockAutomationGateStatus.BLOCKED, gate.status)
+        self.assertIn("RECONCILIATION_PENDING", gate.reasons)
+        self.assertIsNone(record)
+        self.assertIsNone(receipt)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,7 @@ class RankingService:
         self._stocks = stocks
         self._query_type = query_type if query_type in {"1", "2", "3", "4", "5"} else "5"
         self._missing_current_price_logged: set[str] = set()
+        self._last_response_from_local_fallback = False
 
     def set_query_type(self, query_type: str) -> None:
         if query_type not in {"1", "2", "3", "4", "5"}:
@@ -106,12 +107,18 @@ class RankingService:
         # 기존 순위표를 유지하도록 그대로 반환한다.
         partial_response_retries = 0
         stale_snapshot_retries = 0
+        direct_stale_response = False
         while not response:
             response = self._client.request("ka00198", self.STOCK_INFO_PATH, {"qry_tp": self._query_type})
             records = response.get("item_inq_rank", [])
-            if isinstance(records, list) and len(records) >= self.EXPECTED_STOCKS:
+            if isinstance(records, list):
                 snapshot_at = self._snapshot_at(records)
-                if self._is_stale_snapshot(snapshot_at) and stale_snapshot_retries < self.STALE_SNAPSHOT_RETRY_LIMIT:
+                direct_stale_response = self._is_stale_snapshot(snapshot_at)
+                direct_partial_response = (
+                    len(records) < self.EXPECTED_STOCKS
+                    or self._is_partial_stored_snapshot(records)
+                )
+                if direct_stale_response and stale_snapshot_retries < self.STALE_SNAPSHOT_RETRY_LIMIT:
                     stale_snapshot_retries += 1
                     delay = self._stale_snapshot_retry_delay(stale_snapshot_retries - 1)
                     logger.info(
@@ -122,13 +129,21 @@ class RankingService:
                         self.STALE_SNAPSHOT_RETRY_LIMIT,
                     )
                     time.sleep(delay)
+                    # ``while not response``는 비어 있지 않은 직전 응답을 그대로
+                    # 두면 한 번 만에 끝난다. 다음 키움 응답을 실제로 요청하도록
+                    # 폐기 후보만 비운다.
+                    response = {}
                     continue
-                break
-            if partial_response_retries < 2:
-                partial_response_retries += 1
-                time.sleep(0.4)
-                continue
+                if direct_partial_response and partial_response_retries < 2:
+                    partial_response_retries += 1
+                    time.sleep(0.4)
+                    response = {}
+                    continue
             break
+        if direct_stale_response:
+            # 제한 시간까지 새 회차가 없으면 직전 회차를 새 결과처럼 다시
+            # 적용하지 않는다. 빈 결과로 기존 표를 유지하고 UI 재시도를 쓴다.
+            response = {"item_inq_rank": []}
         records = response.get("item_inq_rank", [])
         if not isinstance(records, list):
             raise ValueError("ka00198의 item_inq_rank 형식이 올바르지 않습니다.")
@@ -182,11 +197,18 @@ class RankingService:
             else:
                 for code, name, market in stock_rows:
                     self._stocks.upsert(code, name, market)
+        self._last_response_from_local_fallback = bool(
+            getattr(self._client, "using_fallback", False)
+        )
         return tuple(stocks)
 
     @property
     def last_response_from_storage(self) -> bool:
         return bool(getattr(self, "_last_response_from_storage", False))
+
+    @property
+    def last_response_from_local_fallback(self) -> bool:
+        return bool(getattr(self, "_last_response_from_local_fallback", False))
 
     def _is_stale_snapshot(self, snapshot_at: datetime | None) -> bool:
         """각 순위 기준 시각보다 이전 스냅샷이면 한 번만 보정 조회한다."""

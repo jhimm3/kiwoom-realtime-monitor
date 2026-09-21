@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo
 
@@ -142,6 +142,20 @@ class _KiwoomAccountReader:
             as_of=deposit_as_of,
         )
         return AccountRecovery(account, orders)
+
+    async def read_trade_cost_pages(
+        self, start: date, end: date,
+    ) -> tuple[dict[str, Any], ...]:
+        """Read confirmed broker costs through this account's existing REST queue."""
+        if end < start:
+            raise ValueError("account cost query period ends before it starts")
+        settlement_end = min(self._aware_now().date(), end + timedelta(days=10))
+        return await self._pages("kt00015", {
+            "strt_dt": start.strftime("%Y%m%d"),
+            "end_dt": settlement_end.strftime("%Y%m%d"),
+            "tp": "0", "stk_cd": "", "crnc_cd": "", "gds_tp": "1",
+            "frgn_stex_code": "", "dmst_stex_tp": "%", "qry_sort_tp": "1",
+        })
 
     async def _pages(self, api_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         pages: list[dict[str, Any]] = []

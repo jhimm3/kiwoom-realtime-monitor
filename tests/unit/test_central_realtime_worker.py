@@ -9,6 +9,21 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
 from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import CentralServerUnavailable
 
 
+class _TestSignal:
+    def __init__(self) -> None:
+        self.callbacks = []
+
+    def connect(self, callback, *_args) -> None:
+        self.callbacks.append(callback)
+
+    def emit(self, value=None) -> None:
+        for callback in self.callbacks:
+            if value is None:
+                callback()
+            else:
+                callback(value)
+
+
 class CentralRealtimeWorkerTests(unittest.TestCase):
     def test_converts_http_server_url_to_websocket(self) -> None:
         worker = CentralRealtimeWorker(
@@ -41,11 +56,105 @@ class CentralRealtimeWorkerTests(unittest.TestCase):
         )
         with patch.object(worker, "_receive", side_effect=RuntimeError("offline")), \
                 patch.object(worker, "_wait_or_stop"), \
-                patch.object(worker, "_run_local_fallback", side_effect=StopTest) as fallback:
+                patch.object(worker, "_ensure_local_fallback", side_effect=StopTest) as fallback:
             with self.assertRaises(StopTest):
                 worker.run()
         fallback.assert_called_once_with()
         self.assertEqual(3, worker._consecutive_failures)
+
+    def test_local_fallback_stays_running_while_central_is_still_unavailable(self) -> None:
+        class LocalWorker:
+            def __init__(self) -> None:
+                self.running = False
+                self.starts = 0
+                self.updates = []
+                for name in (
+                    "trade_received", "order_executed", "market_state_received", "program_trade_received",
+                    "stock_reference_received", "connection_failed", "subscription_ready", "connection_opened",
+                    "codes_added", "diagnostics_changed", "status_changed",
+                ):
+                    setattr(self, name, _TestSignal())
+
+            def start(self) -> None:
+                self.running = True
+                self.starts += 1
+
+            def stop(self, _timeout_ms: int) -> None:
+                self.running = False
+
+            def isRunning(self) -> bool:
+                return self.running
+
+            def update_codes(self, codes, nxt_codes) -> None:
+                self.updates.append((codes, nxt_codes))
+
+        local = LocalWorker()
+        worker = CentralRealtimeWorker(
+            DataSourceSettings("personal_server", "https://nas.example", "token", True),
+            ("005930",), fallback_factory=lambda codes, nxt_codes: local,
+        )
+        worker._ensure_local_fallback()
+        worker._ensure_local_fallback()
+
+        self.assertTrue(local.running)
+        self.assertEqual(1, local.starts)
+        self.assertEqual([(("005930",), ())], local.updates)
+
+    def test_local_fallback_forwards_trade_to_outer_worker(self) -> None:
+        class LocalWorker:
+            def __init__(self) -> None:
+                self.running = False
+                for name in (
+                    "trade_received", "order_executed", "market_state_received", "program_trade_received",
+                    "stock_reference_received", "connection_failed", "subscription_ready", "connection_opened",
+                    "codes_added", "diagnostics_changed", "status_changed",
+                ):
+                    setattr(self, name, _TestSignal())
+
+            def start(self) -> None:
+                self.running = True
+
+            def isRunning(self) -> bool:
+                return self.running
+
+        local = LocalWorker()
+        worker = CentralRealtimeWorker(
+            DataSourceSettings("personal_server", "https://nas.example", "token", True),
+            ("005930",), fallback_factory=lambda codes, nxt_codes: local,
+        )
+        received = []
+        worker.trade_received.connect(received.append)
+        worker._ensure_local_fallback()
+        tick = TradeTick("005930", 70000, 1, 70000, 1, 70000, "101010")
+        local.trade_received.emit(tick)
+
+        self.assertEqual([tick], received)
+
+    def test_local_fallback_stops_only_after_central_covers_requested_codes(self) -> None:
+        class LocalWorker:
+            def __init__(self) -> None:
+                self.stops = 0
+
+            def stop(self, _timeout_ms: int) -> None:
+                self.stops += 1
+
+        worker = CentralRealtimeWorker(
+            DataSourceSettings("personal_server", "https://nas.example", "token", True),
+            ("005930", "000660"),
+        )
+        local = LocalWorker()
+        worker._fallback_worker = local
+
+        worker._dispatch({"type": "central_ready", "codes": ["005930", "000660"]})
+        worker._dispatch({"type": "connection_opened", "scope": "upstream", "codes": ["005930"]})
+        self.assertIs(local, worker._fallback_worker)
+        self.assertEqual(0, local.stops)
+
+        worker._dispatch({
+            "type": "connection_opened", "scope": "client", "codes": ["005930", "000660"],
+        })
+        self.assertIsNone(worker._fallback_worker)
+        self.assertEqual(1, local.stops)
 
     def test_forwards_changed_codes_to_running_local_fallback(self) -> None:
         class LocalWorker:

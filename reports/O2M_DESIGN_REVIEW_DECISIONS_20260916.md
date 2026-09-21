@@ -1,6 +1,6 @@
 # O2-M 설계 재검토 결정과 Sol 구현 계약
 
-기준일: 2026-09-16. **설계 검토 완료, 아래 보완은 미구현**.
+기준일: 2026-09-16, 구현 갱신 2026-09-21. **O2-M0과 Me1~Me3 구현 완료, V1 운영 검증 대기**.
 이 문서는 `O2ME_AUTOMATION_RUNNER_SCOPE_REVIEW.md`의 미결 대안을 대체한다.
 제품 코드·운영 DB·NAS·주문 설정은 변경하지 않았다. 현재 O2-M과 직접 연결되는 연구 패키지,
 계좌 runtime, 일지 피드백을 검토했으며 CR0~A5 전체를 다시 시험한 것은 아니다.
@@ -167,6 +167,12 @@ intent 조회를 추가한다. 10,000건 제한 목록으로 최신 상태/멱�
 
 ### O2-M0 — 안전 gate 보완
 
+**2026-09-21 완료:** 영속 control revision과 stop/resume, gate v2, ENTER/EXIT 분리,
+terminal·dirty 대사 판정, 손실 포함 경계, server-now/평가기간 검사, identity/current/active
+단건 조회를 구현했다. v1 이력은 읽기 보존하되 control revision 없는 승인은 재사용하지 않는다.
+관련 O2/DB 회귀 118개와 기존 credential barrier/account owner 회귀 19개가 통과했다.
+실제 risk snapshot producer와 runner가 없으므로 운영 자동 진입은 계속 닫혀 있고 NAS에 배포하지 않았다.
+
 - 목적: 잘못된 승인과 위험 축소 차단 제거.
 - 수정: `application/mock_automation_execution.py`, `mock_automation_recovery.py`,
   `central_server/execution_runtime.py`, `persistence/forward_evaluation_repository.py`,
@@ -180,6 +186,11 @@ intent 조회를 추가한다. 10,000건 제한 목록으로 최신 상태/멱�
 
 ### O2-Me1 — 동결 후보 게시와 합격 근거
 
+**2026-09-21 완료:** 기존 `final_candidate/v1` identity를 변경하지 않는 별도 후보 package와 사전 동결
+수치 정책/결과 receipt, 현재 mock binding 및 scientific hash를 재검증하는 전용 인증 API를 구현했다.
+세 문서는 일반 콘텐츠 allowlist 밖의 비공개 컬렉션에 내용 주소형으로 저장된다. 미정·늦은 정책과
+미합격 OOS 근거는 BLOCKED이며, 게시 성공은 runtime/주문을 시작하지 않는다. NAS 배포는 V1까지 보류한다.
+
 - 목적: PC 후보를 NAS가 정확히 복원하고 미합격 후보를 입장시키지 않음.
 - 수정: `research_process.py`, `scripts/run_research.py` 기존 canonical 경계,
   `mock_automation_admission.py`, `forward_evaluation_repository.py`, `central_server/app.py`.
@@ -191,6 +202,12 @@ intent 조회를 추가한다. 10,000건 제한 목록으로 최신 상태/멱�
 
 ### O2-Me2 — 실제 위험 근거와 계좌 owner 연결
 
+**2026-09-21 완료:** 자동 account bundle의 기존 broker 복구에서 O1 상세 체결과 `kt00015` 실제 비용을
+계좌별 FIFO로 대조해 불변 risk/current revision을 만들고, 운영 recovery/Decision이 같은 저장 revision만
+사용하는 경계를 추가했다. 수동/자동 모드는 기존 credential owner 안에서 flat 확인→명령 차단→drain→
+lease 해제→새 불변 run bundle→broker 재대조 순서로 전환한다. 비용 누락·aggregate-only 체결·잔고 불일치는
+unknown이고 자동 모드의 수동 신규 주문은 거절한다. 지속 runner/UI와 NAS 배포는 아직 연결하지 않았다.
+
 - 목적: 임의 LiveMetrics를 NAS 원장 근거로 대체하고 수동/자동 lease 충돌 제거.
 - 수정: `central_server/mock_runtime.py`, `mock_account_monitor.py`, `execution_runtime.py`,
   account reader·execution/forward repository. 순수 FIFO/비용 계산은 재사용.
@@ -201,6 +218,15 @@ intent 조회를 추가한다. 10,000건 제한 목록으로 최신 상태/멱�
   비용 누락, 전일 보유 FIFO, KST 날짜 변경, 중복 이벤트, 모의 TR 한도 독립. 미확인을 0으로 채우지 않음.
 
 ### O2-Me3 — 지속 runner와 운영 UI
+
+**2026-09-21 완료:** 지속 runner core가 중앙 관측 cursor와 package/spec/run checkpoint를
+보존하고 등록 Family를 그대로 호출한다. O1 상세 FILL만 실제 전략 포지션으로 반영하며 active intent
+대사 중에는 다음 주문 판단을 보내지 않는다. NAS lifespan과 supervisor, 시작·중지·재개·상태 API,
+저장 RUNNING control의 fail-closed 재시작 복원을 연결했다. ELIGIBLE 후보·forward profile·3단계
+stage chain·실제 중앙 shadow event·현재 binding을 저장 전에 대조하는 READY 명세 게시/조회 API도
+연결했다. 저장된 READY 명세의 계좌별 상태·시작·중지·재개 PC 화면과 후보 선택·평가기준/한도 동결·
+명세 게시 UI를 연결했다. 게시→입장→위험 대사→가짜 매수·매도 체결→A5 계좌별 매매일지 투영은
+실제 저장소와 runtime을 사용하는 통합 fixture로 검증했다. 다음은 V1 누적·장시간 검증이다.
 
 - 목적: 승인된 한 후보가 사용자의 매번 실행 없이 정책 안에서 동작.
 - 수정: NAS runner/시작·종료 조립, 기존 family 계산 호출, 기존 연구/forward 화면의 운영 영역.

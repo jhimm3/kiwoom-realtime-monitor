@@ -1,15 +1,63 @@
 # 모듈 지도
 
+> O2-M V1 반복 검사: `scripts/check_mock_automation_v1.py`가 제품 경로를 우회하는 별도 모의 엔진 없이
+> 기존 62개 게시·입장·위험·체결·A5·재시작·중지·계좌 회귀를 같은 프로세스에서 기본 30분 반복한다.
+> wall/CPU·반복 수·RSS·Python heap peak와 실패 출력을 JSON으로 남기며 제품 DB/NAS 설정은 쓰지 않는다.
+
 > 실시간 순위·신고가·기본정보 성능 경계: `central_server/rest_broker.py`가 30초 순위 경계 예약과
 > 중앙 TR 우선순위를, `central_server/autonomous_top20.py`가 신규 추적 종목의 신고가용 일봉 및 당일
 > 기본정보 준비를 담당한다. `central_server/market_ingest.py`가 `ka10001` KST 당일 최신성 판정을
-> 제공하고 `central_server/app.py`의 저장 응답 경계도 같은 판정을 사용한다.
+> 제공하고 `central_server/app.py`의 저장 응답 경계도 같은 판정을 사용한다. 자동 TOP20의
+> `ka00198` 후보는 broker의 unrecorded 경로에서 최신 기준시각·20개 슬롯을 먼저 검사하고, 수락된
+> 완성본만 `top20_membership`으로 저장한다. 일반 broker 요청의 응답 저장 계약은 그대로 유지한다.
 
-> 2026-09-16 O2-M 재검토: 아래 Ma~Md는 구현 위치 설명이다. Md의 안전 완료 판정은 정정했다.
-> 손익은 현재 scalar/출처 문자열 검사이고 실제 근거 producer는 없다. 중지 경합·체결 반영 지연·
-> terminal 주문 오판정을 [감사](reports/O2MD_SAFETY_AUDIT_20260916.md)에서 확인했다.
-> 다음 구현은 [설계 결정](reports/O2M_DESIGN_REVIEW_DECISIONS_20260916.md)의 O2-M0이며,
-> 패키지/runner 연결·배포보다 먼저 안전 경계를 보완한다.
+> 2026-09-21 O2-M0: `application/mock_automation_execution.py`가 영속 control revision과 gate v2,
+> ENTER/EXIT 분리, 서버 시각·평가기간·대사 상태를 검사하고 `execution_runtime.py`가 intent claim
+> 트랜잭션에 control revision을 전달한다. `mock_automation_recovery.py`는 terminal 주문을 제외하고
+> 보유가 있는 같은 run을 manage-only로 복구할 수 있다. `forward_evaluation_repository.py`는
+> admission/lease/current recovery/current stop/approved gate/dispatch receipt를 단건 identity로
+> 조회하며 `execution_repository.py`는 scope별 active intent만 읽는다. 실제 risk snapshot producer와
+> account bundle mode 전환은 O2-Me2, runner/UI는 O2-Me3에서 연결했다. NAS 배포는 V1 전까지 보류한다.
+
+> 2026-09-21 O2-Me3 완료: `central_server/mock_automation_runner.py`가 저장된 NAS
+> `top20_membership`·strict KRX 완료 분봉을 cursor로 한 번씩 읽고 게시 후보의 등록 Family를
+> 그대로 계산한다. 전략의 실제 open/cooldown 상태는 신호나 주문 접수가 아니라 O1 상세 FILL로만
+> 갱신하며, package/spec/run·입력 cursor·체결 cursor·전략 상태·pending intent를 account별 current
+> checkpoint에 저장한다. 동일 입력 재처리는 기존 Decision/intent 멱등 경계를 사용한다.
+> `central_server/mock_automation_supervisor.py`가 계좌별 mode 전환·runner 수명·재시작 복원·중지/재개를
+> 소유하고 `app.py`의 인증 API와 NAS lifespan에 연결한다.
+> `application/mock_automation_specification.py`는 후보 package/policy/receipt, forward profile,
+> DRAFT→EVALUATED→VALIDATED→SHADOW 증거 chain, 실제 중앙 shadow event와 현재 binding을 저장 전에
+> 대조한다. `app.py`의 전용 인증 POST/GET은 검증된 READY 명세만 비공개 repository에 게시·조회하며
+> 게시 자체는 runner나 주문을 시작하지 않는다. `infrastructure/central_content_client.py`는 PC에서
+> 계좌별 게시 후보 목록과 현재 검증 바인딩을 읽는
+> `GET /api/v1/research/mock-automation-candidates/{account_ref}`도 제공한다. 이 읽기 경계는 READY
+> 명세 작성 UI가 package hash나 binding revision을 수동 입력하지 않게 하며, 다른 계좌·프로필의
+> 후보를 섞지 않는다.
+> `presentation/mock_automation_dialog.py`의 READY 작성창은 ELIGIBLE 후보와 같은 monitor ID의 실제
+> shadow event만 선택하며, 평가기간·14개 forward 기준·8개 운용 한도를 화면에서 명시한 뒤
+> `application/mock_automation_specification.py`의 순수 builder로 profile/stage/spec을 고정해 게시한다.
+> 후보·명세 게시, 계좌별 명세·runtime 상태 조회와 시작·중지·재개 요청을 같은 Bearer HTTP 경계로
+> 제공한다. `presentation/mock_automation_dialog.py`는 활성 mock profile과 account settings revision,
+> READY 명세, 저장 control/runner 상태를 조회해 가능한 시작·중지·재개만 노출한다. 메인 툴바와
+> 기본설정에서 열 수 있다. `test_mock_automation_specification.py`는 게시→입장→위험 대사→가짜
+> 매수·매도 체결→계좌별 A5 매매일지 투영을 실제 저장소와 runtime 조합으로 검증한다.
+> `application/order_lifecycle.py`는 상세 체결이 broker 누적 수량을 이미 설명하면 0수량 aggregate를
+> 만들지 않고 broker 누적 상태만 reconciliation event로 갱신한다.
+
+> 2026-09-21 O2-Me1: `application/mock_automation_candidate.py`가 별도 후보 package, 사전 동결
+> eligibility policy와 결과 receipt의 정규화·hash·BLOCKED/ELIGIBLE 판정을 소유한다.
+> `research_process.prepare_mock_automation_candidate_publication`은 CR3 final 원장/run/report에서만
+> 게시 문서를 만들고, `application/research_implementation.py`는 PC와 NAS가 공유하는 scientific hash를
+> 계산한다. `central_server/app.py`의 전용 인증 POST와 `forward_evaluation_repository.py`의 비공개
+> 컬렉션만 이를 저장한다. 일반 콘텐츠 sync, runtime, O1 transport는 이 경계에 연결하지 않는다.
+
+> 2026-09-21 O2-Me2: `application/mock_automation_risk.py`가 계좌별 O1 상세 체결, 실제 broker 비용,
+> broker 복구 잔고를 FIFO로 대조해 불변 risk snapshot과 current revision을 만든다. 자동 bundle에서만
+> 기존 모의 REST queue로 비용 근거를 읽으며 KST 날짜 변경 때 과거 보유 비용을 다시 확보한다.
+> `MockCredentialOwner.switch_execution_mode`는 flat 확인과 gateway/monitor drain 뒤 기존 lease를 놓고
+> 새 자동 run bundle을 만들며, 자동 모드의 수동 신규 주문은 막고 조회·취소·대사는 유지한다. 운영
+> 복구/Decision wrapper는 저장된 같은 risk revision만 허용한다. 지속 runner와 UI는 O2-Me3에서 연결했다.
 
 > O2-Md 지속 Decision gate: `application/mock_automation_execution.py`는 저장된 spec/admission/lease와
 > 최신 recovery revision을 매 action Decision 직전에 다시 연결한다. 현재 mock binding, lease,
@@ -353,14 +401,18 @@ Docker context에서 NAS 전용 백업/실제 env/secret 저장소를 제외하�
 
 R6c1 PC 실전 입력: `presentation/api_settings_dialog.py`의 NAS 실전 관리 버튼은 공급자별 기존 client 캐시를 쓴다.
 `infrastructure/central_credentials_client.py`의 공통 계좌 생성/prepare와 scope 검증 GET/PUT이 real/mock 환경을 구분한다.
-`presentation/nas_credentials_dialog.py`는 기존 단건 worker로 실전 키 확인/적용·조회 ON/OFF를 실행하며
+`presentation/nas_credentials_dialog.py`는 기존 단건 worker로 실전 키 확인/적용·조회 ON/OFF와
+연결 해제된 계좌의 목록 삭제를 실행한다. 삭제는 `credential_runtime.py`와 `database.py`의 기존
+profile lifecycle을 archived로 전환해 계좌 신원·binding·매매 이력을 보존한다. 실전 화면은
 모의주문 토글을 숨기고 실제 `monitor_status.realtime` 승인 상태를 별도로 표시한다.
 기존 mock 이름의 client 메서드는 호환용 진입점으로만 남고 중복 구현하지 않는다. 새 계층/DB/서버 API 없음.
 회귀: `test_central_credentials_client`, `test_nas_credentials_dialog`, `test_nas_credentials_ui_integration` 및 기존 설정/계좌 테스트.
 R6c2 계획된 재연결: 기존 collector가 유한 30초 deadline·상태 통지·REG 종료·0B 관측 간격을 소유한다.
 `central_server/app.py`와 `contracts.py`는 health/capability/WS 상태와 paused TR의 명시 대기 응답을 맡는다.
 `remote_client.py`의 대기 오류 분류/공통 유한 시간 검증과 `central_realtime_worker.py`의
-generation별 로컬 deadline/계획 오류 유예/정상 장애 복귀가 PC를 연결한다.
+generation별 로컬 deadline/계획 오류 유예/정상 장애 복귀가 PC를 연결한다. 장애전환 뒤 직접
+실시간 worker는 중앙 재접속 시도와 병행해 계속 수신하며, 현재 요청 종목 전체의 `connection_opened`
+상류 승인 뒤에만 종료한다. `central_ready`는 서버 접속과 요청 접수일 뿐 복귀 근거가 아니다.
 `main_window.py`의 기존 상태 slot만 변경해 표를 유지하고 수신 재개를 표시한다.
 REST failover 자체는 수정하지 않으며 일반 API 대기는 transport 오류에 포함되지 않는 기존 정책을 유지한다.
 회귀는 `test_planned_reconnect`와 기존 collector/worker/REST/서버/계좌/역할/PC 설정 테스트다.
@@ -375,6 +427,7 @@ REST failover 자체는 수정하지 않으며 일반 API 대기는 transport �
 | 앱 조립, 프로세스 시작, 데이터 모드 선택 | `src/kiwoom_monitor/bootstrap.py` | `test_kiwoom_client_factory.py`, `test_news_process.py` |
 | 사용자 데이터 경로 | `infrastructure/app_paths.py` | 관련 저장소 테스트 |
 | 로컬/NAS 모드 설정 | `infrastructure/central_server_config.py` | `test_central_server_config.py`, `test_api_settings_dialog.py` |
+| 실행 중 API 조회·실시간 경로 교체와 늦은 이전 응답 차단 | `bootstrap.py`의 `build_api_runtime`, `presentation/main_window.py`의 `_restart_for_api_settings` | `test_main_window.py`, `test_planned_reconnect.py` |
 | Google Drive 동기화·업데이트 확인/다운로드 worker | 전송과 NAS와 동일한 공통설정 제외 정책은 `infrastructure/persistence/google_drive_sync.py`, `infrastructure/central_settings_sync.py`; 설정 묶음은 `settings_backup.py`, 전체 테마 프로필 직렬화 원본은 `theme_backup.py`; worker 생성·연속 실행·결과 수명은 `presentation/google_drive_worker_controller.py`; 업데이트 확인·다운로드는 `presentation/update_worker_controller.py` | `test_settings_backup.py`, `test_theme_backup.py`, `test_google_drive_sync.py`, `test_google_drive_worker_controller.py`, `test_update_worker_controller.py` |
 | 뉴스·매매일지 보조 프로세스 명령 구성·요청 번호·수신 중복 차단·숨김 실행·생존 확인·종료 단계 | `presentation/process_control.py` | `test_process_control.py` |
 | 키움 API·NAS 연결 설정 UI/자원 확인 worker | `presentation/api_settings_dialog.py` | `test_api_settings_dialog.py` |
@@ -405,12 +458,12 @@ NAS 자동 시장자료 소유권은 `central_server/autonomous_top20.py`가 담
 
 ## 실시간 종목조회순위
 
-- NAS 독립 순위·편입 이력·TOP20 지수·장후 차트 보완 및 키움 실시간 원본 단절 시 분 행 중단: `central_server/autonomous_top20.py`. 순위는 시작 직후 현재 회차를 먼저 수집한 뒤 24시간 30초마다 수집한다. 응답 `dt/tm`이 직전 회차이거나 최신 20행 안에 종목코드·종목명이 빈 자리가 있으면 0.25초 2회→0.5초 2회→이후 0.75초로 제한 재조회하고 미완성 회차는 저장하지 않는다. 앱의 NAS DB 재확인은 `application/ranking_service.py`가 이전 회차와 부분 회차 모두에 같은 간격을 사용하며 키움 TR로 우회하지 않는다. 최신 완성 회차 미수신 시 기존 표를 유지하고 상태를 대기로 구분한다. 순위 조회·저장은 카탈로그·NXT·계좌 편입·기본정보 보완과 분리하며 TOP20 실시간 거래대금 수집과 KRX/NXT 구독은 시장 관측시간에만 유지한다.
+- NAS 독립 순위·편입 이력·TOP20 지수·장후 차트 보완 및 키움 실시간 원본 단절 시 분 행 중단: `central_server/autonomous_top20.py`. 순위는 시작 직후 현재 회차를 먼저 수집한 뒤 24시간 30초마다 수집한다. 응답 `dt/tm`이 직전 회차이거나 최신 20행 안에 종목코드·종목명이 빈 자리가 있으면 0.25초 2회→0.5초 2회→이후 0.75초로 제한 재조회하고 미완성 회차는 저장하지 않는다. 앱의 NAS DB 재확인은 `application/ranking_service.py`가 이전 회차와 부분 회차 모두에 같은 간격을 사용하며 키움 TR로 우회하지 않는다. NAS 장애로 PC 키움 API에 전환된 경우에도 같은 간격으로 실제 `ka00198`을 다시 요청하며, 최신 회차를 받지 못하면 직전 회차를 새 결과로 적용하지 않는다. 최신 완성 회차 미수신 시 기존 표를 유지하고 상태를 대기로 구분한다. 순위 조회·저장은 카탈로그·NXT·계좌 편입·기본정보 보완과 분리하며 TOP20 실시간 거래대금 수집과 KRX/NXT 구독은 시장 관측시간에만 유지한다.
 - NAS TOP20 KOSPI/KOSDAQ 분류 원본: `infrastructure/krx/stock_catalog.py`; 중앙 보존 컬렉션 `stock_catalog`
 - TOP20 지수 재시작 복구 outbox: `central_server/persistent_outbox.py`
 - 서버: `central_server/realtime_collector.py`, `realtime_hub.py`, `market_ingest.py` (`ka10016/ka10001/ka10100`의 영속 저장 포함). 중앙 수집기는 단일 키움 WebSocket에서 `0B`, `0w`, `0g`를 타입별 그룹으로 관리한다. 전체 TOP20·조건 코호트 0B를 먼저 보장하고, `0g` 상한가·하한가·기준가는 `stock_price_references` 최신 문서와 실시간 이벤트로 함께 보존한다. 일반 NXT 코호트는 SOR 통합으로 받고, 남는 0B venue 상세와 0w는 TOP20, 실제 매수 편입 종목, 나머지 앱 요청 순으로 배정한다. `_AL`은 SOR 원본으로 보존하고 실제 승인 item 기준으로 누적 baseline과 늦은 source 틱을 관리한다. `market_ingest.py`는 분봉 보완 때 SOR 실시간 거래대금과 KRX/NXT 조회 추정값의 차이를 `minute_trade_value_comparisons`에 기록한다. `realtime_hub.py`가 일반 체결 희망 코드와 우선순위 코드를 분리하며, REG/REMOVE는 0.25초 간격으로 보낸다.
 - API: `central_server/app.py`의 `/api/v1/realtime`, `/api/v1/market/snapshots/ranking`, `/api/v1/market/trade-value-comparisons`. 거래대금 비교 요약은 KRX+NXT가 모두 보완된 분만 주 통계에 포함하고 단일 거래소 중간값은 부분 건수로 분리한다.
-- 클라이언트: `infrastructure/kiwoom_rest/central_realtime_worker.py`, `realtime_worker.py`, `realtime.py`. 0B 체결과 0g 가격 기준을 각각 기존 Qt 신호로 전달한다. 키움 `REAL data=null`은 모든 실시간 parser와 중앙 시장 관측에서 빈 batch로 처리해 정상 NAS 연결을 페일오버 사유로 만들지 않는다.
+- 클라이언트: `infrastructure/kiwoom_rest/central_realtime_worker.py`, `realtime_worker.py`, `realtime.py`. 0B 체결과 0g 가격 기준을 각각 기존 Qt 신호로 전달한다. 키움 `REAL data=null`은 모든 실시간 parser와 중앙 시장 관측에서 빈 batch로 처리해 정상 NAS 연결을 페일오버 사유로 만들지 않는다. NAS 장애전환의 직접 WebSocket은 `bootstrap.py`에서 직접 REST fallback과 같은 로컬 client를 사용한다. 중앙 worker 내부에서 만들어진 로컬 QThread 신호는 이벤트 루프 없는 중앙 작업 스레드에 queue하지 않고 즉시 중계한 뒤 최종 GUI 수신 객체의 thread로 전달한다. `realtime_worker.py`는 `REG` 승인 뒤에만 연결·구독 완료 신호를 보낸다.
 - 계산: `application/ranking_service.py`, `domain/ranking.py`
 - UI/예약: `presentation/main_window.py`의 `MainWindow` 순위 갱신·구독 메서드
 - 순위 QThread 생성·신호·현재 worker 수명: `presentation/ranking_worker_controller.py`
@@ -436,10 +489,11 @@ NAS 자동 시장자료 소유권은 `central_server/autonomous_top20.py`가 담
 - 실시간 종목 분봉 계산: `application/minute_trade_value.py`
 - 30초 TOP20 코호트 예약·교체, 구간 기준값, 1분 마감과 종료 시 부분 기록: `application/top20_trade_value_collector.py`
 - 표시 기간 계산: `application/trade_strength.py`
-- 저장/시장지수/TOP20 통계: `infrastructure/persistence/minute_bar_repository.py` (매매일지 시장지수 보완 결과의 분봉·일봉 원자적 일괄 저장 포함)
+- 로컬 저장/시장지수/TOP20 통계: `infrastructure/persistence/minute_bar_repository.py` (매매일지 시장지수 보완 결과의 분봉·일봉 원자적 일괄 저장, 15:30 종가 단일가 및 `ka20006` 확정 분모 포함)
 - 중앙 실시간 봉: `central_server/minute_bars.py`의 1분/1초 집계, `realtime_collector.py`의 기존 0B 연결과 저장 재시도, `market_ingest.py`, `database.py`
-- TOP20 차트·전용 창·DB 보완 worker: `presentation/top20_trade_value.py`; worker 생성·저우선순위 실행·신호 수명은 `presentation/top20_market_repair_worker_controller.py`
-- TOP20 데이터 공급·수집 결과 저장·통계 창 호출 등 메인 화면 연결: `presentation/main_window.py`의 관련 `MainWindow` 메서드
+- 중앙 TOP20 통계 집계/API: `central_server/database.py`, `central_server/app.py`의 `/api/v1/market/top20-statistics`; 앱 읽기 어댑터는 `infrastructure/kiwoom_rest/remote_client.py`
+- TOP20 차트·전용 창·NAS 비동기 읽기·DB 보완 worker: `presentation/top20_trade_value.py`; 보완 worker 생성·저우선순위 실행·신호 수명은 `presentation/top20_market_repair_worker_controller.py`
+- TOP20 데이터 공급·수집 결과 저장·통계 창 호출 등 메인 화면 연결: `presentation/main_window.py`의 관련 `MainWindow` 메서드. NAS 연결은 중앙 원본, PC 직접 연결은 로컬 DB를 선택한다.
 - 테스트: `test_minute_trade_value.py`, `test_second_trade_aggregation.py`, `test_second_trade_storage.py`, `test_top20_trade_value_collector.py`, `test_top20_market_repair_worker_controller.py`, `test_minute_bar_repository.py`, `test_trade_strength.py`, `test_central_minute_bars.py`, `test_central_market_ingest.py`, `test_main_window.py`의 화면 모드 독립 수집 회귀
 
 ## 과거 시장 재현과 시뮬레이션 데이터
@@ -505,7 +559,7 @@ NAS 자동 시장자료 소유권은 `central_server/autonomous_top20.py`가 담
 - 뉴스 후속 작업 실행과 선택 종목 우선순위: `central_server/news_jobs.py`; 영속 작업 claim 정렬은 `central_server/database.py`
 - N1/N2a 기사·작업 계약과 수명: `domain/news_observation.py`가 content hash·처리 버전 기반 job key와 revision 타입을 소유하고, `central_server/news_jobs.py`가 bounded BODY/RULE/AI worker·timeout·재시도·재시작 복구를 소유한다. 공급계약 규칙은 `application/news_rules.py`, 불변 기사/본문/사건/소속/AI 저장과 SQLite/PostgreSQL parity는 `central_server/database.py`, `central_schema.py`가 소유한다.
 - N3 query_set 정책·cursor 수명·24k hard budget 사용·정확한 KRX 회사명 target 판정은 `central_server/news_sources.py`가 소유한다. 빈 `stock_catalog`의 제한된 최초 채움과 실패 재시도도 이 수명 안에서 기존 KRX catalog loader를 재사용한다. NAS 처리 제외 언론사의 제목·링크 관측은 유지하고 BODY/RULE 예약을 생략하는 저장 경계는 `news_sources.py`와 `central_server/database.py`가 함께 보호하며, `news_service.py`는 같은 정책으로 자동 AI 후보를 제외한다. `news_service.py`는 앱과 독립된 loop를 시작하고 기존 watchlist를 별도 8k scope로 유지하며, confirmed GLOBAL 저장기사를 기존 종목 owner 결과와 identity 기준 병합한다. 자동 AI 입력은 owner 기사만 유지한다. `naver_news.py`는 기존 `search()`와 page metadata API를 함께 제공한다. source별 판본 재사용, 기간 진단 집계, 완료 본문에 늦게 확인된 target의 RULE 예약 및 종목별 bounded confirmed 조회는 `central_server/database.py`가 소유한다.
-- 중앙 보존/동기화: `central_content_client.py`, `central_content_sync.py`; 뉴스 프로세스의 60초 변경 감지는 `news_process.py`의 `_news_content_signature`가 뉴스/AI DB만 대상으로 하며 테마 변경은 `central_theme_sync.py`가 별도로 전송한다. 콘텐츠 sync는 성공한 `(collection,owner,key,document)` hash를 원자 manifest에 보존해 변경 문서만 background news process에서 보내고, pull로 받은 hash도 기록해 echo push를 막는다. 기존 `.central_content_seeded` 설치는 성공한 시작 pull 뒤 manifest가 없을 때만 현재 자료를 한 번 baseline으로 이전한다. 중앙 SQLite/PostgreSQL은 동일 `document_json`의 `updated_at`을 유지해 재다운로드 cursor를 흔들지 않는다. 실시간 순위 요청은 항상 최우선이며 이 별도 프로세스의 증분 동기화가 순위 API 경로를 지연시키지 않는다.
+- 중앙 보존/동기화: `central_content_client.py`, `central_content_sync.py`; 뉴스 프로세스의 60초 변경 감지는 `news_process.py`의 `_news_content_signature`가 뉴스/AI DB만 대상으로 하며 테마 변경은 `central_theme_sync.py`가 별도로 전송한다. 개인 NAS 모드는 대용량 뉴스·AI 카탈로그 동기화를 제외하고 선택 종목 검색·선택 기사 이력 API를 사용하며, 테마와 계좌별 매매일지 뉴스 연결만 증분 병합한다. 그 밖의 콘텐츠 sync는 성공한 `(collection,owner,key,document)` hash를 원자 manifest에 보존해 변경 문서만 background news process에서 보내고, pull로 받은 hash도 기록해 echo push를 막는다. 기존 `.central_content_seeded` 설치는 성공한 시작 pull 뒤 manifest가 없을 때만 동기화 대상 자료를 한 번 baseline으로 이전한다. 중앙 SQLite/PostgreSQL은 동일 `document_json`의 `updated_at`을 유지해 재다운로드 cursor를 흔들지 않는다. 실시간 순위 요청은 항상 최우선이며 이 별도 프로세스의 증분 동기화가 순위 API 경로를 지연시키지 않는다.
 - 테스트: `test_news_*.py`, `test_news_observation_history.py`, `test_news_jobs.py`, `test_naver_news_config.py`, `test_article_text.py`, `test_central_news_*.py`, `test_central_ai_*.py`
 
 - R5d2c 공통 뉴스 운영: `presentation/api_settings_dialog.py`가 기존 query-set ON/OFF·한 줄 검색어/정규화·60~86400초 주기·지원 필드/CAS와 NAS 폼 스크롤을 소유한다. `central_server/news_sources.py`의 동일 collector는 접수 검색어의 owned 처리 완료/다음 검색어 정책 확인, 정상 완료 last_success 기반 새 주기 판정, 실패/부분 페이지 예약과 기사/cursor/예산 보존을 소유한다. `app.py`의 기존 operations/worker/local mirror는 그대로이며 새 endpoint/SQL/manager가 없다. 회귀는 `test_news_query_operations.py`, 기존 뉴스 source/인증/설정/DB/Qt 테스트다.
@@ -588,8 +642,9 @@ NAS 자동 시장자료 소유권은 `central_server/autonomous_top20.py`가 담
 - 뉴스·AI·매매일지 뉴스 연결·전체 테마 중앙 병합: `central_content_sync.py`, 즉시 테마 교체와 영속 재시도 dispatcher는 `central_theme_sync.py`
 - NAS 뉴스·AI·Shadow 운영 설정의 GET/부분 PUT 단일 경계와 로컬 뉴스 설정 미러: `infrastructure/central_operational_settings.py`; NAS 연결 설정 UI, 뉴스 설정 UI, Shadow 후보 창이 이 경계를 함께 사용한다.
 - 설정창의 단건 I/O와 창 해제 후 작업 완료 수명: `presentation/settings_request_worker.py`.
-- R4a NAS 모의계좌 입력: `presentation/api_settings_dialog.py`에서 `nas_credentials_dialog.py`를 연다. `infrastructure/central_credentials_client.py`는 HTTPS/redirect 차단·동일 요청 ID·계좌/프로필/버전 응답 검증을 소유한다. UI는 기존 `SettingsRequestWorker`로 I/O를 실행하고 PC 키 설정/미러에는 저장하지 않는다. 회귀는 `test_central_credentials_client.py`, `test_nas_credentials_dialog.py`, `test_nas_credentials_ui_integration.py`다. 매매일지의 명시 계좌 선택/worker context는 아래 R4b가 연결한다.
-- R4b 선택 계좌: `central_server/app.py`의 v3 목록은 기존 mock owner의 admitted binding과 main binding만 읽는다. `journal_process.py`는 background 목록/선택을, `journal_workers.py`는 import 전체 context와 빈 결과를 소유한다. `kiwoom_rest/remote_client.py`는 고정 선택 context의 v3 조회·v2 mock 명령/미확인 submit ID를 소유하고 `account_query.py`의 직접 adapter는 자기 검증 scope만 허용한다. `failover_client.py`/`validation_client.py`는 명시 NAS 계좌를 primary에만 연결한다. 회귀는 `test_selected_account_client.py`, `test_journal_selected_account.py`, `test_selected_account_api_integration.py`다. 신규 자동주문 UI는 별도 후속이다.
+- PC 직접 연결 저장량 진단: `infrastructure/local_storage_diagnostics.py`가 라이브 SQLite를 열지 않고 데이터 폴더의 주식·뉴스·매매일지·연구·로그·기타 실제 파일 용량을 읽기 전용으로 집계한다. `presentation/api_settings_dialog.py`의 `이 PC 저장량`에서 표시하며, 자동 정리는 기존 분봉 30일·일봉 종목별 250개 정책만 설명하고 새 삭제 권한은 만들지 않는다.
+- R4a NAS 모의계좌 입력: `presentation/api_settings_dialog.py`에서 `nas_credentials_dialog.py`를 연다. `infrastructure/central_credentials_client.py`는 HTTPS/redirect 차단·동일 요청 ID·계좌/프로필/버전 응답 검증을 소유한다. 같은 창의 계좌 이름 변경은 credential revision을 확인한 뒤 `central_credential_profiles.label`만 수정하며 계좌 신원·binding·인증키·운영 설정·매매 이력에는 관여하지 않는다. UI는 기존 `SettingsRequestWorker`로 I/O를 실행하고 PC 키 설정/미러에는 저장하지 않는다. 회귀는 `test_central_credentials_client.py`, `test_nas_credentials_dialog.py`, `test_nas_credentials_ui_integration.py`다. 매매일지의 명시 계좌 선택/worker context는 아래 R4b가 연결한다.
+- R4b 선택 계좌: `central_server/app.py`의 v3 목록은 기존 mock owner의 admitted binding과 main binding만 읽고 활성 자격 프로필의 사용자 이름을 표시 전용 `display_label`로 함께 제공한다. `journal_process.py`는 background 목록/선택과 `실전/모의 · 사용자 이름` 표시를, `journal_workers.py`는 import 전체 context와 빈 결과를 소유한다. `kiwoom_rest/remote_client.py`는 고정 선택 context의 v3 조회·v2 mock 명령/미확인 submit ID를 소유하고 `account_query.py`의 직접 adapter는 자기 검증 scope만 허용한다. 표시 이름은 scope/profile/binding 동일성에 참여하지 않는다. `failover_client.py`/`validation_client.py`는 명시 NAS 계좌를 primary에만 연결한다. 회귀는 `test_selected_account_client.py`, `test_journal_selected_account.py`, `test_selected_account_api_integration.py`다. 신규 자동주문 UI는 별도 후속이다.
   NAS/뉴스 설정 조회·저장 및 API 연결 테스트는 UI에서 값을 확보한 뒤 이 worker에서 실행하며,
   QObject 슬롯으로 결과를 전달한다. 운영 설정은 부분 변경과 revision 충돌 계약을 사용한다.
 - 메인 순위표 열 표시·순서 편집 UI: `presentation/column_manager_dialog.py`
@@ -617,7 +672,7 @@ NAS 자동 시장자료 소유권은 `central_server/autonomous_top20.py`가 담
 - 환경설정: `central_server/config.py`
 - DB: `central_server/database.py`
 - 상태 검사: `central_server/deployment_check.py`, `resource_usage.py`
-- 배포: `deploy/synology/`
+- 배포: `deploy/synology/`. Compose의 고정 subnet/gateway는 `KIWOOM_DOCKER_SUBNET`·`KIWOOM_DOCKER_GATEWAY`가 소유하고, HTTPS 인증 쓰기 신뢰 프록시는 같은 gateway 값을 사용한다. 중앙 서버 로그 경계는 `central_server/server_logging.py`이며 access 상세와 `rest_broker.py`의 실제 키움 전송 감사 로그는 `server-data/logs`의 일별 회전 파일에만, 일반 서버 상태는 파일과 컨테이너 콘솔에 함께 기록한다.
 - 실제 PostgreSQL 경계 검사: `scripts/check_postgres_integration.py` (NAS 서버 컨테이너 안에서 실행)
 - 인증 API·WebSocket·자원·스냅샷 운영 검사: `scripts/check_nas_operational.py` (개발 PC/다른 PC 공용)
 - 클라이언트 계약: `infrastructure/central_*_client.py`, `kiwoom_rest/remote_client.py`

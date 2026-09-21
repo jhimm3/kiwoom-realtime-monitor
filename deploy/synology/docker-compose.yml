@@ -15,7 +15,7 @@ services:
       retries: 10
 
   server:
-    image: kiwoom-monitor-server:2026.09.16-ranking-metadata-freshness-v1
+    image: kiwoom-monitor-server:2026.09.21-market-cap-reference-v1
     build:
       context: ../..
       dockerfile: deploy/synology/server.Dockerfile
@@ -28,7 +28,9 @@ services:
       MONITOR_SERVER_ACCESS_TOKEN: ${MONITOR_SERVER_ACCESS_TOKEN}
       KIWOOM_SERVER_HOST: 0.0.0.0
       KIWOOM_SERVER_SECRET_DIR: /app/secrets
-      CREDENTIAL_TRUSTED_PROXIES: "${CREDENTIAL_TRUSTED_PROXIES:-}"
+      CREDENTIAL_TRUSTED_PROXIES: "${KIWOOM_DOCKER_GATEWAY:-172.18.0.1}"
+      CENTRAL_SERVER_LOG_DIR: /app/data/logs
+      CENTRAL_SERVER_LOG_RETENTION_DAYS: ${CENTRAL_SERVER_LOG_RETENTION_DAYS:-14}
       KIWOOM_SERVER_PORT: ${KIWOOM_MONITOR_PORT:-8787}
       KIWOOM_ENVIRONMENT: ${KIWOOM_ENVIRONMENT}
       KIWOOM_APP_KEY: ${KIWOOM_APP_KEY}
@@ -87,3 +89,10 @@ services:
       timeout: 10s
       retries: 5
       start_period: 20s
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: "${KIWOOM_DOCKER_SUBNET:-172.18.0.0/24}"
+          gateway: "${KIWOOM_DOCKER_GATEWAY:-172.18.0.1}"

@@ -102,7 +102,13 @@ class OrderLifecycleTests(unittest.TestCase):
         duplicate = lifecycle.reconcile("intent-1", snapshot)
         self.assertEqual(OrderState.FILLED, duplicate.state)
         self.assertEqual(3, duplicate.filled_quantity)
+        self.assertEqual(3, duplicate.broker_reported_filled_quantity)
         self.assertEqual(("fill-a", "fill-b"), duplicate.fill_ids)
+        self.assertEqual(
+            0,
+            sum(event["event_type"] == "BROKER_FILL_AGGREGATE"
+                for event in self.repository.events("intent-1")),
+        )
 
     def test_fill_wins_cancel_race_and_stale_snapshot_cannot_roll_back(self) -> None:
         transport = _Transport()

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer, Slot
-from PySide6.QtWidgets import QDialog, QFormLayout, QComboBox, QLineEdit, QPushButton, QLabel, QCheckBox, QDialogButtonBox
+from PySide6.QtWidgets import QDialog, QFormLayout, QComboBox, QLineEdit, QPushButton, QLabel, QCheckBox, QDialogButtonBox, QMessageBox, QInputDialog
 
 from kiwoom_monitor.infrastructure.central_credentials_client import CentralCredentialsClient
 from .settings_request_worker import SettingsRequestWorker
@@ -47,6 +47,15 @@ class NasCredentialsDialog(QDialog):
         layout.addRow(self._status)
         self._profiles = QComboBox(); self._profiles.currentIndexChanged.connect(self._profile_changed)
         layout.addRow("모의계좌", self._profiles)
+        self._show_disconnected = QCheckBox("연결 해제된 계좌도 보기")
+        self._show_disconnected.toggled.connect(self._reload)
+        layout.addRow(self._show_disconnected)
+        self._account_help = QLabel(
+            "계좌마다 별도로 연결됩니다. 새 계좌를 연결한 뒤 옛 계좌를 연결 해제하면 "
+            "새 계좌만 조회·주문 대상에 남고, 옛 매매 이력은 보존됩니다."
+        )
+        self._account_help.setWordWrap(True)
+        layout.addRow(self._account_help)
         self._new_label = QLineEdit(); self._new_label.setPlaceholderText("새 계좌 이름")
         layout.addRow("새 계좌", self._new_label)
         self._create_button = QPushButton("새 계좌 추가"); self._create_button.clicked.connect(self._create)
@@ -64,8 +73,11 @@ class NasCredentialsDialog(QDialog):
         layout.addRow(self._preview)
         self._apply_button = QPushButton("확인한 계좌에 적용"); self._apply_button.clicked.connect(self._apply)
         self._cancel_button = QPushButton("확인 요청 취소"); self._cancel_button.clicked.connect(self._cancel)
-        self._disable_button = QPushButton("이 계좌의 NAS 키 비활성화"); self._disable_button.clicked.connect(self._disable)
+        self._disable_button = QPushButton("이 계좌 연결 해제"); self._disable_button.clicked.connect(self._disable)
+        self._delete_button = QPushButton("이 계좌 삭제"); self._delete_button.clicked.connect(self._delete)
+        self._rename_button = QPushButton("계좌 이름 변경"); self._rename_button.clicked.connect(self._rename)
         layout.addRow(self._apply_button); layout.addRow(self._cancel_button); layout.addRow(self._disable_button)
+        layout.addRow(self._rename_button); layout.addRow(self._delete_button)
         self._monitor = QCheckBox("계좌 조회 사용"); self._monitor.toggled.connect(self._monitor_changed)
         self._orders = QCheckBox("수동 모의주문 허용")
         layout.addRow(self._monitor); layout.addRow(self._orders)
@@ -89,7 +101,9 @@ class NasCredentialsDialog(QDialog):
             label = PROVIDER_LABELS[client.provider]
             self.setWindowTitle(f"NAS {label} API 키 관리")
             layout.labelForField(self._profiles).setText("공급자 연결")
-            for widget in (self._new_label, self._create_button, self._monitor, self._orders, self._settings_button):
+            for widget in (self._new_label, self._create_button, self._monitor, self._orders,
+                           self._settings_button, self._show_disconnected, self._account_help,
+                           self._rename_button):
                 widget.hide()
                 field_label = layout.labelForField(widget)
                 if field_label is not None: field_label.hide()
@@ -101,6 +115,7 @@ class NasCredentialsDialog(QDialog):
             self._prepare_button.setText("새 키 준비" if client.provider in {"openai", "gemini", "claude"} else "새 키 확인")
             self._apply_button.setText("준비한 키 적용")
             self._disable_button.setText("이 공급자의 NAS 키 비활성화")
+            self._delete_button.hide()
             self._preview.setText("새 키를 준비한 뒤 NAS 적용을 선택하세요. PC 직접 연결 키와 별도로 저장합니다.")
         self._refresh()
 
@@ -143,6 +158,11 @@ class NasCredentialsDialog(QDialog):
         self._cancel_button.setEnabled(not busy and bool(self._operation) and self._operation.get("state") in {"VALIDATING", "READY"})
         self._disable_button.setEnabled(available and not busy and not pending and
             bool(profile.get("configured") if self._global else profile.get("account_ref")))
+        self._delete_button.setEnabled(
+            not self._global and available and not busy and not pending
+            and profile.get("disabled") is True
+        )
+        self._rename_button.setEnabled(not self._global and available and not busy and not pending)
         settings = not self._global and self._settings is not None and not busy and not pending
         self._monitor.setEnabled(settings); self._orders.setEnabled(settings and self._monitor.isChecked() and not self._real)
         self._settings_button.setEnabled(settings)
@@ -170,8 +190,17 @@ class NasCredentialsDialog(QDialog):
         for profile in result["profiles"]:
             if profile.get("provider") != self._client.provider or profile.get("profile_id") == "nas-main-mock-default": continue
             if self._global and profile.get("profile_id") != f"nas-{self._client.provider}-default": continue
-            status = "비활성" if profile.get("disabled") else "연결됨" if profile.get("runtime") == "ACTIVE" else "연결 확인 필요"
-            name = PROVIDER_LABELS[self._client.provider] if self._global else profile.get('label') or ('기본 실전계좌' if self._real else '기본 모의계좌')
+            if not self._global and profile.get("disabled") and not self._show_disconnected.isChecked():
+                continue
+            status = "연결 해제됨" if profile.get("disabled") else "연결됨" if profile.get("runtime") == "ACTIVE" else "연결 확인 필요"
+            if self._global:
+                name = PROVIDER_LABELS[self._client.provider]
+            elif profile.get("label"):
+                name = profile["label"]
+            elif profile.get("profile_id") in {"nas-mock-default", "nas-real-default"}:
+                name = "이전 실전계좌" if self._real else "이전 모의계좌"
+            else:
+                name = "이름 없는 실전계좌" if self._real else "이름 없는 모의계좌"
             validation = _VALIDATION_LABELS.get(profile.get("runtime_validation"), "") if self._global else ""
             self._profiles.addItem(f"{name} · {status}" + (f" · {validation}" if validation else ""), profile)
             if profile.get("profile_id") == target: self._profiles.setCurrentIndex(self._profiles.count() - 1)
@@ -271,6 +300,66 @@ class NasCredentialsDialog(QDialog):
             lambda: prepare(profile_id, revision, disabled=True))
         self._run(task, self._operation_result, "비활성화 대상 확인 중…")
 
+    def _delete(self):
+        profile = self._profile()
+        if not profile or profile.get("disabled") is not True:
+            return
+        if QMessageBox.question(
+            self,
+            "계좌 삭제",
+            "이 계좌를 계좌 설정 목록에서 삭제할까요?\n\n"
+            "저장된 매매 이력과 계좌 신원은 보존되며, 같은 연결 프로필은 다시 사용할 수 없습니다.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        profile_id, revision = profile["profile_id"], profile["revision"]
+        self._run(
+            lambda: self._client.delete_account_profile(profile_id, revision),
+            self._deleted,
+            "계좌 삭제 중…",
+        )
+
+    @Slot(object)
+    def _deleted(self, _result):
+        self._worker = None
+        if self._closed:
+            return
+        self._operation = None; self._settings = None
+        self._preferred_profile = None
+        self._status.setText("계좌를 목록에서 삭제했습니다. 매매 이력은 유지됩니다.")
+        self._load()
+
+    def _rename(self):
+        profile = self._profile()
+        if not profile:
+            return
+        before = str(profile.get("label", ""))
+        label, accepted = QInputDialog.getText(
+            self, "계좌 이름 변경", "새 계좌 이름을 입력하세요.", text=before,
+        )
+        label = label.strip()
+        if not accepted or label == before:
+            return
+        if not label or len(label) > 120:
+            QMessageBox.warning(self, "계좌 이름 변경", "계좌 이름은 1~120자로 입력하세요.")
+            return
+        profile_id, revision = profile["profile_id"], profile["revision"]
+        self._run(
+            lambda: self._client.rename_account_profile(profile_id, revision, label),
+            self._renamed,
+            "계좌 이름 변경 중…",
+        )
+
+    @Slot(object)
+    def _renamed(self, result):
+        self._worker = None
+        if self._closed:
+            return
+        self._preferred_profile = result["profile_id"]
+        self._status.setText("계좌 이름을 변경했습니다.")
+        self._load()
+
     @Slot(object)
     def _operation_result(self, result):
         self._worker = None
@@ -283,7 +372,7 @@ class NasCredentialsDialog(QDialog):
         ref = result.get("target_account_ref")
         if ref:
             if result.get("disabled"):
-                text = "이 계좌의 NAS 키를 비활성화합니다. 매매 이력은 유지됩니다."
+                text = "이 계좌 연결을 해제합니다. 기본 목록에서는 숨겨지며 매매 이력은 유지됩니다."
             elif not (self._profile() or {}).get("account_ref"):
                 text = ("새 실전계좌입니다. 기존 계좌와 매매 이력은 유지됩니다. 키 적용으로 실전 주문이 활성화되지는 않습니다."
                     if self._real else "새 계좌입니다. 기존 계좌와 매매 이력은 유지되며 새 계좌의 주문은 OFF로 시작합니다.")
@@ -292,7 +381,7 @@ class NasCredentialsDialog(QDialog):
             self._preview.setText(f"{text}\n확인한 계좌: {ref}")
         if result.get("error_code") == "ACCOUNT_CHANGED":
             self._preview.setText("다른 계좌의 키입니다. 새 계좌 추가로 등록하세요. 기존 계좌는 유지됩니다.")
-        self._apply_button.setText("비활성화 적용" if result.get("disabled") else "확인한 계좌에 적용")
+        self._apply_button.setText("연결 해제 적용" if result.get("disabled") else "확인한 계좌에 적용")
         if self._global:
             self._apply_button.setText("비활성화 적용" if result.get("disabled") else "준비한 키 적용")
             if state in {"FAILED", "CONFLICT", "EXPIRED", "CANCELLED", "RECOVERY_REQUIRED"}:

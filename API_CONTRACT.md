@@ -353,6 +353,8 @@ API와 NAS 수신 지연 차이를 뜻하지 않는다. 별도 DB 이력/outbox�
 R4b의 인증 `GET /api/v3/kiwoom/accounts`는 `{accounts: [context]}`를 반환한다.
 context는 기존 v3 응답과 같은 broker/environment/account_ref/credential_profile_id/
 binding_revision/verified_at/verification_method이며 실제 mock admitted bundle과 main 조회 binding만 포함한다.
+활성 자격 프로필에 사용자가 입력한 이름이 있으면 표시 전용 `display_label`을 추가한다. 이 값은 계좌
+식별·조회 일치 판정에 사용하지 않으며 원문 계좌번호나 키움 자격정보를 포함하지 않는다.
 capability `account_contexts_v3`는 이 목록 기능을 표시한다. 빈 목록은 현재 조회 가능한 연결 없음이고
 저장된 옛 계좌를 삭제/병합하지 않는다. 이 API는 키움 TR·인증 갱신을 하지 않는다.
 PC는 Qt worker로 목록을 읽고 선택 scope를 조회 worker 시작 시 같은 목록에서 다시 확인한다.
@@ -401,7 +403,9 @@ provider는 kiwoom_real/kiwoom_mock/naver/dart/openai/gemini/claude 중 하나�
 | --- | --- | --- |
 | `GET /api/v1/settings/credentials` | 없음 | 공급자 지원 여부와 프로필 configured/source/revision/validation/runtime, 익명 account_ref. 키·토큰 없음 |
 | `POST /api/v1/settings/credentials/{provider}/profiles` | UUID request_id, label(최대 120자) | 키 없는 draft profile UUID. 같은 request_id/내용은 같은 profile |
+| `PUT /api/v1/settings/credentials/{provider}/profiles/{profile_id}` | expected_revision, label(1~120자) | 실전·모의계좌의 표시 이름만 변경. 계좌 신원·binding·인증키·설정·매매 이력은 유지 |
 | `POST /api/v1/settings/credentials/{provider}/profiles/{profile_id}/prepare` | UUID request_id, expected_revision, replacement 또는 disable=true | 202 operation_id와 상태. 활성 키/binding 미변경 |
+| `DELETE /api/v1/settings/credentials/{provider}/profiles/{profile_id}` | expected_revision | 연결 해제된 profile만 archived 처리. 계좌 신원·binding·activation·매매 이력은 보존하고 일반 목록에서 제외 |
 | `GET /api/v1/settings/credential-operations/{operation_id}` | 없음 | 상태·safe error_code·revision·committed·계좌 미리보기. 비밀 없음 |
 | `POST /api/v1/settings/credential-operations/{operation_id}/apply` | expected_revision, Kiwoom은 확인한 target_account_ref UUID | 202 적용 시작 또는 동일 작업 결과 |
 | `DELETE /api/v1/settings/credential-operations/{operation_id}` | 없음 | 준비만 취소. 적용 시작 뒤 취소 불가 |
@@ -432,7 +436,7 @@ RECOVERY_REQUIRED이며 이전 키로 자동 rollback하지 않는다. DB 최종
 `apply_status=RECOVERY_REQUIRED`, `applied_revision<revision`으로 구분한다.
 현재 revision을 읽고 빈 부분 PUT으로 재적용하거나 재시작 시 영속 설정을 다시 조립한다.
 성공 시 `apply_status=ACTIVE`, `applied_revision=revision`이다.
-| `GET /api/v1/diagnostics/resources` | 없음 | 프로세스/호스트 메모리와 디스크, DB 크기 | NAS 자원 진단 |
+| `GET /api/v1/diagnostics/resources` | 없음 | 프로세스/호스트 메모리, 디스크·DB 전체 크기, 뉴스/시장/연구/계좌/기타별 추정 용량·건수와 현재 보존 상태 | NAS 자원 진단 |
 
 운영 설정 `ai_provider`는 `none/openai/gemini/claude`, 뉴스 간격은 60~86,400초다. 이 API는 공급자 비밀키를 반환하거나 변경하지 않는다.
 
@@ -530,15 +534,19 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 | --- | --- | --- |
 | `GET /api/v1/market/minute-bars` | `code`, `trading_date=YYYY-MM-DD`, 선택 `market=KRX/NXT/SOR/COMBINED` | 같은 식별자 + `bars[]`, `coverage.complete/markets`; COMBINED 행에 `source_market` 포함 |
 | `GET /api/v1/market/recent-minute-bars` | `code`, `end_date=YYYY-MM-DD`, 선택 `market=KRX/NXT/SOR/COMBINED`, `trading_days` 1~5 | 마지막 실제 거래일 목록 + 정렬된 `bars[]` |
+| `GET /api/v1/market/latest-market-caps` | 반복 `codes=6자리 종목코드`, 1~200개 | 종목별 마지막 저장 0B의 `market_cap_eok`, `observed_at`; 현재가·등락률은 반환하지 않음 |
 | `GET /api/v1/market/trade-value-comparisons` | `code`, `trading_date=YYYY-MM-DD`, 선택 `limit` | SOR 실시간값·KRX/NXT 분봉 조회값·차이·차이율 `comparisons[]`; KRX+NXT 완전 비교만 집계한 `summary` |
 | `GET /api/v1/market/events` | `kind=vi/cohort/upper_limit`, 선택 `code`, `limit` | 불변 `history[]`; cohort는 현재 projection `current[]`와 조건 선택 진단 `condition` 포함 |
 | `GET /api/v1/market/daily-bars` | `code`, 선택 `market`, `limit` 1~5000 | 식별자 + `bars[]` |
 | `GET /api/v1/market/coverage` | `kind`, `subject`, ISO `start/end`, 선택 `available_by`, 고정주기 자료만 `expected_seconds` | 상태·관측 수·가용 수·결측 구간·부재 의미 |
 | `GET /api/v1/market/external-bars` | `instrument`, `timeframe=5m/1d`, `limit` 1~10000 | 공급원·계약코드가 포함된 `bars[]` |
 | `GET /api/v1/market/snapshots/{kind}` | 선택 `subject`, `limit` 1~5000 | `kind`, `subject`, `snapshots[]` |
+| `GET /api/v1/market/top20-statistics` | `start_date/end_date=YYYY-MM-DD`, 최대 367일 | NAS TOP20 `hourly[]`, 정규장 일별 `comparisons[]`; 전체시장 거래대금은 `ka20006` 확정 일봉 |
 | `GET /api/v1/research/observations` | offset 포함 ISO `start/end`, `kinds=ranking,top20_membership,minute_bar` 중 하나 이상, 선택 `subject`, `watermark`, `cursor`, `limit` 1~1000 | 고정 `manifest/watermark`, 순서가 붙은 `observations[]`, `next_cursor` |
 
 스냅샷 `kind`는 `ranking`, `top20_membership`, `top20_index`, `market_state`, `investor_flow`, `program_flow`, `new_high`, `stock_fundamentals`, `nxt_eligibility`를 허용한다. `stock_fundamentals`와 `nxt_eligibility`는 시점 이력과 별도로 범용 콘텐츠의 `stock_fundamentals`, `stock_nxt_eligibility` 컬렉션에서 종목별 최신값도 조회할 수 있다. 봉의 중앙 저장 단위는 거래대금 백만원(`trade_value_million_won`)이다.
+
+NAS 연결 중 TOP20 차트는 `top20_index` 중앙 스냅샷을 읽고, 통계는 서버가 같은 원본을 집계한 `top20-statistics`를 읽는다. PC 직접 연결 중에는 로컬 `monitor.sqlite3`를 사용한다. 정규장 TOP20 합계는 09:00부터 15:30 종가 단일가 체결분까지 포함한다. 과거 전체시장 분모는 `ka20006` 일봉의 코스피·코스닥 거래대금을 사용하므로 장중 `0J/0U` 최종 수신 전에 끝난 값으로 과거 통계를 고정하지 않는다.
 
 거래대금 비교의 `summary.complete_count`와 차이 통계는 `query_scope=KRX+NXT`인 분만 대상으로 한다. `partial_count`와 `scope_counts`는 KRX 또는 NXT 한쪽만 보완된 중간 자료를 따로 보여준다. `total_difference_percent`는 완전 비교 합계의 `(SOR-조회)/조회`, `average_difference_percent`는 분별 차이율 평균이며 `mean_absolute_difference_percent`와 `max_absolute_difference_percent`는 방향을 제거한 오차 크기다.
 
@@ -551,6 +559,77 @@ coverage 상태는 `complete/partial/missing`이다. `available_by`를 지정하
 연구 관측의 첫 요청은 최대 24시간 범위에서 현재 커밋된 revision ID 집합을 새 immutable manifest로 확정한다. 다음 페이지는 첫 응답의 `watermark`와 `next_cursor`를 그대로 보내며 시작·종료·종류·대상도 동일해야 한다. 추출 도중 새 관측이 들어와도 이미 확정한 ID 집합에는 추가되지 않는다. manifest의 `revision_count`와 `revision_ids_hash`로 전체 페이지의 누락·중복을 검사한다. 현재 quality의 `recording_gap=unknown`은 D1 기록 자체만 고정했고 세션별 수집 공백 판정은 아직 하지 않았다는 뜻이다.
 
 `minute_bar` 연구 payload는 KRX/NXT/SOR 원본을 합치지 않으며 `bar_start/end`, OHLCV, 백만원 거래대금, 단위, `window_closed`, `session_finalized`, `capture_quality`, `finalization_source`와 신규 revision의 `session`, `phase`, `schedule_version`, `session_support`를 포함한다. 실시간 flush revision은 형성 중 누적 전체 봉이고 `window_closed=false`다. 타이머 마감은 실제 `bar_end` 뒤의 처리 시각을 `available_at`으로 사용한다. `session_finalized`는 장후 조회처럼 거래 세션 전체가 끝난 뒤의 확인인지 따로 표시한다. strict 연구 입력은 KRX·실제값·시간상 마감·수집 완전 revision 중 명시한 버전 있는 session profile이 허용한 봉만 사용한다. SOR 원본은 통합 시세 연구가 명시적으로 요청할 때만 사용한다. 기존 payload의 필드 누락은 기존 `krx-regular/v1` reader 경계에서만 호환한다.
+
+## 자동 모의운용 후보 게시
+
+`POST /api/v1/research/mock-automation-candidates`는 PC의 완료된 final holdout 결과를 NAS에
+게시하는 전용 Bearer 인증 경계다. 요청은 현재 검증된 mock 계좌의 `account_ref`,
+`credential_profile_id`, `expected_binding_revision`과 다음 세 불변 문서를 받는다.
+
+- `mock_automation_candidate_package/v1`: 기존 `final_candidate/v1` 문서와 그 hash, 등록 family,
+  정규 parameters, execution/session model, scientific implementation hash, final batch/run/result,
+  OOS 평가 근거를 담는다.
+- `mock_automation_eligibility_policy/v1`: final 실행 시작 전에 동결한 최소 거래일·거래수·순손익과
+  최대 drawdown 기준을 담는다. 미정 수치는 합격으로 취급하지 않는다.
+- `mock_automation_eligibility_receipt/v1`: 위 정책과 결과를 결합해 `ELIGIBLE` 또는 `BLOCKED`와
+  관측 수치·사유를 고정한다.
+
+서버는 256 KiB 크기, version, 등록 family와 정규 필드, 모든 content hash와 계보, 현재 scientific
+implementation hash, 현재 mock binding을 다시 검사한다. 같은 ID·같은 내용은 `unchanged`, 같은 ID에
+다른 내용은 409다. 응답의 `orders_started`는 항상 false이며 게시만으로 runtime lease나 주문 transport를
+호출하지 않는다. capability는 `mock_automation_candidate_publish_v1`이다. 이 세 문서는 아래 범용 콘텐츠
+allowlist에 포함되지 않는다.
+
+`GET /api/v1/research/mock-automation-candidates/{account_ref}`는 READY 명세 작성에 사용할 게시 후보를
+읽는다. query의 `credential_profile_id`가 현재 검증된 mock binding에서 같은 `account_ref`를 가리켜야
+한다. 응답의 `binding`은 profile ID, broker/environment/account_ref, binding revision, `verified_at`,
+`verification_method`를 포함하고,
+`candidates[]`의 각 행은 package, eligibility policy, account-scoped receipt의 완전한 묶음이다. 누락되거나
+계보가 맞지 않는 저장 묶음은 409이며 다른 계좌 후보를 섞지 않는다. capability는
+`mock_automation_candidate_read_v1`이다.
+
+`POST /api/v1/research/mock-automation-specs`는 게시된 ELIGIBLE 후보를 READY 운용 명세로
+동결하는 별도 Bearer 인증 경계다. 요청은 같은 mock 계좌의 `account_ref`,
+`credential_profile_id`, `expected_binding_revision`, 중앙 shadow 후보의 `shadow_event_id`와 다음
+문서를 받는다.
+
+- `ForwardEvaluationSpec`: 등록 family/factor, 후보의 session, NAS data path, 평가기간과 미정값 없는
+  forward 기준을 고정한다.
+- `StrategyStageRevision` 3개: `DRAFT→EVALUATED→VALIDATED→SHADOW` 순서와 후보 package hash,
+  eligibility receipt ID, 실제 shadow event ID를 각각 증거로 연결한다.
+- `MockAutomationOperatingSpec`: candidate/final 계보, 현재 mock binding, forward profile ID,
+  동시 전략·포지션·자금·일손실·자료 공백·장애 한도와 고정 운영 정책을 담는다.
+
+서버는 요청 전체 256 KiB 상한, 후보·policy·receipt·final 계보, 등록 family/factor/session, 실제 저장된
+shadow event의 monitor/config/전략/version/전이/시각, 현재 mock binding과 READY 판정을 모두 저장 전에
+검사한다. 기존 stage 이력은 요청 chain의 정확한 prefix일 때만 이어 쓴다. 동일 내용 재게시는
+`unchanged`이고 충돌하는 profile/stage/spec은 409다. 응답의 `orders_started`는 항상 false다.
+`GET /api/v1/research/mock-automation-specs/{account_ref}`는 저장 명세와 게시 계보 기준 readiness를
+조회하며 runtime 시작 상태는 아래 계좌 상태 API에서 따로 읽는다. capability는
+`mock_automation_spec_publish_v1`이다. 현재 중앙 shadow 생성기는 breakout family만 실행하므로 다른
+등록 family는 실제 대응 shadow event가 추가되기 전까지 이 경계를 통과할 수 없다.
+
+## 자동 모의운용 제어
+
+capability `mock_automation_runtime_v1`이 참인 서버는 저장된 READY 운용 명세에 한해 다음 Bearer 인증
+경계를 제공한다. 시작 요청은 `account_ref`, `credential_profile_id`, `spec_id`, 현재
+`expected_settings_revision`, `credential_revision`을 받는다. 서버는 기존 mock credential owner에서
+flat 계좌를 수동 bundle에서 불변 자동 run bundle로 교체하고 admission·최신 broker 대사를 완료한 뒤
+runner를 시작한다. 중간 실패는 자동 bundle의 신규 주문을 닫은 상태로 유지한다.
+
+| Method / path | 의미 |
+| --- | --- |
+| `GET /api/v1/mock-automation/accounts/{account_ref}` | `credential_profile_id`의 control·runtime·runner·복원 오류 상태 조회 |
+| `POST /api/v1/mock-automation/start` | 저장된 RUNNING/신규 control의 READY 명세를 계좌별 runner로 시작 |
+| `POST /api/v1/mock-automation/stop` | `expected_control_revision` CAS로 신규 주문 판단 중지 |
+| `POST /api/v1/mock-automation/resume` | 중지 뒤 새 broker 대사를 기록하고 같은 revision을 CAS로 재개 |
+
+중지·재개 요청은 account/profile/spec, 현재 `expected_control_revision`, 비어 있지 않은 `reason`을
+포함한다. 재개는 재시작 뒤 수동 bundle에서도 안전하게 자동 bundle을 다시 만들 수 있도록 현재
+`expected_settings_revision`과 `credential_revision`도 요구한다. STOP은 기존 주문을 임의 취소하거나
+보유를 청산하지 않는다. NAS 재시작은 저장된 RUNNING
+control만 복원하며 계좌 자격·설정·명세가 맞지 않으면 재시도 간격을 두고 fail-closed 상태를 노출한다.
+후보 게시만으로 시작할 수 없으며 위 READY 명세 게시까지 성공해야 시작 요청의 `spec_id`가 생긴다.
 
 ## 범용 콘텐츠
 
@@ -582,11 +661,17 @@ coverage 상태는 `complete/partial/missing`이다. `available_by`를 지정하
 
 `execution_mock_automation_admissions`는 owner=`mock account_ref`, key=`admission_id`다. 명세의 final batch/run/candidate/result가 CR3 연구 원장의 단일 완료 행과 일치하고 최신 SHADOW revision 및 mock binding이 유지될 때만 기존 O1 lease claim 전에 저장한다. spec당 admission은 하나다. `execution_mock_automation_lease_receipts`는 같은 owner 아래 결정적 자동 `execution_run_id`가 account lease를 얻은 결과를 기록하며 `new_orders_enabled=false`만 허용한다. 다른 수동/자동 run이 lease를 보유하면 receipt는 생기지 않는다.
 
-`execution_mock_automation_recovery_decisions`는 owner=`mock account_ref`, key=`decision_id`인 append-only 복구 판정이다. admission/lease/spec 계보, broker account/orders fingerprint, 관측·account 시각, 미체결/포지션/예약자금 수, 주문가능금액, 검증된 당일 손익과 데이터 공백·unknown·재접속·잔고 불일치 값을 기록한다. 손익이나 공백이 unknown이거나 한도를 넘으면 `BLOCKED`다. 통과 상태도 `CLEARED_ORDERS_DISABLED`이며 주문 활성화를 뜻하지 않는다.
+`execution_mock_automation_recovery_decisions`는 owner=`mock account_ref`, key=`decision_id`인 append-only 복구 판정이다. admission/lease/spec 계보, broker account/orders fingerprint, 관측·account 시각, 미체결/포지션/예약자금 수, 주문가능금액, 검증된 당일 손익과 데이터 공백·unknown·재접속·잔고 불일치 값을 기록한다. 종결 주문 이력은 미체결로 세지 않는다. 보유가 있으면서 신규 진입에만 필요한 근거가 미완결이면 `MANAGE_ONLY_ORDERS_DISABLED`로 기록할 수 있고, 대사·scope·잔고가 불명확하면 계속 `BLOCKED`다. 통과 상태도 주문 활성화를 뜻하지 않는다.
 
-`execution_mock_automation_decision_gates`는 owner=`mock account_ref`, key=`gate_id`인 매 Decision 판정이다. 최신 recovery 뒤에도 현재 binding과 lease, KRX 정규 연속장, Decision/account/order freshness, 계좌별 FIFO와 broker 비용이 완결된 `account_scoped_fifo_broker_cost/v1` 당일 순손익, 데이터 경로·공백, 자금·손실·장애 한도와 O1의 비종결 intent를 다시 검사한다. 통과 상태 `APPROVED_FOR_SINGLE_SUBMISSION`은 해당 `strategy_decision_id`에서 결정한 한 LIMIT intent에만 유효하다.
+`execution_mock_automation_decision_gates`는 owner=`mock account_ref`, key=`gate_id`인 매 Decision 판정이다. gate v2는 최신 recovery 뒤에도 현재 binding과 lease, 영속 control revision, 서버 시각·평가기간, KRX 정규 연속장, Decision/account/order freshness, 계좌별 FIFO와 broker 비용이 완결된 당일 순손익, 데이터 경로·공백, 자금·손실·장애 한도와 O1의 비종결 intent를 다시 검사한다. ENTER와 EXIT를 구분하며 EXIT는 같은 run·symbol의 확인 보유에서 미체결 매도 수량을 뺀 범위만 허용한다. v1 기록은 읽기 호환으로 보존하지만 control revision이 없어 새 제출 승인 근거로 사용하지 않는다. 통과 상태 `APPROVED_FOR_SINGLE_SUBMISSION`은 해당 `strategy_decision_id`에서 결정한 한 LIMIT intent에만 유효하다.
 
-`execution_mock_automation_dispatch_receipts`는 승인 gate와 결정적 O1 intent/order state 연결을 기록한다. 같은 spec/Decision은 같은 intent ID이며 기존 O1 intent가 있으면 broker에 다시 제출하지 않는다. `execution_mock_automation_stop_revisions`는 신규 주문을 즉시 닫은 긴급 중지 revision이다. 중지 뒤에는 더 늦은 broker recovery가 다시 통과해야 하며 기존 주문 취소나 포지션 청산은 별도 O1 대조/명시 정책으로만 처리한다. 세 컬렉션은 공개 주문 API가 아니다.
+`execution_mock_automation_dispatch_receipts`는 승인 gate와 결정적 O1 intent/order state 연결을 기록한다. 같은 spec/Decision은 같은 intent ID이며 기존 O1 intent가 있으면 broker에 다시 제출하거나 새 receipt를 만들지 않는다. `execution_mock_automation_control`은 계좌별 RUNNING/STOPPED와 단조 증가 revision을 저장하고 O1 intent 저장 트랜잭션이 이를 다시 확인한다. `execution_mock_automation_stop_revisions`는 중지 감사 이력이며, 재개는 명시 요청과 중지 이후 새 broker 대사를 모두 요구한다. 기존 주문 취소나 포지션 청산은 별도 O1 대조/명시 정책으로만 처리한다. 이 컬렉션들은 공개 주문 API가 아니다.
+
+`execution_mock_automation_risk_snapshots`는 공개 API가 아닌 계좌별 불변 근거다. 자동 account bundle의 기존
+broker 복구와 O1 상세 `FILL`, `kt00015` 실제 비용을 FIFO로 대조하며 KST 거래일, broker 조회 구간,
+binding/account/reconciliation/event/cost revision을 함께 저장한다. `execution_mock_automation_current_risk`는
+최신 revision만 가리킨다. 비용 누락, aggregate-only 체결, 잔고 불일치는 당일 손익 unknown이며 운영
+recovery와 Decision gate는 current snapshot ID/revision이 일치할 때만 진행한다.
 
 `theme_metadata`의 `owner=default,key=full` 항목에는 선택 필드 `effective_at`, `origin_device`를 함께 보낼 수 있다. `document`는 `ThemeBackupService.export_document()`의 전체 프로필 문서여야 한다. 서버는 클라이언트가 보낸 시각을 가용시각으로 신뢰하지 않고 실제 요청 수신·DB 수락 시각을 별도로 기록한다.
 

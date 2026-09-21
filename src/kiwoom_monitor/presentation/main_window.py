@@ -76,10 +76,12 @@ from kiwoom_monitor.infrastructure.app_paths import AppPaths
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig, DataSourceSettings
 from kiwoom_monitor.infrastructure.central_operational_settings import CentralOperationalSettingsClient
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
+from kiwoom_monitor.infrastructure.central_credentials_client import CentralCredentialsClient
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 from kiwoom_monitor.infrastructure.persistence.database import DEFAULT_SETTINGS
 from kiwoom_monitor.infrastructure.persistence.market_cache_writer import MarketCacheWriter
 from kiwoom_monitor.presentation.candidate_monitor_dialog import CandidateMonitorDialog
+from kiwoom_monitor.presentation.mock_automation_dialog import MockAutomationDialog
 from kiwoom_monitor.presentation.research_dialog import ResearchDialog
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
     MarketIndexTick, OrderExecution, StockPriceReference, TradeTick,
@@ -238,6 +240,7 @@ from kiwoom_monitor.presentation.theme_dialogs import (
 )
 from kiwoom_monitor.presentation.top20_trade_value import (
     Top20MarketRepairWorker,
+    Top20NasDataWorker,
     Top20TradeValueChart,
     Top20TradeValueWindow,
 )
@@ -421,6 +424,8 @@ class MainWindow(QMainWindow):
         candidate_client: CentralContentClient | None = None,
         candidate_settings_client: CentralOperationalSettingsClient | None = None,
         research_data_dir: Path | None = None,
+        mock_automation_credentials_client: CentralCredentialsClient | None = None,
+        market_data_client: object | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -442,12 +447,18 @@ class MainWindow(QMainWindow):
         self._historical_high_refresh_received: set[str] = set()
         self._themes = themes or {}
         self._pending_price_cache: dict[str, int] = {}
+        self._pending_market_cap_cache: dict[str, float] = {}
         self._pending_today_high_cache: dict[str, int] = {}
         self._columns = columns
         self._stock_lookup = stock_lookup
         self._theme_store = theme_store
         self._google_drive_sync = google_drive_sync
         self._api_runtime_factory = api_runtime_factory
+        self._market_data_client = market_data_client
+        self._top20_nas_workers: set[Top20NasDataWorker] = set()
+        self._top20_nas_callbacks: dict[Top20NasDataWorker, tuple[Callable[[object], None], Callable[[str], None] | None]] = {}
+        self._market_cap_reference_codes: set[str] = set()
+        self._market_cap_reference_pending: set[str] = set()
         # 뉴스는 별도 프로세스와 전용 DB로 실행해 실시간 표의 Qt 이벤트 루프와
         # SQLite 잠금을 공유하지 않는다.
         self._news_config_path = news_config_path
@@ -474,6 +485,13 @@ class MainWindow(QMainWindow):
         )
         self._research_dialog = (
             ResearchDialog(research_data_dir, self) if research_data_dir is not None else None
+        )
+        self._mock_automation_dialog = (
+            MockAutomationDialog(
+                candidate_client, mock_automation_credentials_client, self,
+            )
+            if candidate_client is not None and mock_automation_credentials_client is not None
+            else None
         )
         self._journal_process_manager = AuxiliaryProcessManager()
         self._journal_command_path = journal_database_path.with_name("journal_command.json") if journal_database_path else None
@@ -556,6 +574,7 @@ class MainWindow(QMainWindow):
         # 있다. 시놀로지 장애 시에는 설정을 바꾸지 않고 현재 경로만 로컬로
         # 표시하며, 복구되면 다시 시놀로지로 표시한다.
         self._active_api_route = ""
+        self._ranking_uses_local_fallback = False
         self._latest_market_state: dict[str, object] = {}
         self._realtime_diagnostics: dict[str, object] = {
             "abnormal_disconnects": 0, "reconnects": 0, "last_disconnect_reason": "",
@@ -884,6 +903,18 @@ class MainWindow(QMainWindow):
         research_button.setToolTip("전략 연구 · 저장 데이터에서 전략을 반복 비교")
         research_button.clicked.connect(self._show_research_dialog)
         toolbar.addWidget(research_button)
+        automation_button = QPushButton("")
+        automation_button.setObjectName("mock_automation_button")
+        automation_button.setAccessibleName("모의 자동운용")
+        automation_button.setEnabled(self._mock_automation_dialog is not None)
+        automation_button.setFixedSize(14, 14)
+        automation_button.setStyleSheet(
+            "QPushButton { background: #D97706; border: 1px solid #B45309; border-radius: 2px; padding: 0; }"
+            "QPushButton:hover { background: #F59E0B; } QPushButton:disabled { background: #D0D5DD; border-color: #98A2B3; }"
+        )
+        automation_button.setToolTip("모의 자동운용 · READY 명세의 시작·중지·재개")
+        automation_button.clicked.connect(self._show_mock_automation)
+        toolbar.addWidget(automation_button)
         self._rank_query_selector = QComboBox()
         for label, value in (("30초 간격", "5"), ("1분 간격", "1"), ("10분 간격", "2"), ("1시간 간격", "3"), ("당일 누적", "4")):
             self._rank_query_selector.addItem(label, value)
@@ -1021,6 +1052,14 @@ class MainWindow(QMainWindow):
         self._research_dialog.raise_()
         self._research_dialog.activateWindow()
 
+    def _show_mock_automation(self) -> None:
+        if self._mock_automation_dialog is None:
+            self.statusBar().showMessage("NAS HTTPS 연결에서 모의 자동운용을 사용할 수 있습니다.", 5000)
+            return
+        self._mock_automation_dialog.show()
+        self._mock_automation_dialog.raise_()
+        self._mock_automation_dialog.activateWindow()
+
     def _show_investment_notice(self) -> None:
         """상태 표시줄에 투자 유의 안내를 잠시 보여 준다."""
         if self._closing:
@@ -1065,6 +1104,7 @@ class MainWindow(QMainWindow):
             news_api_settings_opener=self._open_news_api_settings,
             shadow_settings_opener=self._show_candidate_monitor,
             research_opener=self._show_research_dialog,
+            mock_automation_opener=self._show_mock_automation,
         )
         # 기본 설정은 메인 표를 막지 않는 별도 창으로 연다. 따라서 순위 갱신은
         # 설정 창이 열려 있어도 즉시 표에 반영된다.
@@ -1283,6 +1323,10 @@ class MainWindow(QMainWindow):
     def _on_themes_changed(self) -> None:
         if self._theme_store is not None:
             self._themes = self._theme_store.all_by_name()
+        # 테마 저장 직후에는 현재 표부터 갱신한다. 순위 worker가 이미
+        # 실행 중이면 _refresh_rankings()가 반환하므로, 전체 재조회에만
+        # 맡기면 표는 빈 테마인데 편집창에는 저장된 테마가 보일 수 있다.
+        self._refresh_theme_badges()
         self._refresh_rankings()
         self._schedule_google_drive_upload("both")
 
@@ -1880,12 +1924,20 @@ class MainWindow(QMainWindow):
         self._api_status.setStyleSheet(f"color: {color}; font-weight: bold;")
 
     def _set_connected_api_status(self) -> None:
-        if self._active_api_route == "local_fallback":
+        if self._ranking_uses_local_fallback:
+            self._set_api_status("API: 로컬 전환", "#B36B00")
+        elif self._active_api_route == "local":
+            self._set_api_status("API: 이 PC", "#008000")
+        elif self._active_api_route == "local_fallback":
             self._set_api_status("API: 로컬 전환", "#B36B00")
         elif self._active_api_route == "central":
             self._set_api_status("API: NAS", "#008000")
         elif self._active_api_route == "central_waiting":
-            self._set_api_status("API: NAS · 실시간 대기", "#B36B00")
+            # 설정 교체 직후나 장 종료 뒤에는 중앙 WebSocket이 체결을
+            # 기다려도 순위·저장 자료의 실제 API 경로는 이미 NAS다.
+            # 상단 표시는 데이터 출처만 나타내고 세부 대기 상태는
+            # 상태표시줄에 맡긴다.
+            self._set_api_status("API: NAS", "#008000")
         elif self._active_api_route == "central_retry":
             self._set_api_status("API: NAS 재연결 중…", "#B36B00")
         else:
@@ -1894,8 +1946,13 @@ class MainWindow(QMainWindow):
     def _on_realtime_status_changed(self, message: str) -> None:
         """실시간 수신 경로를 상단에 표시하고 일반 상태 문구도 유지한다."""
         self.statusBar().showMessage(message)
+        previous_route = self._active_api_route
         if "로컬" in message and ("전환" in message or "실시간" in message):
             self._active_api_route = "local_fallback"
+        elif message.startswith("실시간 체결 구독"):
+            # NAS worker는 문구에 항상 '나스/중앙/시놀로지'가 포함된다.
+            # 접두어 없는 이 문구는 이 PC의 키움 WebSocket 직접 연결이다.
+            self._active_api_route = "local"
         elif "복구 여부" in message:
             self._active_api_route = "central_retry"
         elif (
@@ -1913,6 +1970,15 @@ class MainWindow(QMainWindow):
         else:
             return
         self._set_connected_api_status()
+        if (
+            self._active_api_route == "central"
+            and previous_route in {"local_fallback", "central_retry"}
+        ):
+            # NAS 재시작 동안 로컬 체결만 이어 받은 경우 중앙 DB에는 그
+            # 사이 확정·진행 분봉이 더 쌓였을 수 있다. 기존 loaded 표식을
+            # 버리고 TOP20을 다시 읽어 1·5·60분·당일 값을 즉시 맞춘다.
+            self._minute_history_codes.clear()
+            self._start_minute_history_loading(tuple(self._row_by_code), force=True)
 
     def _open_log_file(self) -> None:
         # 설치본의 Program Files는 읽기 전용이다. 로그는 항상 사용자 데이터
@@ -2168,6 +2234,7 @@ class MainWindow(QMainWindow):
             return
         try:
             runtime = self._api_runtime_factory() if self._api_runtime_factory is not None else {}
+            source_mode = str(runtime.get("source_mode", ""))
             self._ranking_loader = runtime.get("ranking_loader")  # type: ignore[assignment]
             self._realtime_worker_factory = runtime.get("realtime_worker_factory")  # type: ignore[assignment]
             self._realtime_worker_controller.set_factory(self._realtime_worker_factory)
@@ -2192,6 +2259,12 @@ class MainWindow(QMainWindow):
             if self._entry_snapshot_writer is not None:
                 self._entry_snapshot_writer.set_investor_loader(runtime.get("entry_investor_loader"))  # type: ignore[arg-type]
                 self._entry_snapshot_writer.set_program_loader(runtime.get("program_trade_loader"))  # type: ignore[arg-type]
+            self._active_api_route = "local" if source_mode == "local" else "central_waiting"
+            self._ranking_uses_local_fallback = False
+            self._market_data_client = runtime.get("market_data_client")
+            self._market_cap_reference_codes.clear()
+            self._market_cap_reference_pending.clear()
+            self._realtime_market_caps.clear()
         except Exception as error:
             self._api_reloading = False
             self._ranking_execution.end_priority_preparation()
@@ -2720,7 +2793,7 @@ class MainWindow(QMainWindow):
             writer.enqueue_investor_backfill(target, ())
 
     def _refresh_rankings(self) -> None:
-        if self._closing or self._ranking_loader is None:
+        if self._closing or self._api_reloading or self._ranking_loader is None:
             return
         if self._ranking_worker_controller.is_running:
             return
@@ -2732,12 +2805,17 @@ class MainWindow(QMainWindow):
 
     def _on_ranking_worker_finished(self) -> None:
         self._refresh_button.setEnabled(True)
+        if self._api_reloading:
+            return
         if self._closing or not self._ranking_execution.worker_finished():
             return
         logger.info("밀린 순위 조회를 즉시 시작합니다.")
         QTimer.singleShot(0, self._refresh_rankings)
 
     def _on_ranking_failed(self, message: str) -> None:
+        if self._api_reloading:
+            logger.info("API 설정 교체 중 이전 순위 오류를 폐기합니다: %s", message)
+            return
         self._ranking_execution.end_priority_preparation()
         logger.warning("순위 조회에 실패했습니다: %s", message)
         self._set_api_status("API: 오류", "#C00000")
@@ -2745,9 +2823,23 @@ class MainWindow(QMainWindow):
         self._schedule_next_ranking_refresh()
 
     def _on_ranking_loaded(self, stocks: object) -> None:
+        if self._api_reloading:
+            # 이전 연결의 늦은 응답이 중지한 순위 타이머를 다시 켜거나 새
+            # 연결의 표를 덮어쓰지 못하게 한다.
+            logger.info("API 설정 교체 중 이전 순위 응답을 폐기합니다.")
+            return
         if not isinstance(stocks, tuple):
             self._on_ranking_failed("순위 응답 형식이 올바르지 않습니다.")
             return
+        previous_query_route = self._ranking_uses_local_fallback
+        self._ranking_uses_local_fallback = bool(
+            getattr(self._ranking_loader, "last_response_from_local_fallback", False)
+        )
+        if previous_query_route != self._ranking_uses_local_fallback:
+            logger.info(
+                "순위 조회 경로 변경: %s",
+                "이 PC 키움 API" if self._ranking_uses_local_fallback else "NAS",
+            )
         expected_count = int(getattr(self._ranking_loader, "EXPECTED_STOCKS", 0))
         outcome = self._ranking_execution.handle_response(
             stocks,
@@ -2794,6 +2886,7 @@ class MainWindow(QMainWindow):
         if change_summary is None:
             self._on_ranking_failed("순위 변경 계산 결과가 없습니다.")
             return
+        table_apply_started_at = time.monotonic()
         self._rank_changed_codes = set(change_summary.changed_codes)
         if self._rank_changed_codes:
             changed_names = ", ".join(
@@ -2835,6 +2928,7 @@ class MainWindow(QMainWindow):
             self._nxt_checked_codes.update(saved_nxt)
             self._nxt_enabled_codes.update(code for code, enabled in saved_nxt.items() if enabled)
             self._nxt_enabled_codes.difference_update(code for code, enabled in saved_nxt.items() if not enabled)
+        self._start_market_cap_reference_loading(codes)
         use_ranking_price = self._is_after_hours_data_pause()
         for row, stock in enumerate(stocks):
             self._row_by_code[stock.code] = row
@@ -2902,11 +2996,18 @@ class MainWindow(QMainWindow):
         if self._is_nxt_only_session() and self._start_nxt_eligibility_loading(codes):
             self.statusBar().showMessage(f"조회 완료 · {len(stocks)}개 종목 · NXT 가능 종목을 확인하는 중입니다…")
         else:
+            # NAS는 앱이 켜지기 전부터 분봉을 저장한다. 실시간 구독 승인
+            # 뒤까지 기다리지 말고 중앙 저장분을 먼저 읽어 1·5·60분과
+            # 당일 거래대금이 0에서 시작하지 않게 한다.
+            if self._uses_nas_market_data_source():
+                self._start_minute_history_loading(codes)
             self._start_realtime_subscription(self._top20_realtime_codes(codes))
             # 정상 구독 직후에는 subscription_ready가 후속 보완을 시작한다.
             # 연결이 아직 준비되지 않은 경우만을 위한 안전장치다.
             QTimer.singleShot(5_000, lambda: self._start_realtime_followups(codes))
         self._schedule_next_ranking_refresh()
+        table_apply_ms = round((time.monotonic() - table_apply_started_at) * 1000)
+        logger.info("순위 표 적용 완료: %dms · %d개", table_apply_ms, len(stocks))
         # 분봉·기본정보 40건 동시 보완은 모의 API 제한을 쉽게 초과하므로,
         # 안정적인 순위 조회가 확인된 뒤 사용자가 따로 실행하는 방식으로 제공한다.
 
@@ -3373,6 +3474,9 @@ class MainWindow(QMainWindow):
             return
         if tick.market_cap_eok is not None and tick.market_cap_eok > 0:
             self._realtime_market_caps[tick.code] = float(tick.market_cap_eok)
+            self._pending_market_cap_cache[tick.code] = float(tick.market_cap_eok)
+            if not self._price_cache_timer.isActive():
+                self._price_cache_timer.start()
         observed_at = self._ranking_now()
         if tick.change_rate is not None:
             self._last_change_rates[tick.code] = tick.change_rate
@@ -3521,12 +3625,191 @@ class MainWindow(QMainWindow):
 
     def _show_top20_trade_value_window(self) -> None:
         window = self._top20_trade_value_window
+        if self._top20_view_mode == "daily":
+            self._show_top20_trade_value_mode("daily")
+        else:
+            self._show_top20_trade_value_date(self._top20_view_date)
         window.show()
         window.raise_()
         window.activateWindow()
 
+    def _uses_nas_market_data_source(self) -> bool:
+        client = self._market_data_client
+        return (
+            self._active_api_route not in {"local", "local_fallback"}
+            and callable(getattr(client, "load_stored_minute_bars", None))
+        )
+
+    def _uses_nas_top20_source(self) -> bool:
+        client = self._market_data_client
+        return (
+            self._uses_nas_market_data_source()
+            and callable(getattr(client, "load_stored_top20_index", None))
+            and callable(getattr(client, "load_stored_top20_statistics", None))
+        )
+
+    def _start_top20_nas_request(
+        self, request: tuple[str, object], on_completed: Callable[[object], None],
+        on_failed: Callable[[str], None] | None = None,
+    ) -> None:
+        if self._market_data_client is None:
+            if on_failed is not None:
+                on_failed("NAS 시장자료 연결이 없습니다.")
+            return
+        worker = Top20NasDataWorker(self._market_data_client, request)
+        self._top20_nas_workers.add(worker)
+        self._top20_nas_callbacks[worker] = (on_completed, on_failed)
+        worker.completed.connect(
+            lambda _request, result, source=worker: self._finish_top20_nas_request(source, result, "")
+        )
+        worker.failed.connect(
+            lambda _request, message, source=worker: self._finish_top20_nas_request(source, None, message)
+        )
+        worker.finished.connect(lambda source=worker: self._release_top20_nas_worker(source))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _start_market_cap_reference_loading(self, codes: tuple[str, ...]) -> None:
+        """Restore last NAS 0B market caps once per visible symbol in the background."""
+        client = self._market_data_client
+        if (
+            self._active_api_route in {"local", "local_fallback"}
+            or not callable(getattr(client, "load_stored_market_caps", None))
+        ):
+            return
+        # A live tick received before this request is already the newest usable value.
+        self._market_cap_reference_codes.update(
+            code for code in codes if code in self._realtime_market_caps
+        )
+        requested = tuple(
+            code for code in codes
+            if code not in self._market_cap_reference_codes
+            and code not in self._market_cap_reference_pending
+        )
+        if not requested:
+            return
+        self._market_cap_reference_pending.update(requested)
+        self._start_top20_nas_request(
+            ("market_caps", requested),
+            lambda result, targets=requested, source=client: self._apply_market_cap_references(
+                targets, result, source,
+            ),
+            lambda message, targets=requested, source=client: self._market_cap_reference_failed(
+                targets, message, source,
+            ),
+        )
+
+    def _apply_market_cap_references(
+        self, requested: tuple[str, ...], result: object,
+        source_client: object | None = None,
+    ) -> None:
+        if source_client is not None and source_client is not self._market_data_client:
+            return
+        self._market_cap_reference_pending.difference_update(requested)
+        self._market_cap_reference_codes.update(requested)
+        if not isinstance(result, dict):
+            logger.warning("NAS 마지막 0B 시가총액 응답 형식이 올바르지 않습니다.")
+            return
+        requested_codes = set(requested)
+        for code, value in result.items():
+            if str(code) not in requested_codes or not isinstance(value, dict):
+                continue
+            try:
+                market_cap = float(value.get("market_cap_eok"))
+            except (TypeError, ValueError):
+                continue
+            if market_cap <= 0:
+                continue
+            # 요청 도중 실제 0B가 도착했다면 그 값이 더 최신이다.
+            self._realtime_market_caps.setdefault(str(code), market_cap)
+            self._render_market_cap(str(code))
+
+    def _market_cap_reference_failed(
+        self, requested: tuple[str, ...], message: str,
+        source_client: object | None = None,
+    ) -> None:
+        if source_client is not None and source_client is not self._market_data_client:
+            return
+        self._market_cap_reference_pending.difference_update(requested)
+        logger.warning("NAS 마지막 0B 시가총액 복원 실패: %s", message)
+
+    def _finish_top20_nas_request(
+        self, worker: Top20NasDataWorker, result: object, message: str,
+    ) -> None:
+        callbacks = self._top20_nas_callbacks.pop(worker, None)
+        if callbacks is None or self._closing:
+            return
+        completed, failed = callbacks
+        try:
+            if message:
+                if failed is not None:
+                    failed(message)
+            else:
+                completed(result)
+        except RuntimeError:
+            # The user may close the statistics dialog before the HTTP read ends.
+            return
+
+    def _release_top20_nas_worker(self, worker: Top20NasDataWorker) -> None:
+        self._top20_nas_callbacks.pop(worker, None)
+        self._top20_nas_workers.discard(worker)
+
+    @staticmethod
+    def _nas_top20_rows(payload: object) -> list[tuple[datetime, float, float, float]]:
+        rows: list[tuple[datetime, float, float, float]] = []
+        if not isinstance(payload, (tuple, list)):
+            return rows
+        for value in payload:
+            if not isinstance(value, dict) or value.get("capture_state") != "realtime_complete":
+                continue
+            market_values = value.get("market_values")
+            if not isinstance(market_values, (tuple, list)) or len(market_values) < 3:
+                continue
+            try:
+                minute = datetime.fromisoformat(str(value.get("minute", "")))
+                rows.append((minute, *(float(market_values[index] or 0.0) for index in range(3))))
+            except (TypeError, ValueError):
+                continue
+        return sorted(rows, key=lambda row: row[0])
+
+    def _display_top20_date_rows(
+        self, selected_date: date, rows: list[tuple[datetime, float, float, float]], source: str,
+    ) -> None:
+        if selected_date != self._top20_view_date or self._top20_view_mode == "daily":
+            return
+        if selected_date == self._ranking_now().date() and source == "NAS":
+            merged = {row[0]: row for row in self._top20_collector.completed}
+            merged.update({row[0]: row for row in rows})
+            self._top20_collector.completed.clear()
+            self._top20_collector.completed.extend(value for _, value in sorted(merged.items()))
+            rows = list(self._top20_collector.completed)
+        interval = 5 if self._top20_view_mode == "5m" else 60 if self._top20_view_mode == "60m" else 1
+        completed = self._aggregate_top20_rows(rows, interval) if interval > 1 else rows
+        status = (
+            f"{selected_date:%Y-%m-%d} · {source} 전체일 08:00~20:00 저장 기록 {len(completed)}개"
+            if completed else f"{selected_date:%Y-%m-%d} · {source}에 저장된 전체일 기록이 없습니다."
+        )
+        self._top20_trade_value_chart.set_data(None, (0.0, 0.0, 0.0), completed, status)
+
     def _show_top20_trade_value_date(self, selected_date: date) -> None:
         self._top20_view_date = selected_date
+        if self._uses_nas_top20_source():
+            self._top20_trade_value_chart.set_data(
+                None, (0.0, 0.0, 0.0), [], f"{selected_date:%Y-%m-%d} · NAS 저장 기록을 불러오는 중입니다.",
+            )
+            self._start_top20_nas_request(
+                ("date", selected_date.isoformat()),
+                lambda payload, target=selected_date: self._display_top20_date_rows(
+                    target, self._nas_top20_rows(payload), "NAS",
+                ),
+                lambda message, target=selected_date: self._show_top20_local_date(
+                    target, f"NAS 조회 실패 · {message} · PC 로컬",
+                ),
+            )
+            return
+        self._show_top20_local_date(selected_date, "PC 로컬")
+
+    def _show_top20_local_date(self, selected_date: date, source: str) -> None:
         if self._minute_bar_repository is None:
             rows = ()
         else:
@@ -3535,14 +3818,7 @@ class MainWindow(QMainWindow):
             except Exception as error:
                 logger.warning("TOP20 과거 기록 조회 실패: %s", error); rows = ()
         completed = [(minute, kospi, kosdaq, unknown) for minute, _, _, _, kospi, kosdaq, unknown in rows]
-        interval = 5 if self._top20_view_mode == "5m" else 60 if self._top20_view_mode == "60m" else 1
-        if interval > 1:
-            completed = self._aggregate_top20_rows(completed, interval)
-        status = (
-            f"{selected_date:%Y-%m-%d} · 전체일 08:00~20:00 저장 기록 {len(completed)}개"
-            if completed else f"{selected_date:%Y-%m-%d} · 저장된 전체일 기록이 없습니다."
-        )
-        self._top20_trade_value_chart.set_data(None, (0.0, 0.0, 0.0), completed, status)
+        self._display_top20_date_rows(selected_date, completed, source)
 
     def _show_top20_trade_value_mode(self, mode: str) -> None:
         self._top20_view_mode = mode if mode in {"minute", "5m", "60m", "daily"} else "minute"
@@ -3550,6 +3826,20 @@ class MainWindow(QMainWindow):
         if self._top20_view_mode in {"minute", "5m", "60m"}:
             self._show_top20_trade_value_date(self._top20_view_date)
             return
+        if self._uses_nas_top20_source():
+            end = self._ranking_now().date(); start = end - timedelta(days=364)
+            self._top20_trade_value_chart.set_data(
+                None, (0.0, 0.0, 0.0), [], "NAS TOP20 일별 통계를 불러오는 중입니다.",
+            )
+            self._start_top20_nas_request(
+                ("daily", (start.isoformat(), end.isoformat())),
+                self._show_top20_nas_daily,
+                lambda message: self._show_top20_local_daily(f"NAS 조회 실패 · {message} · PC 로컬"),
+            )
+            return
+        self._show_top20_local_daily("PC 로컬")
+
+    def _show_top20_local_daily(self, source: str) -> None:
         if self._minute_bar_repository is None:
             rows = ()
         else:
@@ -3561,8 +3851,25 @@ class MainWindow(QMainWindow):
             (datetime.combine(day, clock_time()), kospi, kosdaq, unknown)
             for day, kospi, kosdaq, unknown in rows
         ]
-        status = f"일봉 {len(completed)}개 · KRX 정규장 09:00~15:29 합계" if completed else "저장된 일봉 기록이 없습니다."
+        status = f"{source} 일봉 {len(completed)}개 · KRX 정규장 09:00~15:30 합계" if completed else f"{source}에 저장된 일봉 기록이 없습니다."
         self._top20_trade_value_chart.set_data(None, (0.0, 0.0, 0.0), completed, status)
+
+    def _show_top20_nas_daily(self, payload: object) -> None:
+        comparisons = payload.get("comparisons") if isinstance(payload, dict) else None
+        completed = []
+        for value in comparisons if isinstance(comparisons, list) else []:
+            market_values = value.get("top20_market_values") if isinstance(value, dict) else None
+            if not isinstance(market_values, list) or len(market_values) < 3:
+                continue
+            try:
+                day = date.fromisoformat(str(value.get("trade_date", "")))
+                completed.append((datetime.combine(day, clock_time()), *(float(market_values[index] or 0.0) for index in range(3))))
+            except (TypeError, ValueError):
+                continue
+        self._top20_trade_value_chart.set_data(
+            None, (0.0, 0.0, 0.0), completed,
+            f"NAS 일봉 {len(completed)}개 · KRX 정규장 09:00~15:30 합계" if completed else "NAS에 저장된 일봉 기록이 없습니다.",
+        )
 
     @staticmethod
     def _aggregate_top20_rows(
@@ -3593,29 +3900,87 @@ class MainWindow(QMainWindow):
         layout.addWidget(content)
         def refresh_statistics() -> None:
             selected_days = int(period.currentData())
-            try:
-                hourly, comparisons = self._minute_bar_repository.load_top20_statistics(selected_days)
-                lines = [
-                    f"최근 {selected_days}일 범위 · 앱이 실행된 구간만 수집되므로 전체 시장을 완전히 대표하지 않습니다.",
-                    "", "[시간대별 TOP20 1분 평균 · 높은 순]",
-                ]
-                lines.extend(f"{hour}  {Top20TradeValueChart._amount(value)}  (수집일 {count}일)" for hour, value, count in hourly)
-                lines.extend(("", "[정규장 09:00~15:29 · 일별 TOP20 / 코스피+코스닥]"))
-                for day, top20, kospi, kosdaq in comparisons:
-                    market_total = kospi + kosdaq
-                    ratio = top20 / market_total * 100 if market_total > 0 else None
-                    ratio_text = f"{ratio:.2f}%" if ratio is not None else "전체시장 자료 없음"
-                    lines.append(f"{day.isoformat()}  TOP20 {Top20TradeValueChart._amount(top20)} / 전체 {Top20TradeValueChart._amount(market_total)} · {ratio_text}")
-                if not hourly and not comparisons: lines.append("저장된 통계 자료가 없습니다.")
-                content.setPlainText("\n".join(lines))
-            except Exception as error:
-                content.setPlainText(f"통계를 불러오지 못했습니다.\n{error}")
+            if self._uses_nas_top20_source():
+                end = self._ranking_now().date(); start = end - timedelta(days=selected_days - 1)
+                content.setPlainText("NAS TOP20 통계를 불러오는 중입니다.")
+                self._start_top20_nas_request(
+                    ("statistics", (start.isoformat(), end.isoformat())),
+                    lambda payload, selected=selected_days: self._render_top20_statistics(
+                        content, selected, payload, "NAS",
+                    ),
+                    lambda message, selected=selected_days: self._render_local_top20_statistics(
+                        content, selected, f"NAS 조회 실패 · {message} · PC 로컬",
+                    ),
+                )
+                return
+            self._render_local_top20_statistics(content, selected_days, "PC 로컬")
         period.currentIndexChanged.connect(refresh_statistics)
         refresh_statistics()
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         close.rejected.connect(dialog.reject); close.accepted.connect(dialog.accept)
         layout.addWidget(close)
         dialog.exec()
+
+    def _render_local_top20_statistics(self, content: QTextEdit, days: int, source: str) -> None:
+        try:
+            hourly, comparisons = self._minute_bar_repository.load_top20_statistics(days) if self._minute_bar_repository is not None else ((), ())
+            payload = {
+                "hourly": [
+                    {"hour": hour, "average_eok": value, "day_count": count}
+                    for hour, value, count in hourly
+                ],
+                "comparisons": [
+                    {
+                        "trade_date": day.isoformat(), "top20_eok": top20,
+                        "kospi_eok": kospi, "kosdaq_eok": kosdaq,
+                    }
+                    for day, top20, kospi, kosdaq in comparisons
+                ],
+            }
+            self._render_top20_statistics(content, days, payload, source)
+        except Exception as error:
+            content.setPlainText(f"통계를 불러오지 못했습니다.\n{error}")
+
+    @staticmethod
+    def _render_top20_statistics(
+        content: QTextEdit, days: int, payload: object, source: str,
+    ) -> None:
+        hourly = payload.get("hourly") if isinstance(payload, dict) else None
+        comparisons = payload.get("comparisons") if isinstance(payload, dict) else None
+        hourly = hourly if isinstance(hourly, list) else []
+        comparisons = comparisons if isinstance(comparisons, list) else []
+        lines = [
+            f"최근 {days}일 범위 · 자료 원본: {source}",
+            "", "[시간대별 TOP20 1분 평균 · 높은 순]",
+        ]
+        for value in hourly:
+            if not isinstance(value, dict):
+                continue
+            try:
+                lines.append(
+                    f"{value.get('hour', '')}  {Top20TradeValueChart._amount(float(value.get('average_eok', 0) or 0))}  "
+                    f"(수집일 {int(value.get('day_count', 0) or 0)}일)"
+                )
+            except (TypeError, ValueError):
+                continue
+        lines.extend(("", "[정규장 09:00~15:30 · 일별 TOP20 / 코스피+코스닥 ka20006]"))
+        for value in comparisons:
+            if not isinstance(value, dict):
+                continue
+            try:
+                top20 = float(value.get("top20_eok", 0) or 0)
+                market_total = float(value.get("kospi_eok", 0) or 0) + float(value.get("kosdaq_eok", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            ratio = top20 / market_total * 100 if market_total > 0 else None
+            ratio_text = f"{ratio:.2f}%" if ratio is not None else "전체시장 자료 없음"
+            lines.append(
+                f"{value.get('trade_date', '')}  TOP20 {Top20TradeValueChart._amount(top20)} / "
+                f"전체 {Top20TradeValueChart._amount(market_total)} · {ratio_text}"
+            )
+        if not hourly and not comparisons:
+            lines.append("저장된 통계 자료가 없습니다.")
+        content.setPlainText("\n".join(lines))
 
     def _reload_top20_completed(self, selected_date: date | None = None) -> None:
         if self._minute_bar_repository is None:
@@ -3886,29 +4251,42 @@ class MainWindow(QMainWindow):
 
     def _save_current_price_cache(self) -> None:
         """체결마다 저장하지 않고 짧게 묶어 마지막 현재가만 보존한다."""
-        if not self._pending_price_cache and not self._pending_today_high_cache:
+        if (
+            not self._pending_price_cache
+            and not self._pending_today_high_cache
+            and not self._pending_market_cap_cache
+        ):
             return
         prices = self._pending_price_cache
         highs = self._pending_today_high_cache
+        market_caps = self._pending_market_cap_cache
         self._pending_price_cache = {}
         self._pending_today_high_cache = {}
+        self._pending_market_cap_cache = {}
         if self._market_cache_writer is not None:
             self._market_cache_writer.enqueue_price_cache(
-                prices, highs, self._ranking_now().date(),
+                prices, highs, market_caps, self._ranking_now().date(),
             )
             return
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_last_prices"):
             self._stock_lookup.update_last_prices(prices)
+        if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_last_market_caps"):
+            self._stock_lookup.update_last_market_caps(market_caps)
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_intraday_highs"):
             self._stock_lookup.update_intraday_highs(highs, self._ranking_now().date())
 
     def _on_price_cache_write_failed(
-        self, prices: object, highs: object, _trade_date: object, message: str,
+        self, prices: object, highs: object, market_caps: object,
+        _trade_date: object, message: str,
     ) -> None:
         if isinstance(prices, dict):
             self._pending_price_cache = {**prices, **self._pending_price_cache}
         if isinstance(highs, dict):
             self._pending_today_high_cache = {**highs, **self._pending_today_high_cache}
+        if isinstance(market_caps, dict):
+            self._pending_market_cap_cache = {
+                **market_caps, **self._pending_market_cap_cache,
+            }
         if not self._closing and not self._price_cache_timer.isActive():
             self._price_cache_timer.start()
         logger.warning("현재가 캐시 저장 실패: %s", message)
@@ -4028,7 +4406,10 @@ class MainWindow(QMainWindow):
             return
         now = self._ranking_now()
         self._ensure_today_minute_bar_storage(now)
-        self._minute_aggregator.seed(code, bars, now)
+        self._minute_aggregator.seed(
+            code, bars, now,
+            include_current_snapshot=self._uses_nas_market_data_source(),
+        )
         if code in self._after_close_finalization_codes and self._finalization_minute_bars_complete(code, bars):
             self._after_close_minute_received.add(code)
         same_day_highs = tuple(
@@ -4855,6 +5236,8 @@ class MainWindow(QMainWindow):
                 self._candidate_dialog.stop()
             if self._research_dialog is not None:
                 self._research_dialog.stop()
+            if self._mock_automation_dialog is not None:
+                self._mock_automation_dialog.stop()
             self._refresh_button.setEnabled(False)
             self.statusBar().showMessage("종료 중: 실행 중인 작업을 일시 중지하고 있습니다…")
             if self._google_drive_sync is not None and self._google_drive_sync.connected and self._settings.get("google_drive_auto_upload_on_exit") == "1" and (self._google_drive_dirty or self._google_drive_debounce.isActive()):
@@ -4896,6 +5279,7 @@ class MainWindow(QMainWindow):
             self._google_drive_worker,
             self._update_check_worker,
             self._update_download_worker,
+            *tuple(self._top20_nas_workers),
         )
 
     def _running_workers(self) -> tuple[QThread, ...]:

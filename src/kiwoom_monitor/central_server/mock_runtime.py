@@ -7,6 +7,7 @@ import hmac
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from kiwoom_monitor.application.account_identity import (
@@ -21,6 +22,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.account_identity import (
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import KiwoomMockAccountReader
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import make_mock_transport
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
+from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository
 
 from .execution_runtime import ExecutionRuntime, ManualMockOrderGateway
 from .market_observations import as_kst
@@ -28,6 +30,37 @@ from .mock_account_monitor import MockAccountMonitor, MockAccountRealtimeCollect
 from .rest_broker import CentralRestBroker, MOCK_ACCOUNT_ENDPOINTS
 from .credential_runtime import CredentialRuntimeHooks, CredentialOperationError, ValidatedCredential
 from .account_query import AccountQuerySessionManager
+
+
+MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION = "mock_account_runtime_context/v1"
+
+
+class MockAccountRuntimeMode(StrEnum):
+    MANUAL = "MANUAL"
+    AUTOMATIC = "AUTOMATIC"
+
+
+@dataclass(frozen=True)
+class MockAutomationRuntimeContext:
+    version: str
+    account_ref: str
+    execution_run_id: str
+    spec_id: str
+    admission_id: str
+    control_revision: int
+    credential_revision: int
+
+    def __post_init__(self) -> None:
+        if self.version != MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION:
+            raise ValueError("unsupported mock account runtime context")
+        if not all(str(getattr(self, name)).strip() for name in (
+            "account_ref", "execution_run_id", "spec_id", "admission_id",
+        )):
+            raise ValueError("automatic runtime context identity is required")
+        if not self.execution_run_id.startswith("mock_auto_run_"):
+            raise ValueError("automatic execution run id is invalid")
+        if self.control_revision <= 0 or self.credential_revision <= 0:
+            raise ValueError("automatic runtime revisions must be positive")
 
 
 @dataclass
@@ -208,9 +241,35 @@ class MockCredentialOwner:
         activation = current.payload.get("activation", {}) if current else {}
         account_ref = previous.account_ref if previous else activation.get("account_ref")
         run_id = previous.run_id if previous else activation.get("run_id")
-        if current is None or not account_ref or not run_id:
+        if current is None:
             raise CredentialOperationError("ACCOUNT_IDENTITY_UNVERIFIED")
-        if activation:
+        if not account_ref:
+            bindings = await asyncio.to_thread(self.store.load_account_bindings)
+            account_ref = next((
+                str(binding["account_ref"])
+                for binding in reversed(bindings)
+                if binding.get("credential_profile_id") == profile_id
+                and binding.get("broker") == "kiwoom"
+                and binding.get("environment") == "mock"
+            ), None)
+        if not account_ref:
+            raise CredentialOperationError("ACCOUNT_IDENTITY_UNVERIFIED")
+        try:
+            run_id = str(uuid.UUID(str(run_id)))
+        except (ValueError, TypeError, AttributeError):
+            # 초기 ENV 이관 profile은 검증된 account binding은 있지만 activation
+            # receipt의 UUID run_id가 없거나 임의 문자열일 수 있다. 연결 해제에는
+            # 새 주문 runtime이 필요하지 않으므로 profile/account에 고정된
+            # migration ID를 사용한다.
+            run_id = str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"kiwoom-monitor:legacy-mock-profile:{profile_id}:{account_ref}",
+            ))
+        complete_activation = {
+            "operation_id", "request_id", "request_digest", "account_ref",
+            "run_id", "environment", "committed_at",
+        }.issubset(activation)
+        if complete_activation:
             await asyncio.to_thread(self.store.finalize_credential_activation, {
                 **activation, "provider": "kiwoom_mock", "profile_id": profile_id,
                 "credential_revision": current.revision,
@@ -545,6 +604,96 @@ class MockCredentialOwner:
             self._pending_profiles.discard(profile_id)
             lock.release()
 
+    async def switch_execution_mode(
+        self,
+        profile_id: str,
+        mode: MockAccountRuntimeMode,
+        *,
+        expected_settings_revision: int,
+        credential_revision: int,
+        automation_context: MockAutomationRuntimeContext | None = None,
+    ) -> "MockAccountBundle":
+        """Replace one drained account bundle without sharing its immutable runtime owner."""
+        old = self._bundles.get(profile_id)
+        if old is None or old.binding is None or self._closing:
+            raise CredentialOperationError("PROFILE_RUNTIME_NOT_READY", 503)
+        if (mode is MockAccountRuntimeMode.AUTOMATIC) != (automation_context is not None):
+            raise CredentialOperationError("ACCOUNT_RUNTIME_MODE_INVALID", 422)
+        if automation_context is not None and (
+            automation_context.account_ref != old.account_ref
+            or automation_context.credential_revision != credential_revision
+        ):
+            raise CredentialOperationError("ACCOUNT_RUNTIME_CONTEXT_MISMATCH", 409)
+        scope = self._scope(old.account_ref)
+        settings = await asyncio.to_thread(self.store.load_account_settings, scope)
+        if (
+            settings["revision"] != expected_settings_revision
+            or self._settings_revisions.get(profile_id) != expected_settings_revision
+            or self._revisions.get(profile_id) != credential_revision
+        ):
+            raise CredentialOperationError("ACCOUNT_SETTINGS_REVISION_CONFLICT")
+        if not settings["monitor_enabled"] or not settings["mock_order_enabled"]:
+            raise CredentialOperationError("MOCK_ORDER_TRANSPORT_DISABLED", 409)
+        lock = self._account_locks.setdefault(old.account_ref, asyncio.Lock())
+        if lock.locked() or profile_id in self._pending_profiles or profile_id in self._booting:
+            raise CredentialOperationError("PROFILE_BUSY")
+        await lock.acquire()
+        self._pending_profiles.add(profile_id)
+        try:
+            if old.gateway is not None:
+                await old.gateway.begin_credential_change()
+            recovery = await old.monitor.refresh_recovery()
+            if (
+                recovery.account.reserved_open_buy_won
+                or any(int(quantity) > 0 for quantity in recovery.account.positions.values())
+                or any(order.state.value not in {"FILLED", "CANCELLED", "REJECTED"} for order in recovery.orders)
+                or old.runtime.load_active_intents()
+            ):
+                raise CredentialOperationError("ACCOUNT_RUNTIME_SWITCH_REQUIRES_FLAT", 409)
+            self._bundles.pop(profile_id, None)
+            self._on_change(profile_id, None)
+            await old.close(close_broker=False)
+            latest = await asyncio.to_thread(self.store.load_account_settings, scope)
+            if latest["revision"] != expected_settings_revision:
+                raise RuntimeError("ACCOUNT_SETTINGS_REVISION_CONFLICT")
+            run_id = automation_context.execution_run_id if automation_context else old.run_id
+            new = MockAccountBundle(
+                self.store,
+                settings=old.client._settings,
+                account_ref=old.account_ref,
+                run_id=run_id,
+                credential_profile_id=profile_id,
+                identity_hmac_key=self.hmac_key,
+                order_transport_enabled=True,
+                client=old.client,
+                broker=old.broker,
+                identity=old._identity,
+                binding=old.binding,
+                require_initial_read=True,
+                read_limiter=self._slots,
+                runtime_mode=mode,
+                automation_context=automation_context,
+            )
+            self._contexts[profile_id] = new
+            await new.start()
+            latest = await asyncio.to_thread(self.store.load_account_settings, scope)
+            if latest["revision"] != expected_settings_revision:
+                await new.close(close_broker=False)
+                raise RuntimeError("ACCOUNT_SETTINGS_REVISION_CONFLICT")
+            self._bundles[profile_id] = new
+            self._on_change(profile_id, new)
+            return new
+        except CredentialOperationError:
+            if old.runtime._active and old.gateway is not None:
+                old.gateway.end_credential_change()
+            raise
+        except Exception:
+            self.errors[profile_id] = "ACCOUNT_SETTINGS_RECOVERY_REQUIRED"
+            raise CredentialOperationError("ACCOUNT_SETTINGS_RECOVERY_REQUIRED", 503) from None
+        finally:
+            self._pending_profiles.discard(profile_id)
+            lock.release()
+
 
 class MockAccountBundle:
     """A bundle is never retargeted to another account, run or credential epoch.
@@ -562,6 +711,8 @@ class MockAccountBundle:
         client: Any = None, broker: CentralRestBroker | None = None,
         identity: Any = None, binding: Any = None, require_initial_read: bool = False,
         read_limiter: asyncio.Semaphore | None = None,
+        runtime_mode: MockAccountRuntimeMode = MockAccountRuntimeMode.MANUAL,
+        automation_context: MockAutomationRuntimeContext | None = None,
     ) -> None:
         from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
 
@@ -572,6 +723,15 @@ class MockAccountBundle:
         self._account_ref = account_ref
         self._run_id = run_id
         self._credential_profile_id = credential_profile_id
+        if (runtime_mode is MockAccountRuntimeMode.AUTOMATIC) != (automation_context is not None):
+            raise ValueError("MOCK_RUNTIME_MODE_CONTEXT_INVALID")
+        if automation_context is not None and (
+            automation_context.account_ref != account_ref
+            or automation_context.execution_run_id != run_id
+        ):
+            raise ValueError("MOCK_RUNTIME_MODE_CONTEXT_INVALID")
+        self._runtime_mode = runtime_mode
+        self._automation_context = automation_context
         self._store = store
         self._hmac_key = identity_hmac_key
         if (client is None) != (broker is None) or (identity is None) != (binding is None):
@@ -605,6 +765,13 @@ class MockAccountBundle:
             KiwoomMockAccountReader(
                 self.broker, environment="mock", account_ref=account_ref, now_provider=now,
             ), self.runtime, self.repository, now_provider=now, read_limiter=read_limiter,
+            automation_risk_repository=(
+                ForwardEvaluationRepository(store)
+                if runtime_mode is MockAccountRuntimeMode.AUTOMATIC else None
+            ),
+            automation_binding_revision=(binding.binding_revision if binding is not None else 0),
+            automation_account_scope=(binding.scope if binding is not None else None),
+            new_orders_enabled_on_start=(runtime_mode is MockAccountRuntimeMode.MANUAL),
         )
         async def token_with_limit():
             async with read_limiter:
@@ -617,6 +784,8 @@ class MockAccountBundle:
         self.gateway = ManualMockOrderGateway(
             self.runtime, self.repository, self.monitor.refresh_account, now_provider=now,
         ) if order_transport_enabled else None
+        if self.gateway is not None:
+            self.gateway.set_manual_submit_enabled(runtime_mode is MockAccountRuntimeMode.MANUAL)
 
     @property
     def account_ref(self) -> str:
@@ -629,6 +798,14 @@ class MockAccountBundle:
     @property
     def credential_profile_id(self) -> str:
         return self._credential_profile_id
+
+    @property
+    def runtime_mode(self) -> MockAccountRuntimeMode:
+        return self._runtime_mode
+
+    @property
+    def automation_context(self) -> MockAutomationRuntimeContext | None:
+        return self._automation_context
 
     @property
     def binding(self):

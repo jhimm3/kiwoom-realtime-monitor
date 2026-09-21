@@ -31,6 +31,7 @@ class SelectedAccountAPIIntegrationTests(unittest.TestCase):
         remote = self.remote(); contexts = remote.load_account_contexts()
         self.assertEqual({self.a["credential_profile_id"], self.b["credential_profile_id"]}, {c.credential_profile_id for c in contexts})
         context = next(c for c in contexts if c.credential_profile_id == self.b["credential_profile_id"])
+        self.assertEqual("b1", context.display_label)
         selected = remote.for_account_scope(context.scope)
         batch = selected.query_account_pages("kt00007", "/api/dostk/acnt", {"ord_dt": "20260915"})
         self.assertEqual(batch.page_count, 2); self.assertEqual(batch.context, context)

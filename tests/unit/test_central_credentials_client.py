@@ -123,6 +123,29 @@ class CredentialsClientTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.client.prepare_mock("nas-mock-default", True, "k", "s")
         self.assertEqual(len(self.requests), 2)
 
+    def test_delete_account_profile_uses_revision_and_validates_archive_result(self):
+        self.responses = [{"provider": "kiwoom_mock", "profile_id": "nas-mock-default",
+                           "lifecycle_state": "archived"}]
+
+        result = self.client.delete_account_profile("nas-mock-default", 3)
+
+        self.assertEqual("archived", result["lifecycle_state"])
+        self.assertEqual("DELETE", self.requests[0].method)
+        self.assertEqual({"expected_revision": 3}, json.loads(self.requests[0].data))
+
+    def test_rename_account_profile_changes_only_label_with_revision(self):
+        self.responses = [{"provider": "kiwoom_mock", "profile_id": "nas-mock-default",
+                           "label": "단타 모의"}]
+
+        result = self.client.rename_account_profile("nas-mock-default", 3, "  단타 모의  ")
+
+        self.assertEqual("단타 모의", result["label"])
+        self.assertEqual("PUT", self.requests[0].method)
+        self.assertEqual(
+            {"expected_revision": 3, "label": "단타 모의"},
+            json.loads(self.requests[0].data),
+        )
+
     def test_settings_write_uses_explicit_mock_scope_and_cas(self):
         self.responses = [{"settings": {"scope": {"broker": "kiwoom", "environment": "mock",
             "account_ref": self.operation["target_account_ref"]}, "revision": 9,

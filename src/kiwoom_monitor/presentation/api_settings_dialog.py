@@ -34,6 +34,7 @@ from kiwoom_monitor.infrastructure.central_operational_settings import (
 )
 from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient, KiwoomSettings
 from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import ApiProfiles, LocalApiConfig
+from kiwoom_monitor.infrastructure.local_storage_diagnostics import inspect_local_storage
 from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig
 from kiwoom_monitor.infrastructure.news_ai import DEFAULT_MODELS, MODEL_OPTIONS
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
@@ -142,6 +143,9 @@ class ApiSettingsDialog(QDialog):
         self._nas_resource_status = QLabel("확인 전")
         self._nas_resource_status.setWordWrap(True)
         self._nas_resource_worker: SettingsRequestWorker | None = None
+        self._local_resource_status = QLabel("확인 전")
+        self._local_resource_status.setWordWrap(True)
+        self._local_resource_worker: SettingsRequestWorker | None = None
         self._operations_worker: SettingsRequestWorker | None = None
         self._connection_worker: SettingsRequestWorker | None = None
         self._nas_client: CentralOperationalSettingsClient | None = None
@@ -175,7 +179,7 @@ class ApiSettingsDialog(QDialog):
             layout = QFormLayout(self)
         route_text = {
             "central": "NAS",
-            "central_waiting": "NAS (키움 실시간 대기 중)",
+            "central_waiting": "NAS",
             "local_fallback": "로컬 키움 API (자동 전환 중)",
             "central_retry": "로컬 키움 API (NAS 재연결 확인 중)",
         }.get(active_route, "설정 적용 후 확인")
@@ -183,8 +187,8 @@ class ApiSettingsDialog(QDialog):
         self._active_route_status.setStyleSheet(
             "color: #B36B00; font-weight: bold;"
             if active_route in {"local_fallback", "central_retry"}
-            else "color: #008000; font-weight: bold;" if active_route == "central"
-            else "color: #B36B00; font-weight: bold;" if active_route == "central_waiting" else ""
+            else "color: #008000; font-weight: bold;" if active_route in {"central", "central_waiting"}
+            else ""
         )
         if self._section == "kiwoom":
             layout.addRow("모의 App Key", self._mock_app_key)
@@ -192,6 +196,12 @@ class ApiSettingsDialog(QDialog):
             layout.addRow("실전 App Key", self._real_app_key)
             layout.addRow("실전 Secret Key", self._real_secret_key)
             layout.addRow("이번 실행 환경", self._environment)
+            local_resource_button = QPushButton("사용량 새로고침")
+            local_resource_button.clicked.connect(self._load_local_resource_usage)
+            local_resource_row = QHBoxLayout()
+            local_resource_row.addWidget(local_resource_button)
+            local_resource_row.addWidget(self._local_resource_status, 1)
+            layout.addRow("이 PC 저장량", local_resource_row)
         else:
             layout.addRow("현재 실제 연결", self._active_route_status)
             layout.addRow("NAS 주소", self._server_url)
@@ -579,6 +589,47 @@ class ApiSettingsDialog(QDialog):
         worker.failed.connect(self._resource_failed)
         worker.start()
 
+    def _load_local_resource_usage(self) -> None:
+        if self._local_resource_worker is not None:
+            return
+        self._local_resource_status.setText("확인 중…")
+        worker = SettingsRequestWorker(lambda: inspect_local_storage(self._path.parent))
+        self._local_resource_worker = worker
+        worker.succeeded.connect(self._show_local_resource_usage)
+        worker.failed.connect(self._local_resource_failed)
+        worker.start()
+
+    @Slot(str)
+    def _local_resource_failed(self, message: str) -> None:
+        self._local_resource_worker = None
+        if not self._closed:
+            self._local_resource_status.setText(f"확인 실패 · {message}")
+
+    @Slot(object)
+    def _show_local_resource_usage(self, values: object) -> None:
+        self._local_resource_worker = None
+        if self._closed:
+            return
+        if not isinstance(values, dict):
+            self._local_resource_status.setText("응답 형식 오류")
+            return
+        lines = [f"전체 {self._format_bytes(values.get('total_bytes'))}"]
+        categories = values.get("categories", [])
+        if isinstance(categories, list):
+            for item in categories:
+                if not isinstance(item, dict):
+                    continue
+                lines.append(
+                    f"{item.get('label', '기타')} {self._format_bytes(item.get('bytes'))}"
+                    f" · {int(item.get('files', 0)):,}개 파일"
+                )
+        retention = values.get("retention", [])
+        if isinstance(retention, list):
+            lines.extend(str(item) for item in retention)
+        if values.get("complete") is False:
+            lines.append("일부 파일은 사용 중이거나 접근할 수 없어 제외됨")
+        self._local_resource_status.setText("\n".join(lines))
+
     @Slot(str)
     def _resource_failed(self, message: str) -> None:
         self._nas_resource_worker = None
@@ -600,9 +651,26 @@ class ApiSettingsDialog(QDialog):
         disk_used = self._format_bytes(values.get("data_disk_used_bytes"))
         disk_total = self._format_bytes(values.get("data_disk_total_bytes"))
         limit_text = f" / {limit}" if values.get("container_memory_limit_bytes") is not None else ""
+        category_lines = []
+        categories = values.get("storage_categories", [])
+        if isinstance(categories, list):
+            for item in categories:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label", "기타"))
+                size = self._format_bytes(item.get("estimated_bytes"))
+                rows = item.get("rows")
+                row_text = f" · {int(rows):,}건" if isinstance(rows, (int, float)) else ""
+                category_lines.append(f"{label} {size}{row_text}")
+        retention = values.get("retention_policy", {})
+        retention_text = "자동 정리: 무제한 저장"
+        if isinstance(retention, dict) and retention.get("automatic_deletion_enabled"):
+            retention_text = "자동 정리: 사용 중"
         self._nas_resource_status.setText(
             f"앱 {process} · 컨테이너 {container}{limit_text}\n"
             f"DB {database} · 저장소 {disk_used} / {disk_total}"
+            + ("\n" + "\n".join(category_lines) if category_lines else "")
+            + f"\n{retention_text}"
         )
 
     def _test_connection(self) -> None:

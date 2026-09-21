@@ -12,6 +12,11 @@ from kiwoom_monitor import research_process as rp
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.research_data_source import FrozenResearchDataset
 from scripts import run_research as runner
+from kiwoom_monitor.application.mock_automation_candidate import (
+    CandidateEligibilityStatus,
+    MockAutomationEligibilityPolicy,
+)
+from datetime import datetime, timedelta
 
 
 class FinalExecutionTests(unittest.TestCase):
@@ -62,6 +67,32 @@ class FinalExecutionTests(unittest.TestCase):
         output = json.loads((self.request.runs_dir/row['run_id']/'manifest.json').read_text(encoding='utf-8'))
         self.assertIn('final_holdout_partition', output); self.assertNotIn('development_partition', output)
         self.assertIn('no_cross_candidate_selection', result['limitations'])
+
+    def test_completed_final_evidence_builds_bounded_candidate_publication(self):
+        result = self.execute()
+        row = result['candidates'][0]
+        run = self.repo.load_run(row['run_id'])
+        candidate_hash = rp.final_candidate_spec_hash(
+            self.request, self.prepared.implementation_hash,
+        )
+        policy = MockAutomationEligibilityPolicy(
+            strategy_ref='strategy-final-1', candidate_spec_hash=candidate_hash,
+            frozen_at=datetime.fromisoformat(run['started_at']) - timedelta(seconds=1),
+            minimum_closed_trades=1_000_000, minimum_active_days=1,
+            minimum_net_realized_pnl_won=0, maximum_drawdown_ppm=100_000,
+        )
+        publication = rp.prepare_mock_automation_candidate_publication(
+            self.repo, self.request, implementation_hash=self.prepared.implementation_hash,
+            strategy_ref='strategy-final-1', account_ref='account-ref-1',
+            final_batch_id=self.prepared.batch.batch_id, final_run_id=row['run_id'],
+            eligibility_policy=policy,
+        )
+        self.assertEqual(candidate_hash, publication['package']['candidate_spec_hash'])
+        self.assertEqual(row['logical_result_hash'], publication['package']['source_final']['result_hash'])
+        self.assertEqual(
+            CandidateEligibilityStatus.BLOCKED.value,
+            publication['eligibility_receipt']['status'],
+        )
 
     def test_completed_candidate_is_cached_only_after_report_and_manifest_validation(self):
         first = self.execute(); run_id = first['candidates'][0]['run_id']

@@ -27,9 +27,8 @@ class _Client:
 
     def server_now(self): return "now"
     def get_access_token(self): return "token"
-
-
 class FailoverKiwoomRestClientTests(unittest.TestCase):
+
     def test_connection_failure_uses_local_and_temporarily_skips_primary(self) -> None:
         primary = _Client(error=CentralServerUnavailable("down"))
         fallback = _Client(result=({"ok": True}, False, ""))
@@ -40,6 +39,58 @@ class FailoverKiwoomRestClientTests(unittest.TestCase):
 
         self.assertEqual(1, primary.calls)
         self.assertEqual(2, fallback.calls)
+        self.assertTrue(client.using_fallback)
+
+    def test_successful_primary_retry_clears_exposed_fallback_state(self) -> None:
+        primary = _Client(error=CentralServerUnavailable("down"))
+        fallback = _Client(result=({"ok": True}, False, ""))
+        client = FailoverKiwoomRestClient(primary, fallback, retry_primary_seconds=1)  # type: ignore[arg-type]
+
+        client.request("ka00198", "/rank", {})
+        self.assertTrue(client.using_fallback)
+        primary.error = None
+        primary.result = ({"ok": True}, False, "")
+        client._primary_retry_at = 0.0
+
+        client.request("ka00198", "/rank", {})
+
+        self.assertFalse(client.using_fallback)
+
+    def test_stored_ranking_gateway_failure_then_uses_local_query(self) -> None:
+        class Primary(_Client):
+            def load_stored_ranking(self, _query_type="5"):
+                raise CentralServerUnavailable("gateway down")
+
+        primary = Primary()
+        fallback = _Client(result=({"item_inq_rank": [{"stk_cd": "005930"}]}, False, ""))
+        client = FailoverKiwoomRestClient(primary, fallback, retry_primary_seconds=60)  # type: ignore[arg-type]
+
+        self.assertIsNone(client.load_stored_ranking("5"))
+        self.assertEqual(
+            {"item_inq_rank": [{"stk_cd": "005930"}]},
+            client.request("ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"}),
+        )
+        self.assertEqual(1, fallback.calls)
+        self.assertTrue(client.using_fallback)
+
+    def test_stored_ranking_success_clears_fallback_state(self) -> None:
+        class Primary(_Client):
+            def load_stored_ranking(self, _query_type="5"):
+                self.calls += 1
+                if self.error is not None:
+                    raise self.error
+                return {"item_inq_rank": [{"stk_cd": "005930"}]}
+
+        primary = Primary(error=CentralServerUnavailable("gateway down"))
+        fallback = _Client(result=({"item_inq_rank": []}, False, ""))
+        client = FailoverKiwoomRestClient(primary, fallback, retry_primary_seconds=1)  # type: ignore[arg-type]
+        self.assertIsNone(client.load_stored_ranking("5"))
+        self.assertTrue(client.using_fallback)
+
+        primary.error = None
+        client._primary_retry_at = 0.0
+        self.assertIsNotNone(client.load_stored_ranking("5"))
+        self.assertFalse(client.using_fallback)
 
     def test_central_api_error_does_not_duplicate_request_locally(self) -> None:
         primary = _Client(error=KiwoomApiError("bad request"))

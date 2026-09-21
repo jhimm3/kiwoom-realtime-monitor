@@ -37,6 +37,32 @@ from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRe
 
 
 class CentralServerAppTests(unittest.TestCase):
+    def test_latest_market_caps_returns_old_0b_reference_without_old_price(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            store.save_realtime_snapshots([{
+                "event_type": "trade", "item_key": "005930", "received_at": 1.0,
+                "event": {"type": "trade", "payload": {
+                    "code": "005930", "current_price": 70_000,
+                    "change_rate": 3.5, "market_cap_eok": 4_321_000,
+                }},
+            }])
+            store.close()
+            settings = CentralServerSettings(f"sqlite:///{path}", "private-token")
+            with TestClient(create_app(settings)) as client:
+                response = client.get(
+                    "/api/v1/market/latest-market-caps",
+                    params=[("codes", "005930")],
+                    headers={"Authorization": "Bearer private-token"},
+                )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(4_321_000, response.json()["market_caps"][0]["market_cap_eok"])
+        self.assertNotIn("current_price", response.text)
+        self.assertNotIn("change_rate", response.text)
+
     def test_combined_minute_bars_prefer_sor_and_never_add_all_three_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
@@ -552,6 +578,8 @@ class CentralServerAppTests(unittest.TestCase):
             ("GET", "/api/v1/settings/accounts/{account_ref}"),
             ("GET", "/api/v1/settings/credentials"),
             ("POST", "/api/v1/settings/credentials/{provider}/profiles"),
+            ("PUT", "/api/v1/settings/credentials/{provider}/profiles/{profile_id}"),
+            ("DELETE", "/api/v1/settings/credentials/{provider}/profiles/{profile_id}"),
             ("POST", "/api/v1/settings/credentials/{provider}/profiles/{profile_id}/prepare"),
             ("GET", "/api/v1/settings/credential-operations/{operation_id}"),
             ("POST", "/api/v1/settings/credential-operations/{operation_id}/apply"),
@@ -564,6 +592,7 @@ class CentralServerAppTests(unittest.TestCase):
             ("GET", "/api/v1/news/sources"),
             ("GET", "/api/v1/market/minute-bars"),
             ("GET", "/api/v1/market/recent-minute-bars"),
+            ("GET", "/api/v1/market/latest-market-caps"),
             ("GET", "/api/v1/market/trade-value-comparisons"),
             ("GET", "/api/v1/market/events"),
             ("GET", "/api/v1/market/daily-bars"),
@@ -571,6 +600,15 @@ class CentralServerAppTests(unittest.TestCase):
             ("GET", "/api/v1/market/external-bars"),
             ("GET", "/api/v1/research/observations"),
             ("GET", "/api/v1/research/candidates"),
+            ("POST", "/api/v1/research/mock-automation-candidates"),
+            ("GET", "/api/v1/research/mock-automation-candidates/{account_ref}"),
+            ("POST", "/api/v1/research/mock-automation-specs"),
+            ("GET", "/api/v1/research/mock-automation-specs/{account_ref}"),
+            ("GET", "/api/v1/mock-automation/accounts/{account_ref}"),
+            ("POST", "/api/v1/mock-automation/start"),
+            ("POST", "/api/v1/mock-automation/stop"),
+            ("POST", "/api/v1/mock-automation/resume"),
+            ("GET", "/api/v1/market/top20-statistics"),
             ("GET", "/api/v1/market/snapshots/{kind}"),
             ("GET", "/api/v1/content/{collection}"),
             ("POST", "/api/v1/content/{collection}"),
@@ -793,6 +831,10 @@ class CentralServerAppTests(unittest.TestCase):
         self.assertTrue(response.json()["capabilities"]["journal_news_links_v2"])
         self.assertTrue(response.json()["capabilities"]["combined_minute_bars"])
         self.assertTrue(response.json()["capabilities"]["trade_value_comparisons"])
+        self.assertTrue(response.json()["capabilities"]["mock_automation_candidate_publish_v1"])
+        self.assertTrue(response.json()["capabilities"]["mock_automation_candidate_read_v1"])
+        self.assertTrue(response.json()["capabilities"]["mock_automation_spec_publish_v1"])
+        self.assertFalse(response.json()["capabilities"]["mock_automation_runtime_v1"])
 
     def test_query_reports_unconfigured_kiwoom_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -821,6 +863,11 @@ class CentralServerAppTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertIn("process_memory_bytes", response.json())
         self.assertGreater(response.json()["database_size_bytes"], 0)
+        self.assertEqual(
+            ["news", "market", "research", "account", "other"],
+            [item["category"] for item in response.json()["storage_categories"]],
+        )
+        self.assertFalse(response.json()["retention_policy"]["automatic_deletion_enabled"])
 
     def test_ai_endpoint_reports_unconfigured_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1091,6 +1138,31 @@ class CentralServerAppTests(unittest.TestCase):
                     headers={"Authorization": "Bearer private-token"},
                 )
         self.assertEqual(404, response.status_code)
+
+    def test_top20_statistics_endpoint_returns_nas_aggregate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            settings = CentralServerSettings(f"sqlite:///{path}", "private-token")
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            store.save_dataset_snapshot("top20_index", "2026-09-08", "2026-09-08T15:30", {
+                "minute": "2026-09-08T15:30", "market_values": [3.0, 2.0, 0.0],
+                "capture_state": "realtime_complete",
+            })
+            store.save_dataset_snapshot("market_index_chart", "20260908:kospi", "20260908", {
+                "daily": [{"dt": "20260908", "trde_prica": "26187833"}],
+            })
+            store.close()
+
+            with TestClient(create_app(settings)) as client:
+                response = client.get(
+                    "/api/v1/market/top20-statistics?start_date=2026-09-08&end_date=2026-09-08",
+                    headers={"Authorization": "Bearer private-token"},
+                )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(5.0, response.json()["comparisons"][0]["top20_eok"])
+        self.assertEqual(261878.33, response.json()["comparisons"][0]["kospi_eok"])
 
     def test_stored_fundamentals_and_nxt_documents_bypass_broker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -75,6 +75,16 @@ class FakeStore:
 
 
 class CandidateMonitorTests(unittest.TestCase):
+    def test_default_session_preserves_existing_monitor_identity_format(self) -> None:
+        monitor = CandidateMonitor(
+            FakeStore(), _config(), poll_seconds=1, universe_max_age_seconds=300,
+        )
+
+        self.assertRegex(
+            monitor.monitor_id,
+            r"^shadow:krx_bar_close_breakout:v1:[0-9a-f]{16}$",
+        )
+
     def test_incremental_monitor_records_one_candidate_and_restart_does_not_duplicate(self) -> None:
         store = FakeStore((_rank(1), _bar(2, 0, 1000, 1010), _bar(3, 1, 1010, 1020), _bar(4, 2, 1030, 1040)))
         monitor = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)

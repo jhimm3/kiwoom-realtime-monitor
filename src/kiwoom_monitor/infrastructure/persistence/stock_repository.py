@@ -409,6 +409,28 @@ class StockRepository:
         finally:
             con.close()
 
+    def update_last_market_caps(self, market_caps: dict[str, float]) -> None:
+        """마지막 0B 시가총액을 저장하되 기본정보 확인 시각은 갱신하지 않는다."""
+        values = tuple(
+            (float(market_cap), float(market_cap), code)
+            for code, market_cap in market_caps.items()
+            if code and float(market_cap) > 0
+        )
+        if not values:
+            return
+        con = sqlite3.connect(self._path)
+        try:
+            con.executemany(
+                "UPDATE stocks SET market_cap=?, "
+                "circulating_market_cap=CASE WHEN float_ratio IS NULL "
+                "THEN circulating_market_cap ELSE ? * float_ratio / 100 END, "
+                "updated_at=CURRENT_TIMESTAMP WHERE code=?",
+                values,
+            )
+            con.commit()
+        finally:
+            con.close()
+
     def load_intraday_highs(self, codes: tuple[str, ...], trade_date: date) -> dict[str, int]:
         if not codes:
             return {}

@@ -54,7 +54,7 @@ def selected_high_cycle_periods(value: str) -> tuple[str, ...]:
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None, drive_client_importer: Callable[[], None] | None = None, update_checker: Callable[[], None] | None = None, journal_backup_exporter: Callable[[], None] | None = None, journal_backup_importer: Callable[[], None] | None = None, news_api_settings_opener: Callable[[], None] | None = None, shadow_settings_opener: Callable[[], None] | None = None, research_opener: Callable[[], None] | None = None) -> None:
+    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None, drive_client_importer: Callable[[], None] | None = None, update_checker: Callable[[], None] | None = None, journal_backup_exporter: Callable[[], None] | None = None, journal_backup_importer: Callable[[], None] | None = None, news_api_settings_opener: Callable[[], None] | None = None, shadow_settings_opener: Callable[[], None] | None = None, research_opener: Callable[[], None] | None = None, mock_automation_opener: Callable[[], None] | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
         self._api_path = api_path
@@ -90,6 +90,7 @@ class SettingsDialog(QDialog):
         self._news_api_settings_opener = news_api_settings_opener
         self._shadow_settings_opener = shadow_settings_opener
         self._research_opener = research_opener
+        self._mock_automation_opener = mock_automation_opener
         self._drive_status_label: QLabel | None = None
         self._google_drive_auto_download = QCheckBox("앱 시작 시 자동 다운로드")
         self._google_drive_auto_download.setChecked(settings.get("google_drive_auto_download") == "1")
@@ -440,7 +441,8 @@ class SettingsDialog(QDialog):
             theme_tab.setWindowFlags(Qt.WindowType.Widget)
             tabs.addTab(theme_tab, "종목/테마")
 
-        if self._shadow_settings_opener is not None or self._research_opener is not None:
+        if (self._shadow_settings_opener is not None or self._research_opener is not None
+                or self._mock_automation_opener is not None):
             research_tab = QWidget(); research_form = QFormLayout(research_tab)
             research_form.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
             research_form.addRow(QLabel("NAS를 끄지 않고 Shadow 후보 감지를 시작·중지하고 조건을 바꿉니다."))
@@ -454,6 +456,11 @@ class SettingsDialog(QDialog):
                 research_button.setObjectName("research_settings_button")
                 research_button.clicked.connect(self._research_opener)
                 research_form.addRow("과거 반복 검증", research_button)
+            if self._mock_automation_opener is not None:
+                automation_button = QPushButton("모의 자동운용 상태·제어")
+                automation_button.setObjectName("mock_automation_settings_button")
+                automation_button.clicked.connect(self._mock_automation_opener)
+                research_form.addRow("모의계좌 운용", automation_button)
             tabs.addTab(research_tab, "전략 연구")
 
         external_tab = QWidget(); external_form = QFormLayout(external_tab)

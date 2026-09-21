@@ -19,9 +19,12 @@ from kiwoom_monitor.domain.order_contract import (
 
 
 class ExecutionStore(Protocol):
-    def create_execution_intent(self, value: dict[str, Any], *, ownership: dict[str, str] | None = None) -> bool: ...
-    def append_execution_event(self, intent: dict[str, Any], event: dict[str, Any], *, ownership: dict[str, str] | None = None) -> bool: ...
+    def create_execution_intent(self, value: dict[str, Any], *, ownership: dict[str, Any] | None = None) -> bool: ...
+    def append_execution_event(self, intent: dict[str, Any], event: dict[str, Any], *, ownership: dict[str, Any] | None = None) -> bool: ...
     def load_execution_intent(self, intent_id: str) -> dict[str, Any] | None: ...
+    def load_active_execution_intents(
+        self, environment: str, account_ref: str, run_id: str,
+    ) -> list[dict[str, Any]]: ...
     def find_execution_intent_by_broker_order_id(
         self, environment: str, account_ref: str, run_id: str, broker_order_id: str,
     ) -> dict[str, Any] | None: ...
@@ -29,7 +32,7 @@ class ExecutionStore(Protocol):
     def load_account_execution_events(
         self, environment: str, account_ref: str, after_sequence: int, limit: int,
     ) -> list[dict[str, Any]]: ...
-    def save_execution_account_snapshot(self, value: dict[str, Any], *, ownership: dict[str, str] | None = None) -> bool: ...
+    def save_execution_account_snapshot(self, value: dict[str, Any], *, ownership: dict[str, Any] | None = None) -> bool: ...
     def acquire_execution_runtime(
         self, owner_key: str, owner_token: str, now: str, lease_expires_at: str,
     ) -> bool: ...
@@ -117,6 +120,7 @@ class ExecutionRepository:
     def __init__(self, store: ExecutionStore) -> None:
         self._store = store
         self._ownership: dict[str, str] | None = None
+        self._automation_control: dict[str, Any] | None = None
 
     def bind_runtime_owner(self, account_ref: str, run_id: str, owner_token: str) -> None:
         ownership = {"owner_key": f"mock:{account_ref}", "owner_token": f"{run_id}:{owner_token}", "run_id": run_id}
@@ -125,7 +129,25 @@ class ExecutionRepository:
         self._ownership = ownership
 
     def _write_options(self) -> dict[str, Any]:
-        return {"ownership": dict(self._ownership)} if self._ownership is not None else {}
+        if self._ownership is None:
+            return {}
+        ownership: dict[str, Any] = dict(self._ownership)
+        if self._automation_control is not None:
+            ownership.update(self._automation_control)
+        return {"ownership": ownership}
+
+    def bind_automation_control(self, *, spec_id: str, control_revision: int) -> None:
+        if self._ownership is None:
+            raise RuntimeError("EXECUTION_REPOSITORY_OWNER_REQUIRED")
+        if not spec_id.strip() or type(control_revision) is not int or control_revision <= 0:
+            raise ValueError("valid automation spec and control revision are required")
+        self._automation_control = {
+            "active_spec_id": spec_id,
+            "control_revision": control_revision,
+        }
+
+    def clear_automation_control(self) -> None:
+        self._automation_control = None
 
     def create(self, intent: OrderIntent) -> ExecutionRecord:
         record = ExecutionRecord(intent, OrderState.QUEUED, "", 0, (), None, intent.created_at)
@@ -159,6 +181,18 @@ class ExecutionRepository:
     def load(self, intent_id: str) -> ExecutionRecord | None:
         value = self._store.load_execution_intent(intent_id)
         return _record_from_document(value) if value else None
+
+    def active_intents(
+        self, environment: str, account_ref: str, run_id: str,
+    ) -> tuple[ExecutionRecord, ...]:
+        if environment != "mock" or not account_ref.strip() or not run_id.strip():
+            raise ValueError("mock environment, account_ref and run_id are required")
+        return tuple(
+            _record_from_document(value)
+            for value in self._store.load_active_execution_intents(
+                environment, account_ref, run_id,
+            )
+        )
 
     def find_by_broker_order_id(
         self, environment: str, account_ref: str, run_id: str, broker_order_id: str,

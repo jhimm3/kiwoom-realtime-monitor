@@ -127,20 +127,26 @@ class OrderLifecycle:
             before = filled_quantity
             broker_reported_filled_quantity = snapshot.filled_quantity
             filled_quantity = max(detailed_filled_quantity, broker_reported_filled_quantity)
-            record = self._apply(
-                record, "BROKER_FILL_AGGREGATE",
-                OrderState.FILLED if filled_quantity == intent.quantity else OrderState.PARTIALLY_FILLED,
-                broker_order_id=broker_order_id, quantity=filled_quantity - before,
-                reason="broker cumulative fill; exact execution identity unavailable",
-                occurred_at=snapshot.as_of, broker_as_of=snapshot.as_of,
-                filled_quantity=filled_quantity, fill_ids=tuple(fill_ids),
-                detailed_filled_quantity=detailed_filled_quantity,
-                broker_reported_filled_quantity=broker_reported_filled_quantity,
-                last_broker_as_of=snapshot.as_of,
-            )
+            aggregate_quantity = filled_quantity - before
+            if aggregate_quantity > 0:
+                record = self._apply(
+                    record, "BROKER_FILL_AGGREGATE",
+                    OrderState.FILLED if filled_quantity == intent.quantity else OrderState.PARTIALLY_FILLED,
+                    broker_order_id=broker_order_id, quantity=aggregate_quantity,
+                    reason="broker cumulative fill; exact execution identity unavailable",
+                    occurred_at=snapshot.as_of, broker_as_of=snapshot.as_of,
+                    filled_quantity=filled_quantity, fill_ids=tuple(fill_ids),
+                    detailed_filled_quantity=detailed_filled_quantity,
+                    broker_reported_filled_quantity=broker_reported_filled_quantity,
+                    last_broker_as_of=snapshot.as_of,
+                )
 
         final_state = self._snapshot_state(snapshot, filled_quantity, intent.quantity)
-        if record.state is not final_state or record.last_broker_as_of != snapshot.as_of:
+        if (
+            record.state is not final_state
+            or record.last_broker_as_of != snapshot.as_of
+            or record.broker_reported_filled_quantity != broker_reported_filled_quantity
+        ):
             record = self._apply(
                 record, "BROKER_RECONCILED", final_state,
                 broker_order_id=broker_order_id, broker_as_of=snapshot.as_of,

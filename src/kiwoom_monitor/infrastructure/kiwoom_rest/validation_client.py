@@ -218,6 +218,15 @@ class ParallelValidationClient:
     def load_stored_market_index(self, market: str, trading_date: str):
         return self._stored_primary("load_stored_market_index", market, trading_date)
 
+    def load_stored_top20_index(self, trading_date: str):
+        return self._stored_primary("load_stored_top20_index", trading_date)
+
+    def load_stored_top20_statistics(self, start_date: str, end_date: str):
+        return self._stored_primary("load_stored_top20_statistics", start_date, end_date)
+
+    def load_stored_market_caps(self, codes: tuple[str, ...]):
+        return self._stored_primary("load_stored_market_caps", codes)
+
     def _stored_primary(self, method: str, *args):
         try:
             return getattr(self._primary, method)(*args)
@@ -322,7 +331,6 @@ class ParallelValidationClient:
 
     def get_access_token(self) -> str:
         return self._local.get_access_token()
-
 
 def _canonical(value: object) -> object:
     if isinstance(value, dict):

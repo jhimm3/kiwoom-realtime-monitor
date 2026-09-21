@@ -56,6 +56,8 @@ R3g 선택 계좌 모의 주문도 기존 intent/event 원장을 사용한다(�
 
 `central_second_trade_bars`, `central_minute_bars`, `central_daily_bars`, `central_dataset_snapshots` 및 TOP20 편입 문서는 자동 삭제하지 않고 같은 키의 관측만 갱신한다. `central_api_query_cache`는 만료 자료를 정리하고 `central_realtime_latest`는 최신 상태만 보유하므로 NAS의 모든 테이블이 append-only인 것은 아니다.
 
+`GET /api/v1/diagnostics/resources`의 분류별 저장량은 테이블·인덱스 물리 크기와 `central_documents` 문서 크기 비율을 이용한 운영 진단 추정값이다. 삭제 가능 여부를 뜻하지 않으며, 보호 참조 기반 보존 정책이 확정되기 전에는 자동 정리에 사용하지 않는다.
+
 - `top20_membership`: 30초 관측별 실제 구성과 키움 원본 행
 - `top20_index`: 1분 거래대금 합계, 시장별 값, 구성 종목과 코호트
 - `top20_daily_entrants`: 거래일 중 한 번이라도 편입된 모든 종목
@@ -189,6 +191,10 @@ run의 시작/완료 시각은 운영 메타데이터이며 재현성 hash에는
 | `central_credential_activations` | v19: operation_id PK, provider/profile/revision, request_id/keyed digest, nullable account_ref/run_id/binding_revision, committed_at. profile/revision·request 중복 금지. binding과 한 트랜잭션 |
 
 R2 프로필 생성의 멱등 원장은 기존 `central_documents`의 `credential_profile_requests`를 사용한다.
+연결 해제 후 계좌를 삭제하면 row를 물리 삭제하지 않고 `lifecycle_state=archived`와
+`archived_at`을 기록한다. 일반 인증 목록과 재시작 bootstrap에서는 제외하지만 기존 계좌 신원,
+binding revision, activation receipt와 매매 이력 참조는 유지한다. vault에는 빈 credentials의
+disabled tombstone만 남으므로 과거 App Key/Secret Key는 보존하지 않는다.
 
 R6b3a 시세 역할은 기존 central_documents의 collection=`server_market_profile_settings`,
 owner=`global`, key=`settings`에 저장한다. 필드는 market_profile_id,
@@ -362,5 +368,24 @@ checkpoint는 재시작 위치이며 연구 증거 원본이 아니다. Decision
 | `execution_mock_automation_decision_gates` | `owner=mock account_ref`, `key=gate_id`. 매 action Decision 직전의 binding/lease/session/data/account/손익/장애 및 진행 중 O1 주문 판정. 통과는 한 intent 제출만 허용 |
 | `execution_mock_automation_dispatch_receipts` | `owner=mock account_ref`, `key=receipt_id`. 승인 gate가 결정적 O1 intent와 현재 order state에 연결된 결과. 같은 Decision 재호출은 기존 intent를 사용 |
 | `execution_mock_automation_stop_revisions` | `owner=mock account_ref`, `key=revision_id`. 신규 주문을 즉시 닫은 긴급 중지 사유와 시각. 기존 주문·포지션 자동 취소/청산 근거로 사용하지 않음 |
+| `execution_mock_automation_control` | `owner=key=mock account_ref`. 현재 RUNNING/STOPPED, 단조 증가 `control_revision`, 활성 spec/run을 저장하는 조건부 갱신 문서 |
+| `execution_mock_automation_admission_by_spec` / `execution_mock_automation_lease_by_admission` | 감사 이력을 반복 탐색하지 않기 위한 현재 identity 문서. 원본 불변 admission/lease를 그대로 가리킴 |
+| `execution_mock_automation_current_recovery` / `execution_mock_automation_current_stop` | admission별 최신 broker 대사와 최신 stop 문서. 원본 append-only revision은 그대로 보존 |
+| `execution_mock_automation_approved_gates` / `execution_mock_automation_dispatch_by_intent` | intent별 승인 gate v2와 최초 dispatch receipt 단건 조회 문서. 같은 Decision 재호출로 receipt를 늘리지 않음 |
+| `execution_mock_automation_risk_snapshots` | `owner=mock account_ref`, `key=snapshot_id`. 계좌/run·KST 거래일·broker 관측 구간·binding/account/reconciliation/event/cost revision, FIFO 당일 실현 순손익 또는 unknown 사유, 보유/미체결·장애 근거를 보존하는 append-only 문서 |
+| `execution_mock_automation_current_risk` | `owner=key=mock account_ref`. 단조 증가한 최신 risk reconciliation revision의 단건 조회 문서. 운영 recovery/gate는 이 문서와 같은 snapshot만 사용 |
 
-열여섯 컬렉션은 공개 콘텐츠 API allowlist에 넣지 않은 NAS 내부 문서다. 모든 key는 문서 내용 hash로 만들고 같은 key의 다른 내용은 repository가 거부한다. O1의 단일 NAS 실행자 전제를 그대로 사용하므로 별도 테이블이나 중앙 schema v17을 추가하지 않는다. O2a stage 저장은 보고서 통과와 분리된 명시 작업이며 `approved_for_live`를 만들 수 없다. O2-Mc의 복구 통과도 신규 주문을 열지 않는다. O2-Md는 승인된 한 Decision의 제출 잠금 안에서만 일시적으로 열고 즉시 다시 닫는다.
+이 컬렉션들은 공개 콘텐츠 API allowlist에 넣지 않은 NAS 내부 문서다. 불변 이력 key는 내용 hash를 사용하고 현재 상태 문서는 명시 identity key와 조건부 control revision을 사용한다. O1의 단일 NAS 실행자 전제를 그대로 사용하므로 별도 테이블이나 중앙 schema v17을 추가하지 않는다. O2a stage 저장은 보고서 통과와 분리된 명시 작업이며 `approved_for_live`를 만들 수 없다. O2-M0 복구 통과도 신규 주문을 열지 않으며 승인된 한 Decision의 intent claim에서 현재 control revision을 다시 확인한다.
+## O2-Me1 자동 모의운용 후보 게시 문서
+
+기존 `central_documents` 물리 테이블 안의 다음 세 컬렉션은 서버 내부 전용이며 일반 콘텐츠 API
+allowlist에 포함하지 않는다.
+
+- `execution_mock_automation_candidate_packages`: owner=`strategy_ref`, key=`package_hash`.
+- `execution_mock_automation_eligibility_policies`: owner=`strategy_ref`, key=`package_hash`; 문서 안의
+  `policy_id`는 정책 내용 hash다. 첫 게시 시 이 행을 먼저 고정해 중단 후 다른 합격선으로 바꾸지 못한다.
+- `execution_mock_automation_eligibility_receipts`: owner=`account_ref`, key=`package_hash`.
+
+모두 내용 주소형 불변 문서다. 같은 key에 다른 JSON은 거절한다. receipt는 현재 검증된 mock binding과
+package/policy 계보가 일치할 때만 저장되며 `BLOCKED`도 감사 근거로 저장할 수 있다. 이 저장은 operating
+spec, admission, runtime lease, execution intent를 만들지 않는다.

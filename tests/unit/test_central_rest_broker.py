@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from kiwoom_monitor.central_server.rest_broker import (
     CentralRestBroker, BrokerResult, MAX_MEMORY_CACHE_ENTRIES, MOCK_ACCOUNT_ENDPOINTS,
@@ -28,8 +29,10 @@ class FakeClient:
 
 class CentralRestBrokerTests(unittest.TestCase):
     def test_low_priority_work_reserves_the_upcoming_ranking_boundary(self) -> None:
-        self.assertAlmostEqual(3.351, ranking_reservation_delay(26.999), places=3)
-        self.assertEqual(0.0, ranking_reservation_delay(30.0))
+        self.assertAlmostEqual(8.001, ranking_reservation_delay(26.999), places=3)
+        self.assertEqual(5.0, ranking_reservation_delay(30.0))
+        self.assertEqual(2.5, ranking_reservation_delay(32.5))
+        self.assertEqual(0.0, ranking_reservation_delay(35.0))
         self.assertEqual(0.0, ranking_reservation_delay(38.0))
 
     def test_ranking_request_runs_before_queued_historical_backfill(self) -> None:
@@ -101,6 +104,50 @@ class CentralRestBrokerTests(unittest.TestCase):
             await broker.close()
         asyncio.run(scenario())
 
+    def test_reservation_yields_worker_to_ranking_without_sleeping_full_delay(self) -> None:
+        async def scenario() -> None:
+            client = FakeClient()
+            broker = CentralRestBroker(client, ranking_reservation=True)
+            delays = iter((1.0, 0.0))
+            with patch(
+                "kiwoom_monitor.central_server.rest_broker.ranking_reservation_delay",
+                side_effect=lambda _now: next(delays),
+            ):
+                historical = asyncio.create_task(
+                    broker.request("ka10094", "/api/dostk/chart", {"stk_cd": "005930"})
+                )
+                await asyncio.sleep(0.01)
+                started = time.monotonic()
+                ranking = asyncio.create_task(
+                    broker.request("ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"})
+                )
+                await asyncio.gather(ranking, historical)
+                self.assertLess(time.monotonic() - started, 0.2)
+                self.assertEqual(
+                    ["ka00198", "ka10094"],
+                    [call[0] for call in client.calls],
+                )
+            await broker.close()
+
+        asyncio.run(scenario())
+
+    def test_audit_log_records_only_actual_upstream_request_metadata(self) -> None:
+        async def scenario() -> None:
+            client = FakeClient()
+            broker = CentralRestBroker(client, namespace="market")
+            with self.assertLogs("kiwoom_monitor.kiwoom_api", level="INFO") as captured:
+                await broker.request("ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"})
+                await broker.request("ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"})
+            await broker.close()
+            joined = "\n".join(captured.output)
+            self.assertEqual(1, len(client.calls))
+            self.assertEqual(1, joined.count("api_id=ka00198"))
+            self.assertIn("namespace=market", joined)
+            self.assertIn("queue_wait_ms=", joined)
+            self.assertNotIn("qry_tp", joined)
+
+        asyncio.run(scenario())
+
     def test_passes_continuation_information(self) -> None:
         async def scenario() -> None:
             client = FakeClient()
@@ -140,6 +187,22 @@ class CentralRestBrokerTests(unittest.TestCase):
             await broker.close()
             self.assertEqual("ka10080", handled[0][0])
             self.assertEqual("005930", handled[0][1]["stk_cd"])
+        asyncio.run(scenario())
+
+    def test_unrecorded_request_skips_storage_handler(self) -> None:
+        async def scenario() -> None:
+            handled: list[str] = []
+            broker = CentralRestBroker(
+                FakeClient(),
+                response_handler=lambda api_id, _body, _payload: handled.append(api_id),
+            )
+            result = await broker.request_unrecorded(
+                "ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"},
+            )
+            await broker.close()
+            self.assertEqual("ka00198", result.payload["api_id"])
+            self.assertEqual([], handled)
+
         asyncio.run(scenario())
 
     def test_mock_account_broker_has_separate_allowlist_and_namespace(self) -> None:

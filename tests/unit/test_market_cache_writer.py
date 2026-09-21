@@ -66,7 +66,8 @@ class MarketCacheWriterTests(unittest.TestCase):
                 {},
             )
             writer.enqueue_price_cache(
-                {"005930": 70500}, {"005930": 71000}, date(2026, 9, 14),
+                {"005930": 70500}, {"005930": 71000}, {"005930": 4_200_000.0},
+                date(2026, 9, 14),
             )
 
             self.assertTrue(writer.stop_and_drain())
@@ -76,7 +77,7 @@ class MarketCacheWriterTests(unittest.TestCase):
                     ("005930", minute.isoformat(timespec="minutes")),
                 ).fetchone()
                 stock = connection.execute(
-                    "SELECT last_price FROM stocks WHERE code=?", ("005930",),
+                    "SELECT last_price,market_cap FROM stocks WHERE code=?", ("005930",),
                 ).fetchone()
                 high = connection.execute(
                     "SELECT high_price FROM intraday_highs WHERE trade_date=? AND stock_code=?",
@@ -84,7 +85,7 @@ class MarketCacheWriterTests(unittest.TestCase):
                 ).fetchone()
 
             self.assertEqual((70500,), bar)
-            self.assertEqual((70500,), stock)
+            self.assertEqual((70500, 4_200_000.0), stock)
             self.assertEqual((71000,), high)
 
 

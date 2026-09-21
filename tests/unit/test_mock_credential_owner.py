@@ -10,10 +10,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from kiwoom_monitor.application.account_identity import bind_verified_account_identity
 from kiwoom_monitor.central_server.credential_runtime import CredentialRuntime
 from kiwoom_monitor.central_server.credential_store import CredentialStore
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.mock_runtime import MockCredentialOwner
+from kiwoom_monitor.domain.order_contract import AccountEnvironment
+from kiwoom_monitor.infrastructure.kiwoom_rest.account_identity import VerifiedAccountIdentity
 from kiwoom_monitor.infrastructure.kiwoom_rest.client import KiwoomRestClient, PreparedKiwoomCredentials
 
 
@@ -137,6 +140,58 @@ class MockCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
         new = self.owner.bundle(self.profile)
         self.assertEqual(old.run_id, new.run_id); self.assertIs(old.broker, new.broker)
         self.assertIsNone(new.monitor._task)
+
+    async def test_disable_normalizes_legacy_non_uuid_runtime_run_id(self):
+        old = await self.active()
+        old._run_id = "legacy-mock-run"
+
+        prepared = await self.runtime.prepare(
+            "kiwoom_mock", self.profile, str(uuid.uuid4()), 1, {}, disabled=True,
+        )
+        operation = self.runtime._operations[prepared["operation_id"]]
+        await asyncio.wait_for(asyncio.shield(operation.task), 5)
+
+        self.assertEqual("READY", operation.state)
+        self.assertEqual(old.account_ref, operation.candidate.account_ref)
+        self.assertNotEqual(old.run_id, operation.candidate.run_id)
+        uuid.UUID(operation.candidate.run_id)
+        await self.apply(operation)
+        self.assertEqual("ACTIVE", operation.state)
+        self.assertTrue(self.vault.load("kiwoom_mock", self.profile).disabled)
+
+    async def test_legacy_import_without_activation_can_be_disabled_from_durable_binding(self):
+        legacy = "nas-mock-default"
+        self.store.register_credential_profile(
+            "kiwoom_mock", legacy, datetime.now(timezone.utc).isoformat(),
+        )
+        binding = bind_verified_account_identity(
+            VerifiedAccountIdentity(
+                "kiwoom", AccountEnvironment.MOCK, "f" * 64, datetime.now(timezone.utc),
+            ),
+            self.store,
+            credential_profile_id=legacy,
+        )
+        # Early account registration could retain only account_ref in the vault
+        # before the full activation receipt contract existed.
+        self.vault.save(
+            "kiwoom_mock", legacy,
+            {"app_key": "expired", "secret_key": "fake-secret"},
+            expected_revision=0,
+            activation={"account_ref": binding.scope.account_ref},
+        )
+
+        prepared = await self.runtime.prepare(
+            "kiwoom_mock", legacy, str(uuid.uuid4()), 1, {}, disabled=True,
+        )
+        operation = self.runtime._operations[prepared["operation_id"]]
+        await asyncio.wait_for(asyncio.shield(operation.task), 5)
+
+        self.assertEqual("READY", operation.state)
+        self.assertEqual(binding.scope.account_ref, operation.candidate.account_ref)
+        uuid.UUID(operation.candidate.run_id)
+        await self.apply(operation)
+        self.assertEqual("ACTIVE", operation.state)
+        self.assertTrue(self.vault.load("kiwoom_mock", legacy).disabled)
 
     async def test_disabled_bootstrap_does_not_verify_or_revive_credentials(self):
         old = await self.active()

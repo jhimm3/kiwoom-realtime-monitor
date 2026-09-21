@@ -177,6 +177,28 @@ class MinuteBarRepositoryTests(unittest.TestCase):
                 daily_count = connection.execute("SELECT count(*) FROM market_index_daily_bars").fetchone()[0]
             self.assertEqual((1, 1), (minute_count, daily_count))
 
+    def test_top20_statistics_include_1530_and_prefer_ka20006_market_total(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = MinuteBarRepository(path)
+            for minute, amount in ((datetime(2026, 9, 8, 15, 29), 10.0), (datetime(2026, 9, 8, 15, 30), 5.0)):
+                repository.upsert_top20_trade_value_index(
+                    minute, amount, ("005930",), "realtime_complete",
+                    kospi_trade_value_eok=amount, kospi_stock_count=1,
+                )
+            repository.upsert_market_index_minutes({
+                ("kospi", datetime(2026, 9, 8, 15, 29)): (1.0, 1.0, 1.0, 1.0, 100.0),
+            })
+            repository.replace_market_index_daily(
+                "kospi", (("2026-09-08T00:00", 1.0, 1.0, 1.0, 1.0, 1, 200.0),),
+            )
+
+            _hourly, comparisons = repository.load_top20_statistics(30)
+
+        row = next(value for value in comparisons if value[0].isoformat() == "2026-09-08")
+        self.assertEqual((15.0, 200.0), (row[1], row[2]))
+
     def test_market_index_history_rolls_back_minutes_when_daily_save_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

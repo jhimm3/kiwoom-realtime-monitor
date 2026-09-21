@@ -52,6 +52,95 @@ from kiwoom_monitor.domain.market_data_contract import (
 
 
 class CentralServerDatabaseTests(unittest.TestCase):
+    def test_storage_breakdown_groups_shared_documents_without_deleting_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.upsert_documents("news_article", [{
+                "owner": "005930", "key": "article-1", "document": {"title": "뉴스"},
+            }])
+            store.upsert_documents("journal_v2_reviews", [{
+                "owner": "account-1", "key": "review-1", "document": {"memo": "복기"},
+            }])
+            store.save_dataset_snapshot(
+                "top20_membership", "2026-09-21", "2026-09-21T10:00:00",
+                {"codes": ["005930"]},
+            )
+
+            breakdown = {item["category"]: item for item in store.storage_breakdown()}
+            store.close()
+
+        self.assertEqual({"news", "market", "research", "account", "other"}, set(breakdown))
+        self.assertGreaterEqual(breakdown["news"]["rows"], 1)
+        self.assertGreaterEqual(breakdown["account"]["rows"], 1)
+        self.assertGreaterEqual(breakdown["market"]["rows"], 1)
+
+    def test_top20_statistics_use_regular_close_and_finalized_market_daily_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            for minute, values in (("15:29", [10.0, 5.0, 0.0]), ("15:30", [3.0, 2.0, 0.0])):
+                key = f"2026-09-08T{minute}"
+                store.save_dataset_snapshot("top20_index", "2026-09-08", key, {
+                    "minute": key, "market_values": values,
+                    "capture_state": "realtime_complete",
+                })
+            for market, amount in (("kospi", "26187833"), ("kosdaq", "8152341")):
+                store.save_dataset_snapshot(
+                    "market_index_chart", f"20260908:{market}", "20260908",
+                    {"daily": [{"dt": "20260908", "trde_prica": amount}]},
+                )
+
+            result = store.load_top20_statistics("2026-09-08", "2026-09-08")
+            store.close()
+
+        comparison = result["comparisons"][0]
+        self.assertEqual(20.0, comparison["top20_eok"])
+        self.assertEqual([13.0, 7.0, 0.0], comparison["top20_market_values"])
+        self.assertEqual(261878.33, comparison["kospi_eok"])
+        self.assertEqual(81523.41, comparison["kosdaq_eok"])
+
+    def test_archived_credential_profile_is_retained_with_history_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            created = store.create_credential_profile(
+                "kiwoom_mock", "11111111-1111-4111-8111-111111111111", "이전 계좌", "digest",
+            )
+
+            archived = store.archive_credential_profile("kiwoom_mock", created["profile_id"])
+            profiles = store.list_credential_profiles()
+            store.close()
+
+        self.assertEqual("archived", archived["lifecycle_state"])
+        stored = next(value for value in profiles if value["profile_id"] == created["profile_id"])
+        self.assertEqual("archived", stored["lifecycle_state"])
+
+    def test_credential_profile_rename_changes_only_display_label(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            created = store.create_credential_profile(
+                "kiwoom_mock", "11111111-1111-4111-8111-111111111111", "처음 이름", "digest",
+            )
+
+            renamed = store.rename_credential_profile(
+                "kiwoom_mock", created["profile_id"], "  단타 모의  ",
+            )
+            stored = next(
+                value for value in store.list_credential_profiles()
+                if value["profile_id"] == created["profile_id"]
+            )
+            store.close()
+
+        self.assertEqual({
+            "provider": "kiwoom_mock",
+            "profile_id": created["profile_id"],
+            "label": "단타 모의",
+        }, renamed)
+        self.assertEqual("단타 모의", stored["label"])
+        self.assertEqual("draft", stored["lifecycle_state"])
+
     def test_stock_news_articles_load_latest_identity_with_latest_body(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
@@ -321,6 +410,27 @@ class CentralServerDatabaseTests(unittest.TestCase):
             events = store.load_realtime_snapshots(["005930"])
         self.assertEqual({"trade", "market_state"}, {event["type"] for event in events})
         self.assertNotIn("000660", str(events))
+
+    def test_latest_market_cap_survives_realtime_snapshot_freshness_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            observed_at = time.time() - 3_600
+            store.save_realtime_snapshots([{
+                "event_type": "trade", "item_key": "005930", "received_at": observed_at,
+                "event": {"type": "trade", "payload": {
+                    "code": "005930", "current_price": 70_000,
+                    "market_cap_eok": 4_321_000,
+                }},
+            }])
+
+            fresh_events = store.load_realtime_snapshots(["005930"])
+            market_caps = store.load_latest_market_caps(["005930"])
+
+        self.assertEqual([], fresh_events)
+        self.assertEqual("005930", market_caps[0]["code"])
+        self.assertEqual(4_321_000, market_caps[0]["market_cap_eok"])
+        self.assertIn("+00:00", market_caps[0]["observed_at"])
 
     def test_minute_bar_upsert_and_market_filter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -600,6 +710,90 @@ class CentralServerDatabaseTests(unittest.TestCase):
             "central_documents.document_json IS DISTINCT FROM EXCLUDED.document_json",
             cursor.sql,
         )
+
+    def test_postgres_latest_market_cap_reads_persisted_trade_without_age_filter(self) -> None:
+        class Cursor:
+            sql = ""
+            parameters = ()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, parameters) -> None:
+                self.sql = sql
+                self.parameters = parameters
+
+            def fetchall(self):
+                return [("005930", 1.0, {
+                    "type": "trade", "payload": {"market_cap_eok": 4_321_000},
+                })]
+
+        class Connection:
+            def __init__(self, cursor) -> None:
+                self._cursor = cursor
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def cursor(self):
+                return self._cursor
+
+        cursor = Cursor()
+        store = PostgresQueryStore("postgresql://unused")
+        store._connect = lambda: Connection(cursor)  # type: ignore[method-assign]
+
+        values = store.load_latest_market_caps(["005930"])
+
+        self.assertIn("event_type='trade'", cursor.sql)
+        self.assertNotIn("received_at>", cursor.sql)
+        self.assertEqual((["005930"],), cursor.parameters)
+        self.assertEqual(4_321_000, values[0]["market_cap_eok"])
+
+    def test_postgres_vi_duplicate_ignores_either_unique_identity(self) -> None:
+        class Cursor:
+            rowcount = 0
+            sql = ""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, _parameters) -> None:
+                self.sql = sql
+
+        class Connection:
+            def __init__(self, cursor) -> None:
+                self._cursor = cursor
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def cursor(self):
+                return self._cursor
+
+        cursor = Cursor()
+        store = PostgresQueryStore("postgresql://unused")
+        store._connect = lambda: Connection(cursor)  # type: ignore[method-assign]
+        store.append_vi_events([{
+            "event_id": "same-event", "event_key": "same-key", "stock_code": "005930",
+            "event_kind": "TRIGGER", "vi_type": "STATIC", "effective_at": "2026-09-21T10:00:00",
+            "received_at": 1.0, "available_at": 1.0, "price": 1000, "direction": "+",
+            "trigger_count": 1, "exchange": "KRX", "source": "test", "document": {},
+        }])
+
+        self.assertIn("ON CONFLICT DO NOTHING", cursor.sql)
+        self.assertNotIn("ON CONFLICT(event_key)", cursor.sql)
 
     def test_external_market_bars_accumulate_and_upsert_same_observation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

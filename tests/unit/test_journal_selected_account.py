@@ -25,7 +25,9 @@ class JournalSelectedAccountTests(unittest.TestCase):
     def setUp(self):
         self.scope = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
         self.other = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
-        self.context = AccountQueryContext(self.scope, "profile-a", 1, "nas")
+        self.context = AccountQueryContext(
+            self.scope, "profile-a", 1, "nas", display_label="단타 모의",
+        )
 
     def owner(self, selected=None):
         return SimpleNamespace(_history_expected_scope=self.scope,
@@ -94,6 +96,7 @@ class JournalSelectedAccountTests(unittest.TestCase):
         JournalWindow._refresh_account_choices(owner, self.scope)
         self.assertEqual(combo.count(), 2)
         self.assertEqual(combo.currentData(), self.scope)
+        self.assertEqual(combo.currentText(), "모의 · 단타 모의")
         JournalWindow._refresh_account_choices(owner)
         self.assertEqual(combo.currentData(), self.scope)
         combo.deleteLater(); self.app.processEvents()

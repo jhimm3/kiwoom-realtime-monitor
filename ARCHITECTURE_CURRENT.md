@@ -6,12 +6,26 @@
 편입 준비 과정은 신고가 계산용 일봉이 중앙 DB에 없을 때 KRX와 NXT 대상 `ka10081`을 한 번 채우고,
 `ka10001`은 KST 당일 `observed_at` 문서만 재사용한다. 앱의 자동 화면 갱신은 이 NAS 저장 자료를 읽는다.
 
-2026-09-16 O2-M 재검토 정정: Ma~Md의 기본 구현은 있으나 자동 모의운영 runner는 연결되지 않았다.
-Md는 현재 손익 scalar/출처 문자열을 검사하며 실제 FIFO/비용 근거 producer는 없다.
-중지 경합·체결 전 잔고 재사용·terminal 주문 차단을 가짜 transport로 재현했다.
-아래 기존 Md 설명을 안전 경계 완료로 해석하지 않는다. 현재 다음 단계는
-[설계 결정](reports/O2M_DESIGN_REVIEW_DECISIONS_20260916.md)의 O2-M0 안전 보완이다.
-이번 재검토에서는 제품 코드·NAS·주문 상태를 변경하지 않았다.
+2026-09-21 O2-M0 안전 보완: 계좌별 `mock_automation_control/v1`의 RUNNING/STOPPED와 단조
+증가 revision을 영속화했다. 승인 gate v2는 현재 control revision, 서버 시각, forward 평가기간,
+종결 주문 제외, 대사 진행 상태를 묶고 O1 intent 저장 트랜잭션에서 같은 control을 다시 확인한다.
+ENTER는 손익·비용·데이터 공백·평가기간을 보수적으로 차단하고 EXIT는 같은 run의 확인된 보유에서
+미체결 매도를 뺀 수량만 허용한다. 중지 저장이 실패하면 메모리 주문 gate도 닫으며, 재개는 명시
+요청과 중지 이후의 새 broker 대사를 요구한다. admission/lease/current recovery/current stop,
+approved gate/dispatch receipt는 identity 단건 문서로 읽고 진행 intent는 scope index로 조회한다.
+v1 gate는 읽기만 유지하고 control revision이 없는 기록을 새 승인 근거로 사용하지 않는다.
+O2-Me2에서 실제 위험 snapshot producer와 계좌 bundle mode 전환까지 연결했다. O2-Me3의 지속
+runner는 중앙 관측 cursor/checkpoint와 O1 상세 체결 기반 전략 상태 복구를 수행한다. 별도 supervisor가
+계좌별 수동→자동 bundle 교체, admission, 최신 risk 대사, runner 수명과 저장 RUNNING control의 재시작
+복원을 소유하며 인증된 시작·중지·재개·상태 API가 이를 호출한다. 복원 실패는 신규 주문 OFF 상태와
+상태 사유를 유지한다. 별도 명세 게시 경계가 ELIGIBLE 후보, forward profile, 3단계 stage chain,
+실제 중앙 shadow event와 현재 mock binding을 모두 대조해 READY 명세를 불변 저장한다. 게시만으로
+runner나 주문은 시작하지 않는다. PC에는 활성 모의 profile과 READY 명세, 저장 control/runner 상태를
+읽어 시작·중지·재개하는 운영 창을 연결했다. 후보 package와 같은 실제 shadow 사건을 선택해 평가기간·
+14개 forward 기준·8개 운용 한도를 동결할 수 있다. 게시→입장→위험 대사→가짜 매수·매도 체결→계좌별
+A5 매매일지 투영은 실제 repository/runtime 조합으로 검증했다. 상세 체결이 broker 누적 체결량 전체를
+설명하면 0수량 aggregate event는 만들지 않고 누적 broker 수량만 reconciliation 상태로 보존한다.
+NAS에는 V1 누적 배포 전까지 반영하지 않는다.
 
 CR4c 백엔드는 완료된 자동 가설의 baseline run에서 TRAIN/VALIDATION만 복사한 `DevelopmentEvidence`를
 콘텐츠 주소형 snapshot으로 만든다. campaign 정책에 명시된 등록 파라미터 값 안에서 부모 설정의 한 필드만
@@ -291,10 +305,20 @@ paused TR의 대기는 일반 API 오류로 구분해 REST 로컬 전환을 유�
 관측 간격은 최신 상태와 PC/NAS 로그에 남으며 종목별 누락량이나 별도 영속 DB 이력은 아니다.
 동시 토큰/실시간 운용·실제 교체 간격은 실환경 미검증이다. 누적 배포/운영 확인 R7이 후속이다.
 R7 배포 준비에서 Docker context의 백업/비밀 제외를 보완하고 build 세 곳을 갱신했다.
-현재 누적 build는 `2026.09.16-runtime-credentials-r7-deploy-v1`이다. NAS 원본 백업/소스 동기화와
-전체 763개 hash 확인을 완료했다. 상세는 R7 배포 보고서/대기 문서를 따른다.
-실행 이미지의 R7 build/health 일치·DB 읽기·앱 WS ready·30초 순위 회차 진행을 확인했다.
-HTTPS 8443 프록시의 TLS/DB/WSS ready와 실제 peer 172.23.0.1 신뢰 검증을 완료했다.
+NAS에 마지막으로 동기화한 후보는 `2026.09.21-api-audit-logging-v1`이고, 현재 로컬 누적 build는
+배포 보류 중인 `2026.09.21-o2me3-fake-cycle-v1`이다. 상세는 R7 배포 보고서/대기 문서를 따른다.
+이전 실행 이미지에서 build/health 일치·DB 읽기·앱 WS ready·30초 순위 회차 진행을 확인했다.
+HTTPS 8443 프록시의 TLS/DB/WSS ready는 확인했으나, Compose 재생성 때 자동 gateway가
+172.23.0.1에서 172.18.0.1로 바뀌어 인증 쓰기가 HTTP 426으로 거부됐다. 배포 후보는 현재 확인한
+172.18.0.0/24와 gateway 172.18.0.1을 고정하고 신뢰 프록시도 같은 gateway 값에서 파생한다.
+PC의 Shadow 후보 창은 숨겨진 상태에서도 새 후보 알림을 위해 기본 2초마다 중앙 후보 cursor를 확인한다.
+후보가 없으면 high watermark가 0이라 `after_sequence=0`이 반복되지만 키움 TR은 발생하지 않는다.
+이 요청을 포함한 Uvicorn access 상세는 `server-data/logs/server.log`에 자정 회전·기본 14일 보존하고,
+Container Manager에는 반복 access 줄을 제외한 서버 상태·경고·오류를 남긴다.
+Docker access log는 PC→NAS 호출이라 실제 키움 TR 횟수를 뜻하지 않는다. `CentralRestBroker`가 cache와
+동일 inflight 병합을 지난 실제 전송만 본문 없이 `kiwoom_monitor.kiwoom_api`로 상세 파일에 기록한다.
+PostgreSQL VI append는 event_key와 event_id 어느 고유키가 먼저 충돌해도 중복으로 무시해 동일 1h/보완
+event 재수신이 background 저장 실패로 승격되지 않게 한다.
 앱 저장 NAS 주소도 HTTPS로 전환했고 접속 토큰/다른 설정은 유지한다. 실행 중인 앱은 재시작이 필요하다.
 장중 REG/다계좌·교체 관측 간격·PostgreSQL 통합/실제 Linux 권한 검증은 남아 있다.
 
@@ -600,11 +624,13 @@ Kiwoom WebSocket
   → 기존 Qt 신호 / UI
 ```
 
-NAS에서는 `AutonomousTop20Service`가 24시간 30초마다 순위를 직접 조회한다. 키움 응답 `dt/tm`이 목표 회차보다 오래되면 0.25초 2회, 0.5초 2회, 이후 0.75초 간격으로 제한 재조회하고, 데스크톱도 NAS 저장 순위가 직전 회차이면 같은 간격으로 중앙 DB만 다시 확인한다. 내부 실시간 구독자와 TOP20 거래대금 집계는 시장 관측시간에만 현재/다음 TOP20의 `0B`를 유지한다. 기존 0B 스트림을 종목·KRX/NXT·거래초별 OHLC, 거래량, 거래대금, 체결 건수로 집계하고 1분봉·TOP20 구성/지수·시장 상태와 함께 중앙 DB에 저장한다. 순위와 TOP20 편입은 기존 최신 projection과 함께 D1 불변 revision에 같은 트랜잭션으로 기록되며 캐시 재처리는 합치고 정정 순서는 보존한다. D3a부터 실시간 1분 delta도 stable operation ID로 정확히 한 번 누적하고, 누적 뒤 전체 봉의 형성 revision과 실제 타이머 처리시각의 마감 revision을 남긴다. 구독을 분 중간에 시작했거나 연결이 끊긴 봉은 partial로 남고, 체결이 없던 분은 합성하지 않는다. 새 키움 연결이나 추가 종목 구독은 만들지 않는다. 20:05 또는 다음 거래일 07:40 이전에는 당일 편입 전 종목의 분봉과 최근 250일 일봉을 저우선순위로 보완한다. NAS와 키움 사이의 WebSocket 원본이 끊기면 해당 분의 TOP20 지수는 만들지 않고, 재연결 뒤 저장을 재개한다. 이 누락 시각은 데스크톱 차트에서 `수집 중단` 세로 경계로 표시된다.
+NAS에서는 `AutonomousTop20Service`가 24시간 30초마다 순위를 직접 조회한다. 키움 응답 `dt/tm`이 목표 회차보다 오래되면 0.25초 2회, 0.5초 2회, 이후 0.75초 간격으로 제한 재조회하고, 데스크톱도 NAS 저장 순위가 직전 회차이면 같은 간격으로 중앙 DB만 다시 확인한다. 내부 실시간 구독자와 TOP20 거래대금 집계는 시장 관측시간에만 현재/다음 TOP20의 `0B`를 유지한다. 기존 0B 스트림을 종목·KRX/NXT·거래초별 OHLC, 거래량, 거래대금, 체결 건수로 집계하고 1분봉·TOP20 구성/지수·시장 상태와 함께 중앙 DB에 저장한다. 순위와 TOP20 편입은 기존 최신 projection과 함께 D1 불변 revision에 같은 트랜잭션으로 기록되며 캐시 재처리는 합치고 정정 순서는 보존한다. D3a부터 실시간 1분 delta도 stable operation ID로 정확히 한 번 누적하고, 누적 뒤 전체 봉의 형성 revision과 실제 타이머 처리시각의 마감 revision을 남긴다. 구독을 분 중간에 시작했거나 연결이 끊긴 봉은 partial로 남고, 체결이 없던 분은 합성하지 않는다. 새 키움 연결이나 추가 종목 구독은 만들지 않는다. 20:05 또는 다음 거래일 07:40 이전에는 당일 편입 전 종목의 분봉과 최근 250일 일봉을 저우선순위로 보완한다. NAS와 키움 사이의 WebSocket 원본이 끊기면 해당 분의 TOP20 지수는 만들지 않고, 재연결 뒤 저장을 재개한다. 이 누락 시각은 데스크톱 차트에서 `수집 중단` 세로 경계로 표시된다. NAS 연결 화면의 TOP20 과거 차트와 통계는 이 중앙 `top20_index`를 직접 읽고, PC 직접 연결 화면만 로컬 DB를 읽는다. 정규장 TOP20 일 합계에는 15:30 종가 단일가 체결분을 포함하며, 과거 코스피·코스닥 전체시장 분모는 장후 확정한 `ka20006` 일 거래대금을 사용한다.
 
 같은 중앙 WebSocket은 시장 전체 `1h` VI와 키움 저장 조건검색도 처리한다. 조건식은 매 연결마다 이름으로 seq를 다시 찾고, 정확한 설정 이름 또는 `15%` 부분문자열이 정확히 하나인 경우에만 KRX 실시간 조건검색을 시작한다. 편입 종목은 D 신호나 15% 아래 하락으로 즉시 제거하지 않고 편입 세션과 그 다음 실제 관측 KRX 세션 종료까지 추적한다. 독립 hub subscriber를 쓰되 TOP20과 겹친 종목은 upstream 0B가 한 번만 구독된다. 편입 후 NXT 가능 여부가 확인되면 기존 KRX/NXT 범위와 장후 봉 보완에 합류한다. 추적 종목의 `0g` 상한가·하한가·기준가 묶음을 중앙 최신 문서와 앱 실시간 이벤트로 보존한다. `upl_pric`과 실제 0B 현재가/당일고가로 상한가 사실을 기록하되, 0B 등락률 기준과 가격제한가가 모순되는 전환 구간에는 새 사실과 화면 강조를 만들지 않는다. 주문은 만들지 않는다.
 
 NAS를 통과한 `ka10016` 신고가 목록, `ka10001` 기본정보·시가총액, `ka10100` NXT 가능 여부는 응답 캐시에만 머물지 않는다. 신고가는 조회 시점별 스냅샷으로, 기본정보와 NXT 가능 여부는 시점별 스냅샷과 종목별 최신 문서로 중앙 DB에 함께 보존한다.
+
+메인 표의 시가총액은 실행 중 수신한 `0B` FID 311을 우선한다. 앱 재시작 뒤 NAS 연결은 중앙 `central_realtime_latest`에 영구 보존된 종목별 마지막 0B에서 시가총액과 관측시각만 일괄 읽고, PC 직접 연결은 로컬 `stocks.market_cap`에 백그라운드 저장한 마지막 0B 값을 읽는다. 직접 연결 저장은 유통비율에 따른 유통시가총액도 함께 보정하지만 `fundamentals_updated_at`은 바꾸지 않는다. WebSocket의 5분 초기 snapshot 제한은 오래된 현재가·등락률을 화면에 되살리지 않기 위해 유지한다. 마지막 0B가 없는 신규 종목만 당일 `ka10001` 시가총액을 사용하며, 복원 요청 도중 들어온 실제 0B는 저장 참조값으로 덮어쓰지 않는다.
 
 `YahooDelayedMarketCollector`는 키움 수집 경로와 독립적으로 나스닥·WTI 선물의 전월물과 차월물 5분봉을 5분 간격, 일봉을 하루 한 번 가져온다. 차월물의 최신 세션 거래량 우위를 연속 2회 확인하면 대표 월물을 앞으로 교체하고, 실제 계약별 원본 봉은 모두 보존한다. 시장 방향 등락률은 월물 간 가격을 연결하지 않고 선택된 계약 자체의 전일 종가를 기준으로 계산한다. 실패는 상태 문서에만 남기며 중앙 REST 큐나 실시간 순위를 중단하지 않는다. 이 공급원은 임시 지연 시세다.
 
@@ -643,7 +669,7 @@ Naver/DART → news process 또는 CentralNewsService → 기사 저장
 기사 → 48시간 사건 묶음 → AI provider(OpenAI/Gemini/Claude) → 분석/사용량 저장
 ```
 
-직접 연결에서는 뉴스 프로세스가 로컬 공급자를 사용한다. 중앙 연결에서는 중앙 뉴스·AI API를 우선하고 받은 결과를 `news.sqlite3`에 반영한다. 중앙 서버는 기사 제목 projection을 먼저 저장하면서 불변 기사 revision과 BODY job을 같은 트랜잭션에 기록한다. 단일 bounded worker가 본문 추출, 기록 전용 공급계약 RULE, 선택적 AI를 처리하므로 느린 공급자가 다음 제목 수집을 막지 않는다. 본문·규칙 사건·기사 소속·AI는 입력 revision·처리 버전·가용시각을 가진 새 revision으로 누적되고 `news_article/news_ai` 최신 projection은 기존 UI 호환을 위해 유지된다. 공급계약 규칙은 사실 근거와 해석을 함께 설명 가능한 JSON으로 저장하지만 현재 화면 후보, 자동 AI 필터, 수동 분석, 주문에는 연결하지 않는다. AI 프롬프트와 캐시 키는 선택한 종목을 분석 기준으로 고정한다. 기사가 그 종목을 단순 나열했을 뿐 직접 영향 근거가 없으면 종목 분석으로 억지 해석하지 않고 `판단 자료 부족`으로 처리한다.
+직접 연결에서는 뉴스 프로세스가 로컬 공급자를 사용한다. 중앙 연결에서는 중앙 뉴스·AI API를 우선하고 선택 종목 목록만 `news.sqlite3` 화면 캐시에 반영한다. 개인 NAS 모드의 일반 콘텐츠 동기화는 전체 `news_article/news_ai/news_ai_shared` 카탈로그를 PC로 복제하거나 PC에서 다시 올리지 않으며, 선택 목록은 `/api/v1/news/search`, 선택 기사 상세는 `/api/v1/news/history/*`로 읽는다. 테마와 계좌별 매매일지 뉴스 연결은 기존 증분 동기화를 유지한다. 중앙 서버는 기사 제목 projection을 먼저 저장하면서 불변 기사 revision과 BODY job을 같은 트랜잭션에 기록한다. 단일 bounded worker가 본문 추출, 기록 전용 공급계약 RULE, 선택적 AI를 처리하므로 느린 공급자가 다음 제목 수집을 막지 않는다. 본문·규칙 사건·기사 소속·AI는 입력 revision·처리 버전·가용시각을 가진 새 revision으로 누적되고 `news_article/news_ai` 최신 projection은 기존 UI 호환을 위해 유지된다. 공급계약 규칙은 사실 근거와 해석을 함께 설명 가능한 JSON으로 저장하지만 현재 화면 후보, 자동 AI 필터, 수동 분석, 주문에는 연결하지 않는다. AI 프롬프트와 캐시 키는 선택한 종목을 분석 기준으로 고정한다. 기사가 그 종목을 단순 나열했을 뿐 직접 영향 근거가 없으면 종목 분석으로 억지 해석하지 않고 `판단 자료 부족`으로 처리한다.
 
 중앙 모드의 종목 뉴스 목록은 최신 `fulltext` 원문이 있으면 제목·요약과 원문 도입부를 함께 사용해 관련성을 다시 계산한다. 이미 발생한 가격 움직임을 중계하고 뒤쪽에 과거 계약·일반 기대를 붙인 기사는 낮은 관련성으로 분리하되, 제목이나 원문 도입부에서 당일 확인 사건을 제시한 기사는 보존한다. 사용자가 대표 기사를 선택할 때는 별도 worker로 NAS의 기사·본문·공급계약 이력을 읽는다. 현재 목록의 identity와 제목·요약이 일치하는 기사 revision, 그 기사에 속한 본문 revision, 선택 종목에 속한 사건 revision만 결합한다. 종목별 본문이 아직 없으면 같은 identity와 제목·요약인 GLOBAL 기사 본문을 사용할 수 있지만 다른 종목 사건은 붙이지 않는다. 공급계약 v2는 계약 표현과 같은 문장의 금액만 선택하고, 수주잔고와 시세 기사 뒤쪽의 과거 계약을 새 사건으로 만들지 않는다. 이 영역의 규칙 점수와 추가 확인 표시는 기존 AI 판단과 별도 근거이며 AI나 주문을 새로 실행하지 않는다.
 
@@ -728,3 +754,27 @@ CR0에서 식별·OOS 선택·후보 사전 제한과 중단 attempt 재시도, 
 - D4 `CandidateMonitor`는 NAS에 저장된 TOP20과 strict KRX 완료봉 revision을 sequence 순서로 D3 Factor/Family에 넣는다. 전략 JSON과 TOP20 최신성 한도를 환경변수로 명시한 경우만 생성하며 기본은 OFF다. 중앙 v15 원장에는 판단·후보·재시작 checkpoint만 남고 주문·체결·실제 일지는 만들지 않는다.
 - 데스크톱 `Shadow 후보` 창은 인증 cursor API를 낮은 주기로 읽는다. 첫 연결 목록은 무음이고 실행 중 새 ACTIVE event ID만 PC 로컬 설정에 따라 화면·beep로 알린다. 후보 생성의 on/off와 전략 주요 조건은 NAS 운영 설정 DB에 저장하고 같은 서버 프로세스에서 감지 task만 즉시 시작·중지·교체한다. `.env`는 최초 기본값이며 창과 소리 수명은 NAS 후보 생성과 분리된다.
 - 사용자가 NAS·로컬 병행 검증을 켠 경우에도 NAS 조회·실시간이 주 입력이다. 로컬 직접 결과는 `ParallelValidationClient`와 `RealtimeValidationRecorder`에서만 비교하며 주 화면·같은 연구 run에 재입력하지 않는다. 대조 JSONL은 공유 불변 참조가 있는 값 차이, 지연, 누락, 중복, 역순, 비교 불가를 구분하고 비교 가능 분모와 bounded 도착 간격 통계를 포함한다. 공급자 사건 ID가 없는 동일초 복수 체결은 n번째 사건 일치를 단정하지 않는다. 이 기능은 같은 키움 공급 경로의 전달·변환·저장 대조이며 독립 시장 데이터 공급자 검증으로 해석하지 않는다.
+2026-09-21 O2-Me1 후보 게시: PC의 CR3 final 원장·완료 run·OOS 보고서에서 기존
+`final_candidate/v1` identity를 유지한 별도 `mock_automation_candidate_package/v1`을 만든다. final 실행
+전에 동결한 수치 정책이 미정이거나 결과가 기준을 통과하지 못하면 eligibility receipt는 BLOCKED다.
+NAS 전용 인증 API는 등록 family, 정규 설정, package/policy/receipt hash와 계보, 현재 scientific hash,
+mock 계좌 binding을 다시 검사해 비공개 중앙 문서에 저장한다. 게시 성공은 operating spec 입장이나
+runtime lease·주문 시작을 뜻하지 않는다.
+
+2026-09-21 O2-Me2 위험 근거와 owner 연결: 자동 모드의 `MockAccountBundle`만 기존 모의계좌
+broker queue로 `kt00015` 실제 비용을 읽고, O1 상세 FILL과 broker 복구 잔고를 계좌별 FIFO로
+대조한다. 결과는 `mock_automation_risk_snapshot/v1` 불변 문서와 계좌별 current revision으로 저장된다.
+전일 매수 원가는 오늘 매도에 이어지되 오늘 실현분만 당일 손익에 포함한다. 비용 누락,
+aggregate-only 체결, O1 순포지션과 broker 잔고 불일치는 unknown으로 닫힌다. KST 날짜가 바뀌면
+과거 보유의 실제 비용 근거를 다시 읽고, 평상시에는 당일 비용만 갱신한다.
+
+수동/자동 전환은 별도 runtime을 겹쳐 띄우지 않는다. 기존 credential owner가 flat broker 상태를
+확인하고 수동 명령 접수를 닫은 뒤 gateway·account query·WebSocket callback·monitor 작업을 drain하고
+기존 lease를 해제한다. 그 뒤 불변 `mock_auto_run_<hash>`의 새 bundle이 lease를 얻고 broker를 다시
+대조한다. 자동 모드에서는 수동 신규 주문을 거절하지만 조회·명시 취소·체결 대사는 같은 owner 안에
+남는다. 저장된 최신 risk ID/revision과 연결된 recovery/Decision 경로만 운영 입력으로 사용한다.
+지속 runner와 NAS 운영 API, READY 명세 게시·조회 API, 저장 명세의 PC 시작·중지·재개 UI는
+O2-Me3에서 연결했다. 계좌별 게시 후보와 현재 검증 바인딩을 읽는 인증 API/PC client, ELIGIBLE 후보와
+실제 shadow 증거 선택, 평가기간·forward 기준·운용 한도 동결 및 READY 게시 UI까지 연결했다.
+전체 fake 통합 fixture는 남아 있다. 현재 실제
+shadow 후보 생성은 breakout family만 지원한다.

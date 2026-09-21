@@ -62,10 +62,13 @@ class CentralContentSyncService:
     def pending_collections(self) -> tuple[str, ...]:
         return self._pending_collections
 
-    def push(self, main_database_path: Path, news_database_path: Path) -> CentralContentSyncResult:
+    def push(
+        self, main_database_path: Path, news_database_path: Path, *,
+        sync_news_catalog: bool = True,
+    ) -> CentralContentSyncResult:
         self._pending_collections = ()
         self._load_push_manifest(news_database_path)
-        news = self._read_news(news_database_path)
+        news = self._read_news(news_database_path, include_catalog=sync_news_catalog)
         themes = self._read_themes(main_database_path)
         v2_enabled = self._journal_news_links_v2_enabled()
         counts: dict[str, int] = {}
@@ -140,7 +143,10 @@ class CentralContentSyncService:
             theme_metadata=counts.get("theme_metadata", 0),
         )
 
-    def pull(self, main_database_path: Path, news_database_path: Path) -> CentralContentSyncResult:
+    def pull(
+        self, main_database_path: Path, news_database_path: Path, *,
+        sync_news_catalog: bool = True,
+    ) -> CentralContentSyncResult:
         """중앙 자료를 현재 PC의 캐시에 병합한다. 중앙 자료는 삭제하지 않는다."""
         self._pending_collections = ()
         self._load_pull_cursors(news_database_path)
@@ -148,10 +154,9 @@ class CentralContentSyncService:
         collections: dict[str, list[dict[str, Any]]] = {}
         next_cursors = dict(self._pull_cursors)
         pending: list[str] = []
-        names = [
-            "news_article", "news_ai", "news_ai_shared", "journal_news_link",
-            "theme_profile", "theme_stock", "theme_metadata",
-        ]
+        names = ["journal_news_link", "theme_profile", "theme_stock", "theme_metadata"]
+        if sync_news_catalog:
+            names[0:0] = ["news_article", "news_ai", "news_ai_shared"]
         if v2_enabled:
             names.append("journal_v2_news_links")
         else:
@@ -265,6 +270,7 @@ class CentralContentSyncService:
 
     def seed_push_manifest(
         self, main_database_path: Path, news_database_path: Path, *, allow_existing: bool = False,
+        sync_news_catalog: bool = True,
     ) -> bool:
         """기존 seeded 설치를 한 번만 증분 manifest 기준선으로 이전한다."""
         path = news_database_path.with_name("central_content_push_manifest.json")
@@ -272,7 +278,7 @@ class CentralContentSyncService:
             return False
         self._load_push_manifest(news_database_path)
         for collection, documents in {
-            **self._read_news(news_database_path),
+            **self._read_news(news_database_path, include_catalog=sync_news_catalog),
             **self._read_themes(main_database_path),
         }.items():
             for document in documents:
@@ -317,7 +323,9 @@ class CentralContentSyncService:
             raise
 
     @staticmethod
-    def _read_news(path: Path) -> dict[str, list[dict[str, Any]]]:
+    def _read_news(
+        path: Path, *, include_catalog: bool = True,
+    ) -> dict[str, list[dict[str, Any]]]:
         result = {name: [] for name in (
             "news_article", "news_ai", "news_ai_shared", "news_request_usage",
             "journal_news_link", "journal_v2_news_links",
@@ -328,7 +336,7 @@ class CentralContentSyncService:
         connection.row_factory = sqlite3.Row
         try:
             tables = _table_names(connection)
-            if "stock_news" in tables:
+            if include_catalog and "stock_news" in tables:
                 for row in connection.execute("SELECT * FROM stock_news"):
                     values = dict(row)
                     item = _document(
@@ -337,19 +345,19 @@ class CentralContentSyncService:
                     item["collector_id"] = f"local-sync:{socket.gethostname().strip() or 'unknown'}"
                     item["collection_scope"] = "local_projection_sync"
                     result["news_article"].append(item)
-            if "stock_news_ai" in tables:
+            if include_catalog and "stock_news_ai" in tables:
                 for row in connection.execute("SELECT * FROM stock_news_ai"):
                     values = dict(row)
                     result["news_ai"].append(_document(
                         str(values.get("stock_code", "")), str(values.get("identity", "")), values,
                     ))
-            if "news_ai_shared" in tables:
+            if include_catalog and "news_ai_shared" in tables:
                 for row in connection.execute("SELECT * FROM news_ai_shared"):
                     values = dict(row)
                     result["news_ai_shared"].append(_document(
                         "shared", str(values.get("identity", "")), values,
                     ))
-            if "news_ai_requests" in tables:
+            if include_catalog and "news_ai_requests" in tables:
                 for row in connection.execute("SELECT * FROM news_ai_requests"):
                     values = dict(row)
                     key = "|".join(str(values.get(name, "")) for name in (
@@ -436,7 +444,7 @@ class CentralContentSyncService:
                 for collection, (table, conflict) in mappings.items():
                     if table not in tables:
                         continue
-                    for value in collections[collection]:
+                    for value in collections.get(collection, []):
                         document = value.get("document")
                         if isinstance(document, dict) and _upsert_row(connection, table, conflict, document):
                             counts[collection] += 1

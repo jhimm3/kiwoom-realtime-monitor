@@ -308,3 +308,16 @@ class PlannedReconnectTableTests(unittest.TestCase):
         self.assertEqual("central", owner._active_api_route)
         self.assertEqual("기존 최신 순위", table.item(0, 0).text())
         table.deleteLater()
+
+    def test_direct_realtime_status_is_labeled_as_this_pc(self):
+        owner = SimpleNamespace(
+            _active_api_route="central", _set_connected_api_status=Mock(),
+            statusBar=lambda: SimpleNamespace(showMessage=Mock()),
+        )
+
+        MainWindow._on_realtime_status_changed(
+            owner, "실시간 체결 구독 중 · KRX · 20종목",
+        )
+
+        self.assertEqual("local", owner._active_api_route)
+        owner._set_connected_api_status.assert_called_once_with()

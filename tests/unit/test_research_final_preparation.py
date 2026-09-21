@@ -63,6 +63,10 @@ class FinalPreparationTests(unittest.TestCase):
             runs_dir=self.root/'other-runs', resource_limits=replace(self.request.resource_limits, memory_mb=1024),
             evaluation=self.fixture.batch.request.evaluation)
         expected = rp.final_candidate_spec_hash(self.request, self.code_hash)
+        self.assertEqual(
+            'b3b3b2343b53cf880dad7e8191a98bdf572bacf6a0c74679e9594d4a5217613e',
+            rp.final_candidate_spec_hash(self.request, 'a' * 64),
+        )
         self.assertEqual(expected, rp.final_candidate_spec_hash(changed, self.code_hash))
         for request, code in ((replace(self.request, strategy=replace(self.request.strategy, buffer_bps=self.request.strategy.buffer_bps+1)), self.code_hash),
                              (replace(self.request, execution=replace(self.request.execution, cost_model=replace(self.request.execution.cost_model, slippage_bps=12))), self.code_hash),

@@ -11,11 +11,13 @@ from kiwoom_monitor.infrastructure.central_settings_sync import CentralSettingsS
 class _Client:
     def __init__(self) -> None:
         self.remote: dict[str, list[dict[str, object]]] = {}
+        self.upsert_calls: list[tuple[str, list[dict[str, object]]]] = []
 
     def load_all(self, collection: str) -> list[dict[str, object]]:
         return list(self.remote.get(collection, ()))
 
     def upsert(self, collection: str, documents: list[dict[str, object]]) -> int:
+        self.upsert_calls.append((collection, list(documents)))
         self.remote.setdefault(collection, []).extend(documents)
         return len(documents)
 
@@ -97,6 +99,29 @@ class CentralSettingsSyncTests(unittest.TestCase):
             self.assertEqual((0, 9, 333), row)
             document = client.remote["app_column_settings"][-1]["document"]
             self.assertNotIn("width", document)
+
+    def test_unchanged_settings_and_columns_are_not_posted_every_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "monitor.sqlite3"
+            connection = sqlite3.connect(path)
+            connection.executescript("""
+                CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                INSERT INTO settings VALUES('rank_query_type','5');
+                CREATE TABLE central_setting_versions(setting_key TEXT PRIMARY KEY,updated_at TEXT NOT NULL);
+                INSERT INTO central_setting_versions VALUES('rank_query_type','2026-09-21T12:00:00+00:00');
+                CREATE TABLE column_settings(column_name TEXT PRIMARY KEY,visible INTEGER,position INTEGER,width INTEGER);
+                INSERT INTO column_settings VALUES('stock',1,1,333);
+                CREATE TABLE central_column_setting_versions(column_name TEXT PRIMARY KEY,updated_at TEXT NOT NULL);
+                INSERT INTO central_column_setting_versions VALUES('stock','2026-09-21T12:00:00+00:00');
+            """)
+            connection.close()
+            client = _Client()
+            service = CentralSettingsSyncService(client)  # type: ignore[arg-type]
+
+            self.assertEqual(2, service.sync(path))
+            client.upsert_calls.clear()
+            self.assertEqual(0, service.sync(path))
+            self.assertEqual([], client.upsert_calls)
 
 
 if __name__ == "__main__":

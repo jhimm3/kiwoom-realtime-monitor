@@ -173,23 +173,40 @@ class MinuteTradeValueAggregator:
         end = start + timedelta(minutes=minutes)
         return sum(bar.trade_value_eok for bar in self._bars.get(code, ()) if start <= bar.minute < end)
 
-    def seed(self, code: str, bars: tuple[MinuteOhlcv, ...], now: datetime | None = None) -> None:
+    def seed(
+        self, code: str, bars: tuple[MinuteOhlcv, ...], now: datetime | None = None,
+        *, include_current_snapshot: bool = False,
+    ) -> None:
         """REST로 받은 과거 1분봉을 시간순으로 넣어 접속 전 누락분을 보완한다."""
         now = now or datetime.now()
         current_minute = now.replace(second=0, microsecond=0)
         by_minute = {
             bar.minute: bar for bar in bars if bar.minute.date() == now.date() and bar.minute < current_minute
         }
-        # REST 응답이 아직 진행 중인 현재 분봉을 포함하더라도, 그 분은
-        # 이미 0B 체결로 쌓인 값을 유지한다. 보완 시점에 실시간 값이
-        # 사라지거나 서로 섞이는 일을 막는다.
-        by_minute.update(
-            {
-                bar.minute: bar
-                for bar in self._bars.get(code, ())
-                if bar.minute.date() == now.date() and bar.minute >= current_minute
-            }
-        )
+        live_current = {
+            bar.minute: bar
+            for bar in self._bars.get(code, ())
+            if bar.minute.date() == now.date() and bar.minute >= current_minute
+        }
+        if include_current_snapshot:
+            # NAS는 앱이 열리기 전부터 현재 분봉을 계속 집계한다. 중앙
+            # snapshot과 앱 접속 뒤 0B 누적이 겹칠 수 있으므로 합산하지
+            # 않고 거래대금이 더 진행된 한 벌을 기준으로 이어 간다.
+            for snapshot in bars:
+                if snapshot.minute.date() != now.date() or snapshot.minute < current_minute:
+                    continue
+                live = live_current.get(snapshot.minute)
+                by_minute[snapshot.minute] = (
+                    snapshot
+                    if live is None or snapshot.trade_value_eok >= live.trade_value_eok
+                    else live
+                )
+            for minute, live in live_current.items():
+                by_minute.setdefault(minute, live)
+        else:
+            # 직접 Kiwoom REST 응답의 진행 중 분봉은 실시간 수신과 시점이
+            # 불명확하므로 기존처럼 이미 쌓인 0B 값을 유지한다.
+            by_minute.update(live_current)
         ordered = sorted(by_minute.values(), key=lambda bar: bar.minute)
         self._bars[code] = deque(ordered[-self._max_minutes :], maxlen=self._max_minutes)
 

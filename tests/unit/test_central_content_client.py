@@ -174,6 +174,92 @@ class CentralContentClientTests(unittest.TestCase):
         self.assertIn("after_sequence=7", requests[0].full_url)
         self.assertIn("limit=50", requests[0].full_url)
 
+    def test_mock_automation_spec_publication_preserves_frozen_documents(self) -> None:
+        requests = []
+
+        def opener(request, **_kwargs):
+            requests.append(request)
+            return Response(json.dumps({"status": "saved", "orders_started": False}).encode())
+
+        result = CentralContentClient(
+            "https://nas.test", "token", opener=opener,
+        ).publish_mock_automation_spec(
+            account_ref="account-ref", credential_profile_id="mock-profile",
+            expected_binding_revision=3, shadow_event_id="shadow-event",
+            forward_profile={"profile_id": "forward-1"},
+            stage_revisions=[{"revision_id": str(index)} for index in range(3)],
+            operating_spec={"spec_id": "spec-1"},
+        )
+
+        body = json.loads(requests[0].data.decode())
+        self.assertEqual("saved", result["status"])
+        self.assertEqual("POST", requests[0].method)
+        self.assertTrue(requests[0].full_url.endswith("/api/v1/research/mock-automation-specs"))
+        self.assertEqual("shadow-event", body["shadow_event_id"])
+        self.assertEqual(["0", "1", "2"], [row["revision_id"] for row in body["stage_revisions"]])
+        self.assertFalse(result["orders_started"])
+
+    def test_mock_automation_candidate_list_is_account_and_profile_scoped(self) -> None:
+        requests = []
+
+        def opener(request, **_kwargs):
+            requests.append(request)
+            return Response(json.dumps({"candidates": []}).encode())
+
+        result = CentralContentClient(
+            "https://nas.test", "token", opener=opener,
+        ).load_mock_automation_candidates(
+            "account/ref", credential_profile_id="mock profile",
+        )
+
+        self.assertEqual([], result["candidates"])
+        self.assertIn(
+            "/api/v1/research/mock-automation-candidates/account%2Fref?"
+            "credential_profile_id=mock+profile",
+            requests[0].full_url,
+        )
+
+    def test_mock_automation_read_and_control_paths_are_account_scoped(self) -> None:
+        requests = []
+
+        def opener(request, **_kwargs):
+            requests.append(request)
+            return Response(json.dumps({"ok": True}).encode())
+
+        client = CentralContentClient("https://nas.test", "token", opener=opener)
+        client.load_mock_automation_specs("account/ref")
+        client.load_mock_automation_status(
+            "account/ref", credential_profile_id="mock profile",
+        )
+        client.start_mock_automation(
+            account_ref="account-ref", credential_profile_id="mock-profile",
+            spec_id="spec-1", expected_settings_revision=4, credential_revision=5,
+        )
+        client.stop_mock_automation(
+            account_ref="account-ref", credential_profile_id="mock-profile",
+            spec_id="spec-1", expected_control_revision=6, reason="user stop",
+        )
+        client.resume_mock_automation(
+            account_ref="account-ref", credential_profile_id="mock-profile",
+            spec_id="spec-1", expected_control_revision=7,
+            expected_settings_revision=8, credential_revision=9, reason="user resume",
+        )
+
+        self.assertIn(
+            "/api/v1/research/mock-automation-specs/account%2Fref", requests[0].full_url,
+        )
+        self.assertIn(
+            "/api/v1/mock-automation/accounts/account%2Fref?credential_profile_id=mock+profile",
+            requests[1].full_url,
+        )
+        self.assertEqual(
+            ["/api/v1/mock-automation/start", "/api/v1/mock-automation/stop",
+             "/api/v1/mock-automation/resume"],
+            [request.full_url.removeprefix("https://nas.test") for request in requests[2:]],
+        )
+        self.assertEqual(6, json.loads(requests[3].data.decode())["expected_control_revision"])
+        self.assertEqual(9, json.loads(requests[4].data.decode())["credential_revision"])
+
 
 if __name__ == "__main__":
     unittest.main()

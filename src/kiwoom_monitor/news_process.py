@@ -373,6 +373,7 @@ def main(arguments: list[str] | None = None) -> int:
         ))
         main_database_path = database_path.with_name("monitor.sqlite3")
         last_content_signature = _news_content_signature(database_path)
+        sync_news_catalog = source.mode != "personal_server"
 
         def schedule_content_sync() -> None:
             nonlocal last_content_signature
@@ -386,8 +387,14 @@ def main(arguments: list[str] | None = None) -> int:
                 nonlocal last_content_signature
                 try:
                     if local_changed:
-                        content_sync.push(main_database_path, database_path)
-                    pulled = content_sync.pull(main_database_path, database_path)
+                        content_sync.push(
+                            main_database_path, database_path,
+                            sync_news_catalog=sync_news_catalog,
+                        )
+                    pulled = content_sync.pull(
+                        main_database_path, database_path,
+                        sync_news_catalog=sync_news_catalog,
+                    )
                     last_content_signature = _news_content_signature(database_path)
                     logger.info(
                         "중앙 콘텐츠 동기화 완료: 내려받기 %s건, 로컬 변경=%s",

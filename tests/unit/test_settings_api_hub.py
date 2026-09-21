@@ -27,12 +27,14 @@ class SettingsApiHubTests(unittest.TestCase):
             open_news_settings = Mock()
             open_shadow_settings = Mock()
             open_research = Mock()
+            open_mock_automation = Mock()
             dialog = SettingsDialog(
                 SettingsRepository(database_path),
                 api_path=Path(directory) / "api.env",
                 news_api_settings_opener=open_news_settings,
                 shadow_settings_opener=open_shadow_settings,
                 research_opener=open_research,
+                mock_automation_opener=open_mock_automation,
             )
 
             buttons = {button.text(): button for button in dialog.findChildren(QPushButton)}
@@ -41,6 +43,7 @@ class SettingsApiHubTests(unittest.TestCase):
             self.assertIn("네이버·DART·AI API 연결", buttons)
             self.assertIn("Shadow 후보 조건·상태", buttons)
             self.assertIn("전략 연구 열기", buttons)
+            self.assertIn("모의 자동운용 상태·제어", buttons)
             tabs = dialog.findChild(QTabWidget)
             self.assertIsNotNone(tabs)
             self.assertIn("연결", tuple(tabs.tabText(index) for index in range(tabs.count())))
@@ -53,8 +56,10 @@ class SettingsApiHubTests(unittest.TestCase):
             open_news_settings.assert_called_once_with()
             buttons["Shadow 후보 조건·상태"].click()
             buttons["전략 연구 열기"].click()
+            buttons["모의 자동운용 상태·제어"].click()
             open_shadow_settings.assert_called_once_with()
             open_research.assert_called_once_with()
+            open_mock_automation.assert_called_once_with()
 
 
 if __name__ == "__main__":

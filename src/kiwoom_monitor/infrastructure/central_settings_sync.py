@@ -151,5 +151,24 @@ class CentralSettingsSyncService:
                     )]
         finally:
             connection.close()
-        saved = self._client.upsert(self.COLLECTION, documents) if documents else 0
-        return saved + (self._client.upsert(self.COLUMN_COLLECTION, column_documents) if column_documents else 0)
+        remote_documents = {
+            (str(value.get("owner", "default")), str(value.get("key", ""))): value.get("document")
+            for value in remote
+        }
+        pending_documents = [
+            value for value in documents
+            if remote_documents.get((str(value["owner"]), str(value["key"]))) != value["document"]
+        ]
+        remote_column_documents = {
+            (str(value.get("owner", "main_table")), str(value.get("key", ""))): value.get("document")
+            for value in remote_columns
+        }
+        pending_column_documents = [
+            value for value in column_documents
+            if remote_column_documents.get((str(value["owner"]), str(value["key"]))) != value["document"]
+        ]
+        saved = self._client.upsert(self.COLLECTION, pending_documents) if pending_documents else 0
+        return saved + (
+            self._client.upsert(self.COLUMN_COLLECTION, pending_column_documents)
+            if pending_column_documents else 0
+        )
