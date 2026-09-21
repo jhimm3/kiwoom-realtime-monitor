@@ -597,6 +597,9 @@ def initialize_probe_database(path: Path) -> None:
                     interval_seconds INTEGER NOT NULL,
                     adjustment_mode TEXT NOT NULL,
                     bar_time TEXT NOT NULL,
+                    bar_time_semantics TEXT NOT NULL DEFAULT 'provider_value_unverified',
+                    raw_date INTEGER,
+                    raw_time INTEGER,
                     open INTEGER,
                     high INTEGER,
                     low INTEGER,
@@ -634,6 +637,19 @@ def initialize_probe_database(path: Path) -> None:
                 if column not in columns:
                     connection.execute(
                         f"ALTER TABLE news_articles ADD COLUMN {column} {declaration}"
+                    )
+            bar_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(market_bars)")
+            }
+            bar_additions = {
+                "bar_time_semantics": "TEXT NOT NULL DEFAULT 'provider_value_unverified'",
+                "raw_date": "INTEGER",
+                "raw_time": "INTEGER",
+            }
+            for column, declaration in bar_additions.items():
+                if column not in bar_columns:
+                    connection.execute(
+                        f"ALTER TABLE market_bars ADD COLUMN {column} {declaration}"
                     )
 
 
@@ -815,6 +831,7 @@ def store_daishin_probe_payload(path: Path, payload: Mapping[str, Any]) -> int:
     session_scope = str(payload.get("session_scope", ""))
     adjustment_mode = str(payload.get("adjustment_mode", ""))
     observed_at = str(payload.get("observed_at", ""))
+    bar_time_semantics = str(payload.get("bar_time_semantics", "provider_value_unverified"))
     bars = payload.get("bars")
     if venue not in {"A", "K", "N"}:
         raise ValueError("invalid Daishin venue")
@@ -822,6 +839,8 @@ def store_daishin_probe_payload(path: Path, payload: Mapping[str, Any]) -> int:
         raise ValueError("invalid Daishin session scope")
     if adjustment_mode not in {"raw", "adjusted"}:
         raise ValueError("invalid Daishin adjustment mode")
+    if bar_time_semantics not in {"provider_value_unverified", "interval_end"}:
+        raise ValueError("invalid Daishin bar time semantics")
     if not observed_at or not isinstance(bars, list):
         raise ValueError("incomplete Daishin probe payload")
     initialize_probe_database(path)
@@ -838,13 +857,16 @@ def store_daishin_probe_payload(path: Path, payload: Mapping[str, Any]) -> int:
                     """
                     INSERT INTO market_bars
                     (provider, code, venue, session_scope, interval_seconds,
-                     adjustment_mode, bar_time, open, high, low, close, volume,
-                     trading_value, observed_at, available_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     adjustment_mode, bar_time, bar_time_semantics, raw_date, raw_time,
+                     open, high, low, close, volume, trading_value, observed_at, available_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(
                         provider, code, venue, session_scope, interval_seconds,
                         adjustment_mode, bar_time
                     ) DO UPDATE SET
+                        bar_time_semantics=excluded.bar_time_semantics,
+                        raw_date=excluded.raw_date,
+                        raw_time=excluded.raw_time,
                         open=excluded.open,
                         high=excluded.high,
                         low=excluded.low,
@@ -856,13 +878,83 @@ def store_daishin_probe_payload(path: Path, payload: Mapping[str, Any]) -> int:
                     """,
                     (
                         DAISHIN_PROVIDER, code, venue, session_scope, interval_seconds,
-                        adjustment_mode, bar_time, bar.get("open"), bar.get("high"),
-                        bar.get("low"), bar.get("close"), bar.get("volume"),
+                        adjustment_mode, bar_time, bar_time_semantics,
+                        bar.get("raw_date"), bar.get("raw_time"), bar.get("open"),
+                        bar.get("high"), bar.get("low"), bar.get("close"), bar.get("volume"),
                         bar.get("trading_value"), observed_at, observed_at,
                     ),
                 )
                 saved += 1
     return saved
+
+
+def import_daishin_backfill_ndjson(
+    artifact_path: Path,
+    database_path: Path,
+    *,
+    before_date: str = "",
+) -> dict[str, Any]:
+    cutoff = _iso_date(before_date) if before_date else ""
+    pages = 0
+    observed_bars = 0
+    selected_bars = 0
+    saved_bars = 0
+    oldest = ""
+    newest = ""
+    summary: dict[str, Any] = {}
+    with artifact_path.open("r", encoding="utf-8-sig") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"invalid NDJSON at line {line_number}: {error}") from error
+            if not isinstance(record, Mapping):
+                raise ValueError(f"invalid NDJSON record at line {line_number}")
+            record_type = str(record.get("record_type", ""))
+            if record_type == "error":
+                raise ValueError(f"Daishin backfill failed: {record.get('error', '')}")
+            if record_type == "summary":
+                summary = dict(record)
+                continue
+            if record_type != "page":
+                raise ValueError(f"unknown NDJSON record type at line {line_number}")
+            bars = record.get("bars")
+            if not isinstance(bars, list):
+                raise ValueError(f"Daishin page has no bars at line {line_number}")
+            pages += 1
+            observed_bars += len(bars)
+            selected = [
+                bar for bar in bars
+                if isinstance(bar, Mapping)
+                and (not cutoff or str(bar.get("bar_time", ""))[:10] < cutoff)
+            ]
+            selected_bars += len(selected)
+            if selected:
+                page_newest = str(selected[0].get("bar_time", ""))
+                page_oldest = str(selected[-1].get("bar_time", ""))
+                newest = max(newest, page_newest) if newest else page_newest
+                oldest = min(oldest, page_oldest) if oldest else page_oldest
+            payload = dict(record)
+            payload["bars"] = selected
+            saved_bars += store_daishin_probe_payload(database_path, payload)
+    if not summary:
+        raise ValueError("Daishin backfill artifact has no summary record")
+    return {
+        "artifact": str(artifact_path.resolve()),
+        "code": str(summary.get("code", "")),
+        "interval_seconds": int(summary.get("interval_seconds", 0)),
+        "pages": pages,
+        "observed_bars": observed_bars,
+        "selected_bars": selected_bars,
+        "saved_bars": saved_bars,
+        "before_date": cutoff,
+        "newest": newest,
+        "oldest": oldest,
+        "provider_has_more": bool(summary.get("provider_has_more")),
+        "stopped_by_max_pages": bool(summary.get("stopped_by_max_pages")),
+    }
 
 
 def inspect_daishin_environment(*, try_connection: bool = True) -> DaishinEnvironment:

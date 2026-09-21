@@ -17,6 +17,7 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
     fetch_naver_stock_news_page,
     inspect_candidate_database,
     inspect_daishin_environment,
+    import_daishin_backfill_ndjson,
     latest_candidates,
     store_daishin_probe_payload,
     store_article_publication_result,
@@ -71,6 +72,13 @@ def main() -> int:
     sample.add_argument("--session", choices=("regular", "regular_and_after"), default="regular")
     sample.add_argument("--adjustment", choices=("raw", "adjusted"), default="raw")
     sample.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
+
+    imported = subparsers.add_parser(
+        "daishin-import", help="연속조회 NDJSON을 별도 표본 DB에 반영합니다."
+    )
+    imported.add_argument("artifact", type=Path)
+    imported.add_argument("--before-date", default="", help="이 날짜보다 오래된 봉만 반영")
+    imported.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
 
     args = parser.parse_args()
     if args.command == "candidates":
@@ -144,6 +152,13 @@ def main() -> int:
             "newest": payload["bars"][0]["bar_time"] if payload.get("bars") else "",
             "output": str(args.output.resolve()),
         }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "daishin-import":
+        result = import_daishin_backfill_ndjson(
+            args.artifact, args.output, before_date=args.before_date,
+        )
+        result["output"] = str(args.output.resolve())
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     if args.command == "naver-history":
         if args.pages < 1 or args.pages > 200:

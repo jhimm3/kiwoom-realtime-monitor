@@ -116,7 +116,7 @@ try {
         remaining_quote_requests = [int]$cybos.GetLimitRemainCount(1)
         limit_request_remain_ms = [int]$cybos.LimitRequestRemainTime
         observed_at = [DateTimeOffset]::UtcNow.ToString('o')
-        bar_time_semantics = 'provider_value_unverified'
+        bar_time_semantics = 'interval_end'
         bars = $bars
     } | ConvertTo-Json -Depth 6 -Compress
 }

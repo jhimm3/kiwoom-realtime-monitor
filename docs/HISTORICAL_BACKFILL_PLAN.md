@@ -40,17 +40,17 @@
 
 공식 담당자의 2026-09-01 안내는 주식 1분 약 2년·5분 약 5년이다. 종목별 실제 도달 날짜·상장기간·중단 구간은 아직 API 응답으로 확인하지 않았다. [공식 제공기간 안내](https://money2.daishin.com/e5/mboard/ptype_basic/Basic_018/DW_Basic_Read_Page.aspx?boardseq=60&m=9508&p=8827&page=1&searchString=&seq=29008&v=8636)
 
-2026-09-22 현재 이 PC에 CREON/CYBOS Plus가 설치되어 `CpUtil.CpCybos`, `CpSysDib.StockChart`, `CpUtil.CpCodeMgr` COM 등록을 32비트에서 확인했다. 32비트 PowerShell 브리지 `scripts/daishin_stockchart_probe.ps1`과 이를 호출하는 `daishin-sample` 명령도 만들었다. 현재 `IsConnect=0`이므로 로그인 완료 전에는 조회하지 않는다. 별도 32비트 Python 설치는 표본의 선행 조건이 아니다.
+2026-09-22 현재 이 PC에 CREON/CYBOS Plus가 설치되어 `CpUtil.CpCybos`, `CpSysDib.StockChart`, `CpUtil.CpCodeMgr` COM 등록을 32비트에서 확인했다. CREON은 로그인되어 있었지만 관리자 권한으로 실행되어 일반 권한 조회에서는 `IsConnect=0`이었다. 같은 관리자 권한의 32비트 PowerShell에서는 `connected=true`를 확인했고 `scripts/daishin_stockchart_probe.ps1`로 실제 조회했다. 별도 32비트 Python 설치는 표본의 선행 조건이 아니다.
 
 표본은 정상 거래 종목, 거래정지/상장기간이 짧은 종목, 2년·5년 경계가 필요한 종목을 기존 후보에서 고른다. 설치된 CYBOS/CREON 접속 환경·Python/COM 호환성·로그인을 확인한 뒤 주문 없는 차트 조회만 수행하는 수집 경로를 만든다.
 
-`CpSysDib.StockChart`의 분봉은 개수 요청과 연속조회로 필요한 과거까지 내려가는 방식을 검증한다. 제공 잔여 요청량·대기시간을 사용하고 키움 NAS 실시간 큐에 대신 백필을 넣지 않는다. 봉 주기, 거래소, 정규/시간외 범위, 수정주가 선택과 봉의 시작/종료 시각 의미를 요청·응답에 기록한다. [연속조회 안내](https://money2.daishin.com/e5/mboard/ptype_basic/Basic_018/DW_Basic_Read_Page.aspx?boardseq=60&m=9508&p=8827&page=1&searchString=&seq=26051&v=8636), [StockChart 도움말](https://money2.daishin.com/e5/mboard/ptype_basic/HTS_Plus_Helper/DW_Basic_Read_Page.aspx?boardseq=284&m=9508&p=8839&page=1&searchString=StockChart&seq=102&v=8642)
+`CpSysDib.StockChart`의 분봉은 기간 요청과 연속조회로 공급자가 제공하는 최과거까지 내려간다. 1분봉의 최초 완전 거래일을 경계로 정하고, 그 이전 거래일만 5분봉으로 저장한다. 5년은 목표 하한일 뿐 고정 중단점이 아니므로 더 오래 제공되면 `Continue=false`가 될 때까지 받는다. 기간 요청이 최신 거래일을 빠뜨리는 실제 응답을 확인했으므로 개수 요청으로 최신 구간을 겹쳐 받아 키 중복 제거로 보강한다. 제공 잔여 요청량·대기시간을 사용하고 키움 NAS 실시간 큐에 대신 백필을 넣지 않는다. [연속조회 안내](https://money2.daishin.com/e5/mboard/ptype_basic/Basic_018/DW_Basic_Read_Page.aspx?boardseq=60&m=9508&p=8827&page=1&searchString=&seq=26051&v=8636), [StockChart 도움말](https://money2.daishin.com/e5/mboard/ptype_basic/HTS_Plus_Helper/DW_Basic_Read_Page.aspx?boardseq=284&m=9508&p=8839&page=1&searchString=StockChart&seq=102&v=8642)
 
 중첩 구간의 키움·대신 값을 비교할 때 단위·수정기준·세션·시간 의미를 먼저 맞춘다. 대신 1분을 5분으로 집계한 결과와 제공 5분을 비교하되 원본 둘은 보존한다. 값 차이를 무조건 어느 한쪽 오류로 정하지 않는다.
 
 본 수집은 가장 오래된 제공구간이 밀려나는 점을 고려해 표본 확인 후 진행한다. 원본 응답/정규화 결과/작업 상태를 구분하고 구간별 체크포인트·재시도·중복 방지·확보 보고를 둔다.
 
-첫 표본은 KRX 정규장·무수정 기준으로 삼성전자 1분 20개, 이후 같은 종목 5분을 조회한다. 봉 원시 날짜·시각과 정규화 시각을 함께 남기고, 공식 도움말이 봉 시각을 시작/종료 중 어느 의미로 쓰는지는 값 비교 전까지 `provider_value_unverified`로 둔다.
+삼성전자 KRX 정규장·무수정 연속조회에서 1분봉은 2024-08-29 09:01부터 2026-09-21 15:30까지 190,102개를 확보했다. 5분봉 원응답은 2021-08-11 09:05까지 도달했고, 정책 경계 전날인 2024-08-28까지 57,710개만 DB에 반영했다. 경계일은 2024-08-28의 5분봉 77개와 2024-08-29의 1분봉 381개로 이어진다. 5분봉 `15:15` 거래량은 1분봉 `15:11~15:15` 합과 정확히 일치하므로 봉 시각은 구간 종료시각인 `interval_end`로 기록한다. 공급자 원시 날짜·시각과 전체 NDJSON 응답도 별도로 보존한다.
 
 ## 3. 네이버 증권 사이트 뉴스
 
@@ -80,7 +80,7 @@ Npay 공식 도움말에는 서비스 화면 밖 개인 프로그램에서 증�
 .\.venv\Scripts\python.exe scripts\probe_historical_backfill.py daishin-sample 005930 --interval 1 --count 20
 ```
 
-마지막 명령은 CREON Plus 로그인과 같은 Windows 권한 수준이 준비된 뒤 실행한다. 표본 성공 전에는 전체 종목·전체 기간 수집을 시작하지 않는다.
+마지막 명령은 CREON Plus 로그인과 같은 Windows 권한 수준에서 실행한다. 이 PC에서는 CREON이 관리자 권한이므로 실행 터미널도 관리자 권한이어야 한다. 1분·5분 첫 표본은 성공했지만 연속조회와 기간 경계 확인 전에는 전체 종목·전체 기간 수집을 시작하지 않는다.
 
 ## 4. 수집 상태와 완료 기준
 

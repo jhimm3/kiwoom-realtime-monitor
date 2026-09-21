@@ -74,6 +74,6 @@
 
 ## 다음 개발의 진입점
 
-외부 `kiwoom_history_backfill`의 후보 DB·기존 수집 스크립트는 앱 모듈이 아니다. 현재 표본 경계는 `infrastructure/historical_backfill.py`, `scripts/probe_historical_backfill.py`, 32비트 COM 브리지 `scripts/daishin_stockchart_probe.ps1`에 있다. [과거 수집 기획](docs/HISTORICAL_BACKFILL_PLAN.md)으로 원천별 표본을 확인한 뒤 기존 `research_data_source`, 뉴스 revision, 프로필 저장 경계에 연결한다.
+외부 `kiwoom_history_backfill`의 후보 DB·기존 수집 스크립트는 앱 모듈이 아니다. 현재 표본 경계는 `infrastructure/historical_backfill.py`, `scripts/probe_historical_backfill.py`, 32비트 COM 표본·연속조회 브리지 `scripts/daishin_stockchart_probe.ps1`과 `scripts/daishin_stockchart_backfill.ps1`에 있다. [과거 수집 기획](docs/HISTORICAL_BACKFILL_PLAN.md)으로 원천별 표본을 확인한 뒤 기존 `research_data_source`, 뉴스 revision, 프로필 저장 경계에 연결한다.
 
 관련 테스트는 각 책임의 `tests/unit/test_*.py`와 `scripts/check_*.py`에서 찾는다. 문서 정리에서 이전 테스트 개수를 새 실행 결과로 복사하지 않는다. 실제 코드 변경 때 해당 경계의 의미 있는 회귀와 필요한 통합 검증을 수행한다.

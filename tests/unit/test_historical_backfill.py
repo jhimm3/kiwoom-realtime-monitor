@@ -12,6 +12,7 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
     ArticlePublicationResult,
     NAVER_HISTORICAL_SEARCH_PROVIDER,
     NAVER_STOCK_NEWS_PROVIDER,
+    import_daishin_backfill_ndjson,
     parse_naver_historical_search_page,
     parse_naver_stock_news_page,
     parse_article_publication_html,
@@ -192,9 +193,11 @@ class HistoricalBackfillTest(unittest.TestCase):
         payload = {
             "provider": "daishin_creon", "code": "005930", "interval_seconds": 300,
             "venue": "K", "session_scope": "regular", "adjustment_mode": "raw",
+            "bar_time_semantics": "interval_end",
             "observed_at": "2026-09-22T05:30:00+00:00",
             "bars": [{
-                "bar_time": "2026-09-21T15:30:00+09:00", "open": 100, "high": 110,
+                "bar_time": "2026-09-21T15:30:00+09:00",
+                "raw_date": 20260921, "raw_time": 1530, "open": 100, "high": 110,
                 "low": 90, "close": 105, "volume": 1000, "trading_value": 102000,
             }],
         }
@@ -203,10 +206,43 @@ class HistoricalBackfillTest(unittest.TestCase):
             self.assertEqual(1, store_daishin_probe_payload(path, payload))
             with closing(sqlite3.connect(path)) as connection:
                 row = connection.execute(
-                    "SELECT provider, interval_seconds, venue, session_scope, adjustment_mode "
+                    "SELECT provider, interval_seconds, venue, session_scope, adjustment_mode, "
+                    "bar_time_semantics, raw_date, raw_time "
                     "FROM market_bars"
                 ).fetchone()
-        self.assertEqual(("daishin_creon", 300, "K", "regular", "raw"), row)
+        self.assertEqual((
+            "daishin_creon", 300, "K", "regular", "raw", "interval_end", 20260921, 1530,
+        ), row)
+
+    def test_imports_only_five_minute_dates_before_one_minute_boundary(self) -> None:
+        page = {
+            "record_type": "page", "provider": "daishin_creon", "code": "005930",
+            "interval_seconds": 300, "venue": "K", "session_scope": "regular",
+            "adjustment_mode": "raw", "bar_time_semantics": "interval_end", "page": 1,
+            "observed_at": "2026-09-22T06:00:00+00:00", "bars": [
+                {"bar_time": "2024-09-02T09:05:00+09:00", "close": 102},
+                {"bar_time": "2024-08-30T15:30:00+09:00", "close": 101},
+            ],
+        }
+        summary = {
+            "record_type": "summary", "provider": "daishin_creon", "code": "005930",
+            "interval_seconds": 300, "provider_has_more": False,
+            "stopped_by_max_pages": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "bars.ndjson"
+            artifact.write_text(
+                json.dumps(page) + "\n" + json.dumps(summary) + "\n", encoding="utf-8"
+            )
+            result = import_daishin_backfill_ndjson(
+                artifact, root / "probe.sqlite3", before_date="2024-09-02",
+            )
+            with closing(sqlite3.connect(root / "probe.sqlite3")) as connection:
+                stored = connection.execute("SELECT bar_time FROM market_bars").fetchall()
+        self.assertEqual(2, result["observed_bars"])
+        self.assertEqual(1, result["selected_bars"])
+        self.assertEqual([("2024-08-30T15:30:00+09:00",)], stored)
 
 
 if __name__ == "__main__":
