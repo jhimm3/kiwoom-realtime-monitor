@@ -1,10 +1,10 @@
 # 현재 앱과 검증 상태
 
-확인 기준: 2026-09-22 · **릴리즈 2.1.0** · tag/HEAD `65b92b572e8faaf8df8a010f06861d055038ee3e`
+확인 기준: 2026-09-22 · **현재 제품 릴리즈 2.1.0** · 로컬 `main`에는 2.1.0 이후 검증·문서 변경이 포함됨
 
-작업 소스는 `C:/Users/pc-1/.codex/worktrees/e0b9/kiwoom-realtime-monitor`, 브랜치는 `codex/release-2.1.0`이다. 오래된 원본 작업폴더의 README 버전을 현재 앱 버전으로 사용하지 않는다. 테스트 실행기의 source root와 interpreter/data 위치는 별개다.
+현재 작업 소스는 `C:/Users/pc-1/Documents/ChatGPT/kiwoom-realtime-monitor`, 브랜치는 `main`이다. 이전 `e0b9` 워크트리의 검증된 변경과 현재 문서를 이 폴더에 fast-forward로 합쳤다. 테스트 실행기의 source root와 interpreter/data 위치는 별개다.
 
-[2.1.0](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v2.1.0), [2.0.0](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v2.0.0), [1.1.20](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.20) GitHub 릴리즈와 로컬 태그·현재 코드를 대조했다. 워크트리에는 매매일지 프로세스/worker/테스트와 CHANGELOG의 미커밋 변경이 있으며 이번 문서 정리가 그 변경의 검증·배포를 뜻하지 않는다.
+[2.1.0](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v2.1.0), [2.0.0](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v2.0.0), [1.1.20](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v1.1.20) GitHub 릴리즈와 로컬 태그·현재 코드를 대조했다. 로컬 `main`의 후속 작업은 새 GitHub 릴리즈나 배포를 뜻하지 않는다.
 
 ## 구현된 기반
 
@@ -31,7 +31,7 @@
 
 ## 새 방향에서 아직 해야 하는 것
 
-대신 1분 약 2년/5분 약 5년 실제 확보, 네이버 증권 사이트 과거 뉴스 경로·본문·도달기간 확인, 외부 역사 자료의 앱 입력 연결, 테마의 의미별 대표명/별칭과 사용자 결정 유지, 필요에 따른 로컬 LLM·학습이 남아 있다. 이 기능을 문서만으로 구현 완료로 표시하지 않는다.
+과거자료 표본 도구를 추가했고 날짜 지정 네이버 검색의 2020년 표본 저장을 확인했다. 검색 날짜와 원문 발행시각을 분리하며, 첫 10건 중 5건은 원문에서 초 단위 시각을 확보했다. CREON은 설치와 COM 등록까지 확인했지만 아직 로그인 연결 전이라 실제 분봉 표본은 남아 있다. 네이버 원문·도달기간 확대, 대신 1분/5분 제공 경계, 외부 역사 자료의 앱 입력 연결, 테마의 의미별 대표명/별칭과 사용자 결정 유지, 필요에 따른 로컬 LLM·학습도 아직 완료하지 않았다.
 
 기존 후보 DB는 읽기 전용으로 확인했다. 94,750개 후보 종목·일, 5,910,806개 일봉, 4,562,200개 분봉이 있고 분봉 작업 완료 중 81,901건은 0행이었다. 실제 확보 범위와 다음 작업은 [과거 자료 확보 기획](HISTORICAL_BACKFILL_PLAN.md)에 적었다.
 

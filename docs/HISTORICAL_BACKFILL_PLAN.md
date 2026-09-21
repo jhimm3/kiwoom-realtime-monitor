@@ -1,10 +1,10 @@
 # 과거 자료 확보 실행 기획
 
-작성일: 2026-09-22 · 상태: **다음 개발 작업** · 상위 문서: [개발 로드맵](../FUTURE_DEVELOPMENT_ROADMAP.md)
+작성일: 2026-09-22 · 상태: **표본 도구 구현·첫 검증 진행** · 상위 문서: [개발 로드맵](../FUTURE_DEVELOPMENT_ROADMAP.md)
 
 ## 목표와 범위
 
-기존 주도후보를 유지하며 대신증권의 최근 약 2년 1분봉·최근 약 5년 5분봉과 네이버 증권 사이트의 과거 뉴스를 확보한다. 지금까지 쌓은 자료와 연결해 LLM 분석·학습 및 기존 연구 엔진에 공급할 사례를 만든다. 이번 문서 작업에서는 수집기 실행·원본 DB 수정·학습을 하지 않았다.
+기존 주도후보를 유지하며 대신증권의 최근 약 2년 1분봉·최근 약 5년 5분봉과 네이버 웹사이트의 과거 뉴스를 확보한다. 지금까지 쌓은 자료와 연결해 LLM 분석·학습 및 기존 연구 엔진에 공급할 사례를 만든다. 표본 수집기는 현재 저장소의 `scripts/probe_historical_backfill.py`에 구현했으며 원본 후보 DB는 수정하지 않는다.
 
 ## 확인한 출발 자료
 
@@ -40,6 +40,8 @@
 
 공식 담당자의 2026-09-01 안내는 주식 1분 약 2년·5분 약 5년이다. 종목별 실제 도달 날짜·상장기간·중단 구간은 아직 API 응답으로 확인하지 않았다. [공식 제공기간 안내](https://money2.daishin.com/e5/mboard/ptype_basic/Basic_018/DW_Basic_Read_Page.aspx?boardseq=60&m=9508&p=8827&page=1&searchString=&seq=29008&v=8636)
 
+2026-09-22 현재 이 PC에 CREON/CYBOS Plus가 설치되어 `CpUtil.CpCybos`, `CpSysDib.StockChart`, `CpUtil.CpCodeMgr` COM 등록을 32비트에서 확인했다. 32비트 PowerShell 브리지 `scripts/daishin_stockchart_probe.ps1`과 이를 호출하는 `daishin-sample` 명령도 만들었다. 현재 `IsConnect=0`이므로 로그인 완료 전에는 조회하지 않는다. 별도 32비트 Python 설치는 표본의 선행 조건이 아니다.
+
 표본은 정상 거래 종목, 거래정지/상장기간이 짧은 종목, 2년·5년 경계가 필요한 종목을 기존 후보에서 고른다. 설치된 CYBOS/CREON 접속 환경·Python/COM 호환성·로그인을 확인한 뒤 주문 없는 차트 조회만 수행하는 수집 경로를 만든다.
 
 `CpSysDib.StockChart`의 분봉은 개수 요청과 연속조회로 필요한 과거까지 내려가는 방식을 검증한다. 제공 잔여 요청량·대기시간을 사용하고 키움 NAS 실시간 큐에 대신 백필을 넣지 않는다. 봉 주기, 거래소, 정규/시간외 범위, 수정주가 선택과 봉의 시작/종료 시각 의미를 요청·응답에 기록한다. [연속조회 안내](https://money2.daishin.com/e5/mboard/ptype_basic/Basic_018/DW_Basic_Read_Page.aspx?boardseq=60&m=9508&p=8827&page=1&searchString=&seq=26051&v=8636), [StockChart 도움말](https://money2.daishin.com/e5/mboard/ptype_basic/HTS_Plus_Helper/DW_Basic_Read_Page.aspx?boardseq=284&m=9508&p=8839&page=1&searchString=StockChart&seq=102&v=8642)
@@ -48,19 +50,37 @@
 
 본 수집은 가장 오래된 제공구간이 밀려나는 점을 고려해 표본 확인 후 진행한다. 원본 응답/정규화 결과/작업 상태를 구분하고 구간별 체크포인트·재시도·중복 방지·확보 보고를 둔다.
 
+첫 표본은 KRX 정규장·무수정 기준으로 삼성전자 1분 20개, 이후 같은 종목 5분을 조회한다. 봉 원시 날짜·시각과 정규화 시각을 함께 남기고, 공식 도움말이 봉 시각을 시작/종료 중 어느 의미로 쓰는지는 값 비교 전까지 `provider_value_unverified`로 둔다.
+
 ## 3. 네이버 증권 사이트 뉴스
 
-목표 경로는 네이버 개발자 뉴스 검색 API가 아닌 **네이버 증권 사이트**다. 종목별 목록과 시장 속보의 날짜·페이지·본문 연결을 최근/2년/5년 경계에서 실제 확인한다. 5년 전체 검색·본문 확보 가능 여부는 아직 미확인이다.
+목표 경로는 네이버 개발자 뉴스 검색 API가 아닌 **네이버 웹사이트가 쓰는 응답**이다. 이전 대화와 외부 `backfill_news.py`를 다시 확인해 날짜 지정 검색 경로 `s.search.naver.com/p/newssearch/3/api/tab/more`를 복원했다. 2020-01-02 써니전자 한 페이지에서 구조화 기사 10건을 다시 읽어 별도 표본 DB에 저장했다. 검색 날짜는 `published_precision=date`로 보존하며 정확한 시각처럼 자정으로 바꾸지 않는다.
+
+현재 네이버 증권 종목 페이지의 `/api/domestic/detail/news`도 별도로 확인했다. 최신 목록은 기사 ID·매체·분 단위 발행시각·요약·관련기사 묶음을 제공하지만, 삼성전자 기준 20개씩 100페이지까지만 응답하고 101페이지부터 HTTP 400이며 100페이지도 2026-09-16까지만 도달했다. 따라서 이 최신 목록만으로 2년·5년 백필을 구성하지 않는다.
 
 기존 외부 `backfill_news.py`는 사이트 속보·공지·해외뉴스와 일반 네이버 웹뉴스 검색을 함께 사용한다. 종목 웹검색이 곧 증권 종목별 목록은 아니다. 작업 상태·기사 ID 중복 제거·원응답 보존 기반은 재사용 검토한다.
 
-확인된 구현 전 점검 항목은 `get_stock_search_names()` 호출/정의 불일치와 검색 대상 날짜로 기사 발행시각을 기록하는 경로다. 실제 재현 후 최소 수정한다. 정확한 발행시각이 날짜 정밀도로 덮이지 않게 한다.
+현재 표본 수집기는 날짜 지정 검색 뒤 언론사 원문에서 JSON-LD `datePublished`, `article:published_time`, `<time>`과 화면의 `data-date-time`을 읽어 `published_at`을 보강한다. `published_at_source`, 원문 문자열, 실제 확인 URL, 확인 상태·시각도 함께 저장한다. 날짜만 확인되면 `published_precision=date`를 유지하며 자정으로 만들지 않는다. 2020-01-02 써니전자 10건 표본에서는 5건의 초 단위 원문 시각을 찾았고, 나머지는 차단 2건·시각 없음 2건·기사 없음 1건으로 상태를 남겼다.
+
+현재 앱과 네이버 검색 API의 정규 필드명은 `published_at`이며 API 원응답의 `pubDate`를 여기에 변환한다. 장기 스키마에서는 원문 게시시각인 `publisher_published_at`, 유통시각, 최초 관측시각을 더 명확히 분리할 수 있도록 이번 표본의 출처 필드를 보존한다. 언론사 원문이 403/로봇 확인이면 우회하지 않고, 제목이 검증된 네이버 기사 링크만 대체 경로로 사용한다. HTTP 200이어도 삭제 안내 페이지만 있으면 `article_unavailable`로 구분한다. 원문 BODY 단계에서는 본문과 시각을 한 번에 읽어 기사당 중복 요청을 만들지 않는 방향을 유지한다.
 
 목록에서 찾은 기사와 본문을 확보한 기사를 구분한다. `description`이 없다는 이유만으로 사이트 목록의 기사 메타데이터를 버리지 않는다. 기존 실시간 검색 API의 필터를 다른 소스에 그대로 적용하지 않는다.
 
 기사 ID/URL, 매체, 제목, 발행/수정/수집시각, 시각 정밀도, 본문 상태, 원문 링크를 보존한다. 기사-종목/후보/테마 관계는 별도로 연결해 한 기사가 여러 종목에 나온 횟수를 독립 사건 수로 세지 않는다. 당시 상호는 종목코드·상호변경 근거로 연결한다.
 
 Npay 공식 도움말에는 서비스 화면 밖 개인 프로그램에서 증권정보를 재가공해 이용하는 것을 제한하는 안내가 있다. 뉴스 목록·본문의 보관과 학습 이용에 해당하는 범위를 확인해 수집 방식에 반영한다. 사이트 접근과 이용 범위는 별도 확인 항목이며 이 문서는 해당 이용 가능성을 확정하지 않는다. [공식 이용 안내](https://help.pay.naver.com/faq/content.help?faqId=17106)
+
+## 표본 실행 위치
+
+표본 결과는 기본적으로 앱 원본 DB와 분리한 `data/historical_backfill_probe.sqlite3`에 저장한다. 이 파일은 원응답, 기사 메타데이터·종목 연결, 공급자·주기·거래소·세션·수정기준을 가진 봉을 분리해 보존한다.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\probe_historical_backfill.py candidates
+.\.venv\Scripts\python.exe scripts\probe_historical_backfill.py naver-history 004770 "써니전자" 2020-01-02 --pages 1
+.\.venv\Scripts\python.exe scripts\probe_historical_backfill.py daishin-sample 005930 --interval 1 --count 20
+```
+
+마지막 명령은 CREON Plus 로그인과 같은 Windows 권한 수준이 준비된 뒤 실행한다. 표본 성공 전에는 전체 종목·전체 기간 수집을 시작하지 않는다.
 
 ## 4. 수집 상태와 완료 기준
 
