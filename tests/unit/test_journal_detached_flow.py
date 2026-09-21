@@ -10,6 +10,7 @@ from unittest.mock import patch
 from kiwoom_monitor.journal_process import JournalWindow
 from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.application.trade_journal_summary import TradeReview, group_trade_episodes
+from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountQueryContext
 
 
 class JournalDetachedFlowTests(unittest.TestCase):
@@ -236,6 +237,48 @@ class JournalDetachedFlowTests(unittest.TestCase):
         )
 
         self.assertEqual(["체결 1건 저장 · 실제비용 정산 대기(다음에 재시도)"], statuses)
+
+    def test_mock_history_result_uses_estimated_cost_without_failure_status(self) -> None:
+        mock_scope = AccountScope(
+            "kiwoom", AccountEnvironment.MOCK, "11111111-1111-4111-8111-111111111111",
+        )
+        context = AccountQueryContext(mock_scope, "mock-profile", 1, "nas")
+        fills = (SimpleNamespace(order_no="1", origin_scope=mock_scope),)
+        statuses: list[str] = []
+        owner = SimpleNamespace(
+            _history_expected_scope=mock_scope,
+            _selected_account_scope=lambda: mock_scope,
+            _repo=SimpleNamespace(upsert_history_sync=lambda *_args, **_kwargs: None),
+            _journal_settings=SimpleNamespace(setValue=lambda *_args: None),
+            _status=SimpleNamespace(setText=statuses.append),
+            reload_history=lambda: None,
+        )
+
+        JournalWindow._history_received(
+            owner, (fills, (), "", context), date(2026, 9, 21), date(2026, 9, 21),
+        )
+
+        self.assertEqual(["모의 체결 1건 저장 · 수수료·세금은 예상값 사용"], statuses)
+
+    def test_history_worker_schedules_deferred_deletion_when_finished(self) -> None:
+        calls: list[str] = []
+
+        class Worker:
+            def deleteLater(self) -> None:
+                calls.append("deleteLater")
+
+        worker = Worker()
+        owner = SimpleNamespace(
+            _history_worker=worker,
+            _history_enrichment_task_ids={"fills": "task"},
+            _quit_after_history_sync=False,
+        )
+
+        JournalWindow._history_finished(owner)
+
+        self.assertEqual(["deleteLater"], calls)
+        self.assertIsNone(owner._history_worker)
+        self.assertEqual({}, owner._history_enrichment_task_ids)
 
     def test_open_active_news_uses_shared_command_channel_contract(self) -> None:
         documents: list[dict[str, object]] = []

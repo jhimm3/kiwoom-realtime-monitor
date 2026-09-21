@@ -16,7 +16,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QPoint, QRectF, QSettings, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QDate, QPoint, QRectF, QSettings, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QBrush, QColor, QCloseEvent, QIcon, QImage, QPainter, QPen, QPolygon, QTextDocument
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QDoubleSpinBox,
@@ -112,6 +112,9 @@ from kiwoom_monitor.presentation.trade_review_view_model import (
 
 class JournalWindow(QMainWindow):
     _AUTO_BACKFILL_BATCH_SIZE = 20
+    # 회차당 5개의 보완 작업을 SQLite에 등록하므로 새 체결을
+    # 한번에 많이 가져온 직후에는 작은 묶음으로 나눠 GUI 응답성을 유지한다.
+    _AUTO_ANALYSIS_BATCH_SIZE = 2
 
     def __init__(self, monitor_db: Path, journal_db: Path, config: Path) -> None:
         super().__init__()
@@ -877,8 +880,9 @@ class JournalWindow(QMainWindow):
         self._history_expected_scope = self._selected_account_scope()
         worker = HistoryWorker(self._history_service, self._cost_service, start, end,
             account_client=self._query_client, account_scope=self._history_expected_scope)
+        worker.setParent(self if isinstance(self, QObject) else None)
         worker.progress.connect(self._history_progress); worker.failed.connect(self._history_enrichment_failed)
-        worker.completed.connect(self._history_received); worker.finished.connect(self._history_finished); worker.finished.connect(worker.deleteLater)
+        worker.completed.connect(self._history_received); worker.finished.connect(self._history_finished)
         self._history_worker = worker; worker.start()
 
     @Slot(str)
@@ -968,19 +972,26 @@ class JournalWindow(QMainWindow):
             if fill_task_id:
                 self._journal_enrichment.complete(fill_task_id, {"fill_count": len(fills)})
             cost_task_id = enrichment_task_ids.get("costs")
+            mock_account = expected_scope.environment.value == "mock"
             if cost_task_id:
                 if cost_error:
                     self._journal_enrichment.fail(cost_task_id, str(cost_error))
+                elif mock_account:
+                    self._journal_enrichment.complete(
+                        cost_task_id, {"cost_count": 0, "source": "estimated"},
+                    )
                 elif fills and not costs:
                     self._journal_enrichment.partial(
                         cost_task_id, {"cost_count": 0}, "체결 비용 정산 대기",
                     )
                 else:
                     self._journal_enrichment.complete(cost_task_id, {"cost_count": len(costs)})
-            if datetime.now().time() >= time(20, 5) and not cost_error and (costs or not fills):
+            if datetime.now().time() >= time(20, 5) and not cost_error and (mock_account or costs or not fills):
                 self._journal_settings.setValue("last_history_sync_day", date.today().isoformat())
             if cost_error:
                 status = f"체결 {len(fills)}건 저장 · 비용조회 실패(다음에 재시도)"
+            elif mock_account:
+                status = f"모의 체결 {len(fills)}건 저장 · 수수료·세금은 예상값 사용"
             elif fills and not costs:
                 status = f"체결 {len(fills)}건 저장 · 실제비용 정산 대기(다음에 재시도)"
             else:
@@ -994,7 +1005,13 @@ class JournalWindow(QMainWindow):
         self._status.setText(f"조회 실패 · {message}")
 
     def _history_finished(self) -> None:
+        # finished 신호 처리 중 마지막 Python 참조를 먼저 없애면
+        # Windows의 Qt6Core에서 QThread 래퍼가 조기 파괴될 수 있다.
+        # 로컬 참조를 잡은 채 deleteLater를 예약한 다음 소유 참조를 해제한다.
+        worker = self._history_worker
         self._history_worker = None
+        if worker is not None:
+            worker.deleteLater()
         self._history_enrichment_task_ids = {}
         if self._quit_after_history_sync:
             self._quit_after_history_sync = False
@@ -1122,7 +1139,7 @@ class JournalWindow(QMainWindow):
             )
             tasks.append((episode, rows))
             task_ids[episode.group_id] = eligible
-            if len(tasks) >= self._AUTO_BACKFILL_BATCH_SIZE:
+            if len(tasks) >= self._AUTO_ANALYSIS_BATCH_SIZE:
                 break
         if not tasks:
             return
@@ -1137,7 +1154,7 @@ class JournalWindow(QMainWindow):
         worker.item_completed.connect(self._analysis_enrichment_completed)
         worker.item_failed.connect(self._analysis_enrichment_failed)
         worker.finished.connect(self._analysis_enrichment_finished)
-        worker.finished.connect(worker.deleteLater)
+        worker.setParent(self if isinstance(self, QObject) else None)
         self._analysis_enrichment_task_ids = task_ids
         self._analysis_enrichment_worker = worker
         worker.start()
@@ -1221,10 +1238,14 @@ class JournalWindow(QMainWindow):
             self._journal_enrichment.fail(task_id, message)
 
     def _analysis_enrichment_finished(self) -> None:
+        worker = self._analysis_enrichment_worker
         self._analysis_enrichment_worker = None
+        delete_later = getattr(worker, "deleteLater", None)
+        if callable(delete_later):
+            delete_later()
         self._analysis_enrichment_task_ids = {}
         if not self._shutting_down:
-            QTimer.singleShot(0, self._schedule_analysis_enrichment)
+            QTimer.singleShot(100, self._schedule_analysis_enrichment)
 
     def _apply_history_filters(self, *args: object) -> None:
         query = self._stock_filter.text().strip().lower() if hasattr(self, "_stock_filter") else ""
@@ -1370,7 +1391,7 @@ class JournalWindow(QMainWindow):
         worker.item_completed.connect(self._backfill_received)
         worker.item_failed.connect(self._backfill_failed)
         worker.completed.connect(self._backfill_completed)
-        worker.finished.connect(self._backfill_finished); worker.finished.connect(worker.deleteLater)
+        worker.setParent(self if isinstance(self, QObject) else None); worker.finished.connect(self._backfill_finished)
         self._automatic_backfill_running = automatic
         self._backfill_enrichment_task_ids = task_ids
         self._backfill_enrichment_force = force
@@ -1436,7 +1457,11 @@ class JournalWindow(QMainWindow):
         self._refresh_backfill_table()
 
     def _backfill_finished(self) -> None:
+        worker = self._backfill_worker
         self._backfill_worker = None
+        delete_later = getattr(worker, "deleteLater", None)
+        if callable(delete_later):
+            delete_later()
         self._automatic_backfill_running = False
         self._backfill_enrichment_task_ids = {}
         self._backfill_enrichment_force = False
@@ -1765,7 +1790,7 @@ class JournalWindow(QMainWindow):
         worker.completed.connect(self._market_index_backfill_completed)
         worker.failed.connect(self._market_index_backfill_failed)
         worker.finished.connect(self._market_index_backfill_finished)
-        worker.finished.connect(worker.deleteLater)
+        worker.setParent(self if isinstance(self, QObject) else None)
         self._market_index_worker = worker
         worker.start()
 
@@ -1783,7 +1808,11 @@ class JournalWindow(QMainWindow):
         self._status.setText(f"시장지수 보완 실패 · {message}")
 
     def _market_index_backfill_finished(self) -> None:
+        worker = self._market_index_worker
         self._market_index_worker = None
+        delete_later = getattr(worker, "deleteLater", None)
+        if callable(delete_later):
+            delete_later()
         self._market_index_active_day = None
         pending, self._pending_market_index_day = self._pending_market_index_day, None
         if pending is not None:
@@ -1838,7 +1867,7 @@ class JournalWindow(QMainWindow):
         worker = DailyChartWorker(self._daily_chart_service, code, day, target)
         worker.completed.connect(self._daily_chart_received)
         worker.failed.connect(lambda message: self._status.setText(f"일봉 조회 실패 · {message}"))
-        worker.finished.connect(self._daily_chart_finished); worker.finished.connect(worker.deleteLater)
+        worker.setParent(self if isinstance(self, QObject) else None); worker.finished.connect(self._daily_chart_finished)
         self._daily_chart_worker = worker; self._status.setText("최근 일봉 가져오는 중…"); worker.start()
 
     def _daily_chart_received(self, code: str, rows: object, target: str) -> None:
@@ -1882,7 +1911,11 @@ class JournalWindow(QMainWindow):
             self._sync_detached_charts()
 
     def _daily_chart_finished(self) -> None:
+        worker = self._daily_chart_worker
         self._daily_chart_worker = None
+        delete_later = getattr(worker, "deleteLater", None)
+        if callable(delete_later):
+            delete_later()
         pending, self._pending_daily_chart = self._pending_daily_chart, None
         if pending is not None:
             self._start_daily_chart(*pending)
@@ -2175,11 +2208,15 @@ class JournalWindow(QMainWindow):
         worker.completed.connect(self._confirmed)
         worker.failed.connect(lambda message: self._status.setText(f"확인 실패 · {message}"))
         worker.finished.connect(self._worker_finished)
-        worker.finished.connect(worker.deleteLater)
+        worker.setParent(self if isinstance(self, QObject) else None)
         self._worker = worker; worker.start()
 
     def _worker_finished(self) -> None:
+        worker = self._worker
         self._worker = None
+        delete_later = getattr(worker, "deleteLater", None)
+        if callable(delete_later):
+            delete_later()
 
     def _confirmed(self, code: str, bars: object, checked_at: object, source: str) -> None:
         if isinstance(bars, tuple) and isinstance(checked_at, datetime):

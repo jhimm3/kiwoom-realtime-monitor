@@ -13,7 +13,7 @@ from kiwoom_monitor.application.trade_cost_service import TradeCostService
 from kiwoom_monitor.application.trade_history_service import TradeFill, TradeHistoryService
 from kiwoom_monitor.application.trade_analysis_preparation_service import TradeAnalysisPreparationService
 from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountScopeMismatchError
-from kiwoom_monitor.domain.order_contract import LEGACY_ACCOUNT_SCOPE
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, LEGACY_ACCOUNT_SCOPE
 
 
 class ConfirmWorker(QThread):
@@ -101,21 +101,31 @@ class HistoryWorker(QThread):
                         raise AccountScopeMismatchError("체결 조회 도중 계좌 context가 변경되었습니다.")
                     fills.extend(history_batch.fills)
                 day -= timedelta(days=1)
-            self.progress.emit("실제 수수료·세금 확인 중…")
             cost_error = ""
-            try:
-                cost_batch = cost_service.load_period_batch(self._start, self._end)
-                if self._expected_scope is not None and cost_batch.context.scope != self._expected_scope:
-                    raise AccountScopeMismatchError("선택 계좌와 비용 조회 계좌가 다릅니다.")
-                if fills_context is not None and cost_batch.context != fills_context:
-                    raise AccountScopeMismatchError("체결과 비용 조회의 계좌 context가 다릅니다.")
-                costs = cost_batch.costs
-                if fills_context is None: fills_context = cost_batch.context
-            except AccountScopeMismatchError:
-                raise
-            except Exception as error:
+            if (
+                self._expected_scope is not None
+                and self._expected_scope.environment is AccountEnvironment.MOCK
+            ):
+                # kt00015는 실계좌의 일자별 실제 정산 자료다. 모의계좌에서는
+                # 현재 중앙 조회가 실패하므로, 체결만 저장하고 매매일지의
+                # 계좌별 예상 비용률을 사용한다.
                 costs = ()
-                cost_error = str(error)
+                self.progress.emit("모의투자 체결 확인 완료 · 비용은 예상값 사용")
+            else:
+                self.progress.emit("실제 수수료·세금 확인 중…")
+                try:
+                    cost_batch = cost_service.load_period_batch(self._start, self._end)
+                    if self._expected_scope is not None and cost_batch.context.scope != self._expected_scope:
+                        raise AccountScopeMismatchError("선택 계좌와 비용 조회 계좌가 다릅니다.")
+                    if fills_context is not None and cost_batch.context != fills_context:
+                        raise AccountScopeMismatchError("체결과 비용 조회의 계좌 context가 다릅니다.")
+                    costs = cost_batch.costs
+                    if fills_context is None: fills_context = cost_batch.context
+                except AccountScopeMismatchError:
+                    raise
+                except Exception as error:
+                    costs = ()
+                    cost_error = str(error)
             if self.isInterruptionRequested(): return
             result = (tuple(fills), costs, cost_error)
             if self._account_client is not None: result += (fills_context,)

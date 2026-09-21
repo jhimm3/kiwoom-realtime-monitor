@@ -119,3 +119,35 @@ class JournalSelectedAccountTests(unittest.TestCase):
             account_client=object(), account_scope=self.scope)
         failed = []; worker.failed.connect(failed.append); worker.run()
         self.assertEqual(len(failed), 1); history.load_day_batch.assert_not_called()
+
+    def test_history_thread_finishes_and_deletes_without_losing_its_owner(self):
+        legacy_context = AccountQueryContext(
+            LEGACY_ACCOUNT_SCOPE, "legacy-unverified", 0, "legacy",
+        )
+        window = JournalWindow.__new__(JournalWindow); QMainWindow.__init__(window)
+        window._history_worker = None
+        window._history_service = SimpleNamespace(
+            load_day_batch=lambda _day: SimpleNamespace(fills=(), context=legacy_context),
+        )
+        window._cost_service = SimpleNamespace(
+            load_period_batch=lambda _start, _end: SimpleNamespace(
+                costs=(), context=legacy_context,
+            ),
+        )
+        window._query_client = None
+        window._selected_account_scope = lambda: LEGACY_ACCOUNT_SCOPE
+        window._history_progress = lambda _message: None
+        window._history_enrichment_failed = lambda _message: None
+        window._history_received = lambda *_values: None
+        window._history_enrichment_task_ids = {}
+        window._quit_after_history_sync = False
+
+        JournalWindow._start_history_sync(
+            window, date(2026, 9, 21), date(2026, 9, 21),
+        )
+
+        wait_until(lambda: window._history_worker is None)
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.app.processEvents()
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

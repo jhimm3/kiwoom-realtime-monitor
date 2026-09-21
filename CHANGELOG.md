@@ -2,6 +2,12 @@
 
 > 현재 릴리스: **2.1.0 (2026-09-21)** — 아래 2026-09-15~21 항목과 관련 구현 보고서를 포함한다.
 
+## 2026-09-21 매매일지 모의계좌 체결 조회 안정화
+
+- 현재 중앙 계좌 경로에서 실패하는 모의계좌 `kt00015` 실제 수수료·세금 조회를 생략하고, 체결 내역은 정상 저장한 뒤 설정된 예상 비용률을 사용한다.
+- 체결 조회와 후속 분석·분봉·일봉 worker의 `finished` 신호 처리 중 QThread 참조가 먼저 해제되어 Windows `Qt6Core.dll` 네이티브 종료로 이어질 수 있던 순서를 수정했다.
+- 새 체결을 많이 가져온 직후 GUI 스레드에서 최대 20회차의 자동보완을 한번에 등록하던 일을 2회차씩 나누고, 다음 묶음 전에 화면 이벤트를 처리하도록 바꿔 조회 완료 직후 렉을 줄였다.
+
 ## 2026-09-21 NAS 마지막 0B 시가총액 복원
 
 - 앱 재시작 뒤 실시간 snapshot의 5분 제한을 넘긴 종목도 NAS에 영구 저장된 마지막 `0B` FID 311 시가총액을 일괄 복원한다.
@@ -900,7 +906,7 @@
 
 - `2026.09.14-market-session-policy-s1`: 거래일 기준 `krx-nxt-schedule/2026-09-13`/`2026-09-14` 공통 정책을 추가해 KRX 정규장·장후 시간외종가·구 시간외단일가·신규 애프터를 구분한다. 기존 연구 reader와 NAS D4 shadow는 `krx-regular/v1`로 고정해 16시 이후 KRX 봉을 자동 소비하지 않는다. NXT 미확인 세부 phase와 mock 애프터 지원은 활성화하지 않았고, 구독·수집·DB·주문·NAS 배포는 후속 단계로 남겼다.
 
-- `2026-09-13 A4b design and boundary audit`: 직전 A4b 완료 판정을 정정했다. 실제 UI relay·묶음 편집에서 scope 누락, 일지 동기화 첫 API 404, 구 NAS 뉴스 capability 오판, 삭제 부활/v1 덮어쓰기를 재현했다. A3 직접 adapter도 현재 자격 재확인이 없다. 기존 구조의 수정 순서 0a~0c와 HTTPS 기존 계좌 대조·DPAPI 재검증·REST/WS 연결 계획을 `reports/A4B_DIRECT_WEBSOCKET_SCOPE_REVIEW.md`에 확정했다. 문서만 변경했으며 제품 코드·스키마·NAS·build 값은 변경하지 않았다. 아래 879개 회귀 통과는 당시 테스트 범위의 역사적 기록이며 위 오류까지 해결됐다는 의미가 아니다.
+- `2026-09-13 A4b design and boundary audit`: 직전 A4b 완료 판정을 정정했다. 실제 UI relay·묶음 편집에서 scope 누락, 일지 동기화 첫 API 404, 구 NAS 뉴스 capability 오판, 삭제 부활/v1 덮어쓰기를 재현했다. A3 직접 adapter도 현재 자격 재확인이 없다. 기존 구조의 수정 순서 0a~0c와 HTTPS 기존 계좌 대조·DPAPI 재검증·REST/WS 연결 계획을 `docs/archive/2026-09-22/reports/A4B_DIRECT_WEBSOCKET_SCOPE_REVIEW.md`에 확정했다. 문서만 변경했으며 제품 코드·스키마·NAS·build 값은 변경하지 않았다. 아래 879개 회귀 통과는 당시 테스트 범위의 역사적 기록이며 위 오류까지 해결됐다는 의미가 아니다.
 
 - `2026.09.13-a4-journal-news-scope-v1`: 뉴스 DB v2가 기존 매매일지 뉴스 연결을 legacy scope로 보존하면서 신규 연결을 실전·모의 계좌별로 저장한다. 매매일지→뉴스 프로세스 명령과 자동 분석 준비도 선택한 계좌 scope를 전달한다. NAS 동기화는 v1 `journal_news_link`에 legacy만, capability 협상된 `journal_v2_news_links`에 검증 계좌만 전송하며 두 경계의 잘못된 scope 문서를 수입하지 않는다. 매매일지 DB v7은 v1에서 읽은 원본 collection/key/revision을 기록해 구 앱이 같은 revision을 다시 올려도 삭제한 legacy 자료가 부활하지 않게 한다. 전체 핵심 회귀 879개(`494+385`)가 통과했다.
 
@@ -964,7 +970,7 @@
 - `2026.09.12-news-worker-fairness-v1`: 50ms 간격으로도 실환경 누적 뉴스 작업이 단일 코어를 점유한 결과를 반영해 후속 작업을 기본 초당 1건으로 제한한다. 공개 `/health`는 작업 스레드 대기열과 분리된 비동기 경로로 제공해 서버 생존 확인이 밀리지 않게 한다.
 - `2026.09.12-news-job-pacing-v1`: 누적 뉴스 후속 작업이 계속 존재할 때 실행기가 쉼 없이 반복해 NAS 단일 CPU 코어와 서버 응답을 고갈시키지 않도록 작업 사이에 50ms 간격을 둔다. 대기 작업이 없을 때의 기존 1초 폴링과 BODY/RULE/AI 처리 계약은 유지한다.
 
-이 파일은 앞으로의 변경을 짧게 누적한다. 배포판별 상세 사용자 변경은 `docs/RELEASE_NOTES_v*.md`에 유지한다.
+이 파일은 앞으로의 변경을 짧게 누적한다. 현재 배포판 상세 사용자 변경은 `docs/RELEASE_NOTES_v2.1.0.md`, 이전 배포판은 `docs/archive/2026-09-22/releases/`에 유지한다.
 
 형식:
 
@@ -1004,7 +1010,7 @@
 
 ## [2.0.0] - 2026-09-12
 
-- 상세 내역: `docs/RELEASE_NOTES_v2.0.0.md`
+- 상세 내역: `docs/archive/2026-09-22/releases/RELEASE_NOTES_v2.0.0.md`
 
 ### Fixed
 
@@ -1179,7 +1185,7 @@
 - `2026.09.12-market-state-time-v1`을 NAS에 배포해 `/health`, 인증 API, WebSocket과 기존 `T88:88` 자료 보정 완료를 실제 확인했다.
 - 새 NAS 이미지 내부의 PostgreSQL 통합 검사에서 중앙 스키마 v3와 주요 저장소 읽기·쓰기·롤백·검증자료 정리를 모두 확인했다.
 - 실제 NAS 서버 컨테이너 중단 시 이 PC의 키움 API로 `ka00198` 20종목이 자동 전환되고, 서버 재시작 뒤 같은 클라이언트가 NAS 경로로 자동 복귀하는 것을 확인했다.
-- 확인된 안정성 결함, 책임 분리, 과추상화 감사, 전체 회귀와 NAS 실검증을 마치고 `reports/REFACTORING_CLOSEOUT_REPORT.md`에 기능 보존 중심 리팩터링 종료선을 기록했다.
+- 확인된 안정성 결함, 책임 분리, 과추상화 감사, 전체 회귀와 NAS 실검증을 마치고 `docs/archive/2026-09-22/reports/REFACTORING_CLOSEOUT_REPORT.md`에 기능 보존 중심 리팩터링 종료선을 기록했다.
 - NAS 독립 TOP20이 시장 필드가 없는 `ka00198` 응답만으로 KOSPI/KOSDAQ을 추측하지 않고 공식 KRX 종목 카탈로그를 중앙 저장해 시장별 지수를 계산하도록 했다.
 - TOP20 지수 저장 실패 자료를 `server-data`의 원자적 outbox에 남겨 컨테이너 재시작 뒤에도 다시 저장하도록 했다.
 - 시작 전에 실행되던 로컬 분봉 30일·일봉 250개 보존 정리를 첫 화면과 최초 순위 처리 뒤로 옮겼다. 실제 DB 복제본의 bootstrap 진입→화면 표시는 0.7258초에서 0.0744초로 줄었고 보존 정책은 유지한다.
@@ -1208,5 +1214,5 @@
 
 ## [1.1.20]
 
-- 상세 내역: `docs/RELEASE_NOTES_v1.1.20.md`
+- 상세 내역: `docs/archive/2026-09-22/releases/RELEASE_NOTES_v1.1.20.md`
 - 이전 버전: `README.md`의 변경 내역 참조

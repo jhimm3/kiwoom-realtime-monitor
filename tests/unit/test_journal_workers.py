@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 from datetime import date, datetime
 from types import SimpleNamespace
 
@@ -11,7 +12,7 @@ from kiwoom_monitor.presentation.journal_workers import (
     MarketIndexBackfillWorker,
 )
 from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountQueryContext
-from kiwoom_monitor.domain.order_contract import LEGACY_ACCOUNT_SCOPE
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
 
 
 class JournalWorkerTests(unittest.TestCase):
@@ -58,6 +59,29 @@ class JournalWorkerTests(unittest.TestCase):
         self.assertEqual([date(2026, 9, 7), date(2026, 9, 4)], history.days)
         fills, costs, error = received[0][0]
         self.assertEqual(2, len(fills)); self.assertEqual((), costs); self.assertEqual("cost unavailable", error)
+
+    def test_history_worker_skips_unsupported_cost_query_for_mock_account(self) -> None:
+        mock_scope = AccountScope(
+            "kiwoom", AccountEnvironment.MOCK, "11111111-1111-4111-8111-111111111111",
+        )
+        context = AccountQueryContext(mock_scope, "mock-profile", 1, "nas")
+
+        class History:
+            def load_day_batch(self, _day):
+                return SimpleNamespace(fills=(), context=context)
+
+        costs = SimpleNamespace(load_period_batch=mock.Mock())
+        received = []
+        worker = HistoryWorker(
+            History(), costs, date(2026, 9, 21), date(2026, 9, 21),
+            account_scope=mock_scope,
+        )
+        worker.completed.connect(lambda *values: received.append(values))
+
+        worker.run()
+
+        costs.load_period_batch.assert_not_called()
+        self.assertEqual(((), (), ""), received[0][0])
 
     def test_backfill_worker_counts_success_and_failure(self) -> None:
         class Service:
