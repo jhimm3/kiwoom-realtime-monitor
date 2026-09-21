@@ -33,7 +33,9 @@
 
 과거자료 운영 DB `data/historical_intelligence.sqlite3`를 만들었다. CREON 삼성전자 연속조회는 1분봉 190,102개(2024-08-29 이후)와 그 이전 5분봉 57,710개(2021-08-11~2024-08-28)를 겹치지 않게 저장했고, 5분봉 시각은 구간 종료시각으로 확인했다. 네이버 날짜 지정 검색은 원응답·기사 관계·원문 URL별 확인 시도와 원문 발행시각을 저장한다. 발행시각 확보, 원문 차단, 기사 없음, 시각 없음, 제목 불일치 등을 별도 상태로 남기며 발행시각을 확인한 기사만 현재 학습 적격으로 표시한다.
 
-NAS의 `stock_aliases` 1,164행을 사용해 94,750개 후보 종목·일의 당시 상호를 선택하고, 이전 대화에서 정한 상호변경일 ±14일에는 구·신 이름을 함께 검색하도록 95,090개 재개 가능 뉴스 작업을 만들었다. 2026-09-22에는 DB와 대신 원응답을 `deploy/synology/server-data/historical-intelligence/v1/runs/20260921T185214Z-04bb4a3f5d43`에 불변 스냅샷으로 게시했고, 로컬 검증 복사본의 SHA-256 일치와 SQLite `integrity_check=ok`를 확인했다. NAS 파일을 네트워크에서 실행 중인 SQLite로 직접 열지 않는다. 다른 후보 종목으로 시세 수집 확대, 뉴스 작업 95,090개의 실제 소진·도달기간 확인, 외부 역사 자료의 앱 연구 입력 연결, 테마의 의미별 대표명/별칭과 사용자 결정 유지, 필요에 따른 로컬 LLM·학습은 아직 완료하지 않았다.
+NAS의 `stock_aliases` 1,164행을 사용해 94,750개 후보 종목·일의 당시 상호를 선택하고, 이전 대화에서 정한 상호변경일 ±14일에는 구·신 이름을 함께 검색하도록 95,090개 재개 가능 뉴스 작업을 만들었다. 2026-09-22에는 DB와 대신 원응답을 `deploy/synology/server-data/historical-intelligence/v1/runs/20260921T185214Z-04bb4a3f5d43`에 불변 스냅샷으로 게시했고, 로컬 검증 복사본의 SHA-256 일치와 SQLite `integrity_check=ok`를 확인했다. NAS 파일을 네트워크에서 실행 중인 SQLite로 직접 열지 않는다. 다른 후보 종목으로 시세 수집 확대, 뉴스 작업 95,090개의 실제 소진·도달기간 확인, 테마의 의미별 대표명/별칭과 사용자 결정 유지, 필요에 따른 로컬 LLM·학습은 아직 완료하지 않았다.
+
+외부 자료를 기존 strict TOP20 재생에 섞지 않기 위해 `historical_reconstruction/v1` 입력 계약과 hash 검증 loader를 추가했다. 후보는 `posthoc_candidate_days/v1`, `not_contemporaneous_top20=true`로 고정하고 후보 생성시각을 알 수 없으므로 export 시각을 `available_at`으로 쓴다. 봉과 뉴스는 실제 수집 관측시각을 유지하며, 종목·일에 1분봉이 있으면 1분만 선택하고 없을 때만 5분을 선택한다. 5분을 1분으로 확장하지 않는다. 첫 최종 로컬 표본 `data/research/historical-reconstruction/2026-09-18-initial-v2`는 후보 50개, 현재 확보된 1분봉 종목 2개, 미확보 48개, 봉 762행, 뉴스 관계 3,497행을 고정했다. 뉴스 관계 중 발행시각 확인 2,056개와 차단 1,295개, 시각 없음 74개 등 제외 상태도 manifest에 따로 집계한다. 이는 입력 연결 표본이며 기존 전략 평가나 학습 완료를 뜻하지 않는다.
 
 수집 진행률은 NAS `deploy/synology/server-data/historical-intelligence/v1/STATUS.md`와 `status.json`에 게시한다. 발행시각이 검증된 과거 기사는 기존 인증된 `news_article` content 경로로 증분 전송하며, NAS 운영 DB에서 `naver_historical_web`/`historical_backfill` revision으로 저장된 뒤 기존 BODY 작업기가 원문을 처리한다. 별도 역사 SQLite 스냅샷 자체를 운영 뉴스 DB로 열거나 덮어쓰지 않는다.
 

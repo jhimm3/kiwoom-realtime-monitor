@@ -41,6 +41,7 @@
 |---|---|
 | `scripts/export_research_dataset.py` | NAS 일별 동결 export·bundle |
 | `src/kiwoom_monitor/infrastructure/research_data_source.py` | 입력 로드·독립 시간/종목/final projection |
+| `scripts/export_historical_reconstruction.py`, `infrastructure/historical_reconstruction.py` | 사후 후보·대신 봉·과거 뉴스의 불변 복원 입력. strict TOP20 재생과 분리 |
 | `src/kiwoom_monitor/research_process.py` | campaign worker·가설·순차/final 평가 프로세스 |
 | `scripts/run_research.py` | 기존 runner의 재생·실행·평가 저장 |
 | `src/kiwoom_monitor/application/research_replay.py` | 시점별 입력 재생 |
