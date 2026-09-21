@@ -188,6 +188,18 @@ def main() -> int:
                     completed_jobs += 1
                 else:
                     truncated_jobs += 1
+                print(json.dumps({
+                    "event": "news_job_finished",
+                    "code": job.code,
+                    "target_date": job.target_date,
+                    "query": job.query_text,
+                    "state": state,
+                    "pages": pages_observed,
+                    "items": items_observed,
+                    "usable": usable,
+                    "unreadable": unreadable,
+                    "missing_time": missing_time,
+                }, ensure_ascii=False), flush=True)
             except Exception as error:
                 finish_news_backfill_job(
                     args.output, job, state="failed", pages_observed=pages_observed,
@@ -196,6 +208,15 @@ def main() -> int:
                     error=f"{type(error).__name__}: {error}",
                 )
                 failed_jobs += 1
+                print(json.dumps({
+                    "event": "news_job_failed",
+                    "code": job.code,
+                    "target_date": job.target_date,
+                    "query": job.query_text,
+                    "pages": pages_observed,
+                    "items": items_observed,
+                    "error": f"{type(error).__name__}: {error}",
+                }, ensure_ascii=False), flush=True)
         print(json.dumps({
             "completed_jobs": completed_jobs,
             "failed_jobs": failed_jobs,

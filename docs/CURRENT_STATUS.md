@@ -35,6 +35,8 @@
 
 NAS의 `stock_aliases` 1,164행을 사용해 94,750개 후보 종목·일의 당시 상호를 선택하고, 이전 대화에서 정한 상호변경일 ±14일에는 구·신 이름을 함께 검색하도록 95,090개 재개 가능 뉴스 작업을 만들었다. 2026-09-22에는 DB와 대신 원응답을 `deploy/synology/server-data/historical-intelligence/v1/runs/20260921T185214Z-04bb4a3f5d43`에 불변 스냅샷으로 게시했고, 로컬 검증 복사본의 SHA-256 일치와 SQLite `integrity_check=ok`를 확인했다. NAS 파일을 네트워크에서 실행 중인 SQLite로 직접 열지 않는다. 다른 후보 종목으로 시세 수집 확대, 뉴스 작업 95,090개의 실제 소진·도달기간 확인, 외부 역사 자료의 앱 연구 입력 연결, 테마의 의미별 대표명/별칭과 사용자 결정 유지, 필요에 따른 로컬 LLM·학습은 아직 완료하지 않았다.
 
+수집 진행률은 NAS `deploy/synology/server-data/historical-intelligence/v1/STATUS.md`와 `status.json`에 게시한다. 발행시각이 검증된 과거 기사는 기존 인증된 `news_article` content 경로로 증분 전송하며, NAS 운영 DB에서 `naver_historical_web`/`historical_backfill` revision으로 저장된 뒤 기존 BODY 작업기가 원문을 처리한다. 별도 역사 SQLite 스냅샷 자체를 운영 뉴스 DB로 열거나 덮어쓰지 않는다.
+
 기존 후보 DB는 읽기 전용으로 확인했다. 94,750개 후보 종목·일, 5,910,806개 일봉, 4,562,200개 분봉이 있고 분봉 작업 완료 중 81,901건은 0행이었다. 실제 확보 범위와 다음 작업은 [과거 자료 확보 기획](HISTORICAL_BACKFILL_PLAN.md)에 적었다.
 
 ## 근거를 찾는 위치

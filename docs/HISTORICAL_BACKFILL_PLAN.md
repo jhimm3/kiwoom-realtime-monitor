@@ -72,6 +72,8 @@ NAS 참조 DB의 `stock_aliases`는 종목코드별 상호와 `valid_from`/`vali
 
 원문 조회는 언론사 원문과 제목이 검증된 네이버 보관 링크의 시도를 각각 기록한다. `published_at_found`만 현재 학습 적격이며 `time_not_found`, `blocked`, `article_unavailable`, `title_mismatch`, `fetch_error`, `not_fetched`는 원자료를 버리지 않고 학습 제외 사유와 함께 남긴다. 원문이 없거나 시각이 없는 건은 별도 집계할 수 있다.
 
+발행시각이 검증된 기사는 기존 인증 API의 `news_article` collection으로 증분 반영한다. NAS는 이를 `collector_id=naver_historical_web`, `collection_scope=historical_backfill` revision으로 저장하고 기존 BODY 작업기로 원문을 읽는다. 따라서 별도 수집 DB는 원응답·실패·재개·감사 원장이고, 앱이 읽는 기사와 원문 상태는 기존 NAS 뉴스 revision DB에 들어간다. 같은 기사·종목 재전송은 기존 content hash 경계에서 중복 revision을 만들지 않는다. 발행시각 미확인 자료는 수집 DB에는 보존하지만 이 운영 반영 대상에서 제외한다.
+
 Npay 공식 도움말에는 서비스 화면 밖 개인 프로그램에서 증권정보를 재가공해 이용하는 것을 제한하는 안내가 있다. 뉴스 목록·본문의 보관과 학습 이용에 해당하는 범위를 확인해 수집 방식에 반영한다. 사이트 접근과 이용 범위는 별도 확인 항목이며 이 문서는 해당 이용 가능성을 확정하지 않는다. [공식 이용 안내](https://help.pay.naver.com/faq/content.help?faqId=17106)
 
 ## 표본 실행 위치
@@ -88,6 +90,8 @@ Npay 공식 도움말에는 서비스 화면 밖 개인 프로그램에서 증�
 마지막 명령은 CREON Plus 로그인과 같은 Windows 권한 수준에서 실행한다. 이 PC에서는 CREON이 관리자 권한이므로 실행 터미널도 관리자 권한이어야 한다. 삼성전자 연속조회와 해상도 경계는 확인했으며, 전체 후보 확대 전에는 시세 작업 재개 원장과 종목별 완전성 보고를 추가한다.
 
 닫힌 SQLite 스냅샷과 원응답은 `scripts/publish_historical_intelligence_to_nas.py`로 `X:\kiwoom-monitor\deploy\synology\server-data\historical-intelligence\v1` 아래에 게시한다. 각 run은 내용 해시를 포함한 불변 디렉터리이고 `latest.json`만 새 run을 가리킨다. SQLite는 NAS 공유에서 직접 갱신하거나 검증하지 않고 로컬 snapshot/검증 복사본을 사용한다.
+
+진행률은 같은 NAS 경로의 `STATUS.md`에서 확인한다. 뉴스 완료/대기/실패·목록 기사·발행시각 상태·운영 뉴스 DB 반영 건수와 대신 종목 작업·주기별 봉 수를 분리해 표시한다. `status.json`은 같은 내용의 기계 판독본이다. 수집기는 작업 하나가 끝날 때마다 진행률을 갱신하고 묶음 종료 시 새 DB 스냅샷을 게시한다.
 
 ## 4. 수집 상태와 완료 기준
 
