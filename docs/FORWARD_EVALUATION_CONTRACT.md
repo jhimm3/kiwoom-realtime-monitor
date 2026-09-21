@@ -1,6 +1,10 @@
 # 모의 전진평가 계약
 
-O2a는 전략을 실제 주문에 연결하는 기능이 아니라, 앞으로 들어오는 자료에서 동결된 전략을 같은 기준으로 평가하기 위한 증거 경계다. 현재 구현은 mock 환경만 허용하며 주문 실행기나 서버 시작 경로를 켜지 않는다.
+기준: **2.1.0**, 2026-09-22 문서 정리. 이 문서는 동결 전진평가·피드백·별도 자동 모의운용 연결의 상세 계약이다.
+구현·배포·운영 확인 범위는 [현재 상태](CURRENT_STATUS.md), 미완료·보류 작업은 [남은 작업](OPEN_ITEMS.md)을 따른다.
+A5 피드백과 O2-M0/Me1~Me3의 runner·제어 API·UI는 구현되어 있다. 코드 연결, NAS 적용, 실제 모의계좌·장시간 검증은 각각 구분한다.
+
+O2a는 전략을 실제 주문에 연결하는 기능이 아니라, 앞으로 들어오는 자료에서 동결된 전략을 같은 기준으로 평가하기 위한 증거 경계다. O2a 평가 계약은 mock 환경만 허용하며, 프로파일·보고서 저장만으로 주문 실행기나 서버 시작 경로를 켜지 않는다. 주문 실행은 아래 별도 O2-M 운용·시작 계약을 따른다.
 
 ## 동결 프로파일
 
@@ -28,11 +32,19 @@ O2a는 전략을 실제 주문에 연결하는 기능이 아니라, 앞으로 �
 
 같은 event ID는 한 번만 센다. `broker_net_pnl_won`은 broker가 반영한 비용 이후 값으로 취급한다. `broker_reported_cost_won`은 설명용이며 다시 차감하지 않는다. 수수료·슬리피지 등 별도로 빠진 비용만 `additional_unmodeled_cost_won`으로 한 번 차감한다.
 
-A5a부터 중앙 event 입력은 검증된 mock 계좌 scope와 `accepted_sequence` 커서로 읽을 수 있다.
-`source_event_id`가 중복 방지 기준이며 run ID는 전략 실행 계보다. 아직 이 원장을 성과값으로 자동
-집계하거나 기존 `ForwardEvidence`를 교체하지 않는다. A5b의 상세 FILL projection은 aggregate를
-수량 근거로만 분리하고 계좌·거래일·주문·체결 ID로 상세 행을 멱등 저장한다. 비용/선택 편향을 포함한
-동결 FeedbackEvidence와 기존 kt00007 체결 대조가 완성된 뒤에만 전진평가 입력으로 연결한다.
+A5a부터 중앙 event 입력은 검증된 mock 계좌 scope와 `accepted_sequence` 커서로 읽는다.
+`source_event_id`가 중복 방지 기준이며 run ID는 전략 실행 계보다. A5b의 상세 FILL projection은
+aggregate를 수량/누락 근거로만 분리하고 계좌·거래일·주문·체결 ID로 상세 행을 멱등 저장한다.
+A5c는 kt00007 요약과 상세 FILL을 대조하며 겹친 요약과 상세를 독립 거래로 더하지 않는다.
+A5d의 `journal_feedback_evidence/v1`은 kt00015 비용, 계좌·기간·전략·선택 run/선언 시각,
+체결 품질, 당시 근거의 PIT 상태와 최종 검증 노출 상태를 동결한다. 부분·충돌·요약 전용 체결,
+비용 누락·열린 포지션에는 확정 순손익을 만들지 않는다.
+
+`forward_evidence_from_feedback`은 계좌·환경·전략·기간이 profile과 일치하고 피드백 적격성이
+확인된 evidence만 기존 `ForwardEvidence`로 변환한다. 데이터 대조 통계와 실행 event는 별도 입력이며,
+추가 누락 비용·MDD·노출도 호출자가 근거를 갖춰 제공한다. 원장만 읽어 모든 성과를 자동 확정하는 계약은 아니다.
+A5e는 별도 기계 복기·등록 파라미터 개선 제안을 보존하고, 명시 채택 시 새 전략 버전과 기존 개발
+campaign의 재검증 요청으로 연결한다. 사용자 복기와 원 전략을 덮어쓰거나 final 평가를 자동 재사용하지 않는다.
 
 ## 출력과 승격
 
@@ -53,9 +65,9 @@ A5a부터 중앙 event 입력은 검증된 mock 계좌 scope와 `accepted_sequen
 
 이 컬렉션은 공개 콘텐츠 API allowlist에 포함하지 않는다. key는 내용 hash이며 같은 key에 다른 문서를 저장하려 하면 실패한다. 별도 중앙 스키마 변경은 없다.
 
-## 아직 하지 않는 것
+## 평가 계약의 한계
 
-- mock 주문 실행기 시작 연결
+- 평가 profile·보고서·PASSED만으로 mock 주문 실행기를 시작하지 않음. 별도 O2-M 시작 경계는 구현되어 있음
 - 운영 기준값 자동 선택
 - 보고서 통과에 따른 자동 전략 교체
 - 실거래 adapter, 실계좌 설정, live 주문
@@ -70,7 +82,7 @@ binding, 이 문서의 동결 profile과 운용 한도를 하나의 content ID�
 
 현재 O1 구현과 연결 가능한 범위는 단일 전략, 단일 포지션, KRX 정규장 지정가다. 명세가
 `READY`여도 저장만으로 runtime claim이나 주문 transport를 켜지 않는다. 후보 입장·lease·broker
-복구와 실제 Decision 전달은 후속 O2-M 실행 단계에서 별도로 검증한다.
+복구와 실제 Decision 전달은 아래 O2-M 실행 경계에 연결되어 있으며 각 단계에서 다시 검증한다.
 
 O2-Mb 입장은 최신 binding과 실제 SHADOW revision을 다시 확인하고, 명세의 final batch 안에
 candidate hash가 한 번만 존재하며 execution과 research run이 모두 같은 result hash로 완료됐는지
@@ -82,8 +94,27 @@ O2-Mc 복구 gate는 account lease를 다시 확인한 뒤 broker 미체결·체
 당일 손익이 없거나 데이터 공백을 알 수 없는 경우도 추정값으로 통과시키지 않는다. 통과 판정은
 `CLEARED_ORDERS_DISABLED`이며 후속 주문 gate를 자동으로 열지 않는다.
 
-O2-Md는 위 통과 뒤의 각 action Decision을 별도로 검사한다. 현재 binding·lease·정규장과 입력/
-계좌 freshness, FIFO 상세 체결과 broker 비용이 완결된 당일 순손익 출처, 자금·손실·장애 한도,
-기존 O1 비종결 intent를 모두 확인한다. 승인된 같은 Decision은 결정적 intent 한 개로만 연결되고
-재호출은 기존 intent를 읽는다. 이 계약은 final candidate package를 NAS 실행 설정으로 복원하는
-운영 runner 자체를 만들지 않는다.
+O2-Md와 M0의 지속 gate는 위 통과 뒤의 각 action Decision을 별도로 검사한다. 현재 binding·lease,
+서버 시각·forward 평가기간·KRX 정규 연속장, 입력/계좌 freshness, 최신 risk snapshot ID/revision,
+자금·손실·장애 한도와 기존 O1 비종결 intent를 확인한다. ENTER/EXIT·terminal 주문·대사 진행 상태를
+구분하며, EXIT는 같은 run의 확인된 보유에서 미체결 매도를 뺀 수량만 허용한다.
+승인된 같은 Decision은 결정적 intent 하나로 연결되고 재호출은 기존 intent를 읽는다.
+계좌의 영속 RUNNING/STOPPED control revision을 intent 저장 트랜잭션에서 다시 검사한다.
+중지 저장 실패 시 메모리 주문 gate도 닫고, 명시 재개는 중지 이후 새 broker 대사를 요구한다.
+
+## O2-Me1~Me3 현재 연결
+
+- Me1은 동결 final 후보 package와 사전 동결 eligibility policy/result receipt를 전용 인증 경계로 게시한다.
+  final `COMPLETED`만으로 입장하지 않으며 content hash·등록 Family·구현 hash·final 계보·현재 mock binding을 대조한다.
+- Me2는 상세 체결·broker 실제 비용·복구 잔고를 계좌별 FIFO로 대조해 불변 risk snapshot과 단조 reconciliation revision을 만든다.
+  비용·체결·잔고가 맞지 않으면 손익을 0으로 추정하지 않는다. 운용 gate는 출처 문자열만으로 이 근거를 대신하지 않는다.
+- 계좌 단일 owner의 수동/자동 bundle 전환은 flat broker 상태를 확인하고 기존 callback·monitor 작업을 drain한 뒤 lease를 넘긴다.
+  자동 모드에서도 조회·명시 취소·대사는 유지하며 수동 신규 주문은 conflict로 거절한다.
+- Me3 runner는 중앙 관측 cursor와 O1 상세 체결을 소비하고 supervisor는 저장 RUNNING 의도를 복원한다.
+  복원 실패는 신규 주문을 닫는다. 인증 시작·중지·재개·상태 API와 PC 모의 자동운용 창이 이 경계를 사용한다.
+- READY 게시 화면은 ELIGIBLE 후보, 같은 설정의 실제 Shadow 근거, 현재 mock binding,
+  동결 Forward 기준과 운용 한도를 확인한다. READY 게시와 자동운용 시작은 별도다.
+- Shadow monitor 자체에는 주문권한이 없다. 자동운용에서도 같은 Decision의 중복 전송을 막는 기존 O1 원장을 사용한다.
+
+이 연결의 로컬 통합·반복 검증 기록은 실제 브로커 전진 성과나 현재 NAS 배포 상태를 증명하지 않는다.
+실제 PostgreSQL·제한 모의계좌·장시간 동시 운용의 확인 범위는 [현재 상태](CURRENT_STATUS.md)와 [남은 작업](OPEN_ITEMS.md)에 남긴다.

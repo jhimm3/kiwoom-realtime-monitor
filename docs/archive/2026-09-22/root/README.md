@@ -1,0 +1,50 @@
+> **정리 전 스냅샷** · 원래 경로: `README.md` · [현재 문서](../../../../README.md) · 원문 바이트는 아카이브 ZIP에 보존했다.
+
+# 키움 실시간 종목순위·테마·거래강도 모니터
+
+키움 REST·WebSocket `0B` 기반의 Windows 상위 20종목 모니터입니다. 실시간 순위·현재가·기간 거래대금·거래강도와 최고가 근접 알림, NXT 표시, 테마·뉴스·자동 매매일지, TOP20 지수를 제공합니다. 저장된 자료로 전략 연구와 Shadow 후보 검증을 반복하고, 검증된 후보를 계좌별 안전 gate를 거쳐 모의운용할 수 있습니다. 선택형 개인 NAS 서버는 앱이 꺼져도 시장·뉴스·계좌 자료를 수집하고 여러 PC에 같은 설정과 분석 자료를 제공하며, NAS를 쓰지 않는 로컬 모드도 그대로 지원합니다.
+
+## 현재 버전
+
+- **2.1.0**
+- [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v2.1.0)
+- [소개 페이지](../../../index.html) · [개인정보처리방침](../../../privacy.html)
+
+## 변경 내역
+
+- [2.1.0](../../../RELEASE_NOTES_v2.1.0.md) — 자동 모의운용 기반, 다중 계좌 인증, NAS 수집·장애전환·뉴스·시장자료 안정화
+- [2.0.0](../releases/RELEASE_NOTES_v2.0.0.md) — 개인 NAS 중앙 수집·장애전환, 공통 백업, 시점별 데이터 계약과 대규모 안정성 리팩터링
+- [1.1.20](../releases/RELEASE_NOTES_v1.1.20.md) — 자동 매매일지·전략팩, 다중 차트, 진입 스냅샷, TOP20 거래대금 지수와 실시간 안정성 개선
+- [1.1.19](../releases/RELEASE_NOTES_v1.1.19.md) — AI 단건·묶음 요청, 호출량 추적, 뉴스창 배치·복원과 뉴스 설정 백업 개선
+- [1.1.18](../releases/RELEASE_NOTES_v1.1.18.md) — 뉴스 전용 프로세스·DB 분리, AI 캐시 백업, 빠른 종목 전환 및 창 연동 안정화
+- [1.1.17](../releases/RELEASE_NOTES_v1.1.17.md) — 네이버 뉴스·선택형 DART 공시, 사건 묶음과 사용자 API 기반 AI 원문 분석
+- [1.1.16](../releases/RELEASE_NOTES_v1.1.16.md) — KRX·NXT 실시간 거래대금 안정화, 순위표 흔들림 완화, 메인 창 위치·크기 복원
+- [1.1.15](../releases/RELEASE_NOTES_v1.1.15.md) — 테마 OCR·텍스트 가져오기 개선, 붙은 종목명 분리, KIND 상호변경 연동
+- [1.1.14](../releases/RELEASE_NOTES_v1.1.14.md) — 역사적 신고가 당일 수정주가 기준 통일, 헤더 전환 강조 깜빡임 제거
+- [1.1.13](../releases/RELEASE_NOTES_v1.1.13.md) — 역사적 신고가 수정주가 정밀 보정·증분 조회, 신고가 헤더 선택 순환
+- [1.1.12](../releases/RELEASE_NOTES_v1.1.12.md) — 수정주가 기준 5·20·250일·1985년 이후 역사적 신고가
+- [1.1.11](../releases/RELEASE_NOTES_v1.1.11.md) — 64비트 Windows 자동 업데이트 도우미 핸들 오류 수정
+- [1.1.10](../releases/RELEASE_NOTES_v1.1.10.md) — KRX+NXT 합산 최고가·직전 거래대금·분봉 보완, 최근 730개 분봉 연속조회
+- [1.1.9](../releases/RELEASE_NOTES_v1.1.9.md) — PowerShell 없이 전용 업데이트 도우미 EXE로 부분 업데이트 적용
+- [1.1.8](../releases/RELEASE_NOTES_v1.1.8.md) — 부분 자동 업데이트 SHA-256 검증, 설정 백업 첨부파일 복원 안전성 강화, 설치본 제3자 고지 포함
+- [1.1.7](../releases/RELEASE_NOTES_v1.1.7.md) — `ka10081` 일봉 직접 거래대금·30일 캐시, 순위 변동 표시 시간 기본값 0초
+- [1.1.6](../releases/RELEASE_NOTES_v1.1.6.md) — 자동 업데이트 도우미 안정화
+- [1.1.5](../releases/RELEASE_NOTES_v1.1.5.md) · [1.1.4](../releases/RELEASE_NOTES_v1.1.4.md) — 업데이트·아이콘 개선
+- [1.1.3](../releases/RELEASE_NOTES_v1.1.3.md) · [1.1.2](../releases/RELEASE_NOTES_v1.1.2.md) · [1.1.1](../releases/RELEASE_NOTES_v1.1.1.md) · [1.1.0](../releases/RELEASE_NOTES_v1.1.0.md)
+
+## 개발 문서
+
+- [현재 구현 아키텍처](ARCHITECTURE_CURRENT.md) · [기능별 모듈 지도](MODULE_MAP.md)
+- [NAS API 계약](API_CONTRACT.md) · [DB 스키마 지도](DB_SCHEMA.md)
+- [과거 시장 재현용 데이터 계약](HISTORICAL_DATA_CONTRACT.md)
+- [향후 앱 개발 로드맵](FUTURE_DEVELOPMENT_ROADMAP.md)
+- [개발 불변 규칙](../../../../DEVELOPMENT_GUARDRAILS.md) · [문서/구현 감사](AUDIT_REPORT.md) · [리팩터링 최종 종료 보고서](../reports/REFACTORING_CLOSEOUT_REPORT.md) · [변경 기록](CHANGELOG.md)
+- [AI 인수인계 개발실행서 v3.3](../legacy/AI_인수인계_개발실행서_v3.3.md) — 상세 운영·배포 기록과 2.0.0 전환 메모
+- [API 발급 가이드](../snapshots/docs/API_발급_가이드.md) — 키움·네이버·DART·AI·Google Drive 자격 증명 준비 방법
+- [AI 강의 전략팩 적용 가이드](../snapshots/docs/AI_강의_전략팩_적용_가이드.md) — PDF·스크립트를 AI로 분석하고 자동분석 전략팩으로 검토·적용하는 방법
+- [기술 명세서](../legacy/키움_실시간_모니터_기술명세서_v2.0.md)
+- [OCR 모델 직접 설치](../snapshots/docs/OCR_모델_직접_설치.md)
+
+## 저작권 및 제3자 고지
+
+앱 자체는 `Copyright 2026 크니. All rights reserved.`로 보호됩니다. 포함 라이브러리·OCR 모델·알림 음성·설치 도구에 대한 고지는 [THIRD_PARTY_LICENSES.txt](../../../../THIRD_PARTY_LICENSES.txt)를 참조하세요. 설치본에는 패키지별 원문 고지 파일을 담은 `licenses/` 폴더도 함께 포함됩니다.

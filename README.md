@@ -8,40 +8,19 @@
 - [GitHub 릴리즈](https://github.com/jhimm3/kiwoom-realtime-monitor/releases/tag/v2.1.0)
 - [소개 페이지](docs/index.html) · [개인정보처리방침](docs/privacy.html)
 
+## 문서와 개발 방향
+
+- **[현재 문서 안내](docs/README.md)** — 기능·기획·계약·운영 문서를 찾는 시작점
+- [현재 앱 상태](docs/CURRENT_STATUS.md) · [개발 로드맵](FUTURE_DEVELOPMENT_ROADMAP.md)
+- [다음 작업: 대신 과거 봉·네이버 증권 뉴스 확보](docs/HISTORICAL_BACKFILL_PLAN.md)
+- [남은 작업과 보류](docs/OPEN_ITEMS.md) · [현재 아키텍처](ARCHITECTURE_CURRENT.md) · [모듈 지도](MODULE_MAP.md)
+- [작업 지침](AGENTS.md) · [개발 불변 규칙](DEVELOPMENT_GUARDRAILS.md)
+
 ## 변경 내역
 
-- [2.1.0](docs/RELEASE_NOTES_v2.1.0.md) — 자동 모의운용 기반, 다중 계좌 인증, NAS 수집·장애전환·뉴스·시장자료 안정화
-- [2.0.0](docs/RELEASE_NOTES_v2.0.0.md) — 개인 NAS 중앙 수집·장애전환, 공통 백업, 시점별 데이터 계약과 대규모 안정성 리팩터링
-- [1.1.20](docs/RELEASE_NOTES_v1.1.20.md) — 자동 매매일지·전략팩, 다중 차트, 진입 스냅샷, TOP20 거래대금 지수와 실시간 안정성 개선
-- [1.1.19](docs/RELEASE_NOTES_v1.1.19.md) — AI 단건·묶음 요청, 호출량 추적, 뉴스창 배치·복원과 뉴스 설정 백업 개선
-- [1.1.18](docs/RELEASE_NOTES_v1.1.18.md) — 뉴스 전용 프로세스·DB 분리, AI 캐시 백업, 빠른 종목 전환 및 창 연동 안정화
-- [1.1.17](docs/RELEASE_NOTES_v1.1.17.md) — 네이버 뉴스·선택형 DART 공시, 사건 묶음과 사용자 API 기반 AI 원문 분석
-- [1.1.16](docs/RELEASE_NOTES_v1.1.16.md) — KRX·NXT 실시간 거래대금 안정화, 순위표 흔들림 완화, 메인 창 위치·크기 복원
-- [1.1.15](docs/RELEASE_NOTES_v1.1.15.md) — 테마 OCR·텍스트 가져오기 개선, 붙은 종목명 분리, KIND 상호변경 연동
-- [1.1.14](docs/RELEASE_NOTES_v1.1.14.md) — 역사적 신고가 당일 수정주가 기준 통일, 헤더 전환 강조 깜빡임 제거
-- [1.1.13](docs/RELEASE_NOTES_v1.1.13.md) — 역사적 신고가 수정주가 정밀 보정·증분 조회, 신고가 헤더 선택 순환
-- [1.1.12](docs/RELEASE_NOTES_v1.1.12.md) — 수정주가 기준 5·20·250일·1985년 이후 역사적 신고가
-- [1.1.11](docs/RELEASE_NOTES_v1.1.11.md) — 64비트 Windows 자동 업데이트 도우미 핸들 오류 수정
-- [1.1.10](docs/RELEASE_NOTES_v1.1.10.md) — KRX+NXT 합산 최고가·직전 거래대금·분봉 보완, 최근 730개 분봉 연속조회
-- [1.1.9](docs/RELEASE_NOTES_v1.1.9.md) — PowerShell 없이 전용 업데이트 도우미 EXE로 부분 업데이트 적용
-- [1.1.8](docs/RELEASE_NOTES_v1.1.8.md) — 부분 자동 업데이트 SHA-256 검증, 설정 백업 첨부파일 복원 안전성 강화, 설치본 제3자 고지 포함
-- [1.1.7](docs/RELEASE_NOTES_v1.1.7.md) — `ka10081` 일봉 직접 거래대금·30일 캐시, 순위 변동 표시 시간 기본값 0초
-- [1.1.6](docs/RELEASE_NOTES_v1.1.6.md) — 자동 업데이트 도우미 안정화
-- [1.1.5](docs/RELEASE_NOTES_v1.1.5.md) · [1.1.4](docs/RELEASE_NOTES_v1.1.4.md) — 업데이트·아이콘 개선
-- [1.1.3](docs/RELEASE_NOTES_v1.1.3.md) · [1.1.2](docs/RELEASE_NOTES_v1.1.2.md) · [1.1.1](docs/RELEASE_NOTES_v1.1.1.md) · [1.1.0](docs/RELEASE_NOTES_v1.1.0.md)
-
-## 개발 문서
-
-- [현재 구현 아키텍처](ARCHITECTURE_CURRENT.md) · [기능별 모듈 지도](MODULE_MAP.md)
-- [NAS API 계약](API_CONTRACT.md) · [DB 스키마 지도](DB_SCHEMA.md)
-- [과거 시장 재현용 데이터 계약](HISTORICAL_DATA_CONTRACT.md)
-- [향후 앱 개발 로드맵](FUTURE_DEVELOPMENT_ROADMAP.md)
-- [개발 불변 규칙](DEVELOPMENT_GUARDRAILS.md) · [문서/구현 감사](AUDIT_REPORT.md) · [리팩터링 최종 종료 보고서](reports/REFACTORING_CLOSEOUT_REPORT.md) · [변경 기록](CHANGELOG.md)
-- [AI 인수인계 개발실행서 v3.3](docs/AI_인수인계_개발실행서_v3.3.md) — 상세 운영·배포 기록과 2.0.0 전환 메모
-- [API 발급 가이드](docs/API_발급_가이드.md) — 키움·네이버·DART·AI·Google Drive 자격 증명 준비 방법
-- [AI 강의 전략팩 적용 가이드](docs/AI_강의_전략팩_적용_가이드.md) — PDF·스크립트를 AI로 분석하고 자동분석 전략팩으로 검토·적용하는 방법
-- [기술 명세서](docs/키움_실시간_모니터_기술명세서_v2.0.md)
-- [OCR 모델 직접 설치](docs/OCR_모델_직접_설치.md)
+- [현재 2.1.0 릴리즈 노트](docs/RELEASE_NOTES_v2.1.0.md)
+- [누적 변경 기록](CHANGELOG.md)
+- [이전 릴리즈·완료 보고서·구형 명세](docs/archive/2026-09-22/README.md)
 
 ## 저작권 및 제3자 고지
 

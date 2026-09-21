@@ -1,5 +1,7 @@
 # 저장소 작업 지침
 
+현재 문서는 [docs/README.md](docs/README.md)에서 찾는다. 현재 제품 기준은 **2.1.0**이며, 작업 위치와 실행 소스는 [CURRENT_STATUS](docs/CURRENT_STATUS.md)를 먼저 확인한다. 새 개발 순서는 [로드맵](FUTURE_DEVELOPMENT_ROADMAP.md), 실제 미완료·보류는 [OPEN_ITEMS](docs/OPEN_ITEMS.md)를 따른다. `docs/archive/`의 단계 지시와 미구현 표현은 과거 기록이며 현재 작업 순서나 새 권한을 뜻하지 않는다.
+
 작업을 시작할 때 `DEVELOPMENT_GUARDRAILS.md`와 수정 대상에 해당하는 `MODULE_MAP.md`를 먼저 확인한다.
 
 리팩터링 종료 또는 후속 보완 작업 중에는 `REFACTORING_CLOSEOUT_PLAN.md`도 먼저 읽는다. 그 문서의 현재 단계 한 가지만 진행하고, 직접 관련 없는 발견·요청은 최종 보류 원장에 기록한다. NAS는 종료 계획 4단계 전까지 중간 배포하지 않는다.

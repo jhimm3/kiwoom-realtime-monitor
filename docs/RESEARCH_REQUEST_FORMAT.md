@@ -1,5 +1,11 @@
 # 전략 연구 요청 파일
 
+기준: **2.1.0**, 2026-09-22 문서 정리. 이 문서는 현재 지원하는 요청 필드·예제·실행 경계를 보존하는 상세 계약이다.
+구현·배포·운영 확인 범위는 [현재 상태](CURRENT_STATUS.md), 미완료·보류 작업은 [남은 작업](OPEN_ITEMS.md)을 따른다.
+현재 PC 연구 DB는 **v23**이다. 아래 v10~v22 표기는 해당 기능을 도입한 마이그레이션 이력이며 현재 DB 버전을 뜻하지 않는다.
+지속 campaign·자동 가설·다기간 bundle·실제 RSS 확인과 CPU batch 양보는 구현되어 있다. 실제 NAS 전체 규모·PC 24시간 운전 검증과는 구분한다.
+최우선 자료 확보 계획은 [과거 자료 확보](HISTORICAL_BACKFILL_PLAN.md)에 있다. 새 원천의 봉·뉴스를 기존 관측 replay와 같은 의미로 자동 편입하지 않는다.
+
 ## CR3d3c 최종 결과 개발 노출 요청 (2026-09-16)
 
 `research_process --expose-final`은 최대 1 MiB의 `final_holdout_exposure_request/v1` JSON을 받는다.
@@ -65,7 +71,7 @@ exit 0은 요청 실행 완료이며 candidate의 과학적 FAILED도 result 안
 사용자 취소는 exit 2, resource blocked는 exit 3, 파싱·준비·저장 오류는 exit 1이다.
 result는 기존 `independent_final_holdout_result/v1` 필드에 `status`와 `kind=independent_final_holdout`을 추가한다.
 자동 retry, 후보 재선택, 최종 결과의 개발 노출은 수행하지 않는다.
-[프로세스 계약](../reports/CR3D3A_FINAL_HOLDOUT_PROCESS.md)을 따른다.
+[프로세스 계약](archive/2026-09-22/reports/CR3D3A_FINAL_HOLDOUT_PROCESS.md)을 따른다.
 
 ## CR3d2b 최종 평가 실행 API (2026-09-16)
 
@@ -129,7 +135,7 @@ record_final_holdout_access(batch, request_id=..., accessed_at=...)가 최초 ba
 expose_final_holdout(window_id, request_id=..., exposed_at=..., reason=...)는 되돌릴 수 없는 개발 노출을 기록한다.
 동일 nonce/내용/시각은 멱등이고 재사용 nonce의 내용 변경, 시각 역행, 창 종료 전 접근은 거절한다.
 CR3d1은 hash 형태/원장 범위 기반이며 CR3d2a가 실제 후보 full spec/hash·입력 내용 일치와 과거 연구 기간 검사를 연결했다. CR3d2b가 최종 엔진·후보별 소유권 실행을 연결했다.
-원장에 없는 기간을 전체 시스템에서 미사용이라고 단정하지 않는다. [구현 계약](../reports/CR3D1_FINAL_HOLDOUT_LEDGER.md)을 따른다.
+원장에 없는 기간을 전체 시스템에서 미사용이라고 단정하지 않는다. [구현 계약](archive/2026-09-22/reports/CR3D1_FINAL_HOLDOUT_LEDGER.md)을 따른다.
 
 ## CR3d2c 최종 후보 명시 복구 (2026-09-16)
 
@@ -140,7 +146,7 @@ CR3d1은 hash 형태/원장 범위 기반이며 CR3d2a가 실제 후보 full spe
 요청은 v20 recovery 원장에 REQUESTED로 append되고, claim 시 같은 run/spec/input을 유지한 채 generation이 증가하며 CLAIMED가 된다.
 동일 요청 재전송은 멱등이지만 CLAIMED 요청을 다시 실행하지 않는다. 다시 실패한 후보는 새 request ID와 사유가 필요하다.
 COMPLETED/RUNNING/미실행/개발 노출 창, RUNNING orphan, 자동 retry는 대상이 아니다.
-[복구 계약](../reports/CR3D2C_EXPLICIT_FINAL_RECOVERY.md)을 따른다.
+[복구 계약](archive/2026-09-22/reports/CR3D2C_EXPLICIT_FINAL_RECOVERY.md)을 따른다.
 
 ## CR3c2 종목 그룹×개발 구간 순차 검증 (2026-09-16)
 
@@ -168,7 +174,7 @@ v2 fold_names는 시간순 1~20개 TRAIN/VALIDATION, buckets는 오름차순/중
 새 요청은 파일을 다시 선택하고 '검증 실행'한다. 완료 결과는 재사용하고 소유자/복구 확인 상태는 임의 재실행하지 않는다.
 단계 표의 그룹 1은 bucket 0, 그룹 2는 bucket 1이며 원래 bucket은 tooltip에 표시한다. 그룹 표는 모든 요청/완료/미시작 수와 식별된 실행의 표본 판정을 구분한다.
 그룹마다 손익 중앙값·최악 구간 MDD를 표시하고 서로 다른 그룹 손익을 합산하지 않는다. 자료가 없는 그룹은 적격 0/N/A로 표시한다.
-[필수 외곽 요청과 상세 출력 계약](../reports/CR3C2_SYMBOL_WINDOW_VALIDATION.md)을 따른다.
+[필수 외곽 요청과 상세 출력 계약](archive/2026-09-22/reports/CR3C2_SYMBOL_WINDOW_VALIDATION.md)을 따른다.
 
 ## CR3c1 명시 종목 그룹 개발 검증 (2026-09-16)
 
@@ -197,7 +203,7 @@ bucket_count는 정수 2~20, bucket은 0 이상 bucket_count 미만이며 bool/f
 그룹을 바꾼 별도 실행은 새로운 초기 현금이다. 서로 다른 bucket 결과를 기존 동일 조건 집계로 섞지 않는다.
 v2 partition은 symbol_partition 필드를 받지 않는다. --validate-partitions v1/순차 검증 창은 시간 v2 partition을 유지한다.
 CR3c2의 v2 batch는 그룹×시간 v3 partition을 실행한다. shared context 개발 검증이며 미사용 최종 종목 holdout 보장이 아니다.
-[실행·검증 계약](../reports/CR3C1_FIXED_SYMBOL_PARTITIONS.md)을 따른다.
+[실행·검증 계약](archive/2026-09-22/reports/CR3C1_FIXED_SYMBOL_PARTITIONS.md)을 따른다.
 
 ## CR3b3 순차 개발 검증 파일 (2026-09-16)
 
@@ -209,7 +215,7 @@ CR3b4에서 전략 연구 → 여러 구간 순차 검증 → 검증 파일 선�
 같은 요청 이어서 실행은 마지막으로 실행한 파싱 snapshot을 재사용한다. 원본 JSON을 바꾸려면 검증 실행을 다시 누른다.
 취소/시간 예산 이후 완료 결과는 DB에서 재사용한다. 실패/소유자 확인 상태는 자동 재시도하지 않는다.
 250ms마다 진행 파일을 확인하며 모든 미시작 구간도 표시한다. 자동 반복과 앱 재시작 후 batch 복원은 아직 없다.
-[필수 JSON 객체와 결과 계약](../reports/CR3B3_SEQUENTIAL_DEVELOPMENT_VALIDATION.md), [화면 실행 계약](../reports/CR3B4_SEQUENTIAL_VALIDATION_DIALOG.md)을 따른다.
+[필수 JSON 객체와 결과 계약](archive/2026-09-22/reports/CR3B3_SEQUENTIAL_DEVELOPMENT_VALIDATION.md), [화면 실행 계약](archive/2026-09-22/reports/CR3B4_SEQUENTIAL_VALIDATION_DIALOG.md)을 따른다.
 
 ```text
 python -m kiwoom_monitor.research_process --validate-partitions validation.json --result validation-result.json --cancel validation.cancel
@@ -232,7 +238,7 @@ python -m kiwoom_monitor.research_process --validate-partitions validation.json 
 }
 ```
 
-database는 이 파일 폴더 기준 상대/절대 경로이며 기존 연구 v17이어야 한다. ID는 1~200개/각 256자 이하,
+database는 이 파일 폴더 기준 상대/절대 경로이며 이미 마이그레이션된 연구 v17~v23 DB를 읽기 전용으로 지원한다. ID는 1~200개/각 256자 이하,
 파일은 64 KiB 이하이며 추가 필드는 거절한다. 아직 결과 선택 목록을 자동 생성하는 편의 UI는 없다.
 
 ```text
@@ -242,14 +248,14 @@ python -m kiwoom_monitor.research_process --compare-runs comparison.json --resul
 CLI 옵션/파싱 오류는 종료 2/결과 파일 없음, 조회 성공은 종료 0/ok, 취소는 2/cancelled,
 조회 오류는 1/failed다. 누락/조건 불일치는 comparison 내부 상태로 보존한다.
 DB·원본 요청을 result/cancel로 덮어쓰는 경로는 거절한다. UI는 요청을 UUID snapshot으로 고정한다.
-시뮬레이션/주문/DB 마이그레이션은 실행하지 않는다. [세부 계약](../reports/CR3B2_INDEPENDENT_COMPARISON_VIEWER.md).
+시뮬레이션/주문/DB 마이그레이션은 실행하지 않는다. [세부 계약](archive/2026-09-22/reports/CR3B2_INDEPENDENT_COMPARISON_VIEWER.md).
 
 ## CR3b1 독립 결과 조회 계약 (2026-09-16)
 
 저장소의 `load_independent_development_comparison((run_id, ...))`로 명시 1~200개 독립 개발 결과를 조회한다.
 출력은 `independent_development_comparison/v1`이며 조건 불일치/누락/실패/표본 부족/기간 겹침을 보존한다.
 구간 손익 분포이며 연속 계좌 수익률이 아니다. 기존 요청 mode/JSON은 바꾸지 않았다.
-프로세스 명령과 화면은 위 CR3b2에 연결했다. [세부 계약](../reports/CR3B1_INDEPENDENT_DEVELOPMENT_COMPARISONS.md)을 따른다.
+프로세스 명령과 화면은 위 CR3b2에 연결했다. [세부 계약](archive/2026-09-22/reports/CR3B1_INDEPENDENT_DEVELOPMENT_COMPARISONS.md)을 따른다.
 
 ## CR3a4a/CR3a4b 독립 구간 캠페인 등록 (2026-09-16)
 
@@ -261,7 +267,7 @@ python -m kiwoom_monitor.research_process --request request.json --register-camp
 ```
 
 request.database가 campaign DB와 같아야 한다. 새 campaign 생성이나 RUNNING 활성화 명령은 아니다.
-등록 결과의 job_id/experiment_id는 유효 실행 spec의 ID다. 연구 DB v17 request_json은 유효 spec,
+등록 결과의 job_id/experiment_id는 유효 실행 spec의 ID다. 연구 DB v17에서 추가한 원본/실행 분리 계약에 따라 request_json은 유효 spec,
 source_request_json은 원본 spec을 불변으로 저장한다. 예산 revision은 두 조회 명세에 같은 운영값으로 합성한다.
 기존 v1 job은 source_request_json 기본 빈값이며 원래 실행 spec으로 동일하게 재구성한다.
 원본 request 파일이 없어도 저장된 source spec과 input_path로 재시작한다. 원본 데이터 파일은 필요하다.
@@ -324,7 +330,7 @@ OOS의 열람/성과/실패와 전체 보고서의 집계 상태/사유를 후�
 개발 무거래 NOT_APPLICABLE/자료 부족 INELIGIBLE은 구별한다. 미등록 개발 상태도 부적격으로 남긴다.
 이번 변경은 요청 JSON/기존 v1 split을 변경하거나 독립 v2 실행을 켜지 않는다.
 평가 코드 hash가 달라졌으므로 이전 동결 요청을 새 구현으로 자동 바꾸지 않는다. 기존 결과는 보존하며
-새 실행은 현재 코드 기준의 새 요청을 사용한다. 독립 partition 입력과 최종 접근 원장은 후속이다.
+새 실행은 현재 코드 기준의 새 요청을 사용한다. 독립 partition 입력은 CR3a2 이후, 최종 접근·실행 원장은 CR3d와 위 전용 요청에서 지원한다.
 
 ## CR2c3c2 완성 자료 등록 복구 (2026-09-16)
 
@@ -333,7 +339,7 @@ NAS 자동 source는 같은 동결 범위의 기존 완성 자료부터 등록�
 NAS 접속 실패가 있어도 그 전에 성공한 등록은 유지한다. 준비 signature는 자료 등록 이후에만 확인 처리한다.
 완성 자료/다른 범위 자료를 자동 삭제하거나 이동하지 않는다. 참조는 기존 jobs/acceptances에 남긴다.
 이미 대기열이 가득 찬 source는 파일/연결 설정 조회 없이 대기하며, 여유가 생긴 다음 scan에서 복구한다.
-설정·요청 형식과 연구 DB v16은 유지된다.
+CR2c3c2는 당시 v16에 새 마이그레이션을 더하지 않고 기존 설정·요청·원장을 재사용했다. 현재 연구 DB 버전은 v23이다.
 
 ## CR2c3c1 오래된 미완성 임시 자료 정리 (2026-09-16)
 
@@ -341,7 +347,7 @@ NAS 자동 준비가 켜진 source는 준비 전에 현재 상위 폴더의 임�
 24시간 이상 지난 미완성 임시 폴더만 대상이며 별도 수동 경로를 지정하거나 사용자 파일을 삭제하지 않는다.
 완성 manifest/연구 참조/알 수 없는 파일/링크/operation ID 없는 기존 표시가 있으면 보존한다.
 일시정지/worker 종료 경계와 현재 root 설정을 지킨다. source 폴더를 바꾸면 이전 폴더를 자동 정리하지 않는다.
-부분 정리/잠김은 PC 연구 DB v16의 정리 원장에서 다시 처리한다. 완성 orphan/보호 보관은 다음 CR2c3c2다.
+부분 정리/잠김은 v16에서 도입한 정리 원장에서 다시 처리한다. 완성 게시 후 미등록 자료의 복구는 위 CR2c3c2가 담당하며 완성 자료는 삭제하지 않는다.
 
 ## CR2c3b 새 자료 폴더 용량 상한 (2026-09-16)
 
@@ -352,7 +358,7 @@ NAS 자동 준비가 켜진 source는 준비 전에 현재 상위 폴더의 임�
 상한을 올리고 재개하면 다시 확인한다. 기본값 0은 기존 동작을 유지한다.
 같은 capped 폴더를 여러 NAS source가 쓰면 root/상한을 일치시켜야 한다.
 상한이 있는 폴더를 서로 parent/child로 겹치게 설정하지 않는다. 다른 source를 끈 뒤 설정을 바꿀 수 있다.
-현재 PC 로컬 연구 DB는 v16이다. 위 CR2c3c1은 미완성 임시 정리이며 완성 orphan/보호 보관은 CR2c3c2다.
+폴더 cap/준비 원장은 v15, 미완성 정리 원장은 v16에서 도입했다. 현재 PC 연구 DB는 v23이다. CR2c3c1은 미완성 임시 정리, CR2c3c2는 완성 게시 후 미등록 자료의 복구이며 완성 자료 삭제 기능은 아니다.
 
 ## CR2c2b NAS 자동 준비 (2026-09-16)
 
@@ -366,9 +372,9 @@ NAS 자동 준비가 켜진 source는 준비 전에 현재 상위 폴더의 임�
 일별 묶음도 기존 날짜들을 유지한다. 새 거래일 추가나 평가 기간 이동은 이 기능이 아니다.
 백로그가 꽉 차면 NAS 다운로드를 기다리고 NAS 오류는 기존 source 재시도 정책을 사용한다.
 취소/부분 응답/byte cap 초과는 완성 폴더를 게시하지 않는다. signature ack는 등록 경계 뒤에만 한다.
-현재 연구 DB는 v16이다. CR2c3a가 새 자동 생성 파일의 표시/읽기 전용 용량 진단을 추가했다.
+NAS 자동 준비 설정은 v14에서 도입했으며 현재 연구 DB는 v23이다. CR2c3a는 새 자동 생성 파일의 표시/읽기 전용 용량 진단을 제공한다.
 기존 무표시 자료를 자동 채택하지 않고 완료된 연구 입력도 보호한다. 미완성 임시 파일만 위 CR2c3c1에서 정리한다.
-폴더 cap/준비 원장은 위 CR2c3b다. 완성 orphan/보호 보관/외부 참조 원장과 날짜 확장/실제 NAS 장시간 운용 검증은 남아 있다.
+폴더 cap/준비 원장은 위 CR2c3b, 완성 게시 후 등록 복구는 CR2c3c2에 연결되어 있다. 완성 자료의 이동·압축·자동 삭제, 외부 매매일지 참조 전수 조사, 새 날짜 확장과 실제 NAS 장시간 운용 검증은 남아 있다.
 
 ## CR2c2a 새 자료 폴더 (2026-09-16)
 
@@ -386,7 +392,7 @@ NAS 자동 준비가 켜진 source는 준비 전에 현재 상위 폴더의 임�
 오래된 implementation hash의 기준 실험은 새 요청을 명시 등록해야 하며 자동 우회하지 않는다.
 
 CR2c2a 자체는 이미 준비된 파일의 자동 등록이며 위 CR2c2b opt-in으로 NAS 파일 준비도 연결할 수 있다.
-새 거래일을 평가에 자동 추가하는 기능은 CR3와 함께 연결한다. 연구 DB는 현재 v14다.
+이 discovery는 v13에서 도입한 같은 고정 범위의 입력 등록이다. 현재 연구 DB는 v23이며 새 거래일 추가·평가 기간 자동 이동은 아직 지원하지 않는다.
 
 ## CR2c1 작업자 복구 (2026-09-16)
 
@@ -400,7 +406,7 @@ CR2c2a 자체는 이미 준비된 파일의 자동 등록이며 위 CR2c2b opt-i
 일반 worker CLI는 직접 claim한다. GUI는 먼저 claim한 뒤 내부 인수
 `--worker-token TOKEN --worker-generation GENERATION`을 함께 전달한다. 종료 응답은 세대별로 멱등 처리한다.
 소유권을 잃은 worker는 새 search job 실행 시작과 결과 commit을 할 수 없다. worker/job 실패 횟수는 독립이다.
-연구 DB는 현재 v12이며 새 자료 자동 등록/보관과 실제 24시간 운용 검증은 남아 있다.
+작업자 복구 원장은 v12에서 도입했다. 현재 v23은 새 자료 자동 등록·NAS 준비·폴더 cap·제한 staging 정리를 포함한다. 실제 24시간 운용 검증은 별도 미완료다.
 
 ## CR2b2 예산 확대 / 재시도 (2026-09-16)
 
@@ -415,7 +421,7 @@ CR2c2a 자체는 이미 준비된 파일의 자동 등록이며 위 CR2c2b opt-i
 연구 DB v11은 예산 revision을 별도 보존하며 같은 과학 identity/원래 요청 파일을 유지한다.
 일반 유한 완료 캐시는 그대로이고 유효한 캠페인만 추가 실험을 연다.
 입력 파일·implementation hash 불일치는 예산 편집으로 우회하지 않는다.
-자세한 계약/검증/다음 단계는 [CR2b2 보고서](../reports/CR2B2_CAMPAIGN_OPERATING_BUDGETS.md)를 따른다.
+당시 구현·검증 근거는 [CR2b2 보고서](archive/2026-09-22/reports/CR2B2_CAMPAIGN_OPERATING_BUDGETS.md)를 따른다.
 
 ## CR2b1 캠페인 실행 (2026-09-16)
 
@@ -442,16 +448,16 @@ python -m kiwoom_monitor.research_process --campaign CAMPAIGN_ID --database PATH
 worker는 DB 작업을 순서대로 실행하고 대기 중에도 새 등록 작업을 확인한다. `--cancel`은 worker만 종료하며
 RUNNING 의도를 STOPPED로 바꾸지 않는다. DB의 PAUSED/STOPPED는 현재 trial 검사에서 중단되고 완료된 결과는 유지된다.
 실험 횟수 한도 도달은 조합 전체 검증 완료와 다르다. 운영 예산 확대는 위 CR2b2를 따른다.
-자동 새 자료 선택·가설 생성·최종평가·주문은 이번 기능에 포함되지 않는다.
-자세한 계약과 제한은 [CR2b1 보고서](../reports/CR2B1_CAMPAIGN_WORKER_AND_CONTROLS.md)를 따른다.
+같은 고정 범위의 새 자료 등록/준비는 CR2c2, 등록 범위의 자동 가설 생성·예약은 CR4에 연결되어 있다. 자동 최종평가와 연구 worker의 주문 실행은 지원하지 않는다.
+자세한 계약과 제한은 [CR2b1 보고서](archive/2026-09-22/reports/CR2B1_CAMPAIGN_WORKER_AND_CONTROLS.md)를 따른다.
 
 ## CR2a 캠페인 원장 (2026-09-16)
 
 PC 연구 저장소 v10은 캠페인 설정 revision, desired_state, 동결 유한 ExperimentSpec/입력 경로,
 예약 cycle을 보존한다. 원장 구현 뒤 위 CR2b1에서 worker/화면을 연결했다.
 새 `mode: campaign`은 지원하지 않는다. 기존 유한 요청 JSON을 등록한다.
-생성 기본 의도는 PAUSED이며 원장 등록만으로 시뮬레이션을 실행하지 않는다. 자동 최종평가/새 가설 생성은 OFF다.
-원장 API와 구현 계약은 [CR2a 보고서](../reports/CR2A_PERSISTENT_CAMPAIGN_LEDGER.md)를 따른다.
+생성 기본 의도는 PAUSED이며 원장 등록만으로 시뮬레이션을 실행하지 않는다. 자동 가설은 기본 OFF이고 위 설정 화면의 명시적 campaign 정책으로 활성화한다. 자동 최종평가는 지원하지 않는다.
+원장 API와 구현 계약은 [CR2a 보고서](archive/2026-09-22/reports/CR2A_PERSISTENT_CAMPAIGN_LEDGER.md)를 따른다.
 
 ## CR1a 날짜별 자료 준비 (2026-09-16)
 
@@ -480,7 +486,7 @@ manifest의 `dataset_id`와 `revision_ids_hash`로 고정한다. index의 bundle
 여러 날짜를 한 번에 실행하므로 현금과 보유가 이어지며 매일 임의 청산하지 않는다.
 미체결 주문은 기존 명시 profile의 세션 경계를 넘어 체결하지 않는다. Factor lookback도 기존 세션 정책을 따른다.
 현재 지원은 기존 KRX 확정/완전 분봉과 당시 TOP20/테마 기반이다. 이 연결이 NXT/호가/초자료 전략을 추가하지 않는다.
-CR1b 자원 정책도 연결했다. 24시간 지속 캠페인은 아직 구현되지 않았다.
+CR1b 자원 정책과 CR2의 영속 campaign·작업자 복구가 연결되어 있다. 실제 PC 24시간 운전과 NAS 전체 규모 처리량 검증은 별도다.
 
 단일 실행/비교 요청에는 선택적 운영 설정 `"resource_budget": {"memory_mb": 512, "cpu_duty_percent": 50}`를
 최상위에 둔다. 제한 검색에서는 기존 `search.resource_budget`에 같은 값을 지정한다. 기본값은 512MiB/50%이며
@@ -492,7 +498,7 @@ CR1b 자원 정책도 연결했다. 24시간 지속 캠페인은 아직 구현�
 GUI는 자원 차단 후 자동 재개를 반복하지 않는다. 예산을 검토해 수동 재실행하면 같은 실험의 미완료 trial을 재시도한다.
 입력 preflight 실패는 출력 DB를 만들지 않는다. CLI/연구 프로세스의 직접 자원 차단 종료 코드는 3이다.
 전체 자료 읽기와 결과 보관은 유지하므로 실제 NAS의 큰 기간은 사전 차단될 수 있다. 일별 export 크기와
-메모리 설정을 먼저 확인한다. [계측 범위와 수치](../reports/CR1B_RESOURCE_LIMITS_AND_BENCHMARK.md)를 참고한다.
+메모리 설정을 먼저 확인한다. [계측 범위와 수치](archive/2026-09-22/reports/CR1B_RESOURCE_LIMITS_AND_BENCHMARK.md)를 참고한다.
 
 연구 데이터 export에는 `observations.jsonl`과 함께 당시 가용 테마 구성을 담은
 `theme_snapshots.jsonl`이 포함될 수 있다. 두 파일은 manifest의 hash와 개수로
@@ -645,9 +651,9 @@ S5 이전 구현 hash와 RunSpec 형태를 보존한다. 따라서 완료된 기
 
 `generation_mode`는 `manual`, `constrained_auto`, `free_research`, `one_parameter_at_a_time` 중 하나다. `one_parameter_at_a_time`은 기준 전략에서 한 trial마다 파라미터 하나만 바꿔 어떤 값 때문에 결과가 달라졌는지 확인한다. 모든 모드는 등록된 Family·Factor·파라미터와 유한 예산 안에서만 실행되며 임의 Python 코드를 받지 않는다. v2 `execution_environment`는 `historical_simulation`으로 고정하며 `live`는 연구 요청으로 실행할 수 없다. job 보존 한도는 queued/running 작업에 적용하고 완료 근거는 자동 삭제하지 않는다.
 
-`historical_simulation`은 `PaperExecutionEngine`의 역사자료 모의 체결이다. 실시간 shadow/키움 모의계좌 실행 선택값은 아니다. 이전 v1의 `replay`·`simulation` 표기는 기존 자료에서만 보존하며 v2 결과로 재사용하지 않는다. 결과 기반 가설 생성·Family 순환·다기간 bundle은 [지속 연구 설계](../reports/CONTINUOUS_RESEARCH_ACCOUNT_SCOPE_REVIEW.md)의 후속 구현이다.
+`historical_simulation`은 `PaperExecutionEngine`의 역사자료 모의 체결이다. 실시간 shadow/키움 모의계좌 실행 선택값은 아니다. 이전 v1의 `replay`·`simulation` 표기는 기존 자료에서만 보존하며 v2 결과로 재사용하지 않는다. 결과 기반 등록 가설 생성·Family 순환은 CR4, 다기간 bundle은 CR1, 영속 campaign은 CR2에서 구현됐다. 현재 지원 범위와 운영 확인 상태는 [현재 상태](CURRENT_STATUS.md)를 따른다.
 
-`resource_budget.cpu_duty_percent`는 10~100이며 현재는 trial 전체 계산 뒤 휴식을 넣는다. 긴 계산의 CPU 상한을 보장하지 않는다. `memory_mb`도 입력값 검사이며 실제 사용량 제한은 아니다. 완료 trial 경계의 중단·재개와 임대 heartbeat는 적용했으며 짧은 batch CPU 양보·RSS 확인은 후속 구현이다.
+`resource_budget.cpu_duty_percent`는 10~100이며 기본 50ms 계산 batch마다 CPU 시간과 IO 대기를 고려해 협력적으로 양보한다. `memory_mb`는 입력 크기×8과 실제 RSS의 preflight 및 로딩/실행 중 RSS 검사에 사용한다. 이는 OS 강제 quota나 순간 할당 상한 보장이 아니다. 완료 trial 경계의 재개·임대 heartbeat는 유지하며 자원 초과는 과학적 실패 결과가 아닌 재시도 가능한 운영 차단으로 남긴다.
 
 현재 모의 체결은 같은 profile 연속 구간의 바로 다음 1분봉이 연속매매 phase일 때만
 그 시가에서 전량 체결되는 모델이다. 세션 공백, 거래일 변경, 고정가·단일가 봉을

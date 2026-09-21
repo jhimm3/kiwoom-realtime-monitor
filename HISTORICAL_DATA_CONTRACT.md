@@ -1,5 +1,7 @@
 # 과거 시장 재현용 데이터 계약
 
+상태 정리 기준: 2026-09-22. 이 문서는 저장·가용시각·재현·공백 처리 계약을 유지한다. 현재 구현과 확인된 배포 범위는 [현재 상태](docs/CURRENT_STATUS.md), 데이터 확보와 미완료 검증은 [남은 작업](docs/OPEN_ITEMS.md)을 따른다. 구현된 연구 기능과 실제 입력 데이터의 충족 여부는 구분한다.
+
 목적은 과거 분봉·일봉을 다시 그리는 데 그치지 않고, 특정 시점에 어떤 종목이 시장의 관심을 받았고 어느 테마에 자금이 몰렸는지 재현해 돌파 조건을 시뮬레이션하는 것이다. 이 문서는 현재 실제 저장 범위와 아직 부족한 범위를 구분한다.
 
 CR1a(2026-09-16)는 기존 일별 export를 `research_dataset_bundle/v1` index로 묶는 PC 자료 준비 단계다.
@@ -41,7 +43,7 @@ CR1b 자원 경계는 입력 바이트×8 + 현재 RSS의 보수적 preflight와
 
 | 자료 | 현재 저장 위치·단위 | 현재 재현 가능 범위 | 남은 공백 |
 | --- | --- | --- | --- |
-| 실시간 종목조회순위 TOP20 | NAS 최신 projection `central_dataset_snapshots`와 D1 불변 원장 `central_observation_revisions`, `kind=ranking/top20_membership` | NAS가 평일 08:00~20:00에 앱과 무관하게 조회한 원본 순위·실제 TOP20 구성 및 같은 시각의 정정 순서 | D1 최초 기록 전과 NAS 비가동·저장 실패 구간은 `legacy_unknown`/`recording_gap`으로 남음 |
+| 실시간 종목조회순위 TOP20 | NAS 최신 projection `central_dataset_snapshots`와 D1 불변 원장 `central_observation_revisions`, `kind=ranking/top20_membership` | NAS가 24시간 30초 주기로 앱과 무관하게 조회한 원본 순위·실제 TOP20 구성 및 같은 시각의 정정 순서 | D1 최초 기록 전과 NAS 비가동·저장 실패 구간은 `legacy_unknown`/`recording_gap`으로 남음 |
 | TOP20 거래대금 지수 | 로컬 `top20_trade_value_index`, NAS `kind=top20_index`, 1분 | 합계·KOSPI/KOSDAQ/미확인 분해·구성 종목·30초 코호트·완성 상태 | 시장 구분을 확인하지 못한 종목은 미확인으로 유지 |
 | 종목 1초 체결 집계 | NAS `central_second_trade_bars`, 1초 | TOP20 또는 hot cohort 0B 구독 뒤 종목·KRX/NXT별 OHLC·거래량·거래대금·체결 건수 | 두 후보군 진입 전과 NAS 비가동/비구독 구간은 복구 불가하며 공백 이력·조회 API는 아직 없음 |
 | VI | NAS `central_vi_event_revisions` | 1h 실시간과 ka10054 보완으로 수신한 발동/해제·정적/동적·가격·시각·방향·횟수·거래소 사실 | NAS 시작 전 전체 이력과 공급원이 주지 않은 필드는 unknown |
@@ -78,7 +80,7 @@ CR1b 자원 경계는 입력 바이트×8 + 현재 RSS의 보수적 preflight와
 18. D1 순위 revision의 신규 시각은 UTC timezone-aware 값으로 저장하고 표시·거래일 해석은 KST로 한다. 최신값·관측 메타데이터·revision은 한 트랜잭션이며 저장이 실패하면 모두 되돌린다. 화면 조회 성공은 유지하되 로그에 `recording_gap`을 남긴다. `RESEARCH_OBSERVATION_HISTORY_ENABLED=false`는 최신 projection을 유지하면서 새 revision 기록만 중단한다.
 19. D3a 실시간 분봉 delta는 생성 시 operation ID를 받고, 재시도에서도 같은 ID를 유지한다. 저장소는 미처리 ID만 누적한 뒤 전체 봉·메타·revision·처리 ID를 한 트랜잭션으로 확정한다. 시간상 마감은 마지막 틱 시각으로 소급하지 않고 실제 타이머 처리시각을 `available_at`으로 쓴다. 구독을 분 중간에 시작했거나 연결 공백이 있던 봉은 마감되어도 partial이며, 체결을 보지 않은 분을 0거래 봉으로 만들지 않는다.
 20. D3b 판단은 평가봉보다 먼저 끝나고 판단 cutoff까지 가용했던 같은 종목·KRX·같은 세션의 연속 complete 봉만 돌파 기준으로 쓴다. TOP 순위 체류는 명시한 관측 창에서만 계산하며 부분 목록·첫 관측·허용치를 넘는 공백은 결측이다. 필수 Factor 결측은 신규 진입을 막고 선택 Factor 결측은 사유를 남기며, 비활성 Factor는 판단 입력에 들어가지 않는다.
-21. D3c bar-only 모의 주문은 판단시각 이후 시작하는 첫 strict 봉에서만 시가 체결을 근사한다. 이미 시작된 봉의 open으로 소급 체결하지 않는다. 비용과 슬리피지는 run별 명시 모델이며 비용이 없으면 성과 부적격이다. 기록 끝의 미체결 주문과 보유 포지션은 CENSORED로 남기고 다음 재편입 가격이나 마지막 close로 자동 청산하지 않는다.
+21. D3c bar-only Paper(내부 가상 체결) 주문은 판단시각 이후 시작하는 첫 strict 봉에서만 시가 체결을 근사한다. 이미 시작된 봉의 open으로 소급 체결하지 않는다. 비용과 슬리피지는 run별 명시 모델이며 비용이 없으면 성과 부적격이다. 기록 끝의 미체결 주문과 보유 포지션은 CENSORED로 남기고 다음 재편입 가격이나 마지막 close로 자동 청산하지 않는다.
 22. C1 맥락 가설은 원본 뉴스·전일 봉·신고가·상한가·테마 관계·D4 후보 revision을 복사해 고치지 않고 `source_refs`로 참조한다. 가설의 사실과 영향 추론은 별도이며, 장중 반응은 `revision_available_at` 순서의 새 revision으로만 누적한다. 사전 가설보다 먼저 관측된 반응은 확인 근거로 쓰지 않고, 세션 만료 뒤 새 반응으로 과거 가설을 확인 상태로 바꾸지 않는다. 전 거래일은 명시 세션 predecessor만 허용한다. Yahoo 외부시장은 저장된 대표 월물의 5분/일봉 지연 자료로만 표시한다.
 23. 시간 정책은 봉을 처리한 오늘 날짜가 아니라 봉의 KST 거래일을 기준으로 고른다. 2026-09-14 전에는 `krx-nxt-schedule/2026-09-13`, 이후에는 `krx-nxt-schedule/2026-09-14`를 사용한다. 기존 `krx-regular/v1` 연구와 D4 shadow는 시행일 이후 KRX 09:00~15:30 봉만 허용하므로 새 16:00~20:00 애프터 봉을 자동 소비하지 않는다. 세션 metadata가 없던 시행 전 관측은 기존 strict KRX reader의 해석을 유지하고 완료 run은 재작성하지 않는다. 명시적 무필터 진단은 `legacy-unfiltered-krx/v0`를 사용한다. NXT의 확인되지 않은 주문접수·동적 phase와 키움 mock 애프터 지원은 `UNKNOWN`/미지원으로 유지한다.
 24. 2026-09-14 이후 공식 정규장 종가·담보 기준 15:30과 차트용 전체일 일봉 20:00을 별도 값으로 취급한다. 전체일 일봉은 익일부터 확정 자료로 사용하고, `정규장만` 조회·연구는 09:00~15:30 범위를 명시한다. 어떤 소비자도 필드 이름이 `daily close`라는 이유만으로 두 값을 교환하지 않는다.
@@ -89,7 +91,7 @@ CR1b 자원 경계는 입력 바이트×8 + 현재 RSS의 보수적 preflight와
 
 ## 현재 시뮬레이션 가능 수준
 
-- NAS가 켜져 있고 앱 조회가 NAS를 통과한 기간은 TOP20 원본 순위와 수집된 종목 봉을 시각으로 결합할 수 있다.
+- NAS가 실행되어 실제로 기록한 기간은 앱 실행·조회 여부와 무관하게 TOP20 원본 순위와 수집된 종목 봉을 시각으로 결합할 수 있다. 순위의 24시간 수집과 시장 관측시간의 종목 봉 수집 범위는 구분한다.
 - 로컬 TOP20 지수의 `cohort_segments`를 사용하면 해당 1분의 전반/후반에 실제 적용된 종목군을 구분할 수 있다.
 - 실제 체결이 있던 종목은 매매일지 스냅샷으로 당시 시장 맥락을 추가할 수 있다.
 - D5 이후 시점은 `/api/v1/themes/history?as_of=`로 당시 서버에 가용했던 테마 전체 문서를 찾을 수 있다. 최초 기록 전이나 결과가 없는 시각에는 현재 테마를 붙이지 않고 unknown으로 둔다.
@@ -97,22 +99,26 @@ CR1b 자원 경계는 입력 바이트×8 + 현재 RSS의 보수적 preflight와
 - N2a 이후 시점은 `/api/v1/news/history/event|membership?as_of=`로 그때까지 기록된 공급계약 판정과 기사 소속을 재현한다. 규칙의 `UNKNOWN`과 `ai_required`는 결측/충돌의 기록이며 자동 주문 신호가 아니다.
 - N3 이후 `/api/v1/news/sources?days=7`은 설정된 검색어별 raw/unique/duplicate, 본문·규칙·target, 최대 gap, truncation/error/요청 예산/job queue를 점검한다. 이는 구성된 query set의 관측 품질이며 전체 시장 뉴스 coverage가 아니다.
 - D3a 이후 `/api/v1/research/observations`는 고정 TOP20 revision과 KRX 분봉 revision을 함께 고정 추출할 수 있다. `replay_krx_minute_bars`는 가상시각 이후 도착한 정정을 제외하고 당시 최신 strict 마감봉을 선택한다.
-- D3b 이후 검증된 export는 `rolling_high_breakout/v1`, 선택 가능한 `rank_persistence/v1`, `krx_bar_close_breakout/v1`으로 재생할 수 있다. Snapshot·Decision·후보 사건과 논리 결과 hash는 별도 연구 DB/run manifest에 남는다. 이 단계의 ENTER/EXIT은 전략 판단이며 모의 체결·손익과 실제 주문은 아직 없다.
-- D3c 이후 전략 Decision은 별도 mock 실행 프로파일에서만 주문·체결·현금·포지션·mark로 이어진다. 같은 봉에서 손절과 목표가가 모두 닿으면 보수적 손절 결과와 낙관 범위를 함께 남긴다. 1/3/5/10분 label은 성숙·공백·구간 종료를 구분하고, 현재 export에 1초 입력이 없으므로 T+1초는 UNSUPPORTED다. 이 결과는 실제 계좌 체결이나 매매일지 원본이 아니다.
+- D3b 이후 검증된 export는 `rolling_high_breakout/v1`, 선택 가능한 `rank_persistence/v1`, `krx_bar_close_breakout/v1`으로 재생할 수 있다. Snapshot·Decision·후보 사건과 논리 결과 hash는 별도 연구 DB/run manifest에 남는다. D3b 단계의 ENTER/EXIT은 전략 판단이다. D3b 자체에는 체결·손익이나 실제 주문이 없으며, 후속 D3c의 Paper 실행과 broker 모의주문은 별도 경계다.
+- D3c 이후 전략 Decision은 별도 mock 실행 프로파일의 Paper(내부 가상 체결)에서 주문·체결·현금·포지션·mark로 이어진다. 같은 봉에서 손절과 목표가가 모두 닿으면 보수적 손절 결과와 낙관 범위를 함께 남긴다. 1/3/5/10분 label은 성숙·공백·구간 종료를 구분하고, 현재 export에 1초 입력이 없으므로 T+1초는 UNSUPPORTED다. 이 결과는 실제 계좌 체결이나 매매일지 원본이 아니다.
 - D7a `chronological_holdout/v1`은 같은 고정 export를 TRAIN→VALIDATION→OOS 순서로만 나눈다. fold 간 gap과 끝 purge 구간을 명시하고, 진입·청산 또는 사건 결과 지평이 purge 경계를 넘는 표본은 `PURGED` 사유로 제외한다. 최초 fold 이전 warmup 자료가 부족하면 보고 적격성이 없으며, final OOS는 접근 시각과 이유가 RunSpec에 기록되기 전까지 수치가 없는 `SEALED` 상태다. v1 fold 상태 정책은 `continuous_state_and_cash/v1`, 기간말 포지션은 `censor_open_position/v1` 하나만 지원한다.
 - D7b 첫 비교는 strategy·비용·체결·fold가 같은 두 run에서 `rank_persistence_filter` 하나만 변경한다. 필터 없음 기준선에만 남은 candidate의 순손실은 회피 손실, 순이익은 놓친 이익으로 표시하며 총손익 차이와 별도로 보존한다. candidate identity가 없는 거래나 fold purge 경계를 넘는 거래는 이 귀속 계산에 넣지 않는다. 현재 export/체결 모델은 VI 주문 가능 여부와 부분체결을 재현하지 못하므로 보고서 limitation에 명시한다.
 - C1 이후 당시 가용한 뉴스·테마 관계·전일 확정 사실과 D4 발견을 같은 종목·사건 가설로 만들고, 수급 확인·대장 확인·무반응·만료·기각을 응답 근거와 함께 `research.sqlite3` v5에서 as-of 재생할 수 있다. 현재 가설 생산은 순수 변환/연구 원장이며 기존 NAS shadow 알림이나 자동 진입 조건을 바꾸지 않는다.
 - H2 이후 D5 테마 revision과 H1 종목·시장별 1초 가격·거래대금의 연속성이 `COMPLETE`인 구간에서만 대장·가격 이탈/재도달·대금 둔화/재가속을 계산한다. 진입 근거는 당시 대장과 입력 참조를 고정해 `research.sqlite3` v6에 보존한다. 공백은 0으로 채우지 않고 `UNKNOWN`으로 남기며, 원시 호가가 없으므로 `LOCKED/BROKEN/RELOCKED`를 추정하지 않는다. 네 대응 정책은 주문 권한 없는 비교 결과다.
+- CR3는 독립 개발 구간의 탐색·순차 검증, 종목 그룹 분할, 명시 최종평가·실패 복구·최종 결과 노출 원장을 구현했다. CR4는 등록 Family와 허용값 안에서의 단일 파라미터 가설·campaign 예약·개발 근거 기반 후속 가설 및 설정 UI를 구현했다. 자동 final 실행이나 임의 전략 생성·실주문 권한을 뜻하지 않는다.
+- A5는 계좌별 실행 원장 읽기·일지 projection·체결 출처 대조·실제 비용 포함 FeedbackEvidence·기계 복기·개선안·새 전략 버전의 CR3 개발 재검증 queue를 구현했다. 사용자 일지 원본·수동 복기를 덮지 않으며 등록·채택·재검증만으로 주문을 켜지 않는다. 실제 제한 모의운용과 24시간 전체 규모 검증은 별도 남은 작업이다.
 - V1 대조 로그는 NAS와 이 PC의 직접 연결이 받은 같은 키움 자료의 전달·변환·저장 품질 기록이다. 공유 불변 source ref가 없는 변동 응답과 공급자 ID 없는 동일초 복수 사건은 값 불일치로 확정하지 않고 `NOT_COMPARABLE`로 남긴다. `MISSING`에는 시간 만료, 비교 queue skip, pending eviction을 구분하며 수신 간격과 source clock 차이를 따로 기록한다. 이 로그는 원본 시장자료나 연구 dataset을 대체하지 않는다.
 
-## 기능 개발보다 먼저 보완할 순서
+## 다음 데이터 확보 우선순위
 
-1. 종목 종류·상장 상태·기업행동처럼 전략이 실제 사용하는 기준정보의 시점 revision 추가.
-2. NAS를 사용하지 않는 로컬 직접 연결에서도 `ka00198` 원본 순위 이력 저장 여부를 사용자 설정으로 결정.
-3. coverage API 결과를 사용해 시뮬레이션 입력의 완전/부분/누락 범위를 먼저 표시.
-4. 위 원본을 읽기 전용으로 결합하는 시뮬레이션 조회 서비스. 전략 계산기는 그 이후 별도 모듈로 추가한다.
+기존 조회·재생·Paper·연구 엔진은 이미 구현된 범위에서 재사용한다. 다음 우선순위는 사용자 방향에 따른 입력 자료 확보다. 아래는 수집·검증 계획이며 확보 완료를 뜻하지 않는다.
 
-이 순서 전에는 과거 자료를 채우기 위해 새로운 TR을 무제한 호출하지 않는다. 먼저 이미 저장된 NAS/로컬 자료와 결측 범위를 계산한다.
+1. 기존 `kiwoom_history_backfill/data/kiwoom_history.sqlite3`의 주도 후보·일봉과 저장 범위를 읽기 전용으로 확인해 대상 종목과 부족한 구간을 정한다. 종목 종류·상장 상태·기업행동 등 전략에 필요한 기준정보의 시점 근거도 별도로 확인한다.
+2. 대신증권 API의 최근 2년 1분봉과 과거 5년 범위 5분봉을 확보하는 계획을 먼저 구체화한다. 두 기간은 중복되므로 전체 범위를 7년으로 합치지 않는다. 원본 봉 단위·출처·거래소·세션·수정주가 여부·수집시각을 보존하고 실제 반환 범위와 결측을 검증한다.
+3. 네이버 검색 API와 구분해 네이버 증권 사이트의 뉴스 확보 경로를 설계한다. 기사 원본·게시시각·최초 관측시각·종목 연결 근거와 중복/정정 이력을 남기며 과거 게시시각을 당시 수집기의 가용시각으로 소급하지 않는다.
+4. 확보된 자료의 coverage와 시점 근거를 확인한 뒤 기존 연구 입력으로 연결한다. 최근 과거봉을 현재 내려받았다는 사실만으로 과거 실시간 순위·테마·뉴스·1초 흐름까지 복원됐다고 보지 않는다. 로컬 직접 연결의 순위 이력 저장 선택과 coverage 표시의 잔여 범위는 남은 작업에서 관리한다.
+
+새 TR을 무제한 호출하지 않고 먼저 기존 저장 자료와 결측 범위를 계산한다. 미래 수집기는 현재 유효한 공급자 요청 제약과 실제 반환 범위를 확인하며 구현한다.
 
 ## D4 shadow 시간·보존 계약
 

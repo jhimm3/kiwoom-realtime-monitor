@@ -1,6 +1,8 @@
 # 키움 모의 주문 기술 계약
 
-확인일: 2026-09-13
+공식 자료 확인일: 2026-09-13. 구현 상태 정리: 2026-09-22.
+
+이 문서는 기존 모의 주문·계좌·멱등·비용 계약을 유지한다. O1 수동 경로와 O2-M 자동 운용 구현, 실제로 확인된 배포 범위는 [현재 상태](CURRENT_STATUS.md), 제한 모의 왕복·장중·장시간 검증은 [남은 작업](OPEN_ITEMS.md)을 따른다. 코드상 허용 경로와 broker의 실제 지원 확인을 구분한다.
 
 ## 공식 지원 범위
 
@@ -30,11 +32,13 @@
 - 기존 조회 `request()`는 통신 오류를 재시도할 수 있지만 주문 transport는 `request_once()`만 사용한다.
 - 주문 API는 중앙 일반 조회 broker, NAS→로컬 failover, 중앙·로컬 병행검증에 들어갈 수 없다.
 - 수동 모의주문 API는 `MOCK_ORDER_TRANSPORT_ENABLED=1`일 때만 열리고 KRX 지정가 주문만 받는다. 후보·전략은 이 API를 자동 호출하지 않는다.
-- 신규 주문은 공통 `krx-nxt-schedule/2026-09-14` 정책의 KRX 정규장 연속매매
-  `09:00 <= KST < 15:20`에서만 허용한다. 현재 모의 장후종가, KRX 애프터,
-  NXT, 정규장 동시호가 주문은 검증되지 않았으므로 `UNSUPPORTED`로 거절한다.
-  거절 event에는 reason, venue, 주문유형, session, phase, schedule revision,
-  `krx-regular/v1` profile을 남긴다.
+- 신규 수동 주문의 검증된 기본 범위는 공통 `krx-nxt-schedule/2026-09-14` 정책의 KRX 정규장
+  연속매매 `09:00 <= KST < 15:20` 지정가다. 별도로 인증된 수동 KRX LIMIT는 `16:00~20:00`에
+  `manual-mock-krx-after-limit-probe/v1` 경로로 broker에 전달할 수 있다. 이는 애프터 지원 확정이
+  아니며 접수·거절 결과와 `policy_version`을 원장에 남기는 운영 확인 경로다.
+  장후종가·NXT·정규장 동시호가 및 허용되지 않은 주문유형은 `UNSUPPORTED`로 거절한다.
+  거절 event에는 기존 reason, venue, 주문유형, session, phase, schedule revision과 해당 profile 근거를 남긴다.
+  O2-M 자동 운용의 READY 지원은 아래 `krx-regular/v1`이며 수동 애프터 probe로 확대되지 않는다.
 - `request_id`는 run별 멱등키다. 같은 주문 재요청은 기존 원장을 반환하며 다른 주문에 같은 ID를 재사용하면 거부한다.
 - 실전 조회와 모의투자 조회는 각각 초당 5회와 초당 1회의 별도 한도를 적용한다. App Key/App Secret, REST client의 잠금·최근 호출 시각, broker queue, WebSocket 세션을 두 환경 사이에서 공유하지 않는다.
 - 응답 유실은 미접수로 판단하지 않고 `SUBMISSION_UNKNOWN`으로 보존한다.

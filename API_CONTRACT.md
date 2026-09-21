@@ -1,5 +1,7 @@
 # NAS API 계약
 
+상태 정리 기준: 2026-09-22. 아래 API·필드·실패 처리 계약은 유지한다. R0~R6 로컬 구현과 R7 기본 배포·HTTPS/WSS 연결은 완료 기록이 있으며, 최신 누적 빌드의 실행 반영과 장중·장시간 검증은 별도다. 단계 이름이 붙은 설명은 그 단계의 구현 범위를 나타낸다. 현재 구현·배포 상태는 [현재 상태](docs/CURRENT_STATUS.md), 미완료 구현과 운영 검증은 [남은 작업](docs/OPEN_ITEMS.md)을 따른다.
+
 현재 계약 버전은 `api_version=v1`, `schema_version=1`이다. 모든 `/api/v1/*` HTTP 요청은 `Authorization: Bearer <NAS 접속 토큰>`이 필요하다. `/health`만 공개다. WebSocket은 같은 헤더 또는 `?token=`을 사용한다.
 
 자동 시장자료 조회에서 `GET /api/v1/market/snapshots/{kind}`의 `kind`는 `investor_flow`, `program_flow`, `new_high`, `market_index_chart`를 포함한다. `GET /api/v1/content/stock_fundamentals`, `stock_nxt_eligibility`, `historical_highs`는 NAS가 만든 종목 문서를 반환한다. `historical_highs.document.target`은 `price`, `first_year`, `last_year`, `occurred_on`, `evidence`를 가진다. 중앙 연결이 정상인데 자료가 비어 있으면 앱은 빈 저장 결과로 처리하고 Kiwoom TR을 대신 만들지 않는다.
@@ -18,7 +20,7 @@
 
 ## 상태와 설정
 
-### 시세 담당 역할 조회·변경 (R6b3b2 로컬 구현, NAS 배포 전)
+### 시세 담당 역할 조회·변경 (구현 계약)
 
 인증된 `PUT /api/v1/settings/market-profile` 요청은 market_profile_id,
 expected_revision(0 이상 정수), expected_binding_revision(1 이상 정수) 세 필드만 받는다.
@@ -56,7 +58,7 @@ monitor OFF는 시세 담당 자격을 없애지 않는다. legacy_real_profile_
 같은 역할 저장은 revision/updated_at을 유지하며 충돌은 전체 rollback한다.
 시세 담당 profile의 disable 또는 계좌 연결 해제는 MARKET_PROFILE_REQUIRED로 거절한다.
 이미 완료한 credential replay는 이후 역할·계좌 설정을 변경하지 않는다.
-실제 역할 변경 API/REST·WS 전환은 R6b3b2에 연결했고 계좌별 실시간 운영은 R6b3c 후속이다.
+실제 역할 변경 API/REST·WS 전환은 R6b3b2, 계좌별 REST·실시간 운영은 R6b3c에서 연결했다. 실제 복수 계좌의 장중 전환·수신 검증은 남은 작업으로 구분한다.
 
 R6b3b1은 실제 전환 전에 사용할 서버 내부 독점 구간을 구현했다. 실전 credential 후보가
 VALIDATING/READY/apply 상태이면 담당 전환은 PROFILE_BUSY로 거절하며 기다리지 않는다.
@@ -65,7 +67,7 @@ VALIDATING/READY/apply 상태이면 담당 전환은 PROFILE_BUSY로 거절하�
 취소/예외는 구간을 해제하며 종료는 구간이 끝나기 전에 context를 닫지 않는다.
 독점 구간 자체는 문서/REST/WS를 변경하지 않는다. R6b3b2 호출자가 구간 안에서 전환한다.
 
-### 선택 계좌 조회·모의주문 (R3g 로컬 구현, NAS 배포 전)
+### 선택 계좌 조회·모의주문 (구현 계약)
 
 R6b3c1은 실전 계좌의 read-only 복구 조회 기반을 연결했다. 서버 내부
 RealCredentialOwner.read_account(profile_id, expected_binding_revision=...)는 admitted real scope와
@@ -125,22 +127,22 @@ capability `multi_account_query_v3`는 명시 대상 조회 경로, `scoped_mock
 실전 owner는 vault·계좌 HMAC 검증·real 주 실행 환경을 갖춘 설치에 연결된다.
 그 외 기존 설치의 실전 조회는 검증된 main profile만 사용하고 미연결 profile은 503 PROFILE_RUNTIME_NOT_READY다.
 
-R6a는 서버 내부의 실전 재연결 기반만 구현했다. collector의 pause/drain/resume와 이전 연결
+R6a 단계에서는 서버 내부의 실전 재연결 기반을 구현했다. collector의 pause/drain/resume와 이전 연결
 generation 차단·실제 token/socket/저장/장 마감 완료, 계좌 query의 신규 BUSY/실제 작업 drain과
-선택적 cursor 폐기를 제공하지만 실제 kiwoom_real 인증 hook/입력 UI에는 연결하지 않았다.
-새 공개 endpoint/실전 지원 capability/응답 필드는 추가하지 않는다. 실전 key 교체 완료는 아니며
-R6b owner/API와 R6c1 입력·R6c2 planned reconnect/등록 확인/관측 간격 PC 표시로 로컬 연결했다.
+선택적 cursor 폐기를 제공했다. R6a 자체는 실제 kiwoom_real 인증 hook/입력 UI나
+새 공개 endpoint/실전 지원 capability/응답 필드를 추가하지 않은 기반 단계다.
+후속 R6b owner/API와 R6c1 입력·R6c2 planned reconnect/등록 확인/관측 간격 PC 표시까지 로컬 연결했다.
 
 R6b1은 기존 credential activation 저장 계약을 실전계좌에도 적용한다. 검증된 scope의
 binding·적용 원장·단일 active_profile_id는 같은 트랜잭션에서 확정된다. 중복 profile의
 계좌 claim 실패는 전체 rollback하며 같은 profile 키 갱신은 운영 설정을 보존한다.
 사용 중지는 과거 binding을 유지하고 계좌 설정을 OFF로 저장한다. 완료 replay는 이후
 설정이나 새 활성 profile을 덮지 않는다. 최초 저장 monitor ON은 실제 runtime 시작을 뜻하지 않는다.
-R6b1은 새 실전 hook/endpoint/capability나 실전 설정 PUT 지원을 추가하지 않았다.
+R6b1 단계 자체는 새 실전 hook/endpoint/capability나 실전 설정 PUT 지원을 추가하지 않았으며, 후속 연결 범위는 아래 R6b2/R6b3 계약을 따른다.
 
 R6b2는 기존 credential prepare/apply/status API에 kiwoom_real hook을 연결한다. provider metadata의
 supported는 실제 owner 연결 여부를 반영하고 v3 계좌 목록/조회는 검증된 실전 profile별로 분리한다.
-시세 담당은 nas-real-default의 기존 client/broker/단일 collector를 유지한다. 추가 실전계좌의
+R6b2 단계에서는 시세 담당으로 nas-real-default의 기존 client/broker/단일 collector를 유지했다. 이후 담당 변경은 위 역할 조회·변경 계약을 따른다. 추가 실전계좌의
 과거 조회/키 갱신은 시장 WS를 재연결하지 않는다. v2 계좌 조회의 암묵적 대상은 여전히 기본 프로필이다.
 사용 중지는 비시세 profile만 허용하며 시세 담당에는 MARKET_PROFILE_REQUIRED를 반환한다.
 동일 계좌 키 갱신의 scope/run은 유지하고 계좌 변경·중복 연결은 준비에서 거절한다.
@@ -149,7 +151,7 @@ commit 후 실패는 RECOVERY_REQUIRED이며 기존 키를 다시 열지 않는�
 ACTIVE는 REST 인증/계좌 binding 적용이며 모든 WS REG 승인·연속 수신 완료를 뜻하지 않는다.
 실전 monitor ON 저장만으로 계좌별 실시간 수집 완료를 주장하지 않으며 해당 GET의 applied_revision은
 수집 운영 적용 전 None이다(사용 중지가 실제 적용된 비시세 계좌는 OFF revision 확인 가능).
-시세 담당 전환/CAS/PUT은 R6b3b2에 연결했다. 실전 계좌 운영 PUT·추가 계좌 실시간 수집은 R6b3c, PC 입력/재연결 표시는 R6c 후속이다.
+시세 담당 전환/CAS/PUT은 R6b3b2, 실전 계좌 운영 PUT·추가 계좌 실시간 수집은 R6b3c, PC 입력/재연결 표시는 R6c에서 연결했다. 구현 완료와 실제 복수 계좌·토큰의 장중 운용 검증은 구분한다.
 
 | Method / path | 요청 | 응답 |
 | --- | --- | --- |
@@ -238,7 +240,7 @@ R5d2c PC NAS 운영 화면은 기존 `news_query_set_enabled`, `news_query_set`,
 기사/본문/분류 작업·source cursor·요청 사용량·일일 상한을 초기화하지 않는다. 제거한 검색어 cursor도
 보존해 다시 추가하면 해당 위치를 재사용한다. 즉시 수집 요청/새 TR/SQL 테이블/범용 계층은 추가하지 않는다.
 
-### 런타임 인증 공통 API (R2 로컬 구현, NAS 배포 전)
+### 런타임 인증 공통 API (구현 계약)
 
 R5d1 PC NAS 설정 메뉴는 네이버/DART/OpenAI/Gemini/Claude의 고정 global 키 관리 화면을 제공한다.
 같은 HTTPS client/worker를 사용하되 client의 공급자는 생성 시 고정한다. 같은 공급자/NAS 대상의
@@ -271,7 +273,7 @@ AI 요청은 본문 준비 전에 공급자/model/key/revision을 고정한다. 
 AI 응답의 선택 추가 credential_revision은 접수 context이고 새 results/사용량 JSON의 같은 필드는
 실제 분석에 사용한 revision이다. 캐시 results는 과거 revision을 보존하며 구형 결과는 해당 필드가 없을 수 있다.
 commit 이후 실패는 해당 공급자 키 부재/RECOVERY_REQUIRED로 두고 이전 ENV 키를 사용하지 않는다.
-PC 공급자 입력 UI·실제 NAS 검증은 후속이며 DB migration/AI 품질 규칙 변경 없음.
+PC 공급자 입력 UI는 R5d1에서 연결했다. 실제 공급자 인증·분석 및 운영 검증은 별도이며 DB migration/AI 품질 규칙 변경은 없다.
 
 R5b는 provider `dart`의 고정 `nas-dart-default`를 지원한다. keyless vault 설치에도 metadata
 supported=true/revision=0/UNCONFIGURED로 공개한다. 임의 DART profile은 503 PROFILE_RUNTIME_NOT_READY다.
@@ -285,14 +287,14 @@ apply는 종목 수집/최종 저장을 drain하고 cache Path/기사/cursor/작
 NAVER 공통 검색은 DART 교체 동안 계속하며 두 공급자 동시 교체도 각 pause를 독립적으로 유지한다.
 키 적용/disable은 운영 dart_enabled를 켜거나 끄지 않는다. 운영 변경은 다음 접수 수집부터 적용한다.
 commit 이후 실패는 DART None/RECOVERY_REQUIRED, disable ACTIVE는 tombstone 적용 완료다.
-PC 공급자 입력 UI·실제 NAS 검증은 후속이며 DB migration/분류 규칙 변경 없음.
+PC 공급자 입력 UI는 R5d1에서 연결했다. 실제 DART 키/IP·응답과 운영 검증은 별도이며 DB migration/분류 규칙 변경은 없다.
 
 R5a는 provider `naver`의 고정 `nas-naver-default` profile을 지원한다. vault 설치가 정상이라면
 키 없는 설치에도 metadata에서 `supported=true`, `revision=0`, `runtime=UNCONFIGURED`로 공개한다.
 prepare의 replacement는 `{client_id, client_secret}`이며 `disable=true`에서는 빈 객체다.
 검증은 기존 네이버 클라이언트의 검색 1건 요청으로 수행하고 모든 실제 HTTP 시도(legacy fallback 포함)를
 기존 watchlist/shared 일일 예산에 포함한다. 성공은 VERIFIED, 인증/예산 실패는 FAILED로 반환하고 키를 노출하지 않는다.
-계좌 대상은 READY/apply 모두 `target_account_ref=null`이다. 계좌용 PC 화면은 아직 NAVER 입력을 제공하지 않는다.
+계좌 대상은 READY/apply 모두 `target_account_ref=null`이다. NAVER 입력은 R5d1의 NAS 뉴스·AI 공급자 관리 화면에서 제공하며 계좌용 입력과 구분한다.
 apply는 두 수집 경로의 실제 진행 작업/저장을 drain한 뒤 함께 교체하며 기사/cursor/작업/사용량을 유지한다.
 pause 중 새 종목 조회는 저장 목록만 읽고 fresh 조회 완료 시각을 기록하지 않는다.
 deadline 초과는 BUSY 후 실제 종료 뒤 FAILED/이전 연결 재개, commit 시작 이후 실패는 RECOVERY_REQUIRED/
@@ -454,15 +456,15 @@ Shadow 후보 설정은 `shadow_candidate_enabled`, 검증된 `shadow_candidate_
 
 NAS 통신이 페이지 도중 끊기면 검증된 직접 API binding이 같은 `account_ref`일 때만 첫 페이지부터 다시 조회한다. 다른 계좌이면 전체 결과를 폐기한다. 구 NAS의 404/405/501은 capability 부족이며 v1 payload에 화면 선택 계좌를 붙여 v2처럼 저장하지 않는다. 계좌 API는 중앙·직접 병행검증 대상에서 제외한다. 일반 시세용 v1 조회와 페이지별 failover 계약은 그대로 유지된다.
 
-2026-09-13 구현 상태 정정: 위 장애전환 계약에서 직접 adapter는 아직 저장 binding과 현재 자격을 fresh `ka00001`으로 대조하지 않는다. 따라서 같은 실제 계좌임을 검증하는 부분은 [A4b 계획](reports/A4B_DIRECT_WEBSOCKET_SCOPE_REVIEW.md) 1~3단계의 미구현 보완이다.
+2026-09-13 구현 상태 정정: 위 장애전환 계약에서 직접 adapter는 아직 저장 binding과 현재 자격을 fresh `ka00001`으로 대조하지 않는다. 따라서 같은 실제 계좌임을 검증하는 부분은 [A4b 계획](docs/archive/2026-09-22/reports/A4B_DIRECT_WEBSOCKET_SCOPE_REVIEW.md) 1~3단계의 미구현 보완이다.
 
 ### 구현 예정: `POST /api/v2/accounts/resolve`
 
 인증된 HTTPS에서 `{environment, account_number}`를 받아 NAS의 기존 검증 registry와만 대조한다. 응답은 `{canonical_scope, matched_binding: {credential_profile_id, binding_revision, verified_at, verification_method}, matched_at}`이며 NAS가 저장한 검증 근거와 PC 로컬 자격의 검증 revision은 구별한다. 요청으로 NAS registry나 활성 profile/binding을 생성·교체하지 않는다. 미등록은 `ACCOUNT_NOT_REGISTERED`이며 local origin의 중앙 결합만 보류한다. PC 키 소유를 NAS가 독립 증명하는 API가 아니라 신뢰하는 단일 소유자 PC의 관측값을 대조하는 경계다.
 
-예정 capability는 `account_identity_resolve_v2`다. HTTP·인증서 오류·redirect는 거절하고 raw를 repr/validation `input`/예외/로그/DB/캐시에 남기지 않는다. 임의 proxy 헤더로 TLS 판정을 우회할 수 없어야 한다. 현재 앱 설정은 HTTP이며 HTTPS 종단은 아직 확인하지 않았다. 이 경로와 capability는 **현재 서버에 구현됐다는 의미가 아니다**.
+예정 capability는 `account_identity_resolve_v2`다. HTTP·인증서 오류·redirect는 거절하고 raw를 repr/validation `input`/예외/로그/DB/캐시에 남기지 않는다. 임의 proxy 헤더로 TLS 판정을 우회할 수 없어야 한다. R7c2 기록에서 NAS HTTPS/WSS 연결과 앱의 HTTPS 주소 전환은 확인됐다. 이 전송 경계의 확인과 별개로 resolve·aliases 경로 및 이 capability는 **현재 미구현**이다.
 
-먼저 만든 local origin의 결합은 별도 인증 HTTPS `POST /api/v2/accounts/aliases`로 구현한다. 입력 `{environment, account_number, origin_scope}`를 서버에서 같은 계좌로 대조한 후 기존 alias 저장 계약을 적용하고 익명 AccountScopeAlias를 반환한다. client가 canonical ref를 선택하지 않는다. 같은 연결은 멱등이며 대상 교체·환경 교차·연쇄/순환은 거절한다. 두 신원 경계가 준비된 뒤 위 capability를 true로 제공한다. raw는 일반 콘텐츠에 포함하지 않는다. 직접 query context의 기존 scope는 origin으로 유지하고 선택 canonical_scope로 매핑을 표현해 alias 뒤에도 저장 key가 변하지 않게 한다.
+먼저 만든 local origin의 결합은 별도 인증 HTTPS `POST /api/v2/accounts/aliases`로 구현할 계획이며 현재 미구현이다. 입력 `{environment, account_number, origin_scope}`를 서버에서 같은 계좌로 대조한 후 기존 alias 저장 계약을 적용하고 익명 AccountScopeAlias를 반환한다. client가 canonical ref를 선택하지 않는다. 같은 연결은 멱등이며 대상 교체·환경 교차·연쇄/순환은 거절한다. 두 신원 경계가 준비된 뒤 위 capability를 true로 제공한다. raw는 일반 콘텐츠에 포함하지 않는다. 직접 query context의 기존 scope는 origin으로 유지하고 선택 canonical_scope로 매핑을 표현해 alias 뒤에도 저장 key가 변하지 않게 한다.
 
 ### `POST /api/v1/kiwoom/query`
 
@@ -505,7 +507,7 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 
 신규 주문은 인증된 수동 KRX 지정가만 받는다. `09:00~15:20`은 검증된 정규장 정책이며 `16:00~20:00`은 키움 모의투자의 새 KRX 애프터 지원 여부를 broker 응답으로 확인하는 `manual-mock-krx-after-limit-probe/v1`이다. probe 허용은 지원 확정이 아니며 접수·거절 결과를 원장과 응답의 `policy_version`으로 구분한다. NXT·시장가·15:20~16:00 신규 주문은 허용하지 않는다.
 
-`request_id`는 같은 `MOCK_EXECUTION_RUN_ID` 안의 멱등키다. 같은 내용으로 다시 요청하면 기존 결과를 반환하고 broker에 재전송하지 않는다. 다른 종목·방향·수량·가격에 같은 ID를 재사용하면 400이다. 전송과 취소 전에 계좌 REST 복구를 먼저 수행한다. 응답 유실은 `SUBMISSION_UNKNOWN`, 취소 응답 유실은 `CANCEL_PENDING`으로 남기며 자동 재전송하지 않는다. 신규 전송은 시행일별 공통 세션 정책에서 KRX 정규장 연속매매 `09:00 <= KST < 15:20`로 판단한 수동 LIMIT만 허용한다. 장후종가·KRX 애프터·NXT·동시호가는 `PRECHECK_REJECTED` 상태와 `UNSUPPORTED|reason|venue|order_type|session|phase|schedule|profile` 근거를 `events[]`에 남긴다. 이 시간 gate는 조회·취소·broker 대조·재연결 복구·늦은 체결을 막지 않으며, 미체결 잔량은 broker 확인 없이 시각만으로 종료하거나 16시에 자동 재주문하지 않는다. 후보나 전략은 이 API를 자동 호출하지 않는다.
+`request_id`는 같은 `MOCK_EXECUTION_RUN_ID` 안의 멱등키다. 같은 내용으로 다시 요청하면 기존 결과를 반환하고 broker에 재전송하지 않는다. 다른 종목·방향·수량·가격에 같은 ID를 재사용하면 400이다. 전송과 취소 전에 계좌 REST 복구를 먼저 수행한다. 응답 유실은 `SUBMISSION_UNKNOWN`, 취소 응답 유실은 `CANCEL_PENDING`으로 남기며 자동 재전송하지 않는다. 신규 수동 LIMIT 전송은 시행일별 공통 세션 정책의 KRX 정규장 연속매매 `09:00 <= KST < 15:20`와 위 `16:00~20:00` KRX 애프터 probe 경로를 구분한다. 장후종가·NXT·동시호가 등 허용되지 않은 신규 주문은 `PRECHECK_REJECTED` 상태와 `UNSUPPORTED|reason|venue|order_type|session|phase|schedule|profile` 근거를 `events[]`에 남긴다. 이 시간 gate는 조회·취소·broker 대조·재연결 복구·늦은 체결을 막지 않으며, 미체결 잔량은 broker 확인 없이 시각만으로 종료하거나 16시에 자동 재주문하지 않는다. 후보나 전략은 이 API를 자동 호출하지 않는다. O2-M 자동 운용의 READY 지원은 별도 `krx-regular/v1` 범위이며 수동 애프터 probe로 확대되지 않는다.
 
 ## 뉴스와 AI
 

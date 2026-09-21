@@ -1,5 +1,7 @@
 # 데이터베이스 스키마 지도
 
+기준: 2.1.0 / 2026-09-22. 이 문서는 테이블·마이그레이션 상세 참조다. 연구 현재 버전은 v23이며 아래 도입 버전은 이력이다. [현재 상태](docs/CURRENT_STATUS.md)와 [남은 작업](docs/OPEN_ITEMS.md)으로 구현·운영 범위를 구분한다. 신규 대신/뉴스 백필의 입력 저장 계약은 [수집 기획](docs/HISTORICAL_BACKFILL_PLAN.md) 단계에서 확정한다.
+
 CR3d1 연구 v18은 final_holdout_access_ledger migration으로 아래 두 표를 추가한다. CR3d2b 연구 v19는 소유권 표를, CR3d2c 연구 v20은 세대와 복구 감사 표를 추가한다. CR4a 연구 v21은 불변 자동 가설과 부모 계보 표를, CR4b 연구 v22는 campaign별 가설 큐를, CR4c 백엔드는 v23 후속 생성 원장을 추가한다. 기존 v17의 run/report/campaign과 migration 이력은 그대로 유지한다.
 
 - research_final_holdout_windows: window_id PK, UTC start/end, FINAL_RESERVED 또는 EXPOSED_DEVELOPMENT state, unique batch_id, immutable spec_json, created_at.
