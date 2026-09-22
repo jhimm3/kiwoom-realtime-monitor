@@ -42,6 +42,7 @@
 | `scripts/export_research_dataset.py` | NAS 일별 동결 export·bundle |
 | `src/kiwoom_monitor/infrastructure/research_data_source.py` | 입력 로드·독립 시간/종목/final projection |
 | `scripts/export_historical_reconstruction.py`, `scripts/prepare_historical_research_input.py`, `infrastructure/historical_reconstruction.py` | 사후 후보·대신 봉·과거 뉴스의 불변 복원과 기존 1분 전략 입력 어댑터. strict TOP20 재생과 분리 |
+| `scripts/plan_historical_research_split.py`, `application/historical_research_split.py` | 다기간 역사 사례의 시간순 TRAIN/VALIDATION/SEALED OOS 배정과 데이터셋 hash 결합 |
 | `src/kiwoom_monitor/research_process.py` | campaign worker·가설·순차/final 평가 프로세스 |
 | `scripts/run_research.py` | 기존 runner의 재생·실행·평가 저장 |
 | `src/kiwoom_monitor/application/research_replay.py` | 시점별 입력 재생 |

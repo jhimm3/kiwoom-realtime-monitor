@@ -41,6 +41,8 @@ NAS의 `stock_aliases` 1,164행을 사용해 94,750개 후보 종목·일의 당
 
 다기간 어댑터는 여러 후보일을 한 동결 입력에 넣되 각 사례의 결과를 후보 DB에서 확인한 바로 다음 거래일까지로 제한한다. 이 경계로 멀리 떨어진 후보일 사이의 봉을 한 사례에 계속 포함하거나 같은 결과 봉을 여러 사례 성과로 중복시키지 않는다. 첫 다기간 표본 `multi-period-2024-2026-v1`은 2024-12-24→12-26, 2025-05-29→05-30, 2026-01-14→01-15 세 사례와 연구 관측 7,567개를 포함하며, 각 원천·파생 manifest와 파일 hash를 일반 권한 로더로 재검증했다. 수집 진행 중 만든 불변 표본이므로 전체 후보 일반화나 시간순 TRAIN/VALIDATION/OOS 성과 완료를 뜻하지 않는다.
 
+같은 표본의 `historical_chronological_split_plan/v1`은 사례를 통째로 시간순 배정해 2024 사례를 TRAIN, 2025 사례를 VALIDATION, 2026 사례를 OOS로 고정했다. 계획은 파생 데이터셋 ID와 revision hash에 결합되고 각 fold의 마지막 15:30 봉을 포함하는 미포함 종료 경계를 사용한다. OOS 상태는 `SEALED`, 결과 포함은 false이며 이 단계에서는 전략 실행·성과 조회·후보 선택을 하지 않았다.
+
 수집 진행률은 NAS `deploy/synology/server-data/historical-intelligence/v1/STATUS.md`와 `status.json`에 게시한다. 발행시각이 검증된 과거 기사는 기존 인증된 `news_article` content 경로로 증분 전송하며, NAS 운영 DB에서 `naver_historical_web`/`historical_backfill` revision으로 저장된 뒤 기존 BODY 작업기가 원문을 처리한다. 별도 역사 SQLite 스냅샷 자체를 운영 뉴스 DB로 열거나 덮어쓰지 않는다.
 
 기존 후보 DB는 읽기 전용으로 확인했다. 94,750개 후보 종목·일, 5,910,806개 일봉, 4,562,200개 분봉이 있고 분봉 작업 완료 중 81,901건은 0행이었다. 실제 확보 범위와 다음 작업은 [과거 자료 확보 기획](HISTORICAL_BACKFILL_PLAN.md)에 적었다.

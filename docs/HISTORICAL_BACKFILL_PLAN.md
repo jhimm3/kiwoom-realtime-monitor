@@ -153,3 +153,5 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 복수 후보일 export는 각 후보일 뒤 후보 DB에서 확인되는 바로 다음 거래일까지만 해당 사례의 결과 구간으로 쓴다. 다음 선택일이 수개월 뒤라는 이유로 그 사이 전체 봉을 한 사례 결과로 넣지 않는다. 어댑터는 사례별 후보군 revision을 다음 거래일 첫 봉 직전에 활성화하고, 완료된 대신 1분봉만 합친다. 결과 봉에는 `historical_case_date`를 남겨 사례 귀속을 검증한다. 완전한 1분 결과 봉이 없는 선택일은 합성하지 않고 파생 manifest의 `excluded_cases`에 남긴다.
 
 첫 다기간 불변 표본은 `multi-period-2024-2026-v1`이다. 선택일과 결과 종료일은 2024-12-24→12-26, 2025-05-29→05-30, 2026-01-14→01-15이며, 후보군 revision 3개와 분봉 7,564개로 총 7,567개 연구 관측을 담았다. 이는 수집 도중 구조를 검증하기 위한 표본이다. 시간순 TRAIN/VALIDATION/OOS 정책과 비용 가정을 고정한 성과 비교는 수집 범위가 더 넓어진 뒤 별도 불변 요청으로 실행한다.
+
+`scripts/plan_historical_research_split.py`는 완성된 사례만 통째로 과거순 TRAIN→VALIDATION→OOS에 배정한다. TRAIN·VALIDATION 사례 수를 명시하고 나머지를 최소 한 사례의 OOS로 남긴다. 산출물 `historical_chronological_split_plan/v1`은 source dataset ID와 revision hash, 사례별 봉 수·시간 경계, 기존 `chronological_holdout/v1` 평가 문서를 함께 고정한다. OOS는 항상 `SEALED`이고 결과를 포함하지 않는다. 첫 계획은 `data/research/historical-evaluation-plans/multi-period-2024-2026-v1.json`이며 사례를 각 1개씩 TRAIN/VALIDATION/OOS에 배정했다.

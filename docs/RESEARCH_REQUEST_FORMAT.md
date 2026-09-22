@@ -6,6 +6,17 @@
 지속 campaign·자동 가설·다기간 bundle·실제 RSS 확인과 CPU batch 양보는 구현되어 있다. 실제 NAS 전체 규모·PC 24시간 운전 검증과는 구분한다.
 최우선 자료 확보 계획은 [과거 자료 확보](HISTORICAL_BACKFILL_PLAN.md)에 있다. 새 원천의 봉·뉴스를 기존 관측 replay와 같은 의미로 자동 편입하지 않는다.
 
+## 역사 복원 시간순 분할 계획
+
+`plan_historical_research_split.py`는 `historical_reconstruction_strategy/v1` 입력의 완성 사례를 통째로 시간순 배정한다. TRAIN·VALIDATION 사례 수는 명시하고 나머지는 최소 한 사례의 OOS로 남긴다. 계획은 source dataset ID와 revision hash에 결합되며 OOS 상태는 항상 `SEALED`, 결과 포함은 false다. 이 계획 생성은 전략 실행이나 OOS 접근이 아니다.
+
+```powershell
+python scripts\plan_historical_research_split.py `
+  --source data\research\historical-strategy-input\multi-period-2024-2026-v1 `
+  --train-cases 1 --validation-cases 1 `
+  --output data\research\historical-evaluation-plans\multi-period-2024-2026-v1.json
+```
+
 ## CR3d3c 최종 결과 개발 노출 요청 (2026-09-16)
 
 `research_process --expose-final`은 최대 1 MiB의 `final_holdout_exposure_request/v1` JSON을 받는다.
