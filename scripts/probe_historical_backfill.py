@@ -20,23 +20,29 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from kiwoom_monitor.infrastructure.historical_backfill import (
-    article_publication_status,
+    article_publication_record,
     claim_news_backfill_job,
+    claim_news_range_job,
     clear_news_backfill_jobs,
     fetch_article_publication,
     fetch_naver_historical_search_page,
     fetch_naver_stock_news_page,
     finish_news_backfill_job,
+    finish_news_range_job,
     inspect_candidate_database,
     inspect_daishin_environment,
     import_daishin_backfill_ndjson,
     latest_candidates,
     release_news_backfill_job,
+    release_news_range_job,
+    seed_news_range_jobs,
     seed_news_backfill_jobs,
     store_daishin_probe_payload,
     store_article_publication_result,
+    store_news_search_observation,
     store_naver_historical_search_page,
     store_naver_stock_news_page,
+    split_news_range_job,
 )
 
 
@@ -44,6 +50,20 @@ DEFAULT_CANDIDATE_DB = Path(
     r"C:\Users\pc-1\Desktop\kiwoom_history_backfill\data\kiwoom_history.sqlite3"
 )
 DEFAULT_OUTPUT_DB = Path("data/historical_intelligence.sqlite3")
+
+
+def _store_resolved_observation(
+    database: Path, page: object, item: object, published_at: str,
+) -> None:
+    source_date = str(getattr(item, "search_published_date", ""))
+    if not source_date and len(published_at) >= 10:
+        source_date = published_at[:10]
+    if not source_date:
+        return
+    start_date = str(getattr(page, "target_date"))
+    end_date = str(getattr(page, "target_end_date", "") or start_date)
+    if start_date <= source_date <= end_date:
+        store_news_search_observation(database, page, item, source_date)
 
 
 class _ArticleHostLimiter:
@@ -143,9 +163,14 @@ class _SearchPagePool:
     def fetch_batch(self, job: object, page_indexes: list[int]):
         def fetch(page_index: int):
             self._limiter.wait()
+            target_end_date = str(
+                getattr(job, "target_end_date", "")
+                or getattr(job, "target_date")
+            )
             page = self._fetcher(  # type: ignore[operator]
                 getattr(job, "code"), getattr(job, "query_text"),
                 getattr(job, "target_date"), 1 + page_index * 10,
+                target_end_date=target_end_date,
             )
             return page_index, page
 
@@ -257,6 +282,12 @@ def main() -> int:
     )
     news_seed.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
 
+    news_range_seed = subparsers.add_parser(
+        "news-range-seed", help="밀도가 높은 대기 뉴스 일자를 월 범위 작업으로 묶습니다."
+    )
+    news_range_seed.add_argument("--minimum-density", type=float, default=0.5)
+    news_range_seed.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
+
     news_run = subparsers.add_parser(
         "news-run", help="대기 중인 과거 뉴스 작업을 재개 가능하게 실행합니다."
     )
@@ -309,6 +340,16 @@ def main() -> int:
             "output": str(args.output.resolve()),
         }, ensure_ascii=False, indent=2))
         return 0
+    if args.command == "news-range-seed":
+        inserted = seed_news_range_jobs(
+            args.output, minimum_density=args.minimum_density,
+        )
+        print(json.dumps({
+            "inserted_range_jobs": inserted,
+            "minimum_density": args.minimum_density,
+            "output": str(args.output.resolve()),
+        }, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "news-run":
         if args.jobs < 1 or args.jobs > 10000:
             parser.error("--jobs must be between 1 and 10000")
@@ -321,11 +362,13 @@ def main() -> int:
         completed_jobs = 0
         failed_jobs = 0
         truncated_jobs = 0
+        claimed_jobs = 0
         collector_unavailable = False
         for _ in range(args.jobs):
-            job = claim_news_backfill_job(args.output)
+            job = claim_news_range_job(args.output) or claim_news_backfill_job(args.output)
             if job is None:
                 break
+            claimed_jobs += 1
             pages_observed = 0
             items_observed = 0
             usable = 0
@@ -337,6 +380,7 @@ def main() -> int:
                 statuses = {}
                 occurrences = []
                 scheduled = set()
+                item_pages = {}
                 completed_articles = 0
                 with _SearchPagePool(
                     workers=args.search_workers, request_delay=args.request_delay,
@@ -368,17 +412,26 @@ def main() -> int:
                             for item in page.items:
                                 key = (item.office_id, item.article_id)
                                 occurrences.append(key)
+                                item_pages[key] = page
                                 if key in statuses or key in scheduled:
                                     continue
-                                status = article_publication_status(args.output, item)
+                                status, published_at = article_publication_record(
+                                    args.output, item,
+                                )
                                 if status in {"", "not_fetched"}:
                                     scheduled.add(key)
                                     article_pool.submit(item)
                                 else:
                                     statuses[key] = status
+                                    _store_resolved_observation(
+                                        args.output, page, item, published_at,
+                                    )
                             for item, result in article_pool.drain():
                                 key = (item.office_id, item.article_id)
                                 store_article_publication_result(args.output, result)
+                                _store_resolved_observation(
+                                    args.output, item_pages[key], item, result.published_at,
+                                )
                                 statuses[key] = result.status
                                 completed_articles += 1
                                 _write_news_heartbeat(
@@ -396,6 +449,9 @@ def main() -> int:
                     for item, result in article_pool.drain(wait=True):
                         key = (item.office_id, item.article_id)
                         store_article_publication_result(args.output, result)
+                        _store_resolved_observation(
+                            args.output, item_pages[key], item, result.published_at,
+                        )
                         statuses[key] = result.status
                         completed_articles += 1
                         _write_news_heartbeat(
@@ -412,13 +468,26 @@ def main() -> int:
                     else:
                         unreadable += 1
                 state = "complete" if exhausted else "truncated"
-                finish_news_backfill_job(
-                    args.output, job, state=state, pages_observed=pages_observed,
-                    items_observed=items_observed, usable_articles=usable,
-                    unreadable_articles=unreadable, missing_time_articles=missing_time,
-                    error="" if exhausted else "page_limit_reached",
-                )
-                if exhausted:
+                if job.range_id and not exhausted and job.target_date < job.target_end_date:
+                    split_news_range_job(args.output, job)
+                    state = "split"
+                elif job.range_id:
+                    finish_news_range_job(
+                        args.output, job, state=state, pages_observed=pages_observed,
+                        items_observed=items_observed, usable_articles=usable,
+                        unreadable_articles=unreadable,
+                        missing_time_articles=missing_time,
+                        error="" if exhausted else "page_limit_reached",
+                    )
+                else:
+                    finish_news_backfill_job(
+                        args.output, job, state=state, pages_observed=pages_observed,
+                        items_observed=items_observed, usable_articles=usable,
+                        unreadable_articles=unreadable,
+                        missing_time_articles=missing_time,
+                        error="" if exhausted else "page_limit_reached",
+                    )
+                if state == "complete":
                     completed_jobs += 1
                 else:
                     truncated_jobs += 1
@@ -430,6 +499,8 @@ def main() -> int:
                     "event": "news_job_finished",
                     "code": job.code,
                     "target_date": job.target_date,
+                    "target_end_date": job.target_end_date or job.target_date,
+                    "member_count": job.member_count,
                     "query": job.query_text,
                     "state": state,
                     "pages": pages_observed,
@@ -440,7 +511,8 @@ def main() -> int:
                 }, ensure_ascii=False), flush=True)
             except Exception as error:
                 if isinstance(error, URLError):
-                    release_news_backfill_job(
+                    release = release_news_range_job if job.range_id else release_news_backfill_job
+                    release(
                         args.output, job,
                         error=f"collector_unavailable: {type(error).__name__}: {error}",
                     )
@@ -457,7 +529,8 @@ def main() -> int:
                         "error": f"{type(error).__name__}: {error}",
                     }, ensure_ascii=False), flush=True)
                     break
-                finish_news_backfill_job(
+                finish = finish_news_range_job if job.range_id else finish_news_backfill_job
+                finish(
                     args.output, job, state="failed", pages_observed=pages_observed,
                     items_observed=items_observed, usable_articles=usable,
                     unreadable_articles=unreadable, missing_time_articles=missing_time,
@@ -478,6 +551,7 @@ def main() -> int:
                     "error": f"{type(error).__name__}: {error}",
                 }, ensure_ascii=False), flush=True)
         print(json.dumps({
+            "claimed_jobs": claimed_jobs,
             "completed_jobs": completed_jobs,
             "failed_jobs": failed_jobs,
             "truncated_jobs": truncated_jobs,

@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode
 from urllib.request import Request, urlopen
 
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
@@ -61,6 +61,9 @@ class NewsBackfillJob:
     name_source: str
     name_source_ref: str
     attempts: int
+    target_end_date: str = ""
+    range_id: str = ""
+    member_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,7 @@ class NaverHistoricalNewsItem:
     original_url: str
     portal_url: str
     position: int
+    search_published_date: str = ""
 
 
 @dataclass(frozen=True)
@@ -113,6 +117,7 @@ class NaverHistoricalNewsPage:
     has_structured_news: bool
     observed_at: str
     raw_json: str
+    target_end_date: str = ""
 
 
 @dataclass(frozen=True)
@@ -367,6 +372,272 @@ def claim_news_backfill_job(output_database: Path) -> NewsBackfillJob | None:
             )
 
 
+def seed_news_range_jobs(output_database: Path, *, minimum_density: float = 0.5) -> int:
+    """Group dense pending days by symbol, query and month without deleting daily jobs."""
+    if not 0 < minimum_density <= 1:
+        raise ValueError("minimum_density must be in (0, 1]")
+    initialize_probe_database(output_database)
+    with closing(_connect_database(output_database)) as connection:
+        observed_page_rates = {
+            (str(row[0]), str(row[1])): float(row[2])
+            for row in connection.execute(
+                """
+                SELECT code, query_text, AVG(pages_observed)
+                FROM news_backfill_jobs
+                WHERE state IN ('complete','truncated') AND pages_observed > 0
+                GROUP BY code, query_text
+                """
+            ).fetchall()
+        }
+        rows = connection.execute(
+            """
+            SELECT code, target_date, query_text
+            FROM news_backfill_jobs
+            WHERE state IN ('pending','failed') AND attempts < 3
+            ORDER BY code, query_text, target_date
+            """
+        ).fetchall()
+        groups: dict[tuple[str, str, str], list[str]] = {}
+        for code, target_date, query_text in rows:
+            date_text = str(target_date)
+            groups.setdefault(
+                (str(code), str(query_text), date_text[:7]), [],
+            ).append(date_text)
+        now = datetime.now(UTC).isoformat()
+        inserted = 0
+        with connection:
+            for (code, query_text, _month), member_dates in groups.items():
+                dates = sorted(set(member_dates))
+                if len(dates) < 2:
+                    continue
+                observed_pages = observed_page_rates.get((code, query_text), 0)
+                if observed_pages >= 50:
+                    continue
+                first = datetime.strptime(dates[0], "%Y-%m-%d").date()
+                last = datetime.strptime(dates[-1], "%Y-%m-%d").date()
+                weekdays = sum(
+                    1 for offset in range((last - first).days + 1)
+                    if (first + timedelta(days=offset)).weekday() < 5
+                )
+                if len(dates) / max(1, weekdays) < minimum_density:
+                    continue
+                # Keep an estimated range below the 100-page hard limit so a
+                # busy query does not download the same leading pages again
+                # after an avoidable midpoint split. Unknown pairs use a
+                # conservative two pages per day until real observations exist.
+                estimated_daily_pages = max(2.0, observed_pages)
+                member_limit = max(2, int(80 // estimated_daily_pages))
+                for offset in range(0, len(dates), member_limit):
+                    members = dates[offset:offset + member_limit]
+                    if len(members) < 2:
+                        continue
+                    identity = "|".join((code, query_text, members[0], members[-1]))
+                    range_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO news_range_jobs
+                        (range_id, code, query_text, start_date, end_date, state,
+                         attempts, member_count, updated_at)
+                        VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                        """,
+                        (range_id, code, query_text, members[0], members[-1],
+                         len(members), now),
+                    )
+                    if cursor.rowcount != 1:
+                        continue
+                    connection.executemany(
+                        """
+                        INSERT INTO news_range_members
+                        (range_id, code, target_date, query_text)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        [(range_id, code, value, query_text) for value in members],
+                    )
+                    connection.executemany(
+                        """
+                        UPDATE news_backfill_jobs SET state='grouped', updated_at=?
+                        WHERE code=? AND target_date=? AND query_text=?
+                          AND state IN ('pending','failed')
+                        """,
+                        [(now, code, value, query_text) for value in members],
+                    )
+                    inserted += 1
+    return inserted
+
+
+def claim_news_range_job(output_database: Path) -> NewsBackfillJob | None:
+    initialize_probe_database(output_database)
+    claimed_at = datetime.now(UTC)
+    now = claimed_at.isoformat()
+    stale_before = (claimed_at - timedelta(hours=2)).isoformat()
+    with closing(_connect_database(output_database)) as connection:
+        connection.row_factory = sqlite3.Row
+        with connection:
+            connection.execute(
+                """
+                UPDATE news_range_jobs
+                SET state='failed', last_error='collector_stale_running_recovered', updated_at=?
+                WHERE state='running' AND updated_at < ?
+                """,
+                (now, stale_before),
+            )
+            row = connection.execute(
+                """
+                SELECT range_id, code, query_text, start_date, end_date,
+                       attempts, member_count
+                FROM news_range_jobs
+                WHERE state IN ('pending','failed') AND attempts < 3
+                ORDER BY end_date DESC, code
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            updated = connection.execute(
+                """
+                UPDATE news_range_jobs
+                SET state='running', attempts=attempts+1, last_error='', updated_at=?
+                WHERE range_id=? AND state IN ('pending','failed')
+                """,
+                (now, row["range_id"]),
+            )
+            if updated.rowcount != 1:
+                return None
+            return NewsBackfillJob(
+                str(row["code"]), str(row["start_date"]), str(row["query_text"]),
+                "range_group", str(row["range_id"]), int(row["attempts"]) + 1,
+                str(row["end_date"]), str(row["range_id"]), int(row["member_count"]),
+            )
+
+
+def release_news_range_job(
+    output_database: Path, job: NewsBackfillJob, *, error: str,
+) -> None:
+    with closing(_connect_database(output_database)) as connection:
+        with connection:
+            connection.execute(
+                """
+                UPDATE news_range_jobs SET
+                    state='pending', attempts=MAX(attempts-1, 0), last_error=?, updated_at=?
+                WHERE range_id=? AND state='running'
+                """,
+                (error, datetime.now(UTC).isoformat(), job.range_id),
+            )
+
+
+def split_news_range_job(output_database: Path, job: NewsBackfillJob) -> int:
+    start = datetime.strptime(job.target_date, "%Y-%m-%d").date()
+    end = datetime.strptime(job.target_end_date, "%Y-%m-%d").date()
+    if start >= end:
+        return 0
+    midpoint = start + timedelta(days=(end - start).days // 2)
+    now = datetime.now(UTC).isoformat()
+    with closing(_connect_database(output_database)) as connection:
+        members = connection.execute(
+            """
+            SELECT code, target_date, query_text FROM news_range_members
+            WHERE range_id=? ORDER BY target_date
+            """,
+            (job.range_id,),
+        ).fetchall()
+        partitions = [
+            [row for row in members if str(row[1]) <= midpoint.isoformat()],
+            [row for row in members if str(row[1]) > midpoint.isoformat()],
+        ]
+        inserted = 0
+        with connection:
+            for rows in partitions:
+                if not rows:
+                    continue
+                child_start, child_end = str(rows[0][1]), str(rows[-1][1])
+                identity = "|".join((job.code, job.query_text, child_start, child_end))
+                child_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO news_range_jobs
+                    (range_id, code, query_text, start_date, end_date, state,
+                     attempts, member_count, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                    """,
+                    (child_id, job.code, job.query_text, child_start, child_end,
+                     len(rows), now),
+                )
+                connection.executemany(
+                    """
+                    INSERT OR IGNORE INTO news_range_members
+                    (range_id, code, target_date, query_text) VALUES (?, ?, ?, ?)
+                    """,
+                    [(child_id, str(row[0]), str(row[1]), str(row[2])) for row in rows],
+                )
+                inserted += max(0, cursor.rowcount)
+            connection.execute(
+                """
+                UPDATE news_range_jobs SET state='split', pages_observed=100,
+                    last_error='page_limit_split', updated_at=? WHERE range_id=?
+                """,
+                (now, job.range_id),
+            )
+    return inserted
+
+
+def finish_news_range_job(
+    output_database: Path, job: NewsBackfillJob, *, state: str,
+    pages_observed: int, items_observed: int, usable_articles: int,
+    unreadable_articles: int, missing_time_articles: int, error: str = "",
+) -> None:
+    if state not in {"complete", "failed", "truncated"}:
+        raise ValueError("news range state must be complete, failed or truncated")
+    now = datetime.now(UTC).isoformat()
+    with closing(_connect_database(output_database)) as connection:
+        member_dates = [
+            str(row[0]) for row in connection.execute(
+                "SELECT target_date FROM news_range_members WHERE range_id=?",
+                (job.range_id,),
+            ).fetchall()
+        ]
+        with connection:
+            connection.execute(
+                """
+                UPDATE news_range_jobs SET state=?, pages_observed=?, items_observed=?,
+                    usable_articles=?, unreadable_articles=?, missing_time_articles=?,
+                    last_error=?, updated_at=? WHERE range_id=?
+                """,
+                (state, pages_observed, items_observed, usable_articles,
+                 unreadable_articles, missing_time_articles, error, now, job.range_id),
+            )
+            if state != "failed":
+                for value in member_dates:
+                    counts = connection.execute(
+                        """
+                        SELECT COUNT(*),
+                               COALESCE(SUM(CASE WHEN a.article_fetch_status='published_at_found'
+                                           THEN 1 ELSE 0 END),0),
+                               COALESCE(SUM(CASE WHEN a.article_fetch_status='time_not_found'
+                                           THEN 1 ELSE 0 END),0)
+                        FROM news_search_observations AS o
+                        JOIN news_articles AS a
+                          ON a.provider=o.provider AND a.office_id=o.office_id
+                         AND a.article_id=o.article_id
+                        WHERE o.code=? AND o.source_date=? AND o.query_text=?
+                        """,
+                        (job.code, value, job.query_text),
+                    ).fetchone()
+                    item_count = int(counts[0])
+                    usable_count = int(counts[1])
+                    missing_count = int(counts[2])
+                    connection.execute(
+                        """
+                        UPDATE news_backfill_jobs SET state=?, pages_observed=?,
+                            items_observed=?, usable_articles=?, unreadable_articles=?,
+                            missing_time_articles=?, last_error=?, updated_at=?
+                        WHERE code=? AND target_date=? AND query_text=? AND state='grouped'
+                        """,
+                        (state, 0, item_count, usable_count,
+                         max(0, item_count - usable_count - missing_count), missing_count,
+                         error, now, job.code, value, job.query_text),
+                    )
+
+
 def finish_news_backfill_job(
     output_database: Path,
     job: NewsBackfillJob,
@@ -451,6 +722,25 @@ def article_publication_status(
             (NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id),
         ).fetchone()
     return str(row[0]) if row is not None else "not_fetched"
+
+
+def article_publication_record(
+    output_database: Path,
+    item: NaverHistoricalNewsItem,
+) -> tuple[str, str]:
+    initialize_probe_database(output_database)
+    with closing(_connect_database(output_database)) as connection:
+        row = connection.execute(
+            """
+            SELECT article_fetch_status, published_at FROM news_articles
+            WHERE provider=? AND office_id=? AND article_id=?
+            """,
+            (NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id),
+        ).fetchone()
+    return (
+        (str(row[0]), str(row[1])) if row is not None
+        else ("not_fetched", "")
+    )
 
 
 def parse_naver_stock_news_page(
@@ -547,10 +837,14 @@ def parse_naver_historical_search_page(
     start: int,
     payload: Mapping[str, Any],
     *,
+    target_end_date: str = "",
     observed_at: datetime | None = None,
 ) -> NaverHistoricalNewsPage:
     normalized_code = _stock_code(code)
     normalized_date = _iso_date(target_date)
+    normalized_end_date = _iso_date(target_end_date) if target_end_date else normalized_date
+    if normalized_end_date < normalized_date:
+        raise ValueError("historical search end date must not precede start date")
     if start < 1:
         raise ValueError("start must be positive")
     collections = payload.get("collection")
@@ -593,6 +887,22 @@ def parse_naver_historical_search_page(
             office_name = ""
             if isinstance(source_profile, Mapping):
                 office_name = _plain_text(str(source_profile.get("title", "")))
+            searchable = unquote(unquote(str(node.get("imageSrc", ""))))
+            date_match = re.search(r"/(20\d{2})/(\d{2})/(\d{2})/", searchable)
+            if date_match is None and isinstance(source_profile, Mapping):
+                searchable = " ".join(
+                    str(value.get("text", ""))
+                    for value in source_profile.get("subTexts", [])
+                    if isinstance(value, Mapping)
+                )
+                date_match = re.search(r"(20\d{2})[.\-/](\d{2})[.\-/](\d{2})", searchable)
+            search_published_date = ""
+            if date_match is not None:
+                candidate_date = "-".join(date_match.groups())
+                try:
+                    search_published_date = _iso_date(candidate_date)
+                except ValueError:
+                    search_published_date = ""
             item = NaverHistoricalNewsItem(
                 article_key=article_key,
                 office_id=office_id or "url",
@@ -604,6 +914,7 @@ def parse_naver_historical_search_page(
                 original_url=original_url,
                 portal_url=portal_url,
                 position=position,
+                search_published_date=search_published_date,
             )
             position += 1
             old = results.get(article_key)
@@ -615,24 +926,29 @@ def parse_naver_historical_search_page(
     raw_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return NaverHistoricalNewsPage(
         normalized_code, str(query).strip(), normalized_date, start, tuple(results.values()),
-        structured, observed, raw_json,
+        structured, observed, raw_json, normalized_end_date,
     )
 
 
-def _naver_historical_search_url(query: str, target_date: str, start: int) -> str:
+def _naver_historical_search_url(
+    query: str, target_date: str, start: int, target_end_date: str = "",
+) -> str:
     normalized_date = _iso_date(target_date)
-    compact = normalized_date.replace("-", "")
-    dotted = normalized_date.replace("-", ".")
+    normalized_end_date = _iso_date(target_end_date) if target_end_date else normalized_date
+    if normalized_end_date < normalized_date:
+        raise ValueError("historical search end date must not precede start date")
+    compact_start = normalized_date.replace("-", "")
+    compact_end = normalized_end_date.replace("-", "")
     params = {
-        "de": dotted,
-        "ds": dotted,
+        "de": normalized_end_date.replace("-", "."),
+        "ds": normalized_date.replace("-", "."),
         "field": "0",
         "pd": "3",
         "query": str(query).strip(),
         "sort": "1",
         "ssc": "tab.news.all",
         "start": start,
-        "nso": f"so:dd,p:from{compact}to{compact},a:all",
+        "nso": f"so:dd,p:from{compact_start}to{compact_end},a:all",
     }
     return f"{NAVER_HISTORICAL_SEARCH_ENDPOINT}?{urlencode(params)}"
 
@@ -643,12 +959,16 @@ def fetch_naver_historical_search_page(
     target_date: str,
     start: int = 1,
     *,
+    target_end_date: str = "",
     timeout: float = 20,
     opener: Callable[..., Any] = urlopen,
 ) -> NaverHistoricalNewsPage:
     normalized_date = _iso_date(target_date)
+    normalized_end_date = _iso_date(target_end_date) if target_end_date else normalized_date
     request = Request(
-        _naver_historical_search_url(query, normalized_date, start),
+        _naver_historical_search_url(
+            query, normalized_date, start, normalized_end_date,
+        ),
         headers={
             "Accept": "application/json,text/plain,*/*",
             "Accept-Language": "ko-KR,ko;q=0.9",
@@ -660,7 +980,10 @@ def fetch_naver_historical_search_page(
         payload = json.loads(response.read().decode("utf-8"))
     if not isinstance(payload, Mapping):
         raise ValueError("Naver historical search response is not an object")
-    return parse_naver_historical_search_page(code, query, normalized_date, start, payload)
+    return parse_naver_historical_search_page(
+        code, query, normalized_date, start, payload,
+        target_end_date=normalized_end_date,
+    )
 
 
 class _ArticleMetadataParser(HTMLParser):
@@ -938,6 +1261,33 @@ def initialize_probe_database(path: Path) -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_news_backfill_jobs_state
                     ON news_backfill_jobs(state, target_date, code);
+                CREATE TABLE IF NOT EXISTS news_range_jobs (
+                    range_id TEXT PRIMARY KEY,
+                    code TEXT NOT NULL,
+                    query_text TEXT NOT NULL,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    member_count INTEGER NOT NULL,
+                    pages_observed INTEGER NOT NULL DEFAULT 0,
+                    items_observed INTEGER NOT NULL DEFAULT 0,
+                    usable_articles INTEGER NOT NULL DEFAULT 0,
+                    unreadable_articles INTEGER NOT NULL DEFAULT 0,
+                    missing_time_articles INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_news_range_jobs_state
+                    ON news_range_jobs(state, end_date, code);
+                CREATE TABLE IF NOT EXISTS news_range_members (
+                    range_id TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    target_date TEXT NOT NULL,
+                    query_text TEXT NOT NULL,
+                    PRIMARY KEY (range_id, code, target_date, query_text),
+                    FOREIGN KEY (range_id) REFERENCES news_range_jobs(range_id)
+                );
                 CREATE TABLE IF NOT EXISTS market_bars (
                     provider TEXT NOT NULL,
                     code TEXT NOT NULL,
@@ -1087,11 +1437,15 @@ def store_naver_stock_news_page(path: Path, page: NaverStockNewsPage) -> None:
 
 def store_naver_historical_search_page(path: Path, page: NaverHistoricalNewsPage) -> None:
     initialize_probe_database(path)
+    end_date = page.target_end_date or page.target_date
     request_key = (
-        f"code={page.code}&date={page.target_date}&query={page.query}&start={page.start}"
+        f"code={page.code}&from={page.target_date}&to={end_date}"
+        f"&query={page.query}&start={page.start}"
     )
     digest = hashlib.sha256(page.raw_json.encode("utf-8")).hexdigest()
-    endpoint = _naver_historical_search_url(page.query, page.target_date, page.start)
+    endpoint = _naver_historical_search_url(
+        page.query, page.target_date, page.start, end_date,
+    )
     with closing(_connect_database(path)) as connection:
         with connection:
             connection.execute(
@@ -1107,6 +1461,9 @@ def store_naver_historical_search_page(path: Path, page: NaverHistoricalNewsPage
                 ),
             )
             for item in page.items:
+                source_date = item.search_published_date or (
+                    page.target_date if end_date == page.target_date else ""
+                )
                 connection.execute(
                     """
                     INSERT INTO news_articles
@@ -1126,11 +1483,13 @@ def store_naver_historical_search_page(path: Path, page: NaverHistoricalNewsPage
                     """,
                     (
                         NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id,
-                        page.target_date, item.office_name, item.title, item.summary,
+                        source_date, item.office_name, item.title, item.summary,
                         item.article_url, item.original_url, item.portal_url,
-                        page.target_date, page.observed_at, page.observed_at,
+                        source_date, page.observed_at, page.observed_at,
                     ),
                 )
+                if not source_date:
+                    continue
                 connection.execute(
                     """
                     INSERT INTO news_search_observations
@@ -1146,10 +1505,38 @@ def store_naver_historical_search_page(path: Path, page: NaverHistoricalNewsPage
                     """,
                     (
                         NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id,
-                        page.code, page.target_date, page.query, page.start, item.position,
+                        page.code, source_date, page.query, page.start, item.position,
                         page.observed_at,
                     ),
                 )
+
+
+def store_news_search_observation(
+    path: Path, page: NaverHistoricalNewsPage, item: NaverHistoricalNewsItem,
+    source_date: str,
+) -> None:
+    normalized_date = _iso_date(source_date)
+    with closing(_connect_database(path)) as connection:
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO news_search_observations
+                (provider, office_id, article_id, code, source_date, query_text,
+                 start, position, observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(
+                    provider, office_id, article_id, code, source_date, query_text
+                ) DO UPDATE SET
+                    start=MIN(news_search_observations.start, excluded.start),
+                    position=excluded.position,
+                    observed_at=excluded.observed_at
+                """,
+                (
+                    NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id,
+                    page.code, normalized_date, page.query, page.start, item.position,
+                    page.observed_at,
+                ),
+            )
 
 
 def store_article_publication_result(path: Path, result: ArticlePublicationResult) -> None:

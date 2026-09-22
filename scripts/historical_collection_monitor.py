@@ -105,6 +105,15 @@ def _database_snapshot() -> dict[str, object]:
                 "SELECT code,target_date,query_text,attempts,pages_observed,items_observed,updated_at "
                 "FROM news_backfill_jobs WHERE state='running' ORDER BY updated_at DESC LIMIT 1"
             ).fetchone()
+            if news is None and connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='news_range_jobs'"
+            ).fetchone():
+                news = connection.execute(
+                    "SELECT code,start_date AS target_date,query_text,attempts,"
+                    "pages_observed,items_observed,updated_at "
+                    "FROM news_range_jobs WHERE state='running' "
+                    "ORDER BY updated_at DESC LIMIT 1"
+                ).fetchone()
             market = connection.execute(
                 "SELECT code,attempts,one_minute_bars,five_minute_bars,updated_at "
                 "FROM market_backfill_jobs WHERE state='running' ORDER BY updated_at DESC LIMIT 1"
@@ -148,7 +157,7 @@ def _counts_text(counts: dict[str, int]) -> tuple[str, float]:
     percent = 100 * complete / total if total else 0.0
     detail = " · ".join(
         f"{name} {counts.get(name, 0):,}"
-        for name in ("complete", "truncated", "running", "pending", "failed")
+        for name in ("complete", "truncated", "running", "pending", "grouped", "failed")
         if counts.get(name, 0)
     )
     return f"완료 {complete:,} / {total:,} ({percent:.2f}%)   {detail}", percent

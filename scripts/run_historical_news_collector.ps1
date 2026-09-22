@@ -74,6 +74,12 @@ $stopRequested = $false
 Write-State 'running' $completed
 Write-Log "collector started jobs=$Jobs max_pages=$MaxPages search_workers=$SearchWorkers article_workers=$ArticleWorkers publish_every=$PublishEvery status_every=$StatusEvery"
 try {
+    $rangeSeedOutput = & $python scripts\probe_historical_backfill.py news-range-seed `
+        --minimum-density 0.5 --output $Database 2>&1
+    foreach ($line in $rangeSeedOutput) { Write-Log ([string]$line) }
+    if ($LASTEXITCODE -ne 0) {
+        throw "news-range-seed exited with code $LASTEXITCODE"
+    }
     for ($index = 1; $index -le $Jobs; $index++) {
         if (Test-Path -LiteralPath $stopFile) {
             Write-Log 'stop file observed'
@@ -91,15 +97,18 @@ try {
         $collectorExitCode = $LASTEXITCODE
         $ErrorActionPreference = $previousErrorAction
         foreach ($line in $output) { Write-Log ([string]$line) }
+        $detail = ($output | ForEach-Object { [string]$_ }) -join ' '
+        if ($detail -match '"claimed_jobs"\s*:\s*0') {
+            Write-Log 'no pending news job remains'
+            break
+        }
         if ($collectorExitCode -eq 2) {
             # news-run records an individual failed job (including transient
             # remote disconnects) in the resumable ledger. Keep the long-lived
             # collector moving so another job failure cannot stop the queue.
-            $detail = ($output | ForEach-Object { [string]$_ }) -join ' '
             Write-Log "news job failed and was retained for retry: $detail"
         }
         elseif ($collectorExitCode -eq 3) {
-            $detail = ($output | ForEach-Object { [string]$_ }) -join ' '
             if ($detail -match 'HTTP Error (403|429)') {
                 Write-Log "Naver search throttled; job returned to pending, retrying after 60 seconds: $detail"
                 Start-Sleep -Seconds 60
@@ -108,7 +117,6 @@ try {
             throw "news-run exited with code ${collectorExitCode}: $detail"
         }
         elseif ($collectorExitCode -ne 0) {
-            $detail = ($output | ForEach-Object { [string]$_ }) -join ' '
             throw "news-run exited with code ${collectorExitCode}: $detail"
         }
         $completed += 1

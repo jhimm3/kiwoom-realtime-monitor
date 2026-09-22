@@ -50,7 +50,10 @@ class HistoricalNewsParallelFetchTests(unittest.TestCase):
         active = 0
         maximum_active = 0
 
-        def fetcher(code: str, query: str, target_date: str, start: int):
+        def fetcher(
+            code: str, query: str, target_date: str, start: int, *,
+            target_end_date: str = "",
+        ):
             nonlocal active, maximum_active
             with guard:
                 active += 1

@@ -31,6 +31,14 @@ def _status(database: Path) -> dict[str, object]:
         finished_jobs = sum(
             int(row[1]) for row in job_rows if str(row[0]) in {"complete", "truncated"}
         )
+        range_job_rows = _rows(
+            connection,
+            "SELECT state,COUNT(*),COALESCE(SUM(member_count),0),"
+            "COALESCE(SUM(pages_observed),0),COALESCE(SUM(items_observed),0) "
+            "FROM news_range_jobs GROUP BY state ORDER BY state",
+        ) if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='news_range_jobs'"
+        ).fetchone() else []
         market_jobs = _rows(
             connection,
             "SELECT state,COUNT(*) FROM market_backfill_jobs GROUP BY state ORDER BY state",
@@ -51,6 +59,7 @@ def _status(database: Path) -> dict[str, object]:
                 "finished_jobs": finished_jobs,
                 "progress_percent": round(100 * finished_jobs / total_jobs, 4) if total_jobs else 0,
                 "states": job_rows,
+                "range_states": range_job_rows,
                 "articles": _rows(
                     connection,
                     "SELECT article_fetch_status,training_eligible,COUNT(*) FROM news_articles "
@@ -112,6 +121,19 @@ def _markdown(status: dict[str, object], published_run: str) -> str:
             f"| {state} | {int(jobs):,} | {int(pages):,} | {int(items):,} | "
             f"{int(usable):,} | {int(unreadable):,} | {int(missing):,} |"
         )
+    if news["range_states"]:
+        lines.extend([
+            "",
+            "### 묶음 검색 작업",
+            "",
+            "| 상태 | 묶음 | 포함 일별 작업 | 페이지 | 목록 기사 |",
+            "|---|---:|---:|---:|---:|",
+        ])
+        for state, ranges, members, pages, items in news["range_states"]:
+            lines.append(
+                f"| {state} | {int(ranges):,} | {int(members):,} | "
+                f"{int(pages):,} | {int(items):,} |"
+            )
     lines.extend([
         "",
         "### 기사 원문시각 상태",

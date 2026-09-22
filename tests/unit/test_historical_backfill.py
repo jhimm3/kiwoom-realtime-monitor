@@ -15,21 +15,167 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
     NAVER_HISTORICAL_SEARCH_PROVIDER,
     NAVER_STOCK_NEWS_PROVIDER,
     claim_news_backfill_job,
+    claim_news_range_job,
     finish_news_backfill_job,
+    finish_news_range_job,
     import_daishin_backfill_ndjson,
+    initialize_probe_database,
     parse_naver_historical_search_page,
     parse_naver_stock_news_page,
     release_news_backfill_job,
     seed_news_backfill_jobs,
+    seed_news_range_jobs,
     parse_article_publication_html,
     store_article_publication_result,
     store_naver_historical_search_page,
     store_naver_stock_news_page,
     store_daishin_probe_payload,
+    split_news_range_job,
 )
 
 
 class HistoricalBackfillTest(unittest.TestCase):
+    def test_dense_pending_days_are_grouped_and_completed_as_one_range(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.sqlite3"
+            initialize_probe_database(output)
+            now = "2026-09-22T00:00:00+00:00"
+            with closing(sqlite3.connect(output)) as connection, connection:
+                connection.executemany(
+                    """
+                    INSERT INTO news_backfill_jobs
+                    (code,target_date,query_text,state,updated_at)
+                    VALUES('005930',?,'삼성전자','pending',?)
+                    """,
+                    [(value, now) for value in (
+                        "2026-09-01", "2026-09-02", "2026-09-03",
+                    )],
+                )
+
+            self.assertEqual(1, seed_news_range_jobs(output, minimum_density=0.5))
+            job = claim_news_range_job(output)
+            assert job is not None
+            self.assertEqual(("2026-09-01", "2026-09-03", 3), (
+                job.target_date, job.target_end_date, job.member_count,
+            ))
+            finish_news_range_job(
+                output, job, state="complete", pages_observed=2,
+                items_observed=12, usable_articles=8,
+                unreadable_articles=3, missing_time_articles=1,
+            )
+            with closing(sqlite3.connect(output)) as connection:
+                states = connection.execute(
+                    "SELECT state,COUNT(*) FROM news_backfill_jobs GROUP BY state"
+                ).fetchall()
+                member_pages = connection.execute(
+                    "SELECT DISTINCT pages_observed FROM news_backfill_jobs"
+                ).fetchall()
+                range_state = connection.execute(
+                    "SELECT state FROM news_range_jobs"
+                ).fetchone()[0]
+            self.assertEqual([("complete", 3)], states)
+            self.assertEqual([(0,)], member_pages)
+            self.assertEqual("complete", range_state)
+
+    def test_range_seed_caps_members_from_observed_page_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.sqlite3"
+            initialize_probe_database(output)
+            now = "2026-09-22T00:00:00+00:00"
+            dates = [f"2026-09-{day:02d}" for day in range(1, 11)]
+            with closing(sqlite3.connect(output)) as connection, connection:
+                connection.execute(
+                    """
+                    INSERT INTO news_backfill_jobs
+                    (code,target_date,query_text,state,pages_observed,updated_at)
+                    VALUES('005930','2026-08-31','삼성전자','complete',20,?)
+                    """,
+                    (now,),
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO news_backfill_jobs
+                    (code,target_date,query_text,state,updated_at)
+                    VALUES('005930',?,'삼성전자','pending',?)
+                    """,
+                    [(value, now) for value in dates],
+                )
+
+            self.assertEqual(3, seed_news_range_jobs(output, minimum_density=0.5))
+            with closing(sqlite3.connect(output)) as connection:
+                sizes = [
+                    int(row[0]) for row in connection.execute(
+                        "SELECT member_count FROM news_range_jobs ORDER BY start_date"
+                    ).fetchall()
+                ]
+            self.assertEqual([4, 4, 2], sizes)
+
+    def test_range_search_uses_image_origin_date_for_relation(self) -> None:
+        article = {
+            "content": "요약",
+            "contentHref": "https://example.test/article/1",
+            "imageSrc": (
+                "https://search.pstatic.net/common/?src=https%3A%2F%2F"
+                "imgnews.pstatic.net%2Fimage%2Forigin%2F001%2F2026%2F09%2F03%2F1.jpg"
+            ),
+            "sourceProfile": {"title": "매체"},
+            "title": "삼성전자 범위 검색 기사",
+        }
+        bootstrap = {"body": {"props": {"children": [{"props": article}]}}}
+        payload = {"collection": [{"script": (
+            "entry.bootstrap(document.getElementById(\"root\"), "
+            + json.dumps(bootstrap, ensure_ascii=False) + ");"
+        )}]}
+        page = parse_naver_historical_search_page(
+            "005930", "삼성전자", "2026-09-01", 1, payload,
+            target_end_date="2026-09-05",
+            observed_at=datetime(2026, 9, 22, 5, 0, tzinfo=UTC),
+        )
+        self.assertEqual("2026-09-03", page.items[0].search_published_date)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.sqlite3"
+            store_naver_historical_search_page(output, page)
+            with closing(sqlite3.connect(output)) as connection:
+                source_date = connection.execute(
+                    "SELECT source_date FROM news_search_observations"
+                ).fetchone()[0]
+                endpoint = connection.execute(
+                    "SELECT endpoint FROM source_pages"
+                ).fetchone()[0]
+        self.assertEqual("2026-09-03", source_date)
+        self.assertIn("from20260901to20260905", endpoint)
+
+    def test_truncated_range_splits_without_releasing_daily_members(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.sqlite3"
+            initialize_probe_database(output)
+            now = "2026-09-22T00:00:00+00:00"
+            dates = ("2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04")
+            with closing(sqlite3.connect(output)) as connection, connection:
+                connection.executemany(
+                    """
+                    INSERT INTO news_backfill_jobs
+                    (code,target_date,query_text,state,updated_at)
+                    VALUES('005930',?,'삼성전자','pending',?)
+                    """,
+                    [(value, now) for value in dates],
+                )
+            seed_news_range_jobs(output, minimum_density=0.5)
+            job = claim_news_range_job(output)
+            assert job is not None
+
+            self.assertEqual(2, split_news_range_job(output, job))
+
+            with closing(sqlite3.connect(output)) as connection:
+                range_states = connection.execute(
+                    "SELECT state,COUNT(*) FROM news_range_jobs GROUP BY state ORDER BY state"
+                ).fetchall()
+                daily_states = connection.execute(
+                    "SELECT DISTINCT state FROM news_backfill_jobs"
+                ).fetchall()
+            self.assertEqual([("pending", 2), ("split", 1)], range_states)
+            self.assertEqual([("grouped",)], daily_states)
+
     def test_news_job_finish_waits_for_a_transient_database_writer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
