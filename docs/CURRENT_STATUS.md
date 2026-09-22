@@ -1,6 +1,6 @@
 # 현재 앱과 검증 상태
 
-확인 기준: 2026-09-22 · **현재 제품 릴리즈 2.1.0** · 로컬 `main`에는 2.1.0 이후 검증·문서 변경이 포함됨
+확인 기준: 2026-09-23 · **현재 제품 릴리즈 2.1.0** · 로컬 `main`에는 2.1.0 이후 검증·문서 변경이 포함됨
 
 현재 작업 소스는 `C:/Users/pc-1/Documents/ChatGPT/kiwoom-realtime-monitor`, 브랜치는 `main`이다. 이전 `e0b9` 워크트리의 검증된 변경과 현재 문서를 이 폴더에 fast-forward로 합쳤다. 테스트 실행기의 source root와 interpreter/data 위치는 별개다.
 
@@ -56,7 +56,9 @@ NAS의 `stock_aliases` 1,164행을 사용해 94,750개 후보 종목·일의 당
 LLM 학습과 단순 추론을 구분하기 위해 `historical_learning_cases/v1` 준비 계약을 추가했다. 사후 후보 선정, 복원 뉴스 제목·검색 요약, 아직 생성하지 않은 AI 해석, 다음 거래일 결과 라벨을 분리하며 strict 시점 재생이나 모델 학습 완료로 표시하지 않는다. 최종 첫 불변 표본 `data/research/historical-learning-cases/2026-09-18-v2`는 50사례, 뉴스 근거가 있는 사례 22개, 결과 봉이 있는 사례 2개다. 결과 없는 48사례와 차단·시각 미확인·후보일 뒤 발행 관계를 그대로 제외 원장에 남겼다. 현재 `semantic_relevance_reviewed=false`, `ai_interpretation_generated=false`, `model_weight_training_ready=false`다. 같은 데이터셋을 NAS `server-data/historical-intelligence/v1/learning-cases/historical-learning-cases-548aae706fe48133557c3ed398cfb1985fa5a80c1212b2daa623113ada877290`에 불변 게시했고 `latest.json`을 별도 갱신했으며 두 파일의 SHA-256 일치를 확인했다.
 이 사례에서 `historical_news_review_queue/v1` 대기열도 만들었다. 2,035개 종목-기사 관계를 공급자·언론사·기사 식별자로 합쳐 고유 기사 1,422개로 줄였고, 종목별 기존 비AI 판정으로 우선 검토 105개를 표시했다. 규칙 판정은 정답이 아니며 전체 항목은 `pending`, `human_review_complete=false`, `llm_used=false`, `model_weight_training_ready=false`다. 로컬 불변 산출물은 `data/research/historical-news-review-queues/2026-09-18-v1`에 있다. 같은 파일을 NAS `server-data/historical-intelligence/v1/news-review-queues/historical-news-review-queue-578f89c206d709720184aa753649dc3840f949a066819b476fc27ce576311805`에 불변 게시하고 `latest.json`을 갱신했으며 두 파일의 SHA-256 일치를 확인했다.
 
-`historical_news_review_workflow.py`로 우선 검토 105행을 `data/research/historical-news-review-work/2026-09-18-priority-v1.csv`에 내보냈다. 이 CSV는 편집 작업본이며 정답 원장이 아니다. 가져오기는 원본 대기열 ID와 파일 hash를 확인하고 관련 판정의 사건 ID, 테마 사용 시 프로필 ID, 검토자와 timezone 포함 검토시각을 요구한다. 검증된 행만 `historical_news_review_decisions/v1` 불변 결과가 되며 그 결과도 `model_weight_training_ready=false`다. 현재 입력된 사람 판정은 0건이다. 워크플로 소스는 `X:\kiwoom-monitor-backups\20260922-213000-human-news-review-workflow-v1` 백업 뒤 NAS와 동기화했고 추적 파일 966개의 SHA-256 불일치는 0개다. 오프라인 연구 CLI이므로 컨테이너 재빌드는 필요하지 않다.
+`historical_news_review_workflow.py`로 우선 검토 105행을 `data/research/historical-news-review-work/2026-09-18-priority-v1.csv`에 내보냈다. 이 CSV는 편집 작업본이며 정답 원장이 아니다. 가져오기는 원본 대기열 ID와 파일 hash를 확인하고 관련 판정의 사건 ID, 테마 사용 시 프로필 이름, 검토자와 timezone 포함 검토시각을 요구한다. 검증된 행만 `historical_news_review_decisions/v1` 불변 결과가 되며 그 결과도 `model_weight_training_ready=false`다. 현재 입력된 사람 판정은 0건이다. 워크플로 소스는 `X:\kiwoom-monitor-backups\20260922-213000-human-news-review-workflow-v1` 백업 뒤 NAS와 동기화했고 추적 파일 966개의 SHA-256 불일치는 0개다. 오프라인 연구 CLI이므로 컨테이너 재빌드는 필요하지 않다.
+
+같은 작업표는 앱의 전략 연구 창에서 `과거 뉴스 검토`로 연다. 화면은 최신 불변 대기열에 결합된 작업표만 읽고, 관련·무관·보류, 사건 ID, 기존 테마 프로필 이름과 테마명, 근거 메모를 행 단위로 원자 저장한다. `검토 결과 동결` 전 작업표는 계속 비권위 편집본이며 현재 사람 판정 0건 상태는 바뀌지 않았다.
 
 수집 진행률은 NAS `deploy/synology/server-data/historical-intelligence/v1/STATUS.md`와 `status.json`에 게시한다. 발행시각이 검증된 과거 기사는 기존 인증된 `news_article` content 경로로 10작업마다 증분 전송한다. 운영 중 100작업마다 게시하는 상태는 작업 원장만 빠르게 집계하고, 17GB대 기사·원문시도 전체 집계는 최종 스냅샷 때 수행한다. 과거 뉴스 검색은 요청 시작 간격 0.5초를 유지하는 4개 작업자로 페이지 응답 대기를 겹친다. 검색과 원문 확인도 파이프라인으로 겹치고, 언론사 원문은 같은 도메인에 한 요청만 허용한 16개 작업자로 병렬 처리한다. 밀도가 50% 이상인 같은 종목·검색어·월의 대기 일자는 날짜 범위 검색으로 묶는다. 완료 표본의 일평균 페이지 수로 한 묶음을 예상 80페이지 이하로 제한하고, 표본이 없으면 일 2페이지로 계산한다. 평균 50페이지 이상인 조합은 일별 작업을 유지하며, 실제 100페이지에 도달한 범위는 날짜를 나눠 재개한다. 범위 결과의 검색 목록 날짜 또는 확인된 원문 `published_at`으로 기존 일별 원장에 다시 귀속하고 날짜를 확인할 수 없는 결과는 임의 날짜에 넣지 않는다. 네이버 검색이 HTTP 403/429를 반환하면 현재 작업을 `pending`으로 되돌리고 60초 후 자동 재개한다. NAS 운영 DB에서 `naver_historical_web`/`historical_backfill` revision으로 저장된 뒤 기존 BODY 작업기가 원문을 처리한다. 별도 역사 SQLite 스냅샷 자체를 운영 뉴스 DB로 열거나 덮어쓰지 않는다.
 

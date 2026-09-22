@@ -10,7 +10,9 @@ from pathlib import Path
 from kiwoom_monitor.application.historical_news_review_decisions import (
     build_historical_news_review_decisions,
     export_historical_news_review_sheet,
+    load_historical_news_review_sheet,
     load_historical_news_review_decisions,
+    update_historical_news_review_sheet_row,
     write_historical_news_review_decisions,
 )
 from kiwoom_monitor.application.historical_news_review_queue import HistoricalNewsReviewQueue
@@ -43,7 +45,7 @@ class HistoricalNewsReviewDecisionTests(unittest.TestCase):
             rows[0].update({
                 "human_decision": "relevant",
                 "canonical_event_id": "event-semiconductor-investment-20240102",
-                "theme_profile_id": "default-profile",
+                "theme_profile_name": "default-profile",
                 "theme_names": "HBM|반도체 투자",
                 "notes": "직접 투자 공시",
                 "reviewer": "tester",
@@ -78,6 +80,31 @@ class HistoricalNewsReviewDecisionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "hash"):
                 load_historical_news_review_decisions(output)
 
+    def test_updates_only_editable_fields_and_keeps_queue_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sheet = Path(directory) / "review.csv"
+            source = _queue()
+            export_historical_news_review_sheet(source, sheet)
+
+            updated = update_historical_news_review_sheet_row(source, sheet, "review-1", {
+                "human_decision": "relevant",
+                "canonical_event_id": "event-1",
+                "theme_profile_name": "기본 테마",
+                "theme_names": "반도체 투자",
+                "notes": "원문 확인",
+                "reviewer": "tester",
+                "reviewed_at": "2026-09-23T10:00:00+09:00",
+            })
+
+            self.assertEqual("queue-dataset", updated["source_queue_dataset_id"])
+            loaded = load_historical_news_review_sheet(source, sheet)
+            self.assertEqual("relevant", loaded[0]["human_decision"])
+            self.assertEqual("기본 테마", loaded[0]["theme_profile_name"])
+            with self.assertRaisesRegex(ValueError, "unsupported review sheet fields"):
+                update_historical_news_review_sheet_row(
+                    source, sheet, "review-1", {"title": "변조"},
+                )
+
     def test_relevant_decision_requires_event_and_theme_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             sheet = Path(directory) / "review.csv"
@@ -97,7 +124,7 @@ class HistoricalNewsReviewDecisionTests(unittest.TestCase):
 
             rows[0]["canonical_event_id"] = "event-1"
             _write_rows(sheet, fields, rows)
-            with self.assertRaisesRegex(ValueError, "theme names require theme_profile_id"):
+            with self.assertRaisesRegex(ValueError, "theme names require theme_profile_name"):
                 build_historical_news_review_decisions(source, sheet)
 
     def test_rejects_sheet_bound_to_different_queue_hash(self) -> None:

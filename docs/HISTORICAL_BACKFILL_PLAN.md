@@ -1,6 +1,6 @@
 # 과거 자료 확보 실행 기획
 
-작성일: 2026-09-22 · 상태: **표본 도구 구현·첫 검증 진행** · 상위 문서: [개발 로드맵](../FUTURE_DEVELOPMENT_ROADMAP.md)
+갱신일: 2026-09-23 · 상태: **표본 도구 구현·첫 검증 진행** · 상위 문서: [개발 로드맵](../FUTURE_DEVELOPMENT_ROADMAP.md)
 
 ## 목표와 범위
 
@@ -149,9 +149,11 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 
 첫 대기열 `data/research/historical-news-review-queues/2026-09-18-v1`은 2,035개 종목-기사 관계를 1,422개 고유 기사로 묶어 613개의 반복 검토를 줄였다. 종목별 규칙 힌트 중 하나라도 관련으로 나온 기사는 105개다. 전체 항목은 아직 `pending`이고 `rule_hint_is_ground_truth=false`, `llm_used=false`, `human_review_complete=false`, `model_weight_training_ready=false`다. 같은 파일은 NAS `server-data/historical-intelligence/v1/news-review-queues/historical-news-review-queue-578f89c206d709720184aa753649dc3840f949a066819b476fc27ce576311805`에도 불변 게시했다. 사람 판정이 입력된 항목만 별도 불변 결과가 되며, 이후 사건 ID를 기준으로 같은 사건이 학습과 평가에 동시에 들어가지 않게 분할한다.
 
-`scripts/historical_news_review_workflow.py export`는 우선순위 기사 또는 전체 기사를 UTF-8 CSV로 내보내며 기존 파일을 덮어쓰지 않는다. `import`는 대기열 ID·hash·순번·항목 ID를 검증하고 완료된 행만 `historical_news_review_decisions/v1`으로 동결한다. 허용 판정은 `relevant`, `not_relevant`, `uncertain`이다. 관련 판정은 `canonical_event_id`가 필수이고 테마명이 있으면 `theme_profile_id`도 필요하다. 무관·보류에는 사건·테마를 붙이지 않는다. 일부만 검토한 결과는 `partial_review_result=true`이고 모든 결과는 `model_weight_training_ready=false`다.
+`scripts/historical_news_review_workflow.py export`는 우선순위 기사 또는 전체 기사를 UTF-8 CSV로 내보내며 기존 파일을 덮어쓰지 않는다. `import`는 대기열 ID·hash·순번·항목 ID를 검증하고 완료된 행만 `historical_news_review_decisions/v1`으로 동결한다. 허용 판정은 `relevant`, `not_relevant`, `uncertain`이다. 관련 판정은 `canonical_event_id`가 필수이고 테마명이 있으면 `theme_profile_name`도 필요하다. 무관·보류에는 사건·테마를 붙이지 않는다. 일부만 검토한 결과는 `partial_review_result=true`이고 모든 결과는 `model_weight_training_ready=false`다.
 
 첫 편집 작업본 `data/research/historical-news-review-work/2026-09-18-priority-v1.csv`에는 규칙상 우선 검토 105행이 들어 있다. 현재 사람 판정은 0건이라 불변 결정 결과는 아직 만들지 않았다. 실제 판정 뒤 사건 ID를 기준으로 같은 사건이 학습과 평가에 동시에 들어가지 않게 분할한다.
+
+앱의 전략 연구 창 `과거 뉴스 검토`는 최신 불변 대기열과 결합된 작업표를 자동 선택한다. 기사 제목·검색 요약·원문 URL·연결 종목과 규칙 점수를 함께 표시하고, 판정 행을 임시 파일 교체 방식으로 저장한다. 관련 판정은 사건 ID를 자동 제안하되 사용자가 기존 사건 ID를 선택하거나 수정할 수 있고, 테마명은 현재 테마 저장소의 프로필 이름과 함께 기록한다. 현재 목록에서 사라진 과거 프로필 이름도 작업표에서 지우지 않는다.
 
 ### D03 첫 입력 계약
 

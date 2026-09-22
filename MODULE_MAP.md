@@ -1,6 +1,6 @@
 # 현재 모듈 지도
 
-기준: 2.1.0 / 2026-09-22 · [현재 아키텍처](ARCHITECTURE_CURRENT.md) · [문서 안내](docs/README.md)
+기준: 2.1.0 / 2026-09-23 · [현재 아키텍처](ARCHITECTURE_CURRENT.md) · [문서 안내](docs/README.md)
 
 아래 경로는 현재 있는 파일이다. 파일을 나누는 계획이 아니라 변경 책임자를 찾는 지도다. 상세 단계별 계보는 [이전 지도](docs/archive/2026-09-22/root/MODULE_MAP.md)에 보존했다. 작업 전 [개발 불변 규칙](DEVELOPMENT_GUARDRAILS.md)을 읽는다.
 
@@ -60,7 +60,7 @@
 | `src/kiwoom_monitor/application/research_search.py` | 제한 trial·개발 근거·후보 선택 |
 | `src/kiwoom_monitor/application/research_hypotheses.py` | 결정적 가설·후속 생성·부모 계보 |
 | `src/kiwoom_monitor/infrastructure/persistence/research_repository.py` | v23 run/campaign/lease/final/가설 원장 |
-| `src/kiwoom_monitor/presentation/research_dialog.py` | 연구·campaign·가설·순차/final UI |
+| `src/kiwoom_monitor/presentation/research_dialog.py`, `presentation/historical_news_review_dialog.py` | 연구·campaign·가설·순차/final UI와 과거 뉴스 사람 검토·작업표 저장·불변 결과 동결 |
 | `src/kiwoom_monitor/application/research_resources.py` | RSS/preflight·CPU 양보 |
 | `src/kiwoom_monitor/application/forward_evaluation.py` | feedback evidence/review/제안·forward 평가 |
 | `src/kiwoom_monitor/application/feedback_strategy_revision.py` | 명시 채택 버전·재검증 spec/dispatch |

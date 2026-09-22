@@ -1,6 +1,6 @@
 # 남은 작업과 보류 사항
 
-기준: 2026-09-22 · [현재 상태](CURRENT_STATUS.md) · [개발 순서](../FUTURE_DEVELOPMENT_ROADMAP.md)
+기준: 2026-09-23 · [현재 상태](CURRENT_STATUS.md) · [개발 순서](../FUTURE_DEVELOPMENT_ROADMAP.md)
 
 아래는 문서 이동 뒤에도 유지할 잔여 목록이다. 과거 보고서의 ‘다음 단계’를 전부 새 작업으로 복사하지 않았다. 상태는 **계획 / 미구현 / 운영 미확인 / 재현 필요 / 보류**로 구분한다. 상세 미확인 조건은 [파일별 감사 목록](archive/2026-09-22/document-inventory.json)의 `remaining`에 보존한다.
 
@@ -13,7 +13,7 @@
 | D03 | 부분 구현 | `historical_reconstruction/v1`과 기존 1분 전략 runner용 어댑터 구현. 후보일 장후 선택→다음 거래일 결과, 실제 수집시각/복원 clock, 사후 후보/당시 TOP20을 분리하고 순위 Factor를 차단. 2024~2026 첫 다기간 입력, 다음 거래일 중복 방지, hash 결합 TRAIN/VALIDATION/SEALED OOS 계획, OOS가 빠진 개발 입력과 품질 검증 완료. 두 기존 Family의 잠정값 구조 실행까지 완료했으나 대부분 `next_tradable_bar_gap`으로 검열된 희소 표본이므로 성과 비교로 사용하지 않음. 재실행 준비도는 TRAIN 분봉 7/50·연속쌍 6/50, VALIDATION 7/50·7/50으로 차단 상태. 수집 확대 뒤 새 분할을 동결하고 기본 gate를 통과한 TRAIN/VALIDATION을 다시 실행해야 함 |
 | D04 | 부분 구현 | 프로필별 별칭·분리 확장·재병합 금지 원장과 뉴스 AI의 근거 있는 원시 테마 후보, 기사 제목·발행시각·원문을 포함한 활성 프로필 검토, 사용자 승인·거절·이름 수정 원장, 반복 제안 승인 중 최신 별칭 재해석, 파일 백업·NAS 전체 스냅샷 보존을 구현. 실제 기사 제안 품질·의미별 병합 정확도, 과거 사건 일괄 후보 생성과 검토량 운영은 남음. 동일 지역의 다른 사업은 지역명만으로 합치지 않음 |
 | D05 | 이후 개선 | 사용자 학습·사례를 반영한 타점 정책 비교. 현재 기준을 최종 전략으로 확정하지 않음 |
-| D06 | 부분 구현 | `historical_learning_cases/v1` 첫 50사례와 `historical_news_review_queue/v1` 고유 기사 1,422개를 동결. 우선 검토 105행 CSV와 검증된 사람 판정을 `historical_news_review_decisions/v1`으로 가져오는 경계를 구현했지만 현재 사람 판정은 0건. 관련 판정은 사건 ID, 테마 사용 시 프로필 ID가 필수다. 실제 관련성·사건·테마 검토, 사건 단위 분할, RAG와 미세조정 비교·평가, 로컬 LLM/Mac 작업자와 행동 EV 범위 결정이 남음 |
+| D06 | 부분 구현 | `historical_learning_cases/v1` 첫 50사례와 `historical_news_review_queue/v1` 고유 기사 1,422개를 동결. 전략 연구 창에서 우선 검토 105행 작업표를 검토·원자 저장하고 검증된 사람 판정을 `historical_news_review_decisions/v1`으로 동결하는 화면과 계약을 구현했지만 현재 사람 판정은 0건. 관련 판정은 사건 ID, 테마 사용 시 프로필 이름이 필수다. 실제 관련성·사건·테마 검토, 사건 단위 분할, RAG와 미세조정 비교·평가, 로컬 LLM/Mac 작업자와 행동 EV 범위 결정이 남음 |
 
 [D01~D03 상세 기획](HISTORICAL_BACKFILL_PLAN.md). D04~D06을 완성해야 D01을 시작할 수 있는 구조로 만들지 않는다.
 

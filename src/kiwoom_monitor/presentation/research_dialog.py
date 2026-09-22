@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QComboBox, QSpinBox, QFormLayout, QDialogButtonBox,
 )
 
+from kiwoom_monitor.presentation.historical_news_review_dialog import HistoricalNewsReviewDialog
 from kiwoom_monitor.presentation.process_control import (
     AuxiliaryProcessManager,
     build_auxiliary_command,
@@ -40,12 +41,13 @@ from kiwoom_monitor.infrastructure.persistence.research_repository import Resear
 class ResearchDialog(QDialog):
     """고정 JSON 요청을 낮은 우선순위의 별도 프로세스에서 실행한다."""
 
-    def __init__(self, state_dir: Path, parent=None) -> None:
+    def __init__(self, state_dir: Path, parent=None, *, theme_repository: object | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("전략 연구")
         self.resize(880, 480)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self._state_dir = Path(state_dir)
+        self._theme_repository = theme_repository
         self._settings = QSettings("KiwoomMonitor", "ResearchDialog")
         self._manager = AuxiliaryProcessManager()
         self._result_path = self._state_dir / "last_research_result.json"
@@ -61,6 +63,7 @@ class ResearchDialog(QDialog):
         self._comparison_dialog: IndependentComparisonDialog | None = None
         self._validation_dialog: DevelopmentValidationDialog | None = None
         self._final_holdout_dialog: FinalHoldoutDialog | None = None
+        self._historical_news_review_dialog: HistoricalNewsReviewDialog | None = None
 
         self._request_path = QLineEdit(str(self._settings.value("request_path", "")))
         self._request_path.setPlaceholderText("연구 요청 JSON 파일을 선택하세요")
@@ -117,6 +120,9 @@ class ResearchDialog(QDialog):
         self._campaign_hypotheses.setEnabled(False)
         self._campaign_hypotheses.clicked.connect(self._edit_campaign_hypotheses)
         budget_actions = QHBoxLayout()
+        self._review_historical_news = QPushButton('과거 뉴스 검토')
+        self._review_historical_news.clicked.connect(self._show_historical_news_review)
+        budget_actions.addWidget(self._review_historical_news)
         self._compare_partitions = QPushButton('독립 구간 결과 비교')
         self._compare_partitions.clicked.connect(self._show_independent_comparison)
         budget_actions.addWidget(self._compare_partitions)
@@ -161,6 +167,15 @@ class ResearchDialog(QDialog):
         if self._request_path.text().strip():
             QTimer.singleShot(0, self._preview_request)
         QTimer.singleShot(0, self._restore_campaign)
+
+    def _show_historical_news_review(self) -> None:
+        if self._historical_news_review_dialog is None:
+            self._historical_news_review_dialog = HistoricalNewsReviewDialog(
+                self._state_dir, self, theme_repository=self._theme_repository,
+            )
+        self._historical_news_review_dialog.show()
+        self._historical_news_review_dialog.raise_()
+        self._historical_news_review_dialog.activateWindow()
 
     def _show_development_validation(self) -> None:
         if self._validation_dialog is None:
@@ -1078,6 +1093,8 @@ class ResearchDialog(QDialog):
                 self._table.setItem(row_index, column, QTableWidgetItem(value))
 
     def stop(self) -> None:
+        if self._historical_news_review_dialog is not None:
+            self._historical_news_review_dialog.close()
         if self._final_holdout_dialog is not None:
             self._final_holdout_dialog.stop()
         if self._validation_dialog is not None:
@@ -1100,6 +1117,8 @@ class ResearchDialog(QDialog):
         self._cancel_path.unlink(missing_ok=True)
 
     def closeEvent(self, event) -> None:
+        if self._historical_news_review_dialog is not None:
+            self._historical_news_review_dialog.close()
         if self._final_holdout_dialog is not None:
             self._final_holdout_dialog.close()
         if self._validation_dialog is not None:

@@ -484,7 +484,7 @@ class MainWindow(QMainWindow):
             if candidate_client is not None else None
         )
         self._research_dialog = (
-            ResearchDialog(research_data_dir, self) if research_data_dir is not None else None
+            ResearchDialog(research_data_dir, self, theme_repository=self._theme_store) if research_data_dir is not None else None
         )
         self._mock_automation_dialog = (
             MockAutomationDialog(

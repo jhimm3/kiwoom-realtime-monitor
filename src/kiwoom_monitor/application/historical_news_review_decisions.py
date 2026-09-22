@@ -36,7 +36,7 @@ CSV_FIELDS = (
     "maximum_rule_relevance_score",
     "human_decision",
     "canonical_event_id",
-    "theme_profile_id",
+    "theme_profile_name",
     "theme_names",
     "notes",
     "reviewer",
@@ -87,6 +87,62 @@ def export_historical_news_review_sheet(
     }
 
 
+def load_historical_news_review_sheet(
+    source: HistoricalNewsReviewQueue, sheet: Path,
+) -> tuple[dict[str, str], ...]:
+    """Load a working sheet only after binding every row to the immutable queue."""
+    _validate_source(source)
+    items_by_id = {str(item["review_item_id"]): item for item in source.items}
+    rows = _read_sheet(sheet)
+    seen: set[str] = set()
+    for row_number, row in enumerate(rows, start=2):
+        _validate_source_binding(source, row, row_number)
+        review_item_id = row["review_item_id"].strip()
+        if not review_item_id or review_item_id not in items_by_id:
+            raise ValueError(f"review row {row_number} has an unknown review_item_id")
+        if review_item_id in seen:
+            raise ValueError(f"review row {row_number} duplicates review_item_id")
+        seen.add(review_item_id)
+        if row["queue_ordinal"].strip() != str(items_by_id[review_item_id]["ordinal"]):
+            raise ValueError(f"review row {row_number} queue ordinal does not match source")
+        _review_values(row, row_number)
+    return tuple(dict(row) for row in rows)
+
+
+def update_historical_news_review_sheet_row(
+    source: HistoricalNewsReviewQueue,
+    sheet: Path,
+    review_item_id: str,
+    values: Mapping[str, str],
+) -> dict[str, str]:
+    """Atomically update one editable review row while preserving source-bound fields."""
+    editable = {
+        "human_decision", "canonical_event_id", "theme_profile_name",
+        "theme_names", "notes", "reviewer", "reviewed_at",
+    }
+    unknown = set(values) - editable
+    if unknown:
+        raise ValueError(f"unsupported review sheet fields: {', '.join(sorted(unknown))}")
+    rows = [dict(row) for row in load_historical_news_review_sheet(source, sheet)]
+    matched = [index for index, row in enumerate(rows) if row["review_item_id"] == review_item_id]
+    if len(matched) != 1:
+        raise ValueError("review item is missing or duplicated in working sheet")
+    index = matched[0]
+    rows[index].update({key: str(value) for key, value in values.items()})
+    _review_values(rows[index], index + 2)
+    destination = Path(sheet)
+    staging = destination.with_name(f".{destination.name}.tmp")
+    try:
+        with staging.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+            writer.writerows(rows)
+        staging.replace(destination)
+    except Exception:
+        staging.unlink(missing_ok=True)
+        raise
+    return dict(rows[index])
+
 def build_historical_news_review_decisions(
     source: HistoricalNewsReviewQueue,
     sheet: Path,
@@ -99,40 +155,18 @@ def build_historical_news_review_decisions(
     if created.tzinfo is None:
         raise ValueError("created_at must be timezone-aware")
     items_by_id = {str(item["review_item_id"]): item for item in source.items}
-    rows = _read_sheet(sheet)
-    seen: set[str] = set()
+    rows = load_historical_news_review_sheet(source, sheet)
     decisions: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
     for row_number, row in enumerate(rows, start=2):
-        _validate_source_binding(source, row, row_number)
         review_item_id = row["review_item_id"].strip()
-        if not review_item_id or review_item_id not in items_by_id:
-            raise ValueError(f"review row {row_number} has an unknown review_item_id")
-        if review_item_id in seen:
-            raise ValueError(f"review row {row_number} duplicates review_item_id")
-        seen.add(review_item_id)
         item = items_by_id[review_item_id]
-        if row["queue_ordinal"].strip() != str(item["ordinal"]):
-            raise ValueError(f"review row {row_number} queue ordinal does not match source")
-        decision = row["human_decision"].strip().casefold()
+        decision, reviewer, reviewed_at, event_id, profile_name, theme_names = _review_values(
+            row, row_number,
+        )
         if not decision:
             continue
-        if decision not in DECISIONS:
-            raise ValueError(f"review row {row_number} has an unsupported human_decision")
-        reviewer = row["reviewer"].strip()
-        reviewed_at = _aware_datetime(row["reviewed_at"].strip())
-        if not reviewer or reviewed_at is None:
-            raise ValueError(f"review row {row_number} requires reviewer and timezone-aware reviewed_at")
-        event_id = row["canonical_event_id"].strip()
-        profile_id = row["theme_profile_id"].strip()
-        theme_names = _split_names(row["theme_names"])
-        if decision == "relevant":
-            if not event_id:
-                raise ValueError(f"review row {row_number} relevant decision requires canonical_event_id")
-            if theme_names and not profile_id:
-                raise ValueError(f"review row {row_number} theme names require theme_profile_id")
-        elif event_id or profile_id or theme_names:
-            raise ValueError(f"review row {row_number} non-relevant/uncertain decision cannot assign event or theme")
+        assert reviewed_at is not None
         counts[decision] += 1
         decisions.append({
             "decision_id": "historical-news-decision-" + _hash_document({
@@ -140,7 +174,7 @@ def build_historical_news_review_decisions(
                 "review_item_id": review_item_id,
                 "human_decision": decision,
                 "canonical_event_id": event_id,
-                "theme_profile_id": profile_id,
+                "theme_profile_name": profile_name,
                 "theme_names": theme_names,
                 "reviewer": reviewer,
                 "reviewed_at": reviewed_at.astimezone(UTC).isoformat(),
@@ -163,7 +197,7 @@ def build_historical_news_review_decisions(
             "human_review": {
                 "decision": decision,
                 "canonical_event_id": event_id,
-                "theme_profile_id": profile_id,
+                "theme_profile_name": profile_name,
                 "theme_names": theme_names,
                 "notes": row["notes"].strip(),
                 "reviewer": reviewer,
@@ -208,7 +242,7 @@ def build_historical_news_review_decisions(
             "source_queue_review_complete": source_complete,
             "partial_review_result": not source_complete,
             "event_ids_required_for_relevant": True,
-            "theme_names_require_profile_id": True,
+            "theme_names_require_profile_name": True,
             "model_weight_training_ready": False,
             "strict_backtest_input": False,
         },
@@ -324,7 +358,7 @@ def _sheet_row(source: HistoricalNewsReviewQueue, item: Mapping[str, Any]) -> di
         "maximum_rule_relevance_score": priority.get("maximum_rule_relevance_score", 0),
         "human_decision": "",
         "canonical_event_id": "",
-        "theme_profile_id": "",
+        "theme_profile_name": "",
         "theme_names": "",
         "notes": "",
         "reviewer": "",
@@ -356,6 +390,32 @@ def _validate_source_binding(
     if row["source_queue_items_file_hash"].strip() != source.manifest["items_file_hash"]:
         raise ValueError(f"review row {row_number} source queue hash does not match")
 
+
+def _review_values(
+    row: Mapping[str, str], row_number: int,
+) -> tuple[str, str, datetime | None, str, str, list[str]]:
+    decision = row["human_decision"].strip().casefold()
+    reviewer = row["reviewer"].strip()
+    reviewed_at = _aware_datetime(row["reviewed_at"].strip())
+    event_id = row["canonical_event_id"].strip()
+    profile_name = row["theme_profile_name"].strip()
+    theme_names = _split_names(row["theme_names"])
+    if not decision:
+        return "", reviewer, reviewed_at, event_id, profile_name, theme_names
+    if decision not in DECISIONS:
+        raise ValueError(f"review row {row_number} has an unsupported human_decision")
+    if not reviewer or reviewed_at is None:
+        raise ValueError(f"review row {row_number} requires reviewer and timezone-aware reviewed_at")
+    if decision == "relevant":
+        if not event_id:
+            raise ValueError(f"review row {row_number} relevant decision requires canonical_event_id")
+        if theme_names and not profile_name:
+            raise ValueError(f"review row {row_number} theme names require theme_profile_name")
+    elif event_id or profile_name or theme_names:
+        raise ValueError(
+            f"review row {row_number} non-relevant/uncertain decision cannot assign event or theme"
+        )
+    return decision, reviewer, reviewed_at, event_id, profile_name, theme_names
 
 def _split_names(value: str) -> list[str]:
     return list(dict.fromkeys(part.strip() for part in value.split("|") if part.strip()))
