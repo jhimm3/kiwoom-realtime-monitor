@@ -497,6 +497,20 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual(1, len(values))
         self.assertEqual([2], values[0]["payload"]["items"])
 
+    def test_dataset_snapshot_batch_is_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            with self.assertRaises(TypeError):
+                store.save_dataset_snapshots([
+                    ("program_flow", "005930", "first", {"rows": []}, None),
+                    ("program_flow", "000660", "second", {"invalid": {1}}, None),
+                ])
+            values = store.load_dataset_snapshots("program_flow")
+            store.close()
+
+        self.assertEqual([], values)
+
     def test_market_metadata_round_trip_and_same_key_correction(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

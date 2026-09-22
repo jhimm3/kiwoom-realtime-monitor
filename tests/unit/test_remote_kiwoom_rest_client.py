@@ -21,6 +21,20 @@ class Response:
 
 
 class RemoteKiwoomRestClientTests(unittest.TestCase):
+    def test_top20_ranking_query_uses_kst_trading_date(self) -> None:
+        captured = {}
+
+        def opener(request, **_kwargs):
+            captured["url"] = request.full_url
+            return Response({"snapshots": []})
+
+        result = RemoteKiwoomRestClient(
+            "https://nas.example.test", "secret", opener=opener,
+        ).load_stored_ranking("5")
+
+        self.assertEqual({"item_inq_rank": []}, result)
+        self.assertRegex(captured["url"], r"subject=\d{4}-\d{2}-\d{2}&limit=1$")
+
     def test_loads_last_nas_0b_market_caps_without_kiwoom_query(self) -> None:
         captured = {}
 

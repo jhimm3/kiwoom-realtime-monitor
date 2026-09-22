@@ -542,11 +542,13 @@ class AutonomousTop20Service:
             raise
 
     def _write_program_snapshots(self, values: tuple[dict[str, Any], ...]) -> None:
-        for value in values:
-            self._store.save_dataset_snapshot(
+        self._store.save_dataset_snapshots([
+            (
                 "program_flow", str(value["subject"]), str(value["snapshot_key"]),
-                dict(value["payload"]),
+                dict(value["payload"]), None,
             )
+            for value in values
+        ])
 
     def _advance(self, now: datetime):
         return self._collector.advance(

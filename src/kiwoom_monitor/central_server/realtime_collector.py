@@ -745,18 +745,17 @@ class CentralRealtimeCollector:
         market_history_by_subject = self._pending_market_history
         market_history = list(market_history_by_subject.values())
         self._pending_market_history.clear()
-        for index, (subject, snapshot_key, payload, observation) in enumerate(market_history):
+        if market_history:
             try:
                 await asyncio.to_thread(
-                    self._store.save_dataset_snapshot,
-                    "market_state",
-                    subject,
-                    snapshot_key,
-                    payload,
-                    observation=observation,
+                    self._store.save_dataset_snapshots,
+                    [
+                        ("market_state", subject, snapshot_key, payload, observation)
+                        for subject, snapshot_key, payload, observation in market_history
+                    ],
                 )
             except Exception:
-                for retry_value in market_history[index:]:
+                for retry_value in market_history:
                     self._pending_market_history.setdefault(retry_value[0], retry_value)
                 raise
 

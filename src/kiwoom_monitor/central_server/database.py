@@ -76,6 +76,11 @@ class StoredQuery:
     next_key: str
 
 
+DatasetSnapshotWrite = tuple[
+    str, str, str, dict[str, Any], MarketDataObservation[object] | None,
+]
+
+
 def _top20_statistics_document(
     top20_rows: list[tuple[object, object, object]],
     market_rows: list[tuple[object, object]],
@@ -697,6 +702,7 @@ class QueryStore(Protocol):
         self, kind: str, subject: str, snapshot_key: str, payload: dict[str, Any],
         *, observation: MarketDataObservation[object] | None = None,
     ) -> None: ...
+    def save_dataset_snapshots(self, values: list[DatasetSnapshotWrite]) -> None: ...
     def load_dataset_snapshots(self, kind: str, subject: str = "", limit: int = 100) -> list[dict[str, Any]]: ...
     def load_top20_statistics(self, start_date: str, end_date: str) -> dict[str, object]: ...
     def load_observation_revisions(
@@ -1178,23 +1184,29 @@ class SQLiteQueryStore:
         self, kind: str, subject: str, snapshot_key: str, payload: dict[str, Any],
         *, observation: MarketDataObservation[object] | None = None,
     ) -> None:
+        self.save_dataset_snapshots([(kind, subject, snapshot_key, payload, observation)])
+
+    def save_dataset_snapshots(self, values: list[DatasetSnapshotWrite]) -> None:
+        if not values:
+            return
         saved_at = time()
         with self._lock, self._connection() as connection:
-            connection.execute(
-                "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
-                "VALUES(?,?,?,?,?) ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
-                "saved_at=excluded.saved_at,payload_json=excluded.payload_json",
-                (kind, subject, snapshot_key, saved_at, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
-            )
-            if observation is not None:
+            for kind, subject, snapshot_key, payload, observation in values:
                 connection.execute(
-                    _market_metadata_upsert_sql("?", "excluded"),
-                    market_metadata_storage_values(snapshot_key, observation),
+                    "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
+                    "VALUES(?,?,?,?,?) ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
+                    "saved_at=excluded.saved_at,payload_json=excluded.payload_json",
+                    (kind, subject, snapshot_key, saved_at, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
                 )
-                if self._observation_history_enabled and kind in RESEARCH_OBSERVATION_KINDS:
-                    _append_sqlite_observation_revision(
-                        connection, kind, subject, snapshot_key, payload, observation,
+                if observation is not None:
+                    connection.execute(
+                        _market_metadata_upsert_sql("?", "excluded"),
+                        market_metadata_storage_values(snapshot_key, observation),
                     )
+                    if self._observation_history_enabled and kind in RESEARCH_OBSERVATION_KINDS:
+                        _append_sqlite_observation_revision(
+                            connection, kind, subject, snapshot_key, payload, observation,
+                        )
 
     def load_dataset_snapshots(self, kind: str, subject: str = "", limit: int = 100) -> list[dict[str, Any]]:
         sql = "SELECT subject,snapshot_key,saved_at,payload_json FROM central_dataset_snapshots WHERE kind=?"
@@ -2374,9 +2386,17 @@ class PostgresQueryStore:
         self, kind: str, subject: str, snapshot_key: str, payload: dict[str, Any],
         *, observation: MarketDataObservation[object] | None = None,
     ) -> None:
+        self.save_dataset_snapshots([(kind, subject, snapshot_key, payload, observation)])
+
+    def save_dataset_snapshots(self, values: list[DatasetSnapshotWrite]) -> None:
+        if not values:
+            return
         saved_at = time()
         started_at = monotonic()
-        payload_json = json.dumps(payload, ensure_ascii=False)
+        serialized = [
+            (kind, subject, snapshot_key, json.dumps(payload, ensure_ascii=False), payload, observation)
+            for kind, subject, snapshot_key, payload, observation in values
+        ]
         serialized_at = monotonic()
         connection = self._connect()
         connected_at = monotonic()
@@ -2385,27 +2405,25 @@ class PostgresQueryStore:
         revision_at = connected_at
         try:
             with connection.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
-                    "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
-                    "saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json",
-                    (kind, subject, snapshot_key, saved_at, payload_json),
-                )
+                for kind, subject, snapshot_key, payload_json, payload, observation in serialized:
+                    cursor.execute(
+                        "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
+                        "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
+                        "saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json",
+                        (kind, subject, snapshot_key, saved_at, payload_json),
+                    )
+                    if observation is not None:
+                        cursor.execute(
+                            _market_metadata_upsert_sql("%s", "EXCLUDED"),
+                            market_metadata_storage_values(snapshot_key, observation),
+                        )
+                        if self._observation_history_enabled and kind in RESEARCH_OBSERVATION_KINDS:
+                            _append_postgres_observation_revision(
+                                cursor, kind, subject, snapshot_key, payload, observation,
+                            )
                 snapshot_at = monotonic()
                 metadata_at = snapshot_at
                 revision_at = snapshot_at
-                if observation is not None:
-                    cursor.execute(
-                        _market_metadata_upsert_sql("%s", "EXCLUDED"),
-                        market_metadata_storage_values(snapshot_key, observation),
-                    )
-                    metadata_at = monotonic()
-                    revision_at = metadata_at
-                    if self._observation_history_enabled and kind in RESEARCH_OBSERVATION_KINDS:
-                        _append_postgres_observation_revision(
-                            cursor, kind, subject, snapshot_key, payload, observation,
-                        )
-                        revision_at = monotonic()
             connection.commit()
         except BaseException:
             connection.rollback()
@@ -2415,10 +2433,11 @@ class PostgresQueryStore:
         completed_at = monotonic()
         elapsed_ms = round((completed_at - started_at) * 1000)
         if elapsed_ms >= 1000:
+            kinds = ",".join(sorted({value[0] for value in values}))
             logger.warning(
-                "slow PostgreSQL dataset snapshot save kind=%s subject=%s key=%s total_ms=%d "
+                "slow PostgreSQL dataset snapshot batch save kinds=%s count=%d total_ms=%d "
                 "serialize_ms=%d connect_ms=%d snapshot_ms=%d metadata_ms=%d revision_ms=%d commit_close_ms=%d",
-                kind, subject, snapshot_key, elapsed_ms,
+                kinds, len(values), elapsed_ms,
                 round((serialized_at - started_at) * 1000),
                 round((connected_at - serialized_at) * 1000),
                 round((snapshot_at - connected_at) * 1000),

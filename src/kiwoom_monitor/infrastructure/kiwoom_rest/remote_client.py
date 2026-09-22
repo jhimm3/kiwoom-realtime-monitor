@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from threading import RLock
 from urllib.error import HTTPError, URLError
@@ -323,7 +323,13 @@ class RemoteKiwoomRestClient:
 
     def load_stored_ranking(self, query_type: str = "5") -> dict[str, Any] | None:
         kind = "top20_membership" if query_type == "5" else "ranking"
-        query = "limit=1" if query_type == "5" else urlencode({"subject": query_type, "limit": 1})
+        query = urlencode({
+            "subject": (
+                datetime.now(timezone(timedelta(hours=9))).date().isoformat()
+                if query_type == "5" else query_type
+            ),
+            "limit": 1,
+        })
         request = Request(
             f"{self._server_url}/api/v1/market/snapshots/{kind}?{query}",
             headers={"Authorization": f"Bearer {self._access_token}"}, method="GET",
