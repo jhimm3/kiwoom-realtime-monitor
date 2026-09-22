@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
+from urllib.error import URLError
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
@@ -24,6 +27,7 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
     inspect_daishin_environment,
     import_daishin_backfill_ndjson,
     latest_candidates,
+    release_news_backfill_job,
     seed_news_backfill_jobs,
     store_daishin_probe_payload,
     store_article_publication_result,
@@ -36,6 +40,43 @@ DEFAULT_CANDIDATE_DB = Path(
     r"C:\Users\pc-1\Desktop\kiwoom_history_backfill\data\kiwoom_history.sqlite3"
 )
 DEFAULT_OUTPUT_DB = Path("data/historical_intelligence.sqlite3")
+
+
+def _write_news_heartbeat(
+    path: Path | None, job: object, phase: str, *, page: int = 0,
+    pages_observed: int = 0, items_observed: int = 0, article: int = 0,
+) -> None:
+    if path is None:
+        return
+    document = {
+        "schema": "historical-news-job-heartbeat/v1",
+        "pid": os.getpid(),
+        "phase": phase,
+        "code": str(getattr(job, "code")),
+        "target_date": str(getattr(job, "target_date")),
+        "query": str(getattr(job, "query_text")),
+        "page": page,
+        "pages_observed": pages_observed,
+        "items_observed": items_observed,
+        "article": article,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+        for retry in range(5):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if retry == 4:
+                    return
+                time.sleep(0.05)
+    except OSError:
+        return
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -90,6 +131,7 @@ def main() -> int:
     news_run.add_argument("--max-pages", type=int, default=100)
     news_run.add_argument("--request-delay", type=float, default=0.5)
     news_run.add_argument("--article-delay", type=float, default=0.2)
+    news_run.add_argument("--heartbeat-file", type=Path)
     news_run.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
 
     daishin = subparsers.add_parser("daishin-preflight", help="CREON Plus 조회 환경만 점검합니다.")
@@ -140,6 +182,7 @@ def main() -> int:
         completed_jobs = 0
         failed_jobs = 0
         truncated_jobs = 0
+        collector_unavailable = False
         for _ in range(args.jobs):
             job = claim_news_backfill_job(args.output)
             if job is None:
@@ -149,16 +192,27 @@ def main() -> int:
             usable = 0
             unreadable = 0
             missing_time = 0
+            _write_news_heartbeat(args.heartbeat_file, job, "claimed")
             try:
                 exhausted = False
                 for page_index in range(args.max_pages):
+                    _write_news_heartbeat(
+                        args.heartbeat_file, job, "search_page",
+                        page=page_index + 1, pages_observed=pages_observed,
+                        items_observed=items_observed,
+                    )
                     page = fetch_naver_historical_search_page(
                         job.code, job.query_text, job.target_date, 1 + page_index * 10,
                     )
                     store_naver_historical_search_page(args.output, page)
                     pages_observed += 1
                     items_observed += len(page.items)
-                    for item in page.items:
+                    for article_index, item in enumerate(page.items, start=1):
+                        _write_news_heartbeat(
+                            args.heartbeat_file, job, "article",
+                            page=page_index + 1, pages_observed=pages_observed,
+                            items_observed=items_observed, article=article_index,
+                        )
                         status = article_publication_status(args.output, item)
                         if status in {"", "not_fetched"}:
                             result = fetch_article_publication(item)
@@ -188,6 +242,10 @@ def main() -> int:
                     completed_jobs += 1
                 else:
                     truncated_jobs += 1
+                _write_news_heartbeat(
+                    args.heartbeat_file, job, state,
+                    pages_observed=pages_observed, items_observed=items_observed,
+                )
                 print(json.dumps({
                     "event": "news_job_finished",
                     "code": job.code,
@@ -201,6 +259,24 @@ def main() -> int:
                     "missing_time": missing_time,
                 }, ensure_ascii=False), flush=True)
             except Exception as error:
+                if isinstance(error, URLError):
+                    release_news_backfill_job(
+                        args.output, job,
+                        error=f"collector_unavailable: {type(error).__name__}: {error}",
+                    )
+                    collector_unavailable = True
+                    _write_news_heartbeat(
+                        args.heartbeat_file, job, "collector_unavailable",
+                        pages_observed=pages_observed, items_observed=items_observed,
+                    )
+                    print(json.dumps({
+                        "event": "news_collector_unavailable",
+                        "code": job.code,
+                        "target_date": job.target_date,
+                        "query": job.query_text,
+                        "error": f"{type(error).__name__}: {error}",
+                    }, ensure_ascii=False), flush=True)
+                    break
                 finish_news_backfill_job(
                     args.output, job, state="failed", pages_observed=pages_observed,
                     items_observed=items_observed, usable_articles=usable,
@@ -208,6 +284,10 @@ def main() -> int:
                     error=f"{type(error).__name__}: {error}",
                 )
                 failed_jobs += 1
+                _write_news_heartbeat(
+                    args.heartbeat_file, job, "failed",
+                    pages_observed=pages_observed, items_observed=items_observed,
+                )
                 print(json.dumps({
                     "event": "news_job_failed",
                     "code": job.code,
@@ -223,7 +303,9 @@ def main() -> int:
             "truncated_jobs": truncated_jobs,
             "output": str(args.output.resolve()),
         }, ensure_ascii=False, indent=2))
-        return 0
+        if collector_unavailable:
+            return 3
+        return 2 if failed_jobs else 0
     if args.command == "daishin-preflight":
         result = inspect_daishin_environment(try_connection=False)
         output: dict[str, object] = {"python_environment": asdict(result)}

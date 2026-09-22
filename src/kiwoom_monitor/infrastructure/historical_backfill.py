@@ -393,6 +393,29 @@ def finish_news_backfill_job(
             )
 
 
+def release_news_backfill_job(
+    output_database: Path, job: NewsBackfillJob, *, error: str,
+) -> None:
+    """Return a job to pending when the collector environment is unavailable.
+
+    Network/session failures are not evidence that the article query itself is bad,
+    so they must not consume the job's bounded three attempts.
+    """
+    with closing(sqlite3.connect(output_database)) as connection:
+        with connection:
+            connection.execute(
+                """
+                UPDATE news_backfill_jobs SET
+                    state='pending', attempts=MAX(attempts-1, 0), last_error=?, updated_at=?
+                WHERE code=? AND target_date=? AND query_text=? AND state='running'
+                """,
+                (
+                    error, datetime.now(UTC).isoformat(), job.code, job.target_date,
+                    job.query_text,
+                ),
+            )
+
+
 def article_publication_is_resolved(
     output_database: Path,
     item: NaverHistoricalNewsItem,
@@ -1376,8 +1399,8 @@ def _stock_code(code: str) -> str:
     normalized = str(code).strip().upper()
     if normalized.startswith("A") and len(normalized) == 7:
         normalized = normalized[1:]
-    if len(normalized) != 6 or not normalized.isdigit():
-        raise ValueError("stock code must be six digits")
+    if re.fullmatch(r"[0-9A-Z]{6}", normalized) is None:
+        raise ValueError("stock code must be six ASCII letters or digits")
     return normalized
 
 

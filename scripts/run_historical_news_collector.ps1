@@ -11,6 +11,9 @@ param(
     [ValidateRange(0.0, 60.0)]
     [double]$ArticleDelay = 0.2,
 
+    [ValidateRange(1, 1000)]
+    [int]$PublishEvery = 10,
+
     [string]$Database = "data\historical_intelligence.sqlite3",
 
     [string]$NasProject = "X:\kiwoom-monitor"
@@ -26,6 +29,7 @@ $logRoot = Join-Path $projectRoot 'data\historical_collection\logs'
 $stateRoot = Join-Path $projectRoot 'data\historical_collection'
 $stopFile = Join-Path $stateRoot 'STOP_NEWS'
 $stateFile = Join-Path $stateRoot 'news-collector-state.json'
+$heartbeatFile = Join-Path $stateRoot 'news-job-heartbeat.json'
 $stamp = [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')
 $logFile = Join-Path $logRoot "news-$stamp.log"
 
@@ -57,27 +61,34 @@ function Write-Log([string]$Message) {
 
 Set-Location $projectRoot
 $completed = 0
+$stopRequested = $false
 Write-State 'running' $completed
-Write-Log "collector started jobs=$Jobs max_pages=$MaxPages"
+Write-Log "collector started jobs=$Jobs max_pages=$MaxPages publish_every=$PublishEvery"
 try {
     for ($index = 1; $index -le $Jobs; $index++) {
         if (Test-Path -LiteralPath $stopFile) {
             Write-Log 'stop file observed'
+            $stopRequested = $true
             break
         }
         $previousErrorAction = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         $output = & $python scripts\probe_historical_backfill.py news-run `
             --jobs 1 --max-pages $MaxPages --request-delay $RequestDelay `
-            --article-delay $ArticleDelay --output $Database 2>&1
+            --article-delay $ArticleDelay --heartbeat-file $heartbeatFile `
+            --output $Database 2>&1
         $collectorExitCode = $LASTEXITCODE
         $ErrorActionPreference = $previousErrorAction
         foreach ($line in $output) { Write-Log ([string]$line) }
         if ($collectorExitCode -ne 0) {
-            throw "news-run exited with code $collectorExitCode"
+            $detail = ($output | ForEach-Object { [string]$_ }) -join ' '
+            throw "news-run exited with code ${collectorExitCode}: $detail"
         }
         $completed += 1
         Write-State 'running' $completed
+        if (($completed % $PublishEvery) -ne 0) {
+            continue
+        }
         try {
             $importOutput = & $python scripts\import_historical_news_to_nas.py `
                 --database $Database --batch-size 100 2>&1
@@ -92,6 +103,19 @@ try {
         catch {
             Write-Log "status publish failed: $($_.Exception.Message)"
         }
+    }
+    if ($stopRequested) {
+        try {
+            & $python scripts\report_historical_collection_status.py `
+                --database $Database --nas-project $NasProject 2>&1 |
+                ForEach-Object { Write-Log ([string]$_) }
+        }
+        catch {
+            Write-Log "final status publish failed: $($_.Exception.Message)"
+        }
+        Write-State 'stopped' $completed
+        Write-Log "collector stopped completed=$completed"
+        exit 0
     }
     Write-State 'publishing' $completed
     $publishOutput = & $python scripts\publish_historical_intelligence_to_nas.py `

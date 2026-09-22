@@ -18,6 +18,7 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
     import_daishin_backfill_ndjson,
     parse_naver_historical_search_page,
     parse_naver_stock_news_page,
+    release_news_backfill_job,
     seed_news_backfill_jobs,
     parse_article_publication_html,
     store_article_publication_result,
@@ -110,6 +111,34 @@ class HistoricalBackfillTest(unittest.TestCase):
                     "SELECT state FROM news_backfill_jobs WHERE code='005930'"
                 ).fetchone()[0]
             self.assertEqual("running", active)
+
+    def test_releases_collector_environment_failure_without_consuming_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.sqlite3"
+            with closing(sqlite3.connect(candidate)) as connection, connection:
+                connection.executescript(
+                    "CREATE TABLE candidate_days(dt TEXT, code TEXT);"
+                    "CREATE TABLE stocks(code TEXT, name TEXT);"
+                    "INSERT INTO stocks VALUES('005930','삼성전자');"
+                    "INSERT INTO candidate_days VALUES('2020-01-02','005930');"
+                )
+            output = root / "output.sqlite3"
+            seed_news_backfill_jobs(candidate, output)
+            job = claim_news_backfill_job(output)
+            assert job is not None
+
+            release_news_backfill_job(
+                output, job, error="collector_unavailable: WinError 10013",
+            )
+
+            with closing(sqlite3.connect(output)) as connection:
+                state = connection.execute(
+                    "SELECT state,attempts,last_error FROM news_backfill_jobs"
+                ).fetchone()
+            self.assertEqual(
+                ("pending", 0, "collector_unavailable: WinError 10013"), state,
+            )
 
     def test_extracts_original_publication_time_with_source_and_precision(self) -> None:
         document = """
@@ -231,6 +260,13 @@ class HistoricalBackfillTest(unittest.TestCase):
     def test_rejects_response_without_cluster_contract(self) -> None:
         with self.assertRaisesRegex(ValueError, "clusters"):
             parse_naver_stock_news_page("005930", 1, 20, {"total": 0})
+
+    def test_accepts_six_character_alphanumeric_short_code(self) -> None:
+        page = parse_naver_stock_news_page(
+            "0011A0", 1, 20, {"total": 0, "clusters": []},
+        )
+
+        self.assertEqual("0011A0", page.code)
 
     def test_stores_historical_date_precision_and_search_relation(self) -> None:
         article = {

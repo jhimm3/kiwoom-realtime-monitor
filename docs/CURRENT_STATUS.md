@@ -53,6 +53,8 @@ NAS의 `stock_aliases` 1,164행을 사용해 94,750개 후보 종목·일의 당
 
 수집 진행률은 NAS `deploy/synology/server-data/historical-intelligence/v1/STATUS.md`와 `status.json`에 게시한다. 발행시각이 검증된 과거 기사는 기존 인증된 `news_article` content 경로로 증분 전송하며, NAS 운영 DB에서 `naver_historical_web`/`historical_backfill` revision으로 저장된 뒤 기존 BODY 작업기가 원문을 처리한다. 별도 역사 SQLite 스냅샷 자체를 운영 뉴스 DB로 열거나 덮어쓰지 않는다.
 
+로컬 수집기 생존 여부는 `scripts/show_historical_collectors.ps1`로 확인한다. 장시간 단일 종목은 종목·페이지·기사 heartbeat가 계속 갱신되면 정상 처리 중이다. NAS `STATUS.md`는 13GB DB 집계를 포함하므로 기본 10작업 묶음마다 갱신한다. 네트워크를 쓸 수 없는 실행 세션은 작업 시도를 소진하지 않고 즉시 종료하며, 영문 포함 6자리 단축코드도 뉴스 수집 대상으로 허용한다.
+
 기존 후보 DB는 읽기 전용으로 확인했다. 94,750개 후보 종목·일, 5,910,806개 일봉, 4,562,200개 분봉이 있고 분봉 작업 완료 중 81,901건은 0행이었다. 실제 확보 범위와 다음 작업은 [과거 자료 확보 기획](HISTORICAL_BACKFILL_PLAN.md)에 적었다.
 
 ## 근거를 찾는 위치
