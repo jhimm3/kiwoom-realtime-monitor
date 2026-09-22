@@ -147,7 +147,11 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 
 `scripts/prepare_historical_news_review_queue.py`는 학습 준비 사례의 기사 관계를 `historical_news_review_queue/v1`로 변환한다. 공급자·언론사·기사 식별자가 같은 기사는 한 검토 항목으로 합치되 연결된 사례·종목·검색어·수집 revision은 각 관계에 남긴다. 기존 `assess_stock_news` 결과는 사람이 먼저 볼 순서를 위한 `rule_hint`이며 의미 관련성 정답, LLM 판정, 테마 확정으로 취급하지 않는다.
 
-첫 대기열 `data/research/historical-news-review-queues/2026-09-18-v1`은 2,035개 종목-기사 관계를 1,422개 고유 기사로 묶어 613개의 반복 검토를 줄였다. 종목별 규칙 힌트 중 하나라도 관련으로 나온 기사는 105개다. 전체 항목은 아직 `pending`이고 `rule_hint_is_ground_truth=false`, `llm_used=false`, `human_review_complete=false`, `model_weight_training_ready=false`다. 같은 파일은 NAS `server-data/historical-intelligence/v1/news-review-queues/historical-news-review-queue-578f89c206d709720184aa753649dc3840f949a066819b476fc27ce576311805`에도 불변 게시했다. 다음 단계는 이 대기열의 사람 판정을 별도 불변 결과로 저장하고, 같은 사건이 학습과 평가에 동시에 들어가지 않도록 사건 ID를 확정하는 것이다.
+첫 대기열 `data/research/historical-news-review-queues/2026-09-18-v1`은 2,035개 종목-기사 관계를 1,422개 고유 기사로 묶어 613개의 반복 검토를 줄였다. 종목별 규칙 힌트 중 하나라도 관련으로 나온 기사는 105개다. 전체 항목은 아직 `pending`이고 `rule_hint_is_ground_truth=false`, `llm_used=false`, `human_review_complete=false`, `model_weight_training_ready=false`다. 같은 파일은 NAS `server-data/historical-intelligence/v1/news-review-queues/historical-news-review-queue-578f89c206d709720184aa753649dc3840f949a066819b476fc27ce576311805`에도 불변 게시했다. 사람 판정이 입력된 항목만 별도 불변 결과가 되며, 이후 사건 ID를 기준으로 같은 사건이 학습과 평가에 동시에 들어가지 않게 분할한다.
+
+`scripts/historical_news_review_workflow.py export`는 우선순위 기사 또는 전체 기사를 UTF-8 CSV로 내보내며 기존 파일을 덮어쓰지 않는다. `import`는 대기열 ID·hash·순번·항목 ID를 검증하고 완료된 행만 `historical_news_review_decisions/v1`으로 동결한다. 허용 판정은 `relevant`, `not_relevant`, `uncertain`이다. 관련 판정은 `canonical_event_id`가 필수이고 테마명이 있으면 `theme_profile_id`도 필요하다. 무관·보류에는 사건·테마를 붙이지 않는다. 일부만 검토한 결과는 `partial_review_result=true`이고 모든 결과는 `model_weight_training_ready=false`다.
+
+첫 편집 작업본 `data/research/historical-news-review-work/2026-09-18-priority-v1.csv`에는 규칙상 우선 검토 105행이 들어 있다. 현재 사람 판정은 0건이라 불변 결정 결과는 아직 만들지 않았다. 실제 판정 뒤 사건 ID를 기준으로 같은 사건이 학습과 평가에 동시에 들어가지 않게 분할한다.
 
 ### D03 첫 입력 계약
 
