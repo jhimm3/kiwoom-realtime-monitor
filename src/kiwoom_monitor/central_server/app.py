@@ -34,7 +34,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.09.22-top20-live-projection-v1"
+SERVER_BUILD = "2026.09.22-theme-suggestion-review-v1"
 logger = logging.getLogger(__name__)
 
 

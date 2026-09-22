@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import sqlite3
+import json
+from datetime import datetime
 from difflib import get_close_matches
 from pathlib import Path
 from typing import Callable
 
 from kiwoom_monitor.application.theme_matching import extract_known_stocks_and_unknown_fragments, split_concatenated_stock_name
+from kiwoom_monitor.application.theme_suggestions import ProfileThemeSuggestion, ThemeSuggestion
 
 
 class ThemeRepository:
@@ -81,6 +84,15 @@ class ThemeRepository:
                     "INSERT INTO profile_theme_name_decisions(profile_id,decision_kind,source_name,target_name,decision_source,updated_at) "
                     "SELECT ?,decision_kind,source_name,target_name,decision_source,updated_at "
                     "FROM profile_theme_name_decisions WHERE profile_id=?",
+                    (target_id, source_id),
+                )
+                connection.execute(
+                    "INSERT INTO profile_theme_suggestions("
+                    "profile_id,stock_code,news_identity,raw_theme_name,evidence,confidence,provider,model,"
+                    "body_hash,analyzed_at,status,reviewed_theme_names,reviewed_at) "
+                    "SELECT ?,stock_code,news_identity,raw_theme_name,evidence,confidence,provider,model,"
+                    "body_hash,analyzed_at,status,reviewed_theme_names,reviewed_at "
+                    "FROM profile_theme_suggestions WHERE profile_id=?",
                     (target_id, source_id),
                 )
             connection.commit()
@@ -329,6 +341,137 @@ class ThemeRepository:
         finally:
             connection.close()
         return tuple(tuple(str(value) for value in row) for row in rows)  # type: ignore[return-value]
+
+    def import_ai_theme_suggestions(self, suggestions: tuple[ThemeSuggestion, ...]) -> int:
+        if not suggestions:
+            return 0
+        connection = self._connect()
+        imported = 0
+        try:
+            profile_id = self._profile_id(connection)
+            with connection:
+                for value in suggestions:
+                    if not value.stock_code or not value.news_identity or not value.raw_theme_name.strip():
+                        continue
+                    cursor = connection.execute(
+                        "INSERT INTO profile_theme_suggestions("
+                        "profile_id,stock_code,news_identity,raw_theme_name,evidence,confidence,provider,model,"
+                        "body_hash,analyzed_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(profile_id,stock_code,news_identity,raw_theme_name) DO UPDATE SET "
+                        "evidence=excluded.evidence,confidence=excluded.confidence,provider=excluded.provider,"
+                        "model=excluded.model,body_hash=excluded.body_hash,analyzed_at=excluded.analyzed_at",
+                        (profile_id, value.stock_code, value.news_identity, value.raw_theme_name.strip(),
+                         value.evidence, max(0, min(100, value.confidence)), value.provider, value.model,
+                         value.body_hash, value.analyzed_at.isoformat()),
+                    )
+                    imported += max(0, cursor.rowcount)
+        finally:
+            connection.close()
+        return imported
+
+    def list_ai_theme_suggestions(self, status: str = "pending") -> tuple[ProfileThemeSuggestion, ...]:
+        if status not in {"pending", "approved", "rejected", "all"}:
+            raise ValueError("지원하지 않는 테마 제안 상태입니다.")
+        connection = self._connect()
+        try:
+            profile_id = self._profile_id(connection)
+            where = "" if status == "all" else "AND p.status=?"
+            parameters: tuple[object, ...] = (profile_id,) if status == "all" else (profile_id, status)
+            rows = connection.execute(
+                "SELECT p.stock_code,COALESCE(s.name,p.stock_code),p.news_identity,p.raw_theme_name,"
+                "p.evidence,p.confidence,p.status,p.provider,p.model,p.analyzed_at,p.reviewed_theme_names "
+                "FROM profile_theme_suggestions p LEFT JOIN stocks s ON s.code=p.stock_code "
+                f"WHERE p.profile_id=? {where} ORDER BY p.analyzed_at DESC,p.stock_code,p.raw_theme_name",
+                parameters,
+            ).fetchall()
+            result: list[ProfileThemeSuggestion] = []
+            for row in rows:
+                reviewed = tuple(map(str, json.loads(str(row[10]))))
+                resolved = reviewed or self._resolve_theme_names(connection, profile_id, str(row[3]))
+                result.append(ProfileThemeSuggestion(
+                    str(row[0]), str(row[1]), str(row[2]), str(row[3]), resolved,
+                    str(row[4]), int(row[5]), str(row[6]), str(row[7]), str(row[8]),
+                    datetime.fromisoformat(str(row[9])),
+                ))
+            return tuple(result)
+        finally:
+            connection.close()
+
+    def review_ai_theme_suggestion(
+        self, key: tuple[str, str, str], *, approved: bool,
+        theme_names: tuple[str, ...] = (),
+    ) -> None:
+        stock_code, news_identity, raw_theme_name = key
+        connection = self._connect()
+        try:
+            profile_id = self._profile_id(connection)
+            row = connection.execute(
+                "SELECT status FROM profile_theme_suggestions WHERE profile_id=? AND stock_code=? "
+                "AND news_identity=? AND raw_theme_name=? COLLATE NOCASE",
+                (profile_id, stock_code, news_identity, raw_theme_name),
+            ).fetchone()
+            if row is None:
+                raise ValueError("검토할 AI 테마 제안을 찾을 수 없습니다.")
+            clean: list[str] = []
+            if approved:
+                default_names = self._resolve_theme_names(connection, profile_id, raw_theme_name)
+                proposed = theme_names or default_names
+                for name in proposed:
+                    value = name.strip()
+                    if value and all(value.casefold() != existing.casefold() for existing in clean):
+                        clean.append(value)
+                if not clean:
+                    raise ValueError("승인할 테마명을 입력하세요.")
+            with connection:
+                if approved:
+                    if theme_names and tuple(value.casefold() for value in clean) != tuple(
+                        value.casefold() for value in default_names
+                    ):
+                        if len(clean) == 1:
+                            self._record_alias(
+                                connection, profile_id, raw_theme_name, clean[0], "user_review",
+                            )
+                            self._merge_theme_rows(
+                                connection, profile_id, raw_theme_name, clean[0],
+                            )
+                        else:
+                            connection.execute(
+                                "DELETE FROM profile_theme_name_decisions WHERE profile_id=? "
+                                "AND source_name=? COLLATE NOCASE AND decision_kind IN ('alias','split_to')",
+                                (profile_id, raw_theme_name),
+                            )
+                            for target in clean:
+                                self._insert_name_decision(
+                                    connection, profile_id, "split_to", raw_theme_name,
+                                    target, "user_review",
+                                )
+                            for index, first in enumerate(clean):
+                                for second in clean[index + 1:]:
+                                    left, right = self._ordered_pair(first, second)
+                                    self._insert_name_decision(
+                                        connection, profile_id, "keep_separate", left, right,
+                                        "user_review",
+                                    )
+                    palette = ("#DCE6F1", "#FFF2CC", "#E2F0D9", "#FCE4D6", "#E4DFEC")
+                    for name in clean:
+                        color = palette[sum(map(ord, name)) % len(palette)]
+                        connection.execute(
+                            "INSERT OR IGNORE INTO profile_themes(profile_id,theme_name,default_color) VALUES(?,?,?)",
+                            (profile_id, name, color),
+                        )
+                        connection.execute(
+                            "INSERT OR IGNORE INTO profile_stock_themes(profile_id,stock_code,theme_name) VALUES(?,?,?)",
+                            (profile_id, stock_code, name),
+                        )
+                connection.execute(
+                    "UPDATE profile_theme_suggestions SET status=?,reviewed_theme_names=?,reviewed_at=CURRENT_TIMESTAMP "
+                    "WHERE profile_id=? AND stock_code=? AND news_identity=? AND raw_theme_name=? COLLATE NOCASE",
+                    ("approved" if approved else "rejected", json.dumps(clean, ensure_ascii=False),
+                     profile_id, stock_code, news_identity, raw_theme_name),
+                )
+        finally:
+            connection.close()
+        self._changed()
 
     def keep_themes_separate(
         self, first: str, second: str, *, decision_source: str = "user",

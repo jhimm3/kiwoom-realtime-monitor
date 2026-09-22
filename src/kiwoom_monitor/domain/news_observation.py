@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 
 ARTICLE_BODY_EXTRACTOR_VERSION = "article-text-v7"
-NEWS_ANALYSIS_SCHEMA_VERSION = "news-analysis-v1"
+NEWS_ANALYSIS_SCHEMA_VERSION = "news-analysis-v2"
 
 
 def stable_document_hash(document: Mapping[str, Any]) -> str:

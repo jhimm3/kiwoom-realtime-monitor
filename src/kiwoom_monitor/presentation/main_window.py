@@ -1087,7 +1087,7 @@ class MainWindow(QMainWindow):
             self._open_column_manager,
             self._export_settings_backup,
             self._import_settings_backup,
-            lambda parent: ThemeManagerDialog(self._theme_store, self._settings, self._select_excel, self._select_theme_image, self._sync_krx_stock_catalog, parent, self._on_themes_changed) if self._theme_store is not None else QWidget(parent),
+            lambda parent: ThemeManagerDialog(self._theme_store, self._settings, self._select_excel, self._select_theme_image, self._sync_krx_stock_catalog, parent, self._on_themes_changed, self._news_database_path) if self._theme_store is not None else QWidget(parent),
             column_manager_panel_factory=lambda parent: ColumnManagerDialog(self._columns, self.COLUMNS, self._table, parent, embedded=True, on_applied=self._apply_column_settings) if self._columns is not None else QWidget(parent),
             stock_lookup=self._stock_lookup,
             drive_connector=self._connect_google_drive,
@@ -1917,7 +1917,7 @@ class MainWindow(QMainWindow):
 
     def _open_theme_manager(self) -> None:
         if self._theme_store is not None:
-            ThemeManagerDialog(self._theme_store, self._settings, self._select_excel, self._select_theme_image, self._sync_krx_stock_catalog, self, self._on_themes_changed).exec()
+            ThemeManagerDialog(self._theme_store, self._settings, self._select_excel, self._select_theme_image, self._sync_krx_stock_catalog, self, self._on_themes_changed, self._news_database_path).exec()
 
     def _set_api_status(self, text: str, color: str) -> None:
         self._api_status.setText(text)

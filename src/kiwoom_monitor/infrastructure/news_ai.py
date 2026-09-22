@@ -13,7 +13,7 @@ from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 
 
 # 대상 종목 관점 계약이 바뀌면 이전 분석을 완료 결과로 재사용하지 않는다.
-ANALYSIS_PROMPT_VERSION = "target-company-v2"
+ANALYSIS_PROMPT_VERSION = "target-company-theme-v3"
 
 
 def analysis_body_hash(stock_name: str, body: str) -> str:
@@ -30,6 +30,13 @@ class AICompanyImpact:
 
 
 @dataclass(frozen=True)
+class AIThemeCandidate:
+    name: str
+    confidence: int
+    evidence: str
+
+
+@dataclass(frozen=True)
 class AINewsAnalysis:
     summary: str
     outlook: str
@@ -39,6 +46,7 @@ class AINewsAnalysis:
     negative_evidence: tuple[str, ...] = ()
     category: str = "기타 증권뉴스"
     company_impacts: tuple[AICompanyImpact, ...] = ()
+    theme_candidates: tuple[AIThemeCandidate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -124,8 +132,10 @@ def _prompt(stock_name: str, title: str, article_text: str) -> str:
 
 outlook, confidence, reason과 긍정·부정 근거는 기사 전체나 다른 회사가 아니라 반드시 위 종목 {stock_name}의 주가·실적·사업에 미치는 영향만 판정하라. {stock_name}을 단순 나열했거나 직접 영향을 확인할 근거가 없으면 outlook을 "판단 자료 부족"으로 하고 summary에도 직접 관계가 없음을 분명히 적어라.
 
+theme_candidates에는 여러 상장사를 같은 재료로 묶을 수 있는 산업·정책·사업·사건 테마만 최대 3개 제안하라. 단순 기사 분류명, 회사명 하나, 주가 상승·하락 표현은 테마로 만들지 말고 기사 근거가 없으면 빈 배열로 둬라. 비슷한 표현을 임의로 다른 테마로 쪼개지 말고 기사에 실제 쓰인 가장 구체적인 이름과 근거를 남겨라.
+
 JSON 하나만 출력하라:
-{{"summary":"3문장 이내 요약","category":"실적·전망|수주·계약|투자·인수합병|자본·주주환원|임상·허가|경영권·주주|주가·수급|공시·규제|산업·정책|기타 증권뉴스 중 하나","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0부터100 정수,"reason":"판정 이유","positive_evidence":["근거"],"negative_evidence":["근거"],"company_impacts":[{{"company":"기사에 나온 상장사명","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0,"reason":"그 회사 관점의 이유"}}]}}
+{{"summary":"3문장 이내 요약","category":"실적·전망|수주·계약|투자·인수합병|자본·주주환원|임상·허가|경영권·주주|주가·수급|공시·규제|산업·정책|기타 증권뉴스 중 하나","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0부터100 정수,"reason":"판정 이유","positive_evidence":["근거"],"negative_evidence":["근거"],"company_impacts":[{{"company":"기사에 나온 상장사명","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0,"reason":"그 회사 관점의 이유"}}],"theme_candidates":[{{"name":"구체적인 테마명","confidence":0,"evidence":"기사에서 확인한 연결 근거"}}]}}
 단순 주가 상승·하락 보도는 기업가치 호재·악재로 단정하지 말고, '뜨거운 감자' 같은 관용어와 부인·반등·회복 문맥을 정확히 구분하라."""
 
 
@@ -141,8 +151,10 @@ def _batch_prompt(stock_name: str, articles: tuple[tuple[str, str], ...]) -> str
 각 결과의 outlook, confidence, reason과 근거는 반드시 대상 종목 {stock_name}의 관점으로 작성하라. {stock_name}이 단순 나열되었거나 직접 영향을 확인할 근거가 없으면 "판단 자료 부족"으로 판정하고 summary에도 직접 관계가 없음을 밝혀라.
 {sections}
 
+각 결과의 theme_candidates에는 여러 상장사를 같은 재료로 묶을 수 있는 산업·정책·사업·사건 테마만 최대 3개 제안하라. 단순 기사 분류명, 회사명 하나, 주가 표현은 제외하고 근거가 없으면 빈 배열로 둬라. 비슷한 표현을 임의로 여러 테마로 쪼개지 마라.
+
 입력 순서와 같은 JSON 배열 하나만 출력하라. 각 항목에 id를 반드시 유지하라:
-[{{"id":1,"summary":"3문장 이내 요약","category":"실적·전망|수주·계약|투자·인수합병|자본·주주환원|임상·허가|경영권·주주|주가·수급|공시·규제|산업·정책|기타 증권뉴스 중 하나","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0,"reason":"판정 이유","positive_evidence":["근거"],"negative_evidence":["근거"],"company_impacts":[{{"company":"상장사명","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0,"reason":"회사별 이유"}}]}}]
+[{{"id":1,"summary":"3문장 이내 요약","category":"실적·전망|수주·계약|투자·인수합병|자본·주주환원|임상·허가|경영권·주주|주가·수급|공시·규제|산업·정책|기타 증권뉴스 중 하나","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0,"reason":"판정 이유","positive_evidence":["근거"],"negative_evidence":["근거"],"company_impacts":[{{"company":"상장사명","outlook":"긍정|부정|혼재|판단 자료 부족","confidence":0,"reason":"회사별 이유"}}],"theme_candidates":[{{"name":"구체적인 테마명","confidence":0,"evidence":"기사 근거"}}]}}]
 기사에 없는 내용을 추측하지 말고 단순 주가 반응과 관용어를 기업가치 변화로 오판하지 마라."""
 
 
@@ -246,10 +258,26 @@ def _parse_value(value: dict[str, object]) -> AINewsAnalysis:
                 str(impact.get("company", "")).strip(), impact_outlook,
                 max(0, min(100, int(impact.get("confidence", 0)))), str(impact.get("reason", "")).strip(),
             ))
+    candidates: list[AIThemeCandidate] = []
+    seen_candidates: set[str] = set()
+    raw_candidates = value.get("theme_candidates", ())
+    if isinstance(raw_candidates, list):
+        for candidate in raw_candidates[:3]:
+            if not isinstance(candidate, dict):
+                continue
+            name = str(candidate.get("name", "")).strip()
+            evidence = str(candidate.get("evidence", "")).strip()
+            key = name.casefold()
+            if len(name) < 2 or len(name) > 40 or not evidence or key in seen_candidates:
+                continue
+            seen_candidates.add(key)
+            candidates.append(AIThemeCandidate(
+                name, max(0, min(100, int(candidate.get("confidence", 0)))), evidence,
+            ))
     return AINewsAnalysis(
         str(value.get("summary", "")).strip(), outlook,
         max(0, min(100, int(value.get("confidence", 0)))), str(value.get("reason", "")).strip(),
         tuple(map(str, value.get("positive_evidence", ()) or ())),
         tuple(map(str, value.get("negative_evidence", ()) or ())),
-        category, tuple(impacts),
+        category, tuple(impacts), tuple(candidates),
     )

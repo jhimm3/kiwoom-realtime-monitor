@@ -3,12 +3,14 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
 from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+from kiwoom_monitor.application.theme_suggestions import ThemeSuggestion
 
 
 class ThemeBackupServiceTest(unittest.TestCase):
@@ -32,6 +34,13 @@ class ThemeBackupServiceTest(unittest.TestCase):
             repository.select_profile("회사")
             repository.replace_for_stock("005930", ("AI",))
             repository.set_theme_alias("인공지능", "AI", decision_source="llm_review")
+            repository.import_ai_theme_suggestions((ThemeSuggestion(
+                "005930", "https://example.com/theme", "인공지능", "기사 근거", 88,
+                "openai", "model", "body-hash", datetime.now(UTC),
+            ),))
+            repository.review_ai_theme_suggestion(
+                repository.list_ai_theme_suggestions()[0].key, approved=True,
+            )
             connection = sqlite3.connect(database_path)
             try:
                 connection.execute("UPDATE settings SET value='회사' WHERE key='theme_active_profile'")
@@ -70,3 +79,6 @@ class ThemeBackupServiceTest(unittest.TestCase):
                 ("alias", "인공지능", "AI", "llm_review"),
                 repository.theme_name_decisions(),
             )
+            approved = repository.list_ai_theme_suggestions("approved")
+            self.assertEqual(1, len(approved))
+            self.assertEqual(("AI",), approved[0].resolved_theme_names)

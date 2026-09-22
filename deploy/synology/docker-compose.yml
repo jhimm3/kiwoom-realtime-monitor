@@ -15,7 +15,7 @@ services:
       retries: 10
 
   server:
-    image: kiwoom-monitor-server:2026.09.22-top20-live-projection-v1
+    image: kiwoom-monitor-server:2026.09.22-theme-suggestion-review-v1
     build:
       context: ../..
       dockerfile: deploy/synology/server.Dockerfile

@@ -8,12 +8,33 @@ from pathlib import Path
 from kiwoom_monitor.application.news_analysis import assess_stock_news
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
 from kiwoom_monitor.infrastructure.news_ai import (
-    AINewsAnalysis, AICompanyImpact, AIRequestUsage, analysis_body_hash,
+    AINewsAnalysis, AICompanyImpact, AIRequestUsage, AIThemeCandidate, analysis_body_hash,
 )
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository, news_identity
 
 
 class NewsAIRepositoryTests(unittest.TestCase):
+    def test_theme_candidates_are_persisted_for_profile_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = NewsAIRepository(Path(directory) / "news.sqlite3")
+            item = StockNewsItem(
+                "지역 개발 기사", "복수 기업 참여", "https://example.com/theme", "",
+                datetime.now(UTC), assess_stock_news("테스트", "지역 개발 기사", "복수 기업 참여"),
+            )
+            repository.save(
+                "000001", item, "openai", "model", analysis_body_hash("테스트", "본문"),
+                AINewsAnalysis(
+                    "요약", "긍정", 80, "근거", (), (), "산업·정책", (),
+                    (AIThemeCandidate("호남클러스터", 84, "복수 상장사 참여"),),
+                ),
+            )
+
+            values = repository.list_theme_suggestions()
+
+            self.assertEqual(1, len(values))
+            self.assertEqual("호남클러스터", values[0].raw_theme_name)
+            self.assertEqual("복수 상장사 참여", values[0].evidence)
+
     def test_same_url_reuses_company_specific_impact_for_another_stock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = NewsAIRepository(Path(directory) / "monitor.sqlite3")

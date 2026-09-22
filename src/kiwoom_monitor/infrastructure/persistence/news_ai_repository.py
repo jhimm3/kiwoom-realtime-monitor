@@ -5,9 +5,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from kiwoom_monitor.application.theme_suggestions import ThemeSuggestion
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
 from kiwoom_monitor.infrastructure.news_ai import (
-    ANALYSIS_PROMPT_VERSION, AINewsAnalysis, AICompanyImpact, AIRequestUsage,
+    ANALYSIS_PROMPT_VERSION, AINewsAnalysis, AICompanyImpact, AIRequestUsage, AIThemeCandidate,
 )
 from kiwoom_monitor.infrastructure.persistence.news_schema import initialize_news_schema
 from kiwoom_monitor.infrastructure.persistence.sqlite_connections import (
@@ -41,7 +42,7 @@ class NewsAIRepository:
     def load(self, stock_code: str, item: StockNewsItem) -> StoredAINewsAnalysis | None:
         with sqlite_read_connection(self._database_path) as connection:
             row = connection.execute(
-                "SELECT provider, model, summary, outlook, confidence, reason, positive_evidence, negative_evidence, analyzed_at, category, body_hash "
+                "SELECT provider, model, summary, outlook, confidence, reason, positive_evidence, negative_evidence, analyzed_at, category, body_hash, theme_candidates "
                 "FROM stock_news_ai WHERE stock_code=? AND identity=?",
                 (stock_code, news_identity(item)),
             ).fetchone()
@@ -49,7 +50,8 @@ class NewsAIRepository:
             return None
         return StoredAINewsAnalysis(
             AINewsAnalysis(str(row[2]), str(row[3]), int(row[4]), str(row[5]),
-                           tuple(json.loads(row[6])), tuple(json.loads(row[7])), str(row[9])),
+                           tuple(json.loads(row[6])), tuple(json.loads(row[7])), str(row[9]), (),
+                           _decode_theme_candidates(str(row[11]))),
             str(row[0]), str(row[1]), datetime.fromisoformat(str(row[8])), str(row[10]),
         )
 
@@ -64,14 +66,15 @@ class NewsAIRepository:
         with sqlite_read_connection(self._database_path) as connection:
             rows = connection.execute(
                 "SELECT identity, provider, model, summary, outlook, confidence, reason, "
-                "positive_evidence, negative_evidence, analyzed_at, category, body_hash "
+                "positive_evidence, negative_evidence, analyzed_at, category, body_hash, theme_candidates "
                 f"FROM stock_news_ai WHERE stock_code=? AND identity IN ({placeholders})",
                 (stock_code, *identities),
             ).fetchall()
         loaded = {
             str(row[0]): StoredAINewsAnalysis(
                 AINewsAnalysis(str(row[3]), str(row[4]), int(row[5]), str(row[6]),
-                               tuple(json.loads(row[7])), tuple(json.loads(row[8])), str(row[10])),
+                               tuple(json.loads(row[7])), tuple(json.loads(row[8])), str(row[10]), (),
+                               _decode_theme_candidates(str(row[12]))),
                 str(row[1]), str(row[2]), datetime.fromisoformat(str(row[9])), str(row[11]),
             )
             for row in rows
@@ -102,15 +105,17 @@ class NewsAIRepository:
              body_hash: str, analysis: AINewsAnalysis) -> None:
         with sqlite_transaction(self._database_path) as connection:
             connection.execute(
-                "INSERT INTO stock_news_ai(stock_code, identity, provider, model, summary, category, outlook, confidence, reason, positive_evidence, negative_evidence, body_hash, analyzed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(stock_code, identity) DO UPDATE SET "
+                "INSERT INTO stock_news_ai(stock_code, identity, provider, model, summary, category, outlook, confidence, reason, positive_evidence, negative_evidence, body_hash, analyzed_at, theme_candidates) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(stock_code, identity) DO UPDATE SET "
                 "provider=excluded.provider, model=excluded.model, summary=excluded.summary, outlook=excluded.outlook, "
                 "category=excluded.category, "
                 "confidence=excluded.confidence, reason=excluded.reason, positive_evidence=excluded.positive_evidence, "
-                "negative_evidence=excluded.negative_evidence, body_hash=excluded.body_hash, analyzed_at=excluded.analyzed_at",
+                "negative_evidence=excluded.negative_evidence, body_hash=excluded.body_hash, analyzed_at=excluded.analyzed_at, "
+                "theme_candidates=excluded.theme_candidates",
                 (stock_code, news_identity(item), provider, model, analysis.summary, analysis.category, analysis.outlook,
                  analysis.confidence, analysis.reason, json.dumps(analysis.positive_evidence, ensure_ascii=False),
-                 json.dumps(analysis.negative_evidence, ensure_ascii=False), body_hash, datetime.now(UTC).isoformat()),
+                 json.dumps(analysis.negative_evidence, ensure_ascii=False), body_hash, datetime.now(UTC).isoformat(),
+                 json.dumps([candidate.__dict__ for candidate in analysis.theme_candidates], ensure_ascii=False)),
             )
             if analysis.company_impacts:
                 connection.execute(
@@ -124,6 +129,25 @@ class NewsAIRepository:
                      json.dumps([impact.__dict__ for impact in analysis.company_impacts], ensure_ascii=False),
                      body_hash, datetime.now(UTC).isoformat()),
                 )
+
+    def list_theme_suggestions(self, limit: int = 1000) -> tuple[ThemeSuggestion, ...]:
+        with sqlite_read_connection(self._database_path) as connection:
+            rows = connection.execute(
+                "SELECT stock_code,identity,provider,model,body_hash,analyzed_at,theme_candidates "
+                "FROM stock_news_ai WHERE theme_candidates<>'[]' "
+                "ORDER BY analyzed_at DESC LIMIT ?",
+                (max(1, min(10_000, int(limit))),),
+            ).fetchall()
+        result: list[ThemeSuggestion] = []
+        for row in rows:
+            for candidate in _decode_theme_candidates(str(row[6])):
+                result.append(ThemeSuggestion(
+                    stock_code=str(row[0]), news_identity=str(row[1]),
+                    raw_theme_name=candidate.name, evidence=candidate.evidence,
+                    confidence=candidate.confidence, provider=str(row[2]), model=str(row[3]),
+                    body_hash=str(row[4]), analyzed_at=datetime.fromisoformat(str(row[5])),
+                ))
+        return tuple(result)
 
     def daily_count(self) -> int:
         today = datetime.now().astimezone().date().isoformat()
@@ -166,4 +190,21 @@ def _decode_impacts(raw: str) -> tuple[AICompanyImpact, ...]:
         AICompanyImpact(str(value.get("company", "")), str(value.get("outlook", "판단 자료 부족")),
                         int(value.get("confidence", 0)), str(value.get("reason", "")))
         for value in values if isinstance(value, dict) and value.get("company")
+    )
+
+
+def _decode_theme_candidates(raw: str) -> tuple[AIThemeCandidate, ...]:
+    try:
+        values = json.loads(raw)
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(values, list):
+        return ()
+    return tuple(
+        AIThemeCandidate(
+            str(value.get("name", "")), max(0, min(100, int(value.get("confidence", 0)))),
+            str(value.get("evidence", "")),
+        )
+        for value in values
+        if isinstance(value, dict) and str(value.get("name", "")).strip()
     )

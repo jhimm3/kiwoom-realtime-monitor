@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QColor, QKeySequence, QPalette
@@ -41,6 +42,7 @@ from kiwoom_monitor.domain.theme_import import validate_theme_rows
 from kiwoom_monitor.domain.theme_parser import parse_themes, theme_key
 from kiwoom_monitor.domain.theme_text_import import parse_theme_text
 from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository
 from kiwoom_monitor.presentation.similar_stock_dialog import choose_similar_stock, confirm_pending_name_change
 
 
@@ -580,9 +582,73 @@ class ThemeBulkEditDialog(QDialog):
                 values.append((before, after))
         return tuple(values)
 
+
+class ThemeSuggestionReviewDialog(QDialog):
+    def __init__(self, suggestions: tuple[object, ...], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("AI 테마 제안 검토")
+        self.resize(1050, 560)
+        layout = QVBoxLayout(self)
+        guide = QLabel(
+            "AI 제안은 자동 적용되지 않습니다. 활성 프로필의 별칭·분리 결정을 적용한 결과를 "
+            "확인하고 승인 또는 거절하세요. 적용 테마는 쉼표로 수정할 수 있습니다."
+        )
+        guide.setWordWrap(True)
+        layout.addWidget(guide)
+        self._suggestions = suggestions
+        self._table = QTableWidget(len(suggestions), 7)
+        self._table.setHorizontalHeaderLabels(
+            ("종목", "AI 원문", "적용 테마", "확신", "근거", "분석", "검토")
+        )
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for column, width in enumerate((120, 130, 180, 60, 310, 130, 90)):
+            self._table.setColumnWidth(column, width)
+        for row, suggestion in enumerate(suggestions):
+            readonly = (
+                (0, str(getattr(suggestion, "stock_name", ""))),
+                (1, str(getattr(suggestion, "raw_theme_name", ""))),
+                (3, str(getattr(suggestion, "confidence", 0))),
+                (4, str(getattr(suggestion, "evidence", ""))),
+                (5, f"{getattr(suggestion, 'provider', '')} / {getattr(suggestion, 'model', '')}"),
+            )
+            for column, value in readonly:
+                item = QTableWidgetItem(value)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self._table.setItem(row, column, item)
+            self._table.setItem(
+                row, 2,
+                QTableWidgetItem(", ".join(getattr(suggestion, "resolved_theme_names", ()))),
+            )
+            action = QComboBox()
+            action.addItem("보류", "pending")
+            action.addItem("승인", "approved")
+            action.addItem("거절", "rejected")
+            self._table.setCellWidget(row, 6, action)
+        layout.addWidget(self._table)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("검토 저장")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def decisions(self) -> tuple[tuple[object, str, tuple[str, ...]], ...]:
+        result: list[tuple[object, str, tuple[str, ...]]] = []
+        for row, suggestion in enumerate(self._suggestions):
+            action = self._table.cellWidget(row, 6)
+            decision = str(action.currentData()) if isinstance(action, QComboBox) else "pending"
+            if decision == "pending":
+                continue
+            target_item = self._table.item(row, 2)
+            targets = parse_themes(target_item.text() if target_item else "", ",/|;")
+            result.append((suggestion, decision, targets))
+        return tuple(result)
+
+
 class ThemeManagerDialog(QDialog):
-    def __init__(self, repository: object, settings: SettingsRepository, on_excel_update: Callable[[], None] | None = None, on_image_update: Callable[[str], None] | None = None, on_catalog_sync: Callable[[], None] | None = None, parent: QWidget | None = None, on_themes_changed: Callable[[], None] | None = None) -> None:
-        super().__init__(parent); self._repository=repository; self._settings=settings; self._separators=",/|;" + settings.get("theme_custom_separators"); self._on_excel_update=on_excel_update; self._on_image_update=on_image_update; self._on_themes_changed=on_themes_changed; self.setWindowTitle("종목/테마 관리"); self.resize(560,420)
+    def __init__(self, repository: object, settings: SettingsRepository, on_excel_update: Callable[[], None] | None = None, on_image_update: Callable[[str], None] | None = None, on_catalog_sync: Callable[[], None] | None = None, parent: QWidget | None = None, on_themes_changed: Callable[[], None] | None = None, news_database_path: Path | None = None) -> None:
+        super().__init__(parent); self._repository=repository; self._settings=settings; self._separators=",/|;" + settings.get("theme_custom_separators"); self._on_excel_update=on_excel_update; self._on_image_update=on_image_update; self._on_themes_changed=on_themes_changed; self._news_database_path=news_database_path; self.setWindowTitle("종목/테마 관리"); self.resize(560,420)
         self._search=QLineEdit(); self._search.setPlaceholderText("종목명 검색"); self._table=QTableWidget(0,2); self._table.setHorizontalHeaderLabels(("종목명","테마"))
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -631,6 +697,10 @@ class ThemeManagerDialog(QDialog):
             image = QPushButton("이미지 테마 업데이트")
             image.clicked.connect(self._start_image_update)
             theme_layout.addWidget(image)
+        if self._news_database_path is not None:
+            ai_review = QPushButton("AI 테마 제안 검토")
+            ai_review.clicked.connect(self._review_ai_theme_suggestions)
+            theme_layout.addWidget(ai_review)
         theme_layout.addWidget(_section_separator())
         theme_layout.addWidget(_section_title("테마 일괄 관리"))
         self._bulk_edit = QPushButton("테마 일괄 수정")
@@ -732,6 +802,40 @@ class ThemeManagerDialog(QDialog):
         self._rows=self._repository.search(self._search.text()); self._table.setRowCount(len(self._rows))
         for index,(_,name,themes) in enumerate(self._rows):
             self._table.setItem(index,0,QTableWidgetItem(name)); self._table.setItem(index,1,QTableWidgetItem(themes))
+
+    def _review_ai_theme_suggestions(self) -> None:
+        if self._news_database_path is None:
+            return
+        try:
+            source = NewsAIRepository(self._news_database_path).list_theme_suggestions()
+            self._repository.import_ai_theme_suggestions(source)
+            pending = self._repository.list_ai_theme_suggestions("pending")
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "AI 테마 제안", f"제안을 불러오지 못했습니다.\n{error}")
+            return
+        if not pending:
+            QMessageBox.information(self, "AI 테마 제안", "검토할 새 AI 테마 제안이 없습니다.")
+            return
+        dialog = ThemeSuggestionReviewDialog(pending, self)
+        if not dialog.exec():
+            return
+        applied = rejected = 0
+        try:
+            for suggestion, decision, targets in dialog.decisions():
+                approved = decision == "approved"
+                self._repository.review_ai_theme_suggestion(
+                    suggestion.key, approved=approved, theme_names=targets,
+                )
+                applied += int(approved)
+                rejected += int(not approved)
+        except ValueError as error:
+            QMessageBox.warning(self, "AI 테마 제안", str(error))
+            return
+        self._reload()
+        self._notify_themes_changed()
+        QMessageBox.information(
+            self, "AI 테마 제안", f"승인 {applied}개 · 거절 {rejected}개를 저장했습니다.",
+        )
     def _edit(self, row: int, _: int) -> None:
         code, name, themes = self._rows[row]
         dialog = ThemeEditDialog(name, parse_themes(themes, self._separators), self._separators, self)

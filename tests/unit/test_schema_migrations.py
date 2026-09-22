@@ -166,6 +166,23 @@ class SchemaMigrationTests(unittest.TestCase):
             self.assertEqual(("#123456",), theme)
             self.assertIsNotNone(decision_table)
 
+    def test_v6_adds_profile_theme_suggestion_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            with closing(sqlite3.connect(path)) as connection:
+                migration = connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=6"
+                ).fetchone()
+                table = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='profile_theme_suggestions'"
+                ).fetchone()
+
+            self.assertEqual(("profile_theme_suggestions",), migration)
+            self.assertIsNotNone(table)
+
     def test_existing_journal_data_survives_baseline_registration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

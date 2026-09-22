@@ -48,6 +48,7 @@ class ThemeBackupService:
                         "themes": [{"name": theme, "color": color} for theme, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
                         "stock_themes": [{"code": code, "theme": theme, "color": color} for code, theme, color in connection.execute("SELECT stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=? ORDER BY stock_code, theme_name", (profile_id,))],
                         "theme_name_decisions": self._decision_documents(connection, profile_id),
+                        "theme_suggestions": self._suggestion_documents(connection, profile_id),
                     })
                 return {**common, "profiles": profiles}
             return {
@@ -175,6 +176,7 @@ class ThemeBackupService:
                     "themes": [{"name": theme, "color": color} for theme, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
                     "stock_themes": [{"code": code, "theme": theme, "color": color} for code, theme, color in connection.execute("SELECT stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=? ORDER BY stock_code, theme_name", (profile_id,))],
                     "theme_name_decisions": self._decision_documents(connection, profile_id),
+                    "theme_suggestions": self._suggestion_documents(connection, profile_id),
                 })
             document = {
                 "format": self.FORMAT, "version": self.VERSION, "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -228,6 +230,9 @@ class ThemeBackupService:
                     decisions = profile.get("theme_name_decisions", [])
                     if isinstance(decisions, list):
                         self._import_name_decisions(connection, profile_id, decisions)
+                    suggestions = profile.get("theme_suggestions", [])
+                    if isinstance(suggestions, list):
+                        self._import_suggestions(connection, profile_id, suggestions)
                 if not connection.execute("SELECT 1 FROM theme_profiles").fetchone():
                     connection.execute("INSERT INTO theme_profiles(profile_name) VALUES ('기본 테마')")
                 active_profile = str(document.get("active_profile", "")).strip()
@@ -264,6 +269,7 @@ class ThemeBackupService:
                 "themes": [{"name": name, "color": color} for name, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
                 "stock_themes": [{"code": code, "theme": theme, "color": color} for code, theme, color in connection.execute("SELECT stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=? ORDER BY stock_code, theme_name", (profile_id,))],
                 "theme_name_decisions": self._decision_documents(connection, profile_id),
+                "theme_suggestions": self._suggestion_documents(connection, profile_id),
                 "aliases": [{"alias": alias, "code": code} for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")],
                 "stock_catalog": [{"code": code, "name": name, "market": market} for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")],
             }
@@ -292,6 +298,7 @@ class ThemeBackupService:
                 connection.execute("DELETE FROM profile_stock_themes WHERE profile_id=?", (profile_id,))
                 connection.execute("DELETE FROM profile_themes WHERE profile_id=?", (profile_id,))
                 connection.execute("DELETE FROM profile_theme_name_decisions WHERE profile_id=?", (profile_id,))
+                connection.execute("DELETE FROM profile_theme_suggestions WHERE profile_id=?", (profile_id,))
                 for item in themes:
                     if isinstance(item, dict) and str(item.get("name", "")).strip():
                         connection.execute("INSERT INTO profile_themes(profile_id, theme_name, default_color) VALUES (?, ?, ?)", (profile_id, str(item["name"]).strip(), str(item.get("color") or "#DCE6F1")))
@@ -301,6 +308,9 @@ class ThemeBackupService:
                 decisions = document.get("theme_name_decisions", [])
                 if isinstance(decisions, list):
                     self._import_name_decisions(connection, profile_id, decisions)
+                suggestions = document.get("theme_suggestions", [])
+                if isinstance(suggestions, list):
+                    self._import_suggestions(connection, profile_id, suggestions)
         except (sqlite3.Error, TypeError, ValueError) as error:
             raise ThemeBackupError("테마 DB 백업 파일을 적용할 수 없습니다.") from error
         finally:
@@ -352,4 +362,53 @@ class ThemeBackupService:
                 (profile_id, kind, source, target,
                  str(item.get("decision_source") or "user"),
                  str(item.get("updated_at") or datetime.now().astimezone().isoformat(timespec="seconds"))),
+            )
+
+    @staticmethod
+    def _suggestion_documents(
+        connection: sqlite3.Connection, profile_id: int,
+    ) -> list[dict[str, object]]:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='profile_theme_suggestions'"
+        ).fetchone()
+        if exists is None:
+            return []
+        columns = (
+            "stock_code", "news_identity", "raw_theme_name", "evidence", "confidence",
+            "provider", "model", "body_hash", "analyzed_at", "status",
+            "reviewed_theme_names", "reviewed_at",
+        )
+        return [
+            dict(zip(columns, row, strict=True))
+            for row in connection.execute(
+                "SELECT stock_code,news_identity,raw_theme_name,evidence,confidence,provider,model,"
+                "body_hash,analyzed_at,status,reviewed_theme_names,reviewed_at "
+                "FROM profile_theme_suggestions WHERE profile_id=? "
+                "ORDER BY analyzed_at,stock_code,news_identity,raw_theme_name",
+                (profile_id,),
+            )
+        ]
+
+    @staticmethod
+    def _import_suggestions(
+        connection: sqlite3.Connection, profile_id: int, suggestions: list[object],
+    ) -> None:
+        for item in suggestions:
+            if not isinstance(item, dict):
+                continue
+            stock_code = str(item.get("stock_code", ""))
+            identity = str(item.get("news_identity", ""))
+            raw_name = str(item.get("raw_theme_name", "")).strip()
+            status = str(item.get("status", "pending"))
+            if not stock_code or not identity or not raw_name or status not in {"pending", "approved", "rejected"}:
+                continue
+            connection.execute(
+                "INSERT OR REPLACE INTO profile_theme_suggestions("
+                "profile_id,stock_code,news_identity,raw_theme_name,evidence,confidence,provider,model,"
+                "body_hash,analyzed_at,status,reviewed_theme_names,reviewed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (profile_id, stock_code, identity, raw_name, str(item.get("evidence", "")),
+                 max(0, min(100, int(item.get("confidence", 0)))), str(item.get("provider", "")),
+                 str(item.get("model", "")), str(item.get("body_hash", "")),
+                 str(item.get("analyzed_at", "")), status,
+                 str(item.get("reviewed_theme_names") or "[]"), item.get("reviewed_at")),
             )

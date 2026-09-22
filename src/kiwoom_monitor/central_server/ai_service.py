@@ -278,6 +278,7 @@ def _analysis_document(stock_code: str, identity: str, provider: str, model: str
         "positive_evidence": json.dumps(analysis.positive_evidence, ensure_ascii=False),
         "negative_evidence": json.dumps(analysis.negative_evidence, ensure_ascii=False),
         "company_impacts": [impact.__dict__ for impact in analysis.company_impacts],
+        "theme_candidates": [candidate.__dict__ for candidate in analysis.theme_candidates],
         "body_hash": body_hash, "analyzed_at": analyzed_at,
     }
 

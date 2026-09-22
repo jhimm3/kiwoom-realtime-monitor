@@ -8,11 +8,13 @@ from kiwoom_monitor.infrastructure.news_ai import (
 
 
 def test_parse_ai_result_accepts_json_wrapped_in_text() -> None:
-    result = _parse('result: {"summary":"요약","category":"수주·계약","outlook":"혼재","confidence":72,"reason":"양쪽 근거","positive_evidence":["수주"],"negative_evidence":["비용"]}')
+    result = _parse('result: {"summary":"요약","category":"수주·계약","outlook":"혼재","confidence":72,"reason":"양쪽 근거","positive_evidence":["수주"],"negative_evidence":["비용"],"theme_candidates":[{"name":"호남클러스터","confidence":81,"evidence":"복수 기업 참여"}]}')
     assert result.outlook == "혼재"
     assert result.confidence == 72
     assert result.positive_evidence == ("수주",)
     assert result.category == "수주·계약"
+    assert result.theme_candidates[0].name == "호남클러스터"
+    assert result.theme_candidates[0].evidence == "복수 기업 참여"
 
 
 def test_parse_ai_result_clamps_confidence_and_unknown_outlook() -> None:

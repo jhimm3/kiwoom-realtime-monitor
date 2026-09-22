@@ -4,7 +4,9 @@ import json
 from typing import Any, Callable
 
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
-from kiwoom_monitor.infrastructure.news_ai import AICompanyImpact, AINewsAnalysis, AIRequestUsage
+from kiwoom_monitor.infrastructure.news_ai import (
+    AICompanyImpact, AINewsAnalysis, AIRequestUsage, AIThemeCandidate,
+)
 
 
 class CentralAIClient(CentralContentClient):
@@ -46,9 +48,12 @@ def _analysis(value: dict[str, Any]) -> AINewsAnalysis:
         str(item.get("company", "")), str(item.get("outlook", "판단 자료 부족")),
         int(item.get("confidence", 0)), str(item.get("reason", "")),
     ) for item in value.get("company_impacts", ()) if isinstance(item, dict))
+    candidates = tuple(AIThemeCandidate(
+        str(item.get("name", "")), int(item.get("confidence", 0)), str(item.get("evidence", "")),
+    ) for item in value.get("theme_candidates", ()) if isinstance(item, dict) and item.get("name"))
     return AINewsAnalysis(
         str(value.get("summary", "")), str(value.get("outlook", "판단 자료 부족")),
         int(value.get("confidence", 0)), str(value.get("reason", "")),
         evidence("positive_evidence"), evidence("negative_evidence"),
-        str(value.get("category", "기타 증권뉴스")), impacts,
+        str(value.get("category", "기타 증권뉴스")), impacts, candidates,
     )

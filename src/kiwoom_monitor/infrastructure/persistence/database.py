@@ -109,7 +109,7 @@ DEFAULT_COLUMNS = (
 )
 
 
-MAIN_SCHEMA_VERSION = 5
+MAIN_SCHEMA_VERSION = 6
 
 
 class Database:
@@ -297,6 +297,11 @@ class Database:
                         "profile_theme_name_decisions",
                         self._create_theme_name_decisions,
                     ),
+                    SQLiteMigration(
+                        6,
+                        "profile_theme_suggestions",
+                        self._create_theme_suggestions,
+                    ),
                 )
             )
             connection.commit()
@@ -377,6 +382,31 @@ class Database:
             "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "PRIMARY KEY(profile_id, decision_kind, source_name, target_name),"
             "FOREIGN KEY(profile_id) REFERENCES theme_profiles(profile_id) ON DELETE CASCADE)"
+        )
+
+    @staticmethod
+    def _create_theme_suggestions(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS profile_theme_suggestions ("
+            "profile_id INTEGER NOT NULL,"
+            "stock_code TEXT NOT NULL,"
+            "news_identity TEXT NOT NULL,"
+            "raw_theme_name TEXT NOT NULL COLLATE NOCASE,"
+            "evidence TEXT NOT NULL,"
+            "confidence INTEGER NOT NULL CHECK(confidence BETWEEN 0 AND 100),"
+            "provider TEXT NOT NULL,"
+            "model TEXT NOT NULL,"
+            "body_hash TEXT NOT NULL,"
+            "analyzed_at TEXT NOT NULL,"
+            "status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),"
+            "reviewed_theme_names TEXT NOT NULL DEFAULT '[]',"
+            "reviewed_at TEXT,"
+            "PRIMARY KEY(profile_id,stock_code,news_identity,raw_theme_name),"
+            "FOREIGN KEY(profile_id) REFERENCES theme_profiles(profile_id) ON DELETE CASCADE)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_profile_theme_suggestions_status "
+            "ON profile_theme_suggestions(profile_id,status,analyzed_at DESC)"
         )
 
     @staticmethod

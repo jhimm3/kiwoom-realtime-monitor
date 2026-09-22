@@ -11,10 +11,11 @@ from kiwoom_monitor.infrastructure.persistence.schema_migrations import (
 )
 
 
-NEWS_SCHEMA_VERSION = 3
+NEWS_SCHEMA_VERSION = 4
 NEWS_SCHEMA_BASELINE_NAME = "current_news_schema_baseline"
 NEWS_ACCOUNT_SCOPE_NAME = "account_scoped_journal_news_links"
 NEWS_LINK_TOMBSTONE_NAME = "journal_news_link_tombstones"
+NEWS_AI_THEME_CANDIDATES_NAME = "news_ai_theme_candidates"
 
 
 def initialize_news_schema(database_path: Path) -> None:
@@ -25,6 +26,7 @@ def initialize_news_schema(database_path: Path) -> None:
             SQLiteMigration(1, NEWS_SCHEMA_BASELINE_NAME, _apply_v1_baseline),
             SQLiteMigration(2, NEWS_ACCOUNT_SCOPE_NAME, _apply_v2_account_scope),
             SQLiteMigration(3, NEWS_LINK_TOMBSTONE_NAME, _apply_v3_link_tombstones),
+            SQLiteMigration(4, NEWS_AI_THEME_CANDIDATES_NAME, _apply_v4_ai_theme_candidates),
         ))
         connection.commit()
     finally:
@@ -129,6 +131,15 @@ def _apply_v3_link_tombstones(connection: sqlite3.Connection) -> None:
     connection.execute(
         "UPDATE journal_news_links SET updated_at=linked_at WHERE updated_at=''"
     )
+
+
+def _apply_v4_ai_theme_candidates(connection: sqlite3.Connection) -> None:
+    for table in ("stock_news_ai", "news_ai_shared"):
+        columns = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+        if "theme_candidates" not in columns:
+            connection.execute(
+                f"ALTER TABLE {table} ADD COLUMN theme_candidates TEXT NOT NULL DEFAULT '[]'"
+            )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_journal_news_links_active_scope ON journal_news_links("
         "canonical_account_ref,origin_broker,origin_environment,group_id,stock_code,is_deleted)"
