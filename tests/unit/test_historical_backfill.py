@@ -77,6 +77,40 @@ class HistoricalBackfillTest(unittest.TestCase):
             alias_rows,
         )
 
+    def test_claim_recovers_only_stale_running_news_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.sqlite3"
+            with closing(sqlite3.connect(candidate)) as connection, connection:
+                connection.executescript(
+                    "CREATE TABLE candidate_days(dt TEXT, code TEXT);"
+                    "CREATE TABLE stocks(code TEXT, name TEXT);"
+                    "INSERT INTO stocks VALUES('005930','삼성전자'),('000660','SK하이닉스');"
+                    "INSERT INTO candidate_days VALUES"
+                    "('2020-01-02','005930'),('2020-01-02','000660');"
+                )
+            output = root / "output.sqlite3"
+            seed_news_backfill_jobs(candidate, output)
+            with closing(sqlite3.connect(output)) as connection, connection:
+                connection.execute(
+                    "UPDATE news_backfill_jobs SET state='running',attempts=1,updated_at=? "
+                    "WHERE code='000660'", ("2020-01-01T00:00:00+00:00",),
+                )
+                connection.execute(
+                    "UPDATE news_backfill_jobs SET state='running',attempts=1,updated_at=? "
+                    "WHERE code='005930'", (datetime.now(UTC).isoformat(),),
+                )
+            job = claim_news_backfill_job(output)
+            self.assertIsNotNone(job)
+            assert job is not None
+            self.assertEqual("000660", job.code)
+            self.assertEqual(2, job.attempts)
+            with closing(sqlite3.connect(output)) as connection:
+                active = connection.execute(
+                    "SELECT state FROM news_backfill_jobs WHERE code='005930'"
+                ).fetchone()[0]
+            self.assertEqual("running", active)
+
     def test_extracts_original_publication_time_with_source_and_precision(self) -> None:
         document = """
         <html><head>

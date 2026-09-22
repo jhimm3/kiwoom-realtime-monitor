@@ -23,6 +23,11 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
 DEFAULT_REFERENCE = Path("data/nas_reference_inspect_20260922/historical_reference.sqlite3")
 DEFAULT_DATABASE = Path("data/historical_intelligence.sqlite3")
 POWERSHELL32 = Path(r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe")
+CREON_CONNECTION_ERROR = "CREON Plus is not connected in this Windows privilege context."
+
+
+class DaishinEnvironmentUnavailable(RuntimeError):
+    """The collector host cannot currently use the logged-in CREON session."""
 
 
 def _initialize_jobs(reference: Path, database: Path) -> int:
@@ -119,7 +124,19 @@ def _run_backfill(code: str, interval: int, output: Path) -> None:
         check=False, capture_output=True, text=True, encoding="utf-8",
     )
     if completed.returncode:
-        raise RuntimeError(completed.stderr.strip() or f"{interval}m backfill failed")
+        detail = completed.stderr.strip()
+        if output.exists():
+            for line in reversed(output.read_text(encoding="utf-8-sig").splitlines()):
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("record_type") == "error":
+                    detail = str(record.get("error") or detail)
+                    break
+        if CREON_CONNECTION_ERROR in detail:
+            raise DaishinEnvironmentUnavailable(detail)
+        raise RuntimeError(detail or f"{interval}m backfill failed")
 
 
 def _recent_overlay(code: str, output: Path) -> dict[str, object]:
@@ -169,6 +186,21 @@ def _finish(database: Path, code: str, state: str, raw_directory: Path, error: s
             )
 
 
+def _defer_for_environment(database: Path, code: str, raw_directory: Path, error: str) -> None:
+    """Return a claimed job without charging an attempt for a host-wide outage."""
+    with closing(sqlite3.connect(database)) as connection:
+        with connection:
+            connection.execute(
+                """
+                UPDATE market_backfill_jobs
+                SET state='pending', attempts=MAX(attempts-1, 0), raw_directory=?,
+                    last_error=?, updated_at=?
+                WHERE code=? AND state='running'
+                """,
+                (str(raw_directory), error[:2000], datetime.now(UTC).isoformat(), code),
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="후보 종목의 대신 1분/이전 5분봉을 재개 가능하게 수집합니다.")
     parser.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE)
@@ -187,6 +219,7 @@ def main() -> int:
     raw_root = args.raw_root.resolve()
     raw_root.mkdir(parents=True, exist_ok=True)
     finished = failed = 0
+    environment_error = ""
     for _ in range(args.jobs):
         job = _claim(database)
         if job is None:
@@ -211,13 +244,22 @@ def main() -> int:
             finished += 1
             print(json.dumps({"event": "market_job_finished", "code": code,
                               "ranges": _ranges(database, code)}, ensure_ascii=False), flush=True)
+        except DaishinEnvironmentUnavailable as error:
+            environment_error = f"{type(error).__name__}: {error}"
+            _defer_for_environment(database, code, directory, environment_error)
+            print(json.dumps({"event": "collector_environment_unavailable", "code": code,
+                              "error": environment_error}, ensure_ascii=False), flush=True)
+            break
         except Exception as error:
             _finish(database, code, "failed", directory, f"{type(error).__name__}: {error}")
             failed += 1
             print(json.dumps({"event": "market_job_failed", "code": code,
                               "error": f"{type(error).__name__}: {error}"}, ensure_ascii=False), flush=True)
     print(json.dumps({"finished": finished, "failed": failed, "seeded": inserted,
+                      "environment_error": environment_error,
                       "database": str(database)}, ensure_ascii=False, indent=2))
+    if environment_error:
+        return 3
     return 0 if failed == 0 else 2
 
 

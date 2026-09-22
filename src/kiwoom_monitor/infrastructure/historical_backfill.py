@@ -319,10 +319,20 @@ def clear_news_backfill_jobs(output_database: Path) -> int:
 
 def claim_news_backfill_job(output_database: Path) -> NewsBackfillJob | None:
     initialize_probe_database(output_database)
-    now = datetime.now(UTC).isoformat()
+    claimed_at = datetime.now(UTC)
+    now = claimed_at.isoformat()
+    stale_before = (claimed_at - timedelta(hours=2)).isoformat()
     with closing(sqlite3.connect(output_database)) as connection:
         connection.row_factory = sqlite3.Row
         with connection:
+            connection.execute(
+                """
+                UPDATE news_backfill_jobs
+                SET state='failed', last_error='collector_stale_running_recovered', updated_at=?
+                WHERE state='running' AND updated_at < ?
+                """,
+                (now, stale_before),
+            )
             row = connection.execute(
                 """
                 SELECT code, target_date, query_text, name_source, name_source_ref, attempts
