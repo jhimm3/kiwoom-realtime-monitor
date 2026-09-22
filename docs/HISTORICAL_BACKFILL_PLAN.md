@@ -143,6 +143,11 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 이 계약은 과거 당시의 strict 재생 입력이 아니다. 후보 생성시각을 알 수 없고 뉴스도 사후 수집했으므로 `strict_point_in_time_case=false`, `strict_backtest_input=false`다. 원문 전체가 아니라 제목과 검색 요약만 있는 현재 범위도 `content_scope`에 명시한다. 모델 호출이나 가중치 학습은 수행하지 않으며 `model_weight_training_ready=false`를 유지한다.
 
 최종 첫 불변 표본 `data/research/historical-learning-cases/2026-09-18-v2`는 후보 50사례를 보존한다. 발행시각 검증과 후보일 이전 조건을 통과한 뉴스 근거가 있는 사례는 22개, 다음 거래일 결과 봉이 있는 사례는 2개, 결과 공백은 48개다. 원문 차단 1,295관계, 시각 없음 74관계, 후보일 뒤 발행 21관계 등은 입력에서 제외하고 이유별 개수로 남겼다. 기사 의미 관련성은 아직 사람 검토 전이며 `semantic_relevance_reviewed=false`다. 이는 사례 파이프라인과 누락 처리를 검증한 표본이며 RAG 품질, 미세조정 준비 완료, 전략 성과를 뜻하지 않는다.
+### D06 기사 의미 검토 대기열
+
+`scripts/prepare_historical_news_review_queue.py`는 학습 준비 사례의 기사 관계를 `historical_news_review_queue/v1`로 변환한다. 공급자·언론사·기사 식별자가 같은 기사는 한 검토 항목으로 합치되 연결된 사례·종목·검색어·수집 revision은 각 관계에 남긴다. 기존 `assess_stock_news` 결과는 사람이 먼저 볼 순서를 위한 `rule_hint`이며 의미 관련성 정답, LLM 판정, 테마 확정으로 취급하지 않는다.
+
+첫 대기열 `data/research/historical-news-review-queues/2026-09-18-v1`은 2,035개 종목-기사 관계를 1,422개 고유 기사로 묶어 613개의 반복 검토를 줄였다. 종목별 규칙 힌트 중 하나라도 관련으로 나온 기사는 105개다. 전체 항목은 아직 `pending`이고 `rule_hint_is_ground_truth=false`, `llm_used=false`, `human_review_complete=false`, `model_weight_training_ready=false`다. 다음 단계는 이 대기열의 사람 판정을 별도 불변 결과로 저장하고, 같은 사건이 학습과 평가에 동시에 들어가지 않도록 사건 ID를 확정하는 것이다.
 
 ### D03 첫 입력 계약
 
