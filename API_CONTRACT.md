@@ -542,11 +542,13 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 | `GET /api/v1/market/daily-bars` | `code`, 선택 `market`, `limit` 1~5000 | 식별자 + `bars[]` |
 | `GET /api/v1/market/coverage` | `kind`, `subject`, ISO `start/end`, 선택 `available_by`, 고정주기 자료만 `expected_seconds` | 상태·관측 수·가용 수·결측 구간·부재 의미 |
 | `GET /api/v1/market/external-bars` | `instrument`, `timeframe=5m/1d`, `limit` 1~10000 | 공급원·계약코드가 포함된 `bars[]` |
-| `GET /api/v1/market/snapshots/{kind}` | 선택 `subject`, `limit` 1~5000 | `kind`, `subject`, `snapshots[]` |
+| `GET /api/v1/market/snapshots/{kind}` | 선택 `subject`, `limit` 1~5000; 최신 TOP20 화면 조회만 `kind=top20_membership&limit=1&prefer_live=true` | `kind`, `subject`, `snapshots[]`; live TOP20에는 `persistence_state=pending|persisted` 포함 |
 | `GET /api/v1/market/top20-statistics` | `start_date/end_date=YYYY-MM-DD`, 최대 367일 | NAS TOP20 `hourly[]`, 정규장 일별 `comparisons[]`; 전체시장 거래대금은 `ka20006` 확정 일봉 |
 | `GET /api/v1/research/observations` | offset 포함 ISO `start/end`, `kinds=ranking,top20_membership,minute_bar` 중 하나 이상, 선택 `subject`, `watermark`, `cursor`, `limit` 1~1000 | 고정 `manifest/watermark`, 순서가 붙은 `observations[]`, `next_cursor` |
 
 스냅샷 `kind`는 `ranking`, `top20_membership`, `top20_index`, `market_state`, `investor_flow`, `program_flow`, `new_high`, `stock_fundamentals`, `nxt_eligibility`를 허용한다. `stock_fundamentals`와 `nxt_eligibility`는 시점 이력과 별도로 범용 콘텐츠의 `stock_fundamentals`, `stock_nxt_eligibility` 컬렉션에서 종목별 최신값도 조회할 수 있다. 봉의 중앙 저장 단위는 거래대금 백만원(`trade_value_million_won`)이다.
+
+`prefer_live=true`는 최신 `top20_membership` 한 건에만 적용된다. 목표 회차와 일치하고 종목코드·종목명이 채워진 20행 전체를 검증한 뒤 PostgreSQL 저장과 동시에 공개하는 것이 아니라 저장 전에 메모리 projection으로 반환한다. 부분 응답과 이전 회차 응답은 live 결과가 될 수 없다. live projection이 없거나 서버가 재시작된 때는 같은 요청도 DB 저장본으로 되돌아간다. 연구·과거 조회는 이 옵션을 사용하지 않는다.
 
 NAS 연결 중 TOP20 차트는 `top20_index` 중앙 스냅샷을 읽고, 통계는 서버가 같은 원본을 집계한 `top20-statistics`를 읽는다. PC 직접 연결 중에는 로컬 `monitor.sqlite3`를 사용한다. 정규장 TOP20 합계는 09:00부터 15:30 종가 단일가 체결분까지 포함한다. 과거 전체시장 분모는 `ka20006` 일봉의 코스피·코스닥 거래대금을 사용하므로 장중 `0J/0U` 최종 수신 전에 끝난 값으로 과거 통계를 고정하지 않는다.
 

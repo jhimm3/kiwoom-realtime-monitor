@@ -64,6 +64,46 @@ class _FlakyIndexStore:
 
 
 class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_validated_membership_is_visible_while_database_save_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            entered = threading.Event()
+            release = threading.Event()
+
+            def blocked_save(*args, **kwargs):
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise TimeoutError("test did not release dataset save")
+
+            store.save_dataset_snapshot = blocked_save  # type: ignore[method-assign]
+            store.upsert_documents = lambda *args, **kwargs: None  # type: ignore[method-assign]
+            service = AutonomousTop20Service(
+                _Broker(), RealtimeHub(), store, catalog_loader=lambda: (),
+            )
+            service._entrants_day = "2026-09-10"
+            refresh = asyncio.create_task(
+                service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0, 0)),
+            )
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                latest = service.latest_membership_snapshot("2026-09-10")
+                self.assertIsNotNone(latest)
+                assert latest is not None
+                self.assertEqual("pending", latest["persistence_state"])
+                self.assertEqual(20, len(latest["payload"]["items"]))
+                self.assertFalse(refresh.done())
+            finally:
+                release.set()
+            await refresh
+            self.assertEqual(
+                "persisted",
+                service.latest_membership_snapshot("2026-09-10")["persistence_state"],
+            )
+            if service._market_catalog_task is not None:
+                await service._market_catalog_task
+            store.close()
+
     def test_nonboundary_start_uses_current_half_minute_as_freshness_target(self) -> None:
         self.assertEqual(
             datetime(2026, 9, 15, 1, 5, 0),

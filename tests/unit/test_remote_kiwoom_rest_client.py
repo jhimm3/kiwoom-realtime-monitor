@@ -33,7 +33,10 @@ class RemoteKiwoomRestClientTests(unittest.TestCase):
         ).load_stored_ranking("5")
 
         self.assertEqual({"item_inq_rank": []}, result)
-        self.assertRegex(captured["url"], r"subject=\d{4}-\d{2}-\d{2}&limit=1$")
+        self.assertRegex(
+            captured["url"],
+            r"subject=\d{4}-\d{2}-\d{2}&limit=1&prefer_live=true$",
+        )
 
     def test_loads_last_nas_0b_market_caps_without_kiwoom_query(self) -> None:
         captured = {}

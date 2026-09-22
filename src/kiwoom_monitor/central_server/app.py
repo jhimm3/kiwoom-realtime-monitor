@@ -493,6 +493,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     app.state.credential_statuses = credential_statuses
     app.state.credential_runtime = credential_runtime
     app.state.realtime_hub = realtime_hub
+    app.state.autonomous_top20_service = top20_service
     app.state.market_event_service = market_event_service
     app.state.external_market_collector = external_market_service
     app.state.candidate_monitor = candidate_monitor
@@ -1801,6 +1802,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     async def dataset_snapshots(
         kind: str, subject: str = Query(default="", max_length=32),
         limit: int = Query(default=100, ge=1, le=5000),
+        prefer_live: bool = Query(default=False),
     ) -> dict[str, object]:
         allowed = {
             "ranking", "top20_membership", "top20_index", "market_state",
@@ -1809,6 +1811,10 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         }
         if kind not in allowed:
             raise HTTPException(status_code=404, detail="지원하지 않는 중앙 시장 자료입니다.")
+        if kind == "top20_membership" and limit == 1 and prefer_live and top20_service is not None:
+            latest = top20_service.latest_membership_snapshot(subject)
+            if latest is not None:
+                return {"kind": kind, "subject": subject, "snapshots": [latest]}
         values = await asyncio.to_thread(store.load_dataset_snapshots, kind, subject, limit)
         return {"kind": kind, "subject": subject, "snapshots": values}
 

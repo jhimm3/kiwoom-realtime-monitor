@@ -329,6 +329,7 @@ class RemoteKiwoomRestClient:
                 if query_type == "5" else query_type
             ),
             "limit": 1,
+            "prefer_live": "true" if query_type == "5" else "false",
         })
         request = Request(
             f"{self._server_url}/api/v1/market/snapshots/{kind}?{query}",

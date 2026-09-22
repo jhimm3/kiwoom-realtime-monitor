@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import sqlite3
 import tempfile
@@ -251,6 +252,41 @@ class CentralServerAppTests(unittest.TestCase):
             app = create_app(settings)
 
         self.assertIsNotNone(app)
+
+    def test_live_top20_endpoint_does_not_wait_for_database_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = CentralServerSettings(
+                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
+                kiwoom_app_key="app-key", kiwoom_secret_key="secret-key",
+                autonomous_top20_enabled=True, market_event_collection_enabled=False,
+                top20_outbox_path=str(Path(directory) / "top20-outbox.json"),
+            )
+            app = create_app(settings)
+            service = app.state.autonomous_top20_service
+            self.assertIsNotNone(service)
+            service._latest_membership_snapshot = {
+                "subject": "2026-09-22",
+                "snapshot_key": "2026-09-22T18:00:00",
+                "saved_at": 1.0,
+                "payload": {"observed_at": "2026-09-22T18:00:00", "codes": ["005930"],
+                            "items": [{"stk_cd": "005930", "stk_nm": "삼성전자"}] * 20},
+                "persistence_state": "pending",
+            }
+            route = next(
+                value for value in app.routes
+                if getattr(value, "path", "") == "/api/v1/market/snapshots/{kind}"
+            )
+            live = asyncio.run(route.endpoint(
+                kind="top20_membership", subject="2026-09-22", limit=1,
+                prefer_live=True,
+            ))
+            persisted = asyncio.run(route.endpoint(
+                kind="top20_membership", subject="2026-09-22", limit=1,
+                prefer_live=False,
+            ))
+
+        self.assertEqual("pending", live["snapshots"][0]["persistence_state"])
+        self.assertEqual([], persisted["snapshots"])
 
     def test_mock_account_monitor_is_wired_only_with_explicit_mock_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

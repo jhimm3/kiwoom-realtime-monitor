@@ -75,6 +75,22 @@ class AutonomousTop20Service:
         self._account_entry_codes: tuple[str, ...] = ()
         self._pending_index_records: dict[str, dict[str, Any]] = {}
         self._pending_program_snapshots: dict[str, dict[str, Any]] = {}
+        self._latest_membership_snapshot: dict[str, Any] | None = None
+
+    def latest_membership_snapshot(self, subject: str = "") -> dict[str, Any] | None:
+        """Return the latest validated 20-slot projection without waiting for persistence."""
+        value = self._latest_membership_snapshot
+        if value is None or (subject and str(value["subject"]) != subject):
+            return None
+        payload = value["payload"]
+        return {
+            **value,
+            "payload": {
+                **payload,
+                "codes": list(payload["codes"]),
+                "items": [dict(item) for item in payload["items"]],
+            },
+        }
 
     async def start(self) -> None:
         if self._tasks:
@@ -169,6 +185,17 @@ class AutonomousTop20Service:
         membership = {
             "observed_at": snapshot_key, "codes": list(codes), "items": items,
         }
+        # Only a fresh, complete 20-slot response reaches this point. Publish
+        # that validated projection before PostgreSQL persistence so the
+        # desktop's live limit=1 read is not delayed by storage latency.
+        projection_saved_at = time.time()
+        self._latest_membership_snapshot = {
+            "subject": day,
+            "snapshot_key": snapshot_key,
+            "saved_at": projection_saved_at,
+            "payload": membership,
+            "persistence_state": "pending",
+        }
         persistence_started_at = time.monotonic()
         await asyncio.to_thread(
             self._store.save_dataset_snapshot,
@@ -184,6 +211,14 @@ class AutonomousTop20Service:
                 source="nas-autonomous-ka00198",
             ),
         )
+        if (
+            self._latest_membership_snapshot is not None
+            and self._latest_membership_snapshot["snapshot_key"] == snapshot_key
+        ):
+            self._latest_membership_snapshot = {
+                **self._latest_membership_snapshot,
+                "persistence_state": "persisted",
+            }
         logger.info(
             "NAS TOP20 최신 순위 저장 완료: 회차=%s 종목=%d 조회후_ms=%d 저장_ms=%d",
             snapshot_key, len(codes),
