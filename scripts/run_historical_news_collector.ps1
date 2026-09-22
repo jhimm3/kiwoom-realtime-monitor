@@ -1,12 +1,12 @@
 param(
-    [ValidateRange(1, 10000)]
+    [ValidateRange(1, 100000)]
     [int]$Jobs = 50,
 
     [ValidateRange(1, 100)]
     [int]$MaxPages = 100,
 
     [ValidateRange(0.0, 60.0)]
-    [double]$RequestDelay = 0.2,
+    [double]$RequestDelay = 0.5,
 
     [ValidateRange(1, 8)]
     [int]$SearchWorkers = 4,
@@ -97,6 +97,15 @@ try {
             # collector moving so another job failure cannot stop the queue.
             $detail = ($output | ForEach-Object { [string]$_ }) -join ' '
             Write-Log "news job failed and was retained for retry: $detail"
+        }
+        elseif ($collectorExitCode -eq 3) {
+            $detail = ($output | ForEach-Object { [string]$_ }) -join ' '
+            if ($detail -match 'HTTP Error (403|429)') {
+                Write-Log "Naver search throttled; job returned to pending, retrying after 60 seconds: $detail"
+                Start-Sleep -Seconds 60
+                continue
+            }
+            throw "news-run exited with code ${collectorExitCode}: $detail"
         }
         elseif ($collectorExitCode -ne 0) {
             $detail = ($output | ForEach-Object { [string]$_ }) -join ' '

@@ -254,7 +254,7 @@ class HistoricalCollectionMonitor(tk.Tk):
             messagebox.showinfo("뉴스 수집기", "뉴스 수집기가 이미 실행 중입니다.")
             return
         NEWS_STOP.unlink(missing_ok=True)
-        self._launch("run_historical_news_collector.ps1", 10000)
+        self._launch("run_historical_news_collector.ps1", 100000)
 
     def start_daishin(self) -> None:
         if not _is_admin():
