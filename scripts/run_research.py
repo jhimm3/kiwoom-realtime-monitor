@@ -126,6 +126,16 @@ def execute_research(
         raise ValueError('independent partition requires a matching explicit session profile')
     bundle_replay = dataset.manifest.get("runtime_input_version") == "continuous_bundle_replay/v1"
     partition_replay = dataset.manifest.get('runtime_input_version') in (DEVELOPMENT_INPUT_VERSION, FINAL_INPUT_VERSION)
+    historical_reconstruction = (
+        dataset.manifest.get('runtime_input_version') == 'historical_reconstruction_strategy/v1'
+    )
+    if historical_reconstruction:
+        if dataset.manifest.get('not_contemporaneous_top20') is not True:
+            raise ValueError('historical reconstruction input is missing its population boundary')
+        if config.rank_persistence_enabled:
+            raise ValueError('historical reconstruction does not support the contemporaneous rank factor')
+        if session_profile not in (None, 'krx-regular/v1'):
+            raise ValueError('historical reconstruction currently supports krx-regular/v1 only')
     if bundle_replay and (session_profile is None or
             research_session_profile_document(session_profile) != dataset.manifest.get("research_session_profile")):
         raise ValueError("research bundle requires a matching explicit session profile")
@@ -175,7 +185,10 @@ def execute_research(
             else:
                 bars = replay_krx_minute_bars(dataset.observations, as_of=cutoff, strict=True,
                                             session_profile=session_profile or "krx-regular/v1")
-                universe = replay_candidate_universe(dataset.observations, as_of=cutoff)
+                universe = replay_candidate_universe(
+                    dataset.observations, as_of=cutoff,
+                    kinds=("historical_candidate_population",) if historical_reconstruction else ("top20_membership",),
+                )
             revision_id = str(observation.get("revision_id", ""))
             evaluation_bar = next(
                 (bar for bar in bars if bar.revision_id == revision_id), None,
@@ -449,8 +462,9 @@ def _run_spec(
         for factor_id in family.factor_ids
     }
     factor_versions["market_regime"] = FACTOR_VERSION
+    historical_reconstruction = input_manifest.get('runtime_input_version') == 'historical_reconstruction_strategy/v1'
     document = {
-        "mode": "historical_replay",
+        "mode": "historical_reconstruction" if historical_reconstruction else "historical_replay",
         "data_manifest_hash": hashlib.sha256(
             _canonical_json(input_manifest).encode("utf-8"),
         ).hexdigest(),
@@ -461,7 +475,7 @@ def _run_spec(
         "parameters": config.to_dict(),
         "initial_state": StrategyState().to_dict(),
         "seed": 0,
-        "clock": "observation_available_at",
+        "clock": "historical_bar_close" if historical_reconstruction else "observation_available_at",
         "ordering": "available_at,accepted_sequence,revision_id",
         "cost_model": (
             execution_config.cost_model.to_dict() if execution_config.cost_model else None

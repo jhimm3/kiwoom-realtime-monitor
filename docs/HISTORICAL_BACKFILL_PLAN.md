@@ -134,4 +134,16 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 
 종목·일별 해상도는 실제 저장 행을 기준으로 1분 우선, 없으면 5분, 둘 다 없으면 `unavailable`이다. 한 사례에 1분과 5분을 중복 입력하지 않고 5분 내부 경로를 합성하지 않는다. 뉴스는 검증된 발행시각뿐 아니라 원문 차단·시각 미확인 같은 상태도 관계 근거로 보존하되 `publication_time_verified`와 학습 제외 사유를 유지한다.
 
-2026-09-22 첫 최종 로컬 표본 `2026-09-18-initial-v2`는 2026-09-18 후보 50개 중 당시 현재 수집이 끝난 2개 종목의 1분봉 762행, 뉴스 관계 3,497행을 포함했다. 뉴스 관계는 발행시각 확인 2,056개, 원문 차단 1,295개, 시각 없음 74개와 그 밖의 실패 상태를 manifest에 분리했다. 나머지 48개 종목·일은 빈 봉을 만들어 채우지 않고 미확보로 집계했다. 수집이 계속되므로 이 표본은 불변으로 두고, 더 넓은 자료가 필요하면 새 dataset ID의 export를 만든다. 다음 D03 범위는 이 입력을 지원하는 기존 전략 Family의 명시적 평가 어댑터와 입력/결과 기간 분리다.
+2026-09-22 첫 최종 로컬 표본 `2026-09-18-initial-v2`는 2026-09-18 후보 50개 중 당시 현재 수집이 끝난 2개 종목의 1분봉 762행, 뉴스 관계 3,497행을 포함했다. 뉴스 관계는 발행시각 확인 2,056개, 원문 차단 1,295개, 시각 없음 74개와 그 밖의 실패 상태를 manifest에 분리했다. 나머지 48개 종목·일은 빈 봉을 만들어 채우지 않고 미확보로 집계했다. 수집이 계속되므로 이 표본은 불변으로 두고, 더 넓은 자료가 필요하면 새 dataset ID의 export를 만든다.
+
+후속 어댑터는 후보일 장 마감 뒤의 날짜만 전략 결과 구간으로 인정한다. `2026-09-18-through-2026-09-21-v1`에서 파생한 `historical-strategy-input/2026-09-18-v1`은 후보 50개와 000150·005930의 2026-09-21 정규장 1분봉 각 381개를 포함한다. 원자료 `available_at`은 payload에 보존하고, 재생 순서에만 명시적인 `historical_bar_close` clock을 사용한다. 5분봉과 진행 중·실패 작업의 봉은 기존 1분 전략 입력에서 제외한다.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_historical_reconstruction.py `
+  --candidate-database <후보DB> --intelligence-database data\historical_intelligence.sqlite3 `
+  --dates 2026-09-18 --outcome-end-date 2026-09-21 --output <복원출력>
+.\.venv\Scripts\python.exe scripts\prepare_historical_research_input.py `
+  --source <복원출력> --date 2026-09-18 --output <연구입력>
+```
+
+기존 runner는 `historical_candidate_population`을 명시적인 복원 입력에서만 허용한다. 이 모집단은 20개로 자르지 않으며 `top20_membership`으로 이름을 바꾸지 않는다. 당시 순위 연속성이 없으므로 rank persistence를 켠 설정은 실행 전에 거부한다. 가격 Factor·Paper 실행 계약은 재사용하지만, 실제 정책 비교는 수집 범위와 평가 분할·비용 가정을 고정한 뒤 수행한다.

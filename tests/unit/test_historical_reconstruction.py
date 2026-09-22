@@ -10,9 +10,12 @@ from pathlib import Path
 
 from kiwoom_monitor.infrastructure.historical_backfill import initialize_probe_database
 from kiwoom_monitor.infrastructure.historical_reconstruction import (
+    adapt_historical_reconstruction_for_research,
     export_historical_reconstruction,
     load_historical_reconstruction,
+    write_historical_research_input,
 )
+from kiwoom_monitor.infrastructure.research_data_source import load_frozen_research_export
 
 
 class HistoricalReconstructionTests(unittest.TestCase):
@@ -112,6 +115,71 @@ class HistoricalReconstructionTests(unittest.TestCase):
             (output / "records.jsonl").write_text(json.dumps({"ordinal": 1}) + "\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "hash"):
                 load_historical_reconstruction(output)
+
+    def test_outcome_window_adapts_only_complete_one_minute_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.sqlite3"
+            intelligence = root / "intelligence.sqlite3"
+            with closing(sqlite3.connect(candidate)) as connection, connection:
+                connection.executescript("""
+                    CREATE TABLE stocks(code TEXT PRIMARY KEY, name TEXT);
+                    CREATE TABLE candidate_days(
+                        dt TEXT, code TEXT, score REAL, reasons TEXT,
+                        rank_value INTEGER, rank_gain INTEGER, rank_high INTEGER,
+                        rank_volume_ratio INTEGER, gain_pct REAL, high_pct REAL,
+                        volume_ratio REAL, trading_value INTEGER,
+                        PRIMARY KEY(dt, code)
+                    );
+                    INSERT INTO stocks VALUES('005930','삼성전자');
+                    INSERT INTO candidate_days VALUES
+                      ('2024-01-02','005930',9.5,'value',1,2,3,4,5,6,7,800);
+                """)
+            initialize_probe_database(intelligence)
+            with closing(sqlite3.connect(intelligence)) as connection, connection:
+                connection.execute(
+                    "CREATE TABLE market_backfill_jobs(code TEXT PRIMARY KEY,state TEXT)"
+                )
+                connection.execute("INSERT INTO market_backfill_jobs VALUES('005930','complete')")
+                for minute, close in ((1, 100), (2, 101), (3, 103)):
+                    timestamp = f"2024-01-03T09:{minute:02d}:00+09:00"
+                    connection.execute(
+                        "INSERT INTO market_bars VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        ("daishin_creon", "005930", "K", "regular", 60, "raw",
+                         timestamp, "interval_end", 20240103, 900 + minute,
+                         close, close + 1, close - 1, close, 100, 10_000_000,
+                         "2026-09-22T02:00:00+00:00", "2026-09-22T02:00:00+00:00"),
+                    )
+                connection.execute(
+                    "INSERT INTO market_bars VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    ("daishin_creon", "005930", "K", "regular", 300, "raw",
+                     "2024-01-03T09:05:00+09:00", "interval_end", 20240103, 905,
+                     100, 104, 99, 103, 300, 30_000_000,
+                     "2026-09-22T02:00:00+00:00", "2026-09-22T02:00:00+00:00"),
+                )
+            output = root / "export"
+            export_historical_reconstruction(
+                candidate, intelligence, output, dates=("2024-01-02",),
+                outcome_end_date="2024-01-03",
+            )
+            source = load_historical_reconstruction(output)
+            derived = adapt_historical_reconstruction_for_research(
+                source, selected_date="2024-01-02",
+            )
+
+            self.assertEqual("2024-01-03", source.manifest["temporal_split"]["outcome_end_date"])
+            self.assertEqual(4, len(derived.observations))
+            self.assertEqual("historical_candidate_population", derived.observations[0]["kind"])
+            self.assertEqual(3, sum(row["kind"] == "minute_bar" for row in derived.observations))
+            bar = derived.observations[1]
+            self.assertEqual("2024-01-03T09:01:00+09:00", bar["available_at"])
+            self.assertEqual("2026-09-22T02:00:00+00:00", bar["payload"]["source_available_at"])
+            self.assertEqual(10, bar["payload"]["trade_value_million_won"])
+            research_output = root / "research-input"
+            write_historical_research_input(derived, research_output)
+            verified = load_frozen_research_export(research_output)
+            self.assertEqual(derived.manifest["dataset_id"], verified.manifest["dataset_id"])
+            self.assertEqual(derived.observations, verified.observations)
 
 
 if __name__ == "__main__":

@@ -37,6 +37,8 @@ NAS의 `stock_aliases` 1,164행을 사용해 94,750개 후보 종목·일의 당
 
 외부 자료를 기존 strict TOP20 재생에 섞지 않기 위해 `historical_reconstruction/v1` 입력 계약과 hash 검증 loader를 추가했다. 후보는 `posthoc_candidate_days/v1`, `not_contemporaneous_top20=true`로 고정하고 후보 생성시각을 알 수 없으므로 export 시각을 `available_at`으로 쓴다. 봉과 뉴스는 실제 수집 관측시각을 유지하며, 종목·일에 1분봉이 있으면 1분만 선택하고 없을 때만 5분을 선택한다. 5분을 1분으로 확장하지 않는다. 첫 최종 로컬 표본 `data/research/historical-reconstruction/2026-09-18-initial-v2`는 후보 50개, 현재 확보된 1분봉 종목 2개, 미확보 48개, 봉 762행, 뉴스 관계 3,497행을 고정했다. 뉴스 관계 중 발행시각 확인 2,056개와 차단 1,295개, 시각 없음 74개 등 제외 상태도 manifest에 따로 집계한다. 이는 입력 연결 표본이며 기존 전략 평가나 학습 완료를 뜻하지 않는다.
 
+후보일과 결과 구간을 분리한 복원본 `data/research/historical-reconstruction/2026-09-18-through-2026-09-21-v1`도 만들었다. 어댑터는 후보 50개를 `historical_candidate_population`으로 유지하고, 수집 작업이 완료된 000150·005930의 다음 거래일 1분봉 각 381개만 `data/research/historical-strategy-input/2026-09-18-v1`에 넣었다. 연구 clock은 2026-09-21 실제 봉 종료시각을 쓰되 원자료가 실제 확보된 2026-09-22 수집시각은 각 payload의 `source_available_at`에 남긴다. 기존 두 전략 Family의 가격 Factor는 이 입력을 실행할 수 있지만 당시 TOP20 자료가 아니므로 rank persistence Factor는 runner에서 거부한다. 현재 정책을 최종값으로 정하지 않았으므로 이 단계에서는 실제 성과 비교 결과를 만들지 않았다.
+
 수집 진행률은 NAS `deploy/synology/server-data/historical-intelligence/v1/STATUS.md`와 `status.json`에 게시한다. 발행시각이 검증된 과거 기사는 기존 인증된 `news_article` content 경로로 증분 전송하며, NAS 운영 DB에서 `naver_historical_web`/`historical_backfill` revision으로 저장된 뒤 기존 BODY 작업기가 원문을 처리한다. 별도 역사 SQLite 스냅샷 자체를 운영 뉴스 DB로 열거나 덮어쓰지 않는다.
 
 기존 후보 DB는 읽기 전용으로 확인했다. 94,750개 후보 종목·일, 5,910,806개 일봉, 4,562,200개 분봉이 있고 분봉 작업 완료 중 81,901건은 0행이었다. 실제 확보 범위와 다음 작업은 [과거 자료 확보 기획](HISTORICAL_BACKFILL_PLAN.md)에 적었다.

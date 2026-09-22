@@ -55,7 +55,8 @@ def normalize_candidate_codes(observation: Mapping[str, Any]) -> tuple[str, ...]
     if not isinstance(payload, Mapping):
         return ()
     raw_codes: list[object] = []
-    if observation.get("kind") == "top20_membership" and isinstance(payload.get("codes"), list):
+    kind = observation.get("kind")
+    if kind in {"top20_membership", "historical_candidate_population"} and isinstance(payload.get("codes"), list):
         raw_codes = list(payload["codes"])
     elif isinstance(payload.get("items"), list):
         raw_codes = [
@@ -63,12 +64,14 @@ def normalize_candidate_codes(observation: Mapping[str, Any]) -> tuple[str, ...]
             for row in payload["items"] if isinstance(row, Mapping)
         ]
     normalized = (normalize_stock_code(value) for value in raw_codes)
-    return tuple(dict.fromkeys(code for code in normalized if code))[:20]
+    values = tuple(dict.fromkeys(code for code in normalized if code))
+    return values if kind == "historical_candidate_population" else values[:20]
 
 
 def replay_candidate_universe(
     observations: Iterable[Mapping[str, Any]], *, as_of: datetime | None = None,
     chronological: bool = False,
+    kinds: tuple[str, ...] = ("top20_membership",),
 ) -> tuple[CandidateUniverseFrame, ...]:
     cutoff: datetime | None = None
     if as_of is not None:
@@ -77,7 +80,7 @@ def replay_candidate_universe(
         cutoff = as_of.astimezone(timezone.utc)
     result: list[CandidateUniverseFrame] = []
     for value in observations:
-        if value.get("kind") != "top20_membership":
+        if value.get("kind") not in kinds:
             continue
         available_text = str(value.get("available_at", ""))
         try:

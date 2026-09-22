@@ -41,6 +41,20 @@ class ResearchReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "timezone-aware"):
             replay_candidate_universe((), as_of=datetime(2026, 9, 12))
 
+    def test_historical_population_requires_explicit_kind_and_is_not_capped_at_twenty(self) -> None:
+        observation = {
+            "kind": "historical_candidate_population",
+            "revision_id": "historical",
+            "observation_key": "2024-01-02",
+            "available_at": "2024-01-03T00:00:00+00:00",
+            "payload": {"codes": [f"{index:06d}" for index in range(25)]},
+        }
+        self.assertEqual((), replay_candidate_universe((observation,)))
+        replayed = replay_candidate_universe(
+            (observation,), kinds=("historical_candidate_population",),
+        )
+        self.assertEqual(25, len(replayed[0].codes))
+
     def test_default_regular_profile_does_not_consume_new_after_market_bar(self) -> None:
         def observation(sequence: int, start: str, end: str) -> dict:
             return {

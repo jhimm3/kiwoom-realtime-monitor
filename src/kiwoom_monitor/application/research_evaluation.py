@@ -564,7 +564,10 @@ def build_research_report(
     limitations = (
         "partial_fill_model_unsupported",
         "vi_orderability_not_exported",
-    )
+    ) + ((
+        "posthoc_candidate_population_not_contemporaneous_top20",
+        "historical_bar_close_replay_clock_with_source_availability_preserved",
+    ) if input_manifest.get("runtime_input_version") == "historical_reconstruction_strategy/v1" else ())
     trades = _closed_trades(event_rows)
     candidate_by_id = {
         str(row.get("event_id", "")): row for row in candidate_rows
@@ -1065,7 +1068,13 @@ def _data_quality(
     spec: ResearchEvaluationSpec, logical_result_hash: str,
 ) -> Mapping[str, Any]:
     minute = tuple(row for row in observations if row.get("kind") == "minute_bar")
-    universe = tuple(row for row in observations if row.get("kind") == "top20_membership")
+    historical_reconstruction = (
+        manifest.get("runtime_input_version") == "historical_reconstruction_strategy/v1"
+    )
+    universe_kind = (
+        "historical_candidate_population" if historical_reconstruction else "top20_membership"
+    )
+    universe = tuple(row for row in observations if row.get("kind") == universe_kind)
     strict = tuple(row for row in minute if (
         row.get("venue") == "KRX" and row.get("completeness") == "complete"
         and row.get("value_kind") == "actual" and isinstance(row.get("payload"), Mapping)
@@ -1077,6 +1086,8 @@ def _data_quality(
         reasons.append("strict_krx_minute_bars_missing")
     if not universe:
         reasons.append("candidate_universe_missing")
+    if historical_reconstruction and manifest.get("not_contemporaneous_top20") is not True:
+        reasons.append("historical_population_boundary_missing")
     revision_ids = [str(row.get("revision_id", "")) for row in observations]
     actual_hash = hashlib.sha256("\n".join(revision_ids).encode("utf-8")).hexdigest()
     reproducible = (

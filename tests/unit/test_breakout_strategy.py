@@ -193,6 +193,57 @@ class BreakoutStrategyTests(unittest.TestCase):
         self.assertEqual(first.logical_result_hash, second.logical_result_hash)
         self.assertEqual(0, first.decision_count)
 
+    def test_historical_reconstruction_population_runs_without_rank_semantics(self) -> None:
+        observations = [{
+            "ordinal": 1, "accepted_sequence": 1, "revision_id": "population",
+            "kind": "historical_candidate_population", "subject": "2026-09-11",
+            "observation_key": "2026-09-11", "available_at": "2026-09-12T00:00:00+00:00",
+            "payload": {"codes": ["005930"], "not_contemporaneous_top20": True},
+        }]
+        for index, (close, high) in enumerate(((1000, 1010), (1010, 1020), (1030, 1040))):
+            bar = _bar(index, close, high)
+            observations.append({
+                "ordinal": index + 2, "accepted_sequence": index + 2,
+                "revision_id": bar.revision_id, "kind": "minute_bar",
+                "subject": "005930:KRX", "venue": "KRX",
+                "observation_key": bar.observation_key, "available_at": bar.bar_end,
+                "completeness": "complete", "value_kind": "actual", "payload": {
+                    "market": "KRX", "code": "005930", "bar_start": bar.bar_start,
+                    "bar_end": bar.bar_end, "open": bar.open, "high": bar.high,
+                    "low": bar.low, "close": bar.close, "volume": bar.volume,
+                    "trade_value_million_won": bar.trade_value_million_won,
+                    "window_closed": True, "capture_quality": "complete",
+                    "finalization_source": "daishin_completed_history_job",
+                    "source_available_at": "2026-09-22T00:00:00+00:00",
+                },
+            })
+        revision_ids = [row["revision_id"] for row in observations]
+        dataset = FrozenResearchDataset({
+            "runtime_input_version": "historical_reconstruction_strategy/v1",
+            "dataset_id": "historical-fixture", "revision_count": len(observations),
+            "revision_ids_hash": hashlib.sha256("\n".join(revision_ids).encode()).hexdigest(),
+            "not_contemporaneous_top20": True,
+        }, tuple(observations))
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ResearchRepository(Path(directory) / "research.sqlite3")
+            result = execute_research(
+                dataset, repository, Path(directory) / "runs", _config(), _execution_config(),
+                _evaluation_spec(),
+            )
+            report = repository.load_research_report(result.run_id)
+            with self.assertRaisesRegex(ValueError, "does not support.*rank"):
+                execute_research(
+                    dataset, repository, Path(directory) / "rank-runs",
+                    _config(rank_persistence_enabled=True), _execution_config(),
+                )
+        self.assertEqual(3, result.decision_count)
+        self.assertEqual(1, result.candidate_count)
+        self.assertNotIn("candidate_universe_missing", report["data_quality"]["reasons"])
+        self.assertIn(
+            "posthoc_candidate_population_not_contemporaneous_top20",
+            report["limitations"],
+        )
+
     def test_disabled_rank_parameters_do_not_change_run_identity(self) -> None:
         manifest = {"dataset_id": "empty", "revision_ids_hash": "zero", "revision_count": 0}
         dataset = FrozenResearchDataset(manifest, ())
