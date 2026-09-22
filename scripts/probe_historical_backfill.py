@@ -71,25 +71,108 @@ def _article_request_host(item: object) -> str:
     return (urlparse(source).hostname or "unknown").lower()
 
 
+class _ArticleFetchPool:
+    """Keep article downloads moving while the next search pages are discovered."""
+
+    def __init__(
+        self, *, workers: int, article_delay: float,
+        fetcher: object = fetch_article_publication,
+    ) -> None:
+        self._limiter = _ArticleHostLimiter(article_delay)
+        self._fetcher = fetcher
+        self._pool = ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="news-article",
+        )
+        self._futures = {}
+
+    def _fetch_one(self, item: object):
+        with self._limiter.slot(_article_request_host(item)):
+            return self._fetcher(item)  # type: ignore[operator]
+
+    def submit(self, item: object) -> None:
+        future = self._pool.submit(self._fetch_one, item)
+        self._futures[future] = item
+
+    def drain(self, *, wait: bool = False):
+        futures = list(self._futures)
+        ready = as_completed(futures) if wait else (
+            future for future in futures if future.done()
+        )
+        for future in ready:
+            item = self._futures.pop(future)
+            yield item, future.result()
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+
+class _RequestStartLimiter:
+    def __init__(self, interval: float) -> None:
+        self._interval = max(0.0, interval)
+        self._lock = threading.Lock()
+        self._next_start = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            delay = self._next_start - now
+            if delay > 0:
+                time.sleep(delay)
+            self._next_start = time.monotonic() + self._interval
+
+
+class _SearchPagePool:
+    """Overlap Naver search responses without exceeding the configured start rate."""
+
+    def __init__(
+        self, *, workers: int, request_delay: float,
+        fetcher: object = fetch_naver_historical_search_page,
+    ) -> None:
+        self._limiter = _RequestStartLimiter(request_delay)
+        self._fetcher = fetcher
+        self._pool = ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="news-search",
+        )
+
+    def fetch_batch(self, job: object, page_indexes: list[int]):
+        def fetch(page_index: int):
+            self._limiter.wait()
+            page = self._fetcher(  # type: ignore[operator]
+                getattr(job, "code"), getattr(job, "query_text"),
+                getattr(job, "target_date"), 1 + page_index * 10,
+            )
+            return page_index, page
+
+        futures = [self._pool.submit(fetch, page_index) for page_index in page_indexes]
+        return sorted((future.result() for future in futures), key=lambda row: row[0])
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+
 def _fetch_article_publications(
     items: list[object], *, workers: int, article_delay: float,
     fetcher: object = fetch_article_publication,
 ):
     """Yield article fetches as they finish, with one active request per host."""
-    limiter = _ArticleHostLimiter(article_delay)
-
-    def fetch_one(item: object):
-        with limiter.slot(_article_request_host(item)):
-            return item, fetcher(item)  # type: ignore[operator]
-
-    if workers == 1:
+    with _ArticleFetchPool(
+        workers=workers, article_delay=article_delay, fetcher=fetcher,
+    ) as pool:
         for item in items:
-            yield fetch_one(item)
-        return
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="news-article") as pool:
-        futures = [pool.submit(fetch_one, item) for item in items]
-        for future in as_completed(futures):
-            yield future.result()
+            pool.submit(item)
+        yield from pool.drain(wait=True)
 
 
 def _write_news_heartbeat(
@@ -180,6 +263,7 @@ def main() -> int:
     news_run.add_argument("--jobs", type=int, default=1)
     news_run.add_argument("--max-pages", type=int, default=100)
     news_run.add_argument("--request-delay", type=float, default=0.5)
+    news_run.add_argument("--search-workers", type=int, default=1)
     news_run.add_argument("--article-delay", type=float, default=0.2)
     news_run.add_argument("--article-workers", type=int, default=1)
     news_run.add_argument("--heartbeat-file", type=Path)
@@ -230,6 +314,8 @@ def main() -> int:
             parser.error("--jobs must be between 1 and 10000")
         if args.max_pages < 1 or args.max_pages > 100:
             parser.error("--max-pages must be between 1 and 100")
+        if args.search_workers < 1 or args.search_workers > 8:
+            parser.error("--search-workers must be between 1 and 8")
         if args.article_workers < 1 or args.article_workers > 16:
             parser.error("--article-workers must be between 1 and 16")
         completed_jobs = 0
@@ -248,51 +334,83 @@ def main() -> int:
             _write_news_heartbeat(args.heartbeat_file, job, "claimed")
             try:
                 exhausted = False
-                for page_index in range(args.max_pages):
-                    _write_news_heartbeat(
-                        args.heartbeat_file, job, "search_page",
-                        page=page_index + 1, pages_observed=pages_observed,
-                        items_observed=items_observed,
-                    )
-                    page = fetch_naver_historical_search_page(
-                        job.code, job.query_text, job.target_date, 1 + page_index * 10,
-                    )
-                    store_naver_historical_search_page(args.output, page)
-                    pages_observed += 1
-                    items_observed += len(page.items)
-                    pending_items = []
-                    statuses = {}
-                    for item in page.items:
-                        status = article_publication_status(args.output, item)
-                        statuses[(item.office_id, item.article_id)] = status
-                        if status in {"", "not_fetched"}:
-                            pending_items.append(item)
-                    completed_articles = 0
-                    for item, result in _fetch_article_publications(
-                        pending_items, workers=args.article_workers,
-                        article_delay=args.article_delay,
-                    ):
+                statuses = {}
+                occurrences = []
+                scheduled = set()
+                completed_articles = 0
+                with _SearchPagePool(
+                    workers=args.search_workers, request_delay=args.request_delay,
+                ) as search_pool, _ArticleFetchPool(
+                    workers=args.article_workers, article_delay=args.article_delay,
+                ) as article_pool:
+                    batch_start = 0
+                    while batch_start < args.max_pages:
+                        batch_width = 1 if batch_start == 0 else args.search_workers
+                        indexes = list(range(
+                            batch_start,
+                            min(args.max_pages, batch_start + batch_width),
+                        ))
+                        _write_news_heartbeat(
+                            args.heartbeat_file, job, "search_page",
+                            page=indexes[0] + 1, pages_observed=pages_observed,
+                            items_observed=items_observed,
+                        )
+                        batch = search_pool.fetch_batch(job, indexes)
+                        for page_index, page in batch:
+                            _write_news_heartbeat(
+                                args.heartbeat_file, job, "search_page",
+                                page=page_index + 1, pages_observed=pages_observed,
+                                items_observed=items_observed,
+                            )
+                            store_naver_historical_search_page(args.output, page)
+                            pages_observed += 1
+                            items_observed += len(page.items)
+                            for item in page.items:
+                                key = (item.office_id, item.article_id)
+                                occurrences.append(key)
+                                if key in statuses or key in scheduled:
+                                    continue
+                                status = article_publication_status(args.output, item)
+                                if status in {"", "not_fetched"}:
+                                    scheduled.add(key)
+                                    article_pool.submit(item)
+                                else:
+                                    statuses[key] = status
+                            for item, result in article_pool.drain():
+                                key = (item.office_id, item.article_id)
+                                store_article_publication_result(args.output, result)
+                                statuses[key] = result.status
+                                completed_articles += 1
+                                _write_news_heartbeat(
+                                    args.heartbeat_file, job, "article",
+                                    page=page_index + 1, pages_observed=pages_observed,
+                                    items_observed=items_observed,
+                                    article=completed_articles,
+                                )
+                            if not page.has_structured_news or len(page.items) < 10:
+                                exhausted = True
+                                break
+                        if exhausted:
+                            break
+                        batch_start += batch_width
+                    for item, result in article_pool.drain(wait=True):
+                        key = (item.office_id, item.article_id)
                         store_article_publication_result(args.output, result)
-                        statuses[(item.office_id, item.article_id)] = result.status
+                        statuses[key] = result.status
                         completed_articles += 1
                         _write_news_heartbeat(
                             args.heartbeat_file, job, "article",
-                            page=page_index + 1, pages_observed=pages_observed,
+                            page=pages_observed, pages_observed=pages_observed,
                             items_observed=items_observed, article=completed_articles,
                         )
-                    for item in page.items:
-                        status = statuses[(item.office_id, item.article_id)]
-                        if status == "published_at_found":
-                            usable += 1
-                        elif status == "time_not_found":
-                            missing_time += 1
-                        else:
-                            unreadable += 1
-                    if not page.has_structured_news or len(page.items) < 10:
-                        exhausted = True
-                        break
-                    if args.request_delay > 0:
-                        time.sleep(args.request_delay)
+                for key in occurrences:
+                    status = statuses[key]
+                    if status == "published_at_found":
+                        usable += 1
+                    elif status == "time_not_found":
+                        missing_time += 1
+                    else:
+                        unreadable += 1
                 state = "complete" if exhausted else "truncated"
                 finish_news_backfill_job(
                     args.output, job, state=state, pages_observed=pages_observed,

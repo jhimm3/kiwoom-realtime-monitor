@@ -6,13 +6,16 @@ param(
     [int]$MaxPages = 100,
 
     [ValidateRange(0.0, 60.0)]
-    [double]$RequestDelay = 0.5,
+    [double]$RequestDelay = 0.2,
+
+    [ValidateRange(1, 8)]
+    [int]$SearchWorkers = 4,
 
     [ValidateRange(0.0, 60.0)]
     [double]$ArticleDelay = 0.2,
 
     [ValidateRange(1, 16)]
-    [int]$ArticleWorkers = 8,
+    [int]$ArticleWorkers = 16,
 
     [ValidateRange(1, 1000)]
     [int]$PublishEvery = 10,
@@ -69,7 +72,7 @@ Set-Location $projectRoot
 $completed = 0
 $stopRequested = $false
 Write-State 'running' $completed
-Write-Log "collector started jobs=$Jobs max_pages=$MaxPages article_workers=$ArticleWorkers publish_every=$PublishEvery status_every=$StatusEvery"
+Write-Log "collector started jobs=$Jobs max_pages=$MaxPages search_workers=$SearchWorkers article_workers=$ArticleWorkers publish_every=$PublishEvery status_every=$StatusEvery"
 try {
     for ($index = 1; $index -le $Jobs; $index++) {
         if (Test-Path -LiteralPath $stopFile) {
@@ -81,6 +84,7 @@ try {
         $ErrorActionPreference = 'Continue'
         $output = & $python scripts\probe_historical_backfill.py news-run `
             --jobs 1 --max-pages $MaxPages --request-delay $RequestDelay `
+            --search-workers $SearchWorkers `
             --article-delay $ArticleDelay --article-workers $ArticleWorkers `
             --heartbeat-file $heartbeatFile `
             --output $Database 2>&1
