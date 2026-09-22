@@ -283,7 +283,7 @@ class HistoricalCollectionMonitor(tk.Tk):
             messagebox.showinfo("대신 수집기", "대신 수집기가 이미 실행 중입니다.")
             return
         DAISHIN_STOP.unlink(missing_ok=True)
-        self._launch("run_daishin_collector.ps1", 1000)
+        self._launch("run_daishin_collector.ps1", 10000)
 
     def stop_news(self) -> None:
         NEWS_STOP.parent.mkdir(parents=True, exist_ok=True)

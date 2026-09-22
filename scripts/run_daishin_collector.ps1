@@ -1,5 +1,5 @@
 param(
-    [ValidateRange(1, 1000)]
+    [ValidateRange(1, 10000)]
     [int]$Jobs = 3,
 
     [string]$Reference = "data\nas_reference_inspect_20260922\historical_reference.sqlite3",

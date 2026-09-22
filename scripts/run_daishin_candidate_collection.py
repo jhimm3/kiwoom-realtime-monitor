@@ -270,8 +270,8 @@ def main() -> int:
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--seed-only", action="store_true")
     args = parser.parse_args()
-    if args.jobs < 1 or args.jobs > 1000:
-        parser.error("--jobs must be between 1 and 1000")
+    if args.jobs < 1 or args.jobs > 10000:
+        parser.error("--jobs must be between 1 and 10000")
     reference, database = args.reference.resolve(strict=True), args.database.resolve()
     heartbeat = args.heartbeat_file.resolve()
     stop_file = args.stop_file.resolve()
