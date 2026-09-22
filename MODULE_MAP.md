@@ -51,6 +51,8 @@
 | `scripts/plan_historical_news_event_split.py`, `application/historical_news_event_split.py` | 사람 검토 관련 기사를 canonical event 단위로 유지한 시간순 TRAIN·VALIDATION·봉인 OOS 불변 계획. 무관·보류와 일부 검토 상태를 분리 |
 | `scripts/prepare_historical_news_development_inputs.py`, `application/historical_news_development_inputs.py`, `presentation/historical_news_review_dialog.py` | 사건 분할에서 TRAIN·VALIDATION 사람 검토 기사만 투영한 RAG·미세조정 비교 공통 입력. 앱과 CLI 생성 경로, OOS payload 제외와 사건 중복 금지 검증 |
 | `scripts/prepare_historical_news_blind_validation.py`, `application/historical_news_blind_validation.py` | 공통 VALIDATION에서 사람 target·사건 ID·테마명을 제거한 방법 중립 평가 요청. 개발 dataset ID·validation hash 결합과 정답 누수 재귀 검증 |
+| `scripts/prepare_historical_news_method_results.py`, `application/historical_news_method_results.py` | prompt baseline·RAG·미세조정 예측을 동일 블라인드 요청 전체에 결합하는 불변 결과. 누락·중복·추가 응답과 OOS·정답 사용 표시 차단 |
+| `scripts/evaluate_historical_news_method.py`, `application/historical_news_method_evaluation.py` | 평가기 전용 VALIDATION target 결합, 사건 pairwise 군집·테마 집합·프로필·coverage 지표. 관련성 분류와 자동 모델 승격은 지원하지 않음 |
 | `scripts/assess_historical_development_readiness.py`, `infrastructure/historical_research_readiness.py` | 역사 개발 분할의 후보별 분봉·연속 1분쌍 완전성 gate. 희소 구조 실행은 명시적 예외 |
 | `src/kiwoom_monitor/research_process.py` | campaign worker·가설·순차/final 평가 프로세스 |
 | `scripts/run_research.py` | 기존 runner의 재생·실행·평가 저장 |

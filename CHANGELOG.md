@@ -16,6 +16,7 @@
 - 앱 개발 입력 생성까지 포함한 추적 파일 974개를 NAS와 SHA-256 불일치 0개로 동기화했다. 직전 NAS 파일 974개는 `X:\kiwoom-monitor-backups\20260923-010929-news-development-inputs-ui-v1`에 보존했고 운영 데이터·비밀 경로는 제외했다.
 - `historical_news_blind_validation/v1`은 공통 개발 입력의 VALIDATION에서 `sample_id`와 `model_input`만 별도 불변 요청으로 투영한다. 사람 정답·사건 ID·테마 이름은 요청에 넣지 않고 재귀 검증으로 누수를 거절하며, 원본 개발 dataset ID와 validation 파일 hash에 요청 집합을 결합한다.
 - 블라인드 VALIDATION 계약까지 포함한 추적 파일 977개를 NAS와 SHA-256 불일치 0개로 동기화했다. 직전 NAS 파일 974개는 `X:\kiwoom-monitor-backups\20260923-012141-news-blind-validation-v1`에 보존했고 운영 데이터·비밀 경로는 제외했다.
+- `historical_news_method_results/v1`은 prompt baseline·RAG·미세조정의 예측을 동일 블라인드 요청 집합에 완전 결합하고 누락·중복·추가 표본을 거절한다. `historical_news_method_evaluation/v1`은 VALIDATION 정답을 평가기에서만 읽어 사건명과 무관한 pairwise 사건 군집 점수, 정규화 테마 집합 점수, 프로필 정확도와 기권 포함 coverage를 계산한다. 관련 기사만 있는 현재 입력에서는 관련성 분류 점수를 지원하지 않고 OOS 접근이나 자동 모델 승격도 허용하지 않는다.
 
 ## 2026-09-22 LLM 학습 준비 사례 계약
 

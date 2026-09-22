@@ -80,6 +80,8 @@ RAG·미세조정 실행기에 사람 정답이 든 `validation.jsonl`을 직접
 
 블라인드 VALIDATION 계약까지 포함한 추적 파일 977개는 NAS와 SHA-256 불일치 0개로 동기화했다. 직전 NAS 파일 974개는 `X:\kiwoom-monitor-backups\20260923-012141-news-blind-validation-v1`에 보존했고 운영 데이터·비밀 경로는 제외했다.
 
+블라인드 요청의 외부 예측을 불변 저장하는 `historical_news_method_results/v1`과 평가기 전용 `historical_news_method_evaluation/v1`도 구현했다. 결과 계약은 prompt baseline·RAG·미세조정 방법 신원과 모든 요청의 일대일 응답을 묶고, 채점기는 사건 ID 문자열 대신 pairwise 동일 사건 군집, 정규화 테마 집합, 테마 프로필 정확도와 기권 포함 coverage를 계산한다. 현재 개발 입력은 관련 기사만 있으므로 관련성 분류 정확도는 지원하지 않고, OOS 접근과 자동 모델 승격은 false다. 실제 입력과 방법 실행 결과가 없어 실제 점수 보고서는 만들지 않았다.
+
 공통 개발 입력 계약까지 포함한 추적 파일 974개는 NAS와 SHA-256 불일치 0개로 동기화했다. 직전 NAS 파일 968개는 `X:\kiwoom-monitor-backups\20260923-005948-historical-news-development-inputs-v1`에 보존했고 운영 데이터·비밀 경로는 제외했다.
 
 수집 진행률은 NAS `deploy/synology/server-data/historical-intelligence/v1/STATUS.md`와 `status.json`에 게시한다. 발행시각이 검증된 과거 기사는 기존 인증된 `news_article` content 경로로 10작업마다 증분 전송한다. 운영 중 100작업마다 게시하는 상태는 작업 원장만 빠르게 집계하고, 17GB대 기사·원문시도 전체 집계는 최종 스냅샷 때 수행한다. 과거 뉴스 검색은 요청 시작 간격 0.5초를 유지하는 4개 작업자로 페이지 응답 대기를 겹친다. 검색과 원문 확인도 파이프라인으로 겹치고, 언론사 원문은 같은 도메인에 한 요청만 허용한 16개 작업자로 병렬 처리한다. 밀도가 50% 이상인 같은 종목·검색어·월의 대기 일자는 날짜 범위 검색으로 묶는다. 완료 표본의 일평균 페이지 수로 한 묶음을 예상 80페이지 이하로 제한하고, 표본이 없으면 일 2페이지로 계산한다. 평균 50페이지 이상인 조합은 일별 작업을 유지하며, 실제 100페이지에 도달한 범위는 날짜를 나눠 재개한다. 범위 결과의 검색 목록 날짜 또는 확인된 원문 `published_at`으로 기존 일별 원장에 다시 귀속하고 날짜를 확인할 수 없는 결과는 임의 날짜에 넣지 않는다. 네이버 검색이 HTTP 403/429를 반환하면 현재 작업을 `pending`으로 되돌리고 60초 후 자동 재개한다. NAS 운영 DB에서 `naver_historical_web`/`historical_backfill` revision으로 저장된 뒤 기존 BODY 작업기가 원문을 처리한다. 별도 역사 SQLite 스냅샷 자체를 운영 뉴스 DB로 열거나 덮어쓰지 않는다.

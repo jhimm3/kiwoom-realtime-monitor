@@ -158,6 +158,13 @@ def load_historical_news_blind_validation(path: Path) -> HistoricalNewsBlindVali
     return dataset
 
 
+def validate_historical_news_blind_validation(
+    dataset: HistoricalNewsBlindValidation,
+) -> None:
+    """Validate an in-memory blind request set before a method consumes it."""
+    _validate_dataset(dataset)
+
+
 def _validate_dataset(dataset: HistoricalNewsBlindValidation) -> None:
     manifest = dataset.manifest
     if (

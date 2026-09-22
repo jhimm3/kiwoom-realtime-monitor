@@ -165,6 +165,8 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 
 `scripts/prepare_historical_news_blind_validation.py`는 개발 입력의 VALIDATION을 모델 실행용 `historical_news_blind_validation/v1` 요청으로 투영한다. `requests.jsonl`에는 `sample_id`와 `model_input`만 있고 `human_target`, 관련성, canonical event ID, 테마 프로필·테마명은 포함할 수 없다. RAG와 미세조정 실행은 이 같은 요청 집합 ID를 사용하고, 채점 단계만 별도로 원본 validation target을 읽는다. 이 요청은 학습 자료가 아니므로 `training_allowed=false`다.
 
+외부 방법의 JSONL 예측은 `scripts/prepare_historical_news_method_results.py`가 `historical_news_method_results/v1`으로 저장한다. 블라인드 요청의 모든 `sample_id`가 정확히 한 번 있어야 하며, 방법 종류·공급자·모델·구현 버전·RAG index 또는 미세조정 artifact ID를 결과 hash에 결합한다. `scripts/evaluate_historical_news_method.py`만 개발 입력의 VALIDATION target을 다시 읽어 사건 pairwise 군집, 정규화 테마 집합, 프로필 정확도, 기권 포함 coverage를 채점한다. 사건 ID 문자열 자체는 방법별 임의 표기이므로 직접 비교하지 않는다. 현재 입력은 관련 기사만 포함하므로 관련성 분류 평가는 별도 음성 표본 계약 전까지 지원하지 않는다.
+
 ### D03 첫 입력 계약
 
 `scripts/export_historical_reconstruction.py`는 선택한 후보일의 후보·현재 확보된 대신 봉·뉴스 근거를 `historical_reconstruction/v1` 불변 디렉터리로 만든다. `manifest.json`과 `records.jsonl`의 hash·ordinal·revision ID를 `load_historical_reconstruction`이 다시 검증한다. 이 형식은 기존 `top20_membership` 입력으로 위장하지 않으며 `strict_top20_replay_supported=false`를 필수로 둔다.
