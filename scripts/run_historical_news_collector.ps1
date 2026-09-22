@@ -65,12 +65,16 @@ try {
             Write-Log 'stop file observed'
             break
         }
+        $previousErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         $output = & $python scripts\probe_historical_backfill.py news-run `
             --jobs 1 --max-pages $MaxPages --request-delay $RequestDelay `
             --article-delay $ArticleDelay --output $Database 2>&1
+        $collectorExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorAction
         foreach ($line in $output) { Write-Log ([string]$line) }
-        if ($LASTEXITCODE -ne 0) {
-            throw "news-run exited with code $LASTEXITCODE"
+        if ($collectorExitCode -ne 0) {
+            throw "news-run exited with code $collectorExitCode"
         }
         $completed += 1
         Write-State 'running' $completed
@@ -103,6 +107,7 @@ try {
     Write-Log "collector finished completed=$completed"
 }
 catch {
+    $ErrorActionPreference = 'Stop'
     Write-State 'failed' $completed $_.Exception.Message
     Write-Log "collector failed: $($_.Exception.Message)"
     exit 2

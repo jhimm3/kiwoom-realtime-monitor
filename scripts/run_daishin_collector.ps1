@@ -46,11 +46,15 @@ function Append-Output([object[]]$Lines) {
 Set-Location $projectRoot
 Write-State 'running'
 try {
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     $output = & $python scripts\run_daishin_candidate_collection.py `
         --reference $Reference --database $Database --jobs $Jobs 2>&1
+    $collectorExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $previousErrorAction
     Append-Output $output
-    if ($LASTEXITCODE -ne 0) {
-        throw "Daishin candidate collector exited with code $LASTEXITCODE"
+    if ($collectorExitCode -ne 0) {
+        throw "Daishin candidate collector exited with code $collectorExitCode"
     }
     # Elevated CREON sessions do not reliably inherit the user's X: mapping.
     # Publish the closed DB snapshot from the ordinary user session afterward.
@@ -59,6 +63,7 @@ try {
     Write-State 'complete'
 }
 catch {
+    $ErrorActionPreference = 'Stop'
     Write-State 'failed' $_.Exception.Message
     Append-Output @("collector failed: $($_.Exception.Message)")
     exit 2
