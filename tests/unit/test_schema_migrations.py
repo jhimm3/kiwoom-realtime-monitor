@@ -131,6 +131,41 @@ class SchemaMigrationTests(unittest.TestCase):
             self.assertEqual(MAIN_SCHEMA_VERSION, versions[-1][0])
             self.assertEqual("3", database.settings.get("rank_query_type"))
 
+    def test_v5_adds_theme_name_decisions_without_changing_existing_themes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            with closing(sqlite3.connect(path)) as connection:
+                profile_id = connection.execute(
+                    "SELECT profile_id FROM theme_profiles WHERE profile_name='기본 테마'"
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO profile_themes(profile_id,theme_name,default_color) "
+                    "VALUES(?,?,?)",
+                    (profile_id, "기존 테마", "#123456"),
+                )
+                connection.execute("DROP TABLE profile_theme_name_decisions")
+                connection.execute("DELETE FROM schema_migrations WHERE version=5")
+                connection.commit()
+
+            database.initialize()
+
+            with closing(sqlite3.connect(path)) as connection:
+                migration = connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=5"
+                ).fetchone()
+                theme = connection.execute(
+                    "SELECT default_color FROM profile_themes WHERE theme_name='기존 테마'"
+                ).fetchone()
+                decision_table = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='profile_theme_name_decisions'"
+                ).fetchone()
+            self.assertEqual(("profile_theme_name_decisions",), migration)
+            self.assertEqual(("#123456",), theme)
+            self.assertIsNotNone(decision_table)
+
     def test_existing_journal_data_survives_baseline_registration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

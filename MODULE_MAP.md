@@ -29,7 +29,7 @@
 | 뉴스 입력·작업 | `central_server/news_sources.py`, `central_server/news_jobs.py` | 현재 Naver 검색 수집과 BODY/RULE/AI 단계 |
 | 뉴스 판단 | `application/news_rules.py`, `application/news_grouping.py`, `application/news_analysis.py` | 규칙·사건 묶음·분석 |
 | AI 공급자 | `infrastructure/news_ai.py` | 기존 외부 공급자 연동 |
-| 테마 | `infrastructure/persistence/theme_repository.py`, `application/theme_matching.py`, `application/theme_preview.py` | 프로필·종목연결·가져오기·미리보기 |
+| 테마 | `infrastructure/persistence/theme_repository.py`, `application/theme_matching.py`, `application/theme_preview.py` | 프로필·종목연결·가져오기·미리보기, 프로필별 대표명/분리 결정 재적용 |
 | 테마 동기화 | `infrastructure/central_theme_sync.py` | 로컬 편집·pending·retry·NAS 스냅샷 |
 | 테마/시장 연구 | `application/theme_leadership.py`, `application/market_research_features.py`, `application/context_candidates.py` | 대장·시장 특징·맥락 가설 |
 | 시점 근거 | `domain/snapshot_provenance.py`, `application/trade_snapshot_context.py` | 당시 관측과 사후 보완 구분 |

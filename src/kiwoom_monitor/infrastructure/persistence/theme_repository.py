@@ -77,6 +77,12 @@ class ThemeRepository:
             if copy_current:
                 connection.execute("INSERT INTO profile_themes(profile_id, theme_name, default_color) SELECT ?, theme_name, default_color FROM profile_themes WHERE profile_id=?", (target_id, source_id))
                 connection.execute("INSERT INTO profile_stock_themes(profile_id, stock_code, theme_name, custom_color) SELECT ?, stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=?", (target_id, source_id))
+                connection.execute(
+                    "INSERT INTO profile_theme_name_decisions(profile_id,decision_kind,source_name,target_name,decision_source,updated_at) "
+                    "SELECT ?,decision_kind,source_name,target_name,decision_source,updated_at "
+                    "FROM profile_theme_name_decisions WHERE profile_id=?",
+                    (target_id, source_id),
+                )
             connection.commit()
         finally:
             connection.close()
@@ -250,13 +256,13 @@ class ThemeRepository:
                 connection.execute("DELETE FROM profile_stock_themes WHERE profile_id=? AND stock_code=?", (profile_id, code))
                 seen: set[str] = set()
                 for raw_name in themes:
-                    name = raw_name.strip()
-                    if not name or name.casefold() in seen:
-                        continue
-                    seen.add(name.casefold())
-                    color = palette[sum(map(ord, name)) % len(palette)]
-                    connection.execute("INSERT OR IGNORE INTO profile_themes(profile_id, theme_name, default_color) VALUES (?, ?, ?)", (profile_id, name, color))
-                    connection.execute("INSERT INTO profile_stock_themes(profile_id, stock_code, theme_name) VALUES (?, ?, ?)", (profile_id, code, name))
+                    for name in self._resolve_theme_names(connection, profile_id, raw_name):
+                        if name.casefold() in seen:
+                            continue
+                        seen.add(name.casefold())
+                        color = palette[sum(map(ord, name)) % len(palette)]
+                        connection.execute("INSERT OR IGNORE INTO profile_themes(profile_id, theme_name, default_color) VALUES (?, ?, ?)", (profile_id, name, color))
+                        connection.execute("INSERT INTO profile_stock_themes(profile_id, stock_code, theme_name) VALUES (?, ?, ?)", (profile_id, code, name))
             connection.commit()
         finally:
             connection.close()
@@ -303,6 +309,76 @@ class ThemeRepository:
             connection.close()
         return tuple((str(name), str(color)) for name, color in rows)
 
+    def resolve_theme_names(self, name: str) -> tuple[str, ...]:
+        """Resolve one imported/LLM label through this profile's user decisions."""
+        connection = self._connect()
+        try:
+            return self._resolve_theme_names(connection, self._profile_id(connection), name)
+        finally:
+            connection.close()
+
+    def theme_name_decisions(self) -> tuple[tuple[str, str, str, str], ...]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT decision_kind,source_name,target_name,decision_source "
+                "FROM profile_theme_name_decisions WHERE profile_id=? "
+                "ORDER BY decision_kind,source_name,target_name",
+                (self._profile_id(connection),),
+            ).fetchall()
+        finally:
+            connection.close()
+        return tuple(tuple(str(value) for value in row) for row in rows)  # type: ignore[return-value]
+
+    def keep_themes_separate(
+        self, first: str, second: str, *, decision_source: str = "user",
+    ) -> None:
+        left, right = self._ordered_pair(first, second)
+        if not left or not right or left.casefold() == right.casefold():
+            raise ValueError("서로 다른 두 테마명을 입력하세요.")
+        connection = self._connect()
+        try:
+            profile_id = self._profile_id(connection)
+            with connection:
+                connection.execute(
+                    "DELETE FROM profile_theme_name_decisions WHERE profile_id=? "
+                    "AND decision_kind='alias' AND ((source_name=? COLLATE NOCASE AND target_name=? COLLATE NOCASE) "
+                    "OR (source_name=? COLLATE NOCASE AND target_name=? COLLATE NOCASE))",
+                    (profile_id, left, right, right, left),
+                )
+                self._insert_name_decision(
+                    connection, profile_id, "keep_separate", left, right, decision_source,
+                )
+        finally:
+            connection.close()
+        self._changed()
+
+    def set_theme_alias(
+        self, alias: str, canonical: str, *, decision_source: str = "user",
+    ) -> None:
+        alias, canonical = alias.strip(), canonical.strip()
+        if not alias or not canonical or alias.casefold() == canonical.casefold():
+            raise ValueError("서로 다른 별칭과 대표 테마명을 입력하세요.")
+        connection = self._connect()
+        try:
+            profile_id = self._profile_id(connection)
+            with connection:
+                resolved = self._resolve_theme_names(connection, profile_id, canonical)
+                if len(resolved) != 1:
+                    raise ValueError("여러 테마로 분리된 이름은 대표 테마로 지정할 수 없습니다.")
+                canonical = resolved[0]
+                if alias.casefold() == canonical.casefold():
+                    raise ValueError("순환하는 테마 별칭은 저장할 수 없습니다.")
+                if self._is_kept_separate(connection, profile_id, alias, canonical):
+                    raise ValueError("사용자가 분리 유지한 테마는 별칭으로 병합할 수 없습니다.")
+                self._record_alias(
+                    connection, profile_id, alias, canonical, decision_source,
+                )
+                self._merge_theme_rows(connection, profile_id, alias, canonical)
+        finally:
+            connection.close()
+        self._changed()
+
     def set_color(self, name: str, color: str) -> None:
         connection = self._connect()
         try:
@@ -326,6 +402,11 @@ class ThemeRepository:
         try:
             profile_id = self._profile_id(connection)
             for name in names:
+                connection.execute(
+                    "DELETE FROM profile_theme_name_decisions WHERE profile_id=? "
+                    "AND (source_name=? COLLATE NOCASE OR target_name=? COLLATE NOCASE)",
+                    (profile_id, name, name),
+                )
                 connection.execute("DELETE FROM profile_stock_themes WHERE profile_id=? AND theme_name=? COLLATE NOCASE", (profile_id, name))
                 connection.execute("DELETE FROM profile_themes WHERE profile_id=? AND theme_name=? COLLATE NOCASE", (profile_id, name))
             connection.commit()
@@ -355,6 +436,7 @@ class ThemeRepository:
                 connection.execute("PRAGMA defer_foreign_keys = ON")
                 connection.execute("UPDATE profile_themes SET theme_name=? WHERE profile_id=? AND theme_name=?", (after, profile_id, before))
                 connection.execute("UPDATE profile_stock_themes SET theme_name=? WHERE profile_id=? AND theme_name=?", (after, profile_id, before))
+            self._record_alias(connection, profile_id, before, after, "user")
             connection.commit()
         finally:
             connection.close()
@@ -382,8 +464,16 @@ class ThemeRepository:
             if source is None:
                 return
             source_name, source_color = str(source[0]), str(source[1])
+            connection.execute(
+                "DELETE FROM profile_theme_name_decisions WHERE profile_id=? "
+                "AND source_name=? COLLATE NOCASE AND decision_kind IN ('alias','split_to')",
+                (profile_id, source_name),
+            )
             keep_source = False
             for target in clean_targets:
+                self._insert_name_decision(
+                    connection, profile_id, "split_to", source_name, target, "user",
+                )
                 if target.casefold() == source_name.casefold():
                     keep_source = True
                     continue
@@ -397,6 +487,12 @@ class ThemeRepository:
                     "WHERE profile_id=? AND theme_name=?",
                     (target, profile_id, source_name),
                 )
+            for index, first in enumerate(clean_targets):
+                for second in clean_targets[index + 1:]:
+                    left, right = self._ordered_pair(first, second)
+                    self._insert_name_decision(
+                        connection, profile_id, "keep_separate", left, right, "user",
+                    )
             if not keep_source:
                 connection.execute(
                     "DELETE FROM profile_stock_themes WHERE profile_id=? AND theme_name=?",
@@ -415,9 +511,135 @@ class ThemeRepository:
         connection = self._connect()
         try:
             profile_id = self._profile_id(connection)
+            connection.execute("DELETE FROM profile_theme_name_decisions WHERE profile_id=?", (profile_id,))
             connection.execute("DELETE FROM profile_stock_themes WHERE profile_id=?", (profile_id,))
             connection.execute("DELETE FROM profile_themes WHERE profile_id=?", (profile_id,))
             connection.commit()
         finally:
             connection.close()
         self._changed()
+
+    @staticmethod
+    def _ordered_pair(first: str, second: str) -> tuple[str, str]:
+        values = sorted((first.strip(), second.strip()), key=lambda value: value.casefold())
+        return values[0], values[1]
+
+    @staticmethod
+    def _insert_name_decision(
+        connection: sqlite3.Connection, profile_id: int, kind: str,
+        source: str, target: str, decision_source: str,
+    ) -> None:
+        connection.execute(
+            "INSERT INTO profile_theme_name_decisions("
+            "profile_id,decision_kind,source_name,target_name,decision_source,updated_at) "
+            "VALUES(?,?,?,?,?,CURRENT_TIMESTAMP) "
+            "ON CONFLICT(profile_id,decision_kind,source_name,target_name) DO UPDATE SET "
+            "decision_source=excluded.decision_source,updated_at=CURRENT_TIMESTAMP",
+            (profile_id, kind, source.strip(), target.strip(), decision_source.strip() or "user"),
+        )
+
+    def _record_alias(
+        self, connection: sqlite3.Connection, profile_id: int,
+        alias: str, canonical: str, decision_source: str,
+    ) -> None:
+        resolved = self._resolve_theme_names(connection, profile_id, canonical)
+        if any(alias.casefold() == target.casefold() for target in resolved):
+            raise ValueError("순환하는 테마 별칭은 저장할 수 없습니다.")
+        if len(resolved) != 1:
+            raise ValueError("여러 테마로 분리된 이름은 대표 테마로 지정할 수 없습니다.")
+        canonical = resolved[0]
+        if self._is_kept_separate(connection, profile_id, alias, canonical):
+            raise ValueError("사용자가 분리 유지한 테마는 별칭으로 병합할 수 없습니다.")
+        connection.execute(
+            "DELETE FROM profile_theme_name_decisions WHERE profile_id=? "
+            "AND source_name=? COLLATE NOCASE AND decision_kind IN ('alias','split_to')",
+            (profile_id, alias),
+        )
+        self._insert_name_decision(
+            connection, profile_id, "alias", alias, canonical, decision_source,
+        )
+
+    @staticmethod
+    def _is_kept_separate(
+        connection: sqlite3.Connection, profile_id: int, first: str, second: str,
+    ) -> bool:
+        left, right = ThemeRepository._ordered_pair(first, second)
+        return connection.execute(
+            "SELECT 1 FROM profile_theme_name_decisions WHERE profile_id=? "
+            "AND decision_kind='keep_separate' AND source_name=? COLLATE NOCASE "
+            "AND target_name=? COLLATE NOCASE",
+            (profile_id, left, right),
+        ).fetchone() is not None
+
+    @staticmethod
+    def _merge_theme_rows(
+        connection: sqlite3.Connection, profile_id: int, alias: str, canonical: str,
+    ) -> None:
+        source = connection.execute(
+            "SELECT theme_name FROM profile_themes WHERE profile_id=? AND theme_name=? COLLATE NOCASE",
+            (profile_id, alias),
+        ).fetchone()
+        if source is None:
+            return
+        target = connection.execute(
+            "SELECT theme_name FROM profile_themes WHERE profile_id=? AND theme_name=? COLLATE NOCASE",
+            (profile_id, canonical),
+        ).fetchone()
+        source_name = str(source[0])
+        canonical_name = str(target[0]) if target is not None else canonical
+        if target is None:
+            color = connection.execute(
+                "SELECT default_color FROM profile_themes WHERE profile_id=? AND theme_name=?",
+                (profile_id, source_name),
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO profile_themes(profile_id,theme_name,default_color) VALUES(?,?,?)",
+                (profile_id, canonical_name, color),
+            )
+        connection.execute(
+            "INSERT OR IGNORE INTO profile_stock_themes(profile_id,stock_code,theme_name,custom_color) "
+            "SELECT profile_id,stock_code,?,custom_color FROM profile_stock_themes "
+            "WHERE profile_id=? AND theme_name=?",
+            (canonical_name, profile_id, source_name),
+        )
+        connection.execute(
+            "DELETE FROM profile_stock_themes WHERE profile_id=? AND theme_name=?",
+            (profile_id, source_name),
+        )
+        connection.execute(
+            "DELETE FROM profile_themes WHERE profile_id=? AND theme_name=?",
+            (profile_id, source_name),
+        )
+
+    @staticmethod
+    def _resolve_theme_names(
+        connection: sqlite3.Connection, profile_id: int, raw_name: str,
+    ) -> tuple[str, ...]:
+        start = raw_name.strip()
+        if not start:
+            return ()
+
+        def resolve(name: str, seen: frozenset[str]) -> tuple[str, ...]:
+            key = name.casefold()
+            if key in seen:
+                return (name,)
+            next_seen = seen | {key}
+            split_rows = connection.execute(
+                "SELECT target_name FROM profile_theme_name_decisions WHERE profile_id=? "
+                "AND decision_kind='split_to' AND source_name=? COLLATE NOCASE ORDER BY target_name",
+                (profile_id, name),
+            ).fetchall()
+            if split_rows:
+                values: list[str] = []
+                for (target,) in split_rows:
+                    values.extend(resolve(str(target), next_seen))
+                return tuple(dict.fromkeys(values))
+            alias = connection.execute(
+                "SELECT target_name FROM profile_theme_name_decisions WHERE profile_id=? "
+                "AND decision_kind='alias' AND source_name=? COLLATE NOCASE "
+                "ORDER BY updated_at DESC,target_name LIMIT 1",
+                (profile_id, name),
+            ).fetchone()
+            return resolve(str(alias[0]), next_seen) if alias is not None else (name,)
+
+        return resolve(start, frozenset())

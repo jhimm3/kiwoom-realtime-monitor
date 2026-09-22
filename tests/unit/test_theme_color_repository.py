@@ -83,6 +83,25 @@ class ThemeColorRepositoryTests(unittest.TestCase):
             self.assertEqual(("통신장비",), repository.themes_for_stock("005930"))
             self.assertIn(("통신장비", repository.color_for_theme("통신장비")), repository.list_themes())
 
+    def test_rename_remembers_alias_for_future_profile_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            stocks = StockRepository(path)
+            stocks.upsert("005930", "삼성전자")
+            stocks.upsert("000660", "SK하이닉스")
+            repository = ThemeRepository(path)
+            repository.replace_for_stock("005930", ("호남개발",))
+
+            repository.rename_theme("호남개발", "호남클러스터")
+            repository.replace_for_stock("000660", ("호남개발",))
+
+            self.assertEqual(("호남클러스터",), repository.themes_for_stock("000660"))
+            self.assertIn(
+                ("alias", "호남개발", "호남클러스터", "user"),
+                repository.theme_name_decisions(),
+            )
+
     def test_does_not_recreate_deleted_default_profile_on_next_start(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
@@ -113,3 +132,48 @@ class ThemeColorRepositoryTests(unittest.TestCase):
             self.assertEqual(("이란", "해운"), repository.themes_for_stock("000660"))
             self.assertNotIn("해운이란", dict(repository.list_themes()))
             self.assertEqual("#123456", repository.color_for_theme("해운"))
+
+    def test_split_expands_future_imports_and_blocks_remerge(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            stocks = StockRepository(path)
+            stocks.upsert("005930", "삼성전자")
+            stocks.upsert("000660", "SK하이닉스")
+            repository = ThemeRepository(path)
+            repository.replace_for_stock("005930", ("호남개발호남클러스터",))
+
+            repository.split_theme(
+                "호남개발호남클러스터", ("호남개발", "호남클러스터"),
+            )
+            repository.replace_for_stock("000660", ("호남개발호남클러스터",))
+
+            self.assertEqual(
+                ("호남개발", "호남클러스터"), repository.themes_for_stock("000660"),
+            )
+            with self.assertRaisesRegex(ValueError, "분리 유지"):
+                repository.set_theme_alias("호남개발", "호남클러스터")
+
+    def test_theme_name_decisions_are_profile_scoped_and_copied_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = ThemeRepository(path)
+            repository.set_theme_alias("호남개발", "호남클러스터", decision_source="llm_review")
+            repository.create_profile("복사본", copy_current=True)
+            repository.create_profile("빈 프로필", copy_current=False)
+
+            repository.select_profile("복사본")
+            self.assertEqual(("호남클러스터",), repository.resolve_theme_names("호남개발"))
+            repository.select_profile("빈 프로필")
+            self.assertEqual(("호남개발",), repository.resolve_theme_names("호남개발"))
+
+    def test_rejects_alias_cycles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = ThemeRepository(path)
+            repository.set_theme_alias("호남개발", "호남클러스터")
+
+            with self.assertRaisesRegex(ValueError, "순환"):
+                repository.set_theme_alias("호남클러스터", "호남개발")

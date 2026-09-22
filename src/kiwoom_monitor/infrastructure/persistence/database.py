@@ -109,7 +109,7 @@ DEFAULT_COLUMNS = (
 )
 
 
-MAIN_SCHEMA_VERSION = 4
+MAIN_SCHEMA_VERSION = 5
 
 
 class Database:
@@ -292,6 +292,11 @@ class Database:
                         "stock_upper_limit_price_cache",
                         self._add_upper_limit_price_column,
                     ),
+                    SQLiteMigration(
+                        5,
+                        "profile_theme_name_decisions",
+                        self._create_theme_name_decisions,
+                    ),
                 )
             )
             connection.commit()
@@ -358,6 +363,21 @@ class Database:
         columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(stocks)")}
         if "upper_limit_price" not in columns:
             connection.execute("ALTER TABLE stocks ADD COLUMN upper_limit_price INTEGER")
+
+    @staticmethod
+    def _create_theme_name_decisions(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS profile_theme_name_decisions ("
+            "profile_id INTEGER NOT NULL,"
+            "decision_kind TEXT NOT NULL CHECK(decision_kind IN "
+            "('alias', 'split_to', 'keep_separate')),"
+            "source_name TEXT NOT NULL COLLATE NOCASE,"
+            "target_name TEXT NOT NULL COLLATE NOCASE,"
+            "decision_source TEXT NOT NULL DEFAULT 'user',"
+            "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(profile_id, decision_kind, source_name, target_name),"
+            "FOREIGN KEY(profile_id) REFERENCES theme_profiles(profile_id) ON DELETE CASCADE)"
+        )
 
     @staticmethod
     def _add_daily_bar_columns(connection: sqlite3.Connection) -> None:

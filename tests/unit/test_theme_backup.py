@@ -31,6 +31,7 @@ class ThemeBackupServiceTest(unittest.TestCase):
             repository.create_profile("회사")
             repository.select_profile("회사")
             repository.replace_for_stock("005930", ("AI",))
+            repository.set_theme_alias("인공지능", "AI", decision_source="llm_review")
             connection = sqlite3.connect(database_path)
             try:
                 connection.execute("UPDATE settings SET value='회사' WHERE key='theme_active_profile'")
@@ -64,3 +65,8 @@ class ThemeBackupServiceTest(unittest.TestCase):
             self.assertEqual(("반도체",), repository.themes_for_stock("005930"))
             repository.select_profile("회사")
             self.assertEqual(("AI",), repository.themes_for_stock("005930"))
+            self.assertEqual(("AI",), repository.resolve_theme_names("인공지능"))
+            self.assertIn(
+                ("alias", "인공지능", "AI", "llm_review"),
+                repository.theme_name_decisions(),
+            )

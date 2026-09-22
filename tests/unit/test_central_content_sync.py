@@ -415,6 +415,10 @@ class CentralContentSyncServiceTest(unittest.TestCase):
                 INSERT OR REPLACE INTO stock_aliases(alias,stock_code) VALUES('삼전','005930');
                 INSERT INTO theme_profiles(profile_name) VALUES('내 테마');
                 UPDATE settings SET value='내 테마' WHERE key='theme_active_profile';
+                INSERT INTO profile_theme_name_decisions(
+                    profile_id,decision_kind,source_name,target_name,decision_source
+                ) SELECT profile_id,'alias','인공지능','AI','llm_review'
+                  FROM theme_profiles WHERE profile_name='내 테마';
             """)
             connection.close()
             client = _Client()
@@ -425,6 +429,9 @@ class CentralContentSyncServiceTest(unittest.TestCase):
             self.assertEqual("내 테마", metadata["active_profile"])
             self.assertIn({"alias": "삼전", "code": "005930"}, metadata["aliases"])
             self.assertIn({"code": "005930", "name": "삼성전자", "market": "KOSPI"}, metadata["stock_catalog"])
+            profile = next(item for item in metadata["profiles"] if item["name"] == "내 테마")
+            self.assertEqual("alias", profile["theme_name_decisions"][0]["kind"])
+            self.assertEqual("인공지능", profile["theme_name_decisions"][0]["source"])
             self.assertEqual(
                 metadata["created_at"], client.saved["theme_metadata"][0]["effective_at"],
             )
@@ -432,14 +439,22 @@ class CentralContentSyncServiceTest(unittest.TestCase):
 
             connection = sqlite3.connect(main)
             connection.execute("UPDATE settings SET value='기본 테마' WHERE key='theme_active_profile'")
+            connection.execute("DELETE FROM profile_theme_name_decisions")
             connection.commit(); connection.close()
             CentralContentSyncService(client).pull(main, Path(temporary) / "missing-news.sqlite3")  # type: ignore[arg-type]
             connection = sqlite3.connect(main)
             restored = connection.execute(
                 "SELECT value FROM settings WHERE key='theme_active_profile'"
             ).fetchone()
+            restored_decision = connection.execute(
+                "SELECT decision_kind,source_name,target_name,decision_source "
+                "FROM profile_theme_name_decisions"
+            ).fetchone()
             connection.close()
             self.assertEqual(("내 테마",), restored)
+            self.assertEqual(
+                ("alias", "인공지능", "AI", "llm_review"), restored_decision,
+            )
 
     def test_pulls_central_news_and_themes_into_local_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

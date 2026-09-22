@@ -47,6 +47,7 @@ class ThemeBackupService:
                         "name": name,
                         "themes": [{"name": theme, "color": color} for theme, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
                         "stock_themes": [{"code": code, "theme": theme, "color": color} for code, theme, color in connection.execute("SELECT stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=? ORDER BY stock_code, theme_name", (profile_id,))],
+                        "theme_name_decisions": self._decision_documents(connection, profile_id),
                     })
                 return {**common, "profiles": profiles}
             return {
@@ -173,6 +174,7 @@ class ThemeBackupService:
                     "name": name,
                     "themes": [{"name": theme, "color": color} for theme, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
                     "stock_themes": [{"code": code, "theme": theme, "color": color} for code, theme, color in connection.execute("SELECT stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=? ORDER BY stock_code, theme_name", (profile_id,))],
+                    "theme_name_decisions": self._decision_documents(connection, profile_id),
                 })
             document = {
                 "format": self.FORMAT, "version": self.VERSION, "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -223,6 +225,9 @@ class ThemeBackupService:
                         for item in assignments:
                             if isinstance(item, dict) and str(item.get("code", "")).strip() and str(item.get("theme", "")).strip():
                                 connection.execute("INSERT OR IGNORE INTO profile_stock_themes(profile_id, stock_code, theme_name, custom_color) VALUES (?, ?, ?, ?)", (profile_id, str(item["code"]), str(item["theme"]).strip(), item.get("color") or None))
+                    decisions = profile.get("theme_name_decisions", [])
+                    if isinstance(decisions, list):
+                        self._import_name_decisions(connection, profile_id, decisions)
                 if not connection.execute("SELECT 1 FROM theme_profiles").fetchone():
                     connection.execute("INSERT INTO theme_profiles(profile_name) VALUES ('기본 테마')")
                 active_profile = str(document.get("active_profile", "")).strip()
@@ -258,6 +263,7 @@ class ThemeBackupService:
                 "format": self.FORMAT, "version": self.VERSION, "created_at": datetime.now().isoformat(timespec="seconds"), "profile": profile_name,
                 "themes": [{"name": name, "color": color} for name, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
                 "stock_themes": [{"code": code, "theme": theme, "color": color} for code, theme, color in connection.execute("SELECT stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=? ORDER BY stock_code, theme_name", (profile_id,))],
+                "theme_name_decisions": self._decision_documents(connection, profile_id),
                 "aliases": [{"alias": alias, "code": code} for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")],
                 "stock_catalog": [{"code": code, "name": name, "market": market} for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")],
             }
@@ -285,13 +291,65 @@ class ThemeBackupService:
                 profile_id = profile[0]
                 connection.execute("DELETE FROM profile_stock_themes WHERE profile_id=?", (profile_id,))
                 connection.execute("DELETE FROM profile_themes WHERE profile_id=?", (profile_id,))
+                connection.execute("DELETE FROM profile_theme_name_decisions WHERE profile_id=?", (profile_id,))
                 for item in themes:
                     if isinstance(item, dict) and str(item.get("name", "")).strip():
                         connection.execute("INSERT INTO profile_themes(profile_id, theme_name, default_color) VALUES (?, ?, ?)", (profile_id, str(item["name"]).strip(), str(item.get("color") or "#DCE6F1")))
                 for item in stock_themes:
                     if isinstance(item, dict) and str(item.get("code", "")).strip() and str(item.get("theme", "")).strip():
                         connection.execute("INSERT OR IGNORE INTO profile_stock_themes(profile_id, stock_code, theme_name, custom_color) VALUES (?, ?, ?, ?)", (profile_id, str(item["code"]), str(item["theme"]).strip(), item.get("color") or None))
+                decisions = document.get("theme_name_decisions", [])
+                if isinstance(decisions, list):
+                    self._import_name_decisions(connection, profile_id, decisions)
         except (sqlite3.Error, TypeError, ValueError) as error:
             raise ThemeBackupError("테마 DB 백업 파일을 적용할 수 없습니다.") from error
         finally:
             connection.close()
+
+    @staticmethod
+    def _decision_documents(
+        connection: sqlite3.Connection, profile_id: int,
+    ) -> list[dict[str, object]]:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='profile_theme_name_decisions'"
+        ).fetchone()
+        if exists is None:
+            return []
+        return [
+            {
+                "kind": kind,
+                "source": source,
+                "target": target,
+                "decision_source": decision_source,
+                "updated_at": updated_at,
+            }
+            for kind, source, target, decision_source, updated_at in connection.execute(
+                "SELECT decision_kind,source_name,target_name,decision_source,updated_at "
+                "FROM profile_theme_name_decisions WHERE profile_id=? "
+                "ORDER BY decision_kind,source_name,target_name",
+                (profile_id,),
+            )
+        ]
+
+    @staticmethod
+    def _import_name_decisions(
+        connection: sqlite3.Connection, profile_id: int, decisions: list[object],
+    ) -> None:
+        allowed = {"alias", "split_to", "keep_separate"}
+        for item in decisions:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind", ""))
+            source = str(item.get("source", "")).strip()
+            target = str(item.get("target", "")).strip()
+            if kind not in allowed or not source or not target:
+                continue
+            connection.execute(
+                "INSERT OR IGNORE INTO profile_theme_name_decisions("
+                "profile_id,decision_kind,source_name,target_name,decision_source,updated_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (profile_id, kind, source, target,
+                 str(item.get("decision_source") or "user"),
+                 str(item.get("updated_at") or datetime.now().astimezone().isoformat(timespec="seconds"))),
+            )
