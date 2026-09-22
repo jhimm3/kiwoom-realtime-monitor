@@ -46,6 +46,48 @@ class HistoricalNewsParallelFetchTests(unittest.TestCase):
         self.assertEqual({"a.example": 1, "b.example": 1}, maximum_by_host)
         self.assertGreaterEqual(maximum_total, 2)
 
+    def test_same_host_queue_does_not_occupy_other_host_workers(self) -> None:
+        items = [
+            SimpleNamespace(original_url=f"https://a.example/{index}", portal_url="")
+            for index in range(3)
+        ] + [
+            SimpleNamespace(original_url="https://b.example/0", portal_url="")
+        ]
+        guard = threading.Lock()
+        active_by_host = {"a.example": 0, "b.example": 0}
+        maximum_by_host = {"a.example": 0, "b.example": 0}
+        active_total = 0
+        maximum_total = 0
+        b_started = threading.Event()
+        first_a_saw_b: list[bool] = []
+
+        def fetcher(item: object) -> str:
+            nonlocal active_total, maximum_total
+            host = str(item.original_url).split("/")[2]
+            if str(item.original_url) == "https://b.example/0":
+                b_started.set()
+            elif str(item.original_url) == "https://a.example/0":
+                first_a_saw_b.append(b_started.wait(timeout=0.2))
+            with guard:
+                active_by_host[host] += 1
+                active_total += 1
+                maximum_by_host[host] = max(maximum_by_host[host], active_by_host[host])
+                maximum_total = max(maximum_total, active_total)
+            time.sleep(0.03)
+            with guard:
+                active_by_host[host] -= 1
+                active_total -= 1
+            return str(item.original_url)
+
+        results = list(_fetch_article_publications(
+            items, workers=2, article_delay=0, fetcher=fetcher,
+        ))
+
+        self.assertEqual(4, len(results))
+        self.assertEqual({"a.example": 1, "b.example": 1}, maximum_by_host)
+        self.assertEqual(2, maximum_total)
+        self.assertEqual([True], first_a_saw_b)
+
     def test_search_pages_overlap_and_return_in_page_order(self) -> None:
         guard = threading.Lock()
         active = 0

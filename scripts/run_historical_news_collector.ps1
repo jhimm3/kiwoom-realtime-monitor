@@ -6,7 +6,7 @@ param(
     [int]$MaxPages = 100,
 
     [ValidateRange(0.0, 60.0)]
-    [double]$RequestDelay = 0.5,
+    [double]$RequestDelay = 0.7,
 
     [ValidateRange(1, 8)]
     [int]$SearchWorkers = 4,

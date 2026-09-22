@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait as wait_for_futures
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from dataclasses import asdict
@@ -71,24 +71,6 @@ def _store_resolved_observation(
         store_news_search_observation(database, page, item, source_date)
 
 
-class _ArticleHostLimiter:
-    """Serialize article requests per publisher while allowing cross-host overlap."""
-
-    def __init__(self, delay: float) -> None:
-        self._delay = max(0.0, delay)
-        self._guard = threading.Lock()
-        self._locks: dict[str, threading.Lock] = {}
-
-    @contextmanager
-    def slot(self, host: str):
-        with self._guard:
-            lock = self._locks.setdefault(host, threading.Lock())
-        with lock:
-            yield
-            if self._delay > 0:
-                time.sleep(self._delay)
-
-
 def _article_request_host(item: object) -> str:
     source = str(
         getattr(item, "original_url", "") or getattr(item, "portal_url", "")
@@ -103,31 +85,67 @@ class _ArticleFetchPool:
         self, *, workers: int, article_delay: float,
         fetcher: object = fetch_article_publication,
     ) -> None:
-        self._limiter = _ArticleHostLimiter(article_delay)
+        self._delay = max(0.0, article_delay)
         self._fetcher = fetcher
         self._pool = ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="news-article",
         )
-        self._futures = {}
+        self._futures: dict[object, tuple[object, str]] = {}
+        self._waiting: dict[str, deque[object]] = {}
+        self._active_hosts: set[str] = set()
 
     def _fetch_one(self, item: object):
-        with self._limiter.slot(_article_request_host(item)):
+        try:
             return self._fetcher(item)  # type: ignore[operator]
+        finally:
+            if self._delay > 0:
+                time.sleep(self._delay)
+
+    def _start(self, item: object, host: str) -> None:
+        future = self._pool.submit(self._fetch_one, item)
+        self._futures[future] = (item, host)
 
     def submit(self, item: object) -> None:
-        future = self._pool.submit(self._fetch_one, item)
-        self._futures[future] = item
+        host = _article_request_host(item)
+        if host in self._active_hosts:
+            self._waiting.setdefault(host, deque()).append(item)
+            return
+        self._active_hosts.add(host)
+        self._start(item, host)
+
+    def _finish(self, future: object):
+        item, host = self._futures.pop(future)
+        queued = self._waiting.get(host)
+        if queued:
+            self._start(queued.popleft(), host)
+            if not queued:
+                self._waiting.pop(host, None)
+        else:
+            self._active_hosts.remove(host)
+        return item, future.result()  # type: ignore[union-attr]
 
     def drain(self, *, wait: bool = False):
-        futures = list(self._futures)
-        ready = as_completed(futures) if wait else (
-            future for future in futures if future.done()
-        )
-        for future in ready:
-            item = self._futures.pop(future)
-            yield item, future.result()
+        while self._futures:
+            ready = [future for future in self._futures if future.done()]  # type: ignore[union-attr]
+            if not ready:
+                if not wait:
+                    return
+                ready = list(
+                    completed
+                    for completed in wait_for_futures(
+                        list(self._futures), return_when=FIRST_COMPLETED,
+                    ).done
+                )
+            for future in ready:
+                yield self._finish(future)
+            if not wait:
+                # Newly scheduled followers may already be complete. Drain those
+                # too, then return as soon as only active work remains.
+                continue
 
     def close(self) -> None:
+        for _item, _result in self.drain(wait=True):
+            pass
         self._pool.shutdown(wait=True)
 
     def __enter__(self):
