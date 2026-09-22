@@ -15,6 +15,7 @@
 - 과거 뉴스 검토 화면에 `개발 입력 생성`을 추가했다. 최신 불변 사람 판정과 dataset ID·파일 hash가 일치하는 가장 최근 사건 분할만 사용해 TRAIN·VALIDATION 입력을 만들며, 봉인 OOS는 계속 제외하고 동일 산출물은 덮어쓰지 않는다.
 - 앱 개발 입력 생성까지 포함한 추적 파일 974개를 NAS와 SHA-256 불일치 0개로 동기화했다. 직전 NAS 파일 974개는 `X:\kiwoom-monitor-backups\20260923-010929-news-development-inputs-ui-v1`에 보존했고 운영 데이터·비밀 경로는 제외했다.
 - `historical_news_blind_validation/v1`은 공통 개발 입력의 VALIDATION에서 `sample_id`와 `model_input`만 별도 불변 요청으로 투영한다. 사람 정답·사건 ID·테마 이름은 요청에 넣지 않고 재귀 검증으로 누수를 거절하며, 원본 개발 dataset ID와 validation 파일 hash에 요청 집합을 결합한다.
+- 블라인드 VALIDATION 계약까지 포함한 추적 파일 977개를 NAS와 SHA-256 불일치 0개로 동기화했다. 직전 NAS 파일 974개는 `X:\kiwoom-monitor-backups\20260923-012141-news-blind-validation-v1`에 보존했고 운영 데이터·비밀 경로는 제외했다.
 
 ## 2026-09-22 LLM 학습 준비 사례 계약
 
