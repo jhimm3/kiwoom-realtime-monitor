@@ -61,7 +61,7 @@
 | `src/kiwoom_monitor/application/research_search.py` | 제한 trial·개발 근거·후보 선택 |
 | `src/kiwoom_monitor/application/research_hypotheses.py` | 결정적 가설·후속 생성·부모 계보 |
 | `src/kiwoom_monitor/infrastructure/persistence/research_repository.py` | v23 run/campaign/lease/final/가설 원장 |
-| `src/kiwoom_monitor/presentation/research_dialog.py`, `presentation/historical_news_review_dialog.py` | 연구·campaign·가설·순차/final UI와 과거 뉴스 사람 검토·작업표 저장·불변 결과 동결 |
+| `src/kiwoom_monitor/presentation/research_dialog.py`, `presentation/historical_news_review_dialog.py` | 연구·campaign·가설·순차/final UI와 과거 뉴스 사람 검토·작업표 저장·불변 결과 동결·사건 분할 계획 실행 |
 | `src/kiwoom_monitor/application/research_resources.py` | RSS/preflight·CPU 양보 |
 | `src/kiwoom_monitor/application/forward_evaluation.py` | feedback evidence/review/제안·forward 평가 |
 | `src/kiwoom_monitor/application/feedback_strategy_revision.py` | 명시 채택 버전·재검증 spec/dispatch |

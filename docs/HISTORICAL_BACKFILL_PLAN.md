@@ -157,6 +157,8 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 
 `scripts/plan_historical_news_event_split.py`는 불변 사람 판정 결과에서 관련 기사만 골라 `historical_news_event_split/v1`을 만든다. 같은 `canonical_event_id`의 여러 기사는 최초 발행시각을 기준으로 하나의 사건이 되며 TRAIN·VALIDATION·OOS 사이에서 나뉘지 않는다. 시간대 표기가 달라도 timezone-aware 실제 시각으로 정렬한다. 무관·보류는 입력 정답으로 섞지 않고 제외 수량으로 남긴다. 일부만 검토한 원천으로도 계획 구조는 검증할 수 있지만 `partial_review_source=true`, `model_weight_training_ready=false`를 유지하며 OOS 검토 payload를 계획에 넣지 않는다.
 
+같은 기능은 과거 뉴스 검토 화면의 `사건 분할 계획`에서 실행한다. 최신 불변 판정에 관련 사건이 3개 이상일 때만 TRAIN과 VALIDATION 사건 수를 입력받고, 선택 가능 상한을 조정해 OOS에 최소 1개 사건이 반드시 남게 한다. 계획은 `data/research/historical-news-event-splits/<plan_id>.json`에 불변 저장한다.
+
 ### D03 첫 입력 계약
 
 `scripts/export_historical_reconstruction.py`는 선택한 후보일의 후보·현재 확보된 대신 봉·뉴스 근거를 `historical_reconstruction/v1` 불변 디렉터리로 만든다. `manifest.json`과 `records.jsonl`의 hash·ordinal·revision ID를 `load_historical_reconstruction`이 다시 검증한다. 이 형식은 기존 `top20_membership` 입력으로 위장하지 않으며 `strict_top20_replay_supported=false`를 필수로 둔다.

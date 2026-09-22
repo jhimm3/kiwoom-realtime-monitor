@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -30,11 +31,17 @@ from PySide6.QtWidgets import (
 )
 
 from kiwoom_monitor.application.historical_news_review_decisions import (
+    HistoricalNewsReviewDecisions,
     build_historical_news_review_decisions,
     export_historical_news_review_sheet,
+    load_historical_news_review_decisions,
     load_historical_news_review_sheet,
     update_historical_news_review_sheet_row,
     write_historical_news_review_decisions,
+)
+from kiwoom_monitor.application.historical_news_event_split import (
+    build_historical_news_event_split,
+    write_historical_news_event_split,
 )
 from kiwoom_monitor.application.historical_news_review_queue import (
     HistoricalNewsReviewQueue,
@@ -77,11 +84,14 @@ class HistoricalNewsReviewDialog(QDialog):
         refresh.clicked.connect(self.reload)
         self._finalize = QPushButton("검토 결과 동결")
         self._finalize.clicked.connect(self._finalize_decisions)
+        self._split_events = QPushButton("사건 분할 계획")
+        self._split_events.clicked.connect(self._create_event_split)
         top = QHBoxLayout()
         top.addWidget(self._status, 1)
         top.addWidget(self._progress)
         top.addWidget(refresh)
         top.addWidget(self._finalize)
+        top.addWidget(self._split_events)
 
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(("상태", "발행시각", "종목", "기사 제목", "규칙 점수"))
@@ -481,6 +491,98 @@ class HistoricalNewsReviewDialog(QDialog):
             "이 결과도 아직 모델 가중치 학습 준비 완료 상태는 아닙니다.",
         )
         self._status.setText(f"불변 검토 결과 저장 완료: {output.name}")
+
+    def _create_event_split(self) -> None:
+        try:
+            decisions = self._latest_decisions()
+        except (OSError, ValueError) as error:
+            QMessageBox.information(self, "사건 분할 계획", str(error))
+            return
+        event_ids: set[str] = set()
+        for row in decisions.decisions:
+            review = row.get("human_review")
+            if isinstance(review, dict) and review.get("decision") == "relevant":
+                event_id = str(review.get("canonical_event_id", "")).strip()
+                if event_id:
+                    event_ids.add(event_id)
+        event_count = len(event_ids)
+        if event_count < 3:
+            QMessageBox.information(
+                self,
+                "사건 분할 계획",
+                "관련으로 동결된 서로 다른 사건이 최소 3개 필요합니다. "
+                f"현재 {event_count}개입니다.",
+            )
+            return
+        train_default = max(1, min(event_count - 2, round(event_count * 0.7)))
+        train_events, accepted = QInputDialog.getInt(
+            self,
+            "사건 분할 계획",
+            f"전체 관련 사건 {event_count}개 중 TRAIN 사건 수",
+            train_default,
+            1,
+            event_count - 2,
+        )
+        if not accepted:
+            return
+        validation_maximum = event_count - train_events - 1
+        validation_default = max(1, min(validation_maximum, round(event_count * 0.15)))
+        validation_events, accepted = QInputDialog.getInt(
+            self,
+            "사건 분할 계획",
+            f"VALIDATION 사건 수 · OOS에 최소 1개 유지 (최대 {validation_maximum})",
+            validation_default,
+            1,
+            validation_maximum,
+        )
+        if not accepted:
+            return
+        try:
+            plan = build_historical_news_event_split(
+                decisions,
+                train_events=train_events,
+                validation_events=validation_events,
+            )
+            output = (
+                self._research_dir / "historical-news-event-splits"
+                / f"{plan['plan_id']}.json"
+            )
+            if output.exists():
+                self._status.setText(f"같은 사건 분할 계획이 이미 있습니다: {output.name}")
+                return
+            write_historical_news_event_split(plan, output)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "사건 분할 계획", str(error))
+            return
+        partitions = plan["partitions"]
+        QMessageBox.information(
+            self,
+            "사건 분할 계획",
+            "사건 단위 분할 계획을 저장했습니다.\n"
+            f"TRAIN {partitions[0]['event_count']} · "
+            f"VALIDATION {partitions[1]['event_count']} · "
+            f"봉인 OOS {partitions[2]['event_count']}\n\n"
+            "이 계획은 아직 모델 가중치 학습 준비 완료 상태가 아닙니다.",
+        )
+        self._status.setText(f"사건 분할 계획 저장 완료: {output.name}")
+
+    def _latest_decisions(self) -> HistoricalNewsReviewDecisions:
+        root = self._research_dir / "historical-news-review-decisions"
+        candidates: list[tuple[str, Path, HistoricalNewsReviewDecisions]] = []
+        for manifest_path in root.glob("*/manifest.json"):
+            try:
+                dataset = load_historical_news_review_decisions(manifest_path.parent)
+            except ValueError:
+                continue
+            candidates.append((
+                str(dataset.manifest.get("created_at", "")),
+                manifest_path.parent,
+                dataset,
+            ))
+        if not candidates:
+            raise ValueError("먼저 사람 판정을 저장하고 검토 결과를 동결하세요.")
+        _, _, dataset = max(candidates, key=lambda value: (value[0], str(value[1])))
+        return dataset
 
     def closeEvent(self, event) -> None:
         if self._dirty and not self._save_current(show_message=False, advance=False):
