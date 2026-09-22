@@ -6,6 +6,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import traceback
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,10 +26,15 @@ DEFAULT_REFERENCE = Path("data/nas_reference_inspect_20260922/historical_referen
 DEFAULT_DATABASE = Path("data/historical_intelligence.sqlite3")
 POWERSHELL32 = Path(r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe")
 CREON_CONNECTION_ERROR = "CREON Plus is not connected in this Windows privilege context."
+DATABASE_TIMEOUT_SECONDS = 60
 
 
 class DaishinEnvironmentUnavailable(RuntimeError):
     """The collector host cannot currently use the logged-in CREON session."""
+
+
+def _connect_database(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(path, timeout=DATABASE_TIMEOUT_SECONDS)
 
 
 def _initialize_jobs(reference: Path, database: Path) -> int:
@@ -40,7 +46,7 @@ def _initialize_jobs(reference: Path, database: Path) -> int:
             and re.fullmatch(r"[0-9A-Z]{6}", code)
         })
     now = datetime.now(UTC).isoformat()
-    with closing(sqlite3.connect(database)) as connection:
+    with closing(_connect_database(database)) as connection:
         with connection:
             connection.execute(
                 """
@@ -98,7 +104,7 @@ def _initialize_jobs(reference: Path, database: Path) -> int:
 
 def _claim(database: Path) -> tuple[str, int] | None:
     now = datetime.now(UTC).isoformat()
-    with closing(sqlite3.connect(database)) as connection:
+    with closing(_connect_database(database)) as connection:
         connection.row_factory = sqlite3.Row
         with connection:
             # A terminated collector may leave one owned job in running state.
@@ -161,7 +167,7 @@ def _recent_overlay(code: str, output: Path) -> dict[str, object]:
 
 
 def _ranges(database: Path, code: str) -> tuple[object, ...]:
-    with closing(sqlite3.connect(database)) as connection:
+    with closing(_connect_database(database)) as connection:
         one = connection.execute(
             "SELECT COUNT(*),MIN(bar_time),MAX(bar_time) FROM market_bars WHERE code=? AND interval_seconds=60",
             (code,),
@@ -175,7 +181,7 @@ def _ranges(database: Path, code: str) -> tuple[object, ...]:
 
 def _finish(database: Path, code: str, state: str, raw_directory: Path, error: str = "") -> None:
     values = _ranges(database, code)
-    with closing(sqlite3.connect(database)) as connection:
+    with closing(_connect_database(database)) as connection:
         with connection:
             connection.execute(
                 """
@@ -191,7 +197,7 @@ def _finish(database: Path, code: str, state: str, raw_directory: Path, error: s
 
 def _defer_for_environment(database: Path, code: str, raw_directory: Path, error: str) -> None:
     """Return a claimed job without charging an attempt for a host-wide outage."""
-    with closing(sqlite3.connect(database)) as connection:
+    with closing(_connect_database(database)) as connection:
         with connection:
             connection.execute(
                 """
@@ -267,4 +273,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        exit_code = main()
+    except Exception:
+        # PowerShell 5.1 can truncate redirected native stderr after its first
+        # ErrorRecord. Keep the complete traceback on stdout for the run log.
+        traceback.print_exc(file=sys.stdout)
+        exit_code = 1
+    raise SystemExit(exit_code)

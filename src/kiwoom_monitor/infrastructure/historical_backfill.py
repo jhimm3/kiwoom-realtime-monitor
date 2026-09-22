@@ -828,7 +828,9 @@ def fetch_article_publication(
 
 def initialize_probe_database(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(path)) as connection:
+    # News and market-history collectors share this database. Allow a short
+    # writer overlap to clear instead of failing a completed CREON download.
+    with closing(sqlite3.connect(path, timeout=60)) as connection:
         with connection:
             connection.executescript(
                 """
@@ -1229,7 +1231,7 @@ def store_daishin_probe_payload(path: Path, payload: Mapping[str, Any]) -> int:
         raise ValueError("incomplete Daishin probe payload")
     initialize_probe_database(path)
     saved = 0
-    with closing(sqlite3.connect(path)) as connection:
+    with closing(sqlite3.connect(path, timeout=60)) as connection:
         with connection:
             for bar in bars:
                 if not isinstance(bar, Mapping):

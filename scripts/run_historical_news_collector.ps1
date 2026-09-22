@@ -80,7 +80,14 @@ try {
         $collectorExitCode = $LASTEXITCODE
         $ErrorActionPreference = $previousErrorAction
         foreach ($line in $output) { Write-Log ([string]$line) }
-        if ($collectorExitCode -ne 0) {
+        if ($collectorExitCode -eq 2) {
+            # news-run records an individual failed job (including transient
+            # remote disconnects) in the resumable ledger. Keep the long-lived
+            # collector moving so another job failure cannot stop the queue.
+            $detail = ($output | ForEach-Object { [string]$_ }) -join ' '
+            Write-Log "news job failed and was retained for retry: $detail"
+        }
+        elseif ($collectorExitCode -ne 0) {
             $detail = ($output | ForEach-Object { [string]$_ }) -join ' '
             throw "news-run exited with code ${collectorExitCode}: $detail"
         }

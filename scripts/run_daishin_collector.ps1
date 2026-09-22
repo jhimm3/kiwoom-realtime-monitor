@@ -54,7 +54,11 @@ try {
     $ErrorActionPreference = $previousErrorAction
     Append-Output $output
     if ($collectorExitCode -ne 0) {
-        throw "Daishin candidate collector exited with code $collectorExitCode"
+        $detail = (($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine).Trim()
+        if (-not $detail) {
+            $detail = "Daishin candidate collector exited with code $collectorExitCode"
+        }
+        throw $detail
     }
     # Elevated CREON sessions do not reliably inherit the user's X: mapping.
     # Publish the closed DB snapshot from the ordinary user session afterward.
