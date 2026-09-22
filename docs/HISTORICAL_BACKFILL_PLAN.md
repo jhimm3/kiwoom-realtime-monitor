@@ -93,7 +93,7 @@ Npay 공식 도움말에는 서비스 화면 밖 개인 프로그램에서 증�
 
 진행률은 같은 NAS 경로의 `STATUS.md`에서 확인한다. 뉴스 완료/대기/실패·목록 기사·발행시각 상태·운영 뉴스 DB 반영 건수와 대신 종목 작업·주기별 봉 수를 분리해 표시한다. `status.json`은 같은 내용의 기계 판독본이다. 수집기는 작업 하나가 끝날 때마다 진행률을 갱신하고 묶음 종료 시 새 DB 스냅샷을 게시한다.
 
-로컬 프로세스와 NAS 게시 상태를 함께 확인하려면 프로젝트 루트의 일반 PowerShell에서 `./scripts/show_historical_collectors.ps1`을 실행한다. `정상 실행`은 PID 존재, 상태 `running`, 최근 120초 안의 상태 갱신을 모두 만족한다. NAS 상태 시각만 오래됐으면 로컬 수집과 NAS 게시 실패를 구분해 로그를 확인한다. 뉴스 수집은 일반 사용자 PowerShell에서 `./scripts/run_historical_news_collector.ps1 -Jobs 10000`, 대신 수집은 CREON과 같은 관리자 PowerShell에서 `./scripts/run_daishin_collector.ps1 -Jobs 1000`으로 시작한다.
+로컬 프로세스와 NAS 게시 상태는 프로젝트 루트의 `수집기_모니터.cmd`에서 함께 확인한다. 모니터는 관리자 권한으로 열리며 뉴스·대신의 작업 원장 진행률, 현재 작업, heartbeat, 최근 오류와 NAS 상태 갱신 시각을 표시하고 정지한 수집기를 재시작한다. CLI 확인은 일반 PowerShell의 `./scripts/show_historical_collectors.ps1`을 유지한다. 뉴스 수집은 `./scripts/run_historical_news_collector.ps1 -Jobs 10000`, 대신 수집은 CREON과 같은 관리자 PowerShell에서 `./scripts/run_daishin_collector.ps1 -Jobs 1000`으로 직접 시작할 수도 있다.
 
 뉴스 검색의 네트워크 세션 자체가 사용할 수 없으면 해당 작업을 `pending`으로 되돌리고 시도 횟수를 소비하지 않은 채 수집기를 실패 종료한다. 이 경우 프로세스가 살아 있는 것처럼 실패 작업을 계속 넘기지 않는다. 로컬 생존 상태는 작업마다 갱신하고, 13GB DB를 읽는 NAS 진행률 집계와 운영 뉴스 반영은 기본 10작업마다 수행한다. `STOP_NEWS`를 이용한 정상 중지는 마지막 상태만 게시하고 대형 불변 스냅샷을 만들지 않는다.
 

@@ -18,6 +18,7 @@ $python = 'C:\Users\pc-1\.cache\codex-runtimes\codex-primary-runtime\dependencie
 $stateRoot = Join-Path $projectRoot 'data\historical_collection'
 $logRoot = Join-Path $stateRoot 'logs'
 $stateFile = Join-Path $stateRoot 'daishin-collector-state.json'
+$stopFile = Join-Path $stateRoot 'STOP_DAISHIN'
 $stamp = [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')
 $logFile = Join-Path $logRoot "daishin-$stamp.log"
 [IO.Directory]::CreateDirectory($logRoot) | Out-Null
@@ -44,6 +45,9 @@ function Append-Output([object[]]$Lines) {
 }
 
 Set-Location $projectRoot
+if (Test-Path -LiteralPath $stopFile) {
+    Remove-Item -LiteralPath $stopFile -Force
+}
 Write-State 'running'
 try {
     $previousErrorAction = $ErrorActionPreference

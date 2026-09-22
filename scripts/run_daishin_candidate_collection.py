@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -24,6 +25,8 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
 
 DEFAULT_REFERENCE = Path("data/nas_reference_inspect_20260922/historical_reference.sqlite3")
 DEFAULT_DATABASE = Path("data/historical_intelligence.sqlite3")
+DEFAULT_HEARTBEAT = Path("data/historical_collection/daishin-job-heartbeat.json")
+DEFAULT_STOP_FILE = Path("data/historical_collection/STOP_DAISHIN")
 POWERSHELL32 = Path(r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe")
 CREON_CONNECTION_ERROR = "CREON Plus is not connected in this Windows privilege context."
 DATABASE_TIMEOUT_SECONDS = 60
@@ -35,6 +38,29 @@ class DaishinEnvironmentUnavailable(RuntimeError):
 
 def _connect_database(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(path, timeout=DATABASE_TIMEOUT_SECONDS)
+
+
+def _write_heartbeat(
+    path: Path, phase: str, *, code: str = "", attempt: int = 0,
+    directory: Path | None = None, error: str = "",
+) -> None:
+    document = {
+        "schema": "daishin-job-heartbeat/v1",
+        "pid": os.getpid(),
+        "phase": phase,
+        "code": code,
+        "attempt": attempt,
+        "raw_directory": str(directory or ""),
+        "error": error[:2000],
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
 
 
 def _initialize_jobs(reference: Path, database: Path) -> int:
@@ -72,27 +98,27 @@ def _initialize_jobs(reference: Path, database: Path) -> int:
                 [(code, now) for code in codes],
             )
             inserted = connection.total_changes - before
-            # A completed code already present in the canonical bar table does not
-            # need to be downloaded again when the job ledger is introduced later.
-            # Aggregate the bar table once instead of rescanning it for every job.
-            existing = {
-                (str(row[0]), int(row[1])): (int(row[2]), str(row[3] or ""), str(row[4] or ""))
-                for row in connection.execute(
-                    "SELECT code,interval_seconds,COUNT(*),MIN(bar_time),MAX(bar_time) "
-                    "FROM market_bars WHERE interval_seconds IN (60,300) "
-                    "GROUP BY code,interval_seconds"
-                )
-            }
-            completed_rows = []
-            for code in codes:
-                one = existing.get((code, 60))
-                five = existing.get((code, 300))
-                # A partial import left by an interrupted run is not complete.
-                # Legacy inference is safe only when both requested intervals
-                # are already present; normal runs retain their explicit ledger state.
-                if one is None or five is None:
-                    continue
-                completed_rows.append((*one, *five, now, code))
+        # Do not hold the writer transaction while scanning tens of millions of
+        # bars. News collection shares this database and must remain writable.
+        existing = {
+            (str(row[0]), int(row[1])): (int(row[2]), str(row[3] or ""), str(row[4] or ""))
+            for row in connection.execute(
+                "SELECT code,interval_seconds,COUNT(*),MIN(bar_time),MAX(bar_time) "
+                "FROM market_bars WHERE interval_seconds IN (60,300) "
+                "GROUP BY code,interval_seconds"
+            )
+        }
+        completed_rows = []
+        for code in codes:
+            one = existing.get((code, 60))
+            five = existing.get((code, 300))
+            # A partial import left by an interrupted run is not complete.
+            # Legacy inference is safe only when both requested intervals
+            # are already present; normal runs retain their explicit ledger state.
+            if one is None or five is None:
+                continue
+            completed_rows.append((*one, *five, now, code))
+        with connection:
             connection.executemany(
                 """
                 UPDATE market_backfill_jobs SET state='complete',one_minute_bars=?,
@@ -218,12 +244,18 @@ def main() -> int:
     parser.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE)
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     parser.add_argument("--raw-root", type=Path, default=Path("data/historical_collection/daishin"))
+    parser.add_argument("--heartbeat-file", type=Path, default=DEFAULT_HEARTBEAT)
+    parser.add_argument("--stop-file", type=Path, default=DEFAULT_STOP_FILE)
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--seed-only", action="store_true")
     args = parser.parse_args()
     if args.jobs < 1 or args.jobs > 1000:
         parser.error("--jobs must be between 1 and 1000")
     reference, database = args.reference.resolve(strict=True), args.database.resolve()
+    heartbeat = args.heartbeat_file.resolve()
+    stop_file = args.stop_file.resolve()
+    stop_file.unlink(missing_ok=True)
+    _write_heartbeat(heartbeat, "initializing")
     inserted = _initialize_jobs(reference, database)
     if args.seed_only:
         print(json.dumps({"seeded": inserted, "database": str(database)}, ensure_ascii=False, indent=2))
@@ -233,6 +265,9 @@ def main() -> int:
     finished = failed = 0
     environment_error = ""
     for _ in range(args.jobs):
+        if stop_file.exists():
+            _write_heartbeat(heartbeat, "stopped")
+            break
         job = _claim(database)
         if job is None:
             break
@@ -242,28 +277,37 @@ def main() -> int:
         directory.mkdir(parents=True)
         one_path, five_path = directory / "1m.ndjson", directory / "5m.ndjson"
         recent_path = directory / "1m-recent-1000.json"
+        _write_heartbeat(heartbeat, "one_minute_download", code=code, attempt=attempt, directory=directory)
         try:
             _run_backfill(code, 1, one_path)
+            _write_heartbeat(heartbeat, "one_minute_import", code=code, attempt=attempt, directory=directory)
             import_daishin_backfill_ndjson(one_path, database)
+            _write_heartbeat(heartbeat, "recent_overlay", code=code, attempt=attempt, directory=directory)
             overlay = _recent_overlay(code, recent_path)
             store_daishin_probe_payload(database, overlay)
             one_oldest = _ranges(database, code)[1]
             if not one_oldest:
                 raise RuntimeError("one-minute response contained no bars")
+            _write_heartbeat(heartbeat, "five_minute_download", code=code, attempt=attempt, directory=directory)
             _run_backfill(code, 5, five_path)
+            _write_heartbeat(heartbeat, "five_minute_import", code=code, attempt=attempt, directory=directory)
             import_daishin_backfill_ndjson(five_path, database, before_date=str(one_oldest)[:10])
             _finish(database, code, "complete", directory)
+            _write_heartbeat(heartbeat, "complete", code=code, attempt=attempt, directory=directory)
             finished += 1
             print(json.dumps({"event": "market_job_finished", "code": code,
                               "ranges": _ranges(database, code)}, ensure_ascii=False), flush=True)
         except DaishinEnvironmentUnavailable as error:
             environment_error = f"{type(error).__name__}: {error}"
             _defer_for_environment(database, code, directory, environment_error)
+            _write_heartbeat(heartbeat, "collector_unavailable", code=code, attempt=attempt, directory=directory, error=environment_error)
             print(json.dumps({"event": "collector_environment_unavailable", "code": code,
                               "error": environment_error}, ensure_ascii=False), flush=True)
             break
         except Exception as error:
-            _finish(database, code, "failed", directory, f"{type(error).__name__}: {error}")
+            detail = f"{type(error).__name__}: {error}"
+            _finish(database, code, "failed", directory, detail)
+            _write_heartbeat(heartbeat, "failed", code=code, attempt=attempt, directory=directory, error=detail)
             failed += 1
             print(json.dumps({"event": "market_job_failed", "code": code,
                               "error": f"{type(error).__name__}: {error}"}, ensure_ascii=False), flush=True)

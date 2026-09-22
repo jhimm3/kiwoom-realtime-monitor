@@ -26,6 +26,11 @@ NAVER_HISTORICAL_SEARCH_ENDPOINT = "https://s.search.naver.com/p/newssearch/3/ap
 NAVER_STOCK_NEWS_PROVIDER = "naver_stock"
 NAVER_HISTORICAL_SEARCH_PROVIDER = "naver_historical_search"
 DAISHIN_PROVIDER = "daishin_creon"
+DATABASE_TIMEOUT_SECONDS = 60
+
+
+def _connect_database(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(path, timeout=DATABASE_TIMEOUT_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -290,7 +295,7 @@ def seed_news_backfill_jobs(
             ).fetchall()
     now = datetime.now(UTC).isoformat()
     inserted = 0
-    with closing(sqlite3.connect(output_database)) as connection:
+    with closing(_connect_database(output_database)) as connection:
         with connection:
             for row in rows:
                 cursor = connection.execute(
@@ -311,7 +316,7 @@ def seed_news_backfill_jobs(
 
 def clear_news_backfill_jobs(output_database: Path) -> int:
     initialize_probe_database(output_database)
-    with closing(sqlite3.connect(output_database)) as connection:
+    with closing(_connect_database(output_database)) as connection:
         with connection:
             cursor = connection.execute("DELETE FROM news_backfill_jobs")
             return max(0, cursor.rowcount)
@@ -322,7 +327,7 @@ def claim_news_backfill_job(output_database: Path) -> NewsBackfillJob | None:
     claimed_at = datetime.now(UTC)
     now = claimed_at.isoformat()
     stale_before = (claimed_at - timedelta(hours=2)).isoformat()
-    with closing(sqlite3.connect(output_database)) as connection:
+    with closing(_connect_database(output_database)) as connection:
         connection.row_factory = sqlite3.Row
         with connection:
             connection.execute(
@@ -376,7 +381,7 @@ def finish_news_backfill_job(
 ) -> None:
     if state not in {"complete", "failed", "truncated"}:
         raise ValueError("news backfill job state must be complete, failed or truncated")
-    with closing(sqlite3.connect(output_database)) as connection:
+    with closing(_connect_database(output_database)) as connection:
         with connection:
             connection.execute(
                 """
@@ -401,7 +406,7 @@ def release_news_backfill_job(
     Network/session failures are not evidence that the article query itself is bad,
     so they must not consume the job's bounded three attempts.
     """
-    with closing(sqlite3.connect(output_database)) as connection:
+    with closing(_connect_database(output_database)) as connection:
         with connection:
             connection.execute(
                 """
@@ -421,7 +426,7 @@ def article_publication_is_resolved(
     item: NaverHistoricalNewsItem,
 ) -> bool:
     initialize_probe_database(output_database)
-    with closing(sqlite3.connect(output_database)) as connection:
+    with closing(_connect_database(output_database)) as connection:
         row = connection.execute(
             """
             SELECT article_fetch_status FROM news_articles
@@ -437,7 +442,7 @@ def article_publication_status(
     item: NaverHistoricalNewsItem,
 ) -> str:
     initialize_probe_database(output_database)
-    with closing(sqlite3.connect(output_database)) as connection:
+    with closing(_connect_database(output_database)) as connection:
         row = connection.execute(
             """
             SELECT article_fetch_status FROM news_articles
@@ -830,7 +835,7 @@ def initialize_probe_database(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # News and market-history collectors share this database. Allow a short
     # writer overlap to clear instead of failing a completed CREON download.
-    with closing(sqlite3.connect(path, timeout=60)) as connection:
+    with closing(_connect_database(path)) as connection:
         with connection:
             connection.executescript(
                 """
@@ -1016,7 +1021,7 @@ def store_naver_stock_news_page(path: Path, page: NaverStockNewsPage) -> None:
     request_key = f"code={page.code}&page={page.page}&page_size={page.page_size}"
     digest = hashlib.sha256(page.raw_json.encode("utf-8")).hexdigest()
     endpoint = f"{NAVER_STOCK_NEWS_ENDPOINT}?{urlencode({'itemCode': page.code, 'page': page.page, 'pageSize': page.page_size})}"
-    with closing(sqlite3.connect(path)) as connection:
+    with closing(_connect_database(path)) as connection:
         with connection:
             connection.execute(
                 """
@@ -1087,7 +1092,7 @@ def store_naver_historical_search_page(path: Path, page: NaverHistoricalNewsPage
     )
     digest = hashlib.sha256(page.raw_json.encode("utf-8")).hexdigest()
     endpoint = _naver_historical_search_url(page.query, page.target_date, page.start)
-    with closing(sqlite3.connect(path)) as connection:
+    with closing(_connect_database(path)) as connection:
         with connection:
             connection.execute(
                 """
@@ -1149,7 +1154,7 @@ def store_naver_historical_search_page(path: Path, page: NaverHistoricalNewsPage
 
 def store_article_publication_result(path: Path, result: ArticlePublicationResult) -> None:
     initialize_probe_database(path)
-    with closing(sqlite3.connect(path)) as connection:
+    with closing(_connect_database(path)) as connection:
         with connection:
             if result.published_at:
                 connection.execute(
@@ -1231,7 +1236,7 @@ def store_daishin_probe_payload(path: Path, payload: Mapping[str, Any]) -> int:
         raise ValueError("incomplete Daishin probe payload")
     initialize_probe_database(path)
     saved = 0
-    with closing(sqlite3.connect(path, timeout=60)) as connection:
+    with closing(_connect_database(path)) as connection:
         with connection:
             for bar in bars:
                 if not isinstance(bar, Mapping):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from contextlib import closing
 from datetime import UTC, datetime
@@ -29,6 +30,53 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
 
 
 class HistoricalBackfillTest(unittest.TestCase):
+    def test_news_job_finish_waits_for_a_transient_database_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.sqlite3"
+            output = root / "output.sqlite3"
+            with closing(sqlite3.connect(candidate)) as connection, connection:
+                connection.executescript(
+                    "CREATE TABLE candidate_days(dt TEXT, code TEXT);"
+                    "CREATE TABLE stocks(code TEXT, name TEXT);"
+                    "INSERT INTO stocks VALUES('005930','삼성전자');"
+                    "INSERT INTO candidate_days VALUES('2026-09-22','005930');"
+                )
+            seed_news_backfill_jobs(candidate, output)
+            job = claim_news_backfill_job(output)
+            assert job is not None
+
+            locked = threading.Event()
+            release = threading.Event()
+
+            def hold_writer_lock() -> None:
+                with closing(sqlite3.connect(output)) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(
+                        "UPDATE news_backfill_jobs SET last_error='other_writer'"
+                    )
+                    locked.set()
+                    release.wait(timeout=2)
+                    connection.commit()
+
+            writer = threading.Thread(target=hold_writer_lock)
+            writer.start()
+            self.assertTrue(locked.wait(timeout=1))
+            timer = threading.Timer(0.1, release.set)
+            timer.start()
+            try:
+                finish_news_backfill_job(output, job, state="complete")
+            finally:
+                release.set()
+                timer.cancel()
+                writer.join(timeout=2)
+
+            with closing(sqlite3.connect(output)) as connection:
+                state = connection.execute(
+                    "SELECT state FROM news_backfill_jobs"
+                ).fetchone()[0]
+            self.assertEqual("complete", state)
+
     def test_seeds_and_resumes_candidate_news_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
