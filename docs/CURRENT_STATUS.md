@@ -43,6 +43,8 @@ NAS의 `stock_aliases` 1,164행을 사용해 94,750개 후보 종목·일의 당
 
 같은 표본의 `historical_chronological_split_plan/v1`은 사례를 통째로 시간순 배정해 2024 사례를 TRAIN, 2025 사례를 VALIDATION, 2026 사례를 OOS로 고정했다. 계획은 파생 데이터셋 ID와 revision hash에 결합되고 각 fold의 마지막 15:30 봉을 포함하는 미포함 종료 경계를 사용한다. OOS 상태는 `SEALED`, 결과 포함은 false이며 이 단계에서는 전략 실행·성과 조회·후보 선택을 하지 않았다.
 
+분할 계획에서 `historical_development_inputs/v1` TRAIN·VALIDATION 입력만 별도 동결했다. TRAIN은 후보군 1개와 1분봉 2,239개, VALIDATION은 직전 후보군 seed와 새 후보군 2개 및 1분봉 2,661개다. 두 입력 모두 원본 역사 모집단 provenance와 source availability 제한을 유지하고 품질 판정 `PASS`·revision 재현성 `VERIFIED`를 확인했다. 패키지는 OOS 입력·관측·결과를 포함하지 않으며 아직 실제 전략 성과 비교를 실행하지 않았다.
+
 수집 진행률은 NAS `deploy/synology/server-data/historical-intelligence/v1/STATUS.md`와 `status.json`에 게시한다. 발행시각이 검증된 과거 기사는 기존 인증된 `news_article` content 경로로 증분 전송하며, NAS 운영 DB에서 `naver_historical_web`/`historical_backfill` revision으로 저장된 뒤 기존 BODY 작업기가 원문을 처리한다. 별도 역사 SQLite 스냅샷 자체를 운영 뉴스 DB로 열거나 덮어쓰지 않는다.
 
 기존 후보 DB는 읽기 전용으로 확인했다. 94,750개 후보 종목·일, 5,910,806개 일봉, 4,562,200개 분봉이 있고 분봉 작업 완료 중 81,901건은 0행이었다. 실제 확보 범위와 다음 작업은 [과거 자료 확보 기획](HISTORICAL_BACKFILL_PLAN.md)에 적었다.

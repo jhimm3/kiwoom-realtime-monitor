@@ -502,9 +502,13 @@ def write_historical_research_input(dataset: "FrozenResearchDataset", output: Pa
     output = Path(output)
     if output.exists():
         raise ValueError("historical strategy input is immutable and cannot be overwritten")
+    observations = tuple(
+        {**row, "ordinal": ordinal}
+        for ordinal, row in enumerate(dataset.observations, start=1)
+    )
     encoded = b"".join(
         (json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-        for row in dataset.observations
+        for row in observations
     )
     manifest = {
         **dataset.manifest,

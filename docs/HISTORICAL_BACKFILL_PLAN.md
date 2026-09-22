@@ -155,3 +155,5 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 첫 다기간 불변 표본은 `multi-period-2024-2026-v1`이다. 선택일과 결과 종료일은 2024-12-24→12-26, 2025-05-29→05-30, 2026-01-14→01-15이며, 후보군 revision 3개와 분봉 7,564개로 총 7,567개 연구 관측을 담았다. 이는 수집 도중 구조를 검증하기 위한 표본이다. 시간순 TRAIN/VALIDATION/OOS 정책과 비용 가정을 고정한 성과 비교는 수집 범위가 더 넓어진 뒤 별도 불변 요청으로 실행한다.
 
 `scripts/plan_historical_research_split.py`는 완성된 사례만 통째로 과거순 TRAIN→VALIDATION→OOS에 배정한다. TRAIN·VALIDATION 사례 수를 명시하고 나머지를 최소 한 사례의 OOS로 남긴다. 산출물 `historical_chronological_split_plan/v1`은 source dataset ID와 revision hash, 사례별 봉 수·시간 경계, 기존 `chronological_holdout/v1` 평가 문서를 함께 고정한다. OOS는 항상 `SEALED`이고 결과를 포함하지 않는다. 첫 계획은 `data/research/historical-evaluation-plans/multi-period-2024-2026-v1.json`이며 사례를 각 1개씩 TRAIN/VALIDATION/OOS에 배정했다.
+
+`scripts/prepare_historical_development_inputs.py`는 계획과 source ID/hash를 대조한 뒤 TRAIN·VALIDATION만 독립 `development_partition/v2` 입력으로 만든다. 역사 후보군 종류와 사후 모집단 제한을 투영 manifest에 유지하며 부분 입력의 ordinal은 새 파일 순서대로 다시 매긴다. 첫 패키지 `data/research/historical-development-inputs/multi-period-2024-2026-v1`은 두 개발 입력의 quality `PASS`와 revision 재현성 `VERIFIED`를 확인했고 `oos_included=false`다.

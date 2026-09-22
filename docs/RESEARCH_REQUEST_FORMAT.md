@@ -17,6 +17,15 @@ python scripts\plan_historical_research_split.py `
   --output data\research\historical-evaluation-plans\multi-period-2024-2026-v1.json
 ```
 
+TRAIN·VALIDATION 입력 투영은 아래 명령을 사용한다. source와 분할 계획의 ID/hash가 다르면 거부하며 출력 패키지에는 OOS를 넣지 않는다.
+
+```powershell
+python scripts\prepare_historical_development_inputs.py `
+  --source data\research\historical-strategy-input\multi-period-2024-2026-v1 `
+  --split-plan data\research\historical-evaluation-plans\multi-period-2024-2026-v1.json `
+  --output data\research\historical-development-inputs\multi-period-2024-2026-v1
+```
+
 ## CR3d3c 최종 결과 개발 노출 요청 (2026-09-16)
 
 `research_process --expose-final`은 최대 1 MiB의 `final_holdout_exposure_request/v1` JSON을 받는다.

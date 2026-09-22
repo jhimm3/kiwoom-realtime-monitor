@@ -561,13 +561,14 @@ def build_research_report(
     label_rows = tuple(_document(row) for row in outcome_labels)
     quality = _data_quality(input_manifest, observation_rows, spec, logical_result_hash)
     cost_reasons = _cost_model_reasons(cost_model, spec)
+    historical_reconstruction = _historical_reconstruction_input(input_manifest)
     limitations = (
         "partial_fill_model_unsupported",
         "vi_orderability_not_exported",
     ) + ((
         "posthoc_candidate_population_not_contemporaneous_top20",
         "historical_bar_close_replay_clock_with_source_availability_preserved",
-    ) if input_manifest.get("runtime_input_version") == "historical_reconstruction_strategy/v1" else ())
+    ) if historical_reconstruction else ())
     trades = _closed_trades(event_rows)
     candidate_by_id = {
         str(row.get("event_id", "")): row for row in candidate_rows
@@ -1068,9 +1069,7 @@ def _data_quality(
     spec: ResearchEvaluationSpec, logical_result_hash: str,
 ) -> Mapping[str, Any]:
     minute = tuple(row for row in observations if row.get("kind") == "minute_bar")
-    historical_reconstruction = (
-        manifest.get("runtime_input_version") == "historical_reconstruction_strategy/v1"
-    )
+    historical_reconstruction = _historical_reconstruction_input(manifest)
     universe_kind = (
         "historical_candidate_population" if historical_reconstruction else "top20_membership"
     )
@@ -1123,6 +1122,13 @@ def _data_quality(
         "candidate_universe_revision_count": len(universe),
         "reproducibility": "VERIFIED" if reproducible else "UNVERIFIED",
     }
+
+
+def _historical_reconstruction_input(manifest: Mapping[str, Any]) -> bool:
+    return (
+        manifest.get("runtime_input_version") == "historical_reconstruction_strategy/v1"
+        or manifest.get("source_runtime_input_version") == "historical_reconstruction_strategy/v1"
+    )
 
 
 def _cost_model_reasons(

@@ -70,11 +70,17 @@ def _prepare_independent_partition(dataset, selected, policy_document, descripto
     fold = selected.folds[0]
     lower = warmup_start(selected)
     end = datetime.fromisoformat(fold.end).astimezone(timezone.utc)
+    historical_reconstruction = (
+        dataset.manifest.get('runtime_input_version') == 'historical_reconstruction_strategy/v1'
+    )
+    universe_kind = (
+        'historical_candidate_population' if historical_reconstruction else 'top20_membership'
+    )
     rows, universe_seed = [], None
     for row in dataset.observations:
         checkpoint()
         available = research_observation_order(row)[0]
-        if available < lower and row.get('kind') == 'top20_membership':
+        if available < lower and row.get('kind') == universe_kind:
             if universe_seed is None or research_observation_order(row) > research_observation_order(universe_seed):
                 universe_seed = row
         if not lower <= available < end:
@@ -108,11 +114,21 @@ def _prepare_independent_partition(dataset, selected, policy_document, descripto
     descriptor = {'spec': policy_document, 'evaluation': selected.to_dict(),
                   'warmup_start': lower.isoformat(), 'active_start': _partition_time(fold.start).isoformat(),
                   'end': end.isoformat(),
+                  'universe_kind': universe_kind,
                   'universe_seed': {key: universe_seed.get(key) for key in ('revision_id', 'available_at', 'observation_key')} if universe_seed is not None else None}
     # Explicit whitelist: no source children, global IDs, watermarks, quality, or future counts.
     scientific = {key: dataset.manifest.get(key) for key in (
         'schema_version', 'research_session_profile', 'kinds', 'subject', 'universe_rule', 'order_policy_version')}
     scientific['kinds'] = sorted({str(row.get('kind', '')) for row in observations})
+    if historical_reconstruction:
+        scientific.update(
+            source_runtime_input_version='historical_reconstruction_strategy/v1',
+            population_id=dataset.manifest.get('population_id'),
+            not_contemporaneous_top20=True,
+            source_availability_preserved_in_payload=bool(
+                dataset.manifest.get('source_availability_preserved_in_payload')
+            ),
+        )
     scientific = json.loads(json.dumps(scientific))
     identity = {'partition': descriptor, 'context': scientific, 'observations': observations, 'themes': copied_themes}
     checkpoint()
@@ -184,11 +200,14 @@ def _validate_independent_partition(dataset, selected, descriptor, partition, ch
     if (descriptor.get('warmup_start'), descriptor.get('active_start'), descriptor.get('end')) != (lower.isoformat(), active.isoformat(), end.isoformat()):
         raise ValueError(f'{label} partition bounds do not match the frozen policy')
     seed = descriptor.get('universe_seed')
+    universe_kind = str(descriptor.get('universe_kind', 'top20_membership'))
+    if universe_kind not in {'top20_membership', 'historical_candidate_population'}:
+        raise ValueError(f'{label} input has an invalid universe kind')
     seed_seen = False
     for row in dataset.observations:
         checkpoint()
         available = research_observation_order(row)[0]
-        if available < lower and isinstance(seed, dict) and row.get('kind') == 'top20_membership' and all(row.get(key) == seed.get(key) for key in ('revision_id', 'available_at', 'observation_key')) and not seed_seen:
+        if available < lower and isinstance(seed, dict) and row.get('kind') == universe_kind and all(row.get(key) == seed.get(key) for key in ('revision_id', 'available_at', 'observation_key')) and not seed_seen:
             seed_seen = True
             continue  # Last previously observed universe; preserve its original timestamp/ID.
         if not lower <= available < end:
