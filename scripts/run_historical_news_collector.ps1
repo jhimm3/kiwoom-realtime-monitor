@@ -11,8 +11,14 @@ param(
     [ValidateRange(0.0, 60.0)]
     [double]$ArticleDelay = 0.2,
 
+    [ValidateRange(1, 16)]
+    [int]$ArticleWorkers = 8,
+
     [ValidateRange(1, 1000)]
     [int]$PublishEvery = 10,
+
+    [ValidateRange(1, 10000)]
+    [int]$StatusEvery = 100,
 
     [string]$Database = "data\historical_intelligence.sqlite3",
 
@@ -63,7 +69,7 @@ Set-Location $projectRoot
 $completed = 0
 $stopRequested = $false
 Write-State 'running' $completed
-Write-Log "collector started jobs=$Jobs max_pages=$MaxPages publish_every=$PublishEvery"
+Write-Log "collector started jobs=$Jobs max_pages=$MaxPages article_workers=$ArticleWorkers publish_every=$PublishEvery status_every=$StatusEvery"
 try {
     for ($index = 1; $index -le $Jobs; $index++) {
         if (Test-Path -LiteralPath $stopFile) {
@@ -75,7 +81,8 @@ try {
         $ErrorActionPreference = 'Continue'
         $output = & $python scripts\probe_historical_backfill.py news-run `
             --jobs 1 --max-pages $MaxPages --request-delay $RequestDelay `
-            --article-delay $ArticleDelay --heartbeat-file $heartbeatFile `
+            --article-delay $ArticleDelay --article-workers $ArticleWorkers `
+            --heartbeat-file $heartbeatFile `
             --output $Database 2>&1
         $collectorExitCode = $LASTEXITCODE
         $ErrorActionPreference = $previousErrorAction
@@ -103,9 +110,11 @@ try {
             if ($LASTEXITCODE -ne 0) {
                 Write-Log "NAS news import exited with code $LASTEXITCODE"
             }
-            $statusOutput = & $python scripts\report_historical_collection_status.py `
-                --database $Database --nas-project $NasProject 2>&1
-            foreach ($line in $statusOutput) { Write-Log ([string]$line) }
+            if (($completed % $StatusEvery) -eq 0) {
+                $statusOutput = & $python scripts\report_historical_collection_status.py `
+                    --database $Database --nas-project $NasProject 2>&1
+                foreach ($line in $statusOutput) { Write-Log ([string]$line) }
+            }
         }
         catch {
             Write-Log "status publish failed: $($_.Exception.Message)"

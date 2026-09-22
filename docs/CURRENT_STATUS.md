@@ -51,9 +51,9 @@ NAS의 `stock_aliases` 1,164행을 사용해 94,750개 후보 종목·일의 당
 
 같은 개발 입력의 재실행 준비도 검사를 추가했다. 현재 TRAIN은 후보 50개 중 분봉 7개·연속 1분쌍 6개, VALIDATION은 분봉과 연속쌍 모두 7개라 `BLOCKED`다. 기본 요청 생성은 후보 전부가 분봉과 최소 한 연속 1분쌍을 가질 때만 허용하며, 희소 입력의 구조 점검은 `--allow-partial`을 명시해야 한다. 후보 원장에는 `00499K` 같은 영문 포함 6자리 단축코드가 91개 있었고 숫자 전용 필터 때문에 대신 작업에서 빠진 사실도 확인했다. CREON bridge와 작업 생성을 영문 포함 6자리로 확장하고 현재 원장에 91개를 증분 등록했다.
 
-수집 진행률은 NAS `deploy/synology/server-data/historical-intelligence/v1/STATUS.md`와 `status.json`에 게시한다. 발행시각이 검증된 과거 기사는 기존 인증된 `news_article` content 경로로 증분 전송하며, NAS 운영 DB에서 `naver_historical_web`/`historical_backfill` revision으로 저장된 뒤 기존 BODY 작업기가 원문을 처리한다. 별도 역사 SQLite 스냅샷 자체를 운영 뉴스 DB로 열거나 덮어쓰지 않는다.
+수집 진행률은 NAS `deploy/synology/server-data/historical-intelligence/v1/STATUS.md`와 `status.json`에 게시한다. 발행시각이 검증된 과거 기사는 기존 인증된 `news_article` content 경로로 10작업마다 증분 전송하며, 약 13GB 원장 집계가 필요한 NAS 전체 상태 보고는 100작업마다 수행한다. 과거 뉴스 원문 확인은 네이버 검색을 0.5초 간격으로 직렬 처리하고, 언론사 원문은 같은 도메인에 한 요청만 허용한 8개 작업자로 병렬 처리한다. NAS 운영 DB에서 `naver_historical_web`/`historical_backfill` revision으로 저장된 뒤 기존 BODY 작업기가 원문을 처리한다. 별도 역사 SQLite 스냅샷 자체를 운영 뉴스 DB로 열거나 덮어쓰지 않는다.
 
-로컬 수집기 생존 여부는 프로젝트 루트의 `수집기_모니터.cmd`를 실행해 확인하고 정지한 수집기를 다시 시작할 수 있다. CLI 확인은 `scripts/show_historical_collectors.ps1`을 유지한다. 장시간 단일 종목은 종목·페이지·기사 또는 분봉 단계 heartbeat가 계속 갱신되면 정상 처리 중이다. NAS `STATUS.md`는 13GB DB 집계를 포함하므로 기본 10작업 묶음마다 갱신한다. 뉴스와 대신 수집기는 공용 SQLite writer 충돌을 기다린 뒤 저장하며, 대신 시작 시 대형 분봉 집계 동안 writer transaction을 유지하지 않는다. 네트워크를 쓸 수 없는 실행 세션은 작업 시도를 소진하지 않고 즉시 종료하며, 영문 포함 6자리 단축코드도 뉴스 수집 대상으로 허용한다.
+로컬 수집기 생존 여부는 프로젝트 루트의 `수집기_모니터.cmd`를 실행해 확인하고 정지한 수집기를 다시 시작할 수 있다. CLI 확인은 `scripts/show_historical_collectors.ps1`을 유지한다. 장시간 단일 종목은 종목·페이지·기사 또는 분봉 단계 heartbeat가 계속 갱신되면 정상 처리 중이다. 뉴스와 대신 수집기는 공용 SQLite writer 충돌을 기다린 뒤 저장하며, 대신 시작 시 대형 분봉 집계 동안 writer transaction을 유지하지 않는다. 네트워크를 쓸 수 없는 실행 세션은 작업 시도를 소진하지 않고 즉시 종료하며, 영문 포함 6자리 단축코드도 뉴스 수집 대상으로 허용한다.
 
 기존 후보 DB는 읽기 전용으로 확인했다. 94,750개 후보 종목·일, 5,910,806개 일봉, 4,562,200개 분봉이 있고 분봉 작업 완료 중 81,901건은 0행이었다. 실제 확보 범위와 다음 작업은 [과거 자료 확보 기획](HISTORICAL_BACKFILL_PLAN.md)에 적었다.
 

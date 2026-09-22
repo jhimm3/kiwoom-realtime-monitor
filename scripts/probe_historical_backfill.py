@@ -5,8 +5,12 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from urllib.error import URLError
+from urllib.parse import urlparse
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +44,52 @@ DEFAULT_CANDIDATE_DB = Path(
     r"C:\Users\pc-1\Desktop\kiwoom_history_backfill\data\kiwoom_history.sqlite3"
 )
 DEFAULT_OUTPUT_DB = Path("data/historical_intelligence.sqlite3")
+
+
+class _ArticleHostLimiter:
+    """Serialize article requests per publisher while allowing cross-host overlap."""
+
+    def __init__(self, delay: float) -> None:
+        self._delay = max(0.0, delay)
+        self._guard = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
+
+    @contextmanager
+    def slot(self, host: str):
+        with self._guard:
+            lock = self._locks.setdefault(host, threading.Lock())
+        with lock:
+            yield
+            if self._delay > 0:
+                time.sleep(self._delay)
+
+
+def _article_request_host(item: object) -> str:
+    source = str(
+        getattr(item, "original_url", "") or getattr(item, "portal_url", "")
+    )
+    return (urlparse(source).hostname or "unknown").lower()
+
+
+def _fetch_article_publications(
+    items: list[object], *, workers: int, article_delay: float,
+    fetcher: object = fetch_article_publication,
+):
+    """Yield article fetches as they finish, with one active request per host."""
+    limiter = _ArticleHostLimiter(article_delay)
+
+    def fetch_one(item: object):
+        with limiter.slot(_article_request_host(item)):
+            return item, fetcher(item)  # type: ignore[operator]
+
+    if workers == 1:
+        for item in items:
+            yield fetch_one(item)
+        return
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="news-article") as pool:
+        futures = [pool.submit(fetch_one, item) for item in items]
+        for future in as_completed(futures):
+            yield future.result()
 
 
 def _write_news_heartbeat(
@@ -131,6 +181,7 @@ def main() -> int:
     news_run.add_argument("--max-pages", type=int, default=100)
     news_run.add_argument("--request-delay", type=float, default=0.5)
     news_run.add_argument("--article-delay", type=float, default=0.2)
+    news_run.add_argument("--article-workers", type=int, default=1)
     news_run.add_argument("--heartbeat-file", type=Path)
     news_run.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
 
@@ -179,6 +230,8 @@ def main() -> int:
             parser.error("--jobs must be between 1 and 10000")
         if args.max_pages < 1 or args.max_pages > 100:
             parser.error("--max-pages must be between 1 and 100")
+        if args.article_workers < 1 or args.article_workers > 16:
+            parser.error("--article-workers must be between 1 and 16")
         completed_jobs = 0
         failed_jobs = 0
         truncated_jobs = 0
@@ -207,19 +260,28 @@ def main() -> int:
                     store_naver_historical_search_page(args.output, page)
                     pages_observed += 1
                     items_observed += len(page.items)
-                    for article_index, item in enumerate(page.items, start=1):
+                    pending_items = []
+                    statuses = {}
+                    for item in page.items:
+                        status = article_publication_status(args.output, item)
+                        statuses[(item.office_id, item.article_id)] = status
+                        if status in {"", "not_fetched"}:
+                            pending_items.append(item)
+                    completed_articles = 0
+                    for item, result in _fetch_article_publications(
+                        pending_items, workers=args.article_workers,
+                        article_delay=args.article_delay,
+                    ):
+                        store_article_publication_result(args.output, result)
+                        statuses[(item.office_id, item.article_id)] = result.status
+                        completed_articles += 1
                         _write_news_heartbeat(
                             args.heartbeat_file, job, "article",
                             page=page_index + 1, pages_observed=pages_observed,
-                            items_observed=items_observed, article=article_index,
+                            items_observed=items_observed, article=completed_articles,
                         )
-                        status = article_publication_status(args.output, item)
-                        if status in {"", "not_fetched"}:
-                            result = fetch_article_publication(item)
-                            store_article_publication_result(args.output, result)
-                            status = result.status
-                            if args.article_delay > 0:
-                                time.sleep(args.article_delay)
+                    for item in page.items:
+                        status = statuses[(item.office_id, item.article_id)]
                         if status == "published_at_found":
                             usable += 1
                         elif status == "time_not_found":
