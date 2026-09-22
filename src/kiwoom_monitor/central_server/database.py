@@ -5,13 +5,13 @@ import hashlib
 import logging
 import sqlite3
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock, Thread
 from time import monotonic, time
 from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
@@ -79,6 +79,45 @@ class StoredQuery:
 DatasetSnapshotWrite = tuple[
     str, str, str, dict[str, Any], MarketDataObservation[object] | None,
 ]
+
+
+def _sample_postgres_backend_waits(
+    database_url: str, backend_pid: int, stop: Event,
+    samples: list[tuple[str, str, tuple[int, ...]]],
+) -> None:
+    """Capture the real PostgreSQL wait event while a TOP20 commit is blocked."""
+    if stop.wait(1.0):
+        return
+    try:
+        import psycopg
+
+        with psycopg.connect(
+            database_url, autocommit=True,
+            application_name="kiwoom-top20-latency-probe",
+        ) as connection, connection.cursor() as cursor:
+            while not stop.is_set():
+                cursor.execute(
+                    "SELECT COALESCE(wait_event_type,''),COALESCE(wait_event,''),"
+                    "pg_blocking_pids(pid) FROM pg_stat_activity WHERE pid=%s",
+                    (backend_pid,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return
+                samples.append((str(row[0]), str(row[1]), tuple(int(value) for value in row[2])))
+                if stop.wait(0.1):
+                    return
+    except Exception as error:
+        samples.append(("DIAGNOSTIC_ERROR", type(error).__name__, ()))
+
+
+def _postgres_wait_summary(samples: list[tuple[str, str, tuple[int, ...]]]) -> str:
+    counts = Counter(samples)
+    return ";".join(
+        f"{wait_type or 'NONE'}:{wait_event or 'NONE'}"
+        f" blockers={','.join(map(str, blockers)) or '-'} samples={count}"
+        for (wait_type, wait_event, blockers), count in counts.most_common()
+    ) or "no-sample"
 
 
 def _top20_statistics_document(
@@ -2399,10 +2438,24 @@ class PostgresQueryStore:
         ]
         serialized_at = monotonic()
         connection = self._connect()
+        backend_pid = int(getattr(getattr(connection, "info", None), "backend_pid", 0) or 0)
+        trace_top20 = backend_pid > 0 and any(value[0] == "top20_membership" for value in values)
+        wait_stop = Event()
+        wait_samples: list[tuple[str, str, tuple[int, ...]]] = []
+        wait_thread = (
+            Thread(
+                target=_sample_postgres_backend_waits,
+                args=(self._database_url, backend_pid, wait_stop, wait_samples),
+                name="top20-postgres-wait-probe", daemon=True,
+            )
+            if trace_top20 else None
+        )
         connected_at = monotonic()
         snapshot_at = connected_at
         metadata_at = connected_at
         revision_at = connected_at
+        if wait_thread is not None:
+            wait_thread.start()
         try:
             with connection.cursor() as cursor:
                 for kind, subject, snapshot_key, payload_json, payload, observation in serialized:
@@ -2429,6 +2482,9 @@ class PostgresQueryStore:
             connection.rollback()
             raise
         finally:
+            wait_stop.set()
+            if wait_thread is not None and wait_thread.is_alive():
+                wait_thread.join(timeout=1.0)
             connection.close()
         completed_at = monotonic()
         elapsed_ms = round((completed_at - started_at) * 1000)
@@ -2445,6 +2501,11 @@ class PostgresQueryStore:
                 round((revision_at - metadata_at) * 1000),
                 round((completed_at - revision_at) * 1000),
             )
+            if trace_top20:
+                logger.warning(
+                    "PostgreSQL TOP20 blocked commit wait trace backend_pid=%d %s",
+                    backend_pid, _postgres_wait_summary(wait_samples),
+                )
 
     def load_dataset_snapshots(self, kind: str, subject: str = "", limit: int = 100) -> list[dict[str, Any]]:
         started_at = monotonic()

@@ -15,7 +15,7 @@ services:
       retries: 10
 
   server:
-    image: kiwoom-monitor-server:2026.09.22-db-write-latency-v1
+    image: kiwoom-monitor-server:2026.09.22-db-write-latency-v2
     build:
       context: ../..
       dockerfile: deploy/synology/server.Dockerfile
