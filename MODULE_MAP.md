@@ -44,9 +44,10 @@
 | `scripts/export_historical_reconstruction.py`, `scripts/prepare_historical_research_input.py`, `infrastructure/historical_reconstruction.py` | 사후 후보·대신 봉·과거 뉴스의 불변 복원과 기존 1분 전략 입력 어댑터. strict TOP20 재생과 분리 |
 | `scripts/plan_historical_research_split.py`, `application/historical_research_split.py` | 다기간 역사 사례의 시간순 TRAIN/VALIDATION/SEALED OOS 배정과 데이터셋 hash 결합 |
 | `scripts/prepare_historical_development_inputs.py`, `infrastructure/research_data_source.py` | 봉인 계획에서 역사 provenance를 유지한 TRAIN·VALIDATION 독립 입력 투영. OOS는 별도 gated 경계 |
+| `scripts/prepare_historical_baseline_requests.py`, `scripts/summarize_historical_baseline_results.py` | OOS 없는 역사 개발 입력의 두 기존 Family 고정 요청 생성과 실행·검열 사유 요약 |
 | `src/kiwoom_monitor/research_process.py` | campaign worker·가설·순차/final 평가 프로세스 |
 | `scripts/run_research.py` | 기존 runner의 재생·실행·평가 저장 |
-| `src/kiwoom_monitor/application/research_replay.py` | 시점별 입력 재생 |
+| `src/kiwoom_monitor/application/research_replay.py` | 시점별 입력 재생. 투영된 역사 입력은 별도 역사 후보군 종류를 명시해 재생 |
 | `src/kiwoom_monitor/application/research_execution.py` | PaperExecutionEngine·봉 체결·현금/비용 |
 | `src/kiwoom_monitor/application/research_evaluation.py` | 연구 성과·품질·평가 |
 | `src/kiwoom_monitor/application/research_families.py` | 등록 Family·Factor·허용 파라미터 |

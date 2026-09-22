@@ -198,10 +198,14 @@ def _utc_cutoff(value: datetime | None) -> datetime | None:
 
 class ResearchReplayCursor:
     """Consume ordered ingests once; keep latest-revision selection identical to full replay."""
-    def __init__(self, observations, *, session_profile, checkpoint=lambda: None):
+    def __init__(
+        self, observations, *, session_profile, checkpoint=lambda: None,
+        universe_kinds: tuple[str, ...] = ("top20_membership",),
+    ):
         self.observations = observations
         self.session_profile = session_profile
         self.checkpoint = checkpoint
+        self.universe_kinds = universe_kinds
         self.offset = 0
         self.latest = {}
         self.universe = []
@@ -213,8 +217,10 @@ class ResearchReplayCursor:
                 break
             self.offset += 1
             self.checkpoint()
-            if value.get('kind') == 'top20_membership':
-                self.universe.extend(replay_candidate_universe((value,), chronological=True))
+            if value.get('kind') in self.universe_kinds:
+                self.universe.extend(replay_candidate_universe(
+                    (value,), chronological=True, kinds=self.universe_kinds,
+                ))
             if value.get('kind') != 'minute_bar' or value.get('venue') != 'KRX':
                 continue
             payload = value.get('payload')

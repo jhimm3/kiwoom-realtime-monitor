@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 
 from kiwoom_monitor.application.research_replay import (
+    ResearchReplayCursor,
     normalize_candidate_codes,
     replay_candidate_universe,
     replay_krx_minute_bars,
@@ -54,6 +55,26 @@ class ResearchReplayTests(unittest.TestCase):
             (observation,), kinds=("historical_candidate_population",),
         )
         self.assertEqual(25, len(replayed[0].codes))
+
+    def test_cursor_can_replay_projected_historical_candidate_population(self) -> None:
+        observation = {
+            "kind": "historical_candidate_population",
+            "revision_id": "historical",
+            "observation_key": "2024-01-02",
+            "available_at": "2024-01-03T00:00:00+00:00",
+            "accepted_sequence": 1,
+            "payload": {"codes": [f"{index:06d}" for index in range(25)]},
+        }
+        cursor = ResearchReplayCursor(
+            (observation,), session_profile="krx-regular/v1",
+            universe_kinds=("historical_candidate_population",),
+        )
+
+        _, universe = cursor.advance((
+            datetime.fromisoformat(observation["available_at"]), 1, "historical",
+        ))
+
+        self.assertEqual(25, len(universe[0].codes))
 
     def test_default_regular_profile_does_not_consume_new_after_market_bar(self) -> None:
         def observation(sequence: int, start: str, end: str) -> dict:

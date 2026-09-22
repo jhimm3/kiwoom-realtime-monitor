@@ -128,6 +128,8 @@ def execute_research(
     partition_replay = dataset.manifest.get('runtime_input_version') in (DEVELOPMENT_INPUT_VERSION, FINAL_INPUT_VERSION)
     historical_reconstruction = (
         dataset.manifest.get('runtime_input_version') == 'historical_reconstruction_strategy/v1'
+        or dataset.manifest.get('source_runtime_input_version')
+        == 'historical_reconstruction_strategy/v1'
     )
     if historical_reconstruction:
         if dataset.manifest.get('not_contemporaneous_top20') is not True:
@@ -145,7 +147,15 @@ def execute_research(
             raise ResearchRunCancelled('research run cancellation requested')
         if resource_guard is not None:
             resource_guard.checkpoint()
-    cursor = ResearchReplayCursor(ordered_input, session_profile=session_profile or 'krx-regular/v1', checkpoint=checkpoint) if bundle_replay or partition_replay else None
+    cursor = ResearchReplayCursor(
+        ordered_input,
+        session_profile=session_profile or 'krx-regular/v1',
+        checkpoint=checkpoint,
+        universe_kinds=(
+            ("historical_candidate_population",)
+            if historical_reconstruction else ("top20_membership",)
+        ),
+    ) if bundle_replay or partition_replay else None
     family = family_for_config(config)
     run_id, spec = research_run_identity(dataset, config, execution_config, evaluation_spec,
                                         session_profile=session_profile, execution_scope=execution_scope)
