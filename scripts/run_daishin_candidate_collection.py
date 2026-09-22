@@ -86,9 +86,12 @@ def _initialize_jobs(reference: Path, database: Path) -> int:
             completed_rows = []
             for code in codes:
                 one = existing.get((code, 60))
-                if one is None:
+                five = existing.get((code, 300))
+                # A partial import left by an interrupted run is not complete.
+                # Legacy inference is safe only when both requested intervals
+                # are already present; normal runs retain their explicit ledger state.
+                if one is None or five is None:
                     continue
-                five = existing.get((code, 300), (0, "", ""))
                 completed_rows.append((*one, *five, now, code))
             connection.executemany(
                 """

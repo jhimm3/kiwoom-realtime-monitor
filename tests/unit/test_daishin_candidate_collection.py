@@ -50,6 +50,44 @@ class DaishinCandidateCollectionTest(unittest.TestCase):
                 with self.assertRaises(collector.DaishinEnvironmentUnavailable):
                     collector._run_backfill("005930", 1, output)
 
+    def test_partial_one_minute_import_is_not_inferred_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.sqlite3"
+            database = Path(directory) / "jobs.sqlite3"
+            with closing(sqlite3.connect(reference)) as connection, connection:
+                connection.execute("CREATE TABLE candidate_days(code TEXT)")
+                connection.execute("INSERT INTO candidate_days VALUES('005305')")
+
+            collector._initialize_jobs(reference, database)
+            collector.store_daishin_probe_payload(database, {
+                "provider": "daishin_creon",
+                "code": "005305",
+                "venue": "K",
+                "session_scope": "regular",
+                "interval_seconds": 60,
+                "adjustment_mode": "raw",
+                "observed_at": "2026-09-22T12:28:25+09:00",
+                "bars": [{
+                    "bar_time": "2024-08-29T09:01:00+09:00",
+                    "raw_date": 20240829,
+                    "raw_time": 901,
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100,
+                    "volume": 10,
+                    "trading_value": 1000,
+                }],
+            })
+
+            collector._initialize_jobs(reference, database)
+
+            with closing(sqlite3.connect(database)) as connection:
+                state = connection.execute(
+                    "SELECT state FROM market_backfill_jobs WHERE code='005305'"
+                ).fetchone()[0]
+            self.assertEqual("pending", state)
+
     def test_environment_failure_returns_claim_without_charging_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "jobs.sqlite3"
