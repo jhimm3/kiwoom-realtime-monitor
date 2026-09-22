@@ -136,6 +136,14 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 
 사례 연결이 완료돼도 모델 가중치 학습 완료는 아니다. 원문 확보 → 품질 검토 → 사례 구성 → 학습/검색 방식 선택 → 평가 순서로 진행한다. 타점 세부 규칙은 이 자료와 사용자의 학습을 바탕으로 이후 조정한다.
 
+### D06 첫 LLM 학습 준비 사례 계약
+
+`scripts/prepare_historical_learning_cases.py`는 검증된 `historical_reconstruction/v1`을 `historical_learning_cases/v1` 불변 묶음으로 변환한다. 한 사례 안에서도 사후 후보 선정은 `sample_selection`, 발행시각이 검증된 기사 제목·검색 요약은 `model_input`, 아직 실행하지 않은 LLM 해석은 `interpretation.status=not_generated`, 다음 거래일 봉에서 계산한 가격 변화는 `outcome_label`로 분리한다. 결과 라벨은 모델 입력이 아니며, 기사 `published_at`을 실제 수집 `available_at`으로 바꾸지 않는다.
+
+이 계약은 과거 당시의 strict 재생 입력이 아니다. 후보 생성시각을 알 수 없고 뉴스도 사후 수집했으므로 `strict_point_in_time_case=false`, `strict_backtest_input=false`다. 원문 전체가 아니라 제목과 검색 요약만 있는 현재 범위도 `content_scope`에 명시한다. 모델 호출이나 가중치 학습은 수행하지 않으며 `model_weight_training_ready=false`를 유지한다.
+
+최종 첫 불변 표본 `data/research/historical-learning-cases/2026-09-18-v2`는 후보 50사례를 보존한다. 발행시각 검증과 후보일 이전 조건을 통과한 뉴스 근거가 있는 사례는 22개, 다음 거래일 결과 봉이 있는 사례는 2개, 결과 공백은 48개다. 원문 차단 1,295관계, 시각 없음 74관계, 후보일 뒤 발행 21관계 등은 입력에서 제외하고 이유별 개수로 남겼다. 기사 의미 관련성은 아직 사람 검토 전이며 `semantic_relevance_reviewed=false`다. 이는 사례 파이프라인과 누락 처리를 검증한 표본이며 RAG 품질, 미세조정 준비 완료, 전략 성과를 뜻하지 않는다.
+
 ### D03 첫 입력 계약
 
 `scripts/export_historical_reconstruction.py`는 선택한 후보일의 후보·현재 확보된 대신 봉·뉴스 근거를 `historical_reconstruction/v1` 불변 디렉터리로 만든다. `manifest.json`과 `records.jsonl`의 hash·ordinal·revision ID를 `load_historical_reconstruction`이 다시 검증한다. 이 형식은 기존 `top20_membership` 입력으로 위장하지 않으며 `strict_top20_replay_supported=false`를 필수로 둔다.

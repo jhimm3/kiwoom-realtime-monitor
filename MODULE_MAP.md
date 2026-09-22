@@ -45,6 +45,7 @@
 | `scripts/plan_historical_research_split.py`, `application/historical_research_split.py` | 다기간 역사 사례의 시간순 TRAIN/VALIDATION/SEALED OOS 배정과 데이터셋 hash 결합 |
 | `scripts/prepare_historical_development_inputs.py`, `infrastructure/research_data_source.py` | 봉인 계획에서 역사 provenance를 유지한 TRAIN·VALIDATION 독립 입력 투영. OOS는 별도 gated 경계 |
 | `scripts/prepare_historical_baseline_requests.py`, `scripts/summarize_historical_baseline_results.py` | OOS 없는 역사 개발 입력의 두 기존 Family 고정 요청 생성과 실행·검열 사유 요약 |
+| `scripts/prepare_historical_learning_cases.py`, `application/historical_learning_cases.py` | 사후 후보 선정·복원 뉴스 근거·미생성 AI 해석·미래 가격 결과를 분리한 불변 LLM 학습 준비 사례. strict 시점 재생이나 모델 학습 완료로 사용하지 않음 |
 | `scripts/assess_historical_development_readiness.py`, `infrastructure/historical_research_readiness.py` | 역사 개발 분할의 후보별 분봉·연속 1분쌍 완전성 gate. 희소 구조 실행은 명시적 예외 |
 | `src/kiwoom_monitor/research_process.py` | campaign worker·가설·순차/final 평가 프로세스 |
 | `scripts/run_research.py` | 기존 runner의 재생·실행·평가 저장 |
