@@ -10,6 +10,7 @@
 - 사건 분할 코드까지 포함한 추적 파일 971개를 NAS 프로젝트와 동기화해 SHA-256 불일치 0개를 확인했다. 기존 968개는 `X:\kiwoom-monitor-backups\20260923-003116-historical-news-event-split-v1`에 보존했고 운영 데이터·비밀 경로는 제외했다.
 - 과거 뉴스 검토 화면의 `사건 분할 계획`은 최신 불변 사람 판정에서 서로 다른 관련 사건이 3개 이상일 때 TRAIN·VALIDATION 수를 받고 최소 1개 사건을 봉인 OOS로 남긴다. 동일 계획은 덮어쓰지 않으며 현재 0건 작업표에서는 먼저 판정과 동결이 필요하다고 안내한다.
 - 앱 사건 분할 실행까지 포함한 추적 파일 971개를 NAS와 다시 대조해 SHA-256 불일치 0개를 확인했다. 직전 971개 파일은 `X:\kiwoom-monitor-backups\20260923-004208-news-event-split-ui-v1`에 보존했다.
+- `historical_news_development_inputs/v1`은 정확히 결합된 사람 판정과 사건 분할에서 TRAIN·VALIDATION 관련 기사만 별도 불변 JSONL로 투영한다. 봉인 OOS 기사·정답 payload는 출력하지 않으며 두 개발 구간 사이의 사건 ID 중복, 파일 hash, plan·dataset ID를 다시 검증한다. 제목·검색 요약·검증 발행시각과 사람 확정 사건·테마를 분리해 이후 RAG와 미세조정 비교가 같은 입력을 사용하게 한다.
 
 ## 2026-09-22 LLM 학습 준비 사례 계약
 

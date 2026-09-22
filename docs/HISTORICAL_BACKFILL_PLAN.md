@@ -159,6 +159,8 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 
 같은 기능은 과거 뉴스 검토 화면의 `사건 분할 계획`에서 실행한다. 최신 불변 판정에 관련 사건이 3개 이상일 때만 TRAIN과 VALIDATION 사건 수를 입력받고, 선택 가능 상한을 조정해 OOS에 최소 1개 사건이 반드시 남게 한다. 계획은 `data/research/historical-news-event-splits/<plan_id>.json`에 불변 저장한다.
 
+`scripts/prepare_historical_news_development_inputs.py`는 결정 dataset ID·파일 hash와 사건 분할 plan ID가 정확히 맞을 때만 `historical_news_development_inputs/v1` 디렉터리를 만든다. `train.jsonl`과 `validation.jsonl`에는 제목·검색 요약·검증 발행시각·연결 사례를 model input으로, 사람 확정 관련성·사건 ID·테마 프로필과 테마명을 target으로 분리한다. OOS 기사와 target은 어떤 출력 파일에도 넣지 않으며 TRAIN과 VALIDATION에 같은 사건 ID가 있으면 거절한다. 이 묶음도 RAG나 미세조정이 실행됐다는 뜻이 아니므로 `llm_used=false`, `model_weight_training_ready=false`를 유지한다.
+
 ### D03 첫 입력 계약
 
 `scripts/export_historical_reconstruction.py`는 선택한 후보일의 후보·현재 확보된 대신 봉·뉴스 근거를 `historical_reconstruction/v1` 불변 디렉터리로 만든다. `manifest.json`과 `records.jsonl`의 hash·ordinal·revision ID를 `load_historical_reconstruction`이 다시 검증한다. 이 형식은 기존 `top20_membership` 입력으로 위장하지 않으며 `strict_top20_replay_supported=false`를 필수로 둔다.

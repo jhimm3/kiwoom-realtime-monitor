@@ -160,6 +160,11 @@ def load_historical_news_event_split(path: Path) -> dict[str, Any]:
     return value
 
 
+def validate_historical_news_event_split(plan: Mapping[str, Any]) -> None:
+    """Validate an in-memory event split before another contract consumes it."""
+    _validate_plan(plan)
+
+
 def _event_document(
     event_id: str, decisions: list[Mapping[str, Any]],
 ) -> dict[str, Any]:

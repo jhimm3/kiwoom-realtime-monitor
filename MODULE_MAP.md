@@ -49,6 +49,7 @@
 | `scripts/prepare_historical_news_review_queue.py`, `application/historical_news_review_queue.py` | 학습 준비 사례의 기사 식별자 중복 제거, 종목·사례별 비AI 규칙 힌트와 사람 검토 빈칸을 보존하는 불변 검토 대기열. 규칙 힌트는 정답이 아님 |
 | `scripts/historical_news_review_workflow.py`, `application/historical_news_review_decisions.py` | 우선 검토 CSV 내보내기와 사람 판정·사건 ID·테마 프로필 검증, 불변 결정 결과 저장. 편집 CSV와 최종 결과를 분리하고 모델 학습 준비 상태는 false 유지 |
 | `scripts/plan_historical_news_event_split.py`, `application/historical_news_event_split.py` | 사람 검토 관련 기사를 canonical event 단위로 유지한 시간순 TRAIN·VALIDATION·봉인 OOS 불변 계획. 무관·보류와 일부 검토 상태를 분리 |
+| `scripts/prepare_historical_news_development_inputs.py`, `application/historical_news_development_inputs.py` | 사건 분할에서 TRAIN·VALIDATION 사람 검토 기사만 투영한 RAG·미세조정 비교 공통 입력. OOS payload 제외와 사건 중복 금지 검증 |
 | `scripts/assess_historical_development_readiness.py`, `infrastructure/historical_research_readiness.py` | 역사 개발 분할의 후보별 분봉·연속 1분쌍 완전성 gate. 희소 구조 실행은 명시적 예외 |
 | `src/kiwoom_monitor/research_process.py` | campaign worker·가설·순차/final 평가 프로세스 |
 | `scripts/run_research.py` | 기존 runner의 재생·실행·평가 저장 |

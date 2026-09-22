@@ -189,7 +189,7 @@ def build_historical_news_review_decisions(
             "article_evidence": {
                 key: item["article"].get(key, "")
                 for key in (
-                    "title", "published_at", "published_precision",
+                    "title", "search_summary", "published_at", "published_precision",
                     "published_at_source", "article_url", "original_url",
                 )
             },
