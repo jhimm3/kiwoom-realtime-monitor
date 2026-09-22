@@ -35,6 +35,7 @@ from kiwoom_monitor.central_server.database import (
     PostgresQueryStore,
     SQLiteQueryStore,
     StoredQuery,
+    _uses_async_dataset_commit,
     create_query_store,
 )
 from kiwoom_monitor.central_server.schema_migrations import CentralSchemaMigrationError, CentralSchemaMigrationRunner
@@ -52,6 +53,16 @@ from kiwoom_monitor.domain.market_data_contract import (
 
 
 class CentralServerDatabaseTests(unittest.TestCase):
+    def test_only_reconstructable_live_snapshots_use_async_commit(self) -> None:
+        self.assertTrue(_uses_async_dataset_commit([
+            ("top20_membership", "2026-09-22", "key", {}, None),
+            ("program_flow", "005930", "key", {}, None),
+        ]))
+        self.assertFalse(_uses_async_dataset_commit([
+            ("top20_membership", "2026-09-22", "key", {}, None),
+            ("investor_flow", "005930", "key", {}, None),
+        ]))
+
     def test_storage_breakdown_groups_shared_documents_without_deleting_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")

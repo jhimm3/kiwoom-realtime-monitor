@@ -34,7 +34,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.09.22-db-write-latency-v2"
+SERVER_BUILD = "2026.09.22-db-write-latency-v3"
 logger = logging.getLogger(__name__)
 
 

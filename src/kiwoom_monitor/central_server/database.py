@@ -80,6 +80,18 @@ DatasetSnapshotWrite = tuple[
     str, str, str, dict[str, Any], MarketDataObservation[object] | None,
 ]
 
+# These live market snapshots are refreshed continuously and can be reconstructed
+# from the next poll/realtime frame.  Keeping their commit synchronous makes the
+# UI wait behind slow NAS WAL fsyncs; durable documents, account data, orders and
+# research exports continue to use PostgreSQL's default synchronous commit.
+ASYNC_COMMIT_DATASET_KINDS = frozenset({
+    "market_state", "new_high", "program_flow", "ranking", "top20_membership",
+})
+
+
+def _uses_async_dataset_commit(values: list[DatasetSnapshotWrite]) -> bool:
+    return bool(values) and all(value[0] in ASYNC_COMMIT_DATASET_KINDS for value in values)
+
 
 def _sample_postgres_backend_waits(
     database_url: str, backend_pid: int, stop: Event,
@@ -2450,6 +2462,7 @@ class PostgresQueryStore:
             )
             if trace_top20 else None
         )
+        asynchronous_commit = _uses_async_dataset_commit(values)
         connected_at = monotonic()
         snapshot_at = connected_at
         metadata_at = connected_at
@@ -2458,6 +2471,8 @@ class PostgresQueryStore:
             wait_thread.start()
         try:
             with connection.cursor() as cursor:
+                if asynchronous_commit:
+                    cursor.execute("SET LOCAL synchronous_commit TO OFF")
                 for kind, subject, snapshot_key, payload_json, payload, observation in serialized:
                     cursor.execute(
                         "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
