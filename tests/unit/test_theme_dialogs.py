@@ -39,14 +39,34 @@ class ThemePreviewDialogTests(unittest.TestCase):
             "주가 움직임만 언급", 20, "pending", "openai", "model", datetime.now(UTC),
         )
         dialog = ThemeSuggestionReviewDialog((approved, rejected))
-        dialog._table.item(0, 2).setText("호남개발")
-        dialog._table.cellWidget(0, 6).setCurrentIndex(1)
-        dialog._table.cellWidget(1, 6).setCurrentIndex(2)
+        dialog._table.item(0, dialog.TARGET_COLUMN).setText("호남개발")
+        dialog._table.cellWidget(0, dialog.ACTION_COLUMN).setCurrentIndex(1)
+        dialog._table.cellWidget(1, dialog.ACTION_COLUMN).setCurrentIndex(2)
 
         decisions = dialog.decisions()
 
         self.assertEqual((approved, "approved", ("호남개발",)), decisions[0])
-        self.assertEqual((rejected, "rejected", ("주가상승",)), decisions[1])
+        self.assertEqual((rejected, "rejected", ()), decisions[1])
+        dialog.close()
+
+    def test_unchanged_target_is_re_resolved_when_an_earlier_row_updates_alias(self) -> None:
+        first = ProfileThemeSuggestion(
+            "000001", "첫 종목", "news-1", "호남클러스터", ("호남클러스터",),
+            "첫 근거", 80, "pending", "openai", "model", datetime.now(UTC),
+        )
+        second = ProfileThemeSuggestion(
+            "000002", "둘째 종목", "news-2", "호남클러스터", ("호남클러스터",),
+            "둘째 근거", 75, "pending", "openai", "model", datetime.now(UTC),
+        )
+        dialog = ThemeSuggestionReviewDialog((first, second))
+        dialog._table.item(0, dialog.TARGET_COLUMN).setText("호남개발")
+        dialog._table.cellWidget(0, dialog.ACTION_COLUMN).setCurrentIndex(1)
+        dialog._table.cellWidget(1, dialog.ACTION_COLUMN).setCurrentIndex(1)
+
+        decisions = dialog.decisions()
+
+        self.assertEqual(("호남개발",), decisions[0][2])
+        self.assertEqual((), decisions[1][2])
         dialog.close()
 
 

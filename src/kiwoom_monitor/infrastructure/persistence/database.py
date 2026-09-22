@@ -109,7 +109,7 @@ DEFAULT_COLUMNS = (
 )
 
 
-MAIN_SCHEMA_VERSION = 6
+MAIN_SCHEMA_VERSION = 7
 
 
 class Database:
@@ -302,6 +302,11 @@ class Database:
                         "profile_theme_suggestions",
                         self._create_theme_suggestions,
                     ),
+                    SQLiteMigration(
+                        7,
+                        "profile_theme_suggestion_article_context",
+                        self._add_theme_suggestion_article_context,
+                    ),
                 )
             )
             connection.commit()
@@ -408,6 +413,18 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_profile_theme_suggestions_status "
             "ON profile_theme_suggestions(profile_id,status,analyzed_at DESC)"
         )
+
+    @staticmethod
+    def _add_theme_suggestion_article_context(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(profile_theme_suggestions)")
+        }
+        for name in ("article_title", "article_published_at", "article_url"):
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE profile_theme_suggestions ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                )
 
     @staticmethod
     def _add_daily_bar_columns(connection: sqlite3.Connection) -> None:

@@ -183,6 +183,24 @@ class SchemaMigrationTests(unittest.TestCase):
             self.assertEqual(("profile_theme_suggestions",), migration)
             self.assertIsNotNone(table)
 
+    def test_v7_adds_article_context_to_theme_suggestions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            with closing(sqlite3.connect(path)) as connection:
+                migration = connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=7"
+                ).fetchone()
+                columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(profile_theme_suggestions)")
+                }
+
+            self.assertEqual(("profile_theme_suggestion_article_context",), migration)
+            self.assertTrue(
+                {"article_title", "article_published_at", "article_url"}.issubset(columns)
+            )
+
     def test_existing_journal_data_survives_baseline_registration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

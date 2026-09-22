@@ -356,13 +356,18 @@ class ThemeRepository:
                     cursor = connection.execute(
                         "INSERT INTO profile_theme_suggestions("
                         "profile_id,stock_code,news_identity,raw_theme_name,evidence,confidence,provider,model,"
-                        "body_hash,analyzed_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                        "body_hash,analyzed_at,article_title,article_published_at,article_url) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
                         "ON CONFLICT(profile_id,stock_code,news_identity,raw_theme_name) DO UPDATE SET "
                         "evidence=excluded.evidence,confidence=excluded.confidence,provider=excluded.provider,"
-                        "model=excluded.model,body_hash=excluded.body_hash,analyzed_at=excluded.analyzed_at",
+                        "model=excluded.model,body_hash=excluded.body_hash,analyzed_at=excluded.analyzed_at,"
+                        "article_title=excluded.article_title,"
+                        "article_published_at=excluded.article_published_at,article_url=excluded.article_url",
                         (profile_id, value.stock_code, value.news_identity, value.raw_theme_name.strip(),
                          value.evidence, max(0, min(100, value.confidence)), value.provider, value.model,
-                         value.body_hash, value.analyzed_at.isoformat()),
+                         value.body_hash, value.analyzed_at.isoformat(), value.article_title,
+                         value.article_published_at.isoformat() if value.article_published_at else "",
+                         value.article_url),
                     )
                     imported += max(0, cursor.rowcount)
         finally:
@@ -379,7 +384,8 @@ class ThemeRepository:
             parameters: tuple[object, ...] = (profile_id,) if status == "all" else (profile_id, status)
             rows = connection.execute(
                 "SELECT p.stock_code,COALESCE(s.name,p.stock_code),p.news_identity,p.raw_theme_name,"
-                "p.evidence,p.confidence,p.status,p.provider,p.model,p.analyzed_at,p.reviewed_theme_names "
+                "p.evidence,p.confidence,p.status,p.provider,p.model,p.analyzed_at,p.reviewed_theme_names,"
+                "p.article_title,p.article_published_at,p.article_url "
                 "FROM profile_theme_suggestions p LEFT JOIN stocks s ON s.code=p.stock_code "
                 f"WHERE p.profile_id=? {where} ORDER BY p.analyzed_at DESC,p.stock_code,p.raw_theme_name",
                 parameters,
@@ -391,7 +397,8 @@ class ThemeRepository:
                 result.append(ProfileThemeSuggestion(
                     str(row[0]), str(row[1]), str(row[2]), str(row[3]), resolved,
                     str(row[4]), int(row[5]), str(row[6]), str(row[7]), str(row[8]),
-                    datetime.fromisoformat(str(row[9])),
+                    datetime.fromisoformat(str(row[9])), str(row[11]),
+                    _optional_datetime(row[12]), str(row[13]),
                 ))
             return tuple(result)
         finally:
@@ -786,3 +793,12 @@ class ThemeRepository:
             return resolve(str(alias[0]), next_seen) if alias is not None else (name,)
 
         return resolve(start, frozenset())
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None

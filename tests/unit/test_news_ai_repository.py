@@ -11,16 +11,19 @@ from kiwoom_monitor.infrastructure.news_ai import (
     AINewsAnalysis, AICompanyImpact, AIRequestUsage, AIThemeCandidate, analysis_body_hash,
 )
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository, news_identity
+from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
 
 
 class NewsAIRepositoryTests(unittest.TestCase):
     def test_theme_candidates_are_persisted_for_profile_review(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            repository = NewsAIRepository(Path(directory) / "news.sqlite3")
+            path = Path(directory) / "news.sqlite3"
+            repository = NewsAIRepository(path)
             item = StockNewsItem(
                 "지역 개발 기사", "복수 기업 참여", "https://example.com/theme", "",
                 datetime.now(UTC), assess_stock_news("테스트", "지역 개발 기사", "복수 기업 참여"),
             )
+            StockNewsRepository(path).upsert("000001", (item,))
             repository.save(
                 "000001", item, "openai", "model", analysis_body_hash("테스트", "본문"),
                 AINewsAnalysis(
@@ -34,6 +37,9 @@ class NewsAIRepositoryTests(unittest.TestCase):
             self.assertEqual(1, len(values))
             self.assertEqual("호남클러스터", values[0].raw_theme_name)
             self.assertEqual("복수 상장사 참여", values[0].evidence)
+            self.assertEqual("지역 개발 기사", values[0].article_title)
+            self.assertEqual(item.published_at, values[0].article_published_at)
+            self.assertEqual("https://example.com/theme", values[0].article_url)
 
     def test_same_url_reuses_company_specific_impact_for_another_stock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

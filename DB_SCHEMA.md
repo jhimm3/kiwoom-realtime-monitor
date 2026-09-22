@@ -50,7 +50,7 @@ R3g 선택 계좌 모의 주문도 기존 intent/event 원장을 사용한다(�
 기존 v1 `manual_mock_` 행과 ID 계산은 변경하지 않는다. 조회·취소는 저장 intent의 account_ref/run을 검증한다.
 페이지 cursor와 owned query는 bundle별 메모리 상태이며 새 DB 테이블은 추가하지 않았다.
 
-스키마의 실행 원본은 각 `CREATE TABLE` 코드다. 이 문서는 수정 범위 파악용이다. 로컬 SQLite 마이그레이션 실행기는 `infrastructure/persistence/schema_migrations.py`에 있다. 메인 DB는 v6, 매매일지 DB는 v9다. 메인 v2와 매매일지 v1은 기존에 멱등적 `CREATE TABLE`·호환 `ALTER TABLE`로 형성된 스키마의 기준선이고, v3에서 공통 시장 관측 메타데이터 표를, v4에서 종목별 당일 실제 상한가 가격 캐시를, v5에서 프로필별 테마 이름 결정 원장을, v6에서 AI 테마 제안 검토 원장을 추가했다. 기존 시장 데이터 행의 시각·출처를 추정해 변환하지 않는다. 이후 필드 변경은 시작 코드에 임의 SQL을 더하지 말고 다음 연속 버전의 명시적 마이그레이션과 이전 DB fixture를 함께 추가한다.
+스키마의 실행 원본은 각 `CREATE TABLE` 코드다. 이 문서는 수정 범위 파악용이다. 로컬 SQLite 마이그레이션 실행기는 `infrastructure/persistence/schema_migrations.py`에 있다. 메인 DB는 v7, 매매일지 DB는 v9다. 메인 v2와 매매일지 v1은 기존에 멱등적 `CREATE TABLE`·호환 `ALTER TABLE`로 형성된 스키마의 기준선이고, v3에서 공통 시장 관측 메타데이터 표를, v4에서 종목별 당일 실제 상한가 가격 캐시를, v5에서 프로필별 테마 이름 결정 원장을, v6에서 AI 테마 제안 검토 원장을, v7에서 제안 판단에 필요한 기사 제목·발행시각·원문 URL을 추가했다. 기존 시장 데이터 행의 시각·출처를 추정해 변환하지 않는다. 이후 필드 변경은 시작 코드에 임의 SQL을 더하지 말고 다음 연속 버전의 명시적 마이그레이션과 이전 DB fixture를 함께 추가한다.
 
 마이그레이션 원장은 `version`, 변경 불가한 `name`, `applied_at`을 저장한다. 실행기는 버전 연속성과 이름 일치를 검사하고 각 변경을 savepoint 안에서 수행한다. 실패한 변경은 DDL과 원장을 함께 되돌리고, 앱이 지원하는 버전보다 새로운 DB는 조용히 열지 않고 오류로 거부한다. 중앙 SQLite/PostgreSQL도 동일한 중앙 마이그레이션 계획을 각 DB 방언의 한 트랜잭션에서 실행한다.
 
@@ -70,7 +70,7 @@ R3g 선택 계좌 모의 주문도 기존 intent/event 원장을 사용한다(�
 
 | 분류 | 테이블 | 역할/주요 키 |
 | --- | --- | --- |
-| 메타 | `schema_migrations` | 메인 스키마 버전·이름·적용 시각. 현재 v6 |
+| 메타 | `schema_migrations` | 메인 스키마 버전·이름·적용 시각. 현재 v7 |
 | 관측 메타 | `market_data_observation_meta` | `(dataset_kind, subject, observation_key)`별 시장 기준/가용 시각·시장·단위·실제/추정·완결성·출처·후보군. 신규 실시간/조회 분봉·일봉과 같은 트랜잭션으로 저장 |
 | 설정 | `settings`, `central_setting_versions`, `column_settings` | 앱 값, 중앙 병합 시각, 표 열 구성 |
 | 종목 | `stocks` | `code` PK, 이름·시장·기본정보·신고가/NXT·당일 상한가 가격 캐시 |
@@ -78,7 +78,7 @@ R3g 선택 계좌 모의 주문도 기존 intent/event 원장을 사용한다(�
 | 테마(구형/호환) | `themes`, `stock_themes` | 테마와 종목 N:M |
 | 테마 프로필 | `theme_profiles`, `profile_themes`, `profile_stock_themes` | 프로필 → 테마 → 종목 N:M |
 | 테마 이름 결정 | `profile_theme_name_decisions` | 프로필별 별칭(`alias`), 분리 확장(`split_to`), 재병합 금지(`keep_separate`)와 결정 출처·갱신 시각 |
-| AI 테마 검토 | `profile_theme_suggestions` | 프로필별 기사 identity·종목·원시 테마·근거·확신도와 pending/approved/rejected, 사용자가 승인한 적용 이름 |
+| AI 테마 검토 | `profile_theme_suggestions` | 프로필별 기사 identity·제목·발행시각·원문 URL, 종목·원시 테마·근거·확신도와 pending/approved/rejected, 사용자가 승인한 적용 이름 |
 | 신고가 | `new_high_snapshot`, `new_high_snapshot_meta`, `intraday_highs`, `historical_high_evidence` | 기간 목록, 당일 고가, 수정주가 근거 |
 | 원시/보정 봉 | `minute_bars`, `daily_bars` | 종목·날짜·분/일 OHLCV와 거래대금 |
 | 지수 봉 | `market_index_minute_bars`, `market_index_daily_bars` | KOSPI/KOSDAQ OHLCV·거래대금 |

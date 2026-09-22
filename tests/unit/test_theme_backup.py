@@ -36,7 +36,8 @@ class ThemeBackupServiceTest(unittest.TestCase):
             repository.set_theme_alias("인공지능", "AI", decision_source="llm_review")
             repository.import_ai_theme_suggestions((ThemeSuggestion(
                 "005930", "https://example.com/theme", "인공지능", "기사 근거", 88,
-                "openai", "model", "body-hash", datetime.now(UTC),
+                "openai", "model", "body-hash", datetime.now(UTC), "AI 산업 기사",
+                datetime(2026, 9, 22, 9, 30, tzinfo=UTC), "https://example.com/original",
             ),))
             repository.review_ai_theme_suggestion(
                 repository.list_ai_theme_suggestions()[0].key, approved=True,
@@ -82,3 +83,5 @@ class ThemeBackupServiceTest(unittest.TestCase):
             approved = repository.list_ai_theme_suggestions("approved")
             self.assertEqual(1, len(approved))
             self.assertEqual(("AI",), approved[0].resolved_theme_names)
+            self.assertEqual("AI 산업 기사", approved[0].article_title)
+            self.assertEqual("https://example.com/original", approved[0].article_url)

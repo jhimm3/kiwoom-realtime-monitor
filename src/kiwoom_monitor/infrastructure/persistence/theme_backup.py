@@ -376,13 +376,15 @@ class ThemeBackupService:
         columns = (
             "stock_code", "news_identity", "raw_theme_name", "evidence", "confidence",
             "provider", "model", "body_hash", "analyzed_at", "status",
-            "reviewed_theme_names", "reviewed_at",
+            "reviewed_theme_names", "reviewed_at", "article_title",
+            "article_published_at", "article_url",
         )
         return [
             dict(zip(columns, row, strict=True))
             for row in connection.execute(
                 "SELECT stock_code,news_identity,raw_theme_name,evidence,confidence,provider,model,"
-                "body_hash,analyzed_at,status,reviewed_theme_names,reviewed_at "
+                "body_hash,analyzed_at,status,reviewed_theme_names,reviewed_at,article_title,"
+                "article_published_at,article_url "
                 "FROM profile_theme_suggestions WHERE profile_id=? "
                 "ORDER BY analyzed_at,stock_code,news_identity,raw_theme_name",
                 (profile_id,),
@@ -405,10 +407,13 @@ class ThemeBackupService:
             connection.execute(
                 "INSERT OR REPLACE INTO profile_theme_suggestions("
                 "profile_id,stock_code,news_identity,raw_theme_name,evidence,confidence,provider,model,"
-                "body_hash,analyzed_at,status,reviewed_theme_names,reviewed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "body_hash,analyzed_at,status,reviewed_theme_names,reviewed_at,article_title,"
+                "article_published_at,article_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (profile_id, stock_code, identity, raw_name, str(item.get("evidence", "")),
                  max(0, min(100, int(item.get("confidence", 0)))), str(item.get("provider", "")),
                  str(item.get("model", "")), str(item.get("body_hash", "")),
                  str(item.get("analyzed_at", "")), status,
-                 str(item.get("reviewed_theme_names") or "[]"), item.get("reviewed_at")),
+                 str(item.get("reviewed_theme_names") or "[]"), item.get("reviewed_at"),
+                 str(item.get("article_title", "")), str(item.get("article_published_at", "")),
+                 str(item.get("article_url", ""))),
             )

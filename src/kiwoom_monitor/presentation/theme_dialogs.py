@@ -6,8 +6,8 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QColor, QKeySequence, QPalette
+from PySide6.QtCore import QEvent, QUrl, Qt
+from PySide6.QtGui import QColor, QDesktopServices, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -584,6 +584,10 @@ class ThemeBulkEditDialog(QDialog):
 
 
 class ThemeSuggestionReviewDialog(QDialog):
+    TARGET_COLUMN = 2
+    ARTICLE_COLUMN = 4
+    ACTION_COLUMN = 8
+
     def __init__(self, suggestions: tuple[object, ...], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("AI 테마 제안 검토")
@@ -591,39 +595,47 @@ class ThemeSuggestionReviewDialog(QDialog):
         layout = QVBoxLayout(self)
         guide = QLabel(
             "AI 제안은 자동 적용되지 않습니다. 활성 프로필의 별칭·분리 결정을 적용한 결과를 "
-            "확인하고 승인 또는 거절하세요. 적용 테마는 쉼표로 수정할 수 있습니다."
+            "확인하고 승인 또는 거절하세요. 적용 테마는 쉼표로 수정할 수 있습니다. "
+            "기사 제목을 두 번 누르면 원문을 엽니다."
         )
         guide.setWordWrap(True)
         layout.addWidget(guide)
         self._suggestions = suggestions
-        self._table = QTableWidget(len(suggestions), 7)
+        self._table = QTableWidget(len(suggestions), 9)
         self._table.setHorizontalHeaderLabels(
-            ("종목", "AI 원문", "적용 테마", "확신", "근거", "분석", "검토")
+            ("종목", "AI 원문", "적용 테마", "확신", "기사", "발행", "근거", "분석", "검토")
         )
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for column, width in enumerate((120, 130, 180, 60, 310, 130, 90)):
+        for column, width in enumerate((110, 125, 165, 55, 240, 115, 260, 125, 80)):
             self._table.setColumnWidth(column, width)
         for row, suggestion in enumerate(suggestions):
+            published = getattr(suggestion, "article_published_at", None)
+            published_text = published.astimezone().strftime("%Y-%m-%d %H:%M") if published else "시간 없음"
             readonly = (
                 (0, str(getattr(suggestion, "stock_name", ""))),
                 (1, str(getattr(suggestion, "raw_theme_name", ""))),
                 (3, str(getattr(suggestion, "confidence", 0))),
-                (4, str(getattr(suggestion, "evidence", ""))),
-                (5, f"{getattr(suggestion, 'provider', '')} / {getattr(suggestion, 'model', '')}"),
+                (4, str(getattr(suggestion, "article_title", "")) or "기사 제목 없음"),
+                (5, published_text),
+                (6, str(getattr(suggestion, "evidence", ""))),
+                (7, f"{getattr(suggestion, 'provider', '')} / {getattr(suggestion, 'model', '')}"),
             )
             for column, value in readonly:
                 item = QTableWidgetItem(value)
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if column == self.ARTICLE_COLUMN:
+                    item.setToolTip(str(getattr(suggestion, "article_url", "")))
                 self._table.setItem(row, column, item)
             self._table.setItem(
-                row, 2,
+                row, self.TARGET_COLUMN,
                 QTableWidgetItem(", ".join(getattr(suggestion, "resolved_theme_names", ()))),
             )
             action = QComboBox()
             action.addItem("보류", "pending")
             action.addItem("승인", "approved")
             action.addItem("거절", "rejected")
-            self._table.setCellWidget(row, 6, action)
+            self._table.setCellWidget(row, self.ACTION_COLUMN, action)
+        self._table.cellDoubleClicked.connect(self._open_article)
         layout.addWidget(self._table)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -636,14 +648,24 @@ class ThemeSuggestionReviewDialog(QDialog):
     def decisions(self) -> tuple[tuple[object, str, tuple[str, ...]], ...]:
         result: list[tuple[object, str, tuple[str, ...]]] = []
         for row, suggestion in enumerate(self._suggestions):
-            action = self._table.cellWidget(row, 6)
+            action = self._table.cellWidget(row, self.ACTION_COLUMN)
             decision = str(action.currentData()) if isinstance(action, QComboBox) else "pending"
             if decision == "pending":
                 continue
-            target_item = self._table.item(row, 2)
+            target_item = self._table.item(row, self.TARGET_COLUMN)
             targets = parse_themes(target_item.text() if target_item else "", ",/|;")
+            initial = tuple(getattr(suggestion, "resolved_theme_names", ()))
+            if tuple(value.casefold() for value in targets) == tuple(value.casefold() for value in initial):
+                targets = ()
             result.append((suggestion, decision, targets))
         return tuple(result)
+
+    def _open_article(self, row: int, column: int) -> None:
+        if column != self.ARTICLE_COLUMN or not (0 <= row < len(self._suggestions)):
+            return
+        url = str(getattr(self._suggestions[row], "article_url", "")).strip()
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
 
 
 class ThemeManagerDialog(QDialog):

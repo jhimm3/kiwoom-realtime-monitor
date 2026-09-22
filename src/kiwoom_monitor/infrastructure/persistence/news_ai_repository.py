@@ -133,9 +133,13 @@ class NewsAIRepository:
     def list_theme_suggestions(self, limit: int = 1000) -> tuple[ThemeSuggestion, ...]:
         with sqlite_read_connection(self._database_path) as connection:
             rows = connection.execute(
-                "SELECT stock_code,identity,provider,model,body_hash,analyzed_at,theme_candidates "
-                "FROM stock_news_ai WHERE theme_candidates<>'[]' "
-                "ORDER BY analyzed_at DESC LIMIT ?",
+                "SELECT a.stock_code,a.identity,a.provider,a.model,a.body_hash,a.analyzed_at,"
+                "a.theme_candidates,COALESCE(n.title,''),n.published_at,"
+                "COALESCE(NULLIF(n.original_link,''),NULLIF(n.link,''),"
+                "CASE WHEN a.identity LIKE 'http%' THEN a.identity ELSE '' END) "
+                "FROM stock_news_ai a LEFT JOIN stock_news n "
+                "ON n.stock_code=a.stock_code AND n.identity=a.identity "
+                "WHERE a.theme_candidates<>'[]' ORDER BY a.analyzed_at DESC LIMIT ?",
                 (max(1, min(10_000, int(limit))),),
             ).fetchall()
         result: list[ThemeSuggestion] = []
@@ -146,6 +150,8 @@ class NewsAIRepository:
                     raw_theme_name=candidate.name, evidence=candidate.evidence,
                     confidence=candidate.confidence, provider=str(row[2]), model=str(row[3]),
                     body_hash=str(row[4]), analyzed_at=datetime.fromisoformat(str(row[5])),
+                    article_title=str(row[7]), article_published_at=_optional_datetime(row[8]),
+                    article_url=str(row[9]),
                 ))
         return tuple(result)
 
@@ -208,3 +214,12 @@ def _decode_theme_candidates(raw: str) -> tuple[AIThemeCandidate, ...]:
         for value in values
         if isinstance(value, dict) and str(value.get("name", "")).strip()
     )
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None

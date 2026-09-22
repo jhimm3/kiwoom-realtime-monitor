@@ -15,6 +15,9 @@ class ThemeSuggestion:
     model: str
     body_hash: str
     analyzed_at: datetime
+    article_title: str = ""
+    article_published_at: datetime | None = None
+    article_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,9 @@ class ProfileThemeSuggestion:
     provider: str
     model: str
     analyzed_at: datetime
+    article_title: str = ""
+    article_published_at: datetime | None = None
+    article_url: str = ""
 
     @property
     def key(self) -> tuple[str, str, str]:
