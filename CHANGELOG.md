@@ -13,6 +13,7 @@
 - `historical_news_development_inputs/v1`은 정확히 결합된 사람 판정과 사건 분할에서 TRAIN·VALIDATION 관련 기사만 별도 불변 JSONL로 투영한다. 봉인 OOS 기사·정답 payload는 출력하지 않으며 두 개발 구간 사이의 사건 ID 중복, 파일 hash, plan·dataset ID를 다시 검증한다. 제목·검색 요약·검증 발행시각과 사람 확정 사건·테마를 분리해 이후 RAG와 미세조정 비교가 같은 입력을 사용하게 한다.
 - 공통 개발 입력 계약까지 포함한 추적 파일 974개를 NAS와 SHA-256 불일치 0개로 동기화했다. 직전 NAS 파일 968개는 `X:\kiwoom-monitor-backups\20260923-005948-historical-news-development-inputs-v1`에 보존했고 운영 데이터·비밀 경로는 제외했다.
 - 과거 뉴스 검토 화면에 `개발 입력 생성`을 추가했다. 최신 불변 사람 판정과 dataset ID·파일 hash가 일치하는 가장 최근 사건 분할만 사용해 TRAIN·VALIDATION 입력을 만들며, 봉인 OOS는 계속 제외하고 동일 산출물은 덮어쓰지 않는다.
+- 앱 개발 입력 생성까지 포함한 추적 파일 974개를 NAS와 SHA-256 불일치 0개로 동기화했다. 직전 NAS 파일 974개는 `X:\kiwoom-monitor-backups\20260923-010929-news-development-inputs-ui-v1`에 보존했고 운영 데이터·비밀 경로는 제외했다.
 
 ## 2026-09-22 LLM 학습 준비 사례 계약
 
