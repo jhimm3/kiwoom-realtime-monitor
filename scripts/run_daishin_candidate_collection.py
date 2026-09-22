@@ -9,7 +9,7 @@ import subprocess
 import sys
 import traceback
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
@@ -92,24 +92,33 @@ def _initialize_jobs(reference: Path, database: Path) -> int:
                 )
                 """
             )
+            existing_job_codes = {
+                str(row[0]) for row in connection.execute(
+                    "SELECT code FROM market_backfill_jobs"
+                )
+            }
+            new_codes = [code for code in codes if code not in existing_job_codes]
             before = connection.total_changes
             connection.executemany(
                 "INSERT OR IGNORE INTO market_backfill_jobs(code,state,updated_at) VALUES(?,'pending',?)",
-                [(code, now) for code in codes],
+                [(code, now) for code in new_codes],
             )
             inserted = connection.total_changes - before
+        if not new_codes:
+            return inserted
         # Do not hold the writer transaction while scanning tens of millions of
         # bars. News collection shares this database and must remain writable.
         existing = {
             (str(row[0]), int(row[1])): (int(row[2]), str(row[3] or ""), str(row[4] or ""))
             for row in connection.execute(
                 "SELECT code,interval_seconds,COUNT(*),MIN(bar_time),MAX(bar_time) "
-                "FROM market_bars WHERE interval_seconds IN (60,300) "
-                "GROUP BY code,interval_seconds"
+                f"FROM market_bars WHERE provider=? AND code IN ({','.join('?' for _ in new_codes)}) "
+                "AND interval_seconds IN (60,300) GROUP BY code,interval_seconds",
+                ("daishin_creon", *new_codes),
             )
         }
         completed_rows = []
-        for code in codes:
+        for code in new_codes:
             one = existing.get((code, 60))
             five = existing.get((code, 300))
             # A partial import left by an interrupted run is not complete.
@@ -154,11 +163,18 @@ def _claim(database: Path) -> tuple[str, int] | None:
             return str(row["code"]), int(row["attempts"]) + 1
 
 
-def _run_backfill(code: str, interval: int, output: Path) -> None:
+def _run_backfill(
+    code: str, interval: int, output: Path, *, to_date: str = "",
+) -> None:
     bridge = Path(__file__).with_name("daishin_stockchart_backfill.ps1")
+    command = [
+        str(POWERSHELL32), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(bridge),
+        "-Code", code, "-Interval", str(interval), "-OutputPath", str(output),
+    ]
+    if to_date:
+        command.extend(["-ToDate", to_date])
     completed = subprocess.run(
-        [str(POWERSHELL32), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(bridge),
-         "-Code", code, "-Interval", str(interval), "-OutputPath", str(output)],
+        command,
         check=False, capture_output=True, text=True, encoding="utf-8",
     )
     if completed.returncode:
@@ -175,6 +191,11 @@ def _run_backfill(code: str, interval: int, output: Path) -> None:
         if CREON_CONNECTION_ERROR in detail:
             raise DaishinEnvironmentUnavailable(detail)
         raise RuntimeError(detail or f"{interval}m backfill failed")
+
+
+def _five_minute_to_date(one_minute_oldest: object) -> str:
+    oldest_day = date.fromisoformat(str(one_minute_oldest)[:10])
+    return (oldest_day - timedelta(days=1)).strftime("%Y%m%d")
 
 
 def _recent_overlay(code: str, output: Path) -> dict[str, object]:
@@ -288,8 +309,9 @@ def main() -> int:
             one_oldest = _ranges(database, code)[1]
             if not one_oldest:
                 raise RuntimeError("one-minute response contained no bars")
+            five_to_date = _five_minute_to_date(one_oldest)
             _write_heartbeat(heartbeat, "five_minute_download", code=code, attempt=attempt, directory=directory)
-            _run_backfill(code, 5, five_path)
+            _run_backfill(code, 5, five_path, to_date=five_to_date)
             _write_heartbeat(heartbeat, "five_minute_import", code=code, attempt=attempt, directory=directory)
             import_daishin_backfill_ndjson(five_path, database, before_date=str(one_oldest)[:10])
             _finish(database, code, "complete", directory)

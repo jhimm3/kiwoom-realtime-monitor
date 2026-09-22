@@ -9,7 +9,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -144,12 +144,21 @@ class _RequestStartLimiter:
         self._next_start = 0.0
 
     def wait(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                delay = self._next_start - now
+                if delay <= 0:
+                    self._next_start = now + self._interval
+                    return
+            time.sleep(delay)
+
+    def defer(self, delay: float) -> None:
+        """Apply one shared cooldown to every search worker."""
         with self._lock:
-            now = time.monotonic()
-            delay = self._next_start - now
-            if delay > 0:
-                time.sleep(delay)
-            self._next_start = time.monotonic() + self._interval
+            self._next_start = max(
+                self._next_start, time.monotonic() + max(0.0, delay),
+            )
 
 
 class _SearchPagePool:
@@ -158,26 +167,46 @@ class _SearchPagePool:
     def __init__(
         self, *, workers: int, request_delay: float,
         fetcher: object = fetch_naver_historical_search_page,
+        throttle_delay: float = 60.0,
+        throttle_retries: int = 10,
+        throttle_observer: object | None = None,
     ) -> None:
         self._limiter = _RequestStartLimiter(request_delay)
         self._fetcher = fetcher
+        self._throttle_delay = max(0.0, throttle_delay)
+        self._throttle_retries = max(0, throttle_retries)
+        self._throttle_observer = throttle_observer
+        self._observer_lock = threading.Lock()
         self._pool = ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="news-search",
         )
 
     def fetch_batch(self, job: object, page_indexes: list[int]):
         def fetch(page_index: int):
-            self._limiter.wait()
             target_end_date = str(
                 getattr(job, "target_end_date", "")
                 or getattr(job, "target_date")
             )
-            page = self._fetcher(  # type: ignore[operator]
-                getattr(job, "code"), getattr(job, "query_text"),
-                getattr(job, "target_date"), 1 + page_index * 10,
-                target_end_date=target_end_date,
-            )
-            return page_index, page
+            throttles = 0
+            while True:
+                self._limiter.wait()
+                try:
+                    page = self._fetcher(  # type: ignore[operator]
+                        getattr(job, "code"), getattr(job, "query_text"),
+                        getattr(job, "target_date"), 1 + page_index * 10,
+                        target_end_date=target_end_date,
+                    )
+                    return page_index, page
+                except HTTPError as error:
+                    if error.code not in {403, 429} or throttles >= self._throttle_retries:
+                        raise
+                    throttles += 1
+                    self._limiter.defer(self._throttle_delay)
+                    if self._throttle_observer is not None:
+                        with self._observer_lock:
+                            self._throttle_observer(  # type: ignore[operator]
+                                page_index + 1, error.code, self._throttle_delay,
+                            )
 
         futures = [self._pool.submit(fetch, page_index) for page_index in page_indexes]
         return sorted((future.result() for future in futures), key=lambda row: row[0])
@@ -387,8 +416,20 @@ def main() -> int:
                 scheduled = set()
                 item_pages = {}
                 completed_articles = 0
+
+                def record_search_throttle(
+                    page: int, status: int, delay: float,
+                ) -> None:
+                    _write_news_heartbeat(
+                        args.heartbeat_file, job, f"search_throttled_{status}",
+                        page=page, pages_observed=pages_observed,
+                        items_observed=items_observed,
+                        article=completed_articles,
+                    )
+
                 with _SearchPagePool(
                     workers=args.search_workers, request_delay=args.request_delay,
+                    throttle_observer=record_search_throttle,
                 ) as search_pool, _ArticleFetchPool(
                     workers=args.article_workers, article_delay=args.article_delay,
                 ) as article_pool:

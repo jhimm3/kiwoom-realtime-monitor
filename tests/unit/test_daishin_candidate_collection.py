@@ -50,6 +50,25 @@ class DaishinCandidateCollectionTest(unittest.TestCase):
                 with self.assertRaises(collector.DaishinEnvironmentUnavailable):
                     collector._run_backfill("005930", 1, output)
 
+    def test_five_minute_download_ends_before_oldest_one_minute_day(self) -> None:
+        self.assertEqual(
+            "20240828",
+            collector._five_minute_to_date("2024-08-29T09:01:00+09:00"),
+        )
+
+        completed = type("Completed", (), {"returncode": 0, "stderr": ""})()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "5m.ndjson"
+            with patch.object(
+                collector.subprocess, "run", return_value=completed,
+            ) as run:
+                collector._run_backfill(
+                    "005930", 5, output, to_date="20240828",
+                )
+
+        command = run.call_args.args[0]
+        self.assertEqual("20240828", command[command.index("-ToDate") + 1])
+
     def test_partial_one_minute_import_is_not_inferred_complete(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             reference = Path(directory) / "reference.sqlite3"
@@ -82,11 +101,23 @@ class DaishinCandidateCollectionTest(unittest.TestCase):
 
             collector._initialize_jobs(reference, database)
 
+            statements: list[str] = []
+            original_connect = collector._connect_database
+
+            def tracked_connect(path: Path) -> sqlite3.Connection:
+                connection = original_connect(path)
+                connection.set_trace_callback(statements.append)
+                return connection
+
+            with patch.object(collector, "_connect_database", side_effect=tracked_connect):
+                collector._initialize_jobs(reference, database)
+
             with closing(sqlite3.connect(database)) as connection:
                 state = connection.execute(
                     "SELECT state FROM market_backfill_jobs WHERE code='005305'"
                 ).fetchone()[0]
             self.assertEqual("pending", state)
+            self.assertFalse(any("GROUP BY code,interval_seconds" in sql for sql in statements))
 
     def test_environment_failure_returns_claim_without_charging_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

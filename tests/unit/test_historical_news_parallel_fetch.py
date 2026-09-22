@@ -4,6 +4,7 @@ import threading
 import time
 import unittest
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 from scripts.probe_historical_backfill import _SearchPagePool, _fetch_article_publications
 
@@ -71,6 +72,36 @@ class HistoricalNewsParallelFetchTests(unittest.TestCase):
 
         self.assertEqual([(0, 1), (1, 11), (2, 21), (3, 31)], results)
         self.assertGreaterEqual(maximum_active, 2)
+
+    def test_throttled_search_retries_only_the_failed_page(self) -> None:
+        attempts: dict[int, int] = {}
+        throttles: list[tuple[int, int, float]] = []
+
+        def fetcher(
+            code: str, query: str, target_date: str, start: int, *,
+            target_end_date: str = "",
+        ):
+            attempts[start] = attempts.get(start, 0) + 1
+            if start == 11 and attempts[start] == 1:
+                raise HTTPError(
+                    url="https://search.naver.com/", code=403,
+                    msg="Forbidden", hdrs=None, fp=None,
+                )
+            return start
+
+        job = SimpleNamespace(code="005930", query_text="삼성전자", target_date="2026-09-22")
+        with _SearchPagePool(
+            workers=3, request_delay=0, fetcher=fetcher,
+            throttle_delay=0, throttle_retries=2,
+            throttle_observer=lambda page, status, delay: throttles.append(
+                (page, status, delay)
+            ),
+        ) as pool:
+            results = pool.fetch_batch(job, [0, 1, 2])
+
+        self.assertEqual([(0, 1), (1, 11), (2, 21)], results)
+        self.assertEqual({1: 1, 11: 2, 21: 1}, attempts)
+        self.assertEqual([(2, 403, 0.0)], throttles)
 
 
 if __name__ == "__main__":
