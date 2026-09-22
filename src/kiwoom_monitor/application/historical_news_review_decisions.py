@@ -186,6 +186,13 @@ def build_historical_news_review_decisions(
                 key: item["article"].get(key, "")
                 for key in ("provider", "office_id", "article_id")
             },
+            "article_evidence": {
+                key: item["article"].get(key, "")
+                for key in (
+                    "title", "published_at", "published_precision",
+                    "published_at_source", "article_url", "original_url",
+                )
+            },
             "case_links": [
                 {
                     "case_id": link.get("case_id", ""),

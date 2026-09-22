@@ -155,6 +155,8 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 
 앱의 전략 연구 창 `과거 뉴스 검토`는 최신 불변 대기열과 결합된 작업표를 자동 선택한다. 기사 제목·검색 요약·원문 URL·연결 종목과 규칙 점수를 함께 표시하고, 판정 행을 임시 파일 교체 방식으로 저장한다. 관련 판정은 사건 ID를 자동 제안하되 사용자가 기존 사건 ID를 선택하거나 수정할 수 있고, 테마명은 현재 테마 저장소의 프로필 이름과 함께 기록한다. 현재 목록에서 사라진 과거 프로필 이름도 작업표에서 지우지 않는다.
 
+`scripts/plan_historical_news_event_split.py`는 불변 사람 판정 결과에서 관련 기사만 골라 `historical_news_event_split/v1`을 만든다. 같은 `canonical_event_id`의 여러 기사는 최초 발행시각을 기준으로 하나의 사건이 되며 TRAIN·VALIDATION·OOS 사이에서 나뉘지 않는다. 시간대 표기가 달라도 timezone-aware 실제 시각으로 정렬한다. 무관·보류는 입력 정답으로 섞지 않고 제외 수량으로 남긴다. 일부만 검토한 원천으로도 계획 구조는 검증할 수 있지만 `partial_review_source=true`, `model_weight_training_ready=false`를 유지하며 OOS 검토 payload를 계획에 넣지 않는다.
+
 ### D03 첫 입력 계약
 
 `scripts/export_historical_reconstruction.py`는 선택한 후보일의 후보·현재 확보된 대신 봉·뉴스 근거를 `historical_reconstruction/v1` 불변 디렉터리로 만든다. `manifest.json`과 `records.jsonl`의 hash·ordinal·revision ID를 `load_historical_reconstruction`이 다시 검증한다. 이 형식은 기존 `top20_membership` 입력으로 위장하지 않으며 `strict_top20_replay_supported=false`를 필수로 둔다.

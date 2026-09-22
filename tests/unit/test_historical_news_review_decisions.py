@@ -73,6 +73,10 @@ class HistoricalNewsReviewDecisionTests(unittest.TestCase):
             review = loaded.decisions[0]["human_review"]
             self.assertEqual("event-semiconductor-investment-20240102", review["canonical_event_id"])
             self.assertEqual(["HBM", "반도체 투자"], review["theme_names"])
+            self.assertEqual(
+                "2024-01-02T10:00:00+09:00",
+                loaded.decisions[0]["article_evidence"]["published_at"],
+            )
             with self.assertRaisesRegex(ValueError, "immutable"):
                 write_historical_news_review_decisions(dataset, output)
             with (output / "decisions.jsonl").open("a", encoding="utf-8") as stream:
