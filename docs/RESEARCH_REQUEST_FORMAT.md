@@ -29,12 +29,17 @@ python scripts\prepare_historical_development_inputs.py `
 개발 입력의 기존 Family 연결을 확인할 때는 다음처럼 OOS 없는 고정 요청을 만든다. 생성된 파라미터와 비용은 구조 점검용 잠정값이며 사용자 확정 정책이나 실계좌 비용이 아니다.
 
 ```powershell
+python scripts\assess_historical_development_readiness.py `
+  --package data\research\historical-development-inputs\multi-period-2024-2026-v1 `
+  --output data\research\historical-development-results\multi-period-2024-2026-v1\readiness.json
+
 python scripts\prepare_historical_baseline_requests.py `
   --package data\research\historical-development-inputs\multi-period-2024-2026-v1 `
-  --output data\research\historical-development-results\multi-period-2024-2026-v1
+  --output data\research\historical-development-results\multi-period-2024-2026-v1 `
+  --allow-partial
 ```
 
-각 요청은 `python -m kiwoom_monitor.research_process --request <요청> --result <결과>`로 실행한다. 네 결과가 모두 생긴 뒤 `scripts/summarize_historical_baseline_results.py --root <결과 루트>`로 비교표와 검열 사유를 만든다. 투영된 역사 입력도 원천 runtime 표시를 유지하므로 역사 후보군을 재생하고 rank persistence를 계속 거부한다.
+`--allow-partial`은 최초 표본의 구조 실행을 재현할 때만 사용한다. 이후 새 개발 입력은 이 옵션 없이 요청 생성이 성공해야 비교 대상으로 진행한다. 각 요청은 `python -m kiwoom_monitor.research_process --request <요청> --result <결과>`로 실행한다. 네 결과가 모두 생긴 뒤 `scripts/summarize_historical_baseline_results.py --root <결과 루트>`로 비교표와 검열 사유를 만든다. 투영된 역사 입력도 원천 runtime 표시를 유지하므로 역사 후보군을 재생하고 rank persistence를 계속 거부한다.
 
 ## CR3d3c 최종 결과 개발 노출 요청 (2026-09-16)
 

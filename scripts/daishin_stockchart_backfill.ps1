@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('^[0-9]{6}$')]
+    [ValidatePattern('^[0-9A-Z]{6}$')]
     [string]$Code,
 
     [Parameter(Mandatory = $true)]

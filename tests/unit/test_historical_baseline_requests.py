@@ -4,7 +4,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from kiwoom_monitor.infrastructure.historical_research_readiness import (
+    HistoricalDevelopmentReadiness,
+)
 from scripts.prepare_historical_baseline_requests import prepare_requests
 
 
@@ -39,7 +43,22 @@ class HistoricalBaselineRequestTests(unittest.TestCase):
                 ],
             }), encoding="utf-8")
 
-            paths = prepare_requests(package, root / "output")
+            readiness = HistoricalDevelopmentReadiness(
+                version="historical_development_readiness/v1", status="BLOCKED",
+                partition_role="TRAIN", candidate_code_count=50, codes_with_bars=4,
+                codes_with_continuous_minute_pair=4, bar_coverage_ppm=80_000,
+                continuous_pair_coverage_ppm=80_000, missing_bar_codes=("000001",),
+                missing_continuous_pair_codes=("000001",),
+                reasons=("candidate_codes_without_minute_bars",),
+            )
+            with patch(
+                "scripts.prepare_historical_baseline_requests.load_research_input",
+                return_value=object(),
+            ), patch(
+                "scripts.prepare_historical_baseline_requests.assess_historical_development_readiness",
+                return_value=readiness,
+            ):
+                paths = prepare_requests(package, root / "output", allow_partial=True)
 
             self.assertEqual(4, len(paths))
             documents = [json.loads(path.read_text(encoding="utf-8")) for path in paths]

@@ -9,15 +9,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any, Mapping
+
+SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+
+from kiwoom_monitor.infrastructure.historical_research_readiness import (
+    assess_historical_development_readiness,
+)
+from kiwoom_monitor.infrastructure.research_data_source import load_research_input
 
 
 BREAKOUT_FAMILY = "krx_bar_close_breakout/v1"
 PULLBACK_FAMILY = "krx_pullback_reacceleration/v1"
 
 
-def prepare_requests(package: Path, output: Path) -> tuple[Path, ...]:
+def prepare_requests(
+    package: Path, output: Path, *, allow_partial: bool = False,
+) -> tuple[Path, ...]:
     package = package.resolve()
     output = output.resolve()
     manifest = _read_mapping(package / "manifest.json", "development package manifest")
@@ -44,6 +56,16 @@ def prepare_requests(package: Path, output: Path) -> tuple[Path, ...]:
         evaluation = partition.get("evaluation")
         if not dataset.is_dir() or not isinstance(evaluation, Mapping):
             raise ValueError(f"historical {role} partition is incomplete")
+        readiness = assess_historical_development_readiness(load_research_input(
+            dataset, session_profile="krx-regular/v1",
+        ))
+        if readiness.status != "READY" and not allow_partial:
+            raise ValueError(
+                f"historical {role} partition is not ready: "
+                f"bar coverage {readiness.codes_with_bars}/{readiness.candidate_code_count}, "
+                f"continuous pairs {readiness.codes_with_continuous_minute_pair}/"
+                f"{readiness.candidate_code_count}; use --allow-partial only for a structural check"
+            )
         for family, name, strategy in _strategies():
             request = {
                 "mode": "single_run",
@@ -151,8 +173,12 @@ def main() -> int:
     )
     parser.add_argument("--package", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--allow-partial", action="store_true",
+        help="Allow an explicitly labelled structural run on incomplete candidate coverage.",
+    )
     args = parser.parse_args()
-    paths = prepare_requests(args.package, args.output)
+    paths = prepare_requests(args.package, args.output, allow_partial=args.allow_partial)
     print(json.dumps({"status": "ok", "requests": [str(path) for path in paths]}, ensure_ascii=False))
     return 0
 

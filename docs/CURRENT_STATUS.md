@@ -47,6 +47,8 @@ NAS의 `stock_aliases` 1,164행을 사용해 94,750개 후보 종목·일의 당
 
 이 개발 입력으로 기존 돌파·눌림 재가속 Family의 고정 TRAIN/VALIDATION 구조 실행도 완료했다. 투영 입력의 원천 `historical_reconstruction_strategy/v1` 표시를 runner가 함께 읽고 재생 커서가 `historical_candidate_population`을 소비하도록 보완했으며, 순위 지속성 Factor 차단도 투영 뒤 유지된다. 결과는 `data/research/historical-development-results/multi-period-2024-2026-v1`에 있다. TRAIN 돌파/눌림은 각각 후보 109/3건이었지만 전부 `next_tradable_bar_gap`으로 검열됐고, VALIDATION은 돌파 102건 중 1건만 체결·종료(-28원), 눌림 3건은 전부 검열됐다. 이는 수집 진행 중인 희소 표본의 구조 점검 결과이며 전략 우열·수익성 근거가 아니다. 파라미터는 잠정값, 비용은 브로커 미검증 개발 추정값이고 OOS는 계속 봉인 상태다.
 
+같은 개발 입력의 재실행 준비도 검사를 추가했다. 현재 TRAIN은 후보 50개 중 분봉 7개·연속 1분쌍 6개, VALIDATION은 분봉과 연속쌍 모두 7개라 `BLOCKED`다. 기본 요청 생성은 후보 전부가 분봉과 최소 한 연속 1분쌍을 가질 때만 허용하며, 희소 입력의 구조 점검은 `--allow-partial`을 명시해야 한다. 후보 원장에는 `00499K` 같은 영문 포함 6자리 단축코드가 91개 있었고 숫자 전용 필터 때문에 대신 작업에서 빠진 사실도 확인했다. CREON bridge와 작업 생성을 영문 포함 6자리로 확장하고 현재 원장에 91개를 증분 등록했다.
+
 수집 진행률은 NAS `deploy/synology/server-data/historical-intelligence/v1/STATUS.md`와 `status.json`에 게시한다. 발행시각이 검증된 과거 기사는 기존 인증된 `news_article` content 경로로 증분 전송하며, NAS 운영 DB에서 `naver_historical_web`/`historical_backfill` revision으로 저장된 뒤 기존 BODY 작업기가 원문을 처리한다. 별도 역사 SQLite 스냅샷 자체를 운영 뉴스 DB로 열거나 덮어쓰지 않는다.
 
 기존 후보 DB는 읽기 전용으로 확인했다. 94,750개 후보 종목·일, 5,910,806개 일봉, 4,562,200개 분봉이 있고 분봉 작업 완료 중 81,901건은 0행이었다. 실제 확보 범위와 다음 작업은 [과거 자료 확보 기획](HISTORICAL_BACKFILL_PLAN.md)에 적었다.

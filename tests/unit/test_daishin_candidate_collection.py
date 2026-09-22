@@ -18,6 +18,25 @@ SPEC.loader.exec_module(collector)
 
 
 class DaishinCandidateCollectionTest(unittest.TestCase):
+    def test_job_seed_includes_six_character_alphanumeric_candidate_codes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.sqlite3"
+            database = Path(directory) / "jobs.sqlite3"
+            with closing(sqlite3.connect(reference)) as connection, connection:
+                connection.execute("CREATE TABLE candidate_days(code TEXT)")
+                connection.executemany(
+                    "INSERT INTO candidate_days VALUES(?)",
+                    [("005930",), ("00499K",), ("0001a0",), ("12345",), ("bad-code",)],
+                )
+
+            collector._initialize_jobs(reference, database)
+
+            with closing(sqlite3.connect(database)) as connection:
+                codes = tuple(row[0] for row in connection.execute(
+                    "SELECT code FROM market_backfill_jobs ORDER BY code"
+                ))
+            self.assertEqual(("0001A0", "00499K", "005930"), codes)
+
     def test_reads_connection_failure_from_bridge_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "1m.ndjson"

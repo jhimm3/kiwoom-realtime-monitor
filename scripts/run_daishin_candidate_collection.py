@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -33,9 +34,11 @@ class DaishinEnvironmentUnavailable(RuntimeError):
 def _initialize_jobs(reference: Path, database: Path) -> int:
     initialize_probe_database(database)
     with closing(sqlite3.connect(reference)) as source:
-        codes = [str(row[0]) for row in source.execute(
-            "SELECT DISTINCT code FROM candidate_days WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]' ORDER BY code"
-        )]
+        codes = sorted({
+            code for row in source.execute("SELECT DISTINCT code FROM candidate_days")
+            if (code := str(row[0] or "").strip().upper())
+            and re.fullmatch(r"[0-9A-Z]{6}", code)
+        })
     now = datetime.now(UTC).isoformat()
     with closing(sqlite3.connect(database)) as connection:
         with connection:

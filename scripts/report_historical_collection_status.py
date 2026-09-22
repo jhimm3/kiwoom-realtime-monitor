@@ -31,6 +31,16 @@ def _status(database: Path) -> dict[str, object]:
         finished_jobs = sum(
             int(row[1]) for row in job_rows if str(row[0]) in {"complete", "truncated"}
         )
+        market_jobs = _rows(
+            connection,
+            "SELECT state,COUNT(*) FROM market_backfill_jobs GROUP BY state ORDER BY state",
+        ) if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_backfill_jobs'"
+        ).fetchone() else []
+        market_total = sum(int(row[1]) for row in market_jobs)
+        market_finished = sum(
+            int(row[1]) for row in market_jobs if str(row[0]) == "complete"
+        )
         result: dict[str, object] = {
             "schema": "historical-collection-status/v1",
             "generated_at": datetime.now(UTC).isoformat(),
@@ -60,6 +70,9 @@ def _status(database: Path) -> dict[str, object]:
                 ).fetchone() else [],
             },
             "market": {
+                "total_jobs": market_total,
+                "finished_jobs": market_finished,
+                "progress_percent": round(100 * market_finished / market_total, 4) if market_total else 0,
                 "codes": int(connection.execute(
                     "SELECT COUNT(DISTINCT code) FROM market_bars"
                 ).fetchone()[0]),
@@ -68,12 +81,7 @@ def _status(database: Path) -> dict[str, object]:
                     "SELECT interval_seconds,COUNT(*),MIN(bar_time),MAX(bar_time) "
                     "FROM market_bars GROUP BY interval_seconds ORDER BY interval_seconds",
                 ),
-                "jobs": _rows(
-                    connection,
-                    "SELECT state,COUNT(*) FROM market_backfill_jobs GROUP BY state ORDER BY state",
-                ) if connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_backfill_jobs'"
-                ).fetchone() else [],
+                "jobs": market_jobs,
             },
         }
     return result
@@ -123,6 +131,8 @@ def _markdown(status: dict[str, object], published_run: str) -> str:
         "",
         "## 대신증권 분봉",
         "",
+        f"- 완료: **{market['finished_jobs']:,} / {market['total_jobs']:,}** "
+        f"(**{market['progress_percent']}%**)",
         f"- 수집 종목: **{market['codes']:,}개**",
         "",
         "| 주기 | 봉 수 | 최초 | 최종 |",

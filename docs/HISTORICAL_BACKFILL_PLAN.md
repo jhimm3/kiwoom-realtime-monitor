@@ -159,3 +159,7 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 `scripts/prepare_historical_development_inputs.py`는 계획과 source ID/hash를 대조한 뒤 TRAIN·VALIDATION만 독립 `development_partition/v2` 입력으로 만든다. 역사 후보군 종류와 사후 모집단 제한을 투영 manifest에 유지하며 부분 입력의 ordinal은 새 파일 순서대로 다시 매긴다. 첫 패키지 `data/research/historical-development-inputs/multi-period-2024-2026-v1`은 두 개발 입력의 quality `PASS`와 revision 재현성 `VERIFIED`를 확인했고 `oos_included=false`다.
 
 `scripts/prepare_historical_baseline_requests.py`는 이 OOS 없는 패키지에서 돌파·눌림 재가속의 TRAIN/VALIDATION 고정 요청 네 개만 만든다. 역사 입력에는 당시 TOP20이 없으므로 순위 Factor를 끄고, 잠정 파라미터·브로커 미검증 비용이라는 상태를 요청에 명시한다. `scripts/summarize_historical_baseline_results.py`는 실행 DB의 검열 사유까지 포함해 비교표를 만든다. 첫 구조 실행에서는 대부분의 주문이 다음 연속 1분봉 증거 부족으로 검열됐으므로 수집 확대 전 전략 선택 근거로 사용하지 않는다.
+
+`scripts/assess_historical_development_readiness.py`는 각 분할의 최신 역사 후보군을 기준으로 후보별 분봉 존재와 최소 한 연속 1분쌍을 검사한다. 하나라도 빠지면 요청 생성 기본값은 `BLOCKED`이며, 최초 희소 표본처럼 실행 경로만 확인할 때에만 `--allow-partial`을 명시한다. 이 gate는 수익성이나 대표성을 보증하지 않고 현재 1분 전략이 후보 전체에서 다음 봉 체결을 검토할 최소 입력이 있는지만 판정한다.
+
+후보 코드에는 보통주 숫자 코드뿐 아니라 `00499K` 같은 영문 포함 6자리 단축코드도 있다. 대신 작업 원장과 두 StockChart bridge는 `[0-9A-Z]{6}`을 허용한다. 파생상품 여부나 연구 포함 여부는 후보 원장의 기존 선택을 유지하며, 코드 모양만으로 자동 제외하지 않는다.
