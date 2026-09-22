@@ -20,7 +20,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from kiwoom_monitor.infrastructure.historical_backfill import (
-    article_publication_record,
+    article_publication_records,
     claim_news_backfill_job,
     claim_news_range_job,
     clear_news_backfill_jobs,
@@ -39,6 +39,7 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
     seed_news_backfill_jobs,
     store_daishin_probe_payload,
     store_article_publication_result,
+    store_article_publication_results,
     store_news_search_observation,
     store_naver_historical_search_page,
     store_naver_stock_news_page,
@@ -56,6 +57,10 @@ def _store_resolved_observation(
     database: Path, page: object, item: object, published_at: str,
 ) -> None:
     source_date = str(getattr(item, "search_published_date", ""))
+    # The search-page store already wrote this relation. Only an item whose
+    # search response had no date needs a second relation after article fetch.
+    if source_date:
+        return
     if not source_date and len(published_at) >= 10:
         source_date = published_at[:10]
     if not source_date:
@@ -409,15 +414,16 @@ def main() -> int:
                             store_naver_historical_search_page(args.output, page)
                             pages_observed += 1
                             items_observed += len(page.items)
+                            page_records = article_publication_records(
+                                args.output, list(page.items),
+                            )
                             for item in page.items:
                                 key = (item.office_id, item.article_id)
                                 occurrences.append(key)
                                 item_pages[key] = page
                                 if key in statuses or key in scheduled:
                                     continue
-                                status, published_at = article_publication_record(
-                                    args.output, item,
-                                )
+                                status, published_at = page_records[key]
                                 if status in {"", "not_fetched"}:
                                     scheduled.add(key)
                                     article_pool.submit(item)
@@ -426,9 +432,12 @@ def main() -> int:
                                     _store_resolved_observation(
                                         args.output, page, item, published_at,
                                     )
-                            for item, result in article_pool.drain():
+                            drained = list(article_pool.drain())
+                            store_article_publication_results(
+                                args.output, [result for _item, result in drained],
+                            )
+                            for item, result in drained:
                                 key = (item.office_id, item.article_id)
-                                store_article_publication_result(args.output, result)
                                 _store_resolved_observation(
                                     args.output, item_pages[key], item, result.published_at,
                                 )
@@ -446,9 +455,12 @@ def main() -> int:
                         if exhausted:
                             break
                         batch_start += batch_width
-                    for item, result in article_pool.drain(wait=True):
+                    drained = list(article_pool.drain(wait=True))
+                    store_article_publication_results(
+                        args.output, [result for _item, result in drained],
+                    )
+                    for item, result in drained:
                         key = (item.office_id, item.article_id)
-                        store_article_publication_result(args.output, result)
                         _store_resolved_observation(
                             args.output, item_pages[key], item, result.published_at,
                         )

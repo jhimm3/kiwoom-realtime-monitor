@@ -133,7 +133,7 @@ try {
             }
             if (($completed % $StatusEvery) -eq 0) {
                 $statusOutput = & $python scripts\report_historical_collection_status.py `
-                    --database $Database --nas-project $NasProject 2>&1
+                    --database $Database --nas-project $NasProject --fast 2>&1
                 foreach ($line in $statusOutput) { Write-Log ([string]$line) }
             }
         }
@@ -144,7 +144,7 @@ try {
     if ($stopRequested) {
         try {
             & $python scripts\report_historical_collection_status.py `
-                --database $Database --nas-project $NasProject 2>&1 |
+                --database $Database --nas-project $NasProject --fast 2>&1 |
                 ForEach-Object { Write-Log ([string]$_) }
         }
         catch {

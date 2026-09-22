@@ -728,19 +728,35 @@ def article_publication_record(
     output_database: Path,
     item: NaverHistoricalNewsItem,
 ) -> tuple[str, str]:
+    return article_publication_records(output_database, (item,)).get(
+        (item.office_id, item.article_id), ("not_fetched", ""),
+    )
+
+
+def article_publication_records(
+    output_database: Path,
+    items: tuple[NaverHistoricalNewsItem, ...] | list[NaverHistoricalNewsItem],
+) -> dict[tuple[str, str], tuple[str, str]]:
+    """Read one search page's article states through a single DB connection."""
     initialize_probe_database(output_database)
     with closing(_connect_database(output_database)) as connection:
-        row = connection.execute(
-            """
-            SELECT article_fetch_status, published_at FROM news_articles
-            WHERE provider=? AND office_id=? AND article_id=?
-            """,
-            (NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id),
-        ).fetchone()
-    return (
-        (str(row[0]), str(row[1])) if row is not None
-        else ("not_fetched", "")
-    )
+        records = {}
+        for item in items:
+            key = (item.office_id, item.article_id)
+            if key in records:
+                continue
+            row = connection.execute(
+                """
+                SELECT article_fetch_status, published_at FROM news_articles
+                WHERE provider=? AND office_id=? AND article_id=?
+                """,
+                (NAVER_HISTORICAL_SEARCH_PROVIDER, *key),
+            ).fetchone()
+            records[key] = (
+                (str(row[0]), str(row[1])) if row is not None
+                else ("not_fetched", "")
+            )
+    return records
 
 
 def parse_naver_stock_news_page(
@@ -1539,63 +1555,77 @@ def store_news_search_observation(
             )
 
 
-def store_article_publication_result(path: Path, result: ArticlePublicationResult) -> None:
+def _store_article_publication_result(
+    connection: sqlite3.Connection, result: ArticlePublicationResult,
+) -> None:
+    if result.published_at:
+        connection.execute(
+            """
+            UPDATE news_articles SET
+                published_at=?, published_precision=?, published_at_source=?,
+                published_at_raw=?, publication_source_url=?, article_fetch_status=?,
+                article_fetched_at=?, training_eligible=1,
+                training_exclusion_reason=''
+            WHERE provider=? AND office_id=? AND article_id=?
+            """,
+            (
+                result.published_at, result.published_precision,
+                result.published_at_source, result.published_at_raw,
+                result.final_url or result.source_url, result.status, result.fetched_at,
+                result.provider, result.office_id, result.article_id,
+            ),
+        )
+    else:
+        connection.execute(
+            """
+            UPDATE news_articles SET
+                publication_source_url=?, article_fetch_status=?, article_fetched_at=?,
+                training_eligible=0, training_exclusion_reason=?
+            WHERE provider=? AND office_id=? AND article_id=?
+            """,
+            (
+                result.final_url or result.source_url, result.status, result.fetched_at,
+                result.status, result.provider, result.office_id, result.article_id,
+            ),
+        )
+    for position, attempt in enumerate(result.attempts):
+        identity = "|".join((
+            result.provider, result.office_id, result.article_id, result.fetched_at,
+            str(position), attempt.url_role, attempt.requested_url,
+        ))
+        attempt_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO news_article_fetch_attempts
+            (attempt_id, provider, office_id, article_id, attempted_at, url_role,
+             requested_url, final_url, http_status, status, error, published_at,
+             published_precision, published_at_source, published_at_raw)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                attempt_id, result.provider, result.office_id, result.article_id,
+                result.fetched_at, attempt.url_role, attempt.requested_url,
+                attempt.final_url, attempt.http_status, attempt.status, attempt.error,
+                attempt.published_at, attempt.published_precision,
+                attempt.published_at_source, attempt.published_at_raw,
+            ),
+        )
+
+
+def store_article_publication_results(
+    path: Path, results: list[ArticlePublicationResult],
+) -> None:
+    if not results:
+        return
     initialize_probe_database(path)
     with closing(_connect_database(path)) as connection:
         with connection:
-            if result.published_at:
-                connection.execute(
-                    """
-                    UPDATE news_articles SET
-                        published_at=?, published_precision=?, published_at_source=?,
-                        published_at_raw=?, publication_source_url=?, article_fetch_status=?,
-                        article_fetched_at=?, training_eligible=1,
-                        training_exclusion_reason=''
-                    WHERE provider=? AND office_id=? AND article_id=?
-                    """,
-                    (
-                        result.published_at, result.published_precision,
-                        result.published_at_source, result.published_at_raw,
-                        result.final_url or result.source_url, result.status, result.fetched_at,
-                        result.provider, result.office_id, result.article_id,
-                    ),
-                )
-            else:
-                connection.execute(
-                    """
-                    UPDATE news_articles SET
-                        publication_source_url=?, article_fetch_status=?, article_fetched_at=?,
-                        training_eligible=0, training_exclusion_reason=?
-                    WHERE provider=? AND office_id=? AND article_id=?
-                    """,
-                    (
-                        result.final_url or result.source_url, result.status, result.fetched_at,
-                        result.status,
-                        result.provider, result.office_id, result.article_id,
-                    ),
-                )
-            for position, attempt in enumerate(result.attempts):
-                identity = "|".join((
-                    result.provider, result.office_id, result.article_id, result.fetched_at,
-                    str(position), attempt.url_role, attempt.requested_url,
-                ))
-                attempt_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO news_article_fetch_attempts
-                    (attempt_id, provider, office_id, article_id, attempted_at, url_role,
-                     requested_url, final_url, http_status, status, error, published_at,
-                     published_precision, published_at_source, published_at_raw)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        attempt_id, result.provider, result.office_id, result.article_id,
-                        result.fetched_at, attempt.url_role, attempt.requested_url,
-                        attempt.final_url, attempt.http_status, attempt.status, attempt.error,
-                        attempt.published_at, attempt.published_precision,
-                        attempt.published_at_source, attempt.published_at_raw,
-                    ),
-                )
+            for result in results:
+                _store_article_publication_result(connection, result)
+
+
+def store_article_publication_result(path: Path, result: ArticlePublicationResult) -> None:
+    store_article_publication_results(path, [result])
 
 
 _MARKET_BAR_UPSERT_SQL = """

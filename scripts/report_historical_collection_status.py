@@ -18,7 +18,7 @@ def _rows(connection: sqlite3.Connection, sql: str) -> list[list[object]]:
     return [list(row) for row in connection.execute(sql).fetchall()]
 
 
-def _status(database: Path) -> dict[str, object]:
+def _status(database: Path, *, fast: bool = False) -> dict[str, object]:
     with closing(sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True)) as connection:
         job_rows = _rows(
             connection,
@@ -60,14 +60,15 @@ def _status(database: Path) -> dict[str, object]:
                 "progress_percent": round(100 * finished_jobs / total_jobs, 4) if total_jobs else 0,
                 "states": job_rows,
                 "range_states": range_job_rows,
-                "articles": _rows(
+                "articles": [] if fast else _rows(
                     connection,
                     "SELECT article_fetch_status,training_eligible,COUNT(*) FROM news_articles "
                     "GROUP BY article_fetch_status,training_eligible ORDER BY 1,2",
                 ),
-                "fetch_attempts": int(connection.execute(
+                "fetch_attempts": None if fast else int(connection.execute(
                     "SELECT COUNT(*) FROM news_article_fetch_attempts"
                 ).fetchone()[0]),
+                "article_counts_deferred": fast,
                 "last_job_update": connection.execute(
                     "SELECT MAX(updated_at) FROM news_backfill_jobs"
                 ).fetchone()[0],
@@ -82,14 +83,15 @@ def _status(database: Path) -> dict[str, object]:
                 "total_jobs": market_total,
                 "finished_jobs": market_finished,
                 "progress_percent": round(100 * market_finished / market_total, 4) if market_total else 0,
-                "codes": int(connection.execute(
+                "codes": None if fast else int(connection.execute(
                     "SELECT COUNT(DISTINCT code) FROM market_bars"
                 ).fetchone()[0]),
-                "bars": _rows(
+                "bars": [] if fast else _rows(
                     connection,
                     "SELECT interval_seconds,COUNT(*),MIN(bar_time),MAX(bar_time) "
                     "FROM market_bars GROUP BY interval_seconds ORDER BY interval_seconds",
                 ),
+                "bar_counts_deferred": fast,
                 "jobs": market_jobs,
             },
         }
@@ -111,7 +113,11 @@ def _markdown(status: dict[str, object], published_run: str) -> str:
         f"- 완료/절단: **{news['finished_jobs']:,} / {news['total_jobs']:,}** "
         f"(**{news['progress_percent']}%**)",
         f"- 마지막 작업 갱신: `{news['last_job_update'] or '없음'}`",
-        f"- 원문 URL 확인 시도: **{news['fetch_attempts']:,}회**",
+        (
+            "- 원문 URL 확인 시도: 운영 중 전체 집계 생략"
+            if news["fetch_attempts"] is None
+            else f"- 원문 URL 확인 시도: **{news['fetch_attempts']:,}회**"
+        ),
         "",
         "| 상태 | 작업 | 페이지 | 목록 기사 | 시각 확보 | 원문 불가 | 시각 없음 |",
         "|---|---:|---:|---:|---:|---:|---:|",
@@ -141,8 +147,11 @@ def _markdown(status: dict[str, object], published_run: str) -> str:
         "| 상태 | 학습 적격 | 기사 |",
         "|---|---:|---:|",
     ])
-    for state, eligible, count in news["articles"]:
-        lines.append(f"| {state} | {int(eligible)} | {int(count):,} |")
+    if news["article_counts_deferred"]:
+        lines.append("| 운영 중 전체 집계 생략 | - | - |")
+    else:
+        for state, eligible, count in news["articles"]:
+            lines.append(f"| {state} | {int(eligible)} | {int(count):,} |")
     lines.extend(["", "### NAS 운영 뉴스 DB 반영", ""])
     if news["nas_imports"]:
         for state, count in news["nas_imports"]:
@@ -155,13 +164,20 @@ def _markdown(status: dict[str, object], published_run: str) -> str:
         "",
         f"- 완료: **{market['finished_jobs']:,} / {market['total_jobs']:,}** "
         f"(**{market['progress_percent']}%**)",
-        f"- 수집 종목: **{market['codes']:,}개**",
+        (
+            "- 수집 종목·봉: 운영 중 전체 집계 생략"
+            if market["codes"] is None
+            else f"- 수집 종목: **{market['codes']:,}개**"
+        ),
         "",
         "| 주기 | 봉 수 | 최초 | 최종 |",
         "|---|---:|---|---|",
     ])
-    for interval, count, oldest, newest in market["bars"]:
-        lines.append(f"| {int(interval) // 60}분 | {int(count):,} | {oldest} | {newest} |")
+    if market["bar_counts_deferred"]:
+        lines.append("| 운영 중 전체 집계 생략 | - | - | - |")
+    else:
+        for interval, count, oldest, newest in market["bars"]:
+            lines.append(f"| {int(interval) // 60}분 | {int(count):,} | {oldest} | {newest} |")
     lines.extend(["", "### 대신 수집 작업", ""])
     if market["jobs"]:
         for state, count in market["jobs"]:
@@ -181,10 +197,14 @@ def main() -> int:
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     parser.add_argument("--nas-project", type=Path, default=DEFAULT_NAS_PROJECT)
     parser.add_argument("--local-only", action="store_true")
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="운영 중 17GB 기사·시도 전체 집계를 생략합니다.",
+    )
     args = parser.parse_args()
 
     database = args.database.resolve(strict=True)
-    status = _status(database)
+    status = _status(database, fast=args.fast)
     if args.local_only:
         print(json.dumps(status, ensure_ascii=False, indent=2))
         return 0
