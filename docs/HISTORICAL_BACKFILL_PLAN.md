@@ -163,6 +163,8 @@ HTTP 성공·작업 `done`·구간 최소/최대 날짜만으로 완전 확보�
 
 같은 생성은 과거 뉴스 검토 화면의 `개발 입력 생성`에서 실행할 수 있다. 화면은 최신 불변 사람 판정에 dataset ID와 결정 파일 hash가 일치하는 사건 분할만 후보로 삼고, 일치하는 계획 중 가장 최근 저장본을 사용한다.
 
+`scripts/prepare_historical_news_blind_validation.py`는 개발 입력의 VALIDATION을 모델 실행용 `historical_news_blind_validation/v1` 요청으로 투영한다. `requests.jsonl`에는 `sample_id`와 `model_input`만 있고 `human_target`, 관련성, canonical event ID, 테마 프로필·테마명은 포함할 수 없다. RAG와 미세조정 실행은 이 같은 요청 집합 ID를 사용하고, 채점 단계만 별도로 원본 validation target을 읽는다. 이 요청은 학습 자료가 아니므로 `training_allowed=false`다.
+
 ### D03 첫 입력 계약
 
 `scripts/export_historical_reconstruction.py`는 선택한 후보일의 후보·현재 확보된 대신 봉·뉴스 근거를 `historical_reconstruction/v1` 불변 디렉터리로 만든다. `manifest.json`과 `records.jsonl`의 hash·ordinal·revision ID를 `load_historical_reconstruction`이 다시 검증한다. 이 형식은 기존 `top20_membership` 입력으로 위장하지 않으며 `strict_top20_replay_supported=false`를 필수로 둔다.

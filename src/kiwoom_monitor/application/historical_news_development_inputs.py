@@ -194,6 +194,13 @@ def load_historical_news_development_inputs(path: Path) -> HistoricalNewsDevelop
     return dataset
 
 
+def validate_historical_news_development_inputs(
+    dataset: HistoricalNewsDevelopmentInputs,
+) -> None:
+    """Validate an in-memory development dataset before deriving another contract."""
+    _validate_dataset(dataset)
+
+
 def _record(role: str, event_id: str, decision: Mapping[str, Any]) -> dict[str, Any]:
     evidence = decision.get("article_evidence")
     review = decision.get("human_review")
