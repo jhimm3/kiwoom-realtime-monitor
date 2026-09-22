@@ -1211,7 +1211,31 @@ def store_article_publication_result(path: Path, result: ArticlePublicationResul
                 )
 
 
-def store_daishin_probe_payload(path: Path, payload: Mapping[str, Any]) -> int:
+_MARKET_BAR_UPSERT_SQL = """
+    INSERT INTO market_bars
+    (provider, code, venue, session_scope, interval_seconds,
+     adjustment_mode, bar_time, bar_time_semantics, raw_date, raw_time,
+     open, high, low, close, volume, trading_value, observed_at, available_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(
+        provider, code, venue, session_scope, interval_seconds,
+        adjustment_mode, bar_time
+    ) DO UPDATE SET
+        bar_time_semantics=excluded.bar_time_semantics,
+        raw_date=excluded.raw_date,
+        raw_time=excluded.raw_time,
+        open=excluded.open,
+        high=excluded.high,
+        low=excluded.low,
+        close=excluded.close,
+        volume=excluded.volume,
+        trading_value=excluded.trading_value,
+        observed_at=excluded.observed_at,
+        available_at=excluded.available_at
+"""
+
+
+def _daishin_bar_rows(payload: Mapping[str, Any]) -> list[tuple[object, ...]]:
     if payload.get("provider") != DAISHIN_PROVIDER:
         raise ValueError("unexpected Daishin provider")
     code = _stock_code(str(payload.get("code", "")))
@@ -1234,49 +1258,37 @@ def store_daishin_probe_payload(path: Path, payload: Mapping[str, Any]) -> int:
         raise ValueError("invalid Daishin bar time semantics")
     if not observed_at or not isinstance(bars, list):
         raise ValueError("incomplete Daishin probe payload")
+    rows = []
+    for bar in bars:
+        if not isinstance(bar, Mapping):
+            continue
+        bar_time = str(bar.get("bar_time", ""))
+        if not bar_time:
+            continue
+        rows.append((
+            DAISHIN_PROVIDER, code, venue, session_scope, interval_seconds,
+            adjustment_mode, bar_time, bar_time_semantics,
+            bar.get("raw_date"), bar.get("raw_time"), bar.get("open"),
+            bar.get("high"), bar.get("low"), bar.get("close"), bar.get("volume"),
+            bar.get("trading_value"), observed_at, observed_at,
+        ))
+    return rows
+
+
+def _store_daishin_payload(
+    connection: sqlite3.Connection, payload: Mapping[str, Any],
+) -> int:
+    rows = _daishin_bar_rows(payload)
+    if rows:
+        connection.executemany(_MARKET_BAR_UPSERT_SQL, rows)
+    return len(rows)
+
+
+def store_daishin_probe_payload(path: Path, payload: Mapping[str, Any]) -> int:
     initialize_probe_database(path)
-    saved = 0
     with closing(_connect_database(path)) as connection:
         with connection:
-            for bar in bars:
-                if not isinstance(bar, Mapping):
-                    continue
-                bar_time = str(bar.get("bar_time", ""))
-                if not bar_time:
-                    continue
-                connection.execute(
-                    """
-                    INSERT INTO market_bars
-                    (provider, code, venue, session_scope, interval_seconds,
-                     adjustment_mode, bar_time, bar_time_semantics, raw_date, raw_time,
-                     open, high, low, close, volume, trading_value, observed_at, available_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(
-                        provider, code, venue, session_scope, interval_seconds,
-                        adjustment_mode, bar_time
-                    ) DO UPDATE SET
-                        bar_time_semantics=excluded.bar_time_semantics,
-                        raw_date=excluded.raw_date,
-                        raw_time=excluded.raw_time,
-                        open=excluded.open,
-                        high=excluded.high,
-                        low=excluded.low,
-                        close=excluded.close,
-                        volume=excluded.volume,
-                        trading_value=excluded.trading_value,
-                        observed_at=excluded.observed_at,
-                        available_at=excluded.available_at
-                    """,
-                    (
-                        DAISHIN_PROVIDER, code, venue, session_scope, interval_seconds,
-                        adjustment_mode, bar_time, bar_time_semantics,
-                        bar.get("raw_date"), bar.get("raw_time"), bar.get("open"),
-                        bar.get("high"), bar.get("low"), bar.get("close"), bar.get("volume"),
-                        bar.get("trading_value"), observed_at, observed_at,
-                    ),
-                )
-                saved += 1
-    return saved
+            return _store_daishin_payload(connection, payload)
 
 
 def import_daishin_backfill_ndjson(
@@ -1293,7 +1305,12 @@ def import_daishin_backfill_ndjson(
     oldest = ""
     newest = ""
     summary: dict[str, Any] = {}
-    with artifact_path.open("r", encoding="utf-8-sig") as stream:
+    initialize_probe_database(database_path)
+    with (
+        artifact_path.open("r", encoding="utf-8-sig") as stream,
+        closing(_connect_database(database_path)) as connection,
+        connection,
+    ):
         for line_number, line in enumerate(stream, start=1):
             if not line.strip():
                 continue
@@ -1329,7 +1346,7 @@ def import_daishin_backfill_ndjson(
                 oldest = min(oldest, page_oldest) if oldest else page_oldest
             payload = dict(record)
             payload["bars"] = selected
-            saved_bars += store_daishin_probe_payload(database_path, payload)
+            saved_bars += _store_daishin_payload(connection, payload)
     if not summary:
         raise ValueError("Daishin backfill artifact has no summary record")
     return {

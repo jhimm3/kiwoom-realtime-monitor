@@ -466,6 +466,35 @@ class HistoricalBackfillTest(unittest.TestCase):
         self.assertEqual(1, result["selected_bars"])
         self.assertEqual([("2024-08-30T15:30:00+09:00",)], stored)
 
+    def test_daishin_artifact_import_is_atomic_across_pages(self) -> None:
+        valid_page = {
+            "record_type": "page", "provider": "daishin_creon", "code": "005930",
+            "interval_seconds": 60, "venue": "K", "session_scope": "regular",
+            "adjustment_mode": "raw", "bar_time_semantics": "interval_end", "page": 1,
+            "observed_at": "2026-09-22T06:00:00+00:00",
+            "bars": [{"bar_time": "2026-09-22T09:01:00+09:00", "close": 100}],
+        }
+        invalid_page = {**valid_page, "page": 2, "provider": "unexpected"}
+        summary = {
+            "record_type": "summary", "provider": "daishin_creon", "code": "005930",
+            "interval_seconds": 60, "provider_has_more": False,
+            "stopped_by_max_pages": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "bars.ndjson"
+            artifact.write_text(
+                "\n".join(json.dumps(value) for value in (valid_page, invalid_page, summary)),
+                encoding="utf-8",
+            )
+            database = root / "probe.sqlite3"
+            with self.assertRaisesRegex(ValueError, "unexpected Daishin provider"):
+                import_daishin_backfill_ndjson(artifact, database)
+            with closing(sqlite3.connect(database)) as connection:
+                count = connection.execute("SELECT COUNT(*) FROM market_bars").fetchone()[0]
+
+        self.assertEqual(0, count)
+
 
 if __name__ == "__main__":
     unittest.main()
