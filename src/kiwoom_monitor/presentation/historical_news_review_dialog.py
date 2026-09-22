@@ -41,7 +41,12 @@ from kiwoom_monitor.application.historical_news_review_decisions import (
 )
 from kiwoom_monitor.application.historical_news_event_split import (
     build_historical_news_event_split,
+    load_historical_news_event_split,
     write_historical_news_event_split,
+)
+from kiwoom_monitor.application.historical_news_development_inputs import (
+    build_historical_news_development_inputs,
+    write_historical_news_development_inputs,
 )
 from kiwoom_monitor.application.historical_news_review_queue import (
     HistoricalNewsReviewQueue,
@@ -86,12 +91,15 @@ class HistoricalNewsReviewDialog(QDialog):
         self._finalize.clicked.connect(self._finalize_decisions)
         self._split_events = QPushButton("사건 분할 계획")
         self._split_events.clicked.connect(self._create_event_split)
+        self._development_inputs = QPushButton("개발 입력 생성")
+        self._development_inputs.clicked.connect(self._create_development_inputs)
         top = QHBoxLayout()
         top.addWidget(self._status, 1)
         top.addWidget(self._progress)
         top.addWidget(refresh)
         top.addWidget(self._finalize)
         top.addWidget(self._split_events)
+        top.addWidget(self._development_inputs)
 
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(("상태", "발행시각", "종목", "기사 제목", "규칙 점수"))
@@ -565,6 +573,61 @@ class HistoricalNewsReviewDialog(QDialog):
             "이 계획은 아직 모델 가중치 학습 준비 완료 상태가 아닙니다.",
         )
         self._status.setText(f"사건 분할 계획 저장 완료: {output.name}")
+
+    def _create_development_inputs(self) -> None:
+        try:
+            decisions = self._latest_decisions()
+            split_path, plan = self._latest_event_split(decisions)
+            dataset = build_historical_news_development_inputs(decisions, plan)
+            output = (
+                self._research_dir / "historical-news-development-inputs"
+                / str(dataset.manifest["dataset_id"])
+            )
+            if output.exists():
+                self._status.setText(f"같은 공통 개발 입력이 이미 있습니다: {output.name}")
+                return
+            write_historical_news_development_inputs(dataset, output)
+        except (OSError, ValueError) as error:
+            QMessageBox.information(self, "개발 입력 생성", str(error))
+            return
+        counts = dataset.manifest["counts"]
+        QMessageBox.information(
+            self,
+            "개발 입력 생성",
+            "RAG·미세조정 비교용 공통 입력을 저장했습니다.\n"
+            f"TRAIN 기사 {counts['train_records']} · "
+            f"VALIDATION 기사 {counts['validation_records']}\n"
+            f"봉인 OOS 기사 {counts['oos_articles_omitted']}건은 포함하지 않았습니다.\n\n"
+            "이 입력 생성은 LLM 실행이나 모델 가중치 학습 완료를 뜻하지 않습니다.",
+        )
+        self._status.setText(
+            f"공통 개발 입력 저장 완료: {output.name} · 분할 {split_path.name}"
+        )
+
+    def _latest_event_split(
+        self, decisions: HistoricalNewsReviewDecisions,
+    ) -> tuple[Path, dict[str, Any]]:
+        root = self._research_dir / "historical-news-event-splits"
+        candidates: list[tuple[int, str, Path, dict[str, Any]]] = []
+        for path in root.glob("*.json"):
+            try:
+                plan = load_historical_news_event_split(path)
+            except ValueError:
+                continue
+            source = plan.get("source")
+            if not isinstance(source, dict):
+                continue
+            if (
+                source.get("dataset_id") != decisions.manifest.get("dataset_id")
+                or source.get("decisions_file_hash")
+                != decisions.manifest.get("decisions_file_hash")
+            ):
+                continue
+            candidates.append((path.stat().st_mtime_ns, str(plan["plan_id"]), path, plan))
+        if not candidates:
+            raise ValueError("최신 불변 사람 판정에 맞는 사건 분할 계획을 먼저 만드세요.")
+        _, _, path, plan = max(candidates, key=lambda value: (value[0], value[1]))
+        return path, plan
 
     def _latest_decisions(self) -> HistoricalNewsReviewDecisions:
         root = self._research_dir / "historical-news-review-decisions"

@@ -23,6 +23,9 @@ from kiwoom_monitor.application.historical_news_review_decisions import (
 from kiwoom_monitor.application.historical_news_event_split import (
     load_historical_news_event_split,
 )
+from kiwoom_monitor.application.historical_news_development_inputs import (
+    load_historical_news_development_inputs,
+)
 from kiwoom_monitor.application.historical_news_review_queue import (
     build_historical_news_review_queue,
     write_historical_news_review_queue,
@@ -126,6 +129,23 @@ class HistoricalNewsReviewDialogTests(unittest.TestCase):
             self.assertEqual(["TRAIN", "VALIDATION", "OOS"], [
                 row["role"] for row in plan["partitions"]
             ])
+
+            with patch(
+                "kiwoom_monitor.presentation.historical_news_review_dialog.QMessageBox.information"
+            ):
+                dialog._create_development_inputs()
+
+            development_outputs = list(
+                (research_dir / "historical-news-development-inputs").glob("*/manifest.json")
+            )
+            self.assertEqual(1, len(development_outputs))
+            dataset = load_historical_news_development_inputs(
+                development_outputs[0].parent
+            )
+            self.assertEqual(1, len(dataset.train))
+            self.assertEqual(1, len(dataset.validation))
+            self.assertFalse(dataset.manifest["boundaries"]["oos_payload_included"])
+            self.assertEqual(plan["plan_id"], dataset.manifest["source"]["event_split"]["plan_id"])
             dialog.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
