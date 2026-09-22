@@ -39,6 +39,8 @@ NAS의 `stock_aliases` 1,164행을 사용해 94,750개 후보 종목·일의 당
 
 후보일과 결과 구간을 분리한 복원본 `data/research/historical-reconstruction/2026-09-18-through-2026-09-21-v1`도 만들었다. 어댑터는 후보 50개를 `historical_candidate_population`으로 유지하고, 수집 작업이 완료된 000150·005930의 다음 거래일 1분봉 각 381개만 `data/research/historical-strategy-input/2026-09-18-v1`에 넣었다. 연구 clock은 2026-09-21 실제 봉 종료시각을 쓰되 원자료가 실제 확보된 2026-09-22 수집시각은 각 payload의 `source_available_at`에 남긴다. 기존 두 전략 Family의 가격 Factor는 이 입력을 실행할 수 있지만 당시 TOP20 자료가 아니므로 rank persistence Factor는 runner에서 거부한다. 현재 정책을 최종값으로 정하지 않았으므로 이 단계에서는 실제 성과 비교 결과를 만들지 않았다.
 
+다기간 어댑터는 여러 후보일을 한 동결 입력에 넣되 각 사례의 결과를 후보 DB에서 확인한 바로 다음 거래일까지로 제한한다. 이 경계로 멀리 떨어진 후보일 사이의 봉을 한 사례에 계속 포함하거나 같은 결과 봉을 여러 사례 성과로 중복시키지 않는다. 첫 다기간 표본 `multi-period-2024-2026-v1`은 2024-12-24→12-26, 2025-05-29→05-30, 2026-01-14→01-15 세 사례와 연구 관측 7,567개를 포함하며, 각 원천·파생 manifest와 파일 hash를 일반 권한 로더로 재검증했다. 수집 진행 중 만든 불변 표본이므로 전체 후보 일반화나 시간순 TRAIN/VALIDATION/OOS 성과 완료를 뜻하지 않는다.
+
 수집 진행률은 NAS `deploy/synology/server-data/historical-intelligence/v1/STATUS.md`와 `status.json`에 게시한다. 발행시각이 검증된 과거 기사는 기존 인증된 `news_article` content 경로로 증분 전송하며, NAS 운영 DB에서 `naver_historical_web`/`historical_backfill` revision으로 저장된 뒤 기존 BODY 작업기가 원문을 처리한다. 별도 역사 SQLite 스냅샷 자체를 운영 뉴스 DB로 열거나 덮어쓰지 않는다.
 
 기존 후보 DB는 읽기 전용으로 확인했다. 94,750개 후보 종목·일, 5,910,806개 일봉, 4,562,200개 분봉이 있고 분봉 작업 완료 중 81,901건은 0행이었다. 실제 확보 범위와 다음 작업은 [과거 자료 확보 기획](HISTORICAL_BACKFILL_PLAN.md)에 적었다.

@@ -181,6 +181,71 @@ class HistoricalReconstructionTests(unittest.TestCase):
             self.assertEqual(derived.manifest["dataset_id"], verified.manifest["dataset_id"])
             self.assertEqual(derived.observations, verified.observations)
 
+    def test_multiple_cases_use_nonoverlapping_outcome_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.sqlite3"
+            intelligence = root / "intelligence.sqlite3"
+            with closing(sqlite3.connect(candidate)) as connection, connection:
+                connection.executescript("""
+                    CREATE TABLE stocks(code TEXT PRIMARY KEY, name TEXT);
+                    CREATE TABLE candidate_days(
+                        dt TEXT, code TEXT, score REAL, reasons TEXT,
+                        rank_value INTEGER, rank_gain INTEGER, rank_high INTEGER,
+                        rank_volume_ratio INTEGER, gain_pct REAL, high_pct REAL,
+                        volume_ratio REAL, trading_value INTEGER,
+                        PRIMARY KEY(dt, code)
+                    );
+                    INSERT INTO stocks VALUES('005930','삼성전자');
+                    INSERT INTO candidate_days VALUES
+                      ('2024-01-02','005930',9.5,'value',1,2,3,4,5,6,7,800),
+                      ('2024-01-03','005930',9.0,'gain',2,1,4,3,4,5,6,700);
+                """)
+            initialize_probe_database(intelligence)
+            with closing(sqlite3.connect(intelligence)) as connection, connection:
+                connection.execute(
+                    "CREATE TABLE market_backfill_jobs(code TEXT PRIMARY KEY,state TEXT)"
+                )
+                connection.execute("INSERT INTO market_backfill_jobs VALUES('005930','complete')")
+                for day, close in ((3, 101), (4, 102)):
+                    timestamp = f"2024-01-{day:02d}T09:01:00+09:00"
+                    connection.execute(
+                        "INSERT INTO market_bars VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        ("daishin_creon", "005930", "K", "regular", 60, "raw",
+                         timestamp, "interval_end", 20240100 + day, 901,
+                         close, close + 1, close - 1, close, 100, 10_000_000,
+                         "2026-09-22T02:00:00+00:00", "2026-09-22T02:00:00+00:00"),
+                    )
+            output = root / "export"
+            manifest = export_historical_reconstruction(
+                candidate, intelligence, output,
+                dates=("2024-01-02", "2024-01-03"), outcome_end_date="2024-01-04",
+            )
+            source = load_historical_reconstruction(output)
+            derived = adapt_historical_reconstruction_for_research(
+                source, selected_dates=("2024-01-02", "2024-01-03"),
+            )
+
+            windows = manifest["temporal_split"]["case_windows"]
+            self.assertEqual("2024-01-03", windows[0]["outcome_end_date"])
+            self.assertEqual("2024-01-04", windows[1]["outcome_end_date"])
+            self.assertEqual(2, len(derived.manifest["included_cases"]))
+            self.assertEqual([], derived.manifest["excluded_cases"])
+            self.assertEqual(
+                ["2024-01-02", "2024-01-03"], derived.manifest["selected_dates"],
+            )
+            self.assertEqual(
+                2,
+                sum(row["kind"] == "historical_candidate_population"
+                    for row in derived.observations),
+            )
+            bars = [row for row in derived.observations if row["kind"] == "minute_bar"]
+            self.assertEqual(2, len(bars))
+            self.assertEqual(
+                {"2024-01-02", "2024-01-03"},
+                {row["payload"]["historical_case_date"] for row in bars},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

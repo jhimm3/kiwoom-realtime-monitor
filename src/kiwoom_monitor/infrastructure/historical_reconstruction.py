@@ -58,6 +58,7 @@ def export_historical_reconstruction(
     if created.tzinfo is None:
         raise ValueError("created_at must be timezone-aware")
     created_text = created.astimezone(UTC).isoformat()
+    case_outcome_ends: dict[str, str] = {}
 
     candidate_path = Path(candidate_database).expanduser().resolve(strict=True)
     intelligence_path = Path(intelligence_database).expanduser().resolve(strict=True)
@@ -72,6 +73,13 @@ def export_historical_reconstruction(
         candidates.execute("BEGIN")
         intelligence.execute("BEGIN")
         for selected_date in selected_dates:
+            next_session = candidates.execute(
+                "SELECT MIN(dt) FROM candidate_days WHERE dt > ? AND dt <= ?",
+                (selected_date, outcome_end),
+            ).fetchone()[0]
+            case_outcome_ends[selected_date] = str(next_session or outcome_end)
+        for selected_date in selected_dates:
+            case_outcome_end = case_outcome_ends[selected_date]
             candidate_rows = candidates.execute(
                 """
                 SELECT c.dt, c.code, COALESCE(s.name, '') AS name, c.score,
@@ -111,10 +119,14 @@ def export_historical_reconstruction(
                 ))
 
                 source_job_state = _market_job_state(intelligence, code)
+                range_start = f"{selected_date}T00:00:00"
+                range_end = f"{(date.fromisoformat(case_outcome_end) + timedelta(days=1)).isoformat()}T00:00:00"
                 case_dates = [str(value[0]) for value in intelligence.execute(
                     "SELECT DISTINCT substr(bar_time,1,10) FROM market_bars "
-                    "WHERE code=? AND substr(bar_time,1,10) BETWEEN ? AND ? ORDER BY 1",
-                    (code, selected_date, outcome_end),
+                    "WHERE provider='daishin_creon' AND code=? "
+                    "AND venue IN ('K','KRX') AND session_scope='regular' "
+                    "AND adjustment_mode='raw' AND bar_time>=? AND bar_time<? ORDER BY 1",
+                    (code, range_start, range_end),
                 )]
                 selected_interval = _preferred_interval(intelligence, code, selected_date)
                 resolution_counts[str(selected_interval) if selected_interval else "unavailable"] += 1
@@ -127,11 +139,16 @@ def export_historical_reconstruction(
                                raw_date, raw_time, open, high, low, close, volume,
                                trading_value, observed_at, available_at
                         FROM market_bars
-                        WHERE code = ? AND substr(bar_time, 1, 10) = ?
+                        WHERE provider='daishin_creon' AND code = ?
+                          AND venue IN ('K','KRX') AND session_scope='regular'
+                          AND adjustment_mode='raw'
+                          AND bar_time >= ? AND bar_time < ?
                           AND interval_seconds = ?
                         ORDER BY bar_time, provider, venue, adjustment_mode
                         """,
-                        (code, bar_date, interval),
+                        (code, f"{bar_date}T00:00:00",
+                         f"{(date.fromisoformat(bar_date) + timedelta(days=1)).isoformat()}T00:00:00",
+                         interval),
                     ).fetchall()
                     for bar in bar_rows:
                         payload = {key: bar[key] for key in bar.keys()}
@@ -222,6 +239,14 @@ def export_historical_reconstruction(
         "temporal_split": {
             "selection_dates": list(selected_dates),
             "outcome_end_date": outcome_end,
+            "case_windows": [
+                {
+                    "selection_date": selected_date,
+                    "outcome_start_policy": "dates_strictly_after_selection_date",
+                    "outcome_end_date": case_outcome_ends[selected_date],
+                }
+                for selected_date in selected_dates
+            ],
             "selection_available_after_session": True,
             "strategy_entry_phase": "bar dates strictly after each selection date",
         },
@@ -305,9 +330,10 @@ def load_historical_reconstruction(path: Path) -> HistoricalReconstructionDatase
 def adapt_historical_reconstruction_for_research(
     dataset: HistoricalReconstructionDataset,
     *,
-    selected_date: str,
+    selected_date: str | None = None,
+    selected_dates: Iterable[str] = (),
 ) -> "FrozenResearchDataset":
-    """Create a derived one-minute strategy input without changing source availability.
+    """Create a one- or multi-case strategy input without changing source availability.
 
     The derived replay clock is the historical bar close.  Every minute observation
     also carries ``source_available_at`` so it cannot be mistaken for a record that
@@ -315,108 +341,136 @@ def adapt_historical_reconstruction_for_research(
     """
     from kiwoom_monitor.infrastructure.research_data_source import FrozenResearchDataset
 
-    case_date = _iso_date(selected_date)
-    if case_date not in dataset.manifest.get("selected_dates", []):
+    requested = tuple(_iso_date(value) for value in selected_dates)
+    if selected_date is not None:
+        if requested:
+            raise ValueError("use selected_date or selected_dates, not both")
+        requested = (_iso_date(selected_date),)
+    requested = tuple(sorted(set(requested)))
+    if not requested:
+        raise ValueError("at least one selected date is required")
+    source_dates = tuple(str(value) for value in dataset.manifest.get("selected_dates", []))
+    if any(value not in source_dates for value in requested):
         raise ValueError("selected date is not present in the reconstruction dataset")
-    candidates = tuple(
-        row for row in dataset.records_of_kind("historical_candidate")
-        if row.get("payload", {}).get("date") == case_date
-    )
-    codes = tuple(dict.fromkeys(
-        str(row["payload"].get("code", "")) for row in candidates
-        if str(row["payload"].get("code", ""))
-    ))
-    source_bars = tuple(
-        row for row in dataset.records_of_kind("historical_market_bar")
-        if row.get("payload", {}).get("case_date") == case_date
-        and row.get("payload", {}).get("phase") == "outcome"
-        and int(row.get("payload", {}).get("interval_seconds", 0)) == 60
-        and row.get("payload", {}).get("source_job_state") == "complete"
-    )
-    if not candidates:
-        raise ValueError("historical reconstruction case has no candidates")
-    if not source_bars:
-        raise ValueError("historical reconstruction case has no complete one-minute outcome bars")
 
-    first_start = min(
-        (_aware_datetime(row["payload"]["bar_time"]) - timedelta(minutes=1)).isoformat()
-        for row in source_bars
-    )
-    observations: list[dict[str, Any]] = [{
-        "accepted_sequence": 1,
-        "revision_id": _hash_document({
-            "kind": "historical_candidate_population",
-            "case_date": case_date,
-            "codes": codes,
-            "activation": first_start,
-        }),
-        "kind": "historical_candidate_population",
-        "subject": case_date,
-        "observation_key": case_date,
-        "effective_at": first_start,
-        "available_at": first_start,
-        "payload": {
-            "codes": list(codes),
-            "population_id": POPULATION_ID,
-            "selection_date": case_date,
-            "activation_policy": "first_collected_session_after_selection_close",
-            "source_available_at": max(str(row["available_at"]) for row in candidates),
-            "not_contemporaneous_top20": True,
-        },
-    }]
-    ordered_bars = sorted(source_bars, key=lambda row: (
-        str(row["payload"]["bar_time"]), str(row["payload"]["code"]), str(row["revision_id"]),
-    ))
-    for sequence, source in enumerate(ordered_bars, start=2):
-        payload = source["payload"]
-        bar_end = _aware_datetime(payload["bar_time"])
-        bar_start = bar_end - timedelta(minutes=1)
-        trading_value = int(payload.get("trading_value") or 0)
-        observation_payload = {
-            "market": "KRX",
-            "code": str(payload["code"]),
-            "bar_start": bar_start.isoformat(),
-            "bar_end": bar_end.isoformat(),
-            "open": int(payload["open"]),
-            "high": int(payload["high"]),
-            "low": int(payload["low"]),
-            "close": int(payload["close"]),
-            "volume": int(payload.get("volume") or 0),
-            "trade_value_million_won": trading_value // 1_000_000,
-            "window_closed": True,
-            "capture_quality": "complete",
-            "finalization_source": "daishin_completed_history_job",
-            "source_revision_id": str(source["revision_id"]),
-            "source_available_at": str(source["available_at"]),
-            "replay_clock_policy": "historical_bar_close",
-        }
-        scientific = {
-            "kind": "minute_bar",
-            "subject": f"{payload['code']}:KRX",
-            "venue": "KRX",
-            "observation_key": bar_start.isoformat(),
-            "effective_at": bar_end.isoformat(),
-            "available_at": bar_end.isoformat(),
-            "completeness": "complete",
-            "value_kind": "actual",
-            "payload": observation_payload,
-        }
+    observations: list[dict[str, Any]] = []
+    included_cases: list[dict[str, Any]] = []
+    excluded_cases: list[dict[str, str]] = []
+    for case_date in requested:
+        candidates = tuple(
+            row for row in dataset.records_of_kind("historical_candidate")
+            if row.get("payload", {}).get("date") == case_date
+        )
+        if not candidates:
+            raise ValueError("historical reconstruction case has no candidates")
+        codes = tuple(dict.fromkeys(
+            str(row["payload"].get("code", "")) for row in candidates
+            if str(row["payload"].get("code", ""))
+        ))
+        source_bars = tuple(
+            row for row in dataset.records_of_kind("historical_market_bar")
+            if row.get("payload", {}).get("case_date") == case_date
+            and row.get("payload", {}).get("phase") == "outcome"
+            and int(row.get("payload", {}).get("interval_seconds", 0)) == 60
+            and row.get("payload", {}).get("source_job_state") == "complete"
+        )
+        if not source_bars:
+            excluded_cases.append({
+                "selection_date": case_date,
+                "reason": "complete_one_minute_outcome_bars_missing",
+            })
+            continue
+        first_start = min(
+            (_aware_datetime(row["payload"]["bar_time"]) - timedelta(minutes=1)).isoformat()
+            for row in source_bars
+        )
         observations.append({
-            "accepted_sequence": sequence,
-            "revision_id": _hash_document(scientific),
-            **scientific,
+            "accepted_sequence": 0,
+            "revision_id": _hash_document({
+                "kind": "historical_candidate_population",
+                "case_date": case_date,
+                "codes": codes,
+                "activation": first_start,
+            }),
+            "kind": "historical_candidate_population",
+            "subject": case_date,
+            "observation_key": case_date,
+            "effective_at": first_start,
+            "available_at": first_start,
+            "payload": {
+                "codes": list(codes),
+                "population_id": POPULATION_ID,
+                "selection_date": case_date,
+                "activation_policy": "first_collected_session_after_selection_close",
+                "source_available_at": max(str(row["available_at"]) for row in candidates),
+                "not_contemporaneous_top20": True,
+            },
         })
+        ordered_bars = sorted(source_bars, key=lambda row: (
+            str(row["payload"]["bar_time"]), str(row["payload"]["code"]),
+            str(row["revision_id"]),
+        ))
+        included_cases.append({
+            "selection_date": case_date,
+            "candidate_count": len(codes),
+            "minute_bar_count": len(ordered_bars),
+        })
+        for source in ordered_bars:
+            payload = source["payload"]
+            bar_end = _aware_datetime(payload["bar_time"])
+            bar_start = bar_end - timedelta(minutes=1)
+            trading_value = int(payload.get("trading_value") or 0)
+            observation_payload = {
+                "market": "KRX",
+                "code": str(payload["code"]),
+                "bar_start": bar_start.isoformat(),
+                "bar_end": bar_end.isoformat(),
+                "open": int(payload["open"]),
+                "high": int(payload["high"]),
+                "low": int(payload["low"]),
+                "close": int(payload["close"]),
+                "volume": int(payload.get("volume") or 0),
+                "trade_value_million_won": trading_value // 1_000_000,
+                "window_closed": True,
+                "capture_quality": "complete",
+                "finalization_source": "daishin_completed_history_job",
+                "source_revision_id": str(source["revision_id"]),
+                "source_available_at": str(source["available_at"]),
+                "replay_clock_policy": "historical_bar_close",
+                "historical_case_date": case_date,
+            }
+            scientific = {
+                "kind": "minute_bar",
+                "subject": f"{payload['code']}:KRX",
+                "venue": "KRX",
+                "observation_key": bar_start.isoformat(),
+                "effective_at": bar_end.isoformat(),
+                "available_at": bar_end.isoformat(),
+                "completeness": "complete",
+                "value_kind": "actual",
+                "payload": observation_payload,
+            }
+            observations.append({
+                "accepted_sequence": 0,
+                "revision_id": _hash_document(scientific),
+                **scientific,
+            })
+    if not included_cases:
+        raise ValueError("historical reconstruction cases have no complete one-minute outcome bars")
     observations.sort(key=lambda row: (
-        str(row["available_at"]), int(row["accepted_sequence"]), str(row["revision_id"]),
+        str(row["available_at"]),
+        0 if row["kind"] == "historical_candidate_population" else 1,
+        str(row["revision_id"]),
     ))
     for ordinal, row in enumerate(observations, start=1):
+        row["accepted_sequence"] = ordinal
         row["ordinal"] = ordinal
     revision_hash = hashlib.sha256(
         "\n".join(str(row["revision_id"]) for row in observations).encode("utf-8")
     ).hexdigest()
     identity = {
         "source_dataset_id": dataset.manifest["dataset_id"],
-        "selected_date": case_date,
+        "selected_dates": requested,
         "revision_ids_hash": revision_hash,
     }
     manifest = {
@@ -427,7 +481,10 @@ def adapt_historical_reconstruction_for_research(
         "revision_ids_hash": revision_hash,
         "source_dataset_id": dataset.manifest["dataset_id"],
         "source_revision_ids_hash": dataset.manifest["revision_ids_hash"],
-        "selected_date": case_date,
+        "selected_date": requested[0] if len(requested) == 1 else "",
+        "selected_dates": list(requested),
+        "included_cases": included_cases,
+        "excluded_cases": excluded_cases,
         "population_id": POPULATION_ID,
         "not_contemporaneous_top20": True,
         "simulation_clock": "historical_bar_close",
@@ -469,11 +526,15 @@ def write_historical_research_input(dataset: "FrozenResearchDataset", output: Pa
 
 
 def _preferred_interval(connection: sqlite3.Connection, code: str, selected_date: str) -> int:
+    range_end = f"{(date.fromisoformat(selected_date) + timedelta(days=1)).isoformat()}T00:00:00"
     values = {
         int(row[0]) for row in connection.execute(
             "SELECT DISTINCT interval_seconds FROM market_bars "
-            "WHERE code=? AND substr(bar_time,1,10)=? AND interval_seconds IN (60,300)",
-            (code, selected_date),
+            "WHERE provider='daishin_creon' AND code=? "
+            "AND venue IN ('K','KRX') AND session_scope='regular' "
+            "AND adjustment_mode='raw' AND bar_time>=? AND bar_time<? "
+            "AND interval_seconds IN (60,300)",
+            (code, f"{selected_date}T00:00:00", range_end),
         )
     }
     return 60 if 60 in values else 300 if 300 in values else 0
