@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -37,6 +37,70 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_settings_backup_import_confirmation_uses_main_window_as_parent(self) -> None:
+        owner = SimpleNamespace()
+        with patch("kiwoom_monitor.presentation.main_window.QFileDialog.getOpenFileName", return_value=("backup.json", "")), \
+                patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as question:
+            MainWindow._import_settings_backup(owner)
+        self.assertIs(owner, question.call_args.args[0])
+
+    def test_settings_backup_import_applies_after_confirmation(self) -> None:
+        refreshed: list[bool] = []
+        owner = SimpleNamespace(
+            _settings=SimpleNamespace(database_path=Path("monitor.sqlite3")),
+            _apply_downloaded_google_drive_data=lambda: refreshed.append(True),
+        )
+        with patch("kiwoom_monitor.presentation.main_window.QFileDialog.getOpenFileName", return_value=("backup.json", "")), \
+                patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes), \
+                patch.object(QMessageBox, "information"), \
+                patch("kiwoom_monitor.presentation.main_window.SettingsBackupService") as backup_service:
+            MainWindow._import_settings_backup(owner)
+        self.assertEqual([True], refreshed)
+        self.assertEqual(Path("backup.json"), backup_service.return_value.import_from.call_args.args[0])
+        self.assertFalse(backup_service.return_value.import_from.call_args.kwargs["include_themes"])
+
+    def test_bulk_theme_save_runs_after_submit_and_reports_only_after_success(self) -> None:
+        class Signal:
+            def connect(self, callback):
+                self.callback = callback
+
+        class Worker:
+            def __init__(self, task):
+                self.task = task
+                self.succeeded = Signal()
+                self.failed = Signal()
+                self.started = False
+
+            def start(self):
+                self.started = True
+
+        saved: list[str] = []
+        messages: list[str] = []
+        store = SimpleNamespace(all_by_name=lambda: {"005930": "반도체"})
+        owner = SimpleNamespace(
+            _theme_store=store, _theme_save_request=None,
+            _theme_save_completion=None, _closing=False,
+            statusBar=lambda: SimpleNamespace(showMessage=lambda message, *_: messages.append(message)),
+            _refresh_theme_badges=lambda: None,
+            _refresh_rankings=lambda: None,
+            _schedule_google_drive_upload=lambda *_: None,
+        )
+        owner._main_theme_change_saved = MethodType(MainWindow._main_theme_change_saved, owner)
+        owner._main_theme_change_failed = MethodType(MainWindow._main_theme_change_failed, owner)
+        with patch("kiwoom_monitor.presentation.main_window.SettingsRequestWorker", Worker), \
+                patch.object(QMessageBox, "information") as information:
+            accepted = MainWindow._submit_main_theme_change(
+                owner, lambda: saved.append("written"), completion=("완료", "1개 적용"),
+            )
+            self.assertTrue(accepted)
+            self.assertEqual([], saved)
+            information.assert_not_called()
+            worker = owner._theme_save_request
+            self.assertTrue(worker.started)
+            worker.succeeded.callback(worker.task())
+            self.assertEqual(["written"], saved)
+            information.assert_called_once_with(owner, "완료", "1개 적용")
+
     def test_followups_start_once_per_applied_ranking_and_ignore_stale_subscription(self) -> None:
         started: list[tuple[str, ...]] = []
         execution = SimpleNamespace(priority_preparing=True)
@@ -193,8 +257,10 @@ class MainWindowTest(unittest.TestCase):
                 "account_scope": requested.to_dict(),
             }),
             _current_account_scope=current,
-            _ensure_news_process=lambda: None,
-            _send_news_command=lambda *args, **kwargs: calls.append((args, kwargs)),
+            _news_window=SimpleNamespace(
+                ensure_started=lambda: None,
+                send_command=lambda *args, **kwargs: calls.append((args, kwargs)),
+            ),
         )
 
         MainWindow._poll_journal_news_request(owner)
@@ -213,8 +279,10 @@ class MainWindowTest(unittest.TestCase):
         ))
         owner = SimpleNamespace(
             _journal_news_inbox=SimpleNamespace(read_new=lambda: next(documents)),
-            _ensure_news_process=lambda: None,
-            _send_news_command=lambda *_args, **kwargs: sent.append(kwargs),
+            _news_window=SimpleNamespace(
+                ensure_started=lambda: None,
+                send_command=lambda *_args, **kwargs: sent.append(kwargs),
+            ),
         )
 
         MainWindow._poll_journal_news_request(owner)
@@ -249,6 +317,7 @@ class MainWindowTest(unittest.TestCase):
             _closing=False,
             _google_drive_pending_target="",
             _google_drive_dirty=False,
+            _google_drive_strict_restore_staged=False,
             _settings=SimpleNamespace(set=lambda key, value: saved.__setitem__(key, value), get=lambda _key: "1"),
             _google_drive_debounce=SimpleNamespace(start=lambda: self.fail("offline change must not start upload")),
             _google_drive_timestamp_now=lambda: "2026-09-12T00:00:00Z",
@@ -274,6 +343,7 @@ class MainWindowTest(unittest.TestCase):
             _google_drive_operation="",
             _google_drive_show_completion=False,
             _google_drive_active_target="",
+            _google_drive_strict_restore_staged=False,
             _settings=SimpleNamespace(get=lambda key: "settings" if key == "google_drive_sync_target" else ""),
             _has_newer_local_google_drive_changes=lambda: True,
             statusBar=lambda: SimpleNamespace(showMessage=lambda _message: None),
@@ -283,6 +353,27 @@ class MainWindowTest(unittest.TestCase):
 
         self.assertEqual("both", started[0][2])
         self.assertEqual("both", owner._google_drive_active_target)
+
+    def test_staged_drive_restore_suppresses_exit_upload(self) -> None:
+        from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncResult
+
+        stopped: list[bool] = []
+        owner = SimpleNamespace(
+            _google_drive_operation="restore",
+            _google_drive_show_completion=False,
+            _google_drive_strict_restore_staged=False,
+            _google_drive_close_pending=True,
+            _google_drive_debounce=SimpleNamespace(stop=lambda: stopped.append(True)),
+            _refresh_google_drive_status=lambda: None,
+            statusBar=lambda: SimpleNamespace(showMessage=lambda _message: None),
+        )
+        MainWindow._on_google_drive_sync_completed(
+            owner, GoogleDriveSyncResult("restore", "staged", "복원 예약"),
+        )
+
+        self.assertTrue(owner._google_drive_strict_restore_staged)
+        self.assertFalse(owner._google_drive_close_pending)
+        self.assertEqual([True], stopped)
 
     @classmethod
     def setUpClass(cls) -> None:

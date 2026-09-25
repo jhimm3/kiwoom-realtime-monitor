@@ -6,6 +6,7 @@ import unittest
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from kiwoom_monitor.application.news_analysis import assess_stock_news
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
@@ -29,6 +30,38 @@ from kiwoom_monitor.infrastructure.persistence.stock_news_repository import Stoc
 
 
 class NewsDatabaseTests(unittest.TestCase):
+    def test_ai_backup_invalid_utf8_is_reported_without_changing_results(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, backup = root / "news.sqlite3", root / "ai.json"
+            item = StockNewsItem(
+                "공급계약", "100억원 계약", "https://example.com/1", "https://example.com/1",
+                datetime.now(UTC), assess_stock_news("회사", "공급계약", "100억원 계약"),
+            )
+            repository = NewsAIRepository(source)
+            repository.save(
+                "000001", item, "gemini", "model", "hash",
+                AINewsAnalysis("요약", "긍정", 80, "이유", ("계약",), (), "수주·계약"),
+            )
+            backup.write_bytes(b"\xff")
+
+            with self.assertRaisesRegex(ValueError, "뉴스 AI 백업 파일을 읽을 수 없습니다"):
+                NewsAIBackupService(source).import_from(backup)
+
+            self.assertIsNotNone(repository.load("000001", item))
+
+    def test_ai_backup_export_failure_keeps_previous_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, backup = root / "news.sqlite3", root / "ai.json"
+            NewsAIRepository(source)
+            backup.write_text("previous backup", encoding="utf-8")
+            with patch("os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaises(OSError):
+                    NewsAIBackupService(source).export_to(backup)
+            self.assertEqual("previous backup", backup.read_text(encoding="utf-8"))
+            self.assertEqual([], list(root.glob(".ai.json.*.tmp")))
+
     def test_existing_news_survives_schema_baseline_registration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "news.sqlite3"

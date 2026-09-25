@@ -2380,15 +2380,44 @@ class PostgresQueryStore:
         return StoredQuery(payload, bool(row[1]), str(row[2]))
 
     def save_query(self, cache_key: str, api_id: str, expires_at: float, value: StoredQuery) -> None:
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO central_api_query_cache(cache_key,api_id,expires_at,payload_json,has_next,next_key) "
-                "VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(cache_key) DO UPDATE SET "
-                "api_id=EXCLUDED.api_id,expires_at=EXCLUDED.expires_at,payload_json=EXCLUDED.payload_json,"
-                "has_next=EXCLUDED.has_next,next_key=EXCLUDED.next_key",
-                (cache_key, api_id, expires_at, json.dumps(value.payload, ensure_ascii=False), value.has_next, value.next_key),
+        total_started = monotonic()
+        encode_started = monotonic()
+        payload_json = json.dumps(value.payload, ensure_ascii=False)
+        encode_ms = round((monotonic() - encode_started) * 1000)
+
+        connect_started = monotonic()
+        connection = self._connect()
+        connect_ms = round((monotonic() - connect_started) * 1000)
+        upsert_ms = cleanup_ms = commit_ms = 0
+        try:
+            with connection.cursor() as cursor:
+                phase_started = monotonic()
+                cursor.execute(
+                    "INSERT INTO central_api_query_cache(cache_key,api_id,expires_at,payload_json,has_next,next_key) "
+                    "VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(cache_key) DO UPDATE SET "
+                    "api_id=EXCLUDED.api_id,expires_at=EXCLUDED.expires_at,payload_json=EXCLUDED.payload_json,"
+                    "has_next=EXCLUDED.has_next,next_key=EXCLUDED.next_key",
+                    (cache_key, api_id, expires_at, payload_json, value.has_next, value.next_key),
+                )
+                upsert_ms = round((monotonic() - phase_started) * 1000)
+
+                phase_started = monotonic()
+                cursor.execute("DELETE FROM central_api_query_cache WHERE expires_at<=%s", (time(),))
+                cleanup_ms = round((monotonic() - phase_started) * 1000)
+
+            phase_started = monotonic()
+            connection.commit()
+            commit_ms = round((monotonic() - phase_started) * 1000)
+        finally:
+            connection.close()
+
+        total_ms = round((monotonic() - total_started) * 1000)
+        if total_ms >= 1000:
+            logger.warning(
+                "slow postgres query cache save api_id=%s encode_ms=%d connect_ms=%d "
+                "upsert_ms=%d cleanup_ms=%d commit_ms=%d total_ms=%d",
+                api_id, encode_ms, connect_ms, upsert_ms, cleanup_ms, commit_ms, total_ms,
             )
-            cursor.execute("DELETE FROM central_api_query_cache WHERE expires_at<=%s", (time(),))
 
     def close(self) -> None:
         return
@@ -2614,30 +2643,65 @@ class PostgresQueryStore:
         placeholders = ",".join("%s" for _ in columns)
         updates = ",".join(f"{column}=EXCLUDED.{column}" for column in columns if column not in BAR_KEY_COLUMNS)
         conflict = "trading_date,minute,code,market" if minute else "trading_date,code,market"
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.executemany(
-                f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders}) "
-                f"ON CONFLICT({conflict}) DO UPDATE SET {updates}",
-                bar_value_rows(values, minute=minute),
-            )
-            _save_postgres_metadata(cursor, observations)
-            if minute and observations and self._observation_history_enabled:
-                for value, (key, observation) in zip(values, observations, strict=True):
-                    _append_postgres_observation_revision(
-                        cursor, "minute_bar", observation.subject, key,
-                        minute_bar_revision_payload(
-                            value,
-                            window_closed=observation.metadata.completeness in {
-                                DataCompleteness.COMPLETE, DataCompleteness.PARTIAL,
-                            },
-                            capture_quality=(
-                                "complete" if observation.metadata.completeness == DataCompleteness.COMPLETE
-                                else observation.metadata.completeness.value
+        total_started = monotonic()
+        connect_started = monotonic()
+        connection = self._connect()
+        connect_ms = round((monotonic() - connect_started) * 1000)
+        bar_write_ms = metadata_ms = revision_ms = commit_ms = close_ms = 0
+        try:
+            with connection.cursor() as cursor:
+                phase_started = monotonic()
+                cursor.executemany(
+                    f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders}) "
+                    f"ON CONFLICT({conflict}) DO UPDATE SET {updates}",
+                    bar_value_rows(values, minute=minute),
+                )
+                bar_write_ms = round((monotonic() - phase_started) * 1000)
+
+                phase_started = monotonic()
+                _save_postgres_metadata(cursor, observations)
+                metadata_ms = round((monotonic() - phase_started) * 1000)
+
+                phase_started = monotonic()
+                if minute and observations and self._observation_history_enabled:
+                    for value, (key, observation) in zip(values, observations, strict=True):
+                        _append_postgres_observation_revision(
+                            cursor, "minute_bar", observation.subject, key,
+                            minute_bar_revision_payload(
+                                value,
+                                window_closed=observation.metadata.completeness in {
+                                    DataCompleteness.COMPLETE, DataCompleteness.PARTIAL,
+                                },
+                                capture_quality=(
+                                    "complete" if observation.metadata.completeness == DataCompleteness.COMPLETE
+                                    else observation.metadata.completeness.value
+                                ),
+                                finalization_source="query_response",
                             ),
-                            finalization_source="query_response",
-                        ),
-                        observation,
-                    )
+                            observation,
+                        )
+                revision_ms = round((monotonic() - phase_started) * 1000)
+
+            phase_started = monotonic()
+            connection.commit()
+            commit_ms = round((monotonic() - phase_started) * 1000)
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            phase_started = monotonic()
+            connection.close()
+            close_ms = round((monotonic() - phase_started) * 1000)
+
+        total_ms = round((monotonic() - total_started) * 1000)
+        if total_ms >= 1000:
+            logger.warning(
+                "slow PostgreSQL market bar save kind=%s rows=%d observations=%d "
+                "connect_ms=%d bars_ms=%d metadata_ms=%d revisions_ms=%d "
+                "commit_ms=%d close_ms=%d total_ms=%d",
+                "minute" if minute else "daily", len(values), len(observations or ()),
+                connect_ms, bar_write_ms, metadata_ms, revision_ms, commit_ms, close_ms, total_ms,
+            )
 
     def load_daily_bars(self, code: str, market: str = "", limit: int = 250) -> list[dict[str, Any]]:
         sql = ("SELECT trading_date::text,code,market,open,high,low,close,volume,trade_value_million_won,updated_at "

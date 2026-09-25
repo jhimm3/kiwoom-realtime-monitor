@@ -763,6 +763,151 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual(10.0, unchanged["updated_at"])
         self.assertEqual(30.0, changed["updated_at"])
 
+    def test_postgres_query_cache_save_reports_slow_phase_timings(self) -> None:
+        class Cursor:
+            statements: list[tuple[str, tuple[object, ...]]] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, parameters) -> None:
+                self.statements.append((sql, parameters))
+
+        class Connection:
+            def __init__(self, cursor) -> None:
+                self._cursor = cursor
+                self.committed = False
+                self.closed = False
+
+            def cursor(self):
+                return self._cursor
+
+            def commit(self) -> None:
+                self.committed = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        cursor = Cursor()
+        connection = Connection(cursor)
+        store = PostgresQueryStore("postgresql://unused")
+        store._connect = lambda: connection  # type: ignore[method-assign]
+        with patch(
+            "kiwoom_monitor.central_server.database.monotonic",
+            side_effect=[index * 0.25 for index in range(12)],
+        ), patch("kiwoom_monitor.central_server.database.logger.warning") as warning:
+            store.save_query("cache-key", "ka10081", time.time() + 30, StoredQuery({"rows": [1]}, False, ""))
+
+        self.assertEqual(2, len(cursor.statements))
+        self.assertIn("INSERT INTO central_api_query_cache", cursor.statements[0][0])
+        self.assertIn("DELETE FROM central_api_query_cache", cursor.statements[1][0])
+        self.assertTrue(connection.committed)
+        self.assertTrue(connection.closed)
+        warning.assert_called_once()
+        self.assertEqual(
+            ("ka10081", 250, 250, 250, 250, 250, 2750),
+            warning.call_args.args[1:],
+        )
+
+    def test_postgres_minute_bar_save_reports_slow_phase_timings(self) -> None:
+        class Cursor:
+            def __init__(self) -> None:
+                self.sql = ""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def executemany(self, sql, _rows) -> None:
+                self.sql = sql
+
+        class Connection:
+            def __init__(self, cursor) -> None:
+                self._cursor = cursor
+                self.committed = False
+                self.rolled_back = False
+                self.closed = False
+
+            def cursor(self):
+                return self._cursor
+
+            def commit(self) -> None:
+                self.committed = True
+
+            def rollback(self) -> None:
+                self.rolled_back = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        cursor = Cursor()
+        connection = Connection(cursor)
+        store = PostgresQueryStore("postgresql://unused")
+        store._connect = lambda: connection  # type: ignore[method-assign]
+        with patch(
+            "kiwoom_monitor.central_server.database.monotonic",
+            side_effect=[index * 0.1 for index in range(14)],
+        ), patch(
+            "kiwoom_monitor.central_server.database.bar_value_rows",
+            return_value=[("2026-09-25", "09:30", "005930")],
+        ), patch("kiwoom_monitor.central_server.database.logger.warning") as warning:
+            store.replace_minute_bars([{"trading_date": "2026-09-25", "minute": "09:30", "code": "005930"}])
+
+        self.assertIn("INSERT INTO central_minute_bars", cursor.sql)
+        self.assertTrue(connection.committed)
+        self.assertFalse(connection.rolled_back)
+        self.assertTrue(connection.closed)
+        warning.assert_called_once()
+        self.assertEqual(
+            ("minute", 1, 0, 100, 100, 100, 100, 100, 100, 1300),
+            warning.call_args.args[1:],
+        )
+
+    def test_postgres_minute_bar_save_rolls_back_and_closes_on_error(self) -> None:
+        class Cursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def executemany(self, *_args) -> None:
+                raise RuntimeError("write failed")
+
+        class Connection:
+            def __init__(self) -> None:
+                self.committed = False
+                self.rolled_back = False
+                self.closed = False
+
+            def cursor(self):
+                return Cursor()
+
+            def commit(self) -> None:
+                self.committed = True
+
+            def rollback(self) -> None:
+                self.rolled_back = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        connection = Connection()
+        store = PostgresQueryStore("postgresql://unused")
+        store._connect = lambda: connection  # type: ignore[method-assign]
+        with patch("kiwoom_monitor.central_server.database.bar_value_rows", return_value=[("row",)]):
+            with self.assertRaisesRegex(RuntimeError, "write failed"):
+                store.replace_minute_bars([{"trading_date": "2026-09-25", "minute": "09:30", "code": "005930"}])
+
+        self.assertFalse(connection.committed)
+        self.assertTrue(connection.rolled_back)
+        self.assertTrue(connection.closed)
+
     def test_postgres_content_upsert_has_same_idempotent_guard(self) -> None:
         class Cursor:
             def __init__(self) -> None:

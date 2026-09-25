@@ -82,6 +82,7 @@ class CentralServerAppTests(unittest.TestCase):
             store.upsert_documents("market_data_coverage", [{
                 "owner": "2026-09-14:005930:KRX", "key": "complete", "document": {
                     "kind": "minute", "window_closed": True, "session_finalized": True,
+                    "as_of": "2026-09-14",
                 },
             }])
             store.close()
@@ -1115,7 +1116,10 @@ class CentralServerAppTests(unittest.TestCase):
                 "trade_value_million_won": 1, "updated_at": 1.0,
             }])
             store.upsert_documents("market_data_coverage", [{
-                "owner": "2026-09-10:005930:KRX", "key": "complete", "document": {"kind": "minute"},
+                "owner": "2026-09-10:005930:KRX", "key": "complete", "document": {
+                    "kind": "minute", "as_of": "2026-09-10",
+                    "window_closed": True, "session_finalized": True,
+                },
             }])
             result = _archived_chart_response(
                 store, "ka10080", {"stk_cd": "005930", "base_dt": "20260910"},
@@ -1127,6 +1131,26 @@ class CentralServerAppTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
+            result = _archived_chart_response(
+                store, "ka10080", {"stk_cd": "005930", "base_dt": "20260910"},
+            )
+            store.close()
+        self.assertIsNone(result)
+
+    def test_existing_bars_with_unfinalized_coverage_do_not_bypass_kiwoom(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.replace_minute_bars([{
+                "trading_date": "2026-09-10", "minute": "09:01", "code": "005930", "market": "KRX",
+                "open": 70000, "high": 70100, "low": 69900, "close": 70050, "volume": 10,
+                "trade_value_million_won": 1, "updated_at": 1.0,
+            }])
+            store.upsert_documents("market_data_coverage", [{
+                "owner": "2026-09-10:005930:KRX", "key": "complete",
+                "document": {"kind": "minute", "as_of": "2026-09-10",
+                             "window_closed": False, "session_finalized": False},
+            }])
             result = _archived_chart_response(
                 store, "ka10080", {"stk_cd": "005930", "base_dt": "20260910"},
             )
@@ -1173,7 +1197,8 @@ class CentralServerAppTests(unittest.TestCase):
             } for day, close in (("2026-09-10", 70500), ("2026-09-09", 69500))])
             store.upsert_documents("market_data_coverage_daily", [{
                 "owner": "005930:KRX", "key": "complete",
-                "document": {"kind": "daily", "rows": 2, "as_of": "2026-09-10"},
+                "document": {"kind": "daily", "rows": 2, "as_of": "2026-09-10",
+                             "window_closed": True, "session_finalized": True},
             }])
             result = _archived_chart_response(
                 store, "ka10081", {"stk_cd": "005930", "base_dt": "20260909"},
@@ -1255,7 +1280,10 @@ class CentralServerAppTests(unittest.TestCase):
             }])
             store.upsert_documents("stock_nxt_eligibility", [{
                 "owner": "005930", "key": "latest",
-                "document": {"payload": {"nxtEnable": "Y"}},
+                "document": {
+                    "observed_at": datetime.now(KST).isoformat(),
+                    "payload": {"nxtEnable": "Y"},
+                },
             }])
             store.close()
             headers = {"Authorization": "Bearer private-token"}

@@ -7,6 +7,7 @@ import time
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -17,7 +18,7 @@ from kiwoom_monitor.application.theme_suggestions import ProfileThemeSuggestion
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
 from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
-from kiwoom_monitor.presentation.theme_dialogs import ThemeManagerDialog, ThemePreviewDialog, ThemeSuggestionReviewDialog, TextThemeImportDialog
+from kiwoom_monitor.presentation.theme_dialogs import ThemeManagerDialog, ThemePreviewDialog, ThemeSuggestionReviewDialog, TextThemeImportDialog, review_image_theme_rows
 from qt_settings_test_support import wait_until
 
 
@@ -25,6 +26,117 @@ class ThemePreviewDialogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_image_ocr_review_returns_only_approved_changes_without_saving(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            lookup = StockRepository(path)
+            lookup.upsert("005930", "삼성전자")
+            store = ThemeRepository(path)
+
+            class Editor:
+                def __init__(self, rows, *_args):
+                    self._rows = rows
+
+                def exec(self):
+                    return True
+
+                def rows(self):
+                    return self._rows
+
+            class Preview:
+                approve = True
+
+                def __init__(self, changes, *_args):
+                    self._changes = changes
+
+                def exec(self):
+                    return self.approve
+
+                def changes(self, _separators):
+                    return self._changes
+
+            status: list[str] = []
+            with patch("kiwoom_monitor.presentation.theme_dialogs.ImageThemeRowsDialog", Editor), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.ThemePreviewDialog", Preview):
+                approved = review_image_theme_rows(
+                    (("삼성전자", "반도체"),), None, database.settings, lookup, store, status.append,
+                )
+                Preview.approve = False
+                cancelled = review_image_theme_rows(
+                    (("삼성전자", "AI"),), None, database.settings, lookup, store, status.append,
+                )
+            self.assertEqual((("005930", ("반도체",)),), approved)
+            self.assertIsNone(cancelled)
+            self.assertEqual((), store.themes_for_stock("005930"))
+            self.assertEqual(1, len(status))
+
+    def test_excel_import_from_theme_manager_applies_only_after_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            lookup = StockRepository(path)
+            lookup.upsert("005930", "삼성전자")
+            store = ThemeRepository(path)
+            changed: list[bool] = []
+            dialog = ThemeManagerDialog(
+                store, database.settings, on_themes_changed=lambda: changed.append(True),
+                stock_lookup=lookup,
+            )
+
+            class Workbook:
+                theme = "반도체"
+
+                def __init__(self, _path):
+                    pass
+
+                def load_header_and_rows(self):
+                    return ("종목명", "테마"), (("삼성전자", self.theme),)
+
+            class Editor:
+                def __init__(self, rows, *_args):
+                    self._rows = rows
+
+                def setWindowTitle(self, _title):
+                    pass
+
+                def findChildren(self, _kind):
+                    return []
+
+                def exec(self):
+                    return True
+
+                def rows(self):
+                    return self._rows
+
+            class Preview:
+                approve = True
+
+                def __init__(self, changes, *_args):
+                    self._changes = changes
+
+                def exec(self):
+                    return self.approve
+
+                def changes(self, _separators):
+                    return self._changes
+
+            with patch("kiwoom_monitor.presentation.theme_dialogs.QFileDialog.getOpenFileName", return_value=(str(path.with_suffix(".xlsx")), "")), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.ExcelThemeRepository", Workbook), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.ImageThemeRowsDialog", Editor), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.ThemePreviewDialog", Preview), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.QMessageBox.information"):
+                dialog._import_excel()
+                wait_until(lambda: dialog._save_request is None)
+                Workbook.theme = "AI"
+                Preview.approve = False
+                dialog._import_excel()
+            self.assertEqual(("반도체",), store.themes_for_stock("005930"))
+            self.assertEqual([True], changed)
+            dialog.close()
 
     def test_theme_save_keeps_gui_responsive_during_sqlite_contention(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

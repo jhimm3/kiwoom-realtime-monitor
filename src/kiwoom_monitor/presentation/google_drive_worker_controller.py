@@ -6,14 +6,17 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QObject, Signal
 
-from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncService
+from kiwoom_monitor.infrastructure.persistence.google_drive_sync import (
+    GoogleDriveSyncResult,
+    GoogleDriveSyncService,
+)
 from kiwoom_monitor.presentation.background_workers import GoogleDriveSyncWorker
 
 
 class GoogleDriveWorkerController(QObject):
-    completed = Signal(str)
+    completed = Signal(object)
     metadata_received = Signal(str)
-    failed = Signal(str)
+    failed = Signal(object)
 
     def __init__(
         self,
@@ -44,9 +47,10 @@ class GoogleDriveWorkerController(QObject):
         worker = self._worker_factory(service, operation, target, interactive)
         worker.setParent(self)
         if not isinstance(worker, GoogleDriveSyncWorker):
-            self.failed.emit(
-                "Google Drive 작업 구성이 올바르지 않습니다. 프로그램을 다시 실행해 주세요."
-            )
+            self.failed.emit(GoogleDriveSyncResult(
+                operation, "failed",
+                "Google Drive 작업 구성이 올바르지 않습니다. 프로그램을 다시 실행해 주세요.",
+            ))
             worker.deleteLater()
             return False
         worker.completed.connect(lambda message, current=worker: self._complete(current, message))
@@ -67,14 +71,14 @@ class GoogleDriveWorkerController(QObject):
             self._release(worker)
             worker.deleteLater()
 
-    def _complete(self, worker: GoogleDriveSyncWorker, message: str) -> None:
+    def _complete(self, worker: GoogleDriveSyncWorker, result: GoogleDriveSyncResult) -> None:
         self._release(worker)
-        self.completed.emit(message)
+        self.completed.emit(result)
 
     def _metadata(self, worker: GoogleDriveSyncWorker, value: str) -> None:
         self._release(worker)
         self.metadata_received.emit(value)
 
-    def _fail(self, worker: GoogleDriveSyncWorker, message: str) -> None:
+    def _fail(self, worker: GoogleDriveSyncWorker, result: GoogleDriveSyncResult) -> None:
         self._release(worker)
-        self.failed.emit(message)
+        self.failed.emit(result)

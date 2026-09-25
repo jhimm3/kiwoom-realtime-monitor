@@ -75,6 +75,37 @@ class MarketIndexTick:
 
 
 @dataclass(frozen=True)
+class MarketOperationTick:
+    """키움 장시작시간(0s)의 원본 상태 코드와 시각."""
+
+    status_code: str
+    trade_time: str | None
+    remaining_time: str | None
+
+
+def parse_market_operation_ticks(message: dict[str, Any]) -> tuple[MarketOperationTick, ...]:
+    """장운영구분(215)을 해석하되 코드 의미를 재분류하지 않고 보존한다."""
+    if str(message.get("trnm", "")).upper() != "REAL":
+        return ()
+    result: list[MarketOperationTick] = []
+    for entry in message.get("data") or ():
+        if not isinstance(entry, dict) or entry.get("type") != "0s":
+            continue
+        values = entry.get("values")
+        if not isinstance(values, dict):
+            continue
+        code = str(values.get("215", "")).strip()
+        if not code:
+            continue
+        result.append(MarketOperationTick(
+            status_code=code,
+            trade_time=str(values["20"]).strip() if values.get("20") is not None else None,
+            remaining_time=str(values["214"]).strip() if values.get("214") is not None else None,
+        ))
+    return tuple(result)
+
+
+@dataclass(frozen=True)
 class ProgramTradeTick:
     """종목프로그램매매(0w)의 누적값과 직전 증감값."""
 

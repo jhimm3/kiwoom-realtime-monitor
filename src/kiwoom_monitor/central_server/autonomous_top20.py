@@ -17,12 +17,14 @@ from kiwoom_monitor.application.market_session_schedule import (
 )
 from kiwoom_monitor.application.historical_high_service import HistoricalHighService
 from kiwoom_monitor.application.top20_trade_value_collector import Top20MinuteRecord, Top20TradeValueCollector
-from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import ProgramTradeTick, TradeTick
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
+    MarketOperationTick, ProgramTradeTick, TradeTick,
+)
 from kiwoom_monitor.infrastructure.krx.stock_catalog import fetch_krx_stock_catalog
 from kiwoom_monitor.domain.ranking import normalize_stock_code
 
 from .database import QueryStore
-from .market_ingest import fundamentals_document_is_current
+from .market_ingest import fundamentals_document_is_current, nxt_eligibility_document_is_current
 from .market_observations import ranking_observation, top20_index_observation
 from .persistent_outbox import JsonRecordOutbox
 from .realtime_hub import RealtimeHub, RealtimeSubscriber
@@ -59,6 +61,7 @@ class AutonomousTop20Service:
         self._markets: dict[str, str] = {}
         self._market_catalog_day = ""
         self._nxt_eligible: dict[str, bool] = {}
+        self._nxt_checked_on: dict[str, str] = {}
         self._fundamentals_ready: dict[str, str] = {}
         self._fundamentals_pending: set[str] = set()
         self._fundamentals_tasks: set[asyncio.Task[None]] = set()
@@ -69,6 +72,8 @@ class AutonomousTop20Service:
         self._last_ranking_slot = ""
         self._last_aux_ranking_slots: dict[str, str] = {}
         self._last_backfill_day = ""
+        self._krx_trading_day_cache: dict[str, tuple[float, bool]] = {}
+        self._calendar_unknown_logged_days: set[str] = set()
         self._backfill_task: asyncio.Task[bool] | None = None
         self._backfill_retry_day = ""
         self._backfill_retry_at = 0.0
@@ -469,13 +474,71 @@ class AutonomousTop20Service:
             first_iteration = False
             if now.weekday() < 5 and now.time().replace(tzinfo=None) >= clock_time(20, 5):
                 day = now.date().isoformat()
-                if self._last_backfill_day != day:
-                    self._schedule_backfill(day)
+                if await self._is_observed_krx_trading_day(day):
+                    if self._last_backfill_day != day:
+                        self._schedule_backfill(day)
+                elif day not in self._calendar_unknown_logged_days:
+                    self._calendar_unknown_logged_days.add(day)
+                    logger.info(
+                        "KRX 장후 보완 대기: %s의 0s 거래일 증거가 없어 종목별 TR을 시작하지 않습니다",
+                        day,
+                    )
             elif now.weekday() < 5 and now.time().replace(tzinfo=None) < clock_time(7, 40):
-                day = _previous_trading_day(now).date().isoformat()
-                if self._last_backfill_day != day:
+                day = await self._previous_observed_krx_trading_day(now)
+                if day and self._last_backfill_day != day:
                     self._schedule_backfill(day)
             await asyncio.sleep(0.25)
+
+    async def _is_observed_krx_trading_day(self, day: str) -> bool:
+        cached = self._krx_trading_day_cache.get(day)
+        if cached is not None and cached[0] > time.monotonic():
+            return cached[1]
+        try:
+            documents = await asyncio.to_thread(
+                self._store.load_documents, "krx_trading_day_observations", day, 1,
+            )
+        except Exception as error:
+            logger.warning("KRX 거래일 증거 조회 실패(%s): %s", day, error)
+            return False
+        confirmed = any(
+            isinstance(value, dict)
+            and isinstance(value.get("document"), dict)
+            and str(value["document"].get("trading_date", "")) == day
+            for value in documents
+        )
+        self._krx_trading_day_cache[day] = (time.monotonic() + 60.0, confirmed)
+        return confirmed
+
+    async def _previous_observed_krx_trading_day(self, value: datetime) -> str:
+        candidate = value.date() - timedelta(days=1)
+        for _ in range(14):
+            if candidate.weekday() < 5 and await self._is_observed_krx_trading_day(candidate.isoformat()):
+                return candidate.isoformat()
+            candidate -= timedelta(days=1)
+        return ""
+
+    def _save_market_operation_day(self, day: str, tick: MarketOperationTick) -> None:
+        observed_at = self._now().isoformat(timespec="seconds")
+        self._store.upsert_documents("krx_trading_day_observations", [{
+            "owner": day,
+            "key": "latest",
+            "document": {
+                "trading_date": day,
+                "source": "kiwoom_websocket_0s",
+                "status_code": tick.status_code,
+                "trade_time": tick.trade_time or "",
+                "remaining_time": tick.remaining_time or "",
+                "observed_at": observed_at,
+            },
+        }])
+
+    def _market_operation_observation_saved(self, task: asyncio.Task[Any]) -> None:
+        self._fundamentals_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning("키움 0s 거래일 증거 저장 실패: %s", error)
 
     def _schedule_backfill(self, day: str) -> None:
         task = self._backfill_task
@@ -520,6 +583,26 @@ class AutonomousTop20Service:
             if not isinstance(event.get("payload"), dict):
                 continue
             payload = event["payload"]
+            if event.get("type") == "market_operation":
+                allowed = {name for name in MarketOperationTick.__dataclass_fields__}
+                try:
+                    tick = MarketOperationTick(**{
+                        key: value for key, value in payload.items() if key in allowed
+                    })
+                except TypeError:
+                    continue
+                # Only KRX phase notifications confirm a KRX trading date.
+                # No frame or stale state is treated as a holiday/calendar row.
+                if tick.status_code in {"0", "2", "3", "4", "8", "9", "a", "b", "c", "d"}:
+                    day = self._now().date().isoformat()
+                    self._krx_trading_day_cache[day] = (time.monotonic() + 60.0, True)
+                    task = asyncio.create_task(
+                        asyncio.to_thread(self._save_market_operation_day, day, tick),
+                        name=f"krx-trading-day-observation-{day}",
+                    )
+                    self._fundamentals_tasks.add(task)
+                    task.add_done_callback(self._market_operation_observation_saved)
+                continue
             if event.get("type") == "program_trade":
                 allowed = {name for name in ProgramTradeTick.__dataclass_fields__}
                 try:
@@ -656,7 +739,9 @@ class AutonomousTop20Service:
             *top20_codes,
             *self._account_entry_codes,
         )))
-        nxt_codes = [code for code in realtime_codes if self._nxt_eligible.get(code, False)]
+        today = self._now().date().isoformat()
+        nxt_codes = [code for code in realtime_codes
+                     if self._nxt_checked_on.get(code) == today and self._nxt_eligible.get(code, False)]
         self._hub.update_subscription(
             self._subscriber, list(realtime_codes), nxt_codes,
             program_codes=list(realtime_codes),
@@ -671,7 +756,7 @@ class AutonomousTop20Service:
             *self._account_entry_codes,
         )))
         for code in realtime_codes:
-            if code not in self._nxt_eligible:
+            if self._nxt_checked_on.get(code) != self._now().date().isoformat():
                 try:
                     await self._nxt_enabled(code)
                 except Exception as error:
@@ -690,14 +775,15 @@ class AutonomousTop20Service:
         return codes
 
     async def _nxt_enabled(self, code: str) -> bool:
-        if code in self._nxt_eligible:
+        today = self._now().date()
+        if self._nxt_checked_on.get(code) == today.isoformat():
             return self._nxt_eligible[code]
         stored = await asyncio.to_thread(
             self._store.load_documents, "stock_nxt_eligibility", code, 1,
         )
         if stored:
             document = stored[0].get("document", {})
-            if isinstance(document, dict):
+            if nxt_eligibility_document_is_current(document, today):
                 payload = document.get("payload", {})
                 enabled = document.get("enabled")
                 if isinstance(payload, dict) and enabled is None:
@@ -706,10 +792,15 @@ class AutonomousTop20Service:
                         enabled = str(raw).strip().upper() == "Y"
                 if isinstance(enabled, bool):
                     self._nxt_eligible[code] = enabled
+                    self._nxt_checked_on[code] = today.isoformat()
                     return enabled
         result = await self._broker.request("ka10100", "/api/dostk/stkinfo", {"stk_cd": code})
-        enabled = str(result.payload.get("nxtEnable", result.payload.get("nxt_enable", ""))).upper() == "Y"
+        raw_enabled = str(result.payload.get("nxtEnable", result.payload.get("nxt_enable", ""))).strip().upper()
+        if raw_enabled not in {"Y", "N"}:
+            raise RuntimeError(f"{code} NXT 대상 여부가 응답에 없습니다.")
+        enabled = raw_enabled == "Y"
         self._nxt_eligible[code] = enabled
+        self._nxt_checked_on[code] = today.isoformat()
         return enabled
 
     def _schedule_fundamentals(self, codes: tuple[str, ...], day: str) -> None:
@@ -843,10 +934,11 @@ class AutonomousTop20Service:
             "orgn_prsm_unp_tp": "1", "for_prsm_unp_tp": "1",
         }
         try:
-            await self._broker.request("ka10045", "/api/dostk/mrkcond", body)
+            result = await self._broker.request("ka10045", "/api/dostk/mrkcond", body)
         except Exception:
             body["stk_cd"] = code
-            await self._broker.request("ka10045", "/api/dostk/mrkcond", body)
+            result = await self._broker.request("ka10045", "/api/dostk/mrkcond", body)
+        self._verify_flow_result(result, "ka10045", "stk_orgn_trde_trnsn", raw_day)
         await asyncio.to_thread(self._store.upsert_documents, "candidate_flow_capture", [{
             "owner": owner, "key": "initial", "document": {
                 "as_of": day, "captured_at": self._now().isoformat(),
@@ -897,15 +989,17 @@ class AutonomousTop20Service:
         }
         program_body = {"amt_qty_tp": "1", "stk_cd": f"{code}_AL", "date": raw_day}
         try:
-            await self._broker.request("ka10045", "/api/dostk/mrkcond", investor_body)
+            investor = await self._broker.request("ka10045", "/api/dostk/mrkcond", investor_body)
         except Exception:
             investor_body["stk_cd"] = code
-            await self._broker.request("ka10045", "/api/dostk/mrkcond", investor_body)
+            investor = await self._broker.request("ka10045", "/api/dostk/mrkcond", investor_body)
+        self._verify_flow_result(investor, "ka10045", "stk_orgn_trde_trnsn", raw_day)
         try:
-            await self._broker.request("ka90008", "/api/dostk/mrkcond", program_body)
+            program = await self._broker.request("ka90008", "/api/dostk/mrkcond", program_body)
         except Exception:
             program_body["stk_cd"] = code
-            await self._broker.request("ka90008", "/api/dostk/mrkcond", program_body)
+            program = await self._broker.request("ka90008", "/api/dostk/mrkcond", program_body)
+        self._verify_flow_result(program, "ka90008", "stk_tm_prm_trde_trnsn", raw_day)
         await asyncio.to_thread(self._store.upsert_documents, "candidate_flow_finalization", [{
             "owner": owner, "key": "complete", "document": {
                 "as_of": day, "completed_at": self._now().isoformat(),
@@ -924,6 +1018,7 @@ class AutonomousTop20Service:
         for market, code in (("kospi", "001"), ("kosdaq", "101")):
             minutes: list[dict[str, Any]] = []
             cont_yn, next_key = "N", ""
+            terminated = False
             for _ in range(8):
                 result = await self._broker.request(
                     "ka20005", "/api/dostk/chart",
@@ -938,25 +1033,31 @@ class AutonomousTop20Service:
                     str(value.get("cntr_tm", ""))[:8]
                     for value in rows if isinstance(value, dict)
                 }
-                if (
-                    not result.has_next or not result.next_key
-                    or any(value and value < raw_day for value in dates)
-                ):
+                if not result.has_next or any(value and value < raw_day for value in dates):
+                    terminated = True
                     break
+                if not result.next_key:
+                    raise RuntimeError(f"{market} 지수 분봉 연속조회 키가 없습니다.")
                 cont_yn, next_key = "Y", result.next_key
-            daily = await self._broker.request(
+            if not terminated:
+                raise RuntimeError(f"{market} 지수 분봉 8페이지 안에 종료점을 확인하지 못했습니다.")
+            minutes = [row for row in minutes if str(row.get("cntr_tm", ""))[:8] == raw_day]
+            if not minutes:
+                raise RuntimeError(f"{market} {day} 지수 분봉이 없어 완료로 표시하지 않습니다.")
+            daily_response = await self._broker.request(
                 "ka20006", "/api/dostk/chart", {"inds_cd": code, "base_dt": raw_day},
             )
-            daily_rows = daily.payload.get("inds_dt_pole_qry", [])
-            if not isinstance(daily_rows, list):
-                raise RuntimeError(f"{market} 지수 일봉 응답 형식이 올바르지 않습니다.")
+            daily_rows = [
+                value for value in daily_response.payload.get("inds_dt_pole_qry", [])
+                if isinstance(value, dict)
+            ]
             await asyncio.to_thread(
                 self._store.save_dataset_snapshot,
                 "market_index_chart", f"{raw_day}:{market}", raw_day,
                 {
                     "market": market, "as_of": day,
                     "minutes": minutes,
-                    "daily": [value for value in daily_rows if isinstance(value, dict)],
+                    "daily": daily_rows,
                 },
             )
             completed.append(market)
@@ -1009,6 +1110,22 @@ class AutonomousTop20Service:
                 "as_of": day, "completed_at": self._now().isoformat(),
             }
         }])
+        return True
+
+    def _verify_flow_result(self, result: Any, api_id: str, rows_key: str, raw_day: str) -> None:
+        if result.recording_succeeded is False or (
+            isinstance(self._broker, CentralRestBroker) and result.recording_succeeded is not True
+        ):
+            raise RuntimeError(f"{api_id} 수급 원본 저장이 확인되지 않았습니다.")
+        rows = result.payload.get(rows_key)
+        if not isinstance(rows, list) or not rows:
+            raise RuntimeError(f"{api_id} 대상일 수급 응답이 비었습니다.")
+        for row in rows:
+            if not isinstance(row, dict):
+                raise RuntimeError(f"{api_id} 수급 응답 행 형식이 올바르지 않습니다.")
+            row_day = str(row.get("dt", row.get("date", ""))).replace("-", "")
+            if row_day and row_day != raw_day:
+                raise RuntimeError(f"{api_id} 수급 응답에 대상일 외 자료가 있습니다.")
 
     async def _verify_backfilled_minutes(
         self, code: str, day: str, market: str, expected_minutes: set[str],
@@ -1139,13 +1256,6 @@ def _response_day_minutes(rows: object, day: str) -> set[str]:
         if len(clock) == 6 and clock.isdigit() and int(clock[:2]) < 24 and int(clock[2:4]) < 60:
             minutes.add(f"{clock[:2]}:{clock[2:4]}")
     return minutes
-
-
-def _previous_trading_day(value: datetime) -> datetime:
-    candidate = value - timedelta(days=1)
-    while candidate.weekday() >= 5:
-        candidate -= timedelta(days=1)
-    return candidate
 
 
 class _AsyncBrokerChartAdapter:

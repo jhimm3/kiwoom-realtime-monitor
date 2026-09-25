@@ -107,6 +107,19 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
         self.assertFalse(contains_krx_observation(message))
         collector._publish_parsed(message)
 
+    def test_market_operation_0s_is_published_without_changing_market_data_semantics(self) -> None:
+        hub = RealtimeHub()
+        subscriber = hub.connect()
+        collector = CentralRealtimeCollector(
+            lambda: "token", "real", hub, lambda: datetime(2026, 9, 14, 9),
+        )
+
+        collector._publish_parsed({"trnm": "REAL", "data": [{
+            "type": "0s", "item": "", "values": {"215": "3", "20": "090000"},
+        }]})
+
+        self.assertEqual("market_operation", subscriber.queue.get_nowait()["type"])
+
     def test_failed_snapshot_flush_keeps_values_for_retry(self) -> None:
         class FlakyStore:
             def __init__(self) -> None:
@@ -257,6 +270,10 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
         asyncio.run(collector._send_subscription(socket, "KRX", ("005930",), ("005930",)))
         self.assertEqual(["005930", "005930_NX"], socket.sent[0]["data"][0]["item"])
         self.assertEqual("0", socket.sent[0]["refresh"])
+        self.assertTrue(any(
+            row == {"item": [""], "type": ["0s"]}
+            for packet in socket.sent for row in packet["data"]
+        ))
         self.assertEqual([{"item": [], "type": ["1h"]}],
                          [row for packet in socket.sent for row in packet["data"] if row["type"] == ["1h"]])
 

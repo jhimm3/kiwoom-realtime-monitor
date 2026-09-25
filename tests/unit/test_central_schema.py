@@ -22,6 +22,8 @@ from kiwoom_monitor.central_server.central_schema import (
     CENTRAL_MOCK_EXECUTION_MIGRATION_NAME,
     CENTRAL_ACCOUNT_IDENTITY_MIGRATION_NAME,
     CENTRAL_ACCOUNT_SCOPE_ALIAS_MIGRATION_NAME,
+    CENTRAL_CREDENTIAL_ACTIVATION_MIGRATION_NAME,
+    CENTRAL_FIVE_MINUTE_BARS_MIGRATION_NAME,
     CENTRAL_INDEXES,
     CENTRAL_TABLES,
     central_schema_migrations,
@@ -55,7 +57,7 @@ class CentralSchemaTests(unittest.TestCase):
     def test_current_schema_keeps_baseline_and_adds_metadata_migration(self) -> None:
         migrations = central_schema_migrations()
 
-        self.assertEqual(19, len(migrations))
+        self.assertEqual(CENTRAL_SCHEMA_VERSION, len(migrations))
         self.assertEqual(1, migrations[0].version)
         self.assertEqual(CENTRAL_SCHEMA_BASELINE_NAME, migrations[0].name)
         self.assertEqual(sqlite_schema_statements(), migrations[0].sqlite_statements)
@@ -125,10 +127,14 @@ class CentralSchemaTests(unittest.TestCase):
         self.assertIn("central_account_registry", "\n".join(migrations[16].sqlite_statements))
         self.assertIn("TIMESTAMPTZ", "\n".join(migrations[16].postgres_statements))
         self.assertEqual(18, migrations[17].version)
-        self.assertEqual(CENTRAL_SCHEMA_VERSION, migrations[18].version)
         self.assertEqual(CENTRAL_ACCOUNT_SCOPE_ALIAS_MIGRATION_NAME, migrations[17].name)
         self.assertIn("central_account_scope_aliases", "\n".join(migrations[17].sqlite_statements))
         self.assertIn("TIMESTAMPTZ", "\n".join(migrations[17].postgres_statements))
+        self.assertEqual(19, migrations[18].version)
+        self.assertEqual(CENTRAL_CREDENTIAL_ACTIVATION_MIGRATION_NAME, migrations[18].name)
+        self.assertEqual(20, migrations[19].version)
+        self.assertEqual(CENTRAL_FIVE_MINUTE_BARS_MIGRATION_NAME, migrations[19].name)
+        self.assertEqual(CENTRAL_SCHEMA_VERSION, migrations[19].version)
 
 
 if __name__ == "__main__":

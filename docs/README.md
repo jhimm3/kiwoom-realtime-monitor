@@ -25,6 +25,7 @@
 
 - [NAS 설치·운영](../deploy/synology/README.md)
 - [패키징·업데이트](UPDATE_PACKAGING.md)
+- [Google Drive 엄격 복원](GOOGLE_DRIVE_RESTORE_DESIGN.md) — 명시 예약 후 다음 실행에서 적용·중단 복구하는 로컬 경계와 원격 백업의 남은 한계
 - [API 발급](API_발급_가이드.md) · [OCR 설치](OCR_모델_직접_설치.md) · [강의 전략팩](AI_강의_전략팩_적용_가이드.md)
 - [현재 릴리즈 2.1.0](RELEASE_NOTES_v2.1.0.md) · [변경 기록](../CHANGELOG.md)
 - [키움 공식 자료 로컬 색인](reference/키움_REST_API_로컬_텍스트_색인.md)

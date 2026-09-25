@@ -5,15 +5,54 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
-from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
+from kiwoom_monitor.infrastructure.persistence.theme_backup import (
+    ThemeBackupError, ThemeBackupService, ThemeRevisionConflict,
+)
 from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
 from kiwoom_monitor.application.theme_suggestions import ThemeSuggestion
 
 
 class ThemeBackupServiceTest(unittest.TestCase):
+    def test_export_replacement_failure_keeps_previous_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            backup_path = Path(directory) / "themes.json"
+            backup_path.write_text("previous backup", encoding="utf-8")
+            with patch("os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaises(OSError):
+                    ThemeBackupService(database_path).export_to(backup_path)
+            self.assertEqual("previous backup", backup_path.read_text(encoding="utf-8"))
+            self.assertEqual([], list(Path(directory).glob(".themes.json.*.tmp")))
+
+    def test_invalid_utf8_backup_reports_read_error_without_replacing_themes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            store = ThemeRepository(path)
+            store.create_profile("유지할 테마")
+            backup_path = Path(directory) / "themes.json"
+            backup_path.write_bytes(b"\xff")
+            with self.assertRaises(ThemeBackupError):
+                ThemeBackupService(path).import_from(backup_path)
+            self.assertIn("유지할 테마", store.list_profiles())
+
+    def test_remote_snapshot_cannot_replace_edit_committed_after_revision_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            backup = ThemeBackupService(path)
+            remote = backup.export_document()
+            revision = backup.revision()
+            ThemeRepository(path).create_profile("새 편집")
+            with self.assertRaises(ThemeRevisionConflict):
+                backup.import_document(remote, expected_revision=revision)
+            self.assertIn("새 편집", [profile["name"] for profile in backup.export_document()["profiles"]])
+
     def test_export_and_import_changes_only_theme_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "data" / "monitor.sqlite3"

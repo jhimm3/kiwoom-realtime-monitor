@@ -40,6 +40,7 @@ class CentralRealtimeWorker(QThread):
     connection_opened = Signal(object)
     codes_added = Signal(object)
     diagnostics_changed = Signal(object)
+    realtime_gap = Signal(object)
 
     def __init__(self, source: DataSourceSettings, codes: tuple[str, ...], *,
                  fallback_factory: Callable[[tuple[str, ...], tuple[str, ...]], RealtimeTradeWorker] | None = None,
@@ -151,6 +152,10 @@ class CentralRealtimeWorker(QThread):
             self.stock_reference_received.emit(value)
         elif event_type == "diagnostics" and isinstance(payload, dict):
             self.diagnostics_changed.emit(payload)
+        elif event_type == "realtime_gap":
+            dropped = event.get("dropped_events")
+            if type(dropped) is int and dropped > 0:
+                self.realtime_gap.emit(dropped)
         elif event_type == "connection_failed":
             if time.monotonic() < self._planned_deadline:
                 self.status_changed.emit("나스 실시간 연결 변경 중 · 기존 순위 유지")

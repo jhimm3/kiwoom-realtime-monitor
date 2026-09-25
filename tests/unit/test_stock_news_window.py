@@ -8,7 +8,7 @@ import uuid
 from datetime import UTC, date, datetime
 from pathlib import Path
 from time import monotonic
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -31,6 +31,7 @@ from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScop
 from kiwoom_monitor.journal_process import JournalWindow
 from kiwoom_monitor.news_process import _apply_show_command
 from kiwoom_monitor.presentation.main_window import MainWindow
+from kiwoom_monitor.presentation.news_window_coordinator import NewsWindowCoordinator
 
 
 class StockNewsWindowTests(unittest.TestCase):
@@ -87,19 +88,20 @@ class StockNewsWindowTests(unittest.TestCase):
             window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
             window._window_settings = QSettings(str(root / "window.ini"), QSettings.Format.IniFormat)
 
-            with patch.object(window, "_select_news_cell") as select, \
-                    patch.object(window, "_analyze_selected") as analyze, \
-                    patch.object(window, "_open_item") as open_item:
-                window._on_news_cell_double_clicked(2, 3)
-                select.assert_called_once_with(2, 3)
-                analyze.assert_called_once_with(automatic=False)
-                open_item.assert_not_called()
+            with patch.object(window, "_item_index", side_effect=lambda row: row):
+                with patch.object(window, "_select_news_cell") as select, \
+                        patch.object(window, "_analyze_selected") as analyze, \
+                        patch.object(window, "_open_item") as open_item:
+                    window._on_news_cell_double_clicked(2, 3)
+                    select.assert_called_once_with(2, 3)
+                    analyze.assert_called_once_with(automatic=False)
+                    open_item.assert_not_called()
 
-                select.reset_mock(); analyze.reset_mock(); open_item.reset_mock()
-                window._on_news_cell_double_clicked(1, 4)
-                select.assert_called_once_with(1, 4)
-                analyze.assert_not_called()
-                open_item.assert_called_once_with(1)
+                    select.reset_mock(); analyze.reset_mock(); open_item.reset_mock()
+                    window._on_news_cell_double_clicked(1, 4)
+                    select.assert_called_once_with(1, 4)
+                    analyze.assert_not_called()
+                    open_item.assert_called_once_with(1)
 
             window.shutdown()
 
@@ -147,6 +149,7 @@ class StockNewsWindowTests(unittest.TestCase):
             )
             window._visible_items = (item,)
             window._visible_groups = (NewsEventGroup(item, (item,)),)
+            window._display_rows = (0,)
             window._ai_result_cache[news_identity(item)] = stored
             window._stock_code = "000001"
             key = window._evidence_key(item)
@@ -176,6 +179,7 @@ class StockNewsWindowTests(unittest.TestCase):
             )
             window._visible_items = (item,)
             window._visible_groups = (NewsEventGroup(item, (item,)),)
+            window._display_rows = (0,)
             window._stock_code = "000001"
             key = window._evidence_key(item)
             window._evidence_cache[key] = (monotonic(), evidence)
@@ -250,16 +254,17 @@ class StockNewsWindowTests(unittest.TestCase):
             JournalWindow._open_active_news(journal)
 
             relayed: list[dict[str, object]] = []
+            news_coordinator = NewsWindowCoordinator(
+                root / "news.env", root / "news.sqlite3",
+                lambda: QRect(10, 20, 800, 600), lambda _message: None, self.app,
+            )
+            news_coordinator.ensure_started = lambda: None
+            news_coordinator._channel = SimpleNamespace(send=relayed.append)
             relay = SimpleNamespace(
                 _journal_news_inbox=SimpleNamespace(read_new=lambda: request_documents[0]),
                 _current_account_scope=current_after_switch,
-                _ensure_news_process=lambda: None,
-                _news_command_path=root / "news-command.json",
-                _news_command_channel=SimpleNamespace(send=relayed.append),
-                frameGeometry=lambda: QRect(10, 20, 800, 600),
-                _news_window_mode=lambda: "independent",
+                _news_window=news_coordinator,
             )
-            relay._send_news_command = MethodType(MainWindow._send_news_command, relay)
             MainWindow._poll_journal_news_request(relay)
 
             window = StockNewsWindow(root / "news.env", root / "news.sqlite3")
@@ -272,6 +277,7 @@ class StockNewsWindowTests(unittest.TestCase):
             window._repository.upsert("005930", (item,))
             window._visible_items = (item,)
             window._visible_groups = (NewsEventGroup(item, (item,)),)
+            window._display_rows = (0,)
             window._table.setRowCount(1)
             window._table.setCurrentCell(0, 0)
             window._toggle_journal_link()
@@ -323,6 +329,7 @@ class StockNewsWindowTests(unittest.TestCase):
             window._visible_groups = (
                 NewsEventGroup(first, (first,)), NewsEventGroup(second, (second,)),
             )
+            window._display_rows = (0, 1)
             window._table.setRowCount(2)
 
             with patch("kiwoom_monitor.presentation.stock_news_window.NewsEvidenceWorker", ControlledWorker):
@@ -364,6 +371,7 @@ class StockNewsWindowTests(unittest.TestCase):
             )
             window._visible_items = (first,)
             window._visible_groups = (NewsEventGroup(first, (first,)),)
+            window._display_rows = (0,)
             window._table.setRowCount(1)
 
             with patch.object(window, "_schedule_evidence") as schedule:

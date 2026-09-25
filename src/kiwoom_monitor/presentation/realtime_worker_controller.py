@@ -16,6 +16,7 @@ class RealtimeWorkerController(QObject):
     program_trade_received = Signal(object)
     stock_reference_received = Signal(object)
     diagnostics_changed = Signal(object)
+    realtime_gap = Signal(object)
     status_changed = Signal(str)
     connection_failed = Signal(str)
     connection_opened = Signal(object)
@@ -69,6 +70,9 @@ class RealtimeWorkerController(QObject):
         if reference_signal is not None:
             reference_signal.connect(self.stock_reference_received.emit)
         worker.diagnostics_changed.connect(self.diagnostics_changed.emit)
+        gap_signal = getattr(worker, "realtime_gap", None)
+        if gap_signal is not None:
+            gap_signal.connect(self.realtime_gap.emit)
         worker.status_changed.connect(self.status_changed.emit)
         worker.connection_failed.connect(self.connection_failed.emit)
         worker.connection_opened.connect(self.connection_opened.emit)

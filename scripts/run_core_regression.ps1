@@ -58,11 +58,11 @@ $testModules = @(
     "tests.unit.test_daily_high_worker_controller",
     "tests.unit.test_fundamentals_worker_controller",
     "tests.unit.test_google_drive_worker_controller",
+    "tests.unit.test_strict_restore",
     "tests.unit.test_historical_high_worker_controller",
     "tests.unit.test_image_theme_ocr_worker_controller",
     "tests.unit.test_krx_stock_catalog_worker_controller",
     "tests.unit.test_minute_history_worker_controller",
-    "tests.unit.test_new_high_worker_controller",
     "tests.unit.test_nxt_eligibility_worker_controller",
     "tests.unit.test_secondary_data_schedule",
     "tests.unit.test_realtime",
@@ -189,7 +189,7 @@ $testModules = @(
     "tests.unit.test_run_test_app_with_data"
 )
 
-$env:PYTHONPATH = Join-Path $repositoryRoot "src"
+$env:PYTHONPATH = "$(Join-Path $repositoryRoot 'src');$(Join-Path $repositoryRoot 'tests\unit')"
 $journalBatchStart = [Array]::IndexOf($testModules, "tests.unit.test_theme_color_repository")
 if ($journalBatchStart -le 0) {
     throw "Core regression batch boundary was not found."

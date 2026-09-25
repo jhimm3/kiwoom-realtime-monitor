@@ -15,7 +15,10 @@ from typing import Any
 from .config import CentralServerSettings
 from .contracts import ServerCapabilities, health_document
 from .database import create_query_store
-from .market_ingest import MarketDataIngestor, fundamentals_document_is_current
+from .market_ingest import (
+    MarketDataIngestor, fundamentals_document_is_current,
+    nxt_eligibility_document_is_current,
+)
 from .realtime_hub import RealtimeHub
 from .realtime_collector import CentralRealtimeCollector
 from .rest_broker import CentralRestBroker
@@ -35,7 +38,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.09.25-top20-quality-lock-v1"
+SERVER_BUILD = "2026.09.26-market-ingest-db-timing-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -1411,10 +1414,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             for value in coverage_markets
         ]
         coverage_complete = bool(coverage_documents) and all(
-            rows
-            and rows[0].get("document", {}).get("kind") == "minute"
-            and rows[0].get("document", {}).get("window_closed") is True
-            and rows[0].get("document", {}).get("session_finalized") is True
+            _archive_coverage_ready(rows, trading_date, "minute")
             for rows in coverage_documents
         )
         return {
@@ -2215,6 +2215,10 @@ def _stored_market_response(
                 document, datetime.now(KST).date(),
             ):
                 return None
+            if api_id == "ka10100" and not nxt_eligibility_document_is_current(
+                document, datetime.now(KST).date(),
+            ):
+                return None
             payload = document.get("payload") if isinstance(document, dict) else None
             if isinstance(payload, dict):
                 return payload
@@ -2234,7 +2238,7 @@ def _archived_chart_response(store: Any, api_id: str, body: dict[str, Any]) -> d
             return None
         day = f"{raw_day[:4]}-{raw_day[4:6]}-{raw_day[6:]}"
         coverage = store.load_documents("market_data_coverage", f"{day}:{code}:{market}", 1)
-        if not _archive_coverage_ready(coverage, day):
+        if not _archive_coverage_ready(coverage, day, "minute"):
             return None
         bars = store.load_minute_bars(code, day, market)
         if not bars:
@@ -2251,7 +2255,7 @@ def _archived_chart_response(store: Any, api_id: str, body: dict[str, Any]) -> d
             return None
         day = f"{raw_day[:4]}-{raw_day[4:6]}-{raw_day[6:]}"
         coverage = store.load_documents("market_data_coverage_daily", f"{code}:{market}", 1)
-        if not _archive_coverage_ready(coverage, day):
+        if not _archive_coverage_ready(coverage, day, "daily"):
             return None
         bars = [
             bar for bar in store.load_daily_bars(code, market, 5000)
@@ -2271,16 +2275,19 @@ def _archived_chart_response(store: Any, api_id: str, body: dict[str, Any]) -> d
     return None
 
 
-def _archive_coverage_ready(values: list[dict[str, Any]], requested_day: str) -> bool:
+def _archive_coverage_ready(values: list[dict[str, Any]], requested_day: str, kind: str) -> bool:
     if not values:
         return False
     document = values[0].get("document")
     if not isinstance(document, dict):
         return False
     as_of = str(document.get("as_of", "")).strip()
-    # 예전 coverage에는 as_of가 없으므로 저장된 봉 자체의 날짜 필터로
-    # 호환한다. 명시된 as_of가 요청일보다 과거면 최근 구간이 빠진 자료다.
-    return not as_of or as_of >= requested_day
+    return (
+        document.get("kind") == kind
+        and document.get("window_closed") is True
+        and document.get("session_finalized") is True
+        and bool(as_of) and as_of >= requested_day
+    )
 
 
 def _trade_value_comparison_summary(values: list[dict[str, Any]]) -> dict[str, object]:

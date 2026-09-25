@@ -83,6 +83,7 @@ from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import Minu
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
 from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
 from kiwoom_monitor.news_process import _application_icon_path, _parent_is_alive, _set_taskbar_app_id
+from kiwoom_monitor.infrastructure.persistence.strict_restore import StrictRestoreCoordinator
 from kiwoom_monitor.presentation.journal_workers import (
     AnalysisEnrichmentWorker, BackfillWorker, ConfirmWorker, DailyChartWorker, HistoryWorker,
     MarketIndexBackfillWorker,
@@ -2279,6 +2280,19 @@ class JournalWindow(QMainWindow):
 
 
 def main(arguments: list[str] | None = None) -> int:
+    incoming = list(arguments if arguments is not None else sys.argv[1:])
+    gate_parser = argparse.ArgumentParser(add_help=False)
+    gate_parser.add_argument("--monitor-database", required=True)
+    gate_parser.add_argument("--journal-database", required=True)
+    gate_options, _ = gate_parser.parse_known_args(incoming)
+    with StrictRestoreCoordinator(
+        Path(gate_options.monitor_database),
+        Path(gate_options.journal_database).with_name("news.sqlite3"),
+    ).enter_child():
+        return _run_journal_process(incoming)
+
+
+def _run_journal_process(arguments: list[str]) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--monitor-database", required=True)
     parser.add_argument("--journal-database", required=True)

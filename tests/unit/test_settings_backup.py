@@ -6,9 +6,10 @@ import tempfile
 import unittest
 from base64 import b64encode
 from pathlib import Path
+from unittest.mock import patch
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
-from kiwoom_monitor.infrastructure.persistence.settings_backup import SettingsBackupService
+from kiwoom_monitor.infrastructure.persistence.settings_backup import SettingsBackupError, SettingsBackupService
 from kiwoom_monitor.infrastructure.naver_news import (
     LocalNaverNewsConfig,
     NaverNewsCredentials,
@@ -19,6 +20,92 @@ from kiwoom_monitor.infrastructure.naver_news import (
 
 
 class SettingsBackupServiceTest(unittest.TestCase):
+    def test_settings_and_themes_export_share_caller_snapshot_without_closing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_database = Path(directory) / "snapshot.sqlite3"
+            service_database = Path(directory) / "service.sqlite3"
+            Database(snapshot_database).initialize()
+            Database(service_database).initialize()
+            connection = sqlite3.connect(snapshot_database)
+            try:
+                connection.execute("UPDATE settings SET value='snapshot-before' WHERE key='theme_active_profile'")
+                connection.commit()
+                connection.execute("BEGIN")
+                backup_path = Path(directory) / "combined.json"
+                SettingsBackupService(service_database).export_to(backup_path, connection=connection)
+                self.assertEqual(
+                    "snapshot-before",
+                    connection.execute("SELECT value FROM settings WHERE key='theme_active_profile'").fetchone()[0],
+                )
+            finally:
+                connection.close()
+
+            document = json.loads(backup_path.read_text(encoding="utf-8"))
+            self.assertEqual("snapshot-before", document["settings"]["theme_active_profile"])
+            self.assertEqual("snapshot-before", document["theme_data"]["active_profile"])
+
+    def test_version4_theme_restore_without_profile_data_preserves_existing_themes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.db"
+            Database(database_path).initialize()
+            backup_path = Path(directory) / "settings-only.json"
+            service = SettingsBackupService(database_path)
+            service.export_to(backup_path, include_themes=False)
+
+            with self.assertRaises(SettingsBackupError):
+                service.import_from(backup_path, include_settings=False, include_themes=True)
+
+            connection = sqlite3.connect(database_path)
+            try:
+                remaining = connection.execute("SELECT COUNT(*) FROM theme_profiles").fetchone()[0]
+            finally:
+                connection.close()
+            self.assertGreater(remaining, 0)
+
+    def test_export_replacement_failure_keeps_previous_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.db"
+            Database(database_path).initialize()
+            backup_path = Path(directory) / "settings.json"
+            backup_path.write_text("previous backup", encoding="utf-8")
+            with patch("os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaises(OSError):
+                    SettingsBackupService(database_path).export_to(backup_path, include_themes=False)
+            self.assertEqual("previous backup", backup_path.read_text(encoding="utf-8"))
+            self.assertEqual([], list(Path(directory).glob(".settings.json.*.tmp")))
+
+    def test_invalid_utf8_backup_reports_read_error_without_changing_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.db"
+            Database(database_path).initialize()
+            backup_path = Path(directory) / "settings.json"
+            backup_path.write_bytes(b"\xff")
+            with self.assertRaises(SettingsBackupError):
+                SettingsBackupService(database_path).import_from(backup_path, include_themes=False)
+
+    def test_null_news_columns_do_not_abort_after_settings_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.db"
+            Database(database_path).initialize()
+            service = SettingsBackupService(database_path)
+            backup_path = Path(directory) / "settings.json"
+            service.export_to(backup_path, include_themes=False)
+            document = json.loads(backup_path.read_text(encoding="utf-8"))
+            document["settings"]["decimal_strength"] = "3"
+            document["news_settings"]["filter"]["visible_columns"] = None
+            backup_path.write_text(json.dumps(document), encoding="utf-8")
+
+            service.import_from(backup_path, include_themes=False)
+
+            connection = sqlite3.connect(database_path)
+            try:
+                actual = connection.execute("SELECT value FROM settings WHERE key='decimal_strength'").fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual("3", actual)
+            self.assertEqual(NewsFilterSettings().visible_columns,
+                             LocalNaverNewsConfig(database_path.parent / "naver_news.dat").load_filter().visible_columns)
+
     def test_news_shortcuts_are_restored_without_copying_api_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -223,15 +310,16 @@ class SettingsBackupServiceTest(unittest.TestCase):
             service = SettingsBackupService(database_path)
 
             valid = b"valid icon"
-            service._import_assets([
-                {"path": "data/near_high_icons/interest.png", "content": b64encode(valid).decode("ascii")},
-                {"path": "data/near_high_sounds/../../../outside.txt", "content": b64encode(b"bad").decode("ascii")},
-                {
-                    "path": "data/strength_icons/fire.png",
-                    "content": b64encode(b"x" * (2 * 1024 * 1024 + 1)).decode("ascii"),
-                },
-            ])
+            with self.assertRaises(SettingsBackupError):
+                service._import_assets([
+                    {"path": "data/near_high_icons/interest.png", "content": b64encode(valid).decode("ascii")},
+                    {"path": "data/near_high_sounds/../../../outside.txt", "content": b64encode(b"bad").decode("ascii")},
+                    {
+                        "path": "data/strength_icons/fire.png",
+                        "content": b64encode(b"x" * (2 * 1024 * 1024 + 1)).decode("ascii"),
+                    },
+                ])
 
-            self.assertEqual(valid, (root / "data" / "near_high_icons" / "interest.png").read_bytes())
+            self.assertFalse((root / "data" / "near_high_icons" / "interest.png").exists())
             self.assertFalse((root / "outside.txt").exists())
             self.assertFalse((root / "data" / "strength_icons" / "fire.png").exists())

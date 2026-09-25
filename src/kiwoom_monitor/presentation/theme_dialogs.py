@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -38,13 +39,141 @@ from PySide6.QtWidgets import (
 
 from kiwoom_monitor.application.theme_matching import MatchedThemeRow, match_theme_rows
 from kiwoom_monitor.application.theme_preview import preview_theme_changes
-from kiwoom_monitor.domain.theme_import import validate_theme_rows
+from kiwoom_monitor.domain.theme_import import validate_theme_header, validate_theme_rows
 from kiwoom_monitor.domain.theme_parser import parse_themes, theme_key
 from kiwoom_monitor.domain.theme_text_import import parse_theme_text
 from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+from kiwoom_monitor.infrastructure.excel.theme_repository import ThemeRepository as ExcelThemeRepository
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository
 from kiwoom_monitor.presentation.similar_stock_dialog import choose_similar_stock, confirm_pending_name_change
 from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
+
+
+def resolve_unmatched_theme_rows(
+    parent: QWidget, stock_lookup: object | None, rows: tuple[object, ...], source_label: str,
+) -> tuple[tuple[MatchedThemeRow, ...], bool]:
+    """Review unmatched Excel/OCR names against the same stock catalog."""
+    if not rows or stock_lookup is None:
+        return (), False
+    resolved: list[MatchedThemeRow] = []
+    for row in rows:
+        original_name = str(getattr(row, "name", ""))
+        themes = tuple(getattr(row, "themes", ()))
+        renamed, handled = confirm_pending_name_change(parent, stock_lookup, original_name, themes)
+        if handled:
+            if renamed is not None:
+                code, current_name = renamed
+                resolved.append(MatchedThemeRow(code, current_name, themes))
+            continue
+        split_finder = getattr(stock_lookup, "find_concatenated_stocks", None)
+        split = split_finder(original_name) if callable(split_finder) else ()
+        if split:
+            labels = " + ".join(name for _, name in split)
+            if QMessageBox.question(
+                parent, "붙어 있는 종목명 확인",
+                f"{source_label}의 '{original_name}'을(를) 다음 종목들로 나눌 수 있습니다.\n\n"
+                f"{labels}\n\n이대로 나눌까요?",
+            ) == QMessageBox.StandardButton.Yes:
+                resolved.extend(MatchedThemeRow(code, name, themes) for code, name in split)
+                continue
+        partial_finder = getattr(stock_lookup, "find_partial_concatenated_stocks", None)
+        known, fragments = partial_finder(original_name) if callable(partial_finder) else ((), ())
+        if known and fragments:
+            known_labels = " + ".join(name for _, name in known)
+            fragment_labels = ", ".join(fragments)
+            if QMessageBox.question(
+                parent, "붙어 있는 종목명 일부 확인",
+                f"{source_label}의 '{original_name}'에서 다음 종목은 확인됐습니다.\n\n{known_labels}\n\n"
+                f"남은 이름만 다시 찾습니다: {fragment_labels}\n\n계속할까요?",
+            ) == QMessageBox.StandardButton.Yes:
+                resolved.extend(MatchedThemeRow(code, name, themes) for code, name in known)
+                for fragment in fragments:
+                    candidate, cancelled = choose_similar_stock(parent, stock_lookup, fragment, themes)
+                    if cancelled:
+                        return (), True
+                    if candidate:
+                        code, selected_name = candidate
+                        resolved.append(MatchedThemeRow(code, selected_name, themes))
+                continue
+        while True:
+            name, ok = QInputDialog.getText(
+                parent, "키움 종목명 확인",
+                f"{source_label}에서 읽은 '{original_name}' 종목명이 현재 키움 종목 목록에 없습니다.\n"
+                f"이 종목이 있던 테마: {', '.join(themes) or '없음'}\n"
+                "OCR 오인식이거나 키움의 실제 표기와 다른 이름일 수 있습니다.\n"
+                "키움에 표시되는 정확한 종목명으로 수정하세요. 비워 두면 이번 업데이트에서 제외합니다.",
+                text=original_name,
+            )
+            if not ok:
+                return (), True
+            name = name.strip()
+            if not name:
+                break
+            code = stock_lookup.find_code_by_name(name)
+            if code:
+                if original_name != name and hasattr(stock_lookup, "save_alias"):
+                    stock_lookup.save_alias(original_name, code)
+                resolved.append(MatchedThemeRow(code, name, themes))
+                break
+            candidate, cancelled = choose_similar_stock(parent, stock_lookup, name, themes)
+            if candidate:
+                code, selected_name = candidate
+                if original_name != selected_name and hasattr(stock_lookup, "save_alias"):
+                    stock_lookup.save_alias(original_name, code)
+                resolved.append(MatchedThemeRow(code, selected_name, themes))
+                break
+            if cancelled:
+                return (), True
+            break
+    return tuple(resolved), False
+
+
+def filter_import_exclusions(
+    settings: SettingsRepository, rows: tuple[tuple[str, str], ...],
+    separators: str, setting_key: str,
+) -> tuple[tuple[str, str], ...]:
+    excluded = {theme_key(theme) for theme in parse_themes(settings.get(setting_key), separators)}
+    if not excluded:
+        return rows
+    filtered: list[tuple[str, str]] = []
+    for name, value in rows:
+        themes = tuple(theme for theme in parse_themes(value, separators) if theme_key(theme) not in excluded)
+        if themes:
+            filtered.append((name, "/".join(themes)))
+    return tuple(filtered)
+
+
+def review_image_theme_rows(
+    rows: tuple[object, ...], parent: QWidget, settings: SettingsRepository,
+    stock_lookup: object | None, repository: object | None,
+    show_status: Callable[[str], None],
+) -> tuple[tuple[str, tuple[str, ...]], ...] | None:
+    """Return only the confirmed OCR edits; persistence remains with the caller."""
+    dialog = ImageThemeRowsDialog(rows, parent, settings)
+    if not dialog.exec():
+        return None
+    separators = ",/|;" + settings.get("theme_image_import_custom_separators")
+    imported, errors = validate_theme_rows(
+        filter_import_exclusions(settings, dialog.rows(), separators, "theme_image_import_exclusions"),
+        separators,
+    )
+    if errors:
+        QMessageBox.warning(parent, "이미지 테마 확인", "\n".join(errors))
+        return None
+    matched, unmatched = match_theme_rows(imported, stock_lookup) if stock_lookup else ((), imported)
+    resolved, cancelled = resolve_unmatched_theme_rows(parent, stock_lookup, unmatched, "이미지 OCR")
+    if cancelled:
+        return None
+    changes = preview_theme_changes(matched + resolved, repository) if repository else ()
+    preview = ThemePreviewDialog(
+        changes, len(unmatched) - len(resolved), parent,
+        frozenset(theme_key(theme) for theme in parse_themes(settings.get("theme_image_import_exclusions"), separators)),
+    )
+    if preview.exec() and repository:
+        changes = preview.changes(separators)
+        return tuple((change.code, change.after) for change in changes if change.status != "변경 없음")
+    show_status(f"이미지 테마 결과 · {len(changes)}개 확인 · 적용은 최종 확인 후에만 수행됩니다")
+    return None
 
 
 def _save_preferences_then_accept(dialog: QDialog, settings: SettingsRepository, values: dict[str, str]) -> None:
@@ -697,10 +826,11 @@ class ThemeSuggestionReviewDialog(QDialog):
 
 
 class ThemeManagerDialog(QDialog):
-    def __init__(self, repository: object, settings: SettingsRepository, on_excel_update: Callable[[], None] | None = None, on_image_update: Callable[[str], None] | None = None, on_catalog_sync: Callable[[], None] | None = None, parent: QWidget | None = None, on_themes_changed: Callable[[], None] | None = None, news_database_path: Path | None = None) -> None:
-        super().__init__(parent); self._repository=repository; self._settings=settings; self._separators=",/|;" + settings.get("theme_custom_separators"); self._on_excel_update=on_excel_update; self._on_image_update=on_image_update; self._on_themes_changed=on_themes_changed; self._news_database_path=news_database_path; self.setWindowTitle("종목/테마 관리"); self.resize(560,420)
+    def __init__(self, repository: object, settings: SettingsRepository, on_excel_update: Callable[[], None] | None = None, on_image_update: Callable[[str], None] | None = None, on_catalog_sync: Callable[[], None] | None = None, parent: QWidget | None = None, on_themes_changed: Callable[[], None] | None = None, news_database_path: Path | None = None, *, stock_lookup: object | None = None, status_callback: Callable[[str], None] | None = None) -> None:
+        super().__init__(parent); self._repository=repository; self._settings=settings; self._separators=",/|;" + settings.get("theme_custom_separators"); self._on_excel_update=on_excel_update; self._on_image_update=on_image_update; self._on_themes_changed=on_themes_changed; self._news_database_path=news_database_path; self._stock_lookup=stock_lookup; self._status_callback=status_callback; self.setWindowTitle("종목/테마 관리"); self.resize(560,420)
         self._save_request: SettingsRequestWorker | None = None
         self._save_completion_message = ""
+        self._save_completion_title = "테마 업데이트 완료"
         self._pending_column_widths: dict[str, str] = {}
         self._column_width_request: SettingsRequestWorker | None = None
         self._search=QLineEdit(); self._search.setPlaceholderText("종목명 검색"); self._table=QTableWidget(0,2); self._table.setHorizontalHeaderLabels(("종목명","테마"))
@@ -743,10 +873,9 @@ class ThemeManagerDialog(QDialog):
         theme_layout.addWidget(_section_title("테마 입력 및 갱신"))
         theme_layout.addWidget(self._add)
         theme_layout.addWidget(self._text_import)
-        if self._on_excel_update is not None:
-            excel = QPushButton("Excel 테마 업데이트")
-            excel.clicked.connect(self._on_excel_update)
-            theme_layout.addWidget(excel)
+        excel = QPushButton("Excel 테마 업데이트")
+        excel.clicked.connect(self._on_excel_update or self._import_excel)
+        theme_layout.addWidget(excel)
         if self._on_image_update is not None:
             image = QPushButton("이미지 테마 업데이트")
             image.clicked.connect(self._start_image_update)
@@ -859,21 +988,6 @@ class ThemeManagerDialog(QDialog):
         self._column_width_request = None
         self._pending_column_widths = {}
         QMessageBox.warning(self, "테마 표 너비 저장", message)
-    def _filter_import_exclusions(
-        self,
-        rows: tuple[tuple[str, str], ...],
-        separators: str,
-        setting_key: str,
-    ) -> tuple[tuple[str, str], ...]:
-        excluded = {theme_key(theme) for theme in parse_themes(self._settings.get(setting_key), separators)}
-        if not excluded:
-            return rows
-        filtered: list[tuple[str, str]] = []
-        for name, value in rows:
-            themes = tuple(theme for theme in parse_themes(value, separators) if theme_key(theme) not in excluded)
-            if themes:
-                filtered.append((name, "/".join(themes)))
-        return tuple(filtered)
     def _reload(self) -> None:
         self._rows=self._repository.search(self._search.text()); self._table.setRowCount(len(self._rows))
         for index,(_,name,themes) in enumerate(self._rows):
@@ -943,9 +1057,74 @@ class ThemeManagerDialog(QDialog):
             return
         self._apply_import_rows(rows, separators, "theme_text_import_exclusions")
 
+    def _import_excel(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "테마 Excel 선택", self._settings.get("theme_excel_import_dir"), "Excel 파일 (*.xlsx)",
+        )
+        if not path:
+            return
+        self._settings.set("theme_excel_import_dir", str(Path(path).parent))
+        try:
+            source = ExcelThemeRepository(Path(path))
+            header, raw_rows = source.load_header_and_rows()
+            errors = validate_theme_header(header)
+        except Exception as error:
+            if self._status_callback is not None:
+                self._status_callback(f"Excel 읽기 실패: {error}")
+            return
+        if errors:
+            QMessageBox.warning(self, "Excel 검증 오류", "\n".join(errors))
+            return
+        editor = ImageThemeRowsDialog(raw_rows, self, self._settings, "theme_excel_import")
+        editor.setWindowTitle("Excel 테마 수정")
+        labels = editor.findChildren(QLabel)
+        if labels:
+            labels[0].setText("Excel에서 읽은 종목명과 테마를 수정하세요. 구분자와 제외 테마는 Excel 업데이트에만 저장됩니다.")
+        if not editor.exec():
+            return
+        separators = ",/|;" + self._settings.get("theme_excel_import_custom_separators")
+        rows, errors = validate_theme_rows(
+            filter_import_exclusions(self._settings, editor.rows(), separators, "theme_excel_import_exclusions"),
+            separators,
+        )
+        if self._status_callback is not None:
+            self._status_callback(f"Excel 검증 완료 · 유효 {len(rows)}건 · 오류 {len(errors)}건")
+        if errors:
+            QMessageBox.warning(self, "Excel 검증 오류", "\n".join(errors))
+            return
+        matched, unmatched = match_theme_rows(rows, self._stock_lookup) if self._stock_lookup else ((), rows)
+        resolved, cancelled = resolve_unmatched_theme_rows(self, self._stock_lookup, unmatched, "Excel")
+        if cancelled:
+            return
+        changes = preview_theme_changes(matched + resolved, self._repository)
+        changed = sum(change.status == "테마 변경" for change in changes)
+        new = sum(change.status == "신규" for change in changes)
+        preview = ThemePreviewDialog(
+            changes, len(unmatched), self,
+            frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_excel_import_exclusions"), separators)),
+        )
+        if preview.exec():
+            changes = preview.changes(separators)
+            pending = tuple((change.code, change.after) for change in changes if change.status != "변경 없음")
+            applied = len(pending)
+            repository = self._repository
+            self._submit_theme_change(
+                lambda: repository.replace_many(pending),
+                f"{applied}개 종목의 테마를 적용했습니다.",
+                title="Excel 테마 업데이트 완료",
+                progress=f"Excel 테마 {applied}개 종목 저장 중…",
+            )
+            return
+        unchanged = sum(change.status == "변경 없음" for change in changes)
+        if self._status_callback is not None:
+            self._status_callback(
+                f"Excel 결과 · 전체 {len(raw_rows)} · 변경 없음 {unchanged} · 신규 {new} · "
+                f"테마 변경 {changed} · 오류/제외 {len(unmatched) - len(resolved)}"
+            )
+
     def _apply_import_rows(self, raw_rows: tuple[tuple[str, str], ...], separators: str, exclusion_setting_key: str) -> None:
         valid, errors = validate_theme_rows(
-            self._filter_import_exclusions(raw_rows, separators, exclusion_setting_key),
+            filter_import_exclusions(self._settings, raw_rows, separators, exclusion_setting_key),
             separators,
         )
         if not valid and not errors:
@@ -1088,26 +1267,31 @@ class ThemeManagerDialog(QDialog):
         if self._on_themes_changed is not None:
             self._on_themes_changed()
 
-    def _submit_theme_change(self, task: Callable[[], object], message: str = "") -> None:
+    def _submit_theme_change(self, task: Callable[[], object], message: str = "", *,
+                             title: str = "테마 업데이트 완료", progress: str = "") -> None:
         if self._save_request is not None:
             return
         self.setEnabled(False)
         worker = SettingsRequestWorker(task)
         self._save_request = worker
         self._save_completion_message = message
+        self._save_completion_title = title
         worker.succeeded.connect(self._theme_change_saved)
         worker.failed.connect(self._theme_change_failed)
+        if progress and self._status_callback is not None:
+            self._status_callback(progress)
         worker.start()
 
     def _theme_change_saved(self, _result: object) -> None:
         self._save_request = None
         message = self._save_completion_message
+        title = self._save_completion_title
         self._save_completion_message = ""
         self.setEnabled(True)
         self._reload()
         self._notify_themes_changed()
         if message:
-            QMessageBox.information(self, "테마 업데이트 완료", message)
+            QMessageBox.information(self, title, message)
 
     def _theme_change_failed(self, message: str) -> None:
         self._save_request = None

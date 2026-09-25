@@ -7,6 +7,9 @@ import time
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.central_content_sync import CentralContentSyncService
+from kiwoom_monitor.infrastructure.persistence.theme_backup import (
+    ThemeBackupService, ThemeRevisionConflict,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -68,16 +71,27 @@ class CentralThemeSyncDispatcher:
             generation = self._generation
             pending_token = self._read_pending()
         try:
+            revision = (ThemeBackupService(self._database_path).revision()
+                        if self._database_path.is_file() else None)
             with self._execution_lock:
                 remote_snapshot, remote_completed_at = self._service.load_theme_snapshot()
                 local_changed_at = self._pending_time(pending_token)
                 if remote_completed_at is not None and remote_completed_at > local_changed_at:
-                    self._service.apply_theme_snapshot(self._database_path, remote_snapshot)
+                    with self._state_lock:
+                        if generation != self._generation:
+                            return False
+                    self._service.apply_theme_snapshot(
+                        self._database_path, remote_snapshot, expected_revision=revision,
+                    )
                     logger.info(
                         "NAS 테마가 로컬 대기 변경보다 최신이어서 NAS 스냅샷을 적용했습니다."
                     )
                 else:
                     self._service.replace_themes(self._database_path)
+        except ThemeRevisionConflict as error:
+            logger.info("로컬 테마 편집을 보존하고 새 버전을 다시 동기화합니다: %s", error)
+            self.notify()
+            return False
         except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
             # 중앙 장애가 테마 편집이나 메인 실시간 화면을 막지 않는다.
             logger.warning("테마 중앙 즉시 보존 실패(로컬 자료 유지): %s", error)

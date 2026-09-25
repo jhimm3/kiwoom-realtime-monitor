@@ -27,6 +27,7 @@ from kiwoom_monitor.infrastructure.central_content_client import CentralContentC
 from kiwoom_monitor.infrastructure.central_content_sync import CentralContentSyncService
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 from kiwoom_monitor.infrastructure.persistence.news_database import initialize_news_database
+from kiwoom_monitor.infrastructure.persistence.strict_restore import StrictRestoreCoordinator
 from kiwoom_monitor.presentation.stock_news_window import StockNewsWindow
 
 
@@ -186,6 +187,18 @@ def _news_content_signature(news_database_path: Path) -> tuple[int, int]:
 
 
 def main(arguments: list[str] | None = None) -> int:
+    incoming = list(arguments if arguments is not None else sys.argv[1:])
+    gate_parser = argparse.ArgumentParser(add_help=False)
+    gate_parser.add_argument("--database", required=True)
+    gate_options, _ = gate_parser.parse_known_args(incoming)
+    database_path = Path(gate_options.database)
+    with StrictRestoreCoordinator(
+        database_path.with_name("monitor.sqlite3"), database_path,
+    ).enter_child():
+        return _run_news_process(incoming)
+
+
+def _run_news_process(arguments: list[str]) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--config", required=True)
     parser.add_argument("--database", required=True)

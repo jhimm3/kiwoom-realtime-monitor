@@ -19,7 +19,7 @@ class _Service:
     def load_theme_snapshot(self):
         return {"theme_profile": [], "theme_stock": [], "theme_metadata": []}, self.remote_completed_at
 
-    def apply_theme_snapshot(self, _path: Path, _snapshot) -> None:
+    def apply_theme_snapshot(self, _path: Path, _snapshot, *, expected_revision=None) -> None:
         self.applied += 1
         self.called.set()
 
@@ -44,6 +44,28 @@ class _FailService(_Service):
 
 
 class CentralThemeSyncDispatcherTests(unittest.TestCase):
+    def test_edit_during_remote_load_is_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / ".theme-pending"
+            marker.write_text("100.0", encoding="utf-8")
+            service = _Service()
+            service.remote_completed_at = 101.0
+            dispatcher = CentralThemeSyncDispatcher(
+                service, Path(directory) / "monitor.sqlite3",
+                debounce_seconds=1.0, pending_path=marker,
+            )  # type: ignore[arg-type]
+            original = service.load_theme_snapshot
+
+            def load_with_edit():
+                dispatcher.notify()
+                return original()
+
+            service.load_theme_snapshot = load_with_edit  # type: ignore[method-assign]
+            self.assertFalse(dispatcher.flush_pending())
+            self.assertEqual(0, service.applied)
+            self.assertTrue(marker.exists())
+            dispatcher.close()
+
     def test_consecutive_changes_are_debounced_off_the_calling_thread(self) -> None:
         service = _Service()
         dispatcher = CentralThemeSyncDispatcher(service, Path("monitor.sqlite3"), debounce_seconds=0.05)  # type: ignore[arg-type]

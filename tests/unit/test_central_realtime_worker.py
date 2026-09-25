@@ -25,6 +25,17 @@ class _TestSignal:
 
 
 class CentralRealtimeWorkerTests(unittest.TestCase):
+    def test_realtime_gap_is_forwarded_only_for_positive_integer_loss(self) -> None:
+        worker = CentralRealtimeWorker(
+            DataSourceSettings("personal_server", "https://nas.example", "token"), ("005930",),
+        )
+        received = []
+        worker.realtime_gap.connect(received.append)
+        worker._dispatch({"type": "realtime_gap", "dropped_events": 3})
+        worker._dispatch({"type": "realtime_gap", "dropped_events": 0})
+        worker._dispatch({"type": "realtime_gap", "dropped_events": True})
+        self.assertEqual([3], received)
+
     def test_converts_http_server_url_to_websocket(self) -> None:
         worker = CentralRealtimeWorker(
             DataSourceSettings("local_server", "http://127.0.0.1:8787", "token"), ("005930",),

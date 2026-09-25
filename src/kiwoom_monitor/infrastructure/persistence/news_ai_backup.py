@@ -4,7 +4,9 @@ import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+from .backup_file import write_json_backup
 from .news_ai_repository import NewsAIRepository
 
 
@@ -19,6 +21,7 @@ class NewsAIBackupService:
     def export_to(self, path: Path) -> None:
         connection = sqlite3.connect(self._database_path)
         try:
+            connection.execute("BEGIN")
             columns = (
                 "stock_code", "identity", "provider", "model", "summary", "category", "outlook",
                 "confidence", "reason", "positive_evidence", "negative_evidence", "body_hash", "analyzed_at",
@@ -42,18 +45,28 @@ class NewsAIBackupService:
             "analyses": [dict(zip(columns, row, strict=True)) for row in rows],
             "shared_analyses": [dict(zip(shared_columns, row, strict=True)) for row in shared_rows],
         }
-        path.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        write_json_backup(path, document, indent=None, separators=(",", ":"))
 
-    def import_from(self, path: Path) -> int:
+    @classmethod
+    def validate_file(cls, path: Path) -> None:
+        cls._read_document(path)
+
+    @classmethod
+    def _read_document(cls, path: Path) -> dict[str, Any]:
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
             raise ValueError("뉴스 AI 백업 파일을 읽을 수 없습니다.") from error
-        if not isinstance(document, dict) or document.get("format") != self.FORMAT or document.get("version") not in {1, self.VERSION}:
+        if not isinstance(document, dict) or document.get("format") != cls.FORMAT or document.get("version") not in {1, cls.VERSION}:
             raise ValueError("뉴스 AI 백업 파일 형식이 올바르지 않습니다.")
         analyses = document.get("analyses", [])
         if not isinstance(analyses, list):
             raise ValueError("뉴스 AI 분석 목록 형식이 올바르지 않습니다.")
+        return document
+
+    def import_from(self, path: Path) -> int:
+        document = self._read_document(path)
+        analyses = document.get("analyses", [])
         valid: list[dict[str, object]] = []
         for item in analyses:
             if not isinstance(item, dict) or not item.get("stock_code") or not item.get("identity"):

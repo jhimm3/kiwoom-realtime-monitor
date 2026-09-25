@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import tempfile
 from base64 import b64decode, b64encode
 from datetime import datetime
 from pathlib import Path
@@ -17,11 +19,14 @@ from kiwoom_monitor.infrastructure.naver_news import (
 )
 
 from .database import DEFAULT_COLUMNS, DEFAULT_SETTINGS
+from .backup_file import write_json_backup
 from .theme_backup import ThemeBackupError, ThemeBackupService
 
 
 class SettingsBackupError(ValueError):
-    pass
+    def __init__(self, message: str, *, local_database_applied: bool = False) -> None:
+        super().__init__(message)
+        self.local_database_applied = local_database_applied
 
 
 class SettingsBackupService:
@@ -41,8 +46,10 @@ class SettingsBackupService:
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
 
-    def export_to(self, path: Path, include_settings: bool = True, include_themes: bool = True, excluded_setting_keys: frozenset[str] = frozenset(), include_column_widths: bool = True) -> None:
-        connection = sqlite3.connect(self._database_path)
+    def export_to(self, path: Path, include_settings: bool = True, include_themes: bool = True, excluded_setting_keys: frozenset[str] = frozenset(), include_column_widths: bool = True, *, connection: sqlite3.Connection | None = None) -> None:
+        owns_connection = connection is None
+        if connection is None:
+            connection = sqlite3.connect(self._database_path)
         try:
             settings = {key: value for key, value in connection.execute("SELECT key, value FROM settings").fetchall() if key not in excluded_setting_keys}
             columns = [
@@ -56,58 +63,59 @@ class SettingsBackupService:
                     "SELECT column_name, visible, position, width FROM column_settings ORDER BY position"
                 )
             ]
+            document: dict[str, Any] = {
+                "format": self.FORMAT,
+                "version": self.VERSION,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            if include_settings:
+                news_config = LocalNaverNewsConfig(self._database_path.parent / "naver_news.dat")
+                news_filter = news_config.load_filter()
+                news_ai = news_config.load_ai()
+                news_official = news_config.load_official()
+                document.update({
+                    "settings": settings,
+                    "columns": columns,
+                    "assets": self._export_assets(settings),
+                    # API 키·Client Secret은 넣지 않고 공개 정보인 이름·주소만 이식한다.
+                    "news_shortcuts": [
+                        {"name": name, "url": url}
+                        for name, url in news_config.load_shortcuts()
+                    ],
+                    "news_settings": {
+                        "filter": {
+                            "enabled": news_filter.enabled,
+                            "excluded_words": list(news_filter.excluded_words),
+                            "excluded_providers": list(news_filter.excluded_providers),
+                            "provider_filter_enabled": news_filter.provider_filter_enabled,
+                            "visible_columns": list(news_filter.visible_columns),
+                            "positive_color": news_filter.positive_color,
+                            "negative_color": news_filter.negative_color,
+                            "mixed_color": news_filter.mixed_color,
+                            "neutral_color": news_filter.neutral_color,
+                            "stored_news_limit": news_filter.stored_news_limit,
+                        },
+                        "ai": {
+                            "provider": news_ai.provider,
+                            "model": news_ai.model,
+                            "daily_limit": news_ai.daily_limit,
+                            "auto_recent_limit": news_ai.auto_recent_limit,
+                            "auto_analyze": news_ai.auto_analyze,
+                            "request_mode": news_ai.request_mode,
+                            "batch_size": news_ai.batch_size,
+                        },
+                        "official": {"dart_enabled": news_official.dart_enabled},
+                    },
+                })
+            if include_themes:
+                document.update({
+                    "theme_data": ThemeBackupService(self._database_path).export_document(connection=connection),
+                    "theme_settings": {key: value for key, value in settings.items() if key in self.THEME_SETTING_KEYS},
+                })
+            write_json_backup(path, document)
         finally:
-            connection.close()
-        document: dict[str, Any] = {
-            "format": self.FORMAT,
-            "version": self.VERSION,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        if include_settings:
-            news_config = LocalNaverNewsConfig(self._database_path.parent / "naver_news.dat")
-            news_filter = news_config.load_filter()
-            news_ai = news_config.load_ai()
-            news_official = news_config.load_official()
-            document.update({
-                "settings": settings,
-                "columns": columns,
-                "assets": self._export_assets(settings),
-                # API 키·Client Secret은 넣지 않고 공개 정보인 이름·주소만 이식한다.
-                "news_shortcuts": [
-                    {"name": name, "url": url}
-                    for name, url in news_config.load_shortcuts()
-                ],
-                "news_settings": {
-                    "filter": {
-                        "enabled": news_filter.enabled,
-                        "excluded_words": list(news_filter.excluded_words),
-                        "excluded_providers": list(news_filter.excluded_providers),
-                        "provider_filter_enabled": news_filter.provider_filter_enabled,
-                        "visible_columns": list(news_filter.visible_columns),
-                        "positive_color": news_filter.positive_color,
-                        "negative_color": news_filter.negative_color,
-                        "mixed_color": news_filter.mixed_color,
-                        "neutral_color": news_filter.neutral_color,
-                        "stored_news_limit": news_filter.stored_news_limit,
-                    },
-                    "ai": {
-                        "provider": news_ai.provider,
-                        "model": news_ai.model,
-                        "daily_limit": news_ai.daily_limit,
-                        "auto_recent_limit": news_ai.auto_recent_limit,
-                        "auto_analyze": news_ai.auto_analyze,
-                        "request_mode": news_ai.request_mode,
-                        "batch_size": news_ai.batch_size,
-                    },
-                    "official": {"dart_enabled": news_official.dart_enabled},
-                },
-            })
-        if include_themes:
-            document.update({
-                "theme_data": ThemeBackupService(self._database_path).export_document(),
-                "theme_settings": {key: value for key, value in settings.items() if key in self.THEME_SETTING_KEYS},
-            })
-        path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+            if owns_connection:
+                connection.close()
 
     def _export_assets(self, settings: dict[str, str]) -> list[dict[str, str]]:
         root = self._database_path.parent.parent
@@ -138,14 +146,23 @@ class SettingsBackupService:
                 continue
         return assets
 
-    def import_from(self, path: Path, include_settings: bool = True, include_themes: bool = True, excluded_setting_keys: frozenset[str] = frozenset(), include_column_widths: bool = True, include_column_layout: bool = True) -> None:
+    def validate_from(
+        self, path: Path, *, include_settings: bool = True, include_themes: bool = True,
+        include_column_widths: bool = True, include_column_layout: bool = True,
+    ) -> None:
+        self._read_document(path, include_settings, include_themes, include_column_widths, include_column_layout)
+
+    def _read_document(
+        self, path: Path, include_settings: bool, include_themes: bool,
+        include_column_widths: bool, include_column_layout: bool,
+    ) -> dict[str, Any]:
         try:
             if path.stat().st_size > self.MAX_BACKUP_DOCUMENT_BYTES:
                 raise SettingsBackupError("설정 백업 파일이 너무 큽니다.")
             document = json.loads(path.read_text(encoding="utf-8"))
         except SettingsBackupError:
             raise
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
             raise SettingsBackupError("설정 백업 파일을 읽을 수 없습니다.") from error
         if not isinstance(document, dict) or document.get("format") != self.FORMAT or document.get("version") not in {1, 2, 3, self.VERSION}:
             raise SettingsBackupError("이 프로그램에서 만든 설정 백업 파일이 아닙니다.")
@@ -154,73 +171,184 @@ class SettingsBackupService:
         themes = document.get("themes", [])
         stock_themes = document.get("stock_themes", [])
         aliases = document.get("aliases", [])
-        stock_catalog = document.get("stock_catalog", [])
-        assets = document.get("assets", [])
-        news_shortcuts = document.get("news_shortcuts")
-        news_settings = document.get("news_settings")
-        theme_data = document.get("theme_data")
-        theme_settings = document.get("theme_settings", {})
         if not all(isinstance(value, list) for value in (columns, themes, stock_themes, aliases)) or not isinstance(settings, dict):
             raise SettingsBackupError("설정 백업 파일 형식이 올바르지 않습니다.")
+        if include_themes and document["version"] == self.VERSION:
+            try:
+                ThemeBackupService.validate_document(document.get("theme_data"))
+            except ThemeBackupError as error:
+                raise SettingsBackupError("설정 백업의 테마 프로필 형식이 올바르지 않습니다.") from error
+        if include_settings:
+            valid_columns = {name for name, _, _, _ in DEFAULT_COLUMNS}
+            try:
+                for item in columns:
+                    if isinstance(item, dict) and str(item.get("name", "")) in valid_columns:
+                        if include_column_widths or include_column_layout:
+                            int(item.get("position", 0))
+                        if include_column_widths:
+                            int(item.get("width", 100))
+            except (TypeError, ValueError) as error:
+                raise SettingsBackupError("설정 백업의 표 구성 형식이 올바르지 않습니다.") from error
+            self._validate_assets(document.get("assets", []))
+        return document
 
+    def import_from(self, path: Path, include_settings: bool = True, include_themes: bool = True, excluded_setting_keys: frozenset[str] = frozenset(), include_column_widths: bool = True, include_column_layout: bool = True) -> None:
+        document = self._read_document(path, include_settings, include_themes, include_column_widths, include_column_layout)
+        self._apply_documents_in_one_transaction((
+            (document, include_settings, include_themes, excluded_setting_keys,
+             include_column_widths, include_column_layout),
+        ))
+
+    def import_from_settings_and_themes(
+        self, settings_path: Path | None, themes_path: Path | None,
+        excluded_setting_keys: frozenset[str] = frozenset(),
+        include_column_widths: bool = False,
+    ) -> None:
+        """Validate both Drive documents, then apply their monitor DB changes once."""
+        documents: list[tuple[dict[str, Any], bool, bool, frozenset[str], bool, bool]] = []
+        if settings_path is not None:
+            settings = self._read_document(
+                settings_path, True, False, include_column_widths, True,
+            )
+            documents.append((settings, True, False, excluded_setting_keys,
+                              include_column_widths, True))
+        if themes_path is not None:
+            themes = self._read_document(themes_path, False, True, False, False)
+            documents.append((themes, False, True, excluded_setting_keys,
+                              False, False))
+        self._apply_documents_in_one_transaction(tuple(documents))
+
+    def _apply_documents_in_one_transaction(
+        self,
+        documents: tuple[tuple[dict[str, Any], bool, bool, frozenset[str], bool, bool], ...],
+    ) -> None:
+        if not documents:
+            return
+        connection = sqlite3.connect(self._database_path)
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            with connection:
+                for document, include_settings, include_themes, excluded, widths, layout in documents:
+                    self._apply_document_to_connection(
+                        connection, document, include_settings, include_themes,
+                        excluded, widths, layout,
+                    )
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            raise SettingsBackupError("설정 백업 파일을 적용할 수 없습니다.") from error
+        finally:
+            connection.close()
+        for document, include_settings, _, _, _, _ in documents:
+            if include_settings:
+                try:
+                    self._import_assets(document.get("assets", []))
+                    self._import_news_settings(
+                        document.get("news_settings"), document.get("news_shortcuts"),
+                    )
+                except (OSError, ValueError) as error:
+                    raise SettingsBackupError(
+                        "설정 DB는 적용됐지만 뉴스 설정 또는 자산 파일 저장에 실패했습니다.",
+                        local_database_applied=True,
+                    ) from error
+
+    def _apply_document_to_connection(
+        self, connection: sqlite3.Connection, document: dict[str, Any],
+        include_settings: bool, include_themes: bool,
+        excluded_setting_keys: frozenset[str], include_column_widths: bool,
+        include_column_layout: bool,
+    ) -> None:
+        settings = document.get("settings", {})
+        columns = document.get("columns", [])
         valid_columns = {name for name, _, _, _ in DEFAULT_COLUMNS}
         imported_columns = [
             item for item in columns
             if isinstance(item, dict) and str(item.get("name", "")) in valid_columns
         ]
-        connection = sqlite3.connect(self._database_path)
-        try:
-            connection.execute("PRAGMA foreign_keys = ON")
-            with connection:
-                if include_settings:
-                    connection.executemany("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [(key, str(value)) for key, value in settings.items() if key in DEFAULT_SETTINGS and key not in excluded_setting_keys])
-                    if include_column_widths:
-                        connection.executemany("UPDATE column_settings SET visible = ?, position = ?, width = ? WHERE column_name = ?", [(int(bool(item.get("visible"))), int(item.get("position", 0)), max(20, int(item.get("width", 100))), str(item["name"])) for item in imported_columns])
-                    elif include_column_layout:
-                        connection.executemany("UPDATE column_settings SET visible = ?, position = ? WHERE column_name = ?", [(int(bool(item.get("visible"))), int(item.get("position", 0)), str(item["name"])) for item in imported_columns])
-                if include_themes and not isinstance(theme_data, dict):
-                    for item in (stock_catalog if isinstance(stock_catalog, list) else ()):
-                        if not isinstance(item, dict): continue
-                        code, name, market = str(item.get("code", "")).upper(), str(item.get("name", "")).strip(), str(item.get("market", "")).strip()
-                        if len(code) == 6 and code.isalnum() and name: connection.execute("INSERT INTO stocks(code, name, market) VALUES (?, ?, ?) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, updated_at=CURRENT_TIMESTAMP", (code, name, market))
-                    connection.execute("DELETE FROM stock_themes"); connection.execute("DELETE FROM themes")
-                    for item in themes:
-                        if isinstance(item, dict) and str(item.get("name", "")).strip(): connection.execute("INSERT INTO themes(theme_name, default_color) VALUES (?, ?)", (str(item["name"]).strip(), str(item.get("color") or "#DCE6F1")))
-                    stock_codes = {code for (code,) in connection.execute("SELECT code FROM stocks")}
-                    for item in stock_themes:
-                        if not isinstance(item, dict): continue
-                        code, theme = str(item.get("code", "")), str(item.get("theme", "")).strip()
-                        if code not in stock_codes or not theme: continue
-                        row = connection.execute("SELECT theme_id FROM themes WHERE theme_name = ?", (theme,)).fetchone()
-                        if row: connection.execute("INSERT INTO stock_themes(stock_code, theme_id, custom_color) VALUES (?, ?, ?)", (code, row[0], item.get("color") or None))
-                    connection.execute("DELETE FROM stock_aliases")
-                    for item in aliases:
-                        if isinstance(item, dict):
-                            alias, code = str(item.get("alias", "")).strip(), str(item.get("code", ""))
-                            if alias and code in stock_codes: connection.execute("INSERT INTO stock_aliases(alias, stock_code) VALUES (?, ?)", (alias, code))
-        except (sqlite3.Error, TypeError, ValueError) as error:
-            raise SettingsBackupError("설정 백업 파일을 적용할 수 없습니다.") from error
-        finally:
-            connection.close()
-        if include_themes and isinstance(theme_data, dict):
-            try:
-                ThemeBackupService(self._database_path).import_document(theme_data)
-            except ThemeBackupError as error:
-                raise SettingsBackupError("설정 백업의 테마 프로필을 적용할 수 없습니다.") from error
-        if include_themes and isinstance(theme_settings, dict):
-            connection = sqlite3.connect(self._database_path)
-            try:
-                with connection:
-                    connection.executemany(
-                        "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                        ((key, str(value)) for key, value in theme_settings.items()
-                         if key in self.THEME_SETTING_KEYS and key not in excluded_setting_keys),
-                    )
-            finally:
-                connection.close()
         if include_settings:
-            self._import_assets(assets)
-            self._import_news_settings(news_settings, news_shortcuts)
+            connection.executemany(
+                "INSERT INTO settings(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [(key, str(value)) for key, value in settings.items()
+                 if key in DEFAULT_SETTINGS and key not in excluded_setting_keys],
+            )
+            if include_column_widths:
+                connection.executemany(
+                    "UPDATE column_settings SET visible=?,position=?,width=? WHERE column_name=?",
+                    [(int(bool(item.get("visible"))), int(item.get("position", 0)),
+                      max(20, int(item.get("width", 100))), str(item["name"]))
+                     for item in imported_columns],
+                )
+            elif include_column_layout:
+                connection.executemany(
+                    "UPDATE column_settings SET visible=?,position=? WHERE column_name=?",
+                    [(int(bool(item.get("visible"))), int(item.get("position", 0)),
+                      str(item["name"])) for item in imported_columns],
+                )
+        if include_themes:
+            theme_data = document.get("theme_data")
+            if isinstance(theme_data, dict):
+                ThemeBackupService(self._database_path).apply_document_in_transaction(
+                    connection, theme_data,
+                )
+            else:
+                self._apply_legacy_themes(connection, document)
+            theme_settings = document.get("theme_settings", {})
+            if isinstance(theme_settings, dict):
+                connection.executemany(
+                    "INSERT INTO settings(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ((key, str(value)) for key, value in theme_settings.items()
+                     if key in self.THEME_SETTING_KEYS and key not in excluded_setting_keys),
+                )
+
+    @staticmethod
+    def _apply_legacy_themes(
+        connection: sqlite3.Connection, document: dict[str, Any],
+    ) -> None:
+        stock_catalog = document.get("stock_catalog", [])
+        if isinstance(stock_catalog, list):
+            for item in stock_catalog:
+                if not isinstance(item, dict):
+                    continue
+                code = str(item.get("code", "")).upper()
+                name = str(item.get("name", "")).strip()
+                market = str(item.get("market", "")).strip()
+                if len(code) == 6 and code.isalnum() and name:
+                    connection.execute(
+                        "INSERT INTO stocks(code,name,market) VALUES(?,?,?) "
+                        "ON CONFLICT(code) DO UPDATE SET name=excluded.name,market=excluded.market,"
+                        "updated_at=CURRENT_TIMESTAMP", (code, name, market),
+                    )
+        connection.execute("DELETE FROM stock_themes")
+        connection.execute("DELETE FROM themes")
+        for item in document.get("themes", []):
+            if isinstance(item, dict) and str(item.get("name", "")).strip():
+                connection.execute(
+                    "INSERT INTO themes(theme_name,default_color) VALUES(?,?)",
+                    (str(item["name"]).strip(), str(item.get("color") or "#DCE6F1")),
+                )
+        stock_codes = {code for (code,) in connection.execute("SELECT code FROM stocks")}
+        for item in document.get("stock_themes", []):
+            if not isinstance(item, dict):
+                continue
+            code, theme = str(item.get("code", "")), str(item.get("theme", "")).strip()
+            if code not in stock_codes or not theme:
+                continue
+            row = connection.execute(
+                "SELECT theme_id FROM themes WHERE theme_name=?", (theme,),
+            ).fetchone()
+            if row:
+                connection.execute(
+                    "INSERT INTO stock_themes(stock_code,theme_id,custom_color) VALUES(?,?,?)",
+                    (code, row[0], item.get("color") or None),
+                )
+        connection.execute("DELETE FROM stock_aliases")
+        for item in document.get("aliases", []):
+            if isinstance(item, dict):
+                alias, code = str(item.get("alias", "")).strip(), str(item.get("code", ""))
+                if alias and code in stock_codes:
+                    connection.execute(
+                        "INSERT INTO stock_aliases(alias,stock_code) VALUES(?,?)", (alias, code),
+                    )
 
     def _import_news_settings(self, raw_settings: Any, raw_shortcuts: Any) -> None:
         if not isinstance(raw_settings, dict) and not isinstance(raw_shortcuts, list):
@@ -245,8 +373,11 @@ class SettingsBackupService:
         if not isinstance(official_data, dict):
             official_data = {}
         allowed_columns = {"time", "provider", "category", "outlook", "title"}
+        raw_columns = filter_data.get("visible_columns", current_filter.visible_columns)
+        if not isinstance(raw_columns, (list, tuple)):
+            raw_columns = current_filter.visible_columns
         columns = tuple(
-            value for value in filter_data.get("visible_columns", current_filter.visible_columns)
+            value for value in raw_columns
             if isinstance(value, str) and value in allowed_columns
         ) or current_filter.visible_columns
         news_filter = NewsFilterSettings(
@@ -300,32 +431,59 @@ class SettingsBackupService:
         except (TypeError, ValueError):
             return default
 
-    def _import_assets(self, assets: Any) -> None:
+    def _validate_assets(self, assets: Any) -> list[tuple[Path, bytes]]:
         if not isinstance(assets, list):
-            return
+            raise SettingsBackupError("설정 백업의 자산 목록 형식이 올바르지 않습니다.")
         root = self._database_path.parent.parent
         total_size = 0
+        prepared: list[tuple[Path, bytes]] = []
+        seen: set[Path] = set()
         for item in assets:
             if not isinstance(item, dict):
-                continue
-            stored, content = str(item.get("path", "")), item.get("content")
+                raise SettingsBackupError("설정 백업의 자산 항목 형식이 올바르지 않습니다.")
+            stored, content = item.get("path"), item.get("content")
+            if not isinstance(stored, str) or not isinstance(content, str):
+                raise SettingsBackupError("설정 백업의 자산 경로 또는 자료가 올바르지 않습니다.")
             resolved = self._resolve_asset_path(root, stored)
-            if not isinstance(content, str) or resolved is None:
-                continue
+            if resolved is None:
+                raise SettingsBackupError("설정 백업에 허용되지 않은 자산 경로가 있습니다.")
             destination, maximum_size = resolved
+            if destination in seen:
+                raise SettingsBackupError("설정 백업에 중복된 자산 경로가 있습니다.")
+            seen.add(destination)
             # Base64는 원본보다 약 4/3배 크다. 먼저 길이를 확인해 불필요한
             # 대용량 디코딩을 막는다.
             if len(content) > ((maximum_size + 2) // 3) * 4:
-                continue
+                raise SettingsBackupError("설정 백업 자산이 허용 크기를 초과했습니다.")
             try:
                 data = b64decode(content, validate=True)
-                if len(data) > maximum_size or total_size + len(data) > self.MAX_BACKUP_ASSET_TOTAL_BYTES:
-                    continue
+            except ValueError as error:
+                raise SettingsBackupError("설정 백업 자산의 Base64 자료가 손상되었습니다.") from error
+            if len(data) > maximum_size or total_size + len(data) > self.MAX_BACKUP_ASSET_TOTAL_BYTES:
+                raise SettingsBackupError("설정 백업 자산의 전체 크기가 허용치를 초과했습니다.")
+            total_size += len(data)
+            prepared.append((destination, data))
+        return prepared
+
+    def _import_assets(self, assets: Any) -> None:
+        prepared = self._validate_assets(assets)
+        for destination, data in prepared:
+            temporary: Path | None = None
+            try:
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(data)
-                total_size += len(data)
-            except (OSError, ValueError):
-                continue
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", dir=destination.parent,
+                    prefix=f".{destination.name}.", suffix=".tmp", delete=False,
+                ) as output:
+                    temporary = Path(output.name)
+                    output.write(data)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, destination)
+                temporary = None
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
 
     @classmethod
     def _resolve_asset_path(cls, root: Path, stored: str) -> tuple[Path, int] | None:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import ctypes
@@ -22,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from PySide6.QtGui import QBrush, QCloseEvent, QResizeEvent, QShowEvent, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPen, QPolygon, QPalette
-from PySide6.QtCore import QDate, QEvent, QEventLoop, QSettings, QThread, QTimer, QUrl, QSize, QPoint, Signal
+from PySide6.QtCore import QDate, QEvent, QEventLoop, QThread, QTimer, QUrl, QSize, QPoint, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -134,10 +133,12 @@ from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository impor
 )
 from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
 from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupError, ThemeBackupService
-from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncError, GoogleDriveSyncService
-from kiwoom_monitor.infrastructure.excel.theme_repository import ThemeRepository as ExcelThemeRepository
-from kiwoom_monitor.domain.theme_import import validate_theme_header, validate_theme_rows
-from kiwoom_monitor.domain.theme_parser import parse_themes, theme_key
+from kiwoom_monitor.infrastructure.persistence.google_drive_sync import (
+    GoogleDriveSyncError,
+    GoogleDriveSyncResult,
+    GoogleDriveSyncService,
+)
+from kiwoom_monitor.domain.theme_parser import parse_themes
 from kiwoom_monitor.domain.theme_text_import import parse_theme_text
 from kiwoom_monitor.presentation.theme_colors import text_color
 from kiwoom_monitor.presentation.api_settings_dialog import ApiSettingsDialog
@@ -218,12 +219,8 @@ from kiwoom_monitor.presentation.settings_dialog import (
     SettingsDialog,
     selected_high_cycle_periods,
 )
+from kiwoom_monitor.presentation.news_window_coordinator import NewsWindowCoordinator
 from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
-from kiwoom_monitor.presentation.similar_stock_dialog import (
-    SimilarStockDialog,
-    choose_similar_stock,
-    confirm_pending_name_change,
-)
 from kiwoom_monitor.presentation.theme_dialogs import (
     ImageThemeImportOptionsDialog,
     ImageThemeRowsDialog,
@@ -234,6 +231,7 @@ from kiwoom_monitor.presentation.theme_dialogs import (
     ThemeEditDialog,
     ThemeManagerDialog,
     ThemePreviewDialog,
+    review_image_theme_rows,
 )
 from kiwoom_monitor.presentation.top20_trade_value import (
     Top20MarketRepairWorker,
@@ -248,8 +246,6 @@ from kiwoom_monitor.presentation.update_worker_controller import UpdateWorkerCon
 from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import ApiProfiles, LocalApiConfig
 from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomApiError, KiwoomRestClient, KiwoomSettings
 from kiwoom_monitor.domain.strength_level import strength_badge
-from kiwoom_monitor.application.theme_matching import MatchedThemeRow, match_theme_rows
-from kiwoom_monitor.application.theme_preview import preview_theme_changes
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv, MinuteTradeValueAggregator
 from kiwoom_monitor.application.market_session_schedule import (
     after_hours_data_pause,
@@ -445,6 +441,7 @@ class MainWindow(QMainWindow):
         self._stock_lookup = stock_lookup
         self._theme_store = theme_store
         self._theme_save_request: SettingsRequestWorker | None = None
+        self._theme_save_completion: tuple[str, str] | None = None
         self._theme_confirmation_active = False
         self._google_drive_sync = google_drive_sync
         self._api_runtime_factory = api_runtime_factory
@@ -455,12 +452,10 @@ class MainWindow(QMainWindow):
         self._market_cap_reference_pending: set[str] = set()
         # 뉴스는 별도 프로세스와 전용 DB로 실행해 실시간 표의 Qt 이벤트 루프와
         # SQLite 잠금을 공유하지 않는다.
-        self._news_config_path = news_config_path
-        self._news_database_path = news_database_path
-        self._news_process_manager = AuxiliaryProcessManager()
-        self._news_command_path = news_database_path.with_name("news_command.json") if news_database_path else None
-        self._news_command_channel = JsonCommandChannel(self._news_command_path)
-        self._news_state_path = news_database_path.with_name("news_window_state.json") if news_database_path else None
+        self._news_window = NewsWindowCoordinator(
+            news_config_path, news_database_path, self.frameGeometry,
+            lambda message: self.statusBar().showMessage(message), self,
+        )
         self._news_api_settings_dialog: QDialog | None = None
         self._journal_database_path = journal_database_path
         self._monitor_database_path = monitor_database_path
@@ -517,21 +512,10 @@ class MainWindow(QMainWindow):
         # 이전 메인 세션이 남긴 매매일지를 재사용하면 새 코드가 반영되지 않고
         # 메인 종료 연동도 끊긴다. 시작할 때 정확한 PID만 정리해 이번 세션에서 새로 띄운다.
         self._stop_stale_journal_process()
-        self._news_dock_timer = QTimer(self)
-        self._news_dock_timer.setSingleShot(True)
-        self._news_dock_timer.setInterval(60)
-        self._news_dock_timer.timeout.connect(self._sync_news_window)
         self._journal_news_timer = QTimer(self)
         self._journal_news_timer.setInterval(150)
         self._journal_news_timer.timeout.connect(self._poll_journal_news_request)
         self._journal_news_timer.start()
-        # 복원 직후 ActivationChange가 command 파일의 restore를 sync로
-        # 덮어쓰지 않게, 뉴스 프로세스의 80ms 폴링보다 충분히 늦게 보낸다.
-        self._news_restore_sync_pending = False
-        self._news_restore_sync_timer = QTimer(self)
-        self._news_restore_sync_timer.setSingleShot(True)
-        self._news_restore_sync_timer.setInterval(250)
-        self._news_restore_sync_timer.timeout.connect(self._finish_news_restore_sync)
         self._api_reloading = False
         self._google_drive_worker_controller = GoogleDriveWorkerController(self)
         self._google_drive_worker_controller.completed.connect(
@@ -565,6 +549,7 @@ class MainWindow(QMainWindow):
         self._google_drive_operation = ""
         self._google_drive_show_completion = False
         self._google_drive_close_pending = False
+        self._google_drive_strict_restore_staged = False
         self._google_drive_pending_target = ""
         self._google_drive_active_target = ""
         self._google_drive_dirty = self._has_newer_local_google_drive_changes()
@@ -749,6 +734,7 @@ class MainWindow(QMainWindow):
             self._on_stock_price_reference
         )
         self._realtime_worker_controller.diagnostics_changed.connect(self._on_realtime_diagnostics_changed)
+        self._realtime_worker_controller.realtime_gap.connect(self._on_realtime_gap)
         self._realtime_worker_controller.status_changed.connect(self._on_realtime_status_changed)
         self._realtime_worker_controller.connection_failed.connect(self._on_realtime_failure)
         self._realtime_worker_controller.connection_opened.connect(
@@ -1081,11 +1067,12 @@ class MainWindow(QMainWindow):
             self._open_column_manager,
             self._export_settings_backup,
             self._import_settings_backup,
-            lambda parent: ThemeManagerDialog(self._theme_store, self._settings, self._select_excel, self._select_theme_image, self._sync_krx_stock_catalog, parent, self._on_themes_changed, self._news_database_path) if self._theme_store is not None else QWidget(parent),
+            lambda parent: ThemeManagerDialog(self._theme_store, self._settings, None, self._select_theme_image, self._sync_krx_stock_catalog, parent, self._on_themes_changed, self._news_window.database_path, stock_lookup=self._stock_lookup, status_callback=lambda message: self.statusBar().showMessage(message)) if self._theme_store is not None else QWidget(parent),
             column_manager_panel_factory=lambda parent: ColumnManagerDialog(self._columns, self.COLUMNS, self._table, parent, embedded=True, on_applied=self._apply_column_settings) if self._columns is not None else QWidget(parent),
             stock_lookup=self._stock_lookup,
             drive_connector=self._connect_google_drive,
             drive_downloader=lambda: self._start_google_drive_sync("download", notify_on_success=True),
+            drive_restorer=lambda: self._start_google_drive_sync("restore", notify_on_success=True),
             drive_uploader=lambda: self._start_google_drive_sync("upload", notify_on_success=True),
             drive_disconnector=self._disconnect_google_drive,
             drive_status=self._google_drive_status,
@@ -1115,22 +1102,22 @@ class MainWindow(QMainWindow):
             self._news_api_settings_dialog.raise_()
             self._news_api_settings_dialog.activateWindow()
             return
-        if self._news_config_path is None:
+        if self._news_window.config_path is None:
             self.statusBar().showMessage("뉴스 설정 파일 위치를 찾지 못했습니다.")
             return
         from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig
         from kiwoom_monitor.presentation.stock_news_window import NaverNewsSettingsDialog
 
         try:
-            source = DataSourceConfig(self._news_config_path.with_name("data_source.json")).load()
+            source = DataSourceConfig(self._news_window.config_path.with_name("data_source.json")).load()
             operational_client = (
                 CentralOperationalSettingsClient(source)
                 if source.mode in {"local_server", "personal_server"} else None
             )
             dialog = NaverNewsSettingsDialog(
-                LocalNaverNewsConfig(self._news_config_path),
+                LocalNaverNewsConfig(self._news_window.config_path),
                 self,
-                database_path=self._news_database_path,
+                database_path=self._news_window.database_path,
                 section="connections",
                 operational_client=operational_client,
             )
@@ -1150,8 +1137,8 @@ class MainWindow(QMainWindow):
             self._news_api_settings_dialog = None
 
     def _on_news_api_settings_saved(self) -> None:
-        if self._news_process_manager.is_running:
-            self._send_news_command(action="reload_settings", activate=False)
+        if self._news_window.is_running:
+            self._news_window.send_command(action="reload_settings", activate=False)
         self.statusBar().showMessage("뉴스·DART·AI 설정을 저장했습니다.")
 
     def _check_for_updates(self, silent: bool = False) -> None:
@@ -1310,8 +1297,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("기본 설정 저장 완료")
         self._schedule_google_drive_upload()
         if dialog.api_changed:
-            if self._news_process_manager.is_running:
-                self._send_news_command(action="reload_settings", activate=False)
+            if self._news_window.is_running:
+                self._news_window.send_command(action="reload_settings", activate=False)
             self._restart_for_api_settings()
 
     def _on_themes_changed(self) -> None:
@@ -1392,7 +1379,11 @@ class MainWindow(QMainWindow):
         self._google_drive_dirty = True
         self._settings.set("google_drive_unsynced_changes", "1")
         self._settings.set("google_drive_local_changed_at", self._google_drive_timestamp_now())
-        if self._google_drive_sync.connected and self._settings.get("google_drive_auto_upload") == "1":
+        if (
+            not self._google_drive_strict_restore_staged
+            and self._google_drive_sync.connected
+            and self._settings.get("google_drive_auto_upload") == "1"
+        ):
             self._google_drive_debounce.start()
 
     def _has_newer_local_google_drive_changes(self) -> bool:
@@ -1417,6 +1408,9 @@ class MainWindow(QMainWindow):
     def _start_google_drive_sync(self, operation: str, interactive: bool = False, close_after: bool = False, allow_connect: bool = False, notify_on_success: bool = False) -> None:
         service = self._google_drive_sync
         if service is None or not service.configured:
+            return
+        if self._google_drive_strict_restore_staged and operation in {"upload", "download", "restore"}:
+            self.statusBar().showMessage("Google Drive 복원이 예약됐습니다. 앱을 다시 시작한 뒤 동기화할 수 있습니다.")
             return
         if not service.connected and not allow_connect:
             self.statusBar().showMessage("Google Drive를 먼저 연결하세요.")
@@ -1512,9 +1506,10 @@ class MainWindow(QMainWindow):
         if self._initial_ranking_waits_for_google_drive:
             self._start_initial_ranking()
 
-    def _on_google_drive_sync_completed(self, message: str) -> None:
+    def _on_google_drive_sync_completed(self, result: GoogleDriveSyncResult) -> None:
+        message = result.message
         self.statusBar().showMessage(message)
-        operation = self._google_drive_operation
+        operation = result.operation or self._google_drive_operation
         show_completion = self._google_drive_show_completion
         self._google_drive_operation = ""
         self._google_drive_show_completion = False
@@ -1523,7 +1518,11 @@ class MainWindow(QMainWindow):
             self._settings.set("google_drive_unsynced_changes", "0")
             self._settings.set("google_drive_last_upload_success_at", self._google_drive_timestamp_now())
             self._google_drive_active_target = ""
-        elif operation == "download" and "다운로드했습니다" in message:
+        elif operation == "restore" and result.status == "staged":
+            self._google_drive_strict_restore_staged = True
+            self._google_drive_debounce.stop()
+            self._google_drive_close_pending = False
+        elif operation == "download" and result.status == "completed" and result.local_changes_applied:
             synced_at = self._google_drive_timestamp_now()
             self._settings.set("google_drive_unsynced_changes", "0")
             self._settings.set("google_drive_local_changed_at", synced_at)
@@ -1538,7 +1537,7 @@ class MainWindow(QMainWindow):
                 self._start_initial_ranking()
         elif show_completion:
             QMessageBox.information(self, "Google Drive 동기화 완료", message)
-        if operation == "download" and "아직 동기화된 설정이 없습니다" in message:
+        if operation == "download" and result.status == "empty":
             target = {"settings": "설정", "themes": "테마", "both": "설정과 테마"}.get(self._settings.get("google_drive_sync_target"), "설정과 테마")
             answer = QMessageBox.question(
                 self,
@@ -1587,10 +1586,11 @@ class MainWindow(QMainWindow):
             self._schedule_next_ranking_refresh()
             self._refresh_rankings()
 
-    def _on_google_drive_sync_failed(self, message: str) -> None:
+    def _on_google_drive_sync_failed(self, result: GoogleDriveSyncResult) -> None:
+        message = result.message
         logger.warning("Google Drive 동기화 실패: %s", message)
         self.statusBar().showMessage(f"Google Drive 동기화 실패: {message}")
-        operation = self._google_drive_operation
+        operation = result.operation or self._google_drive_operation
         if operation == "upload":
             self._google_drive_dirty = True
             self._settings.set("google_drive_unsynced_changes", "1")
@@ -1601,6 +1601,10 @@ class MainWindow(QMainWindow):
         self._google_drive_active_target = ""
         self._google_drive_show_completion = False
         self._refresh_google_drive_status()
+        if operation == "download" and result.local_changes_applied:
+            # 일부 로컬 데이터가 이미 commit된 뒤 파일 적용이 실패할 수 있다.
+            # 실패는 표시하되 메모리와 화면을 commit된 로컬 상태에 맞춘다.
+            self._apply_downloaded_google_drive_data()
         if operation in {"download", "metadata"} and self._initial_ranking_waits_for_google_drive:
             self._start_initial_ranking()
 
@@ -1655,7 +1659,7 @@ class MainWindow(QMainWindow):
 
     def _handle_main_table_click(self, row: int, column: int) -> None:
         self._toggle_table_cell_selection(row, column)
-        if column == 1 and self._news_process_manager.is_running and self._news_window_is_visible():
+        if column == 1 and self._news_window.is_running and self._news_window.is_visible():
             stock_item = self._table.item(row, 1)
             if stock_item is None:
                 return
@@ -1665,30 +1669,21 @@ class MainWindow(QMainWindow):
                 return
             # 연속 클릭 중에는 뉴스 DB 확인조차 매번 시작하지 않고 마지막
             # 종목만 넘긴다. 순위가 바뀌어도 캡처한 코드/이름을 사용한다.
-            request_id = self._news_command_channel.advance()
+            request_id = self._news_window.advance_request()
             QTimer.singleShot(
                 80,
                 lambda: self._apply_pending_news_selection(request_id, code, name),
             )
 
     def _apply_pending_news_selection(self, request_id: int, code: str, name: str) -> None:
-        if request_id != self._news_command_channel.request_id:
+        if request_id != self._news_window.request_id:
             return
-        if self._news_process_manager.is_running and self._news_window_is_visible():
-            self._send_news_command(code, name, activate=False)
-
-    def _news_window_is_visible(self) -> bool:
-        if self._news_state_path is None:
-            return False
-        try:
-            document = json.loads(self._news_state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return False
-        return bool(document.get("visible", False))
+        if self._news_window.is_running and self._news_window.is_visible():
+            self._news_window.send_command(code, name, activate=False)
 
     def _handle_main_table_double_click(self, row: int, column: int) -> None:
-        if column == 1 and self._news_config_path is not None and self._news_database_path is not None:
-            self._news_command_channel.advance()
+        if column == 1 and self._news_window.available:
+            self._news_window.advance_request()
             self._show_stock_news(row)
             return
         self._edit_theme_from_main_table(row, column)
@@ -1701,10 +1696,9 @@ class MainWindow(QMainWindow):
             return
         code = str(stock_item.data(Qt.ItemDataRole.UserRole) or "")
         name = stock_item.text().strip()
-        if not code or not name or self._news_config_path is None or self._news_database_path is None:
+        if not code or not name or not self._news_window.available:
             return
-        self._ensure_news_process()
-        self._send_news_command(code, name, activate=activate)
+        self._news_window.show_stock_news(code, name, activate=activate)
 
     def _show_trading_journal(self) -> None:
         """과거 매매목록을 별도 프로세스로 열어 메인 실시간 표를 보호한다."""
@@ -1783,79 +1777,8 @@ class MainWindow(QMainWindow):
         self._send_journal_command(action="shutdown")
         self._journal_process_manager.stop(graceful_timeout=2.0, terminate_timeout=1.0)
 
-    def _ensure_news_process(self) -> None:
-        if self._news_process_manager.is_running:
-            return
-        if self._news_config_path is None or self._news_database_path is None or self._news_command_path is None:
-            return
-        command = build_auxiliary_command("kiwoom_monitor.news_process", "--news-process", [
-            "--config", str(self._news_config_path),
-            "--database", str(self._news_database_path),
-            "--command-file", str(self._news_command_path),
-            "--parent-pid", str(os.getpid()),
-        ])
-        project_root = self._news_config_path.parent.parent
-        working_directory = project_root if (project_root / "pyproject.toml").is_file() else Path(sys.executable).resolve().parent
-        try:
-            if self._news_state_path is not None:
-                self._news_state_path.unlink(missing_ok=True)
-            self._news_process_manager.start(command, working_directory)
-        except OSError as error:
-            logger.warning("뉴스 프로세스를 시작하지 못했습니다: %s", error)
-            self.statusBar().showMessage("뉴스창을 시작하지 못했습니다.")
-
     def _show_market_news(self) -> None:
-        self._ensure_news_process()
-        self._send_news_command(action="market_news")
-
-    def _stop_current_news_process(self) -> None:
-        """메인 앱 종료 시 뉴스 자식 프로세스까지 확실히 정리한다."""
-        process = self._news_process_manager.process
-        if process is None:
-            return
-        self._news_process_manager.stop(
-            request_shutdown=lambda: self._send_news_command(action="shutdown"),
-            graceful_timeout=3.0,
-            terminate_timeout=1.0,
-            kill_timeout=1.0,
-        )
-
-    def _send_news_command(self, code: str = "", name: str = "", *, activate: bool = True,
-                           action: str = "show", journal_group_id: str = "", trade_date: str = "",
-                           origin_scope: AccountScope | None = None,
-                           account_scope: AccountScope | None = None) -> None:
-        if self._news_command_path is None:
-            return
-        if (origin_scope is None) != (account_scope is None):
-            logger.warning("불완전한 계좌 범위가 포함된 뉴스 명령을 거절했습니다.")
-            return
-        # 상·하·좌·우 고정은 제목 표시줄과 Windows 테두리까지 포함한 실제
-        # 창 외곽을 기준으로 해야 한다. self.x/y/width/height는 내용 영역이라
-        # 위·아래는 제목 표시줄만큼, 좌·우는 테두리만큼 서로 겹치게 된다.
-        frame = self.frameGeometry()
-        document = {
-            "action": action,
-            "code": code,
-            "name": name,
-            "activate": activate,
-            "window_mode": self._news_window_mode(),
-            "main_geometry": [frame.x(), frame.y(), frame.width(), frame.height()],
-            "journal_group_id": journal_group_id,
-            "trade_date": trade_date,
-        }
-        if origin_scope is not None and account_scope is not None:
-            if (
-                origin_scope.broker != account_scope.broker
-                or origin_scope.environment != account_scope.environment
-            ):
-                logger.warning("서로 다른 계좌 환경이 포함된 뉴스 명령을 거절했습니다.")
-                return
-            document["origin_scope"] = origin_scope.to_dict()
-            document["account_scope"] = account_scope.to_dict()
-        try:
-            self._news_command_channel.send(document)
-        except OSError as error:
-            logger.warning("뉴스 프로세스 명령을 저장하지 못했습니다: %s", error)
+        self._news_window.show_market_news()
 
     def _poll_journal_news_request(self) -> None:
         document = self._journal_news_inbox.read_new()
@@ -1869,31 +1792,12 @@ class MainWindow(QMainWindow):
             logger.warning("잘못된 계좌 범위가 포함된 매매일지 뉴스 요청을 거절했습니다.")
             return
         origin_scope, account_scope = scopes
-        self._ensure_news_process()
-        self._send_news_command(
+        self._news_window.ensure_started()
+        self._news_window.send_command(
             code, name, journal_group_id=str(document.get("group_id", "")),
             trade_date=str(document.get("trade_date", "")),
             origin_scope=origin_scope, account_scope=account_scope,
         )
-
-    @staticmethod
-    def _news_window_mode() -> str:
-        mode = str(QSettings("KiwoomMonitor", "StockNewsWindow").value("window_mode", "independent"))
-        if mode == "docked":
-            return "docked_right"
-        valid = {"independent", "linked", "docked_right", "docked_left", "docked_top", "docked_bottom"}
-        return mode if mode in valid else "independent"
-
-    def _sync_news_window(self) -> None:
-        if not self._news_process_manager.is_running:
-            return
-        mode = self._news_window_mode()
-        if mode == "linked" or mode.startswith("docked_"):
-            self._send_news_command(action="sync", activate=False)
-
-    def _finish_news_restore_sync(self) -> None:
-        self._news_restore_sync_pending = False
-        self._sync_news_window()
 
     def _open_column_manager(self) -> None:
         if self._columns is None:
@@ -1920,7 +1824,7 @@ class MainWindow(QMainWindow):
             self._theme_manager_dialog.raise_()
             self._theme_manager_dialog.activateWindow()
             return
-        dialog = ThemeManagerDialog(self._theme_store, self._settings, self._select_excel, self._select_theme_image, self._sync_krx_stock_catalog, self, self._on_themes_changed, self._news_database_path)
+        dialog = ThemeManagerDialog(self._theme_store, self._settings, None, self._select_theme_image, self._sync_krx_stock_catalog, self, self._on_themes_changed, self._news_window.database_path, stock_lookup=self._stock_lookup, status_callback=lambda message: self.statusBar().showMessage(message))
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         dialog.finished.connect(lambda _result, source=dialog: self._clear_theme_manager_dialog(source))
         self._theme_manager_dialog = dialog
@@ -2032,7 +1936,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         if QMessageBox.question(
-            dialog,
+            self,
             "설정 복원",
             "현재 공통 설정과 표 표시·순서를 백업 파일 내용으로 바꿉니다. "
             "테마 DB와 이 PC의 창 위치·크기는 바뀌지 않습니다. 계속할까요?",
@@ -2159,10 +2063,13 @@ class MainWindow(QMainWindow):
             store = self._theme_store
             self._submit_main_theme_change(lambda: store.replace_for_stock(code, after))
 
-    def _submit_main_theme_change(self, task: Callable[[], object]) -> None:
+    def _submit_main_theme_change(
+        self, task: Callable[[], object], *, completion: tuple[str, str] | None = None,
+        progress: str = "테마 저장 중…",
+    ) -> bool:
         if self._theme_save_request is not None or self._theme_store is None:
             self.statusBar().showMessage("이전 테마 저장이 끝나면 다시 시도하세요.", 5_000)
-            return
+            return False
         store = self._theme_store
 
         def persist() -> object:
@@ -2171,21 +2078,30 @@ class MainWindow(QMainWindow):
 
         worker = SettingsRequestWorker(persist)
         self._theme_save_request = worker
+        self._theme_save_completion = completion
         worker.succeeded.connect(self._main_theme_change_saved)
         worker.failed.connect(self._main_theme_change_failed)
+        self.statusBar().showMessage(progress)
         worker.start()
+        return True
 
     def _main_theme_change_saved(self, themes: object) -> None:
         self._theme_save_request = None
+        completion = self._theme_save_completion
+        self._theme_save_completion = None
         if self._closing:
             return
         self._themes = dict(themes)
         self._refresh_theme_badges()
         self._refresh_rankings()
         self._schedule_google_drive_upload("both")
+        self.statusBar().showMessage("테마 저장 완료")
+        if completion is not None:
+            QMessageBox.information(self, *completion)
 
     def _main_theme_change_failed(self, message: str) -> None:
         self._theme_save_request = None
+        self._theme_save_completion = None
         if not self._closing:
             self._on_background_failure(f"테마 저장: {message}")
 
@@ -2471,197 +2387,29 @@ class MainWindow(QMainWindow):
             return
         self._image_theme_rows_reviewing = True
         try:
-            dialog = ImageThemeRowsDialog(rows, self, self._settings)
-            if not dialog.exec():
-                return
-            separators = ",/|;" + self._settings.get("theme_image_import_custom_separators")
-            imported, errors = validate_theme_rows(
-                self._filter_import_exclusions(dialog.rows(), separators, "theme_image_import_exclusions"),
-                separators,
+            pending = review_image_theme_rows(
+                rows, self, self._settings, self._stock_lookup, self._theme_store,
+                lambda message: self.statusBar().showMessage(message),
             )
-            if errors:
-                QMessageBox.warning(self, "이미지 테마 확인", "\n".join(errors))
+            if pending is None or self._theme_store is None:
                 return
-            matched, unmatched = match_theme_rows(imported, self._stock_lookup) if self._stock_lookup else ((), imported)
-            resolved, cancelled = self._resolve_unmatched_theme_rows(unmatched, "이미지 OCR")
-            if cancelled:
-                return
-            changes = preview_theme_changes(matched + resolved, self._theme_store) if self._theme_store else ()
-            preview = ThemePreviewDialog(changes, len(unmatched) - len(resolved), self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_image_import_exclusions"), separators)))
-            if preview.exec() and self._theme_store:
-                changes = preview.changes(separators)
-                pending = tuple((change.code, change.after) for change in changes if change.status != "변경 없음")
-                applied = len(pending)
-                replace_many = getattr(self._theme_store, "replace_many", None)
+            applied = len(pending)
+            store = self._theme_store
+            def persist_image() -> None:
+                replace_many = getattr(store, "replace_many", None)
                 if callable(replace_many):
                     replace_many(pending)
                 else:
                     for code, themes in pending:
-                        self._theme_store.replace_for_stock(code, themes)
-                self._themes = self._theme_store.all_by_name()
-                self._refresh_rankings()
-                QMessageBox.information(self, "이미지 테마 업데이트 완료", f"{applied}개 종목의 테마를 적용했습니다.")
-            self.statusBar().showMessage(f"이미지 테마 결과 · {len(changes)}개 확인 · 적용은 최종 확인 후에만 수행됩니다")
+                        store.replace_for_stock(code, themes)
+            self._submit_main_theme_change(
+                persist_image,
+                completion=("이미지 테마 업데이트 완료", f"{applied}개 종목의 테마를 적용했습니다."),
+                progress=f"이미지 테마 {applied}개 종목 저장 중…",
+            )
         finally:
             self._image_theme_rows_reviewing = False
             self._image_theme_workflow_active = False
-
-    def _select_excel(self) -> None:
-        self._choose_excel_after_catalog()
-
-    def _choose_excel_after_catalog(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "테마 Excel 선택", self._settings.get("theme_excel_import_dir"), "Excel 파일 (*.xlsx)")
-        if path:
-            self._settings.set("theme_excel_import_dir", str(Path(path).parent))
-            try:
-                source = ExcelThemeRepository(Path(path)); header, raw_rows = source.load_header_and_rows()
-                errors = validate_theme_header(header)
-            except Exception as error:
-                self.statusBar().showMessage(f"Excel 읽기 실패: {error}")
-                return
-            if errors:
-                QMessageBox.warning(self, "Excel 검증 오류", "\n".join(errors))
-                return
-            editor = ImageThemeRowsDialog(raw_rows, self, self._settings, "theme_excel_import")
-            editor.setWindowTitle("Excel 테마 수정")
-            labels = editor.findChildren(QLabel)
-            if labels:
-                labels[0].setText("Excel에서 읽은 종목명과 테마를 수정하세요. 구분자와 제외 테마는 Excel 업데이트에만 저장됩니다.")
-            if not editor.exec():
-                return
-            separators = ",/|;" + self._settings.get("theme_excel_import_custom_separators")
-            rows, errors = validate_theme_rows(
-                self._filter_import_exclusions(editor.rows(), separators, "theme_excel_import_exclusions"),
-                separators,
-            )
-            self.statusBar().showMessage(f"Excel 검증 완료 · 유효 {len(rows)}건 · 오류 {len(errors)}건")
-            if errors:
-                QMessageBox.warning(self, "Excel 검증 오류", "\n".join(errors))
-            else:
-                matched, unmatched = match_theme_rows(rows, self._stock_lookup) if self._stock_lookup else ((), rows)
-                resolved, cancelled = self._resolve_unmatched_theme_rows(unmatched, "Excel")
-                if cancelled:
-                    return
-                matched = matched + resolved
-                changes = preview_theme_changes(matched, self._theme_store) if self._theme_store else ()
-                changed = sum(change.status == "테마 변경" for change in changes); new = sum(change.status == "신규" for change in changes)
-                preview = ThemePreviewDialog(changes, len(unmatched), self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_excel_import_exclusions"), separators)))
-                if preview.exec() and self._theme_store:
-                    changes = preview.changes(separators)
-                    pending = tuple((change.code, change.after) for change in changes if change.status != "변경 없음")
-                    applied = len(pending)
-                    self._theme_store.replace_many(pending)
-                    self._themes = self._theme_store.all_by_name()
-                    self._refresh_rankings()
-                    QMessageBox.information(self, "Excel 테마 업데이트 완료", f"{applied}개 종목의 테마를 적용했습니다.")
-                unchanged = sum(change.status == "변경 없음" for change in changes)
-                self.statusBar().showMessage(f"Excel 결과 · 전체 {len(raw_rows)} · 변경 없음 {unchanged} · 신규 {new} · 테마 변경 {changed} · 오류/제외 {len(unmatched) - len(resolved)}")
-
-    def _filter_import_exclusions(
-        self,
-        rows: tuple[tuple[str, str], ...],
-        separators: str,
-        setting_key: str = "theme_import_exclusions",
-    ) -> tuple[tuple[str, str], ...]:
-        excluded = {theme_key(theme) for theme in parse_themes(self._settings.get(setting_key), separators)}
-        if not excluded:
-            return rows
-        filtered: list[tuple[str, str]] = []
-        for name, value in rows:
-            themes = tuple(theme for theme in parse_themes(value, separators) if theme_key(theme) not in excluded)
-            if themes:
-                filtered.append((name, "/".join(themes)))
-        return tuple(filtered)
-
-    def _resolve_unmatched_theme_rows(self, rows: tuple[object, ...], source_label: str) -> tuple[tuple[MatchedThemeRow, ...], bool]:
-        if not rows or self._stock_lookup is None:
-            return (), False
-        resolved: list[MatchedThemeRow] = []
-        for row in rows:
-            original_name = str(getattr(row, "name", ""))
-            themes = tuple(getattr(row, "themes", ()))
-            renamed, handled = confirm_pending_name_change(self, self._stock_lookup, original_name, themes)
-            if handled:
-                if renamed is not None:
-                    code, current_name = renamed
-                    resolved.append(MatchedThemeRow(code, current_name, themes))
-                continue
-            split_finder = getattr(self._stock_lookup, "find_concatenated_stocks", None)
-            split = split_finder(original_name) if callable(split_finder) else ()
-            if split:
-                labels = " + ".join(name for _, name in split)
-                if QMessageBox.question(
-                    self,
-                    "붙어 있는 종목명 확인",
-                    f"{source_label}의 '{original_name}'을(를) 다음 종목들로 나눌 수 있습니다.\n\n"
-                    f"{labels}\n\n이대로 나눌까요?",
-                ) == QMessageBox.StandardButton.Yes:
-                    resolved.extend(MatchedThemeRow(code, name, themes) for code, name in split)
-                    continue
-            partial_finder = getattr(self._stock_lookup, "find_partial_concatenated_stocks", None)
-            known, fragments = partial_finder(original_name) if callable(partial_finder) else ((), ())
-            if known and fragments:
-                known_labels = " + ".join(name for _, name in known)
-                fragment_labels = ", ".join(fragments)
-                if QMessageBox.question(
-                    self,
-                    "붙어 있는 종목명 일부 확인",
-                    f"{source_label}의 '{original_name}'에서 다음 종목은 확인됐습니다.\n\n{known_labels}\n\n"
-                    f"남은 이름만 다시 찾습니다: {fragment_labels}\n\n계속할까요?",
-                ) == QMessageBox.StandardButton.Yes:
-                    resolved.extend(MatchedThemeRow(code, name, themes) for code, name in known)
-                    for fragment in fragments:
-                        candidate, cancelled = choose_similar_stock(self, self._stock_lookup, fragment, themes)
-                        if cancelled:
-                            return (), True
-                        if candidate:
-                            code, selected_name = candidate
-                            resolved.append(MatchedThemeRow(code, selected_name, themes))
-                    continue
-            while True:
-                name, ok = QInputDialog.getText(
-                    self,
-                    "키움 종목명 확인",
-                    f"{source_label}에서 읽은 '{original_name}' 종목명이 현재 키움 종목 목록에 없습니다.\n"
-                    f"이 종목이 있던 테마: {', '.join(themes) or '없음'}\n"
-                    "OCR 오인식이거나 키움의 실제 표기와 다른 이름일 수 있습니다.\n"
-                    "키움에 표시되는 정확한 종목명으로 수정하세요. 비워 두면 이번 업데이트에서 제외합니다.",
-                    text=original_name,
-                )
-                if not ok:
-                    return (), True
-                name = name.strip()
-                if not name:
-                    break
-                code = self._stock_lookup.find_code_by_name(name)
-                if code:
-                    if original_name != name and hasattr(self._stock_lookup, "save_alias"):
-                        self._stock_lookup.save_alias(original_name, code)
-                    resolved.append(MatchedThemeRow(code, name, tuple(getattr(row, "themes", ()))))
-                    break
-                candidate, cancelled = choose_similar_stock(self, self._stock_lookup, name, themes)
-                if candidate:
-                    code, selected_name = candidate
-                    if original_name != selected_name and hasattr(self._stock_lookup, "save_alias"):
-                        self._stock_lookup.save_alias(original_name, code)
-                    resolved.append(MatchedThemeRow(code, selected_name, tuple(getattr(row, "themes", ()))))
-                    break
-                if cancelled:
-                    return (), True
-                break
-                choice = QMessageBox(self)
-                choice.setWindowTitle("종목명 확인")
-                choice.setText(f"'{name}'은(는) 저장된 전체 상장종목 목록에서 찾지 못했습니다.")
-                choice.setInformativeText("다시 입력하거나, 이번 종목만 제외하고 나머지 업데이트를 계속할 수 있습니다.")
-                retry = choice.addButton("다시 입력", QMessageBox.ButtonRole.AcceptRole)
-                skip = choice.addButton("이번 종목 무시", QMessageBox.ButtonRole.DestructiveRole)
-                cancel_all = choice.addButton("전체 취소", QMessageBox.ButtonRole.RejectRole)
-                choice.exec()
-                if choice.clickedButton() is skip:
-                    break
-                if choice.clickedButton() is cancel_all:
-                    return (), True
-        return tuple(resolved), False
 
     def _restore_columns(self) -> bool:
         return self._column_controller.restore()
@@ -5209,23 +4957,30 @@ class MainWindow(QMainWindow):
             self._set_connected_api_status()
         self.statusBar().showMessage("실시간 체결 연결에 실패했습니다. 새로고침으로 다시 시도하세요.")
 
+    def _on_realtime_gap(self, dropped: object) -> None:
+        """A subscriber overflow makes the current aggregate incomplete."""
+        if type(dropped) is not int or dropped <= 0:
+            return
+        self._top20_collector.mark_gap()
+        self._realtime_diagnostics["gap_events"] = int(self._realtime_diagnostics.get("gap_events", 0)) + 1
+        self._realtime_diagnostics["dropped_events"] = int(self._realtime_diagnostics.get("dropped_events", 0)) + dropped
+        self._minute_aggregator.reset_cumulative_baselines(
+            self._realtime_subscription.current_codes
+        )
+        logger.warning("NAS 실시간 이벤트 %s건 누락; 현재 TOP20 구간을 부분 자료로 표시", dropped)
+        self.statusBar().showMessage(
+            f"실시간 체결 {dropped:,}건 누락 · 현재 TOP20 구간은 부분 자료입니다.", 10_000,
+        )
+
     def changeEvent(self, event: QEvent) -> None:
         """독립 뉴스 프로세스의 최소화 상태만 메인창과 맞춘다."""
         super().changeEvent(event)
-        if not self._news_process_manager.is_running:
+        if not hasattr(self, "_news_window"):
             return
         if event.type() == QEvent.Type.WindowStateChange:
-            if self.isMinimized():
-                self._news_restore_sync_timer.stop()
-                self._news_restore_sync_pending = False
-                self._send_news_command(action="minimize")
-            else:
-                self._news_restore_sync_pending = True
-                self._send_news_command(action="restore")
-                self._news_restore_sync_timer.start()
+            self._news_window.on_window_state_change(self.isMinimized())
         elif event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
-            if not self._news_restore_sync_pending:
-                self._sync_news_window()
+            self._news_window.on_activation()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self._closing:
@@ -5269,13 +5024,13 @@ class MainWindow(QMainWindow):
                 self._mock_automation_dialog.stop()
             self._refresh_button.setEnabled(False)
             self.statusBar().showMessage("종료 중: 실행 중인 작업을 일시 중지하고 있습니다…")
-            if self._google_drive_sync is not None and self._google_drive_sync.connected and self._settings.get("google_drive_auto_upload_on_exit") == "1" and (self._google_drive_dirty or self._google_drive_debounce.isActive()):
+            if self._google_drive_sync is not None and self._google_drive_sync.connected and not self._google_drive_strict_restore_staged and self._settings.get("google_drive_auto_upload_on_exit") == "1" and (self._google_drive_dirty or self._google_drive_debounce.isActive()):
                 self._start_google_drive_sync("upload", close_after=True)
             self._request_worker_stop()
             if not self._image_theme_ocr_worker_controller.stop_for_shutdown():
                 logger.warning("OCR 보조 스레드가 강제 종료 제한시간 안에 끝나지 않았습니다.")
             if not self._running_workers():
-                self._stop_current_news_process()
+                self._news_window.stop()
                 if self._journal_command_path is not None:
                     self._stop_current_journal_process()
                 event.accept()
@@ -5286,7 +5041,7 @@ class MainWindow(QMainWindow):
         if self._running_workers():
             event.ignore()
             return
-        self._stop_current_news_process()
+        self._news_window.stop()
         if self._journal_command_path is not None:
             self._stop_current_journal_process()
         event.accept()
@@ -5460,8 +5215,8 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "_window_geometry_save_timer"):
             self._window_geometry_save_timer.start()
-        if hasattr(self, "_news_dock_timer") and self._news_window_mode().startswith("docked_"):
-            self._news_dock_timer.start()
+        if hasattr(self, "_news_window"):
+            self._news_window.schedule_geometry_sync()
         # 수동으로 열 폭을 조정한 뒤 30초 동안은 창을 어떻게 조절해도
         # 행 높이·열 너비를 모두 유지한다.
         if self._column_controller.manual_size_hold:
@@ -5475,8 +5230,8 @@ class MainWindow(QMainWindow):
         super().moveEvent(event)
         if hasattr(self, "_window_geometry_save_timer"):
             self._window_geometry_save_timer.start()
-        if hasattr(self, "_news_dock_timer") and self._news_window_mode().startswith("docked_"):
-            self._news_dock_timer.start()
+        if hasattr(self, "_news_window"):
+            self._news_window.schedule_geometry_sync()
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)

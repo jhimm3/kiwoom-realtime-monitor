@@ -14,8 +14,8 @@
 | 사용자 데이터 | `infrastructure/app_paths.py` | 설치/개발/지정 data 경로 |
 | 순위 | `application/ranking_schedule.py`, `application/ranking_execution.py`, `central_server/autonomous_top20.py` | 순위 시각·재시도·실행·NAS 독립 수집 |
 | REST | `central_server/rest_broker.py`, `infrastructure/kiwoom_rest/client.py`, `infrastructure/kiwoom_rest/remote_client.py` | 중앙 우선순위·직접/원격 경계 |
-| 실시간 | `central_server/realtime_collector.py`, `infrastructure/kiwoom_rest/realtime_worker.py`, `infrastructure/kiwoom_rest/central_realtime_worker.py` | 중앙/직접 구독·REG·장애전환 |
-| 세션 | `application/market_session_schedule.py`, `application/realtime_subscription.py` | 거래일별 venue/phase·구독 대상 |
+| 실시간 | `central_server/realtime_collector.py`, `infrastructure/kiwoom_rest/realtime.py`, `infrastructure/kiwoom_rest/realtime_worker.py`, `infrastructure/kiwoom_rest/central_realtime_worker.py` | 중앙/직접 구독·REG·장애전환, 0s 장운영(215) 원본 이벤트 파싱·중계 |
+| 세션 | `application/market_session_schedule.py`, `application/realtime_subscription.py`, `central_server/autonomous_top20.py` | 거래일별 venue/phase·구독 대상, NAS 장후 보완은 저장된 0s 거래일 증거가 있을 때만 예약. 공식 연간 휴장 달력 자동 동기화는 미구현 |
 | 봉·관측 | `central_server/minute_bars.py`, `central_server/market_ingest.py`, `central_server/market_observations.py` | 1초/1분 집계·TR 적재·revision 의미 |
 | TOP20 | `application/top20_trade_value_collector.py`, `presentation/top20_trade_value.py` | 코호트·지수·차트 |
 | 로컬 쓰기 | `infrastructure/persistence/market_cache_writer.py`, `infrastructure/persistence/minute_bar_repository.py` | 비동기 직렬 쓰기·봉 저장 |
@@ -29,6 +29,7 @@
 | 뉴스 입력·작업 | `central_server/news_sources.py`, `central_server/news_service.py`, `central_server/news_jobs.py`, `infrastructure/naver_stock_news.py` | Naver 검색·증권 종목 목록, TOP20 수집 범위와 BODY/RULE/AI 단계 |
 | 과거 뉴스 PC 전처리·시황 업로드 | `scripts/preprocess_historical_news_locally.py`, `scripts/probe_historical_backfill.py`, `scripts/run_naver_stock_market_news.py`, `scripts/import_prepared_historical_news_to_nas.py`, `scripts/historical_collection_monitor.py`, `central_server/database.py` | 두 원천 수집기가 기사별 BODY/RULE 준비를 병렬 실행해 PC 원장에 저장하고, 준비된 결과만 불변 스냅샷으로 NAS 정상 뉴스 테이블에 적재 |
 | 종목 뉴스 조회 | `central_server/app.py`, `central_server/database.py`, `infrastructure/central_news_client.py`, `presentation/news_workers.py`, `presentation/stock_news_window.py`, `infrastructure/persistence/stock_news_repository.py` | NAS 저장분 200건 페이지, 스크롤 추가 조회, PC 직접 연결 보존 건수 |
+| 뉴스창 실행·명령 | `presentation/news_window_coordinator.py`, `presentation/process_control.py`, `presentation/main_window.py` | 독립 뉴스 프로세스·명령 번호·창 복원 상태는 coordinator가 소유하고 메인 표는 사용자 입력만 전달 |
 | 네이버 증권 시황 피드 | `infrastructure/naver_stock_market_news.py`, `central_server/market_news_sources.py`, `scripts/run_naver_stock_market_news.py`, `scripts/historical_collection_monitor.py` | FLASH/WORLD 날짜별 응답·발행시각, NAS 독립 cursor 수집, 역사 원응답 보존·진행 확인·재시작/정지 |
 | 시장 뉴스 화면 | `presentation/market_news_window.py`, `news_process.py`, `infrastructure/central_news_client.py`, `central_server/database.py` | TOP20 앞 뉴스 진입, 공통/속보/해외 탭. NAS 저장 소스 조회와 PC 직접 연결의 화면 요청을 분리 |
 | 후보 기업행동 백필 | `scripts/collect_historical_market_context.py`, `scripts/daishin_market_context_backfill.ps1`, `scripts/classify_historical_stock_adjustments.py`, `scripts/collect_candidate_event_disclosures.py`, `scripts/collect_candidate_exchange_disclosures.py`, `infrastructure/dart_disclosures.py` | 주도후보에 한정한 CREON 누적 수정계수 경계와 상장·거래량 0·거래 재개 후보 날짜 수집, DART 사건 인접 및 전체 거래소 공시 목록 연결, 원응답·재개·NAS 게시 gate |
@@ -37,6 +38,9 @@
 | AI 공급자 | `infrastructure/news_ai.py` | 기존 외부 공급자 연동 |
 | 테마 | `infrastructure/persistence/theme_repository.py`, `application/theme_matching.py`, `application/theme_preview.py` | 프로필·종목연결·가져오기·미리보기, 프로필별 대표명/분리 결정 재적용 |
 | 테마 동기화 | `infrastructure/central_theme_sync.py` | 로컬 편집·pending·retry·NAS 스냅샷 |
+| 설정·테마·뉴스 AI·일지 백업 파일 | `infrastructure/persistence/settings_backup.py`, `infrastructure/persistence/theme_backup.py`, `infrastructure/persistence/news_ai_backup.py`, `infrastructure/persistence/journal_backup.py`, `infrastructure/persistence/backup_file.py` | JSON과 일지 SQLite 백업 생성·복원, 사용자 선택 파일의 임시 저장 후 교체 |
+| Google Drive 백업·엄격 복원 | `infrastructure/persistence/google_drive_sync.py`, `infrastructure/persistence/strict_restore.py`, `infrastructure/persistence/settings_backup.py`, `infrastructure/persistence/theme_backup.py`, `infrastructure/persistence/news_ai_backup.py`, `presentation/google_drive_worker_controller.py`, `bootstrap.py` | v2 세대별 불변 구성요소를 manifest로 마지막 게시하고 ID/hash/크기를 검증하며 v1 별칭을 호환 갱신한다. 설정·테마는 같은 SQLite 읽기 snapshot에서 만든다. 명시 복원은 검증 자료를 보관해 다음 시작 전 공통 프로세스 잠금 아래 적용하며 중단 시 원상복구한다. 다른 DB 간 동시시점·Drive 동시 편집 병합은 보장하지 않는다 |
+| 테마 다건 가져오기 | `presentation/theme_dialogs.py`, `presentation/main_window.py`, `presentation/settings_request_worker.py`, `infrastructure/persistence/theme_repository.py` | Excel 파일 선택·검토·저장은 테마 관리창이 소유한다. 이미지 OCR 결과의 행 수정·종목명 확인·미리보기는 테마 대화상자 코드가 맡고, OCR 작업자 수명과 승인 뒤 비동기 저장은 메인창이 맡는다. 두 경로 모두 저장 성공 뒤 화면에 반영 |
 | 테마/시장 연구 | `application/theme_leadership.py`, `application/market_research_features.py`, `application/context_candidates.py` | 대장·시장 특징·맥락 가설 |
 | 시점 근거 | `domain/snapshot_provenance.py`, `application/trade_snapshot_context.py` | 당시 관측과 사후 보완 구분 |
 | 일지 | `presentation/journal_workers.py`, `infrastructure/central_journal_sync.py` | 일지 조회/분석·계좌 scope 동기화 |

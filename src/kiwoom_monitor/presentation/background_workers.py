@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QWidget
 from kiwoom_monitor.infrastructure.app_paths import AppPaths
 from kiwoom_monitor.infrastructure.persistence.google_drive_sync import (
     GoogleDriveSyncError,
+    GoogleDriveSyncResult,
     GoogleDriveSyncService,
 )
 from kiwoom_monitor.infrastructure.update_planner import UpdateStep, build_update_plan
@@ -23,9 +24,9 @@ from kiwoom_monitor.presentation.app_metadata import APP_VERSION
 class GoogleDriveSyncWorker(QThread):
     """Drive 통신만 별도 스레드에서 실행해 표·설정 창을 멈추지 않는다."""
 
-    completed = Signal(str)
+    completed = Signal(object)
     metadata_received = Signal(str)
-    failed = Signal(str)
+    failed = Signal(object)
 
     def __init__(self, service: GoogleDriveSyncService, operation: str, target: str, interactive: bool = False, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -41,10 +42,16 @@ class GoogleDriveSyncWorker(QThread):
             if self._operation == "metadata":
                 self.metadata_received.emit(self._service.latest_modified_time(interactive=self._interactive, target=self._target))
                 return
-            action = self._service.upload if self._operation == "upload" else self._service.download
+            action = (
+                self._service.upload if self._operation == "upload" else
+                self._service.stage_restore if self._operation == "restore" else
+                self._service.download
+            )
             self.completed.emit(action(interactive=self._interactive, target=self._target))
         except GoogleDriveSyncError as error:
-            self.failed.emit(str(error))
+            self.failed.emit(GoogleDriveSyncResult(
+                self._operation, "failed", str(error), error.local_changes_applied,
+            ))
 
 
 class UpdateCheckWorker(QThread):

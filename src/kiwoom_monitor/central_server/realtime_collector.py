@@ -13,7 +13,8 @@ from websockets.asyncio.client import connect
 from kiwoom_monitor.application.market_session_schedule import realtime_subscription_target
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
-    parse_account_balance_changes, parse_market_index_ticks, parse_order_executions,
+    parse_account_balance_changes, parse_market_index_ticks, parse_market_operation_ticks,
+    parse_order_executions,
     parse_program_trade_ticks, parse_stock_price_references, parse_trade_ticks,
 )
 from kiwoom_monitor.domain.market_data_contract import MarketDataObservation
@@ -528,6 +529,11 @@ class CentralRealtimeCollector:
             await self._notify_market_event_boundaries()
 
     def _publish_parsed(self, message: dict[str, Any]) -> None:
+        for tick in parse_market_operation_ticks(message):
+            self._hub.publish({
+                "type": "market_operation",
+                "payload": asdict(tick),
+            })
         if (str(message.get("trnm", "")).upper() == "REAL"
                 and self._account_event_handler is not None and self._account_scope_resolver is not None):
             for row in message.get("data") or ():
@@ -857,6 +863,7 @@ class CentralRealtimeCollector:
         groups["3000"] = [
             {"item": [""], "type": ["00", "04"]},
             {"item": ["001", "101"], "type": ["0J", "0U"]},
+            {"item": [""], "type": ["0s"]},
             *([{"item": [], "type": ["1h"]}]
               if session == "KRX" and self._market_events is not None else []),
         ]

@@ -20,12 +20,14 @@ from pathlib import Path
 ROOT = Path("/app/data/maintenance")
 IMPORTER = ROOT / "import_prepared_historical_news_to_nas.py"
 STATUS = ROOT / "prepared-news-import-status.json"
-LOG = ROOT / "prepared-news-import-20260924.log"
+LOG = ROOT / "prepared-news-import-20260925.log"
 SNAPSHOTS = (
     ("search", ROOT / "prepared-news-batch-20260924-1427.sqlite3",
      "0cd2ac49ff1f176dad2ba1dcfb72d4b759c0d450bf3e71372f9be44d425f1141"),
     ("market", ROOT / "prepared-market-news-snapshot-20260924.sqlite3",
      "904fd54ce98384bb7f3b9f560354deb276f5a9d0a3a6b08b45643c776c267e2c"),
+    ("search-current", ROOT / "prepared-news-20260925T2215.sqlite3",
+     "b01f8680fce196a856095ae573970eb51b3e1190f010e7d664c06b08b078e765"),
 )
 
 

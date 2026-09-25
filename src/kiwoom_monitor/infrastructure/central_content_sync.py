@@ -134,9 +134,11 @@ class CentralContentSyncService:
 
     def apply_theme_snapshot(
         self, main_database_path: Path, collections: dict[str, list[dict[str, Any]]],
+        *, expected_revision: str | None = None,
     ) -> CentralContentSyncResult:
         """이미 읽은 중앙 테마 스냅샷을 로컬 DB에 적용한다."""
-        counts = self._write_themes(main_database_path, collections)
+        counts = self._write_themes(main_database_path, collections,
+                                    expected_revision=expected_revision)
         return CentralContentSyncResult(
             theme_profiles=counts.get("theme_profile", 0),
             theme_stocks=counts.get("theme_stock", 0),
@@ -477,10 +479,21 @@ class CentralContentSyncService:
         return counts
 
     @staticmethod
-    def _write_themes(path: Path, collections: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+    def _write_themes(path: Path, collections: dict[str, list[dict[str, Any]]], *,
+                      expected_revision: str | None = None) -> dict[str, int]:
         counts = {"theme_profile": 0, "theme_stock": 0, "theme_metadata": 0}
         if not path.is_file():
             return counts
+        if expected_revision is not None:
+            metadata = collections.get("theme_metadata", [])
+            document = metadata[-1].get("document") if metadata else None
+            if not isinstance(document, dict):
+                raise ValueError("원격 테마 전체 스냅샷이 없어 로컬 테마를 교체할 수 없습니다.")
+            ThemeBackupService(path).import_document(
+                document, expected_revision=expected_revision,
+            )
+            return {"theme_profile": len(collections["theme_profile"]),
+                    "theme_stock": len(collections["theme_stock"]), "theme_metadata": 1}
         connection = sqlite3.connect(path)
         try:
             if not {"theme_profiles", "profile_themes", "profile_stock_themes"}.issubset(_table_names(connection)):

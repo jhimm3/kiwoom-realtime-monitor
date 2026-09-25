@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import tempfile
 from contextlib import closing
 from pathlib import Path
 
@@ -15,8 +17,15 @@ class JournalBackupService:
 
     def export_to(self, target: Path) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(self._database_path)) as source, closing(sqlite3.connect(target)) as destination:
-            source.backup(destination)
+        descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        os.close(descriptor)
+        temporary = Path(name)
+        try:
+            with closing(sqlite3.connect(self._database_path)) as source, closing(sqlite3.connect(temporary)) as destination:
+                source.backup(destination)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def import_from(self, source_path: Path) -> None:
         if not source_path.is_file():

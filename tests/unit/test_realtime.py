@@ -5,7 +5,8 @@ import unittest
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
-    parse_account_balance_changes, parse_market_index_ticks, parse_order_executions,
+    parse_account_balance_changes, parse_market_index_ticks, parse_market_operation_ticks,
+    parse_order_executions,
     parse_program_trade_ticks, parse_stock_price_references, parse_trade_ticks,
     parse_vi_events,
 )
@@ -25,9 +26,23 @@ class RealtimeTests(unittest.TestCase):
         self.assertEqual((), parse_order_executions(message))
         self.assertEqual((), parse_account_balance_changes(message))
         self.assertEqual((), parse_market_index_ticks(message))
+        self.assertEqual((), parse_market_operation_ticks(message))
         self.assertEqual((), parse_program_trade_ticks(message))
         self.assertEqual((), parse_stock_price_references(message))
         self.assertEqual((), parse_vi_events(message))
+
+    def test_reads_0s_market_operation_code_without_reinterpreting_it(self) -> None:
+        ticks = parse_market_operation_ticks({
+            "trnm": "REAL",
+            "data": [{"type": "0s", "item": "", "values": {
+                "215": "3", "20": "090000", "214": "000000",
+            }}],
+        })
+
+        self.assertEqual(1, len(ticks))
+        self.assertEqual(("3", "090000", "000000"), (
+            ticks[0].status_code, ticks[0].trade_time, ticks[0].remaining_time,
+        ))
 
     def test_reads_0g_price_limit_and_reference_as_one_basis(self) -> None:
         values = parse_stock_price_references({

@@ -9,7 +9,7 @@
 ### 소스 빌드 기준과 실제 배포 확인
 
 현재 소스의 빌드 식별자는
-`2026.09.25-top20-quality-lock-v1`이다. 이는 작업본의 기준이며 실제 NAS에
+`2026.09.25-audit-b01-b07-v1`이다. 이는 작업본의 기준이며 실제 NAS에
 배포됐다는 뜻은 아니다. 이후 배포할 때는 작업본의 `SERVER_BUILD`, Compose 이미지
 태그, Dockerfile 검증 문자열을 함께 확인한다.
 프로젝트 소스를 먼저 동기화하고 Container Manager에서 서버 이미지를 다시 빌드한다.
@@ -136,6 +136,8 @@ Container Manager 프로젝트를 중지하지 않고 PostgreSQL의 `pg_dump` �
 DB 백업과 비밀 복구 백업을 구분한다. `.env`와 `server-secrets`의 master.key·암호문은
 일반 코드/DB 백업에 섞지 않고 접근이 제한된 별도 복구 백업으로 관리한다.
 계좌 신원 HMAC 키와 vault 암호화 master.key를 서로 대신 사용하지 않는다.
+
+과거 뉴스 BODY/RULE 작업 선점의 정렬 부하가 확인된 PostgreSQL에는 `scripts/create_news_claim_order_index.py`를 서버 컨테이너의 `/app/data/maintenance/`에 배치한 뒤 한 번 실행한다. 이 도구는 `CREATE INDEX CONCURRENTLY`로 `idx_central_news_jobs_claim_order`를 만들며 앱 스키마 버전은 변경하지 않는다. 마지막 출력의 `state=created` 또는 `already_ready`와 `valid=true`를 확인하고, `scripts/measure_news_claim_order_index.py`로 실제 선점 계획이 새 인덱스를 쓰는지 검증한다. `state=building`은 완료가 아니다. 인덱스 생성이 중단돼 무효 인덱스가 남으면 원인을 확인하기 전 자동 재실행하거나 삭제하지 않는다. 운영 처리량과 다른 쓰기 작업의 지연은 별도로 비교한다.
 
 ## 업데이트
 

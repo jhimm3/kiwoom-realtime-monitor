@@ -59,6 +59,7 @@ from kiwoom_monitor.application.research_queue import (
     should_notify_research_result,
 )
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
+from kiwoom_monitor.infrastructure.persistence.strict_restore import StrictRestoreCoordinator
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient, CentralContentHttpError, CentralContentUnavailableError
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 from scripts.export_research_dataset import prepare_campaign_nas_input
@@ -2021,6 +2022,17 @@ def execute_independent_comparison(request: IndependentComparisonRequest, *, can
 
 
 def main(argv: list[str] | None = None) -> int:
+    data_dir = os.environ.get("KIWOOM_DESKTOP_DATA_DIR")
+    if data_dir:
+        root = Path(data_dir)
+        with StrictRestoreCoordinator(
+            root / "monitor.sqlite3", root / "news.sqlite3",
+        ).enter_child():
+            return _run_research_process(argv)
+    return _run_research_process(argv)
+
+
+def _run_research_process(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="별도 프로세스에서 고정 연구 요청을 실행합니다.")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--request", type=Path)

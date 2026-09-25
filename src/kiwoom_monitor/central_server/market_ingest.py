@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, time as clock_time, timedelta
+from time import monotonic
 from typing import Any, Callable
 
 from kiwoom_monitor.application.market_session_schedule import KRX_AFTER_MARKET_EFFECTIVE_DATE
@@ -43,6 +44,11 @@ def fundamentals_document_is_current(
     return observed_at.astimezone(KST).date() == trading_day
 
 
+def nxt_eligibility_document_is_current(document: object, trading_day: date) -> bool:
+    """NXT eligibility is a dated observation, not a permanent stock attribute."""
+    return fundamentals_document_is_current(document, trading_day)
+
+
 class MarketDataIngestor:
     """키움 차트 조회 응답을 중앙 표준 분봉·일봉으로 저장한다."""
 
@@ -74,11 +80,13 @@ class MarketDataIngestor:
             self._ingest_nxt_eligibility(body, payload)
 
     def _ingest_minutes(self, body: dict[str, Any], payload: dict[str, Any]) -> None:
+        total_started = monotonic()
         raw_code = str(body.get("stk_cd", "")).strip()
         code, market = _code_and_market(raw_code)
         records = payload.get("stk_min_pole_chart_qry", [])
         if not code or not isinstance(records, list):
             return
+        prepare_started = monotonic()
         base_date = _base_date(body.get("base_dt"))
         now = self._now()
         values: list[dict[str, Any]] = []
@@ -120,11 +128,14 @@ class MarketDataIngestor:
                 value_kind=DataValueKind.ESTIMATED,
             )
             observations.append((bar_observation_key(observation), observation))
+        prepare_ms = round((monotonic() - prepare_started) * 1000)
+        metadata_read_ms = 0
         if values:
             first_day = min(str(value["trading_date"]) for value in values)
             last_day = max(str(value["trading_date"]) for value in values)
             start = datetime.fromisoformat(first_day).replace(tzinfo=KST)
             end = datetime.fromisoformat(last_day).replace(tzinfo=KST) + timedelta(days=1)
+            metadata_started = monotonic()
             actual_keys = {
                 item.observation_key
                 for item in self._store.load_market_data_metadata_range(
@@ -132,6 +143,7 @@ class MarketDataIngestor:
                 )
                 if item.metadata.value_kind == DataValueKind.ACTUAL
             }
+            metadata_read_ms = round((monotonic() - metadata_started) * 1000)
             pairs = tuple(
                 (value, observation)
                 for value, observation in zip(values, observations)
@@ -139,7 +151,10 @@ class MarketDataIngestor:
             )
             values = [pair[0] for pair in pairs]
             observations = [pair[1] for pair in pairs]
+        write_started = monotonic()
         self._store.replace_minute_bars(values, observations=observations)
+        bar_write_ms = round((monotonic() - write_started) * 1000)
+        compare_started = monotonic()
         try:
             self._record_sor_trade_value_comparisons(
                 code, market, comparison_values, now,
@@ -147,6 +162,16 @@ class MarketDataIngestor:
         except Exception:
             # 비교 진단 실패가 원본 분봉 저장 성공을 되돌리면 안 된다.
             logger.exception("SOR/조회 분봉 거래대금 비교 기록 실패: %s %s", code, market)
+        compare_ms = round((monotonic() - compare_started) * 1000)
+        total_ms = round((monotonic() - total_started) * 1000)
+        if total_ms >= 1000:
+            logger.warning(
+                "slow market minute ingest api_id=ka10080 code=%s market=%s "
+                "received_bars=%d stored_bars=%d prepare_ms=%d metadata_read_ms=%d "
+                "bar_write_ms=%d sor_compare_ms=%d total_ms=%d",
+                code, market, len(comparison_values), len(values), prepare_ms,
+                metadata_read_ms, bar_write_ms, compare_ms, total_ms,
+            )
 
     def _record_sor_trade_value_comparisons(
         self, code: str, market: str, values: list[dict[str, Any]], now: datetime,

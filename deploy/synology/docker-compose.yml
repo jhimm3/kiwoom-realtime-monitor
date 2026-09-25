@@ -15,7 +15,7 @@ services:
       retries: 10
 
   server:
-    image: kiwoom-monitor-server:2026.09.25-top20-quality-lock-v1
+    image: kiwoom-monitor-server:2026.09.26-market-ingest-db-timing-v1
     build:
       context: ../..
       dockerfile: deploy/synology/server.Dockerfile

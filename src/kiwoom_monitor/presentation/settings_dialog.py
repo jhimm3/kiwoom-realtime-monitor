@@ -55,7 +55,7 @@ def selected_high_cycle_periods(value: str) -> tuple[str, ...]:
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None, drive_client_importer: Callable[[], None] | None = None, update_checker: Callable[[], None] | None = None, journal_backup_exporter: Callable[[], None] | None = None, journal_backup_importer: Callable[[], None] | None = None, news_api_settings_opener: Callable[[], None] | None = None, shadow_settings_opener: Callable[[], None] | None = None, research_opener: Callable[[], None] | None = None, mock_automation_opener: Callable[[], None] | None = None) -> None:
+    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_restorer: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None, drive_client_importer: Callable[[], None] | None = None, update_checker: Callable[[], None] | None = None, journal_backup_exporter: Callable[[], None] | None = None, journal_backup_importer: Callable[[], None] | None = None, news_api_settings_opener: Callable[[], None] | None = None, shadow_settings_opener: Callable[[], None] | None = None, research_opener: Callable[[], None] | None = None, mock_automation_opener: Callable[[], None] | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
         self._save_request: SettingsRequestWorker | None = None
@@ -80,6 +80,7 @@ class SettingsDialog(QDialog):
         self._stock_lookup = stock_lookup
         self._drive_connector = drive_connector
         self._drive_downloader = drive_downloader
+        self._drive_restorer = drive_restorer
         self._drive_uploader = drive_uploader
         self._drive_disconnector = drive_disconnector
         self._drive_status = drive_status
@@ -558,6 +559,11 @@ class SettingsDialog(QDialog):
                 download = QPushButton("지금 다운로드")
                 download.clicked.connect(self._drive_downloader)
                 manage_form.addRow("가져오기", download)
+            if self._drive_restorer is not None:
+                restore = QPushButton("다음 실행 때 선택 항목 복원")
+                restore.clicked.connect(self._drive_restorer)
+                manage_form.addRow("엄격 복원", restore)
+                manage_form.addRow(QLabel("선택한 설정·테마와 저장된 뉴스 AI를 다음 시작 전에 복원합니다."))
             if self._drive_uploader is not None:
                 upload = QPushButton("지금 업로드")
                 upload.clicked.connect(self._drive_uploader)

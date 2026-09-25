@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import logging
 import ctypes
+import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -48,6 +49,9 @@ from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepo
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
 from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
 from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncService
+from kiwoom_monitor.infrastructure.persistence.strict_restore import (
+    RestoreOutcome, StrictRestoreCoordinator, StrictRestoreError,
+)
 from kiwoom_monitor.infrastructure.persistence.news_database import migrate_legacy_news_database
 from kiwoom_monitor.presentation.main_window import APP_DISPLAY_NAME, MainWindow
 
@@ -95,9 +99,32 @@ def main() -> None:
         from kiwoom_monitor.research_process import main as research_main
         index = sys.argv.index("--research-process")
         raise SystemExit(research_main(sys.argv[index + 1:]))
+    _main_with_restore_gate()
+
+
+def _main_with_restore_gate() -> None:
     _set_taskbar_app_id()
     paths = AppPaths.for_current_user()
     configure_logging(paths.log_dir)
+    try:
+        lease, restore_outcome = StrictRestoreCoordinator(
+            paths.database_path, paths.news_database_path,
+        ).enter_main()
+    except (StrictRestoreError, OSError, sqlite3.Error, ValueError) as error:
+        logging.getLogger(__name__).error("시작 전 복원 경계 확인 실패: %s", error)
+        app = QApplication.instance() or QApplication(sys.argv)
+        app.setApplicationName(APP_DISPLAY_NAME)
+        QMessageBox.critical(None, "Google Drive 복원 중단", str(error))
+        return
+    try:
+        _run_desktop(paths, restore_outcome)
+    finally:
+        lease.close()
+
+
+def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> None:
+    # UI-owned research children inherit the same data-folder lease boundary.
+    os.environ["KIWOOM_DESKTOP_DATA_DIR"] = str(paths.data_dir.resolve())
 
     database = Database(paths.database_path)
     database.initialize()
@@ -342,6 +369,9 @@ def main() -> None:
         research_data_dir=paths.data_dir / "research",
     )
     window.show()
+    if restore_outcome is not None:
+        dialog = QMessageBox.warning if restore_outcome.state == "ROLLED_BACK" else QMessageBox.information
+        QTimer.singleShot(0, lambda: dialog(window, "Google Drive 복원", restore_outcome.message))
 
     def retain_market_bars_after_startup() -> None:
         def run() -> None:

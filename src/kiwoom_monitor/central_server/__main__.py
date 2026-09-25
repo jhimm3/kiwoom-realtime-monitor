@@ -10,6 +10,7 @@ from pathlib import Path
 from .app import create_app
 from .config import CentralServerSettings
 from .server_logging import configure_server_logging
+from kiwoom_monitor.infrastructure.persistence.strict_restore import StrictRestoreCoordinator
 
 
 def main() -> None:
@@ -26,16 +27,27 @@ def main() -> None:
         Path(os.environ.get("CENTRAL_SERVER_LOG_DIR", "data/logs")),
         retention_days=_log_retention_days(),
     )
-    server = uvicorn.Server(uvicorn.Config(
-        create_app(settings), host=settings.host, port=settings.port, log_level="info",
-        proxy_headers=False, log_config=None,
-    ))
-    if arguments.parent_pid > 0:
-        threading.Thread(
-            target=_stop_with_parent, args=(server, arguments.parent_pid), daemon=True,
-            name="central-server-parent-watch",
-        ).start()
-    server.run()
+    lease = None
+    # The NAS service has no desktop parent and is not part of local restore.
+    if arguments.parent_pid > 0 and settings.database_url.startswith("sqlite:///"):
+        database_path = Path(settings.database_url.removeprefix("sqlite:///"))
+        lease = StrictRestoreCoordinator(
+            database_path, database_path.with_name("news.sqlite3"),
+        ).enter_child()
+    try:
+        server = uvicorn.Server(uvicorn.Config(
+            create_app(settings), host=settings.host, port=settings.port, log_level="info",
+            proxy_headers=False, log_config=None,
+        ))
+        if arguments.parent_pid > 0:
+            threading.Thread(
+                target=_stop_with_parent, args=(server, arguments.parent_pid), daemon=True,
+                name="central-server-parent-watch",
+            ).start()
+        server.run()
+    finally:
+        if lease is not None:
+            lease.close()
 
 
 def _log_retention_days() -> int:
