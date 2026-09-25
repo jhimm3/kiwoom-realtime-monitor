@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from time import perf_counter
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
@@ -82,6 +83,7 @@ class MockAutomationRunner:
         self._status: dict[str, Any] = {
             "state": "WARMUP", "reason": "not_started", "orders_enabled": False,
         }
+        self._latency: dict[str, Any] | None = None
         self._task: asyncio.Task[None] | None = None
         self._closing = False
         self._restore_or_bootstrap()
@@ -97,6 +99,7 @@ class MockAutomationRunner:
             "fill_cursor": self._fill_cursor,
             "strategy_state": self._state.status,
             **self._status,
+            "latency": dict(self._latency) if self._latency is not None else None,
         }
 
     async def start(self) -> None:
@@ -137,6 +140,7 @@ class MockAutomationRunner:
             await asyncio.sleep(self._poll_seconds)
 
     async def run_once(self, *, limit: int = 1000) -> int:
+        poll_started = perf_counter()
         await asyncio.to_thread(self._apply_new_fills)
         control = await asyncio.to_thread(
             self._repository.load_mock_automation_control, self._bundle.account_ref,
@@ -159,14 +163,55 @@ class MockAutomationRunner:
                 await asyncio.to_thread(self._save_checkpoint)
             return 0
 
+        load_started = perf_counter()
         observations = await asyncio.to_thread(
             self._store.load_observation_revisions_after,
             self._cursor, INPUT_KINDS, limit,
         )
+        load_ms = round((perf_counter() - load_started) * 1000)
+        max_processing_ms = 0
+        max_bar_age_ms: int | None = None
+        bar_count = 0
+        future_bar_count = 0
+        last_bar_age_ms = self._latency.get("last_bar_age_ms") if self._latency else None
+        last_bar_processed_at = self._latency.get("last_bar_processed_at") if self._latency else None
         for observation in observations:
+            observation_started = perf_counter()
             await self._consume(observation)
             self._cursor = max(self._cursor, int(observation.get("accepted_sequence", 0)))
             await asyncio.to_thread(self._save_checkpoint)
+            max_processing_ms = max(
+                max_processing_ms, round((perf_counter() - observation_started) * 1000),
+            )
+            if observation.get("kind") == "minute_bar":
+                bar_count += 1
+                processed_at = datetime.now(timezone.utc)
+                last_bar_processed_at = processed_at.isoformat()
+                try:
+                    available_at = datetime.fromisoformat(str(observation.get("available_at", "")))
+                    if available_at.tzinfo is None:
+                        raise ValueError("minute bar availability lacks timezone")
+                    age_ms = round((processed_at - available_at).total_seconds() * 1000)
+                except ValueError:
+                    age_ms = -1
+                if age_ms < 0:
+                    future_bar_count += 1
+                    last_bar_age_ms = None
+                else:
+                    last_bar_age_ms = age_ms
+                    max_bar_age_ms = max(age_ms, max_bar_age_ms or 0)
+        self._latency = {
+            "last_poll_completed_at": datetime.now(timezone.utc).isoformat(),
+            "last_poll_duration_ms": round((perf_counter() - poll_started) * 1000),
+            "load_duration_ms": load_ms,
+            "observation_count": len(observations),
+            "minute_bar_count": bar_count,
+            "max_observation_processing_ms": max_processing_ms,
+            "max_minute_bar_age_ms": max_bar_age_ms,
+            "future_or_invalid_bar_time_count": future_bar_count,
+            "last_bar_age_ms": last_bar_age_ms,
+            "last_bar_processed_at": last_bar_processed_at,
+        }
         return len(observations)
 
     async def _consume(self, observation: Mapping[str, Any]) -> None:

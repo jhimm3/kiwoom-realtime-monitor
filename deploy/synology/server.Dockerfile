@@ -12,7 +12,7 @@ RUN grep -q '/api/v1/settings/operations' /app/src/kiwoom_monitor/central_server
     && grep -q '/api/v1/diagnostics/resources' /app/src/kiwoom_monitor/central_server/app.py \
     && grep -q '/api/v1/market/latest-market-caps' /app/src/kiwoom_monitor/central_server/app.py \
     && grep -q 'def update_operational_settings' /app/src/kiwoom_monitor/central_server/news_service.py \
-    && grep -q '2026.09.22-theme-suggestion-review-v1' /app/src/kiwoom_monitor/central_server/app.py \
+    && grep -q '2026.09.25-followup-newhigh-cache-v1' /app/src/kiwoom_monitor/central_server/app.py \
     && test -f /app/src/kiwoom_monitor/central_server/credential_store.py \
     && test -f /app/src/kiwoom_monitor/central_server/credential_runtime.py \
     && test -f /app/src/kiwoom_monitor/central_server/schema_migrations.py \
@@ -45,6 +45,7 @@ RUN pip install --no-cache-dir --no-deps . \
 # 실행 시에도 이미지에 복사한 최신 소스를 우선 사용한다.
 ENV PYTHONPATH=/app/src
 RUN python -c "import kiwoom_monitor.infrastructure.kiwoom_rest.local_config as m; print(m.__file__)"
+RUN python -c "from kiwoom_monitor.central_server.database_codec import FIVE_MINUTE_BAR_COLUMNS; from kiwoom_monitor.central_server.app import create_app; print('central server import ok', len(FIVE_MINUTE_BAR_COLUMNS))"
 
 EXPOSE 8787
 CMD ["python", "-m", "kiwoom_monitor.central_server"]

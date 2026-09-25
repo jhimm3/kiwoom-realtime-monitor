@@ -364,12 +364,19 @@ def _page_items(
     items: list[StockNewsItem], catalog: tuple[tuple[str, str], ...],
     processing_excluded_providers: tuple[str, ...] = (),
     filter_stats: dict[str, int] | None = None,
+    *, retain_market_articles: bool = False,
 ) -> list[dict[str, Any]]:
     result = []
     for item in items:
+        if retain_market_articles and (not str(item.title or "").strip()
+                                       or not str(item.link or "").strip()
+                                       or item.published_at is None):
+            if filter_stats is not None:
+                filter_stats["invalid_market_article"] = filter_stats.get("invalid_market_article", 0) + 1
+            continue
         document = _article_document(item)
         targets = _targets(item, catalog)
-        skip_reason = _storage_skip_reason(item, targets)
+        skip_reason = "" if retain_market_articles else _storage_skip_reason(item, targets)
         if skip_reason:
             if filter_stats is not None:
                 filter_stats[skip_reason] = filter_stats.get(skip_reason, 0) + 1

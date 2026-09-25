@@ -199,12 +199,13 @@ class BundleExecutionTests(unittest.TestCase):
             second = child(root, date(2026, 9, 15), rows_for(date(2026, 9, 15), count=0))
             write_frozen_research_bundle(root, (first, second))
             seen = []
-            advance = ResearchReplayCursor.advance
-            def record(cursor, through):
-                bars, universe = advance(cursor, through)
-                seen.append([bar.revision_id for bar in bars] + [frame.revision_id for frame in universe])
-                return bars, universe
-            with patch.object(ResearchReplayCursor, 'advance', new=record):
+            advance = ResearchReplayCursor.advance_for_observation
+            def record(cursor, observation):
+                current, bars, universe = advance(cursor, observation)
+                seen.append([bar.revision_id for bar in cursor.latest.values()]
+                            + [frame.revision_id for frame in universe])
+                return current, bars, universe
+            with patch.object(ResearchReplayCursor, 'advance_for_observation', new=record):
                 run(load_research_input(root, session_profile=PROFILE), root, 'correction')
             self.assertNotIn('correction', seen[2])
             self.assertIn(original['revision_id'], seen[2])

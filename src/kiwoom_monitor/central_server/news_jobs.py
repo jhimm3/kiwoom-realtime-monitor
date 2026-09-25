@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import suppress
+from dataclasses import asdict
 from time import time
 from typing import Any, Callable
 
@@ -13,8 +13,9 @@ from kiwoom_monitor.application.news_rules import (
     grouped_candidate_identities,
     rule_input_hash,
 )
+from kiwoom_monitor.application.news_analysis import assess_stock_news, extractive_news_summary
 from kiwoom_monitor.domain.news_observation import ARTICLE_BODY_EXTRACTOR_VERSION
-from kiwoom_monitor.infrastructure.article_text import clean_article_text, fetch_article_text
+from kiwoom_monitor.infrastructure.article_text import clean_article_text, fetch_article_text_with_metadata
 
 
 LOGGER = logging.getLogger(__name__)
@@ -22,16 +23,21 @@ LOGGER = logging.getLogger(__name__)
 
 class NewsJobRunner:
     def __init__(self, store: Any, *, ai_service: Any = None,
-                 fetcher: Callable[..., str] = fetch_article_text,
+                 fetcher: Callable[..., str | tuple[str, str]] = fetch_article_text_with_metadata,
                  poll_seconds: float = 1.0, body_timeout: float = 15.0,
-                 ai_timeout: float = 90.0, busy_pause_seconds: float = 1.0) -> None:
+                 ai_timeout: float = 90.0, busy_pause_seconds: float = 1.0,
+                 parallelism: int = 1) -> None:
         self._store, self._ai_service, self._fetcher = store, ai_service, fetcher
         self._poll_seconds = max(0.05, float(poll_seconds))
         self._busy_pause_seconds = max(0.01, float(busy_pause_seconds))
         self._body_timeout, self._ai_timeout = body_timeout, ai_timeout
         self._priority_stock_code = ""
         self._task: asyncio.Task[None] | None = None
+        self._tasks: tuple[asyncio.Task[None], ...] = ()
+        self._parallelism = max(1, min(3, int(parallelism)))
         self._closing = asyncio.Event()
+        self._stage_metrics: dict[str, dict[str, float]] = {}
+        self._metrics_started_at = time()
 
     def set_ai_service(self, service: Any) -> None:
         self._ai_service = service
@@ -42,22 +48,31 @@ class NewsJobRunner:
     async def start(self) -> None:
         if self._task is None:
             self._closing.clear()
-            self._task = asyncio.create_task(self._loop(), name="central-news-jobs")
+            stages = {
+                1: (None,), 2: ("BODY", "RULE"), 3: ("BODY", "BODY", "RULE"),
+            }[self._parallelism]
+            self._tasks = tuple(
+                asyncio.create_task(self._loop(stage), name=f"central-news-jobs-{index + 1}")
+                for index, stage in enumerate(stages)
+            )
+            self._task = self._tasks[0]
 
     async def close(self) -> None:
         self._closing.set()
-        task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        tasks, self._tasks = self._tasks, ()
+        self._task = None
+        for task in tasks:
+            await task
 
-    async def run_once(self) -> int:
+    async def run_once(self, *, preferred_stage: str = "") -> int:
         jobs = await asyncio.to_thread(
             self._store.claim_news_jobs, limit=1,
             priority_stock_code=self._priority_stock_code,
+            **({"preferred_stage": preferred_stage} if preferred_stage else {}),
         )
         for job in jobs:
+            started_at = time()
+            failed = False
             try:
                 if job["stage"] == "BODY":
                     output_ref = await self._run_body(job)
@@ -71,6 +86,7 @@ class NewsJobRunner:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                failed = True
                 output_ref = ""
                 if job["stage"] == "BODY" and int(job["attempts"]) >= 3:
                     output_ref = await asyncio.to_thread(self._store.save_news_body_revision, {
@@ -84,7 +100,35 @@ class NewsJobRunner:
                     self._store.retry_news_job, job["job_key"], str(error), time() + delay,
                     output_ref,
                 )
+            finally:
+                self._record_stage(job, started_at, failed)
         return len(jobs)
+
+    def _record_stage(self, job: dict[str, Any], started_at: float, failed: bool) -> None:
+        stage = str(job.get("stage") or "UNKNOWN")
+        metrics = self._stage_metrics.setdefault(stage, {
+            "count": 0, "failed": 0, "elapsed_ms": 0, "max_ms": 0,
+            "wait_ms": 0, "max_wait_ms": 0,
+        })
+        elapsed_ms = max(0.0, (time() - started_at) * 1000)
+        wait_ms = max(0.0, (started_at - float(job.get("queued_at") or started_at)) * 1000)
+        metrics["count"] += 1
+        metrics["failed"] += int(failed)
+        metrics["elapsed_ms"] += elapsed_ms
+        metrics["max_ms"] = max(metrics["max_ms"], elapsed_ms)
+        metrics["wait_ms"] += wait_ms
+        metrics["max_wait_ms"] = max(metrics["max_wait_ms"], wait_ms)
+        if time() - self._metrics_started_at >= 60:
+            for name, value in self._stage_metrics.items():
+                count = int(value["count"])
+                LOGGER.info(
+                    "뉴스 작업 단계별 처리 stage=%s count=%d failed=%d elapsed_avg_ms=%.0f "
+                    "elapsed_max_ms=%.0f wait_avg_ms=%.0f wait_max_ms=%.0f",
+                    name, count, int(value["failed"]), value["elapsed_ms"] / count,
+                    value["max_ms"], value["wait_ms"] / count, value["max_wait_ms"],
+                )
+            self._stage_metrics.clear()
+            self._metrics_started_at = time()
 
     async def _run_body(self, job: dict[str, Any]) -> str:
         cached = await asyncio.to_thread(
@@ -94,14 +138,18 @@ class NewsJobRunner:
             return str(cached["body_revision_id"])
         payload = job["payload"]
         body = ""
+        original_published_at = ""
+        fetched_url = ""
         for url in dict.fromkeys((str(payload.get("link", "")), str(payload.get("original_link", "")))):
             if not url:
                 continue
             try:
-                body = await asyncio.wait_for(
+                fetched = await asyncio.wait_for(
                     asyncio.to_thread(self._fetcher, url, timeout_seconds=self._body_timeout),
                     timeout=self._body_timeout + 1.0,
                 )
+                body, original_published_at = fetched if isinstance(fetched, tuple) else (fetched, "")
+                fetched_url = url
                 break
             except Exception:
                 continue
@@ -110,6 +158,14 @@ class NewsJobRunner:
             body, status = str(payload.get("description") or "").strip(), "summary_only"
         if not body:
             raise ValueError("기사 본문과 검색 요약을 가져오지 못했습니다.")
+        if original_published_at:
+            await asyncio.to_thread(self._store.upsert_documents, "news_original_publication", [{
+                "owner": str(job["article_revision_id"]), "key": "published_at",
+                "document": {
+                    "published_at": original_published_at, "source_url": fetched_url,
+                    "source": "article_html", "precision": "second",
+                },
+            }])
         return await asyncio.to_thread(self._store.save_news_body_revision, {
             "article_revision_id": job["article_revision_id"],
             "extractor_version": ARTICLE_BODY_EXTRACTOR_VERSION,
@@ -156,7 +212,35 @@ class NewsJobRunner:
         cleaned_body = clean_article_text(str(body.get("body_text") or ""))
         if not cleaned_body:
             cleaned_body = str(document.get("description") or "")
-        result = classify_supply_contract(document, cleaned_body)
+        published_rows = await asyncio.to_thread(
+            self._store.load_documents, "news_original_publication", str(article["article_revision_id"]), 1,
+        )
+        original_published_at = (
+            str(published_rows[0]["document"].get("published_at") or "")
+            if published_rows and isinstance(published_rows[0].get("document"), dict) else ""
+        )
+        assessment = assess_stock_news(
+            target_name, str(document.get("title") or ""),
+            str(document.get("description") or ""),
+            article_body=cleaned_body if body.get("status") == "fulltext" else "",
+        )
+        await asyncio.to_thread(self._store.upsert_documents, "news_assessment", [{
+            "owner": target_code, "key": str(article["article_revision_id"]),
+            "document": {
+                "article_revision_id": str(article["article_revision_id"]),
+                "body_revision_id": body_revision_id,
+                "rule_version": "stock-news-assessment-v1",
+                "published_at": original_published_at or str(document.get("published_at") or ""),
+                "listing_published_at": str(document.get("published_at") or ""),
+                "original_published_at": original_published_at,
+                "published_at_source": "article_html" if original_published_at else "listing",
+                "assessment": asdict(assessment),
+                "core_sentences": list(extractive_news_summary(
+                    "", str(document.get("title") or ""), cleaned_body,
+                )) if body.get("status") == "fulltext" else [],
+            },
+        }])
+        result = None if target_code == "GLOBAL" else classify_supply_contract(document, cleaned_body)
         if result is None:
             return f"ignored:{body_revision_id}"
         recent_rows = await asyncio.to_thread(
@@ -180,10 +264,13 @@ class NewsJobRunner:
             "result": result.as_document(),
         })
 
-    async def _loop(self) -> None:
+    async def _loop(self, preferred_stage: str | None = None) -> None:
         while not self._closing.is_set():
             try:
-                processed = await self.run_once()
+                processed = await (
+                    self.run_once(preferred_stage=preferred_stage)
+                    if preferred_stage else self.run_once()
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:

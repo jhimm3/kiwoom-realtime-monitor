@@ -196,6 +196,13 @@ class AutonomousTop20Service:
             "payload": membership,
             "persistence_state": "pending",
         }
+        # The validated live projection and its KRX 0B subscription use the
+        # same in-memory codes. Neither waits for membership/entrant/index DB
+        # writes; the websocket still reports readiness only after REG ACK.
+        async with self._collector_lock:
+            update = self._advance(now)
+            self._collector.prepare(codes, now, enabled=True, collection_open=_collection_open(now))
+        self._schedule_subscription_update(day)
         persistence_started_at = time.monotonic()
         await asyncio.to_thread(
             self._store.save_dataset_snapshot,
@@ -240,15 +247,11 @@ class AutonomousTop20Service:
                 }}
                 for code in codes
             ])
-        async with self._collector_lock:
-            update = self._advance(now)
-            if update.completed is not None:
-                try:
-                    await self._save_index(update.completed)
-                except Exception as error:
-                    logger.warning("NAS TOP20 지수 저장 실패(재시도 예정): %s", error)
-            self._collector.prepare(codes, now, enabled=True, collection_open=_collection_open(now))
-        self._schedule_subscription_update(day)
+        if update.completed is not None:
+            try:
+                await self._save_index(update.completed)
+            except Exception as error:
+                logger.warning("NAS TOP20 지수 저장 실패(재시도 예정): %s", error)
         if self._tasks:
             self._schedule_fundamentals(codes, day)
             self._schedule_new_highs(now)
@@ -344,7 +347,9 @@ class AutonomousTop20Service:
                 logger.warning("NAS 순위 기준 %s 갱신 실패: %s", query_type, error)
 
     def _schedule_new_highs(self, now: datetime) -> None:
-        slot = now.strftime("%Y-%m-%dT%H:%M")
+        slot = _new_high_schedule_slot(now)
+        if not slot:
+            return
         if slot == self._last_new_high_slot:
             return
         self._last_new_high_slot = slot
@@ -1020,6 +1025,18 @@ class AutonomousTop20Service:
 def _collection_open(value: datetime) -> bool:
     current = value.time().replace(tzinfo=None)
     return value.weekday() < 5 and clock_time(8) <= current < clock_time(20)
+
+
+def _new_high_schedule_slot(value: datetime) -> str:
+    """KRX 장중 매분, 종가 반영 시간을 둔 16시 이후 한 번 갱신한다."""
+    if value.weekday() >= 5:
+        return ""
+    current = value.time().replace(tzinfo=None)
+    if clock_time(9) <= current < clock_time(15, 30):
+        return value.strftime("%Y-%m-%dT%H:%M")
+    if clock_time(16) <= current < clock_time(20):
+        return value.strftime("%Y-%m-%d:after_close")
+    return ""
 
 
 def _ranking_collection_due(value: datetime) -> bool:

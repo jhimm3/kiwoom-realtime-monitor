@@ -131,6 +131,26 @@ class SchemaMigrationTests(unittest.TestCase):
             self.assertEqual(MAIN_SCHEMA_VERSION, versions[-1][0])
             self.assertEqual("3", database.settings.get("rank_query_type"))
 
+    def test_v8_creates_news_transfer_ledger_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute(
+                    "INSERT INTO legacy_news_transfer_migrations VALUES(1,'test','2026-09-25')"
+                )
+                connection.commit()
+            Database(path).initialize()
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(
+                    ("legacy_news_transfer_ledger",),
+                    connection.execute("SELECT name FROM schema_migrations WHERE version=8").fetchone(),
+                )
+                self.assertEqual(
+                    (1, "test", "2026-09-25"),
+                    connection.execute("SELECT * FROM legacy_news_transfer_migrations").fetchone(),
+                )
+
     def test_v5_adds_theme_name_decisions_without_changing_existing_themes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

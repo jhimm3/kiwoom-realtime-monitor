@@ -202,5 +202,120 @@ class CampaignInputTests(unittest.TestCase):
         self.assertEqual(str(other.resolve()), sources[0]['root'])
 
 
+class RollingDailyInputTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        from test_research_process import _request_document
+        original = _request_document()
+        original['execution']['cost_model']['valid_to'] = '2026-09-20T00:00:00+00:00'
+        with patch('test_research_campaign_execution._request_document', return_value=original):
+            _, self.request = write_campaign_request(self.root)
+        manifest_path = self.request.dataset / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest.update(captured_range={'start': '2026-09-12T00:00:00+00:00', 'end': '2026-09-12T01:00:00+00:00'},
+                        kinds=['top20_membership', 'minute_bar'], subject='')
+        manifest_path.write_text(json.dumps(manifest))
+        self.watch = self.root / 'rolling'
+        self.watch.mkdir()
+        self.repo = ResearchRepository(self.request.database)
+        self.repo.create_campaign('c', 'rolling', ResearchCampaignPolicy())
+        self.repo.enqueue_campaign_experiment('c', self.request.search, self.request.dataset)
+        self.job = self.repo.load_campaign_jobs('c')[0]['job_id']
+        self.source_id = self.repo.save_campaign_input_source('c', self.job, self.watch, rolling_daily=True)
+        self.repo.set_campaign_desired_state('c', 'RUNNING')
+        self.claim = self.repo.claim_campaign_worker('c', owner_token='rolling-worker', lease_seconds=3600)
+        self.now = datetime.now(UTC)
+
+    def candidate(self, name, day, *, include_bar=True, subject=''):
+        path = self.watch / name
+        shutil.copytree(self.request.dataset, path)
+        start = f'2026-09-{day:02d}T00:00:00+00:00'
+        end = f'2026-09-{day:02d}T01:00:00+00:00'
+        rows = [{'ordinal': 1, 'revision_id': f'{name}-membership', 'kind': 'top20_membership',
+                 'venue': 'KRX', 'available_at': start, 'payload': {'codes': ['005930']}}]
+        if include_bar:
+            rows.append({'ordinal': 2, 'revision_id': f'{name}-bar', 'kind': 'minute_bar',
+                         'venue': 'KRX', 'available_at': f'2026-09-{day:02d}T00:02:00+00:00',
+                         'payload': {'code': '005930', 'bar_start': f'2026-09-{day:02d}T00:01:00+00:00',
+                                     'bar_end': f'2026-09-{day:02d}T00:02:00+00:00'}})
+        encoded = ''.join(json.dumps(row) + '\n' for row in rows).encode()
+        (path / 'observations.jsonl').write_bytes(encoded)
+        manifest_path = path / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest.update(dataset_id=name, captured_range={'start': start, 'end': end}, subject=subject,
+                        revision_count=len(rows), revision_ids_hash=hashlib.sha256('\n'.join(row['revision_id'] for row in rows).encode()).hexdigest(),
+                        observations_file_hash=hashlib.sha256(encoded).hexdigest())
+        manifest_path.write_text(json.dumps(manifest))
+        return path
+
+    def test_closed_new_day_registers_distinct_evaluation_without_mutating_template(self):
+        self.candidate('next-day', 13)
+        result = discover_campaign_inputs(self.repo, 'c', self.claim, now=self.now)
+        self.assertEqual(1, result['registered'])
+        new = self.repo.load_campaign_jobs('c')[1]
+        self.assertEqual('2026-09-13T00:00:00+00:00', new['request']['research_context']['evaluation']['folds'][0]['start'])
+        self.assertEqual('2026-09-12T00:00:00+00:00', self.repo.load_campaign_jobs('c')[0]['request']['research_context']['evaluation']['folds'][0]['start'])
+        self.assertEqual(0, discover_campaign_inputs(self.repo, 'c', self.claim, now=self.now + timedelta(seconds=61))['registered'])
+        self.assertEqual(2, len(self.repo.load_campaign_jobs('c')))
+
+    def test_empty_day_and_other_subject_are_excluded(self):
+        self.candidate('no-bar', 13, include_bar=False)
+        self.candidate('other-stock', 14, subject='000660')
+        result = discover_campaign_inputs(self.repo, 'c', self.claim, now=self.now)
+        self.assertEqual(0, result['registered'])
+        self.assertEqual(2, result['out_of_scope'])
+        self.assertEqual(1, len(self.repo.load_campaign_jobs('c')))
+
+    def test_expired_cost_period_does_not_register_new_day(self):
+        self.candidate('after-cost-validity', 21)
+        result = discover_campaign_inputs(self.repo, 'c', self.claim, now=self.now)
+        self.assertEqual(0, result['registered'])
+        self.assertEqual('cost_validity_does_not_cover_new_day', result['rolling_rejections'][0]['reason'])
+        self.assertEqual(1, len(self.repo.load_campaign_jobs('c')))
+
+    def test_new_manifest_cannot_relabel_old_day_bar_as_new_day_evidence(self):
+        path = self.candidate('relabeled-bar', 13)
+        rows = [json.loads(line) for line in (path / 'observations.jsonl').read_text().splitlines()]
+        rows[1]['payload']['bar_start'] = '2026-09-12T00:01:00+00:00'
+        rows[1]['payload']['bar_end'] = '2026-09-12T00:02:00+00:00'
+        encoded = ''.join(json.dumps(row) + '\n' for row in rows).encode()
+        (path / 'observations.jsonl').write_bytes(encoded)
+        manifest_path = path / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['observations_file_hash'] = hashlib.sha256(encoded).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        result = discover_campaign_inputs(self.repo, 'c', self.claim, now=self.now)
+        self.assertEqual(0, result['registered'])
+        self.assertEqual('trading_day_evidence_missing', result['rolling_rejections'][0]['reason'])
+
+    def test_independent_final_input_cannot_be_registered_as_a_new_development_day(self):
+        path = self.candidate('final-input', 13)
+        manifest_path = path / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['runtime_input_version'] = 'independent_final_holdout_input/v1'
+        manifest_path.write_text(json.dumps(manifest))
+        result = discover_campaign_inputs(self.repo, 'c', self.claim, now=self.now)
+        self.assertEqual(0, result['registered'])
+        self.assertEqual('independent_or_final_input_cannot_roll', result['rolling_rejections'][0]['reason'])
+
+    def test_same_day_cannot_be_mislabeled_as_a_new_rolling_window(self):
+        self.candidate('same-day', 12)
+        result = discover_campaign_inputs(self.repo, 'c', self.claim, now=self.now)
+        self.assertEqual(1, result['registered'])
+        new = self.repo.load_campaign_jobs('c')[1]
+        self.assertEqual('2026-09-12T00:00:00+00:00', new['request']['research_context']['evaluation']['folds'][0]['start'])
+
+    def test_rolling_accepts_nas_auto_prepare_for_development_template(self):
+        self.repo.set_campaign_desired_state('c', 'PAUSED')
+        self.repo.finish_campaign_worker('c', owner_token='rolling-worker', generation=self.claim['generation'], outcome='EXPECTED_EXIT')
+        self.repo.save_campaign_input_source('c', self.job, self.watch, rolling_daily=True,
+                                             nas_auto_prepare=True, nas_config_path=self.root / 'source.json')
+        source = self.repo.load_campaign_input_sources('c')[0]
+        self.assertEqual(1, source['nas_auto_prepare'])
+        self.assertEqual('', source['rolling_next_start'])
+
+
 if __name__ == '__main__':
     unittest.main()

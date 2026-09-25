@@ -8,6 +8,7 @@ import sys
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.request import urlopen
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_ROOT) not in sys.path:
@@ -18,6 +19,16 @@ from kiwoom_monitor.infrastructure.central_content_client import CentralContentC
 
 DEFAULT_DATABASE = Path("data/historical_intelligence.sqlite3")
 DEFAULT_DATA_SOURCE = Path("data/data_source.json")
+DEFAULT_CANDIDATES = Path(r"C:\Users\pc-1\Desktop\kiwoom_history_backfill\data\kiwoom_history.sqlite3")
+
+
+def _require_pc_search_scope(server_url: str) -> None:
+    # Older servers accept arbitrary collection_scope values but still allow
+    # NAS BODY/RULE workers to claim them. Refuse before any import write.
+    with urlopen(f"{server_url.rstrip('/')}/health", timeout=10) as response:
+        health = json.load(response)
+    if "search" not in health.get("historical_news_pc_scopes", ()):
+        raise SystemExit("NAS build does not support PC-owned historical search news; collection may continue, import is paused")
 
 
 def _initialize_ledger(database: Path) -> None:
@@ -43,9 +54,12 @@ def _initialize_ledger(database: Path) -> None:
             )
 
 
-def _pending_documents(database: Path, limit: int) -> list[tuple[dict[str, object], tuple[str, ...]]]:
-    with closing(sqlite3.connect(database)) as connection:
+def _pending_documents(database: Path, limit: int,
+                       candidates: Path) -> list[tuple[dict[str, object], tuple[str, ...]]]:
+    with closing(sqlite3.connect(database, uri=True)) as connection:
         connection.row_factory = sqlite3.Row
+        connection.execute("ATTACH DATABASE ? AS candidate_ref",
+                           (f"file:{candidates.resolve(strict=True).as_posix()}?mode=ro",))
         rows = connection.execute(
             """
             SELECT a.provider,a.office_id,a.article_id,a.title,a.summary,a.published_at,
@@ -54,10 +68,12 @@ def _pending_documents(database: Path, limit: int) -> list[tuple[dict[str, objec
             FROM news_articles AS a
             JOIN news_search_observations AS o
               ON o.provider=a.provider AND o.office_id=a.office_id AND o.article_id=a.article_id
+            JOIN candidate_ref.stocks AS s ON s.code=o.code AND s.market_code IN ('0','10')
             LEFT JOIN nas_news_imports AS i
               ON i.provider=a.provider AND i.office_id=a.office_id
              AND i.article_id=a.article_id AND i.code=o.code AND i.state='imported'
             WHERE a.training_eligible=1 AND a.article_fetch_status='published_at_found'
+              AND EXISTS (SELECT 1 FROM candidate_ref.candidate_days AS c WHERE c.code=o.code)
               AND i.article_id IS NULL
             GROUP BY a.provider,a.office_id,a.article_id,o.code
             ORDER BY a.published_at,a.office_id,a.article_id,o.code
@@ -97,7 +113,7 @@ def _pending_documents(database: Path, limit: int) -> list[tuple[dict[str, objec
             "key": identity,
             "document": document,
             "collector_id": "naver_historical_web",
-            "collection_scope": "historical_backfill",
+            "collection_scope": "historical_news_pc_backfill",
         }, (
             str(row["provider"]), str(row["office_id"]), str(row["article_id"]),
             str(row["code"]), identity, content_hash,
@@ -133,6 +149,7 @@ def main() -> int:
     )
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     parser.add_argument("--data-source", type=Path, default=DEFAULT_DATA_SOURCE)
+    parser.add_argument("--candidates", type=Path, default=DEFAULT_CANDIDATES)
     parser.add_argument("--batch-size", type=int, default=100)
     parser.add_argument("--max-batches", type=int, default=0)
     args = parser.parse_args()
@@ -142,16 +159,18 @@ def main() -> int:
         parser.error("--max-batches must be non-negative")
 
     database = args.database.resolve(strict=True)
+    candidates = args.candidates.resolve(strict=True)
     config = json.loads(args.data_source.resolve(strict=True).read_text(encoding="utf-8-sig"))
     server_url = str(config.get("server_url") or "").strip()
     access_token = str(config.get("access_token") or "").strip()
     if not server_url or not access_token:
         raise SystemExit("data source server_url/access_token is not configured")
+    _require_pc_search_scope(server_url)
     _initialize_ledger(database)
     client = CentralContentClient(server_url, access_token, timeout_seconds=60)
     imported = failed = batches = 0
     while args.max_batches == 0 or batches < args.max_batches:
-        pending = _pending_documents(database, args.batch_size)
+        pending = _pending_documents(database, args.batch_size, candidates)
         if not pending:
             break
         documents = [item[0] for item in pending]

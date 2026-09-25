@@ -193,6 +193,63 @@ class MockAutomationRunnerTests(unittest.TestCase):
 
 
 class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stop_restart_resume_consumes_only_unseen_observations(self):
+        case = MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")
+        case.setUp()
+        self.addCleanup(case.store.close)
+        control_state = {"value": "RUNNING"}
+        observations = [
+            {"kind": "top20_membership", "accepted_sequence": sequence}
+            for sequence in (1, 2, 3)
+        ]
+        loaded_after = []
+        consumed = []
+
+        def configure(runner):
+            runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+                active_spec_id=case.spec.spec_id,
+                desired_state=SimpleNamespace(value=control_state["value"]),
+            )
+
+            async def consume(observation):
+                consumed.append(observation["accepted_sequence"])
+
+            runner._consume = consume
+
+        def load_after(cursor, _kinds, _limit):
+            loaded_after.append(cursor)
+            return [value for value in observations if value["accepted_sequence"] > cursor]
+
+        case.store.load_observation_revisions_after = load_after
+        runner = MockAutomationRunner(case.store, case.bundle, case.spec)
+        configure(runner)
+        observations[:] = observations[:2]
+        self.assertEqual(2, await runner.run_once())
+        self.assertEqual([1, 2], consumed)
+        self.assertEqual(2, runner.status["input_cursor"])
+
+        control_state["value"] = "STOPPED"
+        observations.append({"kind": "top20_membership", "accepted_sequence": 3})
+        reads_before_stop = len(loaded_after)
+        self.assertEqual(0, await runner.run_once())
+        self.assertEqual(reads_before_stop, len(loaded_after))
+        self.assertEqual([1, 2], consumed)
+
+        restarted = MockAutomationRunner(case.store, case.bundle, case.spec)
+        configure(restarted)
+        self.assertEqual("STOPPED", restarted.status["state"])
+        self.assertEqual(2, restarted.status["input_cursor"])
+        self.assertEqual(0, await restarted.run_once())
+        self.assertEqual(reads_before_stop, len(loaded_after))
+
+        control_state["value"] = "RUNNING"
+        self.assertEqual(1, await restarted.run_once())
+        self.assertEqual(2, loaded_after[-1])
+        self.assertEqual([1, 2, 3], consumed)
+        self.assertEqual(3, restarted.status["input_cursor"])
+        self.assertEqual(0, await restarted.run_once())
+        self.assertEqual([1, 2, 3], consumed)
+
     async def test_idle_blocked_runner_does_not_rewrite_checkpoint_each_poll(self):
         case = MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")
         case.setUp()
@@ -202,6 +259,38 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
         revision = runner._checkpoint_revision
         await runner.run_once()
         self.assertEqual(revision, runner._checkpoint_revision)
+
+    async def test_status_measures_observation_age_without_idle_checkpoint_writes(self):
+        case = MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")
+        case.setUp()
+        self.addCleanup(case.store.close)
+        runner = MockAutomationRunner(case.store, case.bundle, case.spec)
+        runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+            active_spec_id=case.spec.spec_id,
+            desired_state=SimpleNamespace(value="RUNNING"),
+        )
+        observation = {
+            "kind": "minute_bar", "accepted_sequence": 1,
+            "available_at": (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat(),
+        }
+        case.store.load_observation_revisions_after = lambda *_args: [observation]
+
+        async def consume(_observation):
+            return None
+
+        runner._consume = consume
+        self.assertEqual(1, await runner.run_once())
+        latency = runner.status["latency"]
+        self.assertEqual(1, latency["observation_count"])
+        self.assertEqual(1, latency["minute_bar_count"])
+        self.assertGreaterEqual(latency["last_bar_age_ms"], 2000)
+        self.assertEqual(0, latency["future_or_invalid_bar_time_count"])
+        self.assertGreaterEqual(latency["last_poll_duration_ms"], latency["load_duration_ms"])
+        revision = runner._checkpoint_revision
+        case.store.load_observation_revisions_after = lambda *_args: []
+        self.assertEqual(0, await runner.run_once())
+        self.assertEqual(revision, runner._checkpoint_revision)
+        self.assertEqual(latency["last_bar_processed_at"], runner.status["latency"]["last_bar_processed_at"])
 
 
 if __name__ == "__main__":

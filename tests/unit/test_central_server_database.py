@@ -28,6 +28,7 @@ from kiwoom_monitor.central_server.central_schema import (
     CENTRAL_ACCOUNT_IDENTITY_MIGRATION_NAME,
     CENTRAL_ACCOUNT_SCOPE_ALIAS_MIGRATION_NAME,
     CENTRAL_MINUTE_BAR_REVISION_MIGRATION_NAME,
+    CENTRAL_FIVE_MINUTE_BARS_MIGRATION_NAME,
     CENTRAL_SCHEMA_VERSION,
     central_schema_migrations,
 )
@@ -101,8 +102,22 @@ class CentralServerDatabaseTests(unittest.TestCase):
                     "market_index_chart", f"20260908:{market}", "20260908",
                     {"daily": [{"dt": "20260908", "trde_prica": amount}]},
                 )
+            store.save_dataset_snapshot("top20_index", "2026-09-07", "2026-09-07T09:00", {
+                "minute": "2026-09-07T09:00", "market_values": [0.0, 0.0, 0.0],
+                "capture_state": "realtime_complete",
+            })
 
             result = store.load_top20_statistics("2026-09-08", "2026-09-08")
+            again = store.load_top20_statistics("2026-09-08", "2026-09-08")
+            cached = store.load_dataset_snapshots("top20_statistics_day", "2026-09-08")
+            store.save_dataset_snapshot("top20_index", "2026-09-08", "2026-09-08T15:30", {
+                "minute": "2026-09-08T15:30", "market_values": [4.0, 2.0, 0.0],
+                "capture_state": "realtime_complete",
+            })
+            invalidated = store.load_dataset_snapshots("top20_statistics_day", "2026-09-08")
+            refreshed = store.load_top20_statistics("2026-09-08", "2026-09-08")
+            holiday = store.load_top20_statistics("2026-09-07", "2026-09-07")
+            combined = store.load_top20_statistics("2026-09-07", "2026-09-08")
             store.close()
 
         comparison = result["comparisons"][0]
@@ -110,6 +125,13 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual([13.0, 7.0, 0.0], comparison["top20_market_values"])
         self.assertEqual(261878.33, comparison["kospi_eok"])
         self.assertEqual(81523.41, comparison["kosdaq_eok"])
+        self.assertEqual(result, again)
+        self.assertEqual(1, len(cached))
+        self.assertEqual([], invalidated)
+        self.assertEqual(21.0, refreshed["comparisons"][0]["top20_eok"])
+        self.assertEqual([], holiday["hourly"])
+        self.assertEqual([], holiday["comparisons"])
+        self.assertEqual(refreshed, combined)
 
     def test_archived_credential_profile_is_retained_with_history_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -179,6 +201,23 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual("첫 제목", loaded[0]["title"])
         self.assertEqual("fulltext", loaded[0]["_body_status"])
         self.assertIn("새 공급계약", loaded[0]["_body_text"])
+
+    def test_stock_news_page_query_orders_by_publication_not_ingestion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.upsert_documents("news_article", [
+                {"owner": "005930", "key": key, "collection_scope": "watchlist",
+                 "document": {"title": key, "link": f"https://n/{key}", "published_at": published}}
+                for key, published in (
+                    ("newest", "2026-09-23T10:00:00+09:00"),
+                    ("oldest", "2026-09-21T10:00:00+09:00"),
+                    ("middle", "2026-09-22T01:00:00+00:00"),
+                )
+            ])
+            first_two = store.load_stock_news_articles("005930", limit=2)
+            store.close()
+        self.assertEqual(["newest", "middle"], [item["title"] for item in first_two])
 
     def test_version_10_fixture_adds_confirmed_stock_news_index_without_losing_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -371,11 +410,39 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 (16, CENTRAL_MOCK_EXECUTION_MIGRATION_NAME),
                 (17, CENTRAL_ACCOUNT_IDENTITY_MIGRATION_NAME),
                 (18, CENTRAL_ACCOUNT_SCOPE_ALIAS_MIGRATION_NAME),
-                (CENTRAL_SCHEMA_VERSION, "encrypted_credential_activation_ledger"),
+                (19, "encrypted_credential_activation_ledger"),
+                (CENTRAL_SCHEMA_VERSION, CENTRAL_FIVE_MINUTE_BARS_MIGRATION_NAME),
             ],
             versions,
         )
         self.assertEqual([1], snapshots[0]["payload"]["items"])
+
+    def test_five_minute_migration_keeps_price_basis_separate_from_live_minutes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            sample = {
+                "trading_date": "2024-08-28", "minute": "09:05", "code": "005930",
+                "market": "KRX", "provider": "daishin_creon",
+                "bar_time_semantics": "interval_end", "open": 100, "high": 101,
+                "low": 99, "close": 100, "volume": 10,
+                "trading_value_raw": 1000, "observed_at": "2026-09-24T00:00:00+00:00",
+            }
+            store.save_five_minute_bars([
+                {**sample, "adjustment_mode": "raw"},
+                {**sample, "adjustment_mode": "adjusted", "close": 95},
+            ])
+            store.save_five_minute_bars([{**sample, "adjustment_mode": "adjusted", "close": 96}])
+            adjusted = store.load_five_minute_bars("005930", "2024-08-28")
+            raw = store.load_five_minute_bars("005930", "2024-08-28", "raw")
+            with closing(sqlite3.connect(path)) as connection:
+                live_count = connection.execute("SELECT COUNT(*) FROM central_minute_bars").fetchone()[0]
+            store.close()
+        self.assertEqual(96, adjusted[0]["close"])
+        self.assertEqual(100, raw[0]["close"])
+        self.assertEqual("09:05", adjusted[0]["minute"])
+        self.assertEqual(0, live_count)
 
     def test_initialize_rejects_a_newer_central_database(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -385,7 +452,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as connection:
                 connection.execute(
                     "INSERT INTO central_schema_migrations(version,name,applied_at) "
-                    "VALUES(20,'future','2026-09-10T00:00:00+00:00')"
+                    "VALUES(21,'future','2026-09-10T00:00:00+00:00')"
                 )
                 connection.commit()
 

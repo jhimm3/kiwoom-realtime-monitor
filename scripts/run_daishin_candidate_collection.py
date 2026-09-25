@@ -17,6 +17,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from kiwoom_monitor.infrastructure.historical_backfill import (
+    candidate_non_stock_codes,
     import_daishin_backfill_ndjson,
     initialize_probe_database,
     store_daishin_probe_payload,
@@ -65,11 +66,13 @@ def _write_heartbeat(
 
 def _initialize_jobs(reference: Path, database: Path) -> int:
     initialize_probe_database(database)
+    non_stock_codes = candidate_non_stock_codes(reference)
     with closing(sqlite3.connect(reference)) as source:
         codes = sorted({
             code for row in source.execute("SELECT DISTINCT code FROM candidate_days")
             if (code := str(row[0] or "").strip().upper())
             and re.fullmatch(r"[0-9A-Z]{6}", code)
+            and code not in non_stock_codes
         })
     now = datetime.now(UTC).isoformat()
     with closing(_connect_database(database)) as connection:
@@ -91,6 +94,11 @@ def _initialize_jobs(reference: Path, database: Path) -> int:
                     updated_at TEXT NOT NULL
                 )
                 """
+            )
+            connection.executemany(
+                "UPDATE market_backfill_jobs SET state='excluded',updated_at=? "
+                "WHERE code=? AND state IN ('pending','failed','complete')",
+                [(now, code) for code in sorted(non_stock_codes)],
             )
             existing_job_codes = {
                 str(row[0]) for row in connection.execute(
@@ -219,11 +227,13 @@ def _recent_overlay(code: str, output: Path) -> dict[str, object]:
 def _ranges(database: Path, code: str) -> tuple[object, ...]:
     with closing(_connect_database(database)) as connection:
         one = connection.execute(
-            "SELECT COUNT(*),MIN(bar_time),MAX(bar_time) FROM market_bars WHERE code=? AND interval_seconds=60",
+            "SELECT COUNT(*),MIN(bar_time),MAX(bar_time) FROM market_bars "
+            "WHERE provider='daishin_creon' AND code=? AND interval_seconds=60",
             (code,),
         ).fetchone()
         five = connection.execute(
-            "SELECT COUNT(*),MIN(bar_time),MAX(bar_time) FROM market_bars WHERE code=? AND interval_seconds=300",
+            "SELECT COUNT(*),MIN(bar_time),MAX(bar_time) FROM market_bars "
+            "WHERE provider='daishin_creon' AND code=? AND interval_seconds=300",
             (code,),
         ).fetchone()
     return (*one, *five)

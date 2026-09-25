@@ -191,6 +191,24 @@ def process_identity_is_alive(process_id: int, start_token: str) -> bool:
     )
 
 
+def process_identity_state(process_id: int, start_token: str) -> str:
+    """Return running, exited, or unknown without mistaking access denial for exit."""
+    if type(process_id) is not int or process_id <= 0 or not start_token:
+        return 'unknown'
+    current = process_start_token(process_id)
+    if current:
+        if current != start_token:
+            return 'exited'
+        return 'running' if process_is_alive(process_id) else 'exited'
+    if sys.platform == 'win32':
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, process_id)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return 'unknown'
+        return 'exited' if ctypes.windll.kernel32.GetLastError() == 87 else 'unknown'
+    return 'exited' if not Path(f'/proc/{process_id}').exists() else 'unknown'
+
+
 def write_json_command(path: Path, document: Mapping[str, object]) -> None:
     """보조 창이 불완전한 명령 파일을 읽지 않도록 임시 파일을 원자적으로 교체한다."""
     temporary = path.with_suffix(".tmp")

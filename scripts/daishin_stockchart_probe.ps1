@@ -3,6 +3,7 @@ param(
     [ValidatePattern('^[0-9A-Z]{6}$')]
     [string]$Code,
 
+
     [ValidateSet(1, 5)]
     [int]$Interval = 1,
 

@@ -143,6 +143,7 @@ class StockNewsWindowTests(unittest.TestCase):
                 identity=news_identity(item), title=item.title,
                 article_revision_id="article-r1", body_revision_id="body-r1",
                 body_status="fulltext", body_text="테스트기업이 공급계약을 체결했습니다.",
+                core_sentences=("테스트기업이 공급계약을 체결했습니다.",),
             )
             window._visible_items = (item,)
             window._visible_groups = (NewsEventGroup(item, (item,)),)

@@ -208,13 +208,20 @@ class FinalExecutionTests(unittest.TestCase):
             def __init__(engine,*args,**kwargs):
                 super().__init__(*args,**kwargs)
                 initial.append((engine.portfolio.cash_won,engine.strategy_state.status))
+        progress = []
         with patch.object(runner,'PaperExecutionEngine',RecordingEngine):
-            result = rp.execute_final_holdout_evaluation(prepared,owner_token=self.owner)
+            result = rp.execute_final_holdout_evaluation(prepared,owner_token=self.owner,
+                progress_callback=lambda snapshot: progress.append(snapshot))
         self.assertEqual(('COMPLETED',['COMPLETED','COMPLETED']),
                          (result['batch_status'],[row['state'] for row in result['candidates']]))
         self.assertEqual([(request.execution.initial_cash_won,'flat')]*2,initial)
         self.assertEqual(batch.candidate_spec_hashes,tuple(row['candidate_spec_hash'] for row in result['candidates']))
         self.assertNotIn('comparison',result)
+        self.assertEqual([
+            ['NOT_STARTED', 'NOT_STARTED'], ['RUNNING', 'NOT_STARTED'],
+            ['COMPLETED', 'NOT_STARTED'], ['COMPLETED', 'RUNNING'],
+            ['COMPLETED', 'COMPLETED'],
+        ], [[row['state'] for row in snapshot['candidates']] for snapshot in progress])
 
     def test_cancel_before_first_claim_creates_no_execution_or_run(self):
         result = self.execute(cancel_requested=lambda: True)

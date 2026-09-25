@@ -19,6 +19,61 @@ SPEC.loader.exec_module(collector)
 
 
 class DaishinCandidateCollectionTest(unittest.TestCase):
+    def test_non_stock_jobs_are_excluded_using_reference_market_code(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.sqlite3"
+            database = Path(directory) / "jobs.sqlite3"
+            with closing(sqlite3.connect(reference)) as connection, connection:
+                connection.execute("CREATE TABLE candidate_days(code TEXT)")
+                connection.execute("CREATE TABLE stocks(code TEXT,market_code TEXT)")
+                connection.executemany("INSERT INTO candidate_days VALUES(?)", [
+                    ("005930",), ("500029",), ("700013",), ("069500",), ("145270",),
+                ])
+                connection.executemany("INSERT INTO stocks VALUES(?,?)", [
+                    ("005930", "0"), ("500029", "60"), ("700013", "90"),
+                    ("069500", "8"), ("145270", "6"),
+                ])
+            collector._initialize_jobs(reference, database)
+            with closing(sqlite3.connect(database)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO market_backfill_jobs(code,state,attempts,updated_at) "
+                    "VALUES('500029','failed',3,'old')"
+                )
+                connection.execute(
+                    "INSERT INTO market_backfill_jobs(code,state,attempts,updated_at) "
+                    "VALUES('069500','complete',1,'old')"
+                )
+            collector._initialize_jobs(reference, database)
+            with closing(sqlite3.connect(database)) as connection:
+                self.assertEqual(list(connection.execute(
+                    "SELECT code,state,attempts FROM market_backfill_jobs ORDER BY code"
+                )), [("005930", "pending", 0), ("069500", "excluded", 1),
+                     ("500029", "excluded", 3)])
+
+    def test_ranges_uses_provider_prefix_instead_of_full_market_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "bars.sqlite3"
+            with closing(sqlite3.connect(database)) as connection, connection:
+                connection.execute(
+                    "CREATE TABLE market_bars(provider TEXT,code TEXT,venue TEXT,"
+                    "interval_seconds INTEGER,bar_time TEXT,"
+                    "PRIMARY KEY(provider,code,venue,interval_seconds,bar_time))"
+                )
+                connection.executemany(
+                    "INSERT INTO market_bars VALUES(?,?,?,?,?)",
+                    [("daishin_creon", "005930", "K", 60, "2026-09-22"),
+                     ("other", "005930", "K", 60, "2026-09-21")],
+                )
+            self.assertEqual((1, "2026-09-22", "2026-09-22", 0, None, None),
+                             collector._ranges(database, "005930"))
+            with closing(sqlite3.connect(database)) as connection:
+                plan = connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT COUNT(*),MIN(bar_time),MAX(bar_time) "
+                    "FROM market_bars WHERE provider='daishin_creon' "
+                    "AND code='005930' AND interval_seconds=60"
+                ).fetchall()
+            self.assertTrue(any("SEARCH market_bars" in row[-1] for row in plan))
+
     def test_job_seed_includes_six_character_alphanumeric_candidate_codes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             reference = Path(directory) / "reference.sqlite3"

@@ -7,14 +7,16 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QToolBar
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QToolBar
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.presentation.main_window import MainWindow, NxtMarkerDelegate, selected_high_cycle_periods
+from kiwoom_monitor.presentation.theme_dialogs import ThemeEditDialog
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
 from kiwoom_monitor.application.daily_high_service import DailyHighTargets
 from kiwoom_monitor.application.trade_strength import StockFundamentals
@@ -35,6 +37,42 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_followups_start_once_per_applied_ranking_and_ignore_stale_subscription(self) -> None:
+        started: list[tuple[str, ...]] = []
+        execution = SimpleNamespace(priority_preparing=True)
+        owner = SimpleNamespace(
+            _closing=False, _ranking_execution=execution,
+            _row_by_code={"005930": 0, "000660": 1},
+            _ranking_followup_revision=1, _started_followup_revision=-1,
+            _start_secondary_loading=lambda codes: started.append(codes),
+        )
+        codes = ("005930", "000660")
+        MainWindow._start_realtime_followups(owner, codes)
+        self.assertEqual([], started)
+        execution.priority_preparing = False
+        MainWindow._start_realtime_followups(owner, ("005930",))
+        self.assertEqual([], started)
+        MainWindow._start_realtime_followups(owner, codes)
+        MainWindow._start_realtime_followups(owner, codes)
+        self.assertEqual([codes], started)
+        owner._ranking_followup_revision = 2
+        MainWindow._start_realtime_followups(owner, codes)
+        self.assertEqual([codes, codes], started)
+
+    def test_theme_confirmation_modal_does_not_defer_live_table_updates(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        editor = ThemeEditDialog("삼성전자", ("반도체",), ",/|;")
+        confirmation = QMessageBox(editor)
+        owner = SimpleNamespace(_image_theme_workflow_active=False)
+        with patch.object(QApplication, "activeModalWidget", return_value=confirmation):
+            self.assertFalse(MainWindow._has_blocking_modal(owner))
+        with patch.object(QApplication, "activeModalWidget", return_value=QMessageBox()):
+            self.assertTrue(MainWindow._has_blocking_modal(owner))
+            owner._theme_confirmation_active = True
+            self.assertFalse(MainWindow._has_blocking_modal(owner))
+        confirmation.close()
+        editor.close()
+
     def test_price_cache_flush_includes_latest_realtime_market_cap(self) -> None:
         queued = []
         writer = SimpleNamespace(

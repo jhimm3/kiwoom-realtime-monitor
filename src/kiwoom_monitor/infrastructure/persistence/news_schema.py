@@ -22,12 +22,25 @@ def initialize_news_schema(database_path: Path) -> None:
     database_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(database_path)
     try:
-        SQLiteMigrationRunner(connection, "news_schema_migrations").apply((
+        plan = (
             SQLiteMigration(1, NEWS_SCHEMA_BASELINE_NAME, _apply_v1_baseline),
             SQLiteMigration(2, NEWS_ACCOUNT_SCOPE_NAME, _apply_v2_account_scope),
             SQLiteMigration(3, NEWS_LINK_TOMBSTONE_NAME, _apply_v3_link_tombstones),
             SQLiteMigration(4, NEWS_AI_THEME_CANDIDATES_NAME, _apply_v4_ai_theme_candidates),
-        ))
+        )
+        # 완성된 DB는 시작할 때 읽기 전용 버전 확인만 한다. 새 버전이나
+        # 불완전한 원장은 아래 실행기가 기존 트랜잭션/호환성 검사를 맡는다.
+        try:
+            recorded = connection.execute(
+                "SELECT version,name FROM news_schema_migrations ORDER BY version"
+            ).fetchall()
+        except sqlite3.OperationalError as error:
+            if "no such table" not in str(error).lower():
+                raise
+            recorded = []
+        if recorded == [(migration.version, migration.name) for migration in plan]:
+            return
+        SQLiteMigrationRunner(connection, "news_schema_migrations").apply(plan)
         connection.commit()
     finally:
         connection.close()

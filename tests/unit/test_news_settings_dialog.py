@@ -71,6 +71,7 @@ class NewsSettingsDialogTests(unittest.TestCase):
             self.assertEqual("thebell.co.kr", dialog._processing_excluded_providers.toPlainText())
 
             dialog._ai_limit.setValue(321)
+            dialog._stored_news_limit.setValue(500)
             dialog._dart_enabled.setChecked(False)
             dialog._processing_excluded_providers.setPlainText("thebell.co.kr, 연합인포맥스")
             dialog._save()
@@ -83,6 +84,7 @@ class NewsSettingsDialogTests(unittest.TestCase):
                 central.changes["news_processing_excluded_providers"] if central.changes else None,
             )
             self.assertEqual(321, config.load_ai().daily_limit)
+            self.assertEqual(500, config.load_filter().stored_news_limit)
             self.assertFalse(config.load_official().dart_enabled)
             self.assertEqual("ai-secret", config.load_ai().api_key)
             self.assertEqual("dart-secret", config.load_official().dart_api_key)
@@ -102,6 +104,12 @@ class NewsSettingsDialogTests(unittest.TestCase):
             dialog._ai_provider.setCurrentIndex(dialog._ai_provider.findData("gemini"))
             dialog._ai_key.setText("new-ai-key")
             dialog._dart_key.setText("new-dart")
+            dialog._local_stock_name_enabled.setChecked(False)
+            dialog._local_common_enabled.setChecked(True)
+            dialog._local_common_queries.setPlainText("증권\n환율")
+            dialog._local_stock_site_enabled.setChecked(True)
+            dialog._local_market_enabled.setChecked(True)
+            dialog._local_flash_url.setText("https://stock.naver.com/api/domestic/news/list")
 
             dialog._save()
 
@@ -112,6 +120,11 @@ class NewsSettingsDialogTests(unittest.TestCase):
             self.assertEqual("new-ai-key", config.load_ai().api_key)
             self.assertEqual("new-dart", config.load_official().dart_api_key)
             self.assertTrue(config.load_official().dart_enabled)
+            self.assertFalse(config.load_sources().stock_name_enabled)
+            self.assertTrue(config.load_sources().common_enabled)
+            self.assertEqual(("증권", "환율"), config.load_sources().common_queries)
+            self.assertTrue(config.load_sources().stock_site_enabled)
+            self.assertTrue(config.load_sources().market_enabled)
 
     def test_slow_nas_load_does_not_block_constructor_or_gui(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -155,6 +168,18 @@ class NewsSettingsDialogTests(unittest.TestCase):
             wait_until(lambda: dialog._operations_worker is None)
             self.assertEqual({}, client.changes)
             self.assertEqual("changed-client", config.load().client_id)
+
+    def test_nas_source_controls_are_owned_by_nas_connection_dialog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = _OperationalClient()
+            dialog = NaverNewsSettingsDialog(
+                LocalNaverNewsConfig(Path(directory) / "news.dat"),
+                section="connections", operational_client=client,
+            )
+            dialog.show()
+            wait_until(lambda: dialog._operations_worker is None)
+            self.assertFalse(hasattr(dialog, "_naver_api_enabled"))
+            self.assertFalse(hasattr(dialog, "_naver_stock_enabled"))
 
 
 if __name__ == "__main__":

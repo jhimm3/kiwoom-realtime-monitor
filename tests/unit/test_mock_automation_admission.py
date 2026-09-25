@@ -416,6 +416,14 @@ class MockAutomationAdmissionTests(unittest.TestCase):
         self.assertEqual(risk.snapshot_id, gate.risk_snapshot_id)
         self.assertIsNotNone(record); self.assertIsNotNone(receipt)
         self.assertEqual(1, transport.calls)
+        replayed_gate, replayed_record, replayed_receipt = dispatch_mock_automation_decision_from_risk(
+            self.forward, runtime, _strategy_decision(runtime.run_id), recovery, risk,
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id, strategy_ref="strategy-1",
+        )
+        self.assertEqual(gate.gate_id, replayed_gate.gate_id)
+        self.assertEqual(record.intent.intent_id, replayed_record.intent.intent_id)
+        self.assertEqual(receipt.receipt_id, replayed_receipt.receipt_id)
+        self.assertEqual(1, transport.calls)
 
     def test_recovery_blocks_open_state_loss_and_fault_limits(self) -> None:
         runtime, execution, _ = self._admitted_runtime()

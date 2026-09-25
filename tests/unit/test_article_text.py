@@ -23,6 +23,23 @@ def test_article_parser_closes_target_after_void_elements() -> None:
     assert "추천 기사와 페이지 푸터" not in parser.article
 
 
+def test_article_parser_prefers_original_second_precision_time() -> None:
+    parser = _ArticleParser()
+    parser.feed(
+        '<meta property="article:published_time" content="2026-09-23T19:01:00+09:00">'
+        '<span class="media_end_head_info_datestamp_time _ARTICLE_DATE_TIME" '
+        'data-date-time="2026-09-23 19:01:43"></span>'
+    )
+    assert parser.published_at == "2026-09-23T19:01:43+09:00"
+
+
+def test_article_parser_ignores_timestamp_without_seconds_or_timezone() -> None:
+    parser = _ArticleParser()
+    parser.feed('<meta property="article:published_time" content="2026-09-23T19:01+09:00">')
+    parser.feed('<meta property="article:published_time" content="2026-09-23T19:01:43">')
+    assert parser.published_at == ""
+
+
 def test_clean_article_text_removes_portal_tail_after_copyright() -> None:
     text = (
         "기사 본문 " * 30

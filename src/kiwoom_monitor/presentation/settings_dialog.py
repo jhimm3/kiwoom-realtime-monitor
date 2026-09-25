@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
-from PySide6.QtCore import QEventLoop, QSize, QTimer, QUrl, Qt
+from PySide6.QtCore import QEventLoop, QSettings, QSize, QTimer, QUrl, Qt
 from PySide6.QtGui import QColor, QResizeEvent
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
@@ -40,6 +40,7 @@ from kiwoom_monitor.infrastructure.persistence.settings_repository import Settin
 from kiwoom_monitor.presentation.api_settings_dialog import ApiSettingsDialog
 from kiwoom_monitor.presentation.app_metadata import APP_COPYRIGHT, APP_DISPLAY_NAME, APP_VERSION
 from kiwoom_monitor.presentation.similar_stock_dialog import SimilarStockDialog
+from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
 from kiwoom_monitor.presentation.theme_colors import text_color
 
 
@@ -57,6 +58,7 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None, drive_client_importer: Callable[[], None] | None = None, update_checker: Callable[[], None] | None = None, journal_backup_exporter: Callable[[], None] | None = None, journal_backup_importer: Callable[[], None] | None = None, news_api_settings_opener: Callable[[], None] | None = None, shadow_settings_opener: Callable[[], None] | None = None, research_opener: Callable[[], None] | None = None, mock_automation_opener: Callable[[], None] | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
+        self._save_request: SettingsRequestWorker | None = None
         self._api_path = api_path
         self._data_source_path = api_path.with_name("data_source.json") if api_path is not None else None
         try:
@@ -271,6 +273,10 @@ class SettingsDialog(QDialog):
             self._high_header_cycle_checks[period] = checkbox
 
         self._build_grouped_layout()
+        self._window_settings = QSettings("KiwoomMonitor", "SettingsDialog")
+        geometry = self._window_settings.value("geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
         return
         layout = QFormLayout(self)
         layout.addRow("화면 갱신 주기(초)", self._refresh_interval)
@@ -611,12 +617,19 @@ class SettingsDialog(QDialog):
         self.setStyleSheet(f"QWidget {{ font-size: {point_size}pt; }}")
 
     def done(self, result: int) -> None:
-        self._save_dialog_size()
+        self._dialog_size_save_timer.stop()
+        self._window_settings.setValue("geometry", self.saveGeometry())
+        if result != QDialog.DialogCode.Accepted:
+            self._save_dialog_size()
         super().done(result)
 
     def _save_dialog_size(self) -> None:
-        self._settings.set("settings_dialog_width", str(self.width()))
-        self._settings.set("settings_dialog_height", str(self.height()))
+        values = {
+            "settings_dialog_width": str(self.width()),
+            "settings_dialog_height": str(self.height()),
+        }
+        settings = self._settings
+        SettingsRequestWorker(lambda: settings.set_many(values)).start()
 
     def _dialog_dimension(self, key: str, default: int) -> int:
         try:
@@ -1024,6 +1037,13 @@ class SettingsDialog(QDialog):
             self.api_changed = True
 
     def _save(self) -> None:
+        if self._save_request is not None:
+            return
+        pending_settings: dict[str, str] = {}
+
+        def save_setting(key: str, value: str) -> None:
+            pending_settings[key] = value
+
         try:
             strength_thresholds = {
                 period: tuple(float(field.text()) for field in fields)
@@ -1055,58 +1075,59 @@ class SettingsDialog(QDialog):
         if not cycle_periods:
             QMessageBox.warning(self, "입력 확인", "헤더 클릭 순환 신고가를 하나 이상 선택하세요.")
             return
-        self._settings.set("rank_query_type", str(self._rank_query_type.currentData()))
-        self._settings.set("rank_row_odd_color", self._rank_row_colors["odd"])
-        self._settings.set("rank_row_even_color", self._rank_row_colors["even"])
-        self._settings.set("rank_changed_row_color", self._rank_row_colors["changed"])
-        self._settings.set("rank_changed_highlight_seconds", f"{self._rank_changed_highlight_seconds.value():.2f}")
-        self._settings.set("rank_changed_highlight_enabled", "1" if self._rank_changed_highlight_enabled.isChecked() else "0")
-        self._settings.set("ui_mode", str(self._ui_mode.currentData()))
+        save_setting("rank_query_type", str(self._rank_query_type.currentData()))
+        save_setting("rank_row_odd_color", self._rank_row_colors["odd"])
+        save_setting("rank_row_even_color", self._rank_row_colors["even"])
+        save_setting("rank_changed_row_color", self._rank_row_colors["changed"])
+        save_setting("rank_changed_highlight_seconds", f"{self._rank_changed_highlight_seconds.value():.2f}")
+        save_setting("rank_changed_highlight_enabled", "1" if self._rank_changed_highlight_enabled.isChecked() else "0")
+        save_setting("ui_mode", str(self._ui_mode.currentData()))
         for period, (interest, caution, fire) in strength_thresholds.items():
-            self._settings.set(f"strength_{period}_interest", str(interest))
-            self._settings.set(f"strength_{period}_caution", str(caution))
-            self._settings.set(f"strength_{period}_fire", str(fire))
+            save_setting(f"strength_{period}_interest", str(interest))
+            save_setting(f"strength_{period}_caution", str(caution))
+            save_setting(f"strength_{period}_fire", str(fire))
         for period, value in trade_value_alerts.items():
-            self._settings.set(f"trade_value_{period}_alert_eok", str(value))
-        self._settings.set("trade_value_alert_enabled", "1" if self._trade_value_alert_enabled.isChecked() else "0")
+            save_setting(f"trade_value_{period}_alert_eok", str(value))
+        save_setting("trade_value_alert_enabled", "1" if self._trade_value_alert_enabled.isChecked() else "0")
         for level, value in zip(("interest", "caution", "fire"), near_high_thresholds):
-            self._settings.set(f"near_high_{level}_percent", str(value))
-        self._settings.set("near_high_row_alert_level", str(self._near_high_row_alert_level.currentData()))
-        self._settings.set("near_high_show_icon", "1" if self._near_high_icons.isChecked() else "0")
+            save_setting(f"near_high_{level}_percent", str(value))
+        save_setting("near_high_row_alert_level", str(self._near_high_row_alert_level.currentData()))
+        save_setting("near_high_show_icon", "1" if self._near_high_icons.isChecked() else "0")
         for level, field in self._near_high_icon_fields.items():
-            self._settings.set(f"near_high_icon_{level}", field.text().strip())
-            self._settings.set(f"near_high_icon_{level}_image", self._near_high_icon_images[level])
-        self._settings.set("near_high_sound_enabled", "1" if self._near_high_sounds.isChecked() else "0")
-        self._settings.set("near_high_sound_cooldown_seconds", str(self._near_high_sound_cooldown.value()))
+            save_setting(f"near_high_icon_{level}", field.text().strip())
+            save_setting(f"near_high_icon_{level}_image", self._near_high_icon_images[level])
+        save_setting("near_high_sound_enabled", "1" if self._near_high_sounds.isChecked() else "0")
+        save_setting("near_high_sound_cooldown_seconds", str(self._near_high_sound_cooldown.value()))
         for level, value in self._near_high_sound_paths.items():
-            self._settings.set(f"near_high_sound_{level}", value)
-        self._settings.set("ui_font_size", str(font_size)); self._settings.set("ui_row_height", str(row_height)); self._settings.set("theme_badge_enabled", "1" if self._theme_badge_enabled.isChecked() else "0"); self._settings.set("theme_badge_font_size", str(badge_font_size)); self._settings.set("theme_badge_padding", str(badge_padding))
+            save_setting(f"near_high_sound_{level}", value)
+        save_setting("ui_font_size", str(font_size)); save_setting("ui_row_height", str(row_height)); save_setting("theme_badge_enabled", "1" if self._theme_badge_enabled.isChecked() else "0"); save_setting("theme_badge_font_size", str(badge_font_size)); save_setting("theme_badge_padding", str(badge_padding))
         for level, value in market_cap_highlights.items():
-            self._settings.set(f"market_cap_highlight_{level}_eok", str(value))
-            self._settings.set(f"market_cap_highlight_{level}_color", self._market_cap_highlight_colors[level])
-            self._settings.set(f"market_cap_highlight_{level}_badge_color", self._market_cap_highlight_badge_colors[level])
-        self._settings.set("market_cap_highlight_enabled", "1" if self._market_cap_highlight_enabled.isChecked() else "0")
-        self._settings.set("market_cap_highlight_badge_enabled", "1" if self._market_cap_highlight_badge_enabled.isChecked() else "0")
-        self._settings.set("upper_limit_highlight_enabled", "1" if self._upper_limit_highlight_enabled.isChecked() else "0")
+            save_setting(f"market_cap_highlight_{level}_eok", str(value))
+            save_setting(f"market_cap_highlight_{level}_color", self._market_cap_highlight_colors[level])
+            save_setting(f"market_cap_highlight_{level}_badge_color", self._market_cap_highlight_badge_colors[level])
+        save_setting("market_cap_highlight_enabled", "1" if self._market_cap_highlight_enabled.isChecked() else "0")
+        save_setting("market_cap_highlight_badge_enabled", "1" if self._market_cap_highlight_badge_enabled.isChecked() else "0")
+        save_setting("upper_limit_highlight_enabled", "1" if self._upper_limit_highlight_enabled.isChecked() else "0")
         for key, field in self._decimal_fields.items():
-            self._settings.set(f"decimal_{key}", field.currentText())
-        self._settings.set("near_high_alert_enabled", "1" if self._near_high_enabled.isChecked() else "0")
-        self._settings.set("strength_show_icon", "1" if self._strength_icons.isChecked() else "0")
+            save_setting(f"decimal_{key}", field.currentText())
+        save_setting("near_high_alert_enabled", "1" if self._near_high_enabled.isChecked() else "0")
+        save_setting("strength_show_icon", "1" if self._strength_icons.isChecked() else "0")
         for level, field in self._strength_icon_fields.items():
-            self._settings.set(f"strength_icon_{level}", field.text().strip())
-            self._settings.set(f"strength_icon_{level}_image", self._strength_icon_images[level])
-        self._settings.set("strength_display_mode", str(self._strength_display_mode.currentData()))
-        self._settings.set("show_server_clock", "1" if self._show_server_clock.isChecked() else "0")
-        self._settings.set("theme_trade_summary_enabled", "1" if self._theme_trade_summary_enabled.isChecked() else "0")
-        self._settings.set("theme_trade_summary_period", str(self._theme_trade_summary_period.currentData()))
-        self._settings.set("theme_group_sort_basis", str(self._theme_group_sort_basis.currentData()))
-        self._settings.set("theme_trade_summary_excluded_stocks", self._theme_trade_summary_excluded_stocks.text().strip())
-        self._settings.set("theme_trade_summary_excluded_enabled", "1" if self._theme_trade_summary_excluded_enabled.isChecked() else "0")
-        self._settings.set("google_drive_auto_download", "1" if self._google_drive_auto_download.isChecked() else "0")
-        self._settings.set("google_drive_auto_upload", "1" if self._google_drive_auto_upload.isChecked() else "0")
-        self._settings.set("google_drive_auto_upload_on_exit", "1" if self._google_drive_auto_upload_on_exit.isChecked() else "0")
-        self._settings.set("google_drive_sync_target", str(self._google_drive_sync_target.currentData()))
-        self._settings.set("auto_update_check", "1" if self._auto_update_check.isChecked() else "0")
+            save_setting(f"strength_icon_{level}", field.text().strip())
+            save_setting(f"strength_icon_{level}_image", self._strength_icon_images[level])
+        save_setting("strength_display_mode", str(self._strength_display_mode.currentData()))
+        save_setting("show_server_clock", "1" if self._show_server_clock.isChecked() else "0")
+        save_setting("theme_trade_summary_enabled", "1" if self._theme_trade_summary_enabled.isChecked() else "0")
+        save_setting("theme_trade_summary_period", str(self._theme_trade_summary_period.currentData()))
+        save_setting("theme_group_sort_basis", str(self._theme_group_sort_basis.currentData()))
+        save_setting("theme_trade_summary_excluded_stocks", self._theme_trade_summary_excluded_stocks.text().strip())
+        save_setting("theme_trade_summary_excluded_enabled", "1" if self._theme_trade_summary_excluded_enabled.isChecked() else "0")
+        save_setting("google_drive_auto_download", "1" if self._google_drive_auto_download.isChecked() else "0")
+        save_setting("google_drive_auto_upload", "1" if self._google_drive_auto_upload.isChecked() else "0")
+        save_setting("google_drive_auto_upload_on_exit", "1" if self._google_drive_auto_upload_on_exit.isChecked() else "0")
+        save_setting("google_drive_sync_target", str(self._google_drive_sync_target.currentData()))
+        save_setting("auto_update_check", "1" if self._auto_update_check.isChecked() else "0")
+        source_to_save: DataSourceSettings | None = None
         if self._data_source_path is not None:
             selected_mode = str(self._data_source_mode.currentData())
             if selected_mode != self._data_source.mode:
@@ -1120,12 +1141,38 @@ class SettingsDialog(QDialog):
                 except ValueError as error:
                     QMessageBox.warning(self, "데이터 연결 방식", str(error))
                     return
-                DataSourceConfig(self._data_source_path).save(source)
-                self._data_source = source
-                self.api_changed = True
+                source_to_save = source
         current_high_period = str(self._high_distance_period.currentData())
         if current_high_period not in cycle_periods:
             current_high_period = cycle_periods[0]
-        self._settings.set("high_header_cycle_periods", ",".join(cycle_periods))
-        self._settings.set("high_distance_period", current_high_period)
+        save_setting("high_header_cycle_periods", ",".join(cycle_periods))
+        save_setting("high_distance_period", current_high_period)
+        save_setting("settings_dialog_width", str(self.width()))
+        save_setting("settings_dialog_height", str(self.height()))
+        settings, source_path = self._settings, self._data_source_path
+
+        def persist() -> object:
+            if source_to_save is not None and source_path is not None:
+                DataSourceConfig(source_path).save(source_to_save)
+            settings.set_many(pending_settings)
+            return source_to_save
+
+        self.setEnabled(False)
+        worker = SettingsRequestWorker(persist)
+        self._save_request = worker
+        worker.succeeded.connect(self._settings_saved)
+        worker.failed.connect(self._settings_save_failed)
+        worker.start()
+
+    def _settings_saved(self, source: object) -> None:
+        self._save_request = None
+        if isinstance(source, DataSourceSettings):
+            self._data_source = source
+            self.api_changed = True
+        self.setEnabled(True)
         self.accept()
+
+    def _settings_save_failed(self, message: str) -> None:
+        self._save_request = None
+        self.setEnabled(True)
+        QMessageBox.warning(self, "설정 저장", f"설정을 저장하지 못했습니다.\n{message}")

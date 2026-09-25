@@ -9,6 +9,8 @@ from queue import Empty, Queue
 from PySide6.QtCore import QThread, Signal
 
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
+from kiwoom_monitor.application.daily_high_service import DailyHighTargets
+from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
 
@@ -21,6 +23,10 @@ class MarketCacheWriter(QThread):
     price_failed = Signal(object, object, object, object, str)
     history_saved = Signal(str)
     history_failed = Signal(str, str)
+    daily_high_failed = Signal(str, str)
+    comparison_saved = Signal(int)
+    comparison_failed = Signal(str)
+    fundamentals_failed = Signal(str, str)
 
     def __init__(self, database_path: Path) -> None:
         super().__init__()
@@ -53,6 +59,23 @@ class MarketCacheWriter(QThread):
         if bars:
             self._queue.put(("history", code, tuple(bars), trade_date, synced_at))
 
+    def enqueue_daily_high(self, code: str, targets: DailyHighTargets,
+                           trade_date: date, observed_at: datetime) -> None:
+        self._queue.put(("daily_high", code, targets, trade_date, observed_at))
+
+    def enqueue_fundamentals(self, code: str, market_cap_eok: float | None,
+                             float_ratio_percent: float | None,
+                             float_shares: int | None,
+                             upper_limit_price: int | None) -> None:
+        self._queue.put(("fundamentals", code, market_cap_eok,
+                         float_ratio_percent, float_shares, upper_limit_price))
+
+    def enqueue_trade_comparisons(
+        self, values: dict[str, tuple[tuple[str, float], ...]], trade_date: date,
+    ) -> None:
+        if values:
+            self._queue.put(("comparison", dict(values), trade_date))
+
     def stop_and_drain(self, timeout_ms: int = 7_000) -> bool:
         self.requestInterruption()
         return self.wait(timeout_ms)
@@ -60,6 +83,7 @@ class MarketCacheWriter(QThread):
     def run(self) -> None:
         minute_repository = MinuteBarRepository(self._database_path)
         stock_repository = StockRepository(self._database_path)
+        daily_repository = DailyBarRepository(self._database_path)
         while not self.isInterruptionRequested() or not self._queue.empty():
             try:
                 job = self._queue.get(timeout=0.1)
@@ -71,6 +95,44 @@ class MarketCacheWriter(QThread):
                 self._save_prices(stock_repository, job[1], job[2], job[3], job[4])
             elif job[0] == "history":
                 self._save_history(minute_repository, job[1], job[2], job[3], job[4])
+            elif job[0] == "daily_high":
+                self._save_daily_high(stock_repository, daily_repository, job[1], job[2], job[3], job[4])
+            elif job[0] == "comparison":
+                self._save_comparison(minute_repository, job[1], job[2])
+            elif job[0] == "fundamentals":
+                self._save_fundamentals(stock_repository, job[1], job[2], job[3], job[4], job[5])
+
+    def _save_fundamentals(self, repository: StockRepository, code: str,
+                           market_cap_eok: float | None, float_ratio_percent: float | None,
+                           float_shares: int | None, upper_limit_price: int | None) -> None:
+        try:
+            repository.update_fundamentals(
+                code, market_cap_eok, float_ratio_percent, None,
+                float_shares, upper_limit_price,
+            )
+        except Exception as error:
+            self.fundamentals_failed.emit(code, str(error))
+
+    def _save_daily_high(self, stock_repository: StockRepository,
+                         daily_repository: DailyBarRepository, code: str,
+                         targets: DailyHighTargets, trade_date: date,
+                         observed_at: datetime) -> None:
+        try:
+            stock_repository.update_adjusted_high_250_price(code, targets.high_250_price)
+            daily_repository.upsert_targets(code, targets, trade_date, observed_at=observed_at)
+        except Exception as error:
+            self.daily_high_failed.emit(code, str(error))
+
+    def _save_comparison(self, repository: MinuteBarRepository,
+                         values: dict[str, tuple[tuple[str, float], ...]],
+                         trade_date: date) -> None:
+        try:
+            count = repository.update_comparison_reports(values, trade_date)
+        except Exception as error:
+            self.comparison_failed.emit(str(error))
+            return
+        if count:
+            self.comparison_saved.emit(count)
 
     def _save_minute(
         self,

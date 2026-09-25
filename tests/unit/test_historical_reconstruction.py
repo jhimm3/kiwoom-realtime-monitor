@@ -5,20 +5,155 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.historical_backfill import initialize_probe_database
 from kiwoom_monitor.infrastructure.historical_reconstruction import (
+    HistoricalReconstructionDataset,
     adapt_historical_reconstruction_for_research,
     export_historical_reconstruction,
     load_historical_reconstruction,
     write_historical_research_input,
 )
 from kiwoom_monitor.infrastructure.research_data_source import load_frozen_research_export
+from kiwoom_monitor.application.research_replay import replay_krx_minute_bars
 
 
 class HistoricalReconstructionTests(unittest.TestCase):
+    def test_delayed_session_1530_is_continuous_and_1630_is_auction(self) -> None:
+        case_date = "2025-11-12"
+        records = [{"kind": "historical_candidate", "revision_id": "candidate",
+                    "available_at": "2026-09-24T00:00:00+00:00",
+                    "payload": {"date": case_date, "code": "347850", "market_code": "0"}}]
+        for clock in ("15:30", "16:30"):
+            records.append({
+                "kind": "historical_market_bar", "revision_id": f"bar-{clock}",
+                "available_at": "2026-09-24T00:00:00+00:00",
+                "payload": {"case_date": case_date, "phase": "outcome", "code": "347850",
+                            "interval_seconds": 60, "source_job_state": "complete",
+                            "bar_time": f"2025-11-13T{clock}:00+09:00", "open": 100,
+                            "high": 100, "low": 100, "close": 100, "volume": 10,
+                            "trading_value": 1000},
+            })
+        source = HistoricalReconstructionDataset(
+            {"dataset_id": "delayed-source", "revision_ids_hash": "source-hash",
+             "selected_dates": [case_date]}, tuple(records),
+        )
+        derived = adapt_historical_reconstruction_for_research(source, selected_date=case_date)
+        bars = {row["payload"]["bar_end"]: row["payload"] for row in derived.observations
+                if row["kind"] == "minute_bar"}
+        self.assertEqual("2025-11-13T15:29:00+09:00", bars["2025-11-13T15:30:00+09:00"]["bar_start"])
+        self.assertNotIn("phase", bars["2025-11-13T15:30:00+09:00"])
+        self.assertEqual("2025-11-13T16:20:00+09:00", bars["2025-11-13T16:30:00+09:00"]["bar_start"])
+        self.assertEqual("AUCTION_ORDER_ENTRY", bars["2025-11-13T16:30:00+09:00"]["phase"])
+        replay = replay_krx_minute_bars(derived.observations, strict=True)
+        self.assertEqual(2, len(replay))
+        self.assertEqual("AUCTION_ORDER_ENTRY", replay[-1].market_phase)
+
+    def test_1530_close_print_is_auction_not_fabricated_1529_minute(self) -> None:
+        case_date = "2024-01-02"
+        source = HistoricalReconstructionDataset({
+            "dataset_id": "close-print-source", "revision_ids_hash": "source-hash",
+            "selected_dates": [case_date],
+        }, (
+            {"kind": "historical_candidate", "revision_id": "candidate", "available_at": "2026-09-24T00:00:00+00:00",
+             "payload": {"date": case_date, "code": "005930", "market_code": "0"}},
+            {"kind": "historical_market_bar", "revision_id": "close", "available_at": "2026-09-24T00:00:00+00:00",
+             "payload": {"case_date": case_date, "phase": "outcome", "code": "005930",
+                         "interval_seconds": 60, "source_job_state": "complete",
+                         "bar_time": "2024-01-03T15:30:00+09:00", "open": 100, "high": 100,
+                         "low": 100, "close": 100, "volume": 10, "trading_value": 1000}},
+        ))
+        derived = adapt_historical_reconstruction_for_research(source, selected_date=case_date)
+        bar = next(row for row in derived.observations if row["kind"] == "minute_bar")
+        population = next(row for row in derived.observations
+                          if row["kind"] == "historical_candidate_population")
+        self.assertEqual("2024-01-03T15:20:00+09:00", population["available_at"])
+        self.assertEqual("2024-01-03T15:20:00+09:00", bar["payload"]["bar_start"])
+        self.assertEqual(600, bar["payload"]["replay_interval_seconds"])
+        self.assertEqual("AUCTION_ORDER_ENTRY", bar["payload"]["phase"])
+        replay = replay_krx_minute_bars(derived.observations, strict=True)
+        self.assertEqual(1, len(replay))
+        self.assertEqual("AUCTION_ORDER_ENTRY", replay[0].market_phase)
+
+    def test_excludes_sparse_minute_candidate_from_derived_population_only(self) -> None:
+        case_date = "2024-12-24"
+        records = []
+        for code, minutes in (("005930", (1, 2)), ("000545", (1, 31, 61))):
+            records.append({
+                "kind": "historical_candidate", "revision_id": f"candidate-{code}",
+                "available_at": "2026-09-24T00:00:00+00:00",
+                "payload": {"date": case_date, "code": code, "market_code": "0"},
+            })
+            for minute in minutes:
+                bar_time = (datetime.fromisoformat("2024-12-26T09:00:00+09:00")
+                            + timedelta(minutes=minute)).isoformat()
+                records.append({
+                    "kind": "historical_market_bar",
+                    "revision_id": f"bar-{code}-{minute}",
+                    "available_at": "2026-09-24T00:00:00+00:00",
+                    "payload": {"case_date": case_date, "phase": "outcome", "code": code,
+                                "interval_seconds": 60, "source_job_state": "complete",
+                                "bar_time": bar_time, "open": 100, "high": 100,
+                                "low": 100, "close": 100, "volume": 1,
+                                "trading_value": 100},
+                })
+        source = HistoricalReconstructionDataset({
+            "dataset_id": "test-source", "revision_ids_hash": "test-hash",
+            "selected_dates": [case_date],
+        }, tuple(records))
+        derived = adapt_historical_reconstruction_for_research(
+            source, selected_date=case_date, individual_stocks_only=True,
+            exclude_noncontinuous_minute_candidates=True,
+        )
+        population = next(row for row in derived.observations
+                          if row["kind"] == "historical_candidate_population")
+        self.assertEqual(["005930"], population["payload"]["codes"])
+        self.assertEqual(["005930", "005930"], [row["payload"]["code"]
+                         for row in derived.observations if row["kind"] == "minute_bar"])
+        self.assertEqual([{
+            "selection_date": case_date, "code": "000545",
+            "outcome_minute_bar_count": 3,
+            "reason": "no_continuous_one_minute_outcome_pair",
+        }], derived.manifest["excluded_noncontinuous_minute_candidates"])
+        self.assertEqual(2, len(source.records_of_kind("historical_candidate")))
+
+    def test_stock_only_projection_preserves_excluded_candidates_in_source(self) -> None:
+        case_date = "2024-01-02"
+        records = []
+        for code, market_code in (("005930", "0"), ("069500", "8")):
+            records.append({
+                "kind": "historical_candidate", "revision_id": f"candidate-{code}",
+                "available_at": "2026-09-22T00:00:00+00:00",
+                "payload": {"date": case_date, "code": code, "market_code": market_code},
+            })
+            records.append({
+                "kind": "historical_market_bar", "revision_id": f"bar-{code}",
+                "available_at": "2026-09-22T00:00:00+00:00",
+                "payload": {"case_date": case_date, "phase": "outcome", "code": code,
+                            "interval_seconds": 60, "source_job_state": "complete",
+                            "bar_time": "2024-01-03T09:01:00+09:00", "open": 100,
+                            "high": 100, "low": 100, "close": 100, "volume": 1,
+                            "trading_value": 100},
+            })
+        source = HistoricalReconstructionDataset({
+            "dataset_id": "test-source", "revision_ids_hash": "test-hash",
+            "selected_dates": [case_date],
+        }, tuple(records))
+        original = adapt_historical_reconstruction_for_research(source, selected_date=case_date)
+        stocks = adapt_historical_reconstruction_for_research(
+            source, selected_date=case_date, individual_stocks_only=True,
+        )
+        self.assertEqual(original.manifest["included_cases"][0]["candidate_count"], 2)
+        self.assertEqual(stocks.manifest["included_cases"][0]["candidate_count"], 1)
+        self.assertEqual(stocks.manifest["excluded_non_stock_candidates"], [
+            {"selection_date": case_date, "code": "069500", "market_code": "8"},
+        ])
+        self.assertEqual([row["payload"]["code"] for row in stocks.observations
+                          if row["kind"] == "minute_bar"], ["005930"])
+        self.assertEqual(len(source.records), 4)
+
     def test_exports_posthoc_candidates_with_one_real_resolution_and_news_statuses(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

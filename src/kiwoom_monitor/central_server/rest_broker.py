@@ -115,6 +115,12 @@ CACHE_SECONDS = {
 }
 
 
+def _persistent_cache_ttl(api_id: str, cont_yn: str) -> float:
+    """Short-lived deduplication stays in RAM; market response storage is separate."""
+    ttl = CACHE_SECONDS.get(api_id, 0.0) if cont_yn == "N" else 0.0
+    return ttl if ttl > 2.0 else 0.0
+
+
 @dataclass(frozen=True)
 class BrokerResult:
     payload: dict[str, Any]
@@ -165,11 +171,13 @@ class CentralRestBroker:
         if not self._namespace:
             raise ValueError("broker namespace is required")
         self._queue: asyncio.PriorityQueue[tuple[int, int, _Job | _CredentialJob | None]] = asyncio.PriorityQueue()
+        self._persist_queue: asyncio.Queue[tuple[_Job, BrokerResult] | None] = asyncio.Queue()
         self._sequence = count()
         self._inflight: dict[str, asyncio.Future[BrokerResult]] = {}
         self._cache: dict[str, tuple[float, BrokerResult]] = {}
         self._guard = asyncio.Lock()
         self._worker: asyncio.Task[None] | None = None
+        self._persist_worker: asyncio.Task[None] | None = None
         self._credential_paused = False
         self._credential_generation = 0
         self._drain_task: asyncio.Task[None] | None = None
@@ -221,6 +229,7 @@ class CentralRestBroker:
 
     async def _drain_credentials(self) -> None:
         await self._queue.join()
+        await self._persist_queue.join()
         await asyncio.to_thread(self._client.begin_credential_change)
 
     async def activate_prepared_credentials(self, prepared: Any) -> int:
@@ -291,6 +300,8 @@ class CentralRestBroker:
                 raise BrokerCredentialBusyError("BROKER_CLOSE_IN_PROGRESS")
             self._close_task.result()
             self._close_task = None
+        if self._persist_worker is None or self._persist_worker.done():
+            self._persist_worker = asyncio.create_task(self._run_persistence(), name="kiwoom-broker-persistence")
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run(), name="kiwoom-central-rest-broker")
 
@@ -304,6 +315,10 @@ class CentralRestBroker:
         if worker is not None:
             await self._queue.put((10_000, next(self._sequence), None))
             await worker
+        persist_worker, self._persist_worker = self._persist_worker, None
+        if persist_worker is not None:
+            await self._persist_queue.put(None)
+            await persist_worker
         for task in (self._drain_task, self._activation_task, self._resume_task):
             if task is not None:
                 await asyncio.shield(task)
@@ -347,7 +362,7 @@ class CentralRestBroker:
                 value = cached[1]
                 return BrokerResult(copy.deepcopy(value.payload), value.has_next, value.next_key, True)
             ttl = CACHE_SECONDS.get(api_id, 0.0) if cont_yn == "N" else 0.0
-            if record_response and ttl > 0 and self._store is not None:
+            if record_response and _persistent_cache_ttl(api_id, cont_yn) and self._store is not None:
                 stored = await asyncio.to_thread(self._store.load_query, key)
                 if stored is not None:
                     if self._response_handler is not None:
@@ -403,6 +418,7 @@ class CentralRestBroker:
                     await asyncio.sleep(min(delay, 0.05))
                     continue
                 try:
+                    delegated = False
                     started_at = time.monotonic()
                     queue_wait_ms = round((started_at - job.queued_at) * 1000)
                     payload, has_next, next_key = await asyncio.to_thread(
@@ -416,25 +432,15 @@ class CentralRestBroker:
                         round((time.monotonic() - started_at) * 1000),
                     )
                     result = BrokerResult(payload, has_next, next_key)
-                    if job.record_response and self._response_handler is not None:
-                        try:
-                            await asyncio.to_thread(self._response_handler, job.api_id, job.body, payload)
-                        except Exception:
-                            # 저장 보완 실패가 화면 조회 성공까지 실패로 바꾸면 안 된다.
-                            logger.exception(
-                                "recording_gap: 중앙 조회 응답 저장에 실패했습니다: %s", job.api_id,
-                            )
                     ttl = CACHE_SECONDS.get(job.api_id, 0.0) if job.cont_yn == "N" else 0.0
                     if ttl > 0:
                         async with self._guard:
                             self._cache[job.key] = (time.monotonic() + ttl, result)
                             self._prune_memory_cache()
-                        if job.record_response and self._store is not None:
-                            await asyncio.to_thread(
-                                self._store.save_query, job.key, job.api_id, time.time() + ttl,
-                                StoredQuery(result.payload, result.has_next, result.next_key),
-                            )
-                    if not job.future.done():
+                    if job.record_response and (self._response_handler is not None or (_persistent_cache_ttl(job.api_id, job.cont_yn) and self._store is not None)):
+                        await self._persist_queue.put((job, result))
+                        delegated = True
+                    elif not job.future.done():
                         job.future.set_result(result)
                 except Exception as error:
                     api_audit_logger.warning(
@@ -444,10 +450,57 @@ class CentralRestBroker:
                     if not job.future.done():
                         job.future.set_exception(error)
                 finally:
+                    if not delegated:
+                        async with self._guard:
+                            self._inflight.pop(job.key, None)
+            finally:
+                self._queue.task_done()
+
+    async def _run_persistence(self) -> None:
+        while True:
+            item = await self._persist_queue.get()
+            try:
+                if item is None:
+                    return
+                job, result = item
+                try:
+                    started_at = time.monotonic()
+                    handler_ms = cache_ms = 0
+                    if self._response_handler is not None:
+                        phase_started = time.monotonic()
+                        try:
+                            await asyncio.to_thread(self._response_handler, job.api_id, job.body, result.payload)
+                        except Exception:
+                            logger.exception("recording_gap: 중앙 조회 응답 저장에 실패했습니다: %s", job.api_id)
+                        handler_ms = round((time.monotonic() - phase_started) * 1000)
+                    ttl = _persistent_cache_ttl(job.api_id, job.cont_yn)
+                    if ttl > 0 and self._store is not None:
+                        phase_started = time.monotonic()
+                        try:
+                            await asyncio.to_thread(
+                                self._store.save_query, job.key, job.api_id, time.time() + ttl,
+                                StoredQuery(result.payload, result.has_next, result.next_key),
+                            )
+                        except Exception:
+                            logger.exception("recording_gap: 중앙 조회 캐시 저장에 실패했습니다: %s", job.api_id)
+                        cache_ms = round((time.monotonic() - phase_started) * 1000)
+                    total_ms = round((time.monotonic() - started_at) * 1000)
+                    if total_ms >= 1000:
+                        logger.warning(
+                            "slow broker persistence namespace=%s api_id=%s handler_ms=%d cache_ms=%d total_ms=%d",
+                            self._namespace, job.api_id, handler_ms, cache_ms, total_ms,
+                        )
+                    if not job.future.done():
+                        job.future.set_result(result)
+                except Exception as error:
+                    logger.exception("broker persistence failed unexpectedly: %s", job.api_id)
+                    if not job.future.done():
+                        job.future.set_exception(error)
+                finally:
                     async with self._guard:
                         self._inflight.pop(job.key, None)
             finally:
-                self._queue.task_done()
+                self._persist_queue.task_done()
 
     def _prune_memory_cache(self) -> None:
         """만료 응답과 오래된 응답을 제거해 24시간 실행 시 메모리를 제한한다."""

@@ -230,7 +230,7 @@ class PartitionCampaignTests(unittest.TestCase):
             before = old.execute('SELECT request_json,input_path,state FROM research_campaign_jobs').fetchall()
             migration_rows = old.execute('SELECT * FROM research_schema_migrations').fetchall()
         migrated = ResearchRepository(old_path)
-        self.assertEqual(23, migrated.schema_version())
+        self.assertEqual(27, migrated.schema_version())
         with closing(sqlite3.connect(old_path)) as connection:
             self.assertEqual(before, connection.execute('SELECT request_json,input_path,state FROM research_campaign_jobs').fetchall())
             self.assertEqual(migration_rows, connection.execute('SELECT * FROM research_schema_migrations WHERE version<=16').fetchall())

@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
@@ -39,6 +40,20 @@ class ThemeColorRepositoryTests(unittest.TestCase):
             repository.set_stock_theme_color("005930", "반도체", "#F4CCCC")
 
             self.assertEqual("#CFE2F3", repository.color_for_theme("반도체"))
+            self.assertEqual("#F4CCCC", repository.color_for_stock_theme("005930", "반도체"))
+
+    def test_badge_colors_share_one_read_and_refresh_after_a_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            StockRepository(path).upsert("005930", "삼성전자")
+            repository = ThemeRepository(path)
+            repository.replace_for_stock("005930", ("반도체", "AI"))
+            with patch.object(repository, "_connect", wraps=repository._connect) as connect:
+                repository.color_for_stock_theme("005930", "반도체")
+                repository.color_for_stock_theme("005930", "AI")
+                self.assertEqual(1, connect.call_count)
+            repository.set_stock_theme_color("005930", "반도체", "#F4CCCC")
             self.assertEqual("#F4CCCC", repository.color_for_stock_theme("005930", "반도체"))
 
     def test_keeps_themes_separate_by_profile(self) -> None:

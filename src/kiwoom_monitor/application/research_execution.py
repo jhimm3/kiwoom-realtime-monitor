@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
 from typing import Any, Mapping
 
 from kiwoom_monitor.application.breakout_strategy import (
@@ -24,6 +26,7 @@ from kiwoom_monitor.domain.ranking import normalize_stock_code
 
 
 COST_MODEL_VERSION = "fixed_bps/v1"
+COST_MODEL_DECIMAL_VERSION = "fixed_bps/v2"
 EXECUTION_MODEL_VERSION = "next_tradable_bar_open/v1"
 SAME_BAR_PATH_VERSION = "conservative_with_optimistic_bound/v1"
 
@@ -31,17 +34,35 @@ SAME_BAR_PATH_VERSION = "conservative_with_optimistic_bound/v1"
 @dataclass(frozen=True)
 class SimulationCostModel:
     version: str
-    commission_bps: int
-    sell_tax_bps: int
-    slippage_bps: int
+    commission_bps: int | Decimal
+    sell_tax_bps: int | Decimal
+    slippage_bps: int | Decimal
     rate_basis: str = "unspecified"
     source: str = ""
     valid_from: str = ""
     valid_to: str = ""
 
     def __post_init__(self) -> None:
-        if self.version != COST_MODEL_VERSION:
+        if self.version not in {COST_MODEL_VERSION, COST_MODEL_DECIMAL_VERSION}:
             raise ValueError(f"unregistered cost model: {self.version}")
+        for field in ("commission_bps", "sell_tax_bps", "slippage_bps"):
+            value = getattr(self, field)
+            if self.version == COST_MODEL_VERSION:
+                if type(value) is not int:
+                    raise ValueError(f"{field} must be an integer in fixed_bps/v1")
+            else:
+                if not isinstance(value, (str, Decimal)):
+                    raise ValueError(f"{field} must be a canonical decimal string in fixed_bps/v2")
+                text = str(value)
+                if re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]{1,2})?", text) is None:
+                    raise ValueError(f"{field} must be a canonical decimal string in fixed_bps/v2")
+                try:
+                    decimal_value = Decimal(text)
+                except InvalidOperation as exc:
+                    raise ValueError(f"{field} must be a decimal rate") from exc
+                if not decimal_value.is_finite() or decimal_value < 0:
+                    raise ValueError(f"{field} must be a canonical nonnegative rate in 0.01 bp units")
+                object.__setattr__(self, field, decimal_value)
         if min(self.commission_bps, self.sell_tax_bps, self.slippage_bps) < 0:
             raise ValueError("simulation cost rates must not be negative")
         if self.slippage_bps >= 10_000:
@@ -59,7 +80,11 @@ class SimulationCostModel:
                 raise ValueError("simulation cost valid_to must be after valid_from")
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        if self.version == COST_MODEL_DECIMAL_VERSION:
+            for field in ("commission_bps", "sell_tax_bps", "slippage_bps"):
+                result[field] = str(result[field])
+        return result
 
 
 @dataclass(frozen=True)
@@ -184,6 +209,11 @@ class PaperExecutionEngine:
     def process_bar(self, bar: KrxMinuteBarFrame) -> tuple[ExecutionEvent, ...]:
         events: list[ExecutionEvent] = []
         pending = self.portfolio.pending_order
+        if (pending is not None and self.session_profile is not None
+                and pending.research_session and bar.research_session
+                and bar.research_session != pending.research_session):
+            events.append(self._discard_pending(pending, bar, "session_boundary_before_fill"))
+            pending = None
         if pending is not None and pending.symbol == normalize_stock_code(bar.code):
             bar_start = _aware_datetime(bar.bar_start).astimezone(timezone.utc)
             eligible_after = _aware_datetime(pending.eligible_after).astimezone(timezone.utc)
@@ -284,7 +314,9 @@ class PaperExecutionEngine:
         if self.session_profile is None:
             return ""
         submitted = _aware_datetime(pending.submitted_at).astimezone(timezone.utc)
-        expected_start = submitted.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        expected_start = submitted.replace(second=0, microsecond=0)
+        if submitted > expected_start:
+            expected_start += timedelta(minutes=1)
         bar_start = _aware_datetime(bar.bar_start).astimezone(timezone.utc)
         if pending.research_session and bar.research_session != pending.research_session:
             return "session_boundary_before_fill"
@@ -315,7 +347,8 @@ class PaperExecutionEngine:
             symbol=pending.symbol, side=pending.side, occurred_at=bar.bar_start,
             received_at=bar.available_at, quantity=pending.quantity, price=0,
             notional=0, commission=0, tax=0, realized=0,
-            source_revision_id=bar.revision_id, optimistic_exit_price=None, reason=reason,
+            source_revision_id=(bar.revision_id if normalize_stock_code(bar.code) == pending.symbol else ""),
+            optimistic_exit_price=None, reason=reason,
         )
 
     def finalize(self, ended_at: str) -> tuple[ExecutionEvent, ...]:
@@ -373,8 +406,8 @@ class PaperExecutionEngine:
             )
         price = _slipped_price(bar.open, pending.side, cost.slippage_bps)
         notional = price * pending.quantity
-        commission = notional * cost.commission_bps // 10_000
-        tax = notional * cost.sell_tax_bps // 10_000 if pending.side == "SELL" else 0
+        commission = _fee_won(notional, cost.commission_bps)
+        tax = _fee_won(notional, cost.sell_tax_bps) if pending.side == "SELL" else 0
         if pending.side == "BUY":
             required = notional + commission
             if required > self.portfolio.cash_won:
@@ -473,8 +506,8 @@ class PaperExecutionEngine:
         assert position is not None and cost is not None
         quantity = min(quantity, position.quantity)
         notional = price * quantity
-        commission = notional * cost.commission_bps // 10_000
-        tax = notional * cost.sell_tax_bps // 10_000
+        commission = _fee_won(notional, cost.commission_bps)
+        tax = _fee_won(notional, cost.sell_tax_bps)
         proceeds = notional - commission - tax
         entry_basis = position.entry_price * quantity + (
             position.entry_commission * quantity // position.quantity
@@ -545,7 +578,7 @@ class PaperExecutionEngine:
             return reference_price * quantity
         price = _slipped_price(reference_price, "BUY", cost.slippage_bps)
         notional = price * quantity
-        return notional + notional * cost.commission_bps // 10_000
+        return notional + _fee_won(notional, cost.commission_bps)
 
     def _event(
         self,
@@ -588,10 +621,16 @@ class PaperExecutionEngine:
         return ExecutionEvent(event_id=_content_id("execution", body), **body)
 
 
-def _slipped_price(price: int, side: str, slippage_bps: int) -> int:
+def _fee_won(notional: int, rate_bps: int | Decimal) -> int:
+    return int((Decimal(notional) * rate_bps / 10_000).to_integral_value(rounding=ROUND_DOWN))
+
+
+def _slipped_price(price: int, side: str, slippage_bps: int | Decimal) -> int:
     if side == "BUY":
-        return (price * (10_000 + slippage_bps) + 9_999) // 10_000
-    return price * (10_000 - slippage_bps) // 10_000
+        return int((Decimal(price) * (10_000 + slippage_bps) / 10_000)
+                   .to_integral_value(rounding=ROUND_CEILING))
+    return int((Decimal(price) * (10_000 - slippage_bps) / 10_000)
+               .to_integral_value(rounding=ROUND_DOWN))
 
 
 def _content_id(prefix: str, value: Mapping[str, Any]) -> str:

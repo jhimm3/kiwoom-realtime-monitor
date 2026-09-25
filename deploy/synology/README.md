@@ -9,7 +9,7 @@
 ### 소스 빌드 기준과 실제 배포 확인
 
 현재 소스의 빌드 식별자는
-`2026.09.22-theme-suggestion-review-v1`이다. 이는 작업본의 기준이며 실제 NAS에
+`2026.09.25-followup-newhigh-cache-v1`이다. 이는 작업본의 기준이며 실제 NAS에
 배포됐다는 뜻은 아니다. 이후 배포할 때는 작업본의 `SERVER_BUILD`, Compose 이미지
 태그, Dockerfile 검증 문자열을 함께 확인한다.
 프로젝트 소스를 먼저 동기화하고 Container Manager에서 서버 이미지를 다시 빌드한다.

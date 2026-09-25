@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -30,7 +31,7 @@ from kiwoom_monitor.infrastructure.persistence.schema_migrations import (
 UTC = timezone.utc
 
 
-def _evaluation(run_id: str = "run-1"):
+def _evaluation(run_id: str = "run-1", *, index: int = 2):
     def bar(index: int, close: int, high: int) -> KrxMinuteBarFrame:
         start = datetime(2026, 9, 12, 0, index, tzinfo=UTC)
         end = start + timedelta(minutes=1)
@@ -45,13 +46,13 @@ def _evaluation(run_id: str = "run-1"):
         "v1", "v1", "v1", 2, 0, False, False, 1, 60, 30, 0,
         300, 500, 10, 1, 1_000_000, 60, 30,
     )
-    current = bar(2, 1030, 1040)
+    current = bar(index, 1030, 1040)
     universe = CandidateUniverseFrame(
-        "rank", "rank", datetime(2026, 9, 12, 0, 2, tzinfo=UTC).isoformat(), ("005930",),
+        "rank", "rank", datetime(2026, 9, 12, 0, index, tzinfo=UTC).isoformat(), ("005930",),
     )
     return evaluate_breakout_bar(
         run_id=run_id, evaluation_bar=current,
-        bar_history=(bar(0, 1000, 1010), bar(1, 1010, 1020)),
+        bar_history=(bar(index - 2, 1000, 1010), bar(index - 1, 1010, 1020)),
         universe_frames=(universe,), config=config, state=StrategyState(),
     )
 
@@ -91,7 +92,7 @@ class ResearchRepositoryTests(unittest.TestCase):
                 connection.commit()
 
             repository = ResearchRepository(path)
-            self.assertEqual(23, repository.schema_version())
+            self.assertEqual(27, repository.schema_version())
             self.assertEqual("old-run", repository.load_run("old-run")["run_id"])
 
     def test_v8_job_is_preserved_when_attempt_fencing_is_added(self) -> None:
@@ -114,10 +115,25 @@ class ResearchRepositoryTests(unittest.TestCase):
             repository = ResearchRepository(path)
             job = repository.load_search_job("job-v8")
             version = repository.schema_version()
-            self.assertEqual(23, version)
+            self.assertEqual(27, version)
         self.assertEqual("queued", job["status"])
         self.assertEqual(0, job["generation"])
         self.assertEqual("", job["owner_token"])
+
+    def test_v23_running_run_is_preserved_without_invented_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'research.sqlite3'
+            with closing(sqlite3.connect(path)) as connection:
+                SQLiteMigrationRunner(connection, table='research_schema_migrations').apply(_MIGRATIONS[:23])
+                connection.execute("INSERT INTO research_runs(run_id,status,started_at,spec_json,input_manifest_json) "
+                                   "VALUES('old-independent','running','before','{}','{}')")
+                connection.commit()
+            repository = ResearchRepository(path)
+            self.assertEqual(27, repository.schema_version())
+            self.assertEqual('running', repository.load_run('old-independent')['status'])
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(0, connection.execute(
+                    'SELECT COUNT(*) FROM research_independent_run_owners').fetchone()[0])
 
     def test_migration_and_atomic_idempotent_append(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -129,10 +145,35 @@ class ResearchRepositoryTests(unittest.TestCase):
             repository.finish_run("run-1", "hash-1")
             self.assertFalse(repository.append_evaluation(evaluation))
 
-            self.assertEqual(23, repository.schema_version())
+            self.assertEqual(27, repository.schema_version())
             self.assertEqual(1, len(repository.load_evaluations("run-1")))
             self.assertEqual(1, len(repository.load_candidate_events("run-1")))
             self.assertEqual("completed", repository.load_run("run-1")["status"])
+
+    def test_evaluation_batch_preserves_order_and_idempotence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ResearchRepository(Path(directory) / "research.sqlite3")
+            repository.start_run("run-1", {"mode": "fixture"}, {"dataset_id": "fixture"})
+            evaluations = (_evaluation(index=2), _evaluation(index=3))
+            self.assertEqual((True, True), repository.append_evaluations(evaluations))
+            self.assertEqual((False, False), repository.append_evaluations(evaluations))
+            self.assertEqual(
+                [value.decision.decision_id for value in evaluations],
+                [value["decision_id"] for value in repository.load_evaluations("run-1")],
+            )
+            repository.finish_run("run-1", "hash-1")
+            self.assertEqual((False, False), repository.append_evaluations(evaluations))
+
+    def test_evaluation_batch_rolls_back_if_an_existing_row_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ResearchRepository(Path(directory) / "research.sqlite3")
+            repository.start_run("run-1", {"mode": "fixture"}, {"dataset_id": "fixture"})
+            original = _evaluation(index=2)
+            repository.append_evaluation(original)
+            conflicting = replace(original, decision=replace(original.decision, reasons=("changed",)))
+            with self.assertRaisesRegex(ValueError, "immutable"):
+                repository.append_evaluations((_evaluation(index=3), conflicting))
+            self.assertEqual(1, len(repository.load_evaluations("run-1")))
 
     def test_run_inputs_and_completed_hash_are_immutable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

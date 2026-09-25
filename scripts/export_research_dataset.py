@@ -80,7 +80,7 @@ def export_daily_dataset(client, start, end, kinds, subject, output, session_pro
     return manifest
 
 
-def prepare_campaign_nas_input(client, source, template_path, scope, known_fingerprints, *, checkpoint=lambda: None, max_encoded_bytes=32 * 1024 * 1024, begin_preparation=lambda: None, publication_context=nullcontext, record_staging=lambda path: None):
+def prepare_campaign_nas_input(client, source, template_path, scope, known_fingerprints, *, checkpoint=lambda: None, max_encoded_bytes=32 * 1024 * 1024, begin_preparation=lambda: None, publication_context=nullcontext, record_staging=lambda path: None, rolling_range=None, validate_dataset=None):
     """Probe fixed snapshots, stage verified files, then publish a new directory."""
     checkpoint()
     if (template_path / 'manifest.json').stat().st_size > 1024 * 1024:
@@ -89,7 +89,10 @@ def prepare_campaign_nas_input(client, source, template_path, scope, known_finge
     children = template_manifest.get('children') if template_manifest.get('bundle_version') else None
     if template_manifest.get('bundle_version') and (not isinstance(children, list) or not children):
         raise ValueError('NAS preparation bundle child contract is invalid')
-    ranges = [entry['captured_range'] for entry in children] if children else [scope['captured_range']]
+    if rolling_range is not None and children:
+        raise ValueError('rolling NAS preparation requires a single daily template')
+    target_scope = {**scope, 'captured_range': rolling_range} if rolling_range is not None else scope
+    ranges = [entry['captured_range'] for entry in children] if children else [target_scope['captured_range']]
     pages, themes, signatures = [], [], []
     for captured in ranges:
         checkpoint()
@@ -107,6 +110,8 @@ def prepare_campaign_nas_input(client, source, template_path, scope, known_finge
             raise ValueError('NAS preparation probe is incomplete')
         if manifest.get('captured_range') != captured or sorted(manifest.get('kinds', [])) != sorted(scope['kinds']) or (manifest.get('subject') or '') != (scope.get('subject') or ''):
             raise ValueError('NAS preparation probe scope does not match the study')
+        if rolling_range is not None and count == 0:
+            return {'status': 'empty', 'signature': '', 'path': None}
         history = client.load_theme_history(as_of=end.timestamp(), limit=1000)
         checkpoint()
         snapshots = history.get('snapshots')
@@ -115,8 +120,9 @@ def prepare_campaign_nas_input(client, source, template_path, scope, known_finge
         signatures.append({'revision_ids_hash': manifest['revision_ids_hash'], 'themes': hashlib.sha256(json.dumps(snapshots, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()})
         pages.append(page)
         themes.append(history)
-    signature = hashlib.sha256(json.dumps(signatures, sort_keys=True).encode()).hexdigest()
-    if signature == source['remote_signature']:
+    signature_input = {'ranges': ranges, 'signatures': signatures} if rolling_range is not None else signatures
+    signature = hashlib.sha256(json.dumps(signature_input, sort_keys=True).encode()).hexdigest()
+    if rolling_range is None and signature == source['remote_signature']:
         return {'status': 'unchanged', 'signature': signature, 'path': None}
     operation_id = begin_preparation()
     root = Path(source['root'])
@@ -153,19 +159,26 @@ def prepare_campaign_nas_input(client, source, template_path, scope, known_finge
             write_frozen_research_bundle(payload, tuple(paths), reserve_bytes=reserve_bytes)
         checkpoint()
         dataset = load_research_input(payload, session_profile=profile, checkpoint=checkpoint)
-        if campaign_input_scope(dataset) != scope:
+        if campaign_input_scope(dataset) != target_scope:
             raise ValueError('prepared NAS dataset scope does not match the study')
+        if validate_dataset is not None:
+            validate_dataset(dataset, payload)
         fingerprint = campaign_input_fingerprint(dataset, checkpoint=checkpoint)
+        if rolling_range is not None:
+            fingerprint = hashlib.sha256((json.dumps(rolling_range, sort_keys=True) + fingerprint).encode()).hexdigest()
         del dataset
-        if fingerprint in known_fingerprints:
-            return {'status': 'unchanged', 'signature': signature, 'path': None}
         target = root / ('nas-' + source['source_id'][:12] + '-' + fingerprint)
+        if fingerprint in known_fingerprints:
+            return {'status': 'unchanged', 'signature': signature, 'path': None, 'fingerprint': fingerprint}
         checkpoint()
         if target.is_symlink() or target.resolve().parent != root.resolve():
             raise ValueError('published NAS input target is outside the source root')
         if target.exists():
             existing = load_research_input(target, session_profile=profile, checkpoint=checkpoint)
-            if campaign_input_scope(existing) != scope or campaign_input_fingerprint(existing, checkpoint=checkpoint) != fingerprint:
+            existing_fingerprint = campaign_input_fingerprint(existing, checkpoint=checkpoint)
+            if rolling_range is not None:
+                existing_fingerprint = hashlib.sha256((json.dumps(rolling_range, sort_keys=True) + existing_fingerprint).encode()).hexdigest()
+            if campaign_input_scope(existing) != target_scope or existing_fingerprint != fingerprint:
                 raise ValueError('published NAS input conflicts with verified snapshot')
         else:
             write_research_storage_marker(payload, source['source_id'], kind='published', fingerprint=fingerprint, reserve_bytes=reserve_bytes, operation_id=operation_id)
@@ -178,7 +191,7 @@ def prepare_campaign_nas_input(client, source, template_path, scope, known_finge
                 if target.is_symlink() or target.resolve().parent != root.resolve() or stage.resolve().parent != root.resolve() or payload.is_symlink() or payload.resolve().parent != stage.resolve():
                     raise ValueError('NAS publication path escaped the source root')
                 payload.rename(target)
-        return {'status': 'prepared', 'signature': signature, 'path': str(target)}
+        return {'status': 'prepared', 'signature': signature, 'path': str(target), 'fingerprint': fingerprint}
 
 
 def export_date_bundle(client, dates, kinds, subject, output, session_profile, *, reuse_days=False):

@@ -28,6 +28,30 @@ def article(title: str, *, identity: str = "article-1", description: str = ""):
 
 
 class NewsEventHistoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_body_job_persists_assessment_and_original_publication_seconds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
+            store.initialize()
+            store.upsert_documents("news_article", article("테스트기업, 공급계약 체결"))
+            runner = NewsJobRunner(store, fetcher=lambda *_args, **_kwargs: (
+                "테스트기업이 공급계약을 체결했다. 계약 금액은 500억원이다.",
+                "2026-09-12T09:00:43+09:00",
+            ))
+            await runner.run_once()
+            await runner.run_once()
+            saved = store.load_documents("news_assessment", "005930", 1)[0]["document"]
+            self.assertEqual("2026-09-12T09:00:43+09:00", saved["published_at"])
+            self.assertEqual("2026-09-12T00:00:00+00:00", saved["listing_published_at"])
+            self.assertEqual("article_html", saved["published_at_source"])
+            service = CentralNewsService(
+                None, store, jobs_enabled=False, query_set_enabled=False,
+                naver_api_enabled=False, naver_stock_enabled=False, read_only_search=True,
+            )
+            values = await service.search("005930", "테스트기업", None)
+            self.assertEqual("2026-09-12T00:00:43+00:00", values[0]["published_at"])
+            self.assertEqual(saved["assessment"]["category"], values[0]["category"])
+            store.close()
+
     async def test_authenticated_api_reads_event_and_membership_revisions(self) -> None:
         try:
             from fastapi.testclient import TestClient
@@ -54,8 +78,15 @@ class NewsEventHistoryTests(unittest.IsolatedAsyncioTestCase):
                     f"/api/v1/news/history/membership?target={event['event_id']}",
                     headers={"Authorization": "Bearer private-token"},
                 )
+                body = client.get(
+                    "/api/v1/news/history/body",
+                    params={"target": event["article_revision_id"], "stock_code": "005930"},
+                    headers={"Authorization": "Bearer private-token"},
+                )
             self.assertEqual(event["event_revision_id"], response.json()["revisions"][0]["event_revision_id"])
             self.assertEqual(event["event_id"], membership.json()["revisions"][0]["event_id"])
+            self.assertEqual(event["article_revision_id"], body.json()["assessment"]["article_revision_id"])
+            self.assertIn("core_sentences", body.json()["assessment"])
 
     async def _record(self, store: SQLiteQueryStore, title: str, *, identity: str = "article-1",
                       body: str = "") -> tuple[dict, dict]:

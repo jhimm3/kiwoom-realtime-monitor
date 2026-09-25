@@ -52,6 +52,7 @@ def summarize(root: Path) -> Mapping[str, Any]:
             "submitted_order_count": int(fold.get("submitted_order_count", 0)),
             "filled_order_count": int(fold.get("filled_order_count", 0)),
             "censored_order_count": int(fold.get("censored_order_count", 0)),
+            "run_censored_event_count": sum(censored.values()),
             "censored_reasons": dict(sorted(censored.items())),
             "closed_trade_count": int(fold.get("closed_trade_count", 0)),
             "active_day_count": int(fold.get("active_day_count", 0)),
@@ -90,7 +91,7 @@ def _markdown(summary: Mapping[str, Any]) -> str:
         "This is a structural TRAIN/VALIDATION check on a sparse collection-in-progress sample. "
         "Parameters are provisional, costs are not broker verified, and OOS remains sealed.",
         "",
-        "| Partition | Family | Status | Decisions | Candidates | Submitted | Filled | Censored | Closed | Net PnL |",
+        "| Partition | Family | Status | Decisions | Candidates | Submitted | Filled | In-fold censored | Closed | Net PnL |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for run in summary["runs"]:
@@ -101,7 +102,11 @@ def _markdown(summary: Mapping[str, Any]) -> str:
             f"{run['censored_order_count']} | {run['closed_trade_count']} | "
             f"{run['net_realized_pnl_won']} |"
         )
-    lines.extend(["", "## Censored order reasons", ""])
+    lines.extend([
+        "", "The in-fold count uses the evaluation window. The reason counts below cover the whole run,",
+        "including orders censored when the research interval ended.",
+        "", "## Run-wide censored event reasons", "",
+    ])
     for run in summary["runs"]:
         reasons = ", ".join(
             f"{reason or '(empty)'}={count}"

@@ -74,6 +74,72 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("000660", claimed[0]["stock_code"])
             store.close()
 
+    async def test_rule_lane_claims_completed_body_despite_body_backlog(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
+            store.initialize()
+            store.upsert_documents("news_article", _article())
+            runner = NewsJobRunner(store, fetcher=lambda *_args, **_kwargs: "본문 " * 100)
+            self.assertEqual(1, await runner.run_once())
+            second = _article("새 본문 대기 기사")[0]
+            second["key"] = "article-2"
+            second["document"] = {
+                **second["document"], "identity": "article-2",
+                "link": "https://news/2", "original_link": "https://origin/2",
+            }
+            store.upsert_documents("news_article", [second])
+
+            selected = store.claim_news_jobs(preferred_stage="RULE")
+
+            self.assertEqual("RULE", selected[0]["stage"])
+            store.close()
+
+    async def test_parallel_body_lanes_overlap_without_duplicate_claim(self) -> None:
+        import threading
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
+            store.initialize()
+            for number in range(3):
+                item = _article(f"기사 {number}")[0]
+                item["key"] = f"article-{number}"
+                item["document"] = {
+                    **item["document"], "identity": f"article-{number}",
+                    "link": f"https://news/{number}",
+                    "original_link": f"https://origin/{number}",
+                }
+                store.upsert_documents("news_article", [item])
+            active = 0
+            peak = 0
+            lock = threading.Lock()
+            overlapped = threading.Event()
+            release = threading.Event()
+
+            def slow_fetch(*_args, **_kwargs):
+                nonlocal active, peak
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                    if active >= 2:
+                        overlapped.set()
+                release.wait(timeout=3)
+                with lock:
+                    active -= 1
+                return "본문 " * 100
+
+            runner = NewsJobRunner(store, fetcher=slow_fetch, parallelism=3,
+                                   busy_pause_seconds=0.02)
+            await runner.start()
+            try:
+                concurrent = await asyncio.to_thread(overlapped.wait, 2)
+            finally:
+                release.set()
+                await runner.close()
+
+            self.assertTrue(concurrent)
+            self.assertGreaterEqual(peak, 2)
+            store.close()
+
     async def test_continuous_backlog_is_paced_and_does_not_starve_event_loop(self) -> None:
         class BusyRunner(NewsJobRunner):
             def __init__(self) -> None:

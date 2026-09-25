@@ -260,5 +260,5 @@ class ResearchStagingCleanupTests(unittest.TestCase):
         migrated = ResearchRepository(path)
         with closing(sqlite3.connect(path)) as connection:
             self.assertEqual(before, connection.execute('SELECT * FROM research_campaign_storage_operations').fetchall())
-        self.assertEqual(23, migrated.schema_version())
+        self.assertEqual(27, migrated.schema_version())
         self.assertEqual((), migrated.load_campaign_staging_cleanups(self.source_id))

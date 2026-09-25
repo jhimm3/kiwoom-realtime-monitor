@@ -15,19 +15,20 @@ from kiwoom_monitor.infrastructure.persistence.sqlite_connections import (
 
 
 class StockNewsRepository:
-    def __init__(self, database_path: Path) -> None:
+    def __init__(self, database_path: Path, *, stored_news_limit: int | None = 200) -> None:
         self._database_path = database_path
+        self._stored_news_limit = None if stored_news_limit is None else max(50, min(1000, int(stored_news_limit)))
         self._initialize_schema()
 
     def _initialize_schema(self) -> None:
         initialize_news_schema(self._database_path)
 
-    def load(self, stock_code: str, *, limit: int = 200) -> tuple[StockNewsItem, ...]:
+    def load(self, stock_code: str, *, limit: int | None = None) -> tuple[StockNewsItem, ...]:
         with sqlite_read_connection(self._database_path) as connection:
             rows = connection.execute(
                 "SELECT title, description, link, original_link, published_at, relevant, category, outlook, reason, relevance_score, outlook_score "
                 "FROM stock_news WHERE stock_code=? ORDER BY COALESCE(published_at, first_seen_at) DESC LIMIT ?",
-                (stock_code, max(1, limit)),
+                (stock_code, max(1, self._stored_news_limit or 200 if limit is None else limit)),
             ).fetchall()
         return tuple(
             StockNewsItem(
@@ -86,14 +87,15 @@ class StockNewsRepository:
                 "naver_checked_at=COALESCE(excluded.naver_checked_at, stock_news_sync.naver_checked_at)",
                 (stock_code, checked_at.isoformat(), naver_checked_at.isoformat() if naver_checked_at else None),
             )
-            # 매매일지에 연결한 기사는 최신 200건 밖으로 밀려나도 계속 보존한다.
-            connection.execute(
-                "DELETE FROM stock_news WHERE stock_code=? AND identity NOT IN ("
-                "SELECT identity FROM stock_news WHERE stock_code=? ORDER BY COALESCE(published_at, first_seen_at) DESC LIMIT 200) "
-                "AND NOT EXISTS (SELECT 1 FROM journal_news_links l WHERE l.stock_code=stock_news.stock_code "
-                "AND l.identity=stock_news.identity AND l.is_deleted=0)",
-                (stock_code, stock_code),
-            )
+            # 매매일지에 연결한 기사는 설정된 최신 건수 밖으로 밀려나도 계속 보존한다.
+            if self._stored_news_limit is not None:
+                connection.execute(
+                    "DELETE FROM stock_news WHERE stock_code=? AND identity NOT IN ("
+                    "SELECT identity FROM stock_news WHERE stock_code=? ORDER BY COALESCE(published_at, first_seen_at) DESC LIMIT ?) "
+                    "AND NOT EXISTS (SELECT 1 FROM journal_news_links l WHERE l.stock_code=stock_news.stock_code "
+                    "AND l.identity=stock_news.identity AND l.is_deleted=0)",
+                    (stock_code, stock_code, self._stored_news_limit),
+                )
         return sum(1 for item in items if news_identity(item) not in existing)
 
     def set_journal_link(

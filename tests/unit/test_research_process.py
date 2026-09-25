@@ -71,6 +71,20 @@ def _write_empty_dataset(root: Path) -> None:
 
 
 class ResearchProcessTests(unittest.TestCase):
+    def test_decimal_cost_request_round_trips_without_float_conversion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_empty_dataset(root)
+            document = _request_document()
+            document["execution"]["cost_model"].update(
+                version="fixed_bps/v2", commission_bps="1.5",
+                sell_tax_bps="20", slippage_bps="5",
+            )
+            path = root / "request.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            cost = load_research_process_request(path).execution.cost_model
+            self.assertEqual(cost.to_dict(), document["execution"]["cost_model"])
+
     def test_relative_paths_and_all_locked_settings_are_validated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

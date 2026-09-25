@@ -201,7 +201,7 @@ class CampaignWorkerTests(unittest.TestCase):
         with closing(sqlite3.connect(path)) as connection:
             for table, rows in before.items():
                 self.assertEqual(rows, connection.execute(f'SELECT {previous_columns[table]} FROM {table}').fetchall())
-        self.assertEqual(23, migrated.schema_version())
+        self.assertEqual(27, migrated.schema_version())
         self.assertEqual('IDLE', migrated.load_campaign_worker('old')['state'])
 
 

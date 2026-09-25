@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import uuid
 from pathlib import Path
@@ -20,6 +21,7 @@ from kiwoom_monitor.presentation.historical_news_review_dialog import Historical
 from kiwoom_monitor.presentation.process_control import (
     AuxiliaryProcessManager,
     build_auxiliary_command,
+    process_identity_document,
     write_json_command,
 )
 from kiwoom_monitor.research_process import (load_research_process_request,
@@ -36,6 +38,25 @@ from kiwoom_monitor.application.research_hypotheses import (
     generate_research_hypotheses,
 )
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
+
+
+def _record_research_operation_owner(files: Mapping[str, Path], process: object, kind: str) -> bool:
+    """Persist a child identity only when its PID and creation token are verifiable."""
+    pid = getattr(process, 'pid', None)
+    if type(pid) is not int or pid <= 0:
+        return False
+    identity = process_identity_document(pid)
+    if not identity['start_token']:
+        return False
+    write_json_command(files['owner'], {
+        'version': 'research_operation_owner/v1', 'kind': kind,
+        'pid': identity['pid'], 'start_token': identity['start_token'],
+        'request': str(files['request'].resolve()),
+        'request_sha256': hashlib.sha256(files['request'].read_bytes()).hexdigest(),
+        'result': str(files['result'].resolve()),
+        'cancel': str(files['cancel'].resolve()),
+    })
+    return True
 
 
 class ResearchDialog(QDialog):
@@ -167,6 +188,9 @@ class ResearchDialog(QDialog):
         if self._request_path.text().strip():
             QTimer.singleShot(0, self._preview_request)
         QTimer.singleShot(0, self._restore_campaign)
+        geometry = self._settings.value("geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
 
     def _show_historical_news_review(self) -> None:
         if self._historical_news_review_dialog is None:
@@ -698,7 +722,7 @@ class ResearchDialog(QDialog):
         if not jobs:
             return
         editor = QDialog(self)
-        editor.setWindowTitle('같은 연구 범위의 새 자료 자동 등록')
+        editor.setWindowTitle('새 연구 자료 자동 등록')
         layout = QFormLayout(editor)
         template = QComboBox(editor)
         for job in jobs:
@@ -707,6 +731,7 @@ class ResearchDialog(QDialog):
         enabled = QCheckBox('자동 등록 켜기', editor)
         enabled.setChecked(True)
         nas_prepare = QCheckBox('NAS에서 새 자료 자동 준비', editor)
+        rolling_daily = QCheckBox('새 거래일의 TRAIN/VALIDATION 평가 기간 확장', editor)
         storage_cap = QSpinBox(editor)
         storage_cap.setRange(0, 1000000)
         storage_cap.setSuffix(' GB')
@@ -723,6 +748,7 @@ class ResearchDialog(QDialog):
             folder.setText(source['root'] if source else '')
             enabled.setChecked(bool(source['enabled']) if source else True)
             nas_prepare.setChecked(bool(source['nas_auto_prepare']) if source else False)
+            rolling_daily.setChecked(bool(source['rolling_daily']) if source else False)
             storage_cap.setValue((int(source['storage_cap_bytes']) + 1024 ** 3 - 1) // 1024 ** 3 if source else 0)
             status.setText(f"{source['state']} · {source['reason']}" if source else '')
         template.currentIndexChanged.connect(select_template)
@@ -731,8 +757,9 @@ class ResearchDialog(QDialog):
         layout.addRow(browse)
         layout.addRow(enabled)
         layout.addRow(nas_prepare)
+        layout.addRow(rolling_daily)
         layout.addRow('새 자료 폴더 용량 상한 (0=무제한)', storage_cap)
-        layout.addRow(QLabel('직접 하위의 완성 자료만 확인합니다. 기간·종목 범위·세션이 다른 자료는 등록하지 않습니다.', editor))
+        layout.addRow(QLabel('거래일 확장과 NAS 자동 준비를 함께 켜면 완료된 새 날짜를 하루씩 준비합니다. FINAL/OOS는 확장하지 않습니다.', editor))
         status = QLabel('', editor)
         layout.addRow(status)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel, editor)
@@ -740,7 +767,7 @@ class ResearchDialog(QDialog):
             try:
                 if not folder.text().strip():
                     raise ValueError('자료 폴더를 선택해 주세요')
-                repository.save_campaign_input_source(campaign_id, template.currentData(), Path(folder.text()), enabled=enabled.isChecked(), nas_auto_prepare=nas_prepare.isChecked(), nas_config_path=self._state_dir.parent / 'data_source.json' if nas_prepare.isChecked() else None, storage_cap_bytes=storage_cap.value() * 1024 ** 3)
+                repository.save_campaign_input_source(campaign_id, template.currentData(), Path(folder.text()), enabled=enabled.isChecked(), nas_auto_prepare=nas_prepare.isChecked(), nas_config_path=self._state_dir.parent / 'data_source.json' if nas_prepare.isChecked() else None, storage_cap_bytes=storage_cap.value() * 1024 ** 3, rolling_daily=rolling_daily.isChecked())
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
                 status.setText(str(exc))
                 return
@@ -1093,6 +1120,7 @@ class ResearchDialog(QDialog):
                 self._table.setItem(row_index, column, QTableWidgetItem(value))
 
     def stop(self) -> None:
+        self._settings.setValue("geometry", self.saveGeometry())
         if self._historical_news_review_dialog is not None:
             self._historical_news_review_dialog.close()
         if self._final_holdout_dialog is not None:
@@ -1117,6 +1145,7 @@ class ResearchDialog(QDialog):
         self._cancel_path.unlink(missing_ok=True)
 
     def closeEvent(self, event) -> None:
+        self._settings.setValue("geometry", self.saveGeometry())
         if self._historical_news_review_dialog is not None:
             self._historical_news_review_dialog.close()
         if self._final_holdout_dialog is not None:
@@ -1189,6 +1218,7 @@ class DevelopmentValidationDialog(QDialog):
         self.resize(1000, 520)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self._state_dir = Path(state_dir)
+        self._saved_request_path = self._state_dir / 'last_development_validation_request.json'
         self._manager = AuxiliaryProcessManager()
         self._operation = None
         self._last_request = None
@@ -1230,6 +1260,20 @@ class DevelopmentValidationDialog(QDialog):
         self._poll = QTimer(self)
         self._poll.setInterval(250)
         self._poll.timeout.connect(self._poll_process)
+        self._restore_last_request()
+
+    def _restore_last_request(self) -> None:
+        if not self._saved_request_path.exists():
+            return
+        try:
+            batch = load_development_validation_request(self._saved_request_path)
+        except (OSError, TypeError, ValueError) as exc:
+            self._status.setText('이전 순차 검증 요청 복원 실패: ' + str(exc))
+            return
+        self._last_request = batch
+        self._request_path.setText(str(self._saved_request_path))
+        self._resume.setEnabled(True)
+        self._status.setText('이전 순차 검증 요청 복원됨 · 실행 상태는 연구 원장에서 재확인합니다.')
 
     def _browse(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, '순차 검증 요청', '', 'JSON (*.json)')
@@ -1250,20 +1294,30 @@ class DevelopmentValidationDialog(QDialog):
         try:
             operation_id = uuid.uuid4().hex
             files = {key: self._state_dir / f'development_validation_{operation_id}.{suffix}'
-                     for key, suffix in (('request', 'json'), ('result', 'result.json'), ('cancel', 'cancel'))}
+                     for key, suffix in (('request', 'json'), ('result', 'result.json'),
+                                         ('cancel', 'cancel'), ('owner', 'owner.json'))}
             source = Path(self._request_path.text().strip()).resolve()
-            for path in files.values():
+            for path in (*files.values(), self._saved_request_path):
                 resolved = path.resolve()
-                if (resolved in (source, batch.request.database.resolve())
+                if ((resolved == source and path != self._saved_request_path)
+                        or resolved == batch.request.database.resolve()
                         or resolved.is_relative_to(batch.request.dataset.resolve())):
                     raise ValueError('operation files must be outside the frozen input/source/database')
             self._state_dir.mkdir(parents=True, exist_ok=True)
+            write_json_command(self._saved_request_path, batch.to_dict())
+            self._last_request = batch
             self._operation = {**files, 'batch': batch, 'implementation_hash': None}
             files['request'].write_text(json.dumps(batch.to_dict(), ensure_ascii=False), encoding='utf-8')
-            self._manager.start(build_auxiliary_command('kiwoom_monitor.research_process', '--research-process', [
+            process = self._manager.start(build_auxiliary_command('kiwoom_monitor.research_process', '--research-process', [
                 '--validate-partitions', str(files['request']), '--result', str(files['result']),
-                '--cancel', str(files['cancel'])]), Path.cwd(), below_normal_priority=True)
-            self._last_request = batch
+                '--cancel', str(files['cancel']),
+                '--validation-owner-token', 'development-ui-owner-' + operation_id]),
+                Path.cwd(), below_normal_priority=True)
+            try:
+                if not _record_research_operation_owner(files, process, 'development_validation'):
+                    self._status.setToolTip('자식 프로세스 시작 토큰을 확인할 수 없어 비정상 종료 자동 판정은 보류합니다.')
+            except OSError as exc:
+                self._status.setToolTip('자식 프로세스 소유 기록 저장 실패: ' + str(exc))
             self._last_encoded = None
             self._run.setEnabled(False)
             self._resume.setEnabled(False)
@@ -1291,6 +1345,7 @@ class DevelopmentValidationDialog(QDialog):
         if self._operation is None or process is None:
             return
         exit_code = process.poll()
+        verified = False
         try:
             path = self._operation['result']
             if not path.exists():
@@ -1308,11 +1363,13 @@ class DevelopmentValidationDialog(QDialog):
             if encoded != self._last_encoded or exit_code is not None:
                 self._apply_progress(document, finished=exit_code is not None)
                 self._last_encoded = encoded
+            if exit_code is not None:
+                verified = True
         except (OSError, TypeError, ValueError, KeyError, AttributeError) as exc:
             self._status.setText('진행 확인 실패: ' + str(exc))
         finally:
             if exit_code is not None:
-                self._clear_operation()
+                self._clear_operation(preserve_receipt=not verified)
 
     def _apply_progress(self, document, *, finished: bool) -> None:
         operation = self._operation
@@ -1426,19 +1483,23 @@ class DevelopmentValidationDialog(QDialog):
         self._status.setToolTip(str(document.get('reason', '')))
         self._summary.setText(f'전체 {len(steps)} / 완료 {complete} / 미시작 {sum(row["state"] == "NOT_STARTED" for row in steps)} · 초기 현금은 구간마다 별개 · 적격은 수익성 승인 아님')
 
-    def _clear_operation(self) -> None:
+    def _clear_operation(self, *, preserve_receipt: bool = False) -> None:
         operation, self._operation = self._operation, None
         self._poll.stop()
         self._manager.clear()
         errors = []
         if operation is not None:
-            for key in ('request', 'result', 'cancel'):
+            for key in (() if preserve_receipt else ('request', 'result', 'cancel', 'owner')):
                 try:
-                    operation[key].unlink(missing_ok=True)
+                    path = operation.get(key)
+                    if path is not None:
+                        path.unlink(missing_ok=True)
                 except OSError as exc:
                     errors.append(str(exc))
         if errors:
             self._status.setToolTip(self._status.toolTip() + '\n' + '\n'.join(errors))
+        if preserve_receipt and operation is not None:
+            self._status.setToolTip(self._status.toolTip() + '\n비정상 종료 기록 보존: ' + str(operation['owner']))
         self._run.setEnabled(True)
         self._resume.setEnabled(self._last_request is not None)
         self._cancel.setEnabled(False)
@@ -1448,7 +1509,7 @@ class DevelopmentValidationDialog(QDialog):
             self._request_cancel()
         if self._manager.is_running:
             self._manager.stop(graceful_timeout=3.0, terminate_timeout=1.0)
-        self._clear_operation()
+        self._clear_operation(preserve_receipt=self._operation is not None)
 
     def closeEvent(self, event) -> None:
         self._request_cancel()
@@ -1464,6 +1525,7 @@ class FinalHoldoutDialog(QDialog):
     _RECOVERABLE = frozenset(('FAILED', 'CANCELLED'))
     _STATES = {
         'NOT_STARTED': '미시작',
+        'RUNNING': '실행 중',
         'COMPLETED': '실행 완료',
         'CACHED': '완료 결과 재사용',
         'FAILED': '실패 · 명시 복구 필요',
@@ -1478,8 +1540,10 @@ class FinalHoldoutDialog(QDialog):
         self.resize(1120, 540)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self._state_dir = Path(state_dir)
+        self._saved_request_path = self._state_dir / 'last_final_holdout_request.json'
         self._manager = AuxiliaryProcessManager()
         self._operation: dict[str, Any] | None = None
+        self._last_encoded: bytes | None = None
         self._last_request = None
         self._last_states: dict[str, str] = {}
         self._displayed_hashes: list[str] = []
@@ -1553,6 +1617,23 @@ class FinalHoldoutDialog(QDialog):
         self._poll = QTimer(self)
         self._poll.setInterval(250)
         self._poll.timeout.connect(self._poll_process)
+        self._restore_last_request()
+
+    def _restore_last_request(self) -> None:
+        if not self._saved_request_path.exists():
+            return
+        try:
+            request = load_final_holdout_execution_request(self._saved_request_path)
+            if request.recoveries:
+                raise ValueError('저장된 요청에 명시 복구가 포함돼 있습니다')
+        except (OSError, TypeError, ValueError) as exc:
+            self._status.setText('이전 최종 평가 요청 복원 실패: ' + str(exc))
+            return
+        self._last_request = request
+        self._can_resume = True
+        self._request_path.setText(str(self._saved_request_path))
+        self._resume.setEnabled(True)
+        self._status.setText('이전 최종 평가 요청 복원됨 · 최종 원장을 확인한 뒤 남은 후보를 수동 실행할 수 있습니다.')
 
     def _browse(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, '최종 평가 요청', '', 'JSON (*.json)')
@@ -1574,27 +1655,40 @@ class FinalHoldoutDialog(QDialog):
             return
         try:
             operation_id = uuid.uuid4().hex
+            if source_path is None or not request.recoveries:
+                request = replace(request, owner_token='final-ui-owner-' + operation_id)
             files = {key: self._state_dir / f'final_holdout_{operation_id}.{suffix}'
-                     for key, suffix in (('request', 'json'), ('result', 'result.json'), ('cancel', 'cancel'))}
+                     for key, suffix in (('request', 'json'), ('result', 'result.json'),
+                                         ('cancel', 'cancel'), ('owner', 'owner.json'))}
             first = request.candidates[0]
-            protected = {first.database.resolve()}
-            if source_path is not None:
-                protected.add(Path(source_path).resolve())
-            for path in files.values():
+            for path in (*files.values(), self._saved_request_path):
                 resolved = path.resolve()
-                if (resolved in protected or resolved.is_relative_to(first.dataset.resolve())
+                if (resolved == first.database.resolve()
+                        or (source_path is not None and resolved == source_path.resolve()
+                            and path != self._saved_request_path)
+                        or resolved.is_relative_to(first.dataset.resolve())
                         or resolved.is_relative_to(first.runs_dir.resolve())):
                     raise ValueError('operation files must be outside the request, frozen input, database and run artifacts')
             self._state_dir.mkdir(parents=True, exist_ok=True)
+            # A recovery needs a fresh explicit decision after restart; only the base batch is resumable.
+            write_json_command(self._saved_request_path, replace(request, recoveries=()).to_dict())
+            self._last_request = request
+            self._can_resume = True
             self._operation = {'request': files['request'], 'result': files['result'],
-                'cancel': files['cancel'], 'snapshot': request}
+                'cancel': files['cancel'], 'owner': files['owner'], 'snapshot': request}
             write_json_command(files['request'], request.to_dict())
             command = build_auxiliary_command('kiwoom_monitor.research_process', '--research-process', [
                 '--evaluate-final', str(files['request']), '--result', str(files['result']),
                 '--cancel', str(files['cancel']),
             ])
-            self._manager.start(command, Path.cwd(), below_normal_priority=True)
-            self._last_request = request
+            process = self._manager.start(command, Path.cwd(), below_normal_priority=True)
+            if source_path is None or not request.recoveries:
+                try:
+                    if not _record_research_operation_owner(files, process, 'final_holdout'):
+                        self._status.setToolTip('자식 프로세스 시작 토큰을 확인할 수 없어 비정상 종료 자동 판정은 보류합니다.')
+                except OSError as exc:
+                    self._status.setToolTip('자식 프로세스 소유 기록 저장 실패: ' + str(exc))
+            self._last_encoded = None
             self._can_resume = False
             self._exposure_available = False
             self._run.setEnabled(False)
@@ -1690,9 +1784,26 @@ class FinalHoldoutDialog(QDialog):
         if self._operation is None or process is None:
             return
         exit_code = process.poll()
-        if exit_code is None:
-            return
         operation = self._operation
+        if exit_code is None:
+            if operation.get('kind') == 'exposure' or not operation['result'].is_file():
+                return
+            try:
+                with operation['result'].open('rb') as stream:
+                    encoded = stream.read(self._RESULT_LIMIT + 1)
+                if len(encoded) > self._RESULT_LIMIT:
+                    raise ValueError('최종 평가 진행 결과가 16 MiB를 초과합니다')
+                if encoded == self._last_encoded:
+                    return
+                result = json.loads(encoded.decode('utf-8'))
+                if not isinstance(result, Mapping) or result.get('status') != 'running':
+                    return
+                self._apply_result(result, operation['snapshot'], finished=False)
+                self._last_encoded = encoded
+            except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                self._status.setText('최종 평가 진행 확인 실패: ' + str(exc))
+            return
+        verified = False
         try:
             with operation['result'].open('rb') as stream:
                 encoded = stream.read(self._RESULT_LIMIT + 1)
@@ -1718,20 +1829,21 @@ class FinalHoldoutDialog(QDialog):
                 self._apply_exposure_result(result, operation['snapshot'])
             else:
                 self._apply_result(result, operation['snapshot'])
+            verified = True
         except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
             subject = '개발 사용 기록' if operation.get('kind') == 'exposure' else '최종 평가'
             self._status.setText(subject + ' 결과 확인 실패: ' + str(exc) + ' · 이전 표 유지')
         finally:
-            self._clear_operation()
+            self._clear_operation(preserve_receipt=operation.get('kind') != 'exposure' and not verified)
 
-    def _apply_result(self, result: Mapping[str, Any], request) -> None:
+    def _apply_result(self, result: Mapping[str, Any], request, *, finished: bool = True) -> None:
         required = {'status', 'kind', 'version', 'batch_id', 'window_id', 'implementation_hash',
                     'batch_status', 'candidates', 'limitations'}
         if (set(result) != required or result.get('kind') != 'independent_final_holdout'
                 or result.get('version') != 'independent_final_holdout_result/v1'
                 or result.get('batch_id') != request.batch.batch_id
                 or result.get('window_id') != request.batch.window_id
-                or result.get('status') not in ('ok', 'cancelled', 'resource_blocked')):
+                or result.get('status') not in (('ok', 'cancelled', 'resource_blocked') if finished else ('running',))):
             raise ValueError('최종 평가 결과 범위 불일치')
         implementation_hash = result['implementation_hash']
         if (not isinstance(implementation_hash, str) or len(implementation_hash) != 64
@@ -1754,7 +1866,8 @@ class FinalHoldoutDialog(QDialog):
             values = tuple(row[key] for key in (
                 'run_id', 'reason', 'logical_result_hash', 'performance_status',
                 'report_status', 'recovery_request_id'))
-            if state not in self._STATES or any(not isinstance(value, str) for value in values):
+            if (state not in self._STATES or finished and state == 'RUNNING'
+                    or any(not isinstance(value, str) for value in values)):
                 raise ValueError('최종 평가 후보 상태 불일치')
             if row['run_id']:
                 run_ids.append(row['run_id'])
@@ -1786,24 +1899,29 @@ class FinalHoldoutDialog(QDialog):
                 item = QTableWidgetItem(value)
                 item.setToolTip(tooltip)
                 self._table.setItem(index, column, item)
-        self._displayed_hashes = expected_hashes
-        self._last_states = {row['candidate_spec_hash']: row['state'] for row in rows}
+        if finished:
+            self._displayed_hashes = expected_hashes
+            self._last_states = {row['candidate_spec_hash']: row['state'] for row in rows}
         failed = sum(row['state'] == 'FAILED' for row in rows)
         cancelled = sum(row['state'] == 'CANCELLED' for row in rows)
         pending = sum(row['state'] == 'NOT_STARTED' for row in rows)
-        self._can_resume = any(row['state'] == 'NOT_STARTED' for row in rows)
-        label = ('최종 평가 완료' if expected_batch == 'COMPLETED' else
+        if finished:
+            self._can_resume = any(row['state'] == 'NOT_STARTED' for row in rows)
+        label = ('최종 평가 진행 중' if not finished else
+                 '최종 평가 완료' if expected_batch == 'COMPLETED' else
                  '자원 한도로 중단됨' if result['status'] == 'resource_blocked' else
                  '취소됨 · 종료 후보는 명시 복구 필요' if result['status'] == 'cancelled' else
                  '일부 후보 확인 필요')
         self._status.setText(label)
         self._summary.setText(
-            f'전체 {len(rows)} / 완료 {complete} / 실패 {failed} / 취소 {cancelled} / 미시작 {pending} '
+            f'전체 {len(rows)} / 완료 {complete} / 실행 중 {sum(row["state"] == "RUNNING" for row in rows)} '
+            f'/ 실패 {failed} / 취소 {cancelled} / 미시작 {pending} '
             '· 실패·취소는 자동 재시도하지 않음'
         )
         self._summary.setToolTip('\n'.join(str(value) for value in result['limitations']))
-        self._exposure_available = True
-        self._exposed = False
+        if finished:
+            self._exposure_available = True
+            self._exposed = False
         self._selection_changed()
 
     def _apply_exposure_result(self, result: Mapping[str, Any], request: FinalHoldoutExposureRequest) -> None:
@@ -1821,6 +1939,12 @@ class FinalHoldoutDialog(QDialog):
             raise ValueError('개발 사용 기록 결과 범위 불일치')
         self._exposed = True
         self._exposure_available = False
+        self._can_resume = False
+        self._last_request = None
+        try:
+            self._saved_request_path.unlink(missing_ok=True)
+        except OSError as exc:
+            self._summary.setToolTip('저장된 최종 요청 정리 실패: ' + str(exc))
         self._status.setText('개발 사용 기록 완료 · 같은 기간은 다시 최종 검증으로 쓸 수 없음')
         self._summary.setText('이 최종 결과는 EXPOSED_DEVELOPMENT로 전환됐습니다. 다음 최종 평가는 새 미사용 기간이 필요합니다.')
 
@@ -1833,19 +1957,23 @@ class FinalHoldoutDialog(QDialog):
         self._expose.setEnabled(self._operation is None and self._exposure_available
                                 and not self._exposed and bool(self._exposure_reason.text().strip()))
 
-    def _clear_operation(self) -> None:
+    def _clear_operation(self, *, preserve_receipt: bool = False) -> None:
         operation, self._operation = self._operation, None
         self._poll.stop()
         self._manager.clear()
         errors = []
         if operation is not None:
-            for key in ('request', 'result', 'cancel'):
+            for key in (() if preserve_receipt else ('request', 'result', 'cancel', 'owner')):
                 try:
-                    operation[key].unlink(missing_ok=True)
+                    path = operation.get(key)
+                    if path is not None:
+                        path.unlink(missing_ok=True)
                 except OSError as exc:
                     errors.append(str(exc))
         if errors:
             self._status.setToolTip(self._status.toolTip() + '\n' + '\n'.join(errors))
+        if preserve_receipt and operation is not None:
+            self._status.setToolTip(self._status.toolTip() + '\n비정상 종료 기록 보존: ' + str(operation['owner']))
         self._run.setEnabled(True)
         self._resume.setEnabled(self._last_request is not None and self._can_resume)
         self._cancel.setEnabled(False)
@@ -1856,7 +1984,8 @@ class FinalHoldoutDialog(QDialog):
             self._request_cancel()
         if self._manager.is_running:
             self._manager.stop(graceful_timeout=3.0, terminate_timeout=1.0)
-        self._clear_operation()
+        self._clear_operation(preserve_receipt=self._operation is not None
+                              and self._operation.get('kind') != 'exposure')
 
     def closeEvent(self, event) -> None:
         self._request_cancel()

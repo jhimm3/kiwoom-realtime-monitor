@@ -62,6 +62,21 @@ class FinalHoldoutCliTests(unittest.TestCase):
         self.assertEqual(1, len(repository.load_final_holdout_events(self.fixture.batch.window_id)))
         self.assertEqual('COMPLETED', repository.load_final_holdout_executions(self.fixture.batch.batch_id)[0]['state'])
 
+    def test_candidate_running_snapshot_precedes_final_result(self):
+        execute = rp.execute_research
+        observed = []
+
+        def inspect_progress(*args, **kwargs):
+            progress = json.loads(self.result.read_text(encoding='utf-8'))
+            observed.append((progress['status'], progress['batch_id'], progress['candidates'][0]['state']))
+            return execute(*args, **kwargs)
+
+        with patch.object(rp, 'execute_research', side_effect=inspect_progress):
+            code, result = self.cli()
+        self.assertEqual([('running', self.fixture.batch.batch_id, 'RUNNING')], observed)
+        self.assertEqual((0, 'ok', 'COMPLETED'),
+                         (code, result['status'], result['candidates'][0]['state']))
+
     def test_failed_cli_is_terminal_until_explicit_recovery_request(self):
         with patch.object(rp, 'execute_research', side_effect=ValueError('final CLI fixture')) as execute:
             first_code, first = self.cli()

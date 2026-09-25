@@ -14,7 +14,7 @@ from kiwoom_monitor.application.research_execution import (
     SimulationCostModel,
     SimulationExecutionConfig,
 )
-from kiwoom_monitor.application.market_session_schedule import research_session_profile_document
+from kiwoom_monitor.application.market_session_schedule import research_session_profile_contract_matches
 from kiwoom_monitor.application.research_families import parse_strategy_config
 from kiwoom_monitor.application.research_splits import ResearchEvaluationSpec
 
@@ -343,7 +343,7 @@ def _validate_candidate_spec(value: Mapping[str, Any], expected_hash: str) -> No
     profile = str(session.get("profile", ""))
     if not profile.strip():
         raise ValueError("candidate session profile is missing")
-    if research_session_profile_document(profile) != dict(session):
+    if not research_session_profile_contract_matches(session, profile):
         raise ValueError("candidate session profile is not canonical")
     if _sha256(value) != expected_hash:
         raise ValueError("candidate_spec content does not match candidate_spec_hash")

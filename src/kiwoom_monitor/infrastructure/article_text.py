@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from html import unescape
 from html.parser import HTMLParser
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 
@@ -91,8 +93,23 @@ class _ArticleParser(HTMLParser):
         self.article: list[str] = []
         self.paragraphs: list[str] = []
         self._in_p = 0
+        self.published_at = ""
+        self._published_priority = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        priority = 0
+        raw_time = ""
+        if "_ARTICLE_DATE_TIME" in str(attributes.get("class") or ""):
+            raw_time, priority = str(attributes.get("data-date-time") or ""), 2
+        elif tag == "meta" and str(attributes.get("property") or attributes.get("name") or "").lower() in {
+            "article:published_time", "og:published_time", "datepublished", "pubdate",
+        }:
+            raw_time, priority = str(attributes.get("content") or ""), 1
+        if priority > self._published_priority:
+            published_at = _publication_time(raw_time, naver_time=priority == 2)
+            if published_at:
+                self.published_at, self._published_priority = published_at, priority
         is_void = tag in _VOID_ELEMENTS
         if not is_void:
             self._depth += 1
@@ -199,6 +216,14 @@ def _looks_like_photo_caption_only(text: str) -> bool:
 
 
 def fetch_article_text(url: str, *, timeout_seconds: float = 10.0, max_characters: int = 24_000) -> str:
+    return fetch_article_text_with_metadata(
+        url, timeout_seconds=timeout_seconds, max_characters=max_characters,
+    )[0]
+
+
+def fetch_article_text_with_metadata(
+    url: str, *, timeout_seconds: float = 10.0, max_characters: int = 24_000,
+) -> tuple[str, str]:
     if not url.startswith(("http://", "https://")):
         raise ValueError("기사 원문 주소가 없습니다.")
     request = Request(url, headers={
@@ -209,6 +234,13 @@ def fetch_article_text(url: str, *, timeout_seconds: float = 10.0, max_character
         raw = response.read(2_000_000)
         content_type = response.headers.get_content_charset() if response.headers else None
     html = raw.decode(content_type or "utf-8", errors="replace")
+    return parse_article_text_with_metadata(html, max_characters=max_characters)
+
+
+def parse_article_text_with_metadata(
+    html: str, *, max_characters: int = 24_000,
+) -> tuple[str, str]:
+    """Extract the same BODY result from HTML already fetched for publication time."""
     parser = _ArticleParser()
     parser.feed(html)
     parts = parser.article if sum(map(len, parser.article)) >= 200 else parser.paragraphs
@@ -218,4 +250,21 @@ def fetch_article_text(url: str, *, timeout_seconds: float = 10.0, max_character
     text = clean_article_text(raw_text)
     if len(text) < 40:
         raise ValueError("기사 본문을 추출하지 못했습니다. 원문 페이지에서 확인하세요.")
-    return text[:max_characters]
+    return text[:max_characters], parser.published_at
+
+
+def _publication_time(raw: str, *, naver_time: bool) -> str:
+    try:
+        if naver_time:
+            parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=ZoneInfo("Asia/Seoul"),
+            )
+        else:
+            if not re.search(r"[T ]\d{2}:\d{2}:\d{2}", raw):
+                return ""
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return ""
+        return parsed.isoformat()
+    except ValueError:
+        return ""

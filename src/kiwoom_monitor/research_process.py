@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from decimal import Decimal, ROUND_HALF_UP
 import json
 import os
 import secrets
@@ -12,7 +13,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Mapping, Callable
 
 from kiwoom_monitor.application.research_families import (
@@ -26,6 +27,7 @@ from kiwoom_monitor.application.market_session_schedule import (
     research_session_profile_document,
 )
 from kiwoom_monitor.application.research_execution import (
+    COST_MODEL_DECIMAL_VERSION,
     SimulationCostModel,
     SimulationExecutionConfig,
 )
@@ -111,7 +113,9 @@ def final_candidate_spec_document(
     costs = execution.cost_model
     if (not isinstance(costs, SimulationCostModel) or costs.rate_basis == 'unspecified'
             or not costs.source.strip() or not costs.valid_from or not costs.valid_to
-            or any(type(rate) is not int for rate in (costs.commission_bps, costs.sell_tax_bps, costs.slippage_bps))):
+            or (costs.version != COST_MODEL_DECIMAL_VERSION and any(
+                type(rate) is not int for rate in
+                (costs.commission_bps, costs.sell_tax_bps, costs.slippage_bps)))):
         raise ValueError('final candidate requires explicit cost provenance and validity')
     return {'version': 'final_candidate/v1', 'family': request.family, 'parameters': parameters,
             'execution_model': execution.to_dict(),
@@ -234,7 +238,8 @@ class FinalHoldoutExposureRequest:
 
 def execute_final_holdout_evaluation(prepared: PreparedFinalHoldoutEvaluation, *, owner_token: str,
                                      cancel_requested=lambda: False,
-                                     recoveries: Mapping[str, Mapping[str, str]] | None = None) -> dict[str, Any]:
+                                     recoveries: Mapping[str, Mapping[str, str]] | None = None,
+                                     progress_callback: Callable[[Mapping[str, Any]], None] | None = None) -> dict[str, Any]:
     """Run only the locked candidate set; terminal failures never retry automatically."""
     if not isinstance(prepared, PreparedFinalHoldoutEvaluation):
         raise ValueError('prepared final holdout evaluation is required')
@@ -294,14 +299,33 @@ def execute_final_holdout_evaluation(prepared: PreparedFinalHoldoutEvaluation, *
         if manifest_path.exists():
             raise ValueError('final recovery requires manual review because an output manifest exists')
         recovery_documents[candidate_hash] = {'request_id': request_id, 'reason': reason}
-    rows = []
-    for candidate_hash, candidate in keyed:
-        row = {'candidate_spec_hash': candidate_hash, 'run_id': '', 'state': 'NOT_STARTED',
-               'reason': '', 'logical_result_hash': '', 'performance_status': '', 'report_status': '',
-               'recovery_request_id': ''}
-        rows.append(row)
+    rows = [
+        {'candidate_spec_hash': candidate_hash, 'run_id': '', 'state': 'NOT_STARTED',
+         'reason': '', 'logical_result_hash': '', 'performance_status': '', 'report_status': '',
+         'recovery_request_id': ''}
+        for candidate_hash, _ in keyed
+    ]
+    limitations = ['fixed_candidates_only', 'no_cross_candidate_selection',
+                   'failed_or_cancelled_candidates_require_explicit_review',
+                   'recovery_requires_audited_request_and_absent_output_manifest']
+
+    def snapshot() -> dict[str, Any]:
+        complete = all(row['state'] in ('COMPLETED', 'CACHED') for row in rows)
+        return {'version': 'independent_final_holdout_result/v1', 'batch_id': batch.batch_id,
+                'window_id': batch.window_id, 'implementation_hash': prepared.implementation_hash,
+                'batch_status': 'COMPLETED' if complete else 'PARTIAL',
+                'candidates': [dict(row) for row in rows], 'limitations': list(limitations)}
+
+    def publish_progress() -> None:
+        if progress_callback is not None:
+            progress_callback(snapshot())
+
+    publish_progress()
+    for index, (candidate_hash, candidate) in enumerate(keyed):
+        row = rows[index]
         if cancel_requested():
             row['state'], row['reason'] = 'CANCELLED', 'user_cancelled_before_claim'
+            publish_progress()
             break
         if research_implementation_hash(batch.session_profile) != prepared.implementation_hash:
             raise ValueError('research implementation changed during final execution')
@@ -338,14 +362,18 @@ def execute_final_holdout_evaluation(prepared: PreparedFinalHoldoutEvaluation, *
                 row.update(state='CACHED', logical_result_hash=run['logical_result_hash'],
                            performance_status=str(output.get('performance', {}).get('status', '')),
                            report_status=str(output.get('research_report', {}).get('status', '')))
+            publish_progress()
             continue
         if claim != 'claimed':
             row['state'] = claim.upper()
             existing = repository.load_run(run_id)
             row['reason'] = str((existing or {}).get('error') or f'existing_final_execution_{claim}')
+            publish_progress()
             continue
         ownership = {'batch_id': batch.batch_id, 'candidate_spec_hash': candidate_hash,
                      'owner_token': owner_token}
+        row['state'] = 'RUNNING'
+        publish_progress()
         try:
             result = execute_research(dataset, repository, candidate.runs_dir, candidate.strategy,
                 candidate.execution, candidate.evaluation, cancel_requested, candidate.session_profile, guard,
@@ -362,24 +390,15 @@ def execute_final_holdout_evaluation(prepared: PreparedFinalHoldoutEvaluation, *
             repository.finish_final_holdout_execution(batch.batch_id, candidate_hash, run_id=run_id,
                 owner_token=owner_token, outcome='CANCELLED', reason=reason)
             row['state'], row['reason'] = 'CANCELLED', reason
+            publish_progress()
             break
         except (OSError, TypeError, ValueError, RuntimeError, sqlite3.Error) as exc:
             reason = f'{type(exc).__name__}: {exc}'[:2000]
             repository.finish_final_holdout_execution(batch.batch_id, candidate_hash, run_id=run_id,
                 owner_token=owner_token, outcome='FAILED', reason=reason)
             row['state'], row['reason'] = 'FAILED', reason
-    while len(rows) < len(keyed):
-        candidate_hash = keyed[len(rows)][0]
-        rows.append({'candidate_spec_hash': candidate_hash, 'run_id': '', 'state': 'NOT_STARTED',
-                     'reason': '', 'logical_result_hash': '', 'performance_status': '', 'report_status': '',
-                     'recovery_request_id': ''})
-    complete = all(row['state'] in ('COMPLETED', 'CACHED') for row in rows)
-    return {'version': 'independent_final_holdout_result/v1', 'batch_id': batch.batch_id,
-            'window_id': batch.window_id, 'implementation_hash': prepared.implementation_hash,
-            'batch_status': 'COMPLETED' if complete else 'PARTIAL', 'candidates': rows,
-            'limitations': ['fixed_candidates_only', 'no_cross_candidate_selection',
-                            'failed_or_cancelled_candidates_require_explicit_review',
-                            'recovery_requires_audited_request_and_absent_output_manifest']}
+        publish_progress()
+    return snapshot()
 
 
 def prepare_final_holdout_evaluation(batch: FinalHoldoutBatchSpec, candidates: tuple[ResearchProcessRequest, ...],
@@ -495,7 +514,8 @@ def load_final_holdout_execution_request(path: Path) -> FinalHoldoutExecutionReq
 
 
 def execute_final_holdout_request(request: FinalHoldoutExecutionRequest, *,
-                                  cancel_path: Path | None = None) -> dict[str, Any]:
+                                  cancel_path: Path | None = None,
+                                  progress_path: Path | None = None) -> dict[str, Any]:
     """Prepare and execute one immutable process request; the cancel file is advisory and bounded."""
     if not isinstance(request, FinalHoldoutExecutionRequest):
         raise ValueError('parsed final holdout execution request is required')
@@ -506,8 +526,15 @@ def execute_final_holdout_request(request: FinalHoldoutExecutionRequest, *,
     checkpoint()
     prepared = prepare_final_holdout_evaluation(request.batch, request.candidates,
         request_id=request.access_request_id, accessed_at=request.accessed_at, checkpoint=checkpoint)
+    def publish_progress(snapshot: Mapping[str, Any]) -> None:
+        if progress_path is not None:
+            try:
+                _write_result(progress_path, {'status': 'running', 'kind': 'independent_final_holdout', **snapshot})
+            except OSError as exc:
+                print(f'final progress snapshot write failed: {exc}', file=sys.stderr)
     result = execute_final_holdout_evaluation(prepared, owner_token=request.owner_token,
-        cancel_requested=cancelled, recoveries=request.recovery_mapping())
+        cancel_requested=cancelled, recoveries=request.recovery_mapping(),
+        progress_callback=publish_progress if progress_path is not None else None)
     resource_blocked = any(row['state'] == 'CANCELLED'
         and row['reason'].startswith('ResearchResourceBlocked:') for row in result['candidates'])
     user_cancelled = cancelled() and any(row['state'] in ('CANCELLED', 'NOT_STARTED')
@@ -751,6 +778,118 @@ def _campaign_request_from_spec(spec, input_path, database, runs_dir):
     }, Path.cwd())
 
 
+def _rolling_daily_spec(spec, baseline_scope, dataset, now):
+    """Move one development fold with a completed, distinct trading-day input."""
+    if (dataset.manifest.get('runtime_input_version') in
+            ('independent_final_holdout_input/v1', 'independent_development_input/v1')
+            or 'final_holdout_partition' in dataset.manifest
+            or 'development_partition' in dataset.manifest):
+        return None, 'independent_or_final_input_cannot_roll'
+    candidate_scope = campaign_input_scope(dataset)
+    if any(candidate_scope.get(key) != baseline_scope.get(key) for key in
+           ('kinds', 'subject', 'research_session_profile', 'universe_rule', 'order_policy_version')):
+        return None, 'scientific_scope_mismatch'
+    def aware(value):
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise ValueError('rolling timestamps require a timezone')
+        return parsed.astimezone(UTC)
+    try:
+        old = baseline_scope['captured_range']
+        new = candidate_scope['captured_range']
+        old_start, old_end = (aware(old[key]) for key in ('start', 'end'))
+        new_start, new_end = (aware(new[key]) for key in ('start', 'end'))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None, 'invalid_daily_range'
+    offset = new_start - old_start
+    if (offset < timedelta(days=1) or offset.total_seconds() % 86400
+            or old_end - old_start != new_end - new_start
+            or not timedelta(0) < new_end - new_start <= timedelta(days=1)
+            or new_end > now):
+        return None, 'not_a_closed_later_daily_range'
+    context = spec.research_context
+    if 'development_partition' in context or spec.final_holdout_accessed_at:
+        return None, 'rolling_requires_unpartitioned_development'
+    try:
+        evaluation = ResearchEvaluationSpec.from_dict(context['evaluation'])
+    except (KeyError, TypeError, ValueError):
+        return None, 'invalid_template_evaluation'
+    if (len(evaluation.folds) != 1 or evaluation.folds[0].role not in ('TRAIN', 'VALIDATION')
+            or evaluation.final_holdout_accessed_at or evaluation.final_holdout_access_reason):
+        return None, 'rolling_requires_one_unexposed_development_fold'
+    fold = evaluation.folds[0]
+    start, end = (aware(value) for value in (fold.start, fold.end))
+    if start - timedelta(seconds=evaluation.warmup_seconds) < old_start or end > old_end:
+        return None, 'template_fold_outside_captured_range'
+    def in_new_range(row):
+        try:
+            return new_start <= aware(row['available_at']) < new_end
+        except (KeyError, TypeError, ValueError):
+            return False
+    def bar_in_new_range(row):
+        if row.get('kind') != 'minute_bar' or row.get('venue') != 'KRX' or not in_new_range(row):
+            return False
+        payload = row.get('payload') or {}
+        try:
+            return new_start <= aware(payload['bar_start']) < aware(payload['bar_end']) <= new_end
+        except (KeyError, TypeError, ValueError):
+            return False
+    if (not any(bar_in_new_range(row)
+                for row in dataset.observations)
+            or not any(row.get('kind') in ('top20_membership', 'historical_candidate_population')
+                       and in_new_range(row) for row in dataset.observations)):
+        return None, 'trading_day_evidence_missing'
+    shifted = evaluation.to_dict()
+    shifted['folds'][0]['start'] = (start + offset).isoformat()
+    shifted['folds'][0]['end'] = (end + offset).isoformat()
+    shifted_evaluation = ResearchEvaluationSpec.from_dict(shifted)
+    costs = (context.get('execution') or {}).get('cost_model') or {}
+    if costs.get('valid_from') and costs.get('valid_to'):
+        valid_from = aware(costs['valid_from'])
+        valid_to = aware(costs['valid_to'])
+        if valid_from > start + offset or valid_to < end + offset:
+            return None, 'cost_validity_does_not_cover_new_day'
+    return replace(spec, dataset_id=str(dataset.manifest['dataset_id']),
+                   dataset_hash=str(dataset.manifest['revision_ids_hash']),
+                   research_context={**context, 'evaluation': shifted_evaluation.to_dict()}), ''
+
+
+def _nas_rolling_range_for_start(scope, spec, now, start_value):
+    """Validate a completed window against the immutable daily template."""
+    captured = scope['captured_range']
+    baseline_start = datetime.fromisoformat(captured['start'])
+    baseline_end = datetime.fromisoformat(captured['end'])
+    if (baseline_start.tzinfo is None or baseline_end.tzinfo is None
+            or not timedelta(0) < baseline_end - baseline_start <= timedelta(days=1)):
+        raise ValueError('rolling NAS preparation requires a single daily template range')
+    next_start = datetime.fromisoformat(start_value)
+    if next_start.tzinfo is None or next_start < baseline_start + timedelta(days=1):
+        raise ValueError('rolling NAS cursor is invalid')
+    next_end = next_start + (baseline_end - baseline_start)
+    if next_end + timedelta(days=1) > now:
+        return None
+    offset = next_start - baseline_start
+    evaluation = ResearchEvaluationSpec.from_dict(spec.research_context['evaluation'])
+    fold = evaluation.folds[0]
+    costs = (spec.research_context.get('execution') or {}).get('cost_model') or {}
+    if costs.get('valid_from') and costs.get('valid_to'):
+        first = datetime.fromisoformat(costs['valid_from'])
+        last = datetime.fromisoformat(costs['valid_to'])
+        fold_start = datetime.fromisoformat(fold.start)
+        fold_end = datetime.fromisoformat(fold.end)
+        if any(value.tzinfo is None for value in (first, last, fold_start, fold_end)):
+            raise ValueError('rolling cost and fold timestamps require timezones')
+        if first > fold_start + offset or last < fold_end + offset:
+            raise ValueError('rolling_cost_validity_does_not_cover_new_day')
+    return {'start': next_start.isoformat(), 'end': next_end.isoformat()}, (next_start + timedelta(days=1)).isoformat(), next_start.astimezone(timezone(timedelta(hours=9))).weekday() >= 5
+
+
+def _next_nas_rolling_range(source, scope, spec, now):
+    baseline_start = datetime.fromisoformat(scope['captured_range']['start'])
+    start = source['rolling_next_start'] or (baseline_start + timedelta(days=1)).isoformat()
+    return _nas_rolling_range_for_start(scope, spec, now, start)
+
+
 def execute_process_request(
     request: ResearchProcessRequest,
     *,
@@ -893,11 +1032,16 @@ def execute_process_request(
                             status="INELIGIBLE", error="cost stress requires a base cost model",
                         )
                     multiplier = trial.cost_multiplier_ppm
+                    def stressed_rate(rate: int | Decimal) -> int | str:
+                        scaled = Decimal(rate) * multiplier / 1_000_000
+                        if base_cost.version == COST_MODEL_DECIMAL_VERSION:
+                            return str(scaled.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                        return int(scaled)
                     stressed_cost = replace(
                         base_cost,
-                        commission_bps=base_cost.commission_bps * multiplier // 1_000_000,
-                        sell_tax_bps=base_cost.sell_tax_bps * multiplier // 1_000_000,
-                        slippage_bps=base_cost.slippage_bps * multiplier // 1_000_000,
+                        commission_bps=stressed_rate(base_cost.commission_bps),
+                        sell_tax_bps=stressed_rate(base_cost.sell_tax_bps),
+                        slippage_bps=stressed_rate(base_cost.slippage_bps),
                         rate_basis="model_estimate",
                         source=f"{base_cost.source} · stress {multiplier}ppm",
                     )
@@ -1364,12 +1508,35 @@ def discover_campaign_inputs(repository, campaign_id, worker_claim, *, cancel_re
                         summary['unchanged'] += 1
                         continue
                     dataset = load(path)
-                    if campaign_input_scope(dataset) != scope:
+                    if source['rolling_daily'] and (
+                            dataset.manifest.get('runtime_input_version') in
+                            ('independent_final_holdout_input/v1', 'independent_development_input/v1')
+                            or 'final_holdout_partition' in dataset.manifest
+                            or 'development_partition' in dataset.manifest):
+                        summary['out_of_scope'] += 1
+                        summary.setdefault('rolling_rejections', []).append(
+                            {'path': str(path), 'reason': 'independent_or_final_input_cannot_roll'})
+                        del dataset
+                        continue
+                    candidate_scope = campaign_input_scope(dataset)
+                    if candidate_scope != scope and not source['rolling_daily']:
                         summary['out_of_scope'] += 1
                         del dataset
                         continue
-                    fingerprint = campaign_input_fingerprint(dataset, checkpoint=checkpoint)
                     candidate = replace(spec, dataset_id=str(dataset.manifest['dataset_id']), dataset_hash=str(dataset.manifest['revision_ids_hash']))
+                    if candidate_scope != scope:
+                        candidate, reason = _rolling_daily_spec(spec, scope, dataset, moment)
+                        if candidate is None:
+                            summary['out_of_scope'] += 1
+                            summary.setdefault('rolling_rejections', []).append({'path': str(path), 'reason': reason})
+                            del dataset
+                            continue
+                        rolling_request = _campaign_request_from_spec(candidate, path, repository.path,
+                                                                       repository.path.parent / 'runs')
+                        _validate_search_input(rolling_request, dataset)
+                    fingerprint = campaign_input_fingerprint(dataset, checkpoint=checkpoint)
+                    if candidate_scope != scope:
+                        fingerprint = hashlib.sha256((json.dumps(candidate_scope['captured_range'], sort_keys=True) + fingerprint).encode()).hexdigest()
                     source_spec = None
                     if 'development_partition' in candidate.research_context:
                         source_spec = candidate
@@ -1422,8 +1589,39 @@ def discover_campaign_inputs(repository, campaign_id, worker_claim, *, cancel_re
                     return repository.campaign_storage_publication(storage_operation, worker_claim)
                 def record_storage_staging(path):
                     repository.record_campaign_storage_staging(storage_operation, worker_claim, path)
+                def validate_rolling_dataset(dataset, path):
+                    candidate, reason = _rolling_daily_spec(spec, scope, dataset, moment)
+                    if candidate is None:
+                        raise ValueError(f'rolling NAS input is incomplete: {reason}')
+                    request = _campaign_request_from_spec(candidate, path, repository.path, repository.path.parent / 'runs')
+                    _validate_search_input(request, dataset)
+                retry_day = repository.load_due_campaign_rolling_empty_day(source['source_id'], now=moment) if source['rolling_daily'] else None
+                if retry_day is not None:
+                    rolling_day = _nas_rolling_range_for_start(scope, spec, moment, retry_day['range_start'])
+                elif source['rolling_daily']:
+                    try:
+                        rolling_day = _next_nas_rolling_range(source, scope, spec, moment)
+                    except ValueError as exc:
+                        if str(exc) != 'rolling_cost_validity_does_not_cover_new_day':
+                            raise
+                        repository.record_campaign_input_scan(source['source_id'], now=moment)
+                        summary['cost_window_closed'] = summary.get('cost_window_closed', 0) + 1
+                        continue
+                else:
+                    rolling_day = None
+                if source['rolling_daily'] and rolling_day is None:
+                    repository.record_campaign_input_scan(source['source_id'], now=moment)
+                    summary['waiting_closed_day'] = summary.get('waiting_closed_day', 0) + 1
+                    continue
+                if rolling_day is not None and rolling_day[2]:
+                    if retry_day is not None:
+                        raise ValueError('rolling retry unexpectedly refers to a weekend')
+                    repository.advance_campaign_rolling_day(source['source_id'], rolling_day[0]['start'], rolling_day[1], worker_claim)
+                    repository.record_campaign_input_scan(source['source_id'], now=moment)
+                    summary['non_trading_days'] = summary.get('non_trading_days', 0) + 1
+                    continue
                 try:
-                    prepared = prepare_campaign_nas_input(client, source, baseline_path, scope, {row['fingerprint'] for row in acceptances}, checkpoint=checkpoint, max_encoded_bytes=guard.limits.memory_mb * 1024 * 1024 // 16, begin_preparation=begin_storage, publication_context=storage_publication, record_staging=record_storage_staging)
+                    prepared = prepare_campaign_nas_input(client, source, baseline_path, scope, {row['fingerprint'] for row in acceptances}, checkpoint=checkpoint, max_encoded_bytes=guard.limits.memory_mb * 1024 * 1024 // 16, begin_preparation=begin_storage, publication_context=storage_publication, record_staging=record_storage_staging, rolling_range=rolling_day[0] if rolling_day else None, validate_dataset=validate_rolling_dataset if rolling_day else None)
                     storage_outcome = 'PUBLISHED' if prepared['status'] == 'prepared' else 'UNCHANGED'
                     storage_path = prepared['path'] or ''
                 except ResearchRunCancelled:
@@ -1443,8 +1641,24 @@ def discover_campaign_inputs(repository, campaign_id, worker_claim, *, cancel_re
                 summary['nas_prepared'] = summary.get('nas_prepared', 0) + int(prepared['status'] == 'prepared')
                 if prepared['status'] == 'prepared':
                     register_paths([Path(prepared['path'])])
+                if rolling_day is not None:
+                    if prepared['status'] != 'empty' and not any(
+                            row['fingerprint'] == prepared['fingerprint']
+                            for row in repository.load_campaign_input_acceptances(source['source_id'])):
+                        raise ValueError('rolling NAS input lacks complete trading-day evidence')
+                    if retry_day is not None:
+                        repository.finish_campaign_rolling_empty_day(source['source_id'], rolling_day[0]['start'], worker_claim,
+                            checked_at=moment.isoformat(), fingerprint=prepared.get('fingerprint') if prepared['status'] != 'empty' else None)
+                        key = 'recovered_late_days' if prepared['status'] != 'empty' else 'rechecked_empty_days'
+                        summary[key] = summary.get(key, 0) + 1
+                    else:
+                        repository.advance_campaign_rolling_day(source['source_id'], rolling_day[0]['start'], rolling_day[1], worker_claim,
+                            empty_checked_at=moment.isoformat() if prepared['status'] == 'empty' else None)
+                        if prepared['status'] == 'empty':
+                            summary['non_trading_days'] = summary.get('non_trading_days', 0) + 1
             if source['nas_auto_prepare']:
-                repository.record_campaign_prepared_input(source['source_id'], prepared['signature'], worker_claim)
+                if prepared['status'] != 'empty':
+                    repository.record_campaign_prepared_input(source['source_id'], prepared['signature'], worker_claim)
                 # Diagnostic only: no archive/deletion policy or filesystem mutation.
                 summary.setdefault('storage_inventory', []).append(
                     repository.inspect_campaign_input_storage(source['source_id'], checkpoint=checkpoint, max_entries=1000))
@@ -1628,7 +1842,8 @@ class _ValidationTimeBudgetExpired(ResearchRunCancelled):
 
 
 def execute_development_validation(batch: DevelopmentValidationRequest, *, cancel_path: Path | None = None,
-                                   result_path: Path | None = None) -> dict[str, Any]:
+                                   result_path: Path | None = None,
+                                   owner_token: str | None = None) -> dict[str, Any]:
     """One frozen strategy, sequential fresh engines, scoped atomic claims and completed cache."""
     request = batch.request
     implementation_hash = research_implementation_hash(request.session_profile)
@@ -1726,7 +1941,8 @@ def execute_development_validation(batch: DevelopmentValidationRequest, *, cance
             if stopped():
                 status, reason = ('cancelled', 'user_cancelled') if cancelled() else ('ok', 'validation_time_budget_exhausted')
                 break
-            claim = repository.start_run(run_id, spec, selected.manifest, claim_independent=True)
+            claim = repository.start_run(run_id, spec, selected.manifest,
+                                         claim_independent=True, owner_token=owner_token)
             if claim == 'completed':
                 projection = repository.load_independent_development_comparison((run_id,))
                 row['state'] = 'CACHE_INVALID' if projection.partitions[0].status == 'INVALID' else 'CACHED'
@@ -1817,10 +2033,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--runs-dir', type=Path)
     parser.add_argument('--worker-token')
     parser.add_argument('--worker-generation', type=int)
+    parser.add_argument('--validation-owner-token')
     parser.add_argument('--register-campaign', help='Validate and register --request in an existing campaign')
     parser.add_argument("--result", required=True, type=Path)
     parser.add_argument("--cancel", type=Path)
     args = parser.parse_args(argv)
+    if args.validation_owner_token is not None and not args.validate_partitions:
+        parser.error('--validation-owner-token requires --validate-partitions')
     if args.expose_final:
         if args.register_campaign or args.database or args.runs_dir or args.worker_token or args.worker_generation is not None:
             parser.error('--expose-final cannot be combined with campaign options')
@@ -1853,6 +2072,11 @@ def main(argv: list[str] | None = None) -> int:
             validation_request = load_development_validation_request(args.validate_partitions)
         except (OSError, TypeError, ValueError) as exc:
             parser.error(str(exc))
+        if args.validation_owner_token is not None:
+            if (not args.validation_owner_token.startswith('development-ui-owner-')
+                    or len(args.validation_owner_token) != len('development-ui-owner-') + 32
+                    or any(char not in '0123456789abcdef' for char in args.validation_owner_token[-32:])):
+                parser.error('validation owner token must be a UI operation token')
         protected = {args.validate_partitions.resolve(), validation_request.request.database.resolve()}
         for output in (args.result, args.cancel):
             if output is not None and (output.resolve() in protected or _is_within(output.resolve(), validation_request.request.dataset)):
@@ -1874,9 +2098,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.expose_final:
             result = execute_final_holdout_exposure(exposure_request, cancel_path=args.cancel)
         elif args.evaluate_final:
-            result = execute_final_holdout_request(final_request, cancel_path=args.cancel)
+            result = execute_final_holdout_request(final_request, cancel_path=args.cancel,
+                                                   progress_path=args.result)
         elif args.validate_partitions:
-            result = execute_development_validation(validation_request, cancel_path=args.cancel, result_path=args.result)
+            result = execute_development_validation(validation_request, cancel_path=args.cancel,
+                                                    result_path=args.result, owner_token=args.validation_owner_token)
         elif args.compare_runs:
             result = execute_independent_comparison(comparison_request, cancel_path=args.cancel)
         elif args.campaign:

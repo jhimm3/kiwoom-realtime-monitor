@@ -208,9 +208,31 @@ class ResearchReplayCursor:
         self.universe_kinds = universe_kinds
         self.offset = 0
         self.latest = {}
+        self.latest_by_code_day = {}
         self.universe = []
 
     def advance(self, through):
+        self._advance_state(through)
+        return (tuple(sorted(self.latest.values(), key=lambda row: (row.bar_start, row.code, row.revision_id))),
+                tuple(self.universe))
+
+    def advance_for_observation(self, observation):
+        """Return the current bar and only same-code, same-day factor history."""
+        self._advance_state(_revision_order(observation))
+        key = (str(observation.get('subject', '')), str(observation.get('observation_key', '')))
+        current = self.latest.get(key)
+        if current is None or current.revision_id != str(observation.get('revision_id', '')):
+            return None, (), tuple(self.universe)
+        group = self._bar_group(current)
+        bars = tuple(sorted(self.latest_by_code_day[group].values(),
+                            key=lambda row: (row.bar_start, row.code, row.revision_id)))
+        return current, bars, tuple(self.universe)
+
+    @staticmethod
+    def _bar_group(frame):
+        return frame.code, datetime.fromisoformat(frame.bar_start).astimezone(KST).date()
+
+    def _advance_state(self, through):
         while self.offset < len(self.observations):
             value = self.observations[self.offset]
             if _revision_order(value) > through:
@@ -229,12 +251,18 @@ class ResearchReplayCursor:
             key = (str(value.get('subject', '')), str(value.get('observation_key', '')))
             frames = replay_krx_minute_bars((value,), strict=True, session_profile=self.session_profile)
             # A latest invalid correction hides its older valid revision, just as full replay does.
+            previous = self.latest.get(key)
+            if previous is not None:
+                previous_group = self._bar_group(previous)
+                group_rows = self.latest_by_code_day[previous_group]
+                group_rows.pop(key, None)
+                if not group_rows:
+                    del self.latest_by_code_day[previous_group]
             if frames:
                 self.latest[key] = frames[0]
+                self.latest_by_code_day.setdefault(self._bar_group(frames[0]), {})[key] = frames[0]
             else:
                 self.latest.pop(key, None)
-        return (tuple(sorted(self.latest.values(), key=lambda row: (row.bar_start, row.code, row.revision_id))),
-                tuple(self.universe))
 
 
 def _aware_datetime(value: object) -> datetime | None:

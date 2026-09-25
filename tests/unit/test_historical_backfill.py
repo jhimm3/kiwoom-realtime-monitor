@@ -12,18 +12,22 @@ from pathlib import Path
 from kiwoom_monitor.infrastructure.historical_backfill import (
     ArticleFetchAttempt,
     ArticlePublicationResult,
+    NaverHistoricalNewsItem,
     NAVER_HISTORICAL_SEARCH_PROVIDER,
     NAVER_STOCK_NEWS_PROVIDER,
     claim_news_backfill_job,
     claim_news_range_job,
     finish_news_backfill_job,
     finish_news_range_job,
+    fetch_article_publication,
     import_daishin_backfill_ndjson,
     initialize_probe_database,
+    load_article_body_snapshot,
     parse_naver_historical_search_page,
     parse_naver_stock_news_page,
     release_news_backfill_job,
     seed_news_backfill_jobs,
+    exclude_non_stock_news_jobs,
     seed_news_range_jobs,
     parse_article_publication_html,
     store_article_publication_result,
@@ -35,6 +39,57 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
 
 
 class HistoricalBackfillTest(unittest.TestCase):
+    def test_publication_fetch_reuses_same_html_for_body_snapshot(self) -> None:
+        html = (
+            '<html><head><title>삼성전자 공급계약</title>'
+            '<meta property="article:published_time" content="2020-01-02T10:31:42+09:00">'
+            '</head><body><div id="dic_area">'
+            + '삼성전자가 새로운 공급계약을 체결했다. ' * 12
+            + '</div></body></html>'
+        )
+        calls = []
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return html.encode()
+
+            def geturl(self):
+                return "https://publisher.test/article"
+
+            class headers:
+                @staticmethod
+                def get_content_charset():
+                    return "utf-8"
+
+        def opener(*args, **kwargs):
+            calls.append((args, kwargs))
+            return Response()
+
+        item = NaverHistoricalNewsItem(
+            "key", "001", "123", "매체", "삼성전자 공급계약", "요약",
+            "https://publisher.test/article", "https://publisher.test/article",
+            "", 1,
+        )
+        result = fetch_article_publication(item, opener=opener)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("published_at_found", result.status)
+        self.assertIn("공급계약을 체결했다", result.body_text)
+        self.assertEqual("https://publisher.test/article", result.body_source_url)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "news.sqlite3"
+            store_article_publication_result(path, result)
+            snapshot = load_article_body_snapshot(path, result.provider, "001", "123")
+            self.assertIsNotNone(snapshot)
+            self.assertEqual(result.body_text, snapshot["body_text"])
+
     def test_dense_pending_days_are_grouped_and_completed_as_one_range(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "output.sqlite3"
@@ -271,6 +326,43 @@ class HistoricalBackfillTest(unittest.TestCase):
             ],
             alias_rows,
         )
+
+    def test_non_stock_news_jobs_are_excluded_without_deleting_archived_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate, output = root / "candidate.sqlite3", root / "output.sqlite3"
+            with closing(sqlite3.connect(candidate)) as connection, connection:
+                connection.executescript(
+                    "CREATE TABLE candidate_days(dt TEXT, code TEXT);"
+                    "CREATE TABLE stocks(code TEXT, name TEXT, market_code TEXT);"
+                    "INSERT INTO stocks VALUES('005930','삼성전자','0'),"
+                    "('233740','KODEX 코스닥150레버리지','8');"
+                    "INSERT INTO candidate_days VALUES('2026-09-21','005930'),"
+                    "('2026-09-21','233740'),('2026-09-22','233740');"
+                )
+            self.assertEqual(1, seed_news_backfill_jobs(candidate, output))
+            with closing(sqlite3.connect(output)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO news_backfill_jobs(code,target_date,query_text,state,updated_at) "
+                    "VALUES('233740','2026-09-21','KODEX 코스닥150레버리지','pending','2026-09-24')"
+                )
+                connection.execute(
+                    "INSERT INTO news_range_jobs(range_id,code,query_text,start_date,end_date,"
+                    "state,attempts,member_count,updated_at) VALUES('range','233740',"
+                    "'KODEX 코스닥150레버리지','2026-09-21','2026-09-22',"
+                    "'pending',0,2,'2026-09-24')"
+                )
+            self.assertEqual({"daily": 1, "ranges": 1},
+                             exclude_non_stock_news_jobs(candidate, output))
+            self.assertEqual({"daily": 0, "ranges": 0},
+                             exclude_non_stock_news_jobs(candidate, output))
+            with closing(sqlite3.connect(output)) as connection:
+                self.assertEqual(
+                    [("005930", "pending"), ("233740", "excluded")],
+                    connection.execute("SELECT code,state FROM news_backfill_jobs ORDER BY code").fetchall(),
+                )
+                self.assertEqual("excluded", connection.execute(
+                    "SELECT state FROM news_range_jobs WHERE range_id='range'").fetchone()[0])
 
     def test_claim_recovers_only_stale_running_news_job(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

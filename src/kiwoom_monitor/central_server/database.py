@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, RLock, Thread
 from time import monotonic, time
@@ -39,6 +39,7 @@ from kiwoom_monitor.domain.news_observation import (
 )
 from kiwoom_monitor.application.market_data_coverage import CoverageObservation
 from kiwoom_monitor.application.news_rules import SUPPLY_CONTRACT_RULE_VERSION
+from kiwoom_monitor.application.news_rules import grouped_candidate_identities
 from kiwoom_monitor.infrastructure.market_data_metadata_codec import (
     market_metadata_from_storage_row,
     market_metadata_storage_values,
@@ -54,6 +55,9 @@ from kiwoom_monitor.central_server.database_codec import (
     document_result_rows,
     document_select_query,
     document_value_rows,
+    FIVE_MINUTE_BAR_COLUMNS,
+    five_minute_bar_result_rows,
+    five_minute_bar_value_rows,
     json_mapping,
     observation_revision_result_rows,
     second_trade_bar_value_rows,
@@ -151,6 +155,8 @@ def _top20_statistics_document(
         if not isinstance(values, (list, tuple)) or len(values) < 3:
             continue
         amounts = [float(values[index] or 0.0) for index in range(3)]
+        if sum(amounts) <= 0:
+            continue
         day = str(subject)
         if "08:00" <= clock < "20:00":
             hour = f"{clock[:2]}:00"
@@ -190,6 +196,7 @@ def _top20_statistics_document(
             "hour": hour,
             "average_eok": hourly_totals[hour] / hourly_counts[hour],
             "day_count": len(hourly_days[hour]),
+            "sample_count": hourly_counts[hour],
         }
         for hour in sorted(hourly_totals, key=lambda value: hourly_totals[value] / hourly_counts[value], reverse=True)
     ]
@@ -205,6 +212,64 @@ def _top20_statistics_document(
             "kosdaq_eok": float(market.get("kosdaq", 0.0)),
         })
     return {"hourly": hourly, "comparisons": comparisons}
+
+
+def _top20_statistics_days(start_date: str, end_date: str) -> list[str]:
+    first, last = date.fromisoformat(start_date), min(date.fromisoformat(end_date), _top20_today())
+    if last < first:
+        return []
+    return [(first + timedelta(days=offset)).isoformat() for offset in range((last - first).days + 1)]
+
+
+def _top20_today() -> date:
+    return datetime.now(ZoneInfo("Asia/Seoul")).date()
+
+
+def _top20_statistics_merge(daily: dict[str, dict[str, object]], days: list[str]) -> dict[str, object]:
+    sums: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+    comparisons: list[dict[str, object]] = []
+    for day in days:
+        document = daily.get(day, {})
+        for row in document.get("hourly", []):
+            hour, count = str(row["hour"]), int(row["sample_count"])
+            sums[hour][0] += float(row["average_eok"]) * count
+            sums[hour][1] += count
+            sums[hour][2] += int(row["day_count"])
+        comparisons.extend(document.get("comparisons", []))
+    return {
+        "hourly": [
+            {"hour": hour, "average_eok": values[0] / values[1], "day_count": int(values[2])}
+            for hour, values in sorted(sums.items(), key=lambda item: item[1][0] / item[1][1], reverse=True)
+            if values[1] > 0
+        ],
+        "comparisons": comparisons,
+    }
+
+
+def _top20_statistics_group_days(
+    days: list[str], top20_rows: list[tuple[object, object, object]],
+    market_rows: list[tuple[object, object]],
+) -> dict[str, dict[str, object]]:
+    top20_by_day: dict[str, list[tuple[object, object, object]]] = defaultdict(list)
+    market_by_day: dict[str, list[tuple[object, object]]] = defaultdict(list)
+    for row in top20_rows:
+        top20_by_day[str(row[0])].append(row)
+    for row in market_rows:
+        raw_day = str(row[0])[:8]
+        market_by_day[f"{raw_day[:4]}-{raw_day[4:6]}-{raw_day[6:8]}"].append(row)
+    return {
+        day: _top20_statistics_document(top20_by_day.get(day, []), market_by_day.get(day, []))
+        for day in days
+    }
+
+
+def _top20_statistics_cache_day(kind: str, subject: str) -> str:
+    if kind == "top20_index":
+        return subject[:10]
+    if kind == "market_index_chart" and len(subject) >= 8:
+        raw = subject[:8]
+        return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+    return ""
 
 
 _CREDENTIAL_ACTIVATION_COLUMNS = (
@@ -744,6 +809,8 @@ class QueryStore(Protocol):
         observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
     ) -> None: ...
     def load_minute_bars(self, code: str, trading_date: str, market: str = "") -> list[dict[str, Any]]: ...
+    def save_five_minute_bars(self, values: list[dict[str, Any]]) -> None: ...
+    def load_five_minute_bars(self, code: str, trading_date: str, adjustment_mode: str = "adjusted") -> list[dict[str, Any]]: ...
     def replace_daily_bars(
         self, values: list[dict[str, Any]], *,
         observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
@@ -791,7 +858,14 @@ class QueryStore(Protocol):
                              limit: int = 100) -> list[dict[str, Any]]: ...
     def enqueue_news_ai_jobs(self, values: list[dict[str, Any]]) -> int: ...
     def claim_news_jobs(self, *, limit: int = 1, now: float | None = None,
-                        priority_stock_code: str = "") -> list[dict[str, Any]]: ...
+                        priority_stock_code: str = "", preferred_stage: str = "") -> list[dict[str, Any]]: ...
+    def claim_external_historical_news_job(self, stage: str,
+                                           excluded_codes: tuple[str, ...] = (),
+                                           scope: str = "all") -> dict[str, Any] | None: ...
+    def complete_external_historical_news_job(self, value: dict[str, Any]) -> dict[str, str]: ...
+    def save_historical_market_news_batch(self, source: str, target_date: str,
+                                          batch_id: str, items: list[dict[str, Any]],
+                                          processing_owner: str = "nas") -> dict[str, Any]: ...
     def finish_news_job(self, job_key: str, output_ref: str) -> None: ...
     def retry_news_job(self, job_key: str, error: str, next_retry_at: float,
                        output_ref: str = "") -> None: ...
@@ -814,6 +888,7 @@ class QueryStore(Protocol):
     def save_news_source_page(self, value: dict[str, Any]) -> dict[str, Any]: ...
     def load_news_source_diagnostics(self, *, source_id: str = "", days: int = 7,
                                      limit: int = 100) -> dict[str, Any]: ...
+    def load_market_news_feed(self, source: str, *, limit: int = 200) -> list[dict[str, Any]]: ...
     def find_news_ai_revision(
         self, *, target_id: str, article_revision_id: str, body_revision_id: str,
         provider: str, model: str, prompt_version: str, schema_version: str,
@@ -1167,6 +1242,29 @@ class SQLiteQueryStore:
             rows = connection.execute(sql, parameters).fetchall()
         return bar_result_rows(rows, minute=True)
 
+    def save_five_minute_bars(self, values: list[dict[str, Any]]) -> None:
+        if not values:
+            return
+        with self._lock, self._connection() as connection:
+            connection.executemany(
+                "INSERT INTO central_five_minute_bars("
+                + ",".join(FIVE_MINUTE_BAR_COLUMNS) + ") VALUES(" + ",".join("?" for _ in FIVE_MINUTE_BAR_COLUMNS) + ") "
+                "ON CONFLICT(trading_date,minute,code,market,provider,adjustment_mode) DO UPDATE SET "
+                "open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,"
+                "volume=excluded.volume,trading_value_raw=excluded.trading_value_raw,"
+                "observed_at=excluded.observed_at",
+                five_minute_bar_value_rows(values),
+            )
+
+    def load_five_minute_bars(self, code: str, trading_date: str, adjustment_mode: str = "adjusted") -> list[dict[str, Any]]:
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                "SELECT " + ",".join(FIVE_MINUTE_BAR_COLUMNS) + " FROM central_five_minute_bars "
+                "WHERE code=? AND trading_date=? AND adjustment_mode=? ORDER BY minute,provider",
+                (code, trading_date, adjustment_mode),
+            ).fetchall()
+        return five_minute_bar_result_rows(rows)
+
     def replace_minute_bars(
         self, values: list[dict[str, Any]], *,
         observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
@@ -1249,6 +1347,12 @@ class SQLiteQueryStore:
                     "saved_at=excluded.saved_at,payload_json=excluded.payload_json",
                     (kind, subject, snapshot_key, saved_at, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
                 )
+                cache_day = _top20_statistics_cache_day(kind, subject)
+                if cache_day:
+                    connection.execute(
+                        "DELETE FROM central_dataset_snapshots WHERE kind='top20_statistics_day' "
+                        "AND subject=?", (cache_day,),
+                    )
                 if observation is not None:
                     connection.execute(
                         _market_metadata_upsert_sql("?", "excluded"),
@@ -1272,19 +1376,44 @@ class SQLiteQueryStore:
         return dataset_snapshot_result_rows(rows)
 
     def load_top20_statistics(self, start_date: str, end_date: str) -> dict[str, object]:
+        days = _top20_statistics_days(start_date, end_date)
+        if not days:
+            return {"hourly": [], "comparisons": []}
+        completed = [day for day in days if day < _top20_today().isoformat()]
         with self._lock, self._connection() as connection:
-            top20_rows = connection.execute(
-                "SELECT subject,snapshot_key,payload_json FROM central_dataset_snapshots "
-                "WHERE kind='top20_index' AND subject>=? AND subject<=? ORDER BY snapshot_key",
-                (start_date, end_date),
-            ).fetchall()
-            start_raw, end_raw = start_date.replace("-", ""), end_date.replace("-", "")
-            market_rows = connection.execute(
-                "SELECT subject,payload_json FROM central_dataset_snapshots "
-                "WHERE kind='market_index_chart' AND subject>=? AND subject<? ORDER BY subject",
-                (start_raw, end_raw + "~"),
-            ).fetchall()
-        return _top20_statistics_document(top20_rows, market_rows)
+            cached = {
+                str(day): json.loads(str(payload)) for day, payload in connection.execute(
+                    "SELECT subject,payload_json FROM central_dataset_snapshots "
+                    "WHERE kind='top20_statistics_day' AND subject>=? AND subject<=?",
+                    (days[0], days[-1]),
+                )
+            }
+            missing = [day for day in completed if day not in cached]
+            needed = [*missing, *[day for day in days if day >= _top20_today().isoformat()]]
+            if needed:
+                start, end = min(needed), max(needed)
+                top20_rows = connection.execute(
+                    "SELECT subject,snapshot_key,payload_json FROM central_dataset_snapshots "
+                    "WHERE kind='top20_index' AND subject>=? AND subject<=? ORDER BY snapshot_key",
+                    (start, end),
+                ).fetchall()
+                market_rows = connection.execute(
+                    "SELECT subject,payload_json FROM central_dataset_snapshots "
+                    "WHERE kind='market_index_chart' AND subject>=? AND subject<? ORDER BY subject",
+                    (start.replace("-", ""), end.replace("-", "") + "~"),
+                ).fetchall()
+                computed = _top20_statistics_group_days(
+                    needed, [row for row in top20_rows if str(row[0]) in needed],
+                    [row for row in market_rows if _top20_statistics_cache_day("market_index_chart", str(row[0])) in needed],
+                )
+                cached.update(computed)
+                connection.executemany(
+                    "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
+                    "VALUES('top20_statistics_day',?,?,?,?) ON CONFLICT(kind,subject,snapshot_key) "
+                    "DO UPDATE SET saved_at=excluded.saved_at,payload_json=excluded.payload_json",
+                    ((day, day, time(), json.dumps(computed[day], ensure_ascii=False)) for day in missing),
+                )
+        return _top20_statistics_merge(cached, days)
 
     def load_observation_revisions(
         self, kind: str, subject: str = "", limit: int = 100,
@@ -1515,7 +1644,7 @@ class SQLiteQueryStore:
             return _enqueue_sqlite_news_ai_jobs(connection, values)
 
     def claim_news_jobs(self, *, limit: int = 1, now: float | None = None,
-                        priority_stock_code: str = "") -> list[dict[str, Any]]:
+                        priority_stock_code: str = "", preferred_stage: str = "") -> list[dict[str, Any]]:
         claimed_at = float(now if now is not None else time())
         with self._lock, self._connection() as connection:
             connection.execute(
@@ -1526,15 +1655,21 @@ class SQLiteQueryStore:
             priority = str(priority_stock_code or "").strip()
             rows = connection.execute(
                 "SELECT job_key,article_revision_id,stock_code,target_id,stage,input_hash,"
-                "processing_version,attempts,payload_json FROM central_news_jobs "
+                "processing_version,attempts,payload_json,updated_at FROM central_news_jobs "
                 "WHERE state='PENDING' AND next_retry_at<=? "
-                "ORDER BY CASE "
+                "AND (stage NOT IN ('BODY','RULE') OR NOT EXISTS ("
+                "SELECT 1 FROM central_news_article_revisions a "
+                "WHERE a.article_revision_id=central_news_jobs.article_revision_id "
+                "AND a.collection_scope IN ('historical_backfill','historical_market_backfill',"
+                "'historical_market_pc_backfill','historical_news_pc_backfill'))) "
+                "ORDER BY CASE WHEN ?<>'' AND stage=? THEN -1 "
                 "WHEN ?<>'' AND (stock_code=? OR target_id=?) AND stage='BODY' THEN 0 "
                 "WHEN ?<>'' AND (stock_code=? OR target_id=?) THEN 1 "
                 "WHEN stage='BODY' AND stock_code<>'GLOBAL' THEN 2 "
                 "WHEN stage='BODY' THEN 3 WHEN stage='AI' THEN 4 ELSE 5 END,"
                 "CASE WHEN stage='BODY' THEN -updated_at ELSE updated_at END LIMIT ?",
-                (claimed_at, priority, priority, priority, priority, priority, priority,
+                (claimed_at, preferred_stage, preferred_stage,
+                 priority, priority, priority, priority, priority, priority,
                  bounded_limit(limit, 4)),
             ).fetchall()
             for row in rows:
@@ -1543,6 +1678,60 @@ class SQLiteQueryStore:
                     "WHERE job_key=?", (claimed_at, row[0]),
                 )
         return _news_job_rows(rows)
+
+    def claim_external_historical_news_job(self, stage: str,
+                                           excluded_codes: tuple[str, ...] = (),
+                                           scope: str = "all") -> dict[str, Any] | None:
+        if stage not in {"BODY", "RULE"}:
+            raise ValueError("BODY 또는 RULE 작업만 외부 처리할 수 있습니다.")
+        if scope not in {"all", "pc_market", "pc_search", "pc"}:
+            raise ValueError("지원하지 않는 과거 뉴스 작업 범위입니다.")
+        claimed_at = time()
+        excluded = tuple(sorted(set(excluded_codes)))
+        exclusion_sql = f" AND j.target_id NOT IN ({','.join('?' for _ in excluded)})" if excluded else ""
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT j.job_key,j.article_revision_id,j.stock_code,j.target_id,j.stage,j.input_hash,"
+                "j.processing_version,j.attempts,j.payload_json,j.updated_at "
+                "FROM central_news_jobs j JOIN central_news_article_revisions a "
+                "ON a.article_revision_id=j.article_revision_id "
+                "WHERE j.state='PENDING' AND j.stage=? AND j.processing_version=? "
+                "AND j.next_retry_at<=? "
+                + ("AND a.collection_scope='historical_market_pc_backfill' "
+                   if scope == "pc_market" else
+                   "AND a.collection_scope='historical_news_pc_backfill' "
+                   if scope == "pc_search" else
+                   "AND a.collection_scope IN ('historical_backfill','historical_market_backfill',"
+                   "'historical_market_pc_backfill','historical_news_pc_backfill') " if scope == "pc" else
+                   "AND a.collection_scope IN ('historical_backfill','historical_market_backfill',"
+                   "'historical_market_pc_backfill','historical_news_pc_backfill') ")
+                + exclusion_sql + " ORDER BY j.updated_at LIMIT 1",
+                (stage, ARTICLE_BODY_EXTRACTOR_VERSION if stage == "BODY" else SUPPLY_CONTRACT_RULE_VERSION,
+                 claimed_at, *excluded),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE central_news_jobs SET state='RUNNING',attempts=attempts+1,updated_at=? "
+                "WHERE job_key=? AND state='PENDING'", (claimed_at, row[0]),
+            )
+        return _news_job_rows([row])[0]
+
+    def complete_external_historical_news_job(self, value: dict[str, Any]) -> dict[str, str]:
+        with self._lock, self._connection() as connection:
+            return _complete_external_news_job(connection, value, postgres=False)
+
+    def save_historical_market_news_batch(self, source: str, target_date: str,
+                                          batch_id: str, items: list[dict[str, Any]],
+                                          processing_owner: str = "nas") -> dict[str, Any]:
+        with self._lock, self._connection() as connection:
+            prior = connection.execute("SELECT 1 FROM central_news_source_runs WHERE run_id=? LIMIT 1",
+                                       (batch_id,)).fetchone()
+            if prior:
+                return {"state": "already_imported", "raw_count": len(items)}
+            result = _save_sqlite_news_source_page(connection,
+                _historical_market_source_page(source, target_date, batch_id, items, processing_owner))
+            return {"state": "imported", **result}
 
     def finish_news_job(self, job_key: str, output_ref: str) -> None:
         with self._lock, self._connection() as connection:
@@ -1678,6 +1867,13 @@ class SQLiteQueryStore:
                                      limit: int = 100) -> dict[str, Any]:
         with self._lock, self._connection() as connection:
             return _load_sqlite_news_source_diagnostics(connection, source_id, days, limit)
+
+    def load_market_news_feed(self, source: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(_market_news_feed_sql("?"),
+                                      (_market_news_source_prefix(source),
+                                       bounded_limit(limit, 1000))).fetchall()
+        return _decode_market_news_feed(rows)
 
     def find_news_ai_revision(
         self, *, target_id: str, article_revision_id: str, body_revision_id: str,
@@ -2368,6 +2564,30 @@ class PostgresQueryStore:
             rows = cursor.fetchall()
         return bar_result_rows(rows, minute=True)
 
+    def save_five_minute_bars(self, values: list[dict[str, Any]]) -> None:
+        if not values:
+            return
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.executemany(
+                "INSERT INTO central_five_minute_bars("
+                + ",".join(FIVE_MINUTE_BAR_COLUMNS) + ") VALUES(" + ",".join("%s" for _ in FIVE_MINUTE_BAR_COLUMNS) + ") "
+                "ON CONFLICT(trading_date,minute,code,market,provider,adjustment_mode) DO UPDATE SET "
+                "open=EXCLUDED.open,high=EXCLUDED.high,low=EXCLUDED.low,close=EXCLUDED.close,"
+                "volume=EXCLUDED.volume,trading_value_raw=EXCLUDED.trading_value_raw,"
+                "observed_at=EXCLUDED.observed_at",
+                five_minute_bar_value_rows(values),
+            )
+
+    def load_five_minute_bars(self, code: str, trading_date: str, adjustment_mode: str = "adjusted") -> list[dict[str, Any]]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT " + ",".join(FIVE_MINUTE_BAR_COLUMNS) + " FROM central_five_minute_bars "
+                "WHERE code=%s AND trading_date=%s AND adjustment_mode=%s ORDER BY minute,provider",
+                (code, trading_date, adjustment_mode),
+            )
+            rows = cursor.fetchall()
+        return five_minute_bar_result_rows(rows)
+
     def replace_minute_bars(
         self, values: list[dict[str, Any]], *,
         observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
@@ -2473,13 +2693,29 @@ class PostgresQueryStore:
             with connection.cursor() as cursor:
                 if asynchronous_commit:
                     cursor.execute("SET LOCAL synchronous_commit TO OFF")
+                historical_cache_days = sorted({
+                    day for kind, subject, *_ in serialized
+                    if (day := _top20_statistics_cache_day(kind, subject))
+                    and day < _top20_today().isoformat()
+                })
+                for day in historical_cache_days:
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(%s,%s)",
+                        (902025, int(day.replace("-", ""))),
+                    )
                 for kind, subject, snapshot_key, payload_json, payload, observation in serialized:
+                    cache_day = _top20_statistics_cache_day(kind, subject)
                     cursor.execute(
                         "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
                         "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
                         "saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json",
                         (kind, subject, snapshot_key, saved_at, payload_json),
                     )
+                    if cache_day:
+                        cursor.execute(
+                            "DELETE FROM central_dataset_snapshots WHERE kind='top20_statistics_day' "
+                            "AND subject=%s", (cache_day,),
+                        )
                     if observation is not None:
                         cursor.execute(
                             _market_metadata_upsert_sql("%s", "EXCLUDED"),
@@ -2552,21 +2788,51 @@ class PostgresQueryStore:
         return dataset_snapshot_result_rows(rows)
 
     def load_top20_statistics(self, start_date: str, end_date: str) -> dict[str, object]:
+        days = _top20_statistics_days(start_date, end_date)
+        if not days:
+            return {"hourly": [], "comparisons": []}
+        completed = [day for day in days if day < _top20_today().isoformat()]
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT subject,snapshot_key,payload_json FROM central_dataset_snapshots "
-                "WHERE kind='top20_index' AND subject>=%s AND subject<=%s ORDER BY snapshot_key",
-                (start_date, end_date),
-            )
-            top20_rows = cursor.fetchall()
-            start_raw, end_raw = start_date.replace("-", ""), end_date.replace("-", "")
-            cursor.execute(
                 "SELECT subject,payload_json FROM central_dataset_snapshots "
-                "WHERE kind='market_index_chart' AND subject>=%s AND subject<%s ORDER BY subject",
-                (start_raw, end_raw + "~"),
+                "WHERE kind='top20_statistics_day' AND subject>=%s AND subject<=%s",
+                (days[0], days[-1]),
             )
-            market_rows = cursor.fetchall()
-        return _top20_statistics_document(top20_rows, market_rows)
+            cached = {str(day): payload if isinstance(payload, dict) else json.loads(str(payload))
+                      for day, payload in cursor.fetchall()}
+            missing = [day for day in completed if day not in cached]
+            needed = [*missing, *[day for day in days if day >= _top20_today().isoformat()]]
+            if needed:
+                for day in sorted(missing):
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(%s,%s)",
+                        (902025, int(day.replace("-", ""))),
+                    )
+                start, end = min(needed), max(needed)
+                cursor.execute(
+                    "SELECT subject,snapshot_key,payload_json FROM central_dataset_snapshots "
+                    "WHERE kind='top20_index' AND subject>=%s AND subject<=%s ORDER BY snapshot_key",
+                    (start, end),
+                )
+                top20_rows = cursor.fetchall()
+                cursor.execute(
+                    "SELECT subject,payload_json FROM central_dataset_snapshots "
+                    "WHERE kind='market_index_chart' AND subject>=%s AND subject<%s ORDER BY subject",
+                    (start.replace("-", ""), end.replace("-", "") + "~"),
+                )
+                market_rows = cursor.fetchall()
+                computed = _top20_statistics_group_days(
+                    needed, [row for row in top20_rows if str(row[0]) in needed],
+                    [row for row in market_rows if _top20_statistics_cache_day("market_index_chart", str(row[0])) in needed],
+                )
+                cached.update(computed)
+                cursor.executemany(
+                    "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
+                    "VALUES('top20_statistics_day',%s,%s,%s,%s) ON CONFLICT(kind,subject,snapshot_key) "
+                    "DO UPDATE SET saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json",
+                    [(day, day, time(), json.dumps(computed[day], ensure_ascii=False)) for day in missing],
+                )
+        return _top20_statistics_merge(cached, days)
 
     def load_observation_revisions(
         self, kind: str, subject: str = "", limit: int = 100,
@@ -2808,7 +3074,7 @@ class PostgresQueryStore:
             return _enqueue_postgres_news_ai_jobs(cursor, values)
 
     def claim_news_jobs(self, *, limit: int = 1, now: float | None = None,
-                        priority_stock_code: str = "") -> list[dict[str, Any]]:
+                        priority_stock_code: str = "", preferred_stage: str = "") -> list[dict[str, Any]]:
         claimed_at = float(now if now is not None else time())
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -2818,16 +3084,22 @@ class PostgresQueryStore:
             priority = str(priority_stock_code or "").strip()
             cursor.execute(
                 "SELECT job_key,article_revision_id,stock_code,target_id,stage,input_hash,"
-                "processing_version,attempts,payload_json FROM central_news_jobs "
+                "processing_version,attempts,payload_json,updated_at FROM central_news_jobs "
                 "WHERE state='PENDING' AND next_retry_at<=%s "
-                "ORDER BY CASE "
+                "AND (stage NOT IN ('BODY','RULE') OR NOT EXISTS ("
+                "SELECT 1 FROM central_news_article_revisions a "
+                "WHERE a.article_revision_id=central_news_jobs.article_revision_id "
+                "AND a.collection_scope IN ('historical_backfill','historical_market_backfill',"
+                "'historical_market_pc_backfill','historical_news_pc_backfill'))) "
+                "ORDER BY CASE WHEN %s<>'' AND stage=%s THEN -1 "
                 "WHEN %s<>'' AND (stock_code=%s OR target_id=%s) AND stage='BODY' THEN 0 "
                 "WHEN %s<>'' AND (stock_code=%s OR target_id=%s) THEN 1 "
                 "WHEN stage='BODY' AND stock_code<>'GLOBAL' THEN 2 "
                 "WHEN stage='BODY' THEN 3 WHEN stage='AI' THEN 4 ELSE 5 END,"
                 "CASE WHEN stage='BODY' THEN -updated_at ELSE updated_at END "
                 "FOR UPDATE SKIP LOCKED LIMIT %s",
-                (claimed_at, priority, priority, priority, priority, priority, priority,
+                (claimed_at, preferred_stage, preferred_stage,
+                 priority, priority, priority, priority, priority, priority,
                  bounded_limit(limit, 4)),
             )
             rows = cursor.fetchall()
@@ -2837,6 +3109,114 @@ class PostgresQueryStore:
                     "WHERE job_key=%s", (claimed_at, row[0]),
                 )
         return _news_job_rows(rows)
+
+    def claim_external_historical_news_job(self, stage: str,
+                                           excluded_codes: tuple[str, ...] = (),
+                                           scope: str = "all") -> dict[str, Any] | None:
+        if stage not in {"BODY", "RULE"}:
+            raise ValueError("BODY 또는 RULE 작업만 외부 처리할 수 있습니다.")
+        if scope not in {"all", "pc_market", "pc_search", "pc"}:
+            raise ValueError("지원하지 않는 과거 뉴스 작업 범위입니다.")
+        claimed_at = time()
+        excluded = tuple(sorted(set(excluded_codes)))
+        exclusion_sql = f" AND j.target_id NOT IN ({','.join('%s' for _ in excluded)})" if excluded else ""
+        started_at = monotonic()
+        connected_at = started_at
+        selected_at = started_at
+        updated_at = started_at
+        connection = None
+        backend_pid = 0
+        wait_stop = Event()
+        wait_samples: list[tuple[str, str, tuple[int, ...]]] = []
+        wait_thread = None
+        outcome = "no_job"
+        phase = "connect"
+        try:
+            connection = self._connect()
+            connected_at = monotonic()
+            phase = "select"
+            backend_pid = int(getattr(getattr(connection, "info", None), "backend_pid", 0) or 0)
+            if backend_pid > 0:
+                wait_thread = Thread(
+                    target=_sample_postgres_backend_waits,
+                    args=(self._database_url, backend_pid, wait_stop, wait_samples),
+                    name="news-claim-postgres-wait-probe", daemon=True,
+                )
+                wait_thread.start()
+            with connection, connection.cursor() as cursor:
+                cursor.execute(
+                "SELECT j.job_key,j.article_revision_id,j.stock_code,j.target_id,j.stage,j.input_hash,"
+                "j.processing_version,j.attempts,j.payload_json,j.updated_at "
+                "FROM central_news_jobs j JOIN central_news_article_revisions a "
+                "ON a.article_revision_id=j.article_revision_id "
+                "WHERE j.state='PENDING' AND j.stage=%s AND j.processing_version=%s "
+                "AND j.next_retry_at<=%s "
+                + ("AND a.collection_scope='historical_market_pc_backfill' "
+                   if scope == "pc_market" else
+                   "AND a.collection_scope='historical_news_pc_backfill' "
+                   if scope == "pc_search" else
+                   "AND a.collection_scope IN ('historical_backfill','historical_market_backfill',"
+                   "'historical_market_pc_backfill','historical_news_pc_backfill') " if scope == "pc" else
+                   "AND a.collection_scope IN ('historical_backfill','historical_market_backfill',"
+                   "'historical_market_pc_backfill','historical_news_pc_backfill') ")
+                + exclusion_sql + " ORDER BY j.updated_at LIMIT 1 FOR UPDATE OF j SKIP LOCKED",
+                (stage, ARTICLE_BODY_EXTRACTOR_VERSION if stage == "BODY" else SUPPLY_CONTRACT_RULE_VERSION,
+                 claimed_at, *excluded),
+                )
+                row = cursor.fetchone()
+                selected_at = monotonic()
+                phase = "update_or_commit"
+                if row is None:
+                    return None
+                cursor.execute(
+                    "UPDATE central_news_jobs SET state='RUNNING',attempts=attempts+1,updated_at=%s "
+                    "WHERE job_key=%s", (claimed_at, row[0]),
+                )
+                updated_at = monotonic()
+            outcome = "claimed"
+            return _news_job_rows([row])[0]
+        except BaseException as error:
+            outcome = type(error).__name__
+            if phase == "connect":
+                connected_at = monotonic()
+                selected_at = connected_at
+            elif phase == "select":
+                selected_at = monotonic()
+            raise
+        finally:
+            completed_at = monotonic()
+            wait_stop.set()
+            if wait_thread is not None and wait_thread.is_alive():
+                wait_thread.join(timeout=0.05)
+            elapsed_ms = round((completed_at - started_at) * 1000)
+            if elapsed_ms >= 1000 or outcome not in {"claimed", "no_job"}:
+                logger.warning(
+                    "slow PostgreSQL historical news claim stage=%s scope=%s outcome=%s "
+                    "excluded_count=%d total_ms=%d connect_ms=%d select_ms=%d "
+                    "update_commit_ms=%d backend_pid=%d waits=%s",
+                    stage, scope, outcome, len(excluded), elapsed_ms,
+                    round((connected_at - started_at) * 1000),
+                    round((selected_at - connected_at) * 1000),
+                    round((completed_at - selected_at) * 1000),
+                    backend_pid,
+                    _postgres_wait_summary(wait_samples),
+                )
+
+    def complete_external_historical_news_job(self, value: dict[str, Any]) -> dict[str, str]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            return _complete_external_news_job(cursor, value, postgres=True)
+
+    def save_historical_market_news_batch(self, source: str, target_date: str,
+                                          batch_id: str, items: list[dict[str, Any]],
+                                          processing_owner: str = "nas") -> dict[str, Any]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (batch_id,))
+            cursor.execute("SELECT 1 FROM central_news_source_runs WHERE run_id=%s LIMIT 1", (batch_id,))
+            if cursor.fetchone():
+                return {"state": "already_imported", "raw_count": len(items)}
+            result = _save_postgres_news_source_page(cursor,
+                _historical_market_source_page(source, target_date, batch_id, items, processing_owner))
+            return {"state": "imported", **result}
 
     def finish_news_job(self, job_key: str, output_ref: str) -> None:
         with self._connect() as connection, connection.cursor() as cursor:
@@ -2977,6 +3357,14 @@ class PostgresQueryStore:
                                      limit: int = 100) -> dict[str, Any]:
         with self._connect() as connection, connection.cursor() as cursor:
             return _load_postgres_news_source_diagnostics(cursor, source_id, days, limit)
+
+    def load_market_news_feed(self, source: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(_market_news_feed_sql("%s"),
+                           (_market_news_source_prefix(source),
+                            bounded_limit(limit, 1000)))
+            rows = cursor.fetchall()
+        return _decode_market_news_feed(rows)
 
     def find_news_ai_revision(
         self, *, target_id: str, article_revision_id: str, body_revision_id: str,
@@ -3742,7 +4130,7 @@ def _storage_category(name: str, *, collection: bool = False) -> str:
     if not collection and normalized.startswith(("central_research_", "central_shadow_")):
         return "research"
     if not collection and normalized in {
-        "central_second_trade_bars", "central_minute_bars", "central_daily_bars",
+        "central_second_trade_bars", "central_minute_bars", "central_five_minute_bars", "central_daily_bars",
         "central_dataset_snapshots", "central_realtime_latest", "central_external_bars",
         "central_market_data_observation_meta", "central_observation_revisions",
         "central_minute_bar_operations", "central_hot_cohort_current",
@@ -4075,7 +4463,174 @@ def _news_job_rows(rows: list[tuple[object, ...]]) -> list[dict[str, Any]]:
     keys = ("job_key", "article_revision_id", "stock_code", "target_id", "stage",
             "input_hash", "processing_version", "attempts")
     return [{**dict(zip(keys, row[:8], strict=True)), "attempts": int(row[7]) + 1,
-             "payload": row[8] if isinstance(row[8], dict) else json.loads(str(row[8]))} for row in rows]
+             "payload": row[8] if isinstance(row[8], dict) else json.loads(str(row[8])),
+             "queued_at": float(row[9])} for row in rows]
+
+
+def _historical_market_source_page(source: str, target_date: str, batch_id: str,
+                                   items: list[dict[str, Any]], processing_owner: str = "nas") -> dict[str, Any]:
+    if source not in {"flash", "world"} or len(target_date) != 10 or processing_owner not in {"nas", "pc"}:
+        raise ValueError("과거 시황 원천 또는 날짜가 올바르지 않습니다.")
+    datetime.fromisoformat(target_date)
+    now = time()
+    return {
+        "source_id": f"naver-stock:{source}:historical:{target_date}",
+        "scope": "historical_market_pc_backfill" if processing_owner == "pc" else "historical_market_backfill",
+        "query_text": source,
+        "run_id": batch_id, "page_start": 1, "checked_at": now, "completed_at": now,
+        "request_count": 0, "budget_remaining": 0, "coverage": "historical_market_import",
+        "truncated": False, "error": "", "next_start": 1,
+        "next_schedule_at": now, "last_success": now,
+        "document": {"target_date": target_date, "source": source,
+                     "scope_statement": "PC archived Naver Stock market feed"},
+        "items": items,
+    }
+
+
+def _complete_external_news_job(db: Any, value: dict[str, Any], *, postgres: bool) -> dict[str, str]:
+    """Commit a leased historical BODY/RULE result with its revision and job state."""
+    marker = "%s" if postgres else "?"
+
+    def query(sql: str, params: tuple[object, ...] = ()) -> list[tuple[Any, ...]]:
+        statement = sql.replace("?", marker)
+        if postgres:
+            db.execute(statement, params)
+            return db.fetchall() if statement.lstrip().upper().startswith("SELECT") else []
+        cursor = db.execute(statement, params)
+        return cursor.fetchall() if statement.lstrip().upper().startswith("SELECT") else []
+
+    job_key = str(value["job_key"])
+    row = query(
+        "SELECT j.article_revision_id,j.stock_code,j.target_id,j.stage,j.input_hash,"
+        "j.processing_version,j.attempts,j.state,j.output_ref,j.payload_json,a.collection_scope "
+        "FROM central_news_jobs j JOIN central_news_article_revisions a "
+        "ON a.article_revision_id=j.article_revision_id WHERE j.job_key=?"
+        + (" FOR UPDATE OF j" if postgres else ""), (job_key,),
+    )
+    if not row or str(row[0][10]) not in {"historical_backfill", "historical_market_backfill",
+                                            "historical_market_pc_backfill", "historical_news_pc_backfill"}:
+        raise ValueError("과거 뉴스 작업이 존재하지 않습니다.")
+    article_id, stock_code, target_id, stage, input_hash, version, attempts, state, prior_ref, payload_raw, _ = row[0]
+    if state == "COMPLETED" and int(attempts) == int(value["attempts"]):
+        return {"state": "already_completed", "output_ref": str(prior_ref)}
+    if state != "RUNNING" or int(attempts) != int(value["attempts"]):
+        raise ValueError("뉴스 작업 소유권이 만료되었거나 다른 실행기가 완료했습니다.")
+    if str(value["stage"]) != str(stage):
+        raise ValueError("뉴스 작업 단계가 일치하지 않습니다.")
+    payload = json_mapping(payload_raw)
+    if str(value.get("error") or ""):
+        new_state = "FAILED" if int(attempts) >= 3 else "PENDING"
+        query(
+            "UPDATE central_news_jobs SET state=?,error=?,next_retry_at=?,updated_at=? WHERE job_key=?",
+            (new_state, str(value["error"])[:1000], time() + min(60.0, 2 ** min(int(attempts), 5)), time(), job_key),
+        )
+        return {"state": new_state.lower(), "output_ref": ""}
+
+    if stage == "BODY":
+        if str(version) != ARTICLE_BODY_EXTRACTOR_VERSION:
+            raise ValueError("본문 추출기 버전이 서버와 다릅니다.")
+        body_text = str(value.get("body_text") or "")
+        body_status = str(value.get("body_status") or "")
+        if body_status not in {"fulltext", "summary_only"} or not body_text.strip():
+            raise ValueError("본문 상태 또는 내용이 올바르지 않습니다.")
+        if len(body_text) > 2_000_000:
+            raise ValueError("기사 본문이 허용 크기를 초과합니다.")
+        article = query("SELECT content_hash FROM central_news_article_revisions WHERE article_revision_id=?", (article_id,))
+        if not article or str(article[0][0]) != str(input_hash):
+            raise ValueError("기사 내용 해시가 작업 입력과 다릅니다.")
+        previous = query(
+            "SELECT body_revision_id FROM central_news_body_revisions WHERE article_revision_id=? "
+            "AND content_hash=? AND extractor_version=? AND status=? "
+            "ORDER BY accepted_sequence DESC LIMIT 1",
+            (article_id, stable_document_hash({"body": body_text}), version, body_status),
+        )
+        output_ref = str(previous[0][0]) if previous else (
+            _save_postgres_news_body(db, {"article_revision_id": article_id, "extractor_version": version,
+                "fetched_at": value.get("fetched_at"), "status": body_status, "body_text": body_text})
+            if postgres else _save_sqlite_news_body(db, {"article_revision_id": article_id,
+                "extractor_version": version, "fetched_at": value.get("fetched_at"),
+                "status": body_status, "body_text": body_text})
+        )
+        publication = str(value.get("original_published_at") or "")
+        if publication:
+            document = {"published_at": publication, "source_url": str(value.get("source_url") or ""),
+                        "source": "article_html", "precision": "second"}
+            query(
+                "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
+                "updated_at=excluded.updated_at,document_json=excluded.document_json "
+                "WHERE central_documents.document_json<>excluded.document_json"
+                if not postgres else
+                "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
+                "updated_at=EXCLUDED.updated_at,document_json=EXCLUDED.document_json "
+                "WHERE central_documents.document_json IS DISTINCT FROM EXCLUDED.document_json",
+                ("news_original_publication", article_id, "published_at", time(),
+                 json.dumps(document, ensure_ascii=False, separators=(",", ":"))),
+            )
+    elif stage == "RULE":
+        if str(version) != SUPPLY_CONTRACT_RULE_VERSION:
+            raise ValueError("규칙 버전이 서버와 다릅니다.")
+        body_id = str(payload.get("body_revision_id") or "")
+        body = query("SELECT content_hash FROM central_news_body_revisions "
+                     "WHERE body_revision_id=? AND article_revision_id=?", (body_id, article_id))
+        if not body or str(body[0][0]) != str(input_hash):
+            raise ValueError("본문 리비전 또는 해시가 작업 입력과 다릅니다.")
+        assessment = value.get("assessment")
+        sentences = value.get("core_sentences")
+        if not isinstance(assessment, dict) or not isinstance(sentences, list):
+            raise ValueError("규칙 평가 결과 형식이 올바르지 않습니다.")
+        target_code = str(payload.get("stock_code") or target_id)
+        if target_code != str(target_id):
+            raise ValueError("규칙 대상 종목이 일치하지 않습니다.")
+        article_row = query("SELECT published_at FROM central_news_article_revisions WHERE article_revision_id=?", (article_id,))
+        publication_row = query("SELECT document_json FROM central_documents WHERE collection=? AND owner=? AND document_key=?",
+                                ("news_original_publication", article_id, "published_at"))
+        original_at = str(json_mapping(publication_row[0][0]).get("published_at") or "") if publication_row else ""
+        listing_at = str(article_row[0][0] or "")
+        document = {"article_revision_id": article_id, "body_revision_id": body_id,
+                    "rule_version": "stock-news-assessment-v1", "published_at": original_at or listing_at,
+                    "listing_published_at": listing_at, "original_published_at": original_at,
+                    "published_at_source": "article_html" if original_at else "listing",
+                    "assessment": assessment, "core_sentences": sentences}
+        query(
+            "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
+            + ("updated_at=EXCLUDED.updated_at,document_json=EXCLUDED.document_json "
+               "WHERE central_documents.document_json IS DISTINCT FROM EXCLUDED.document_json" if postgres else
+               "updated_at=excluded.updated_at,document_json=excluded.document_json "
+               "WHERE central_documents.document_json<>excluded.document_json"),
+            ("news_assessment", target_code, article_id, time(),
+             json.dumps(document, ensure_ascii=False, separators=(",", ":"))),
+        )
+        result = value.get("rule_result")
+        if result is None:
+            output_ref = f"ignored:{body_id}"
+        else:
+            if not isinstance(result, dict) or str(result.get("rule_version")) != str(version):
+                raise ValueError("공급계약 규칙 결과 버전이 일치하지 않습니다.")
+            encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            rule_hash = hashlib.sha256("\0".join((str(article_id), body_id, str(version),
+                          hashlib.sha256(encoded).hexdigest())).encode("utf-8")).hexdigest()
+            history = (_load_postgres_news_history(db, "article", str(stock_code), "", None, 100)
+                       if postgres else _load_sqlite_news_history(db, "article", str(stock_code), "", None, 100))
+            recent = [{**dict(item["document"]), "identity": item["identity"]}
+                      for item in history if item["article_revision_id"] != article_id]
+            current = query("SELECT identity,document_json FROM central_news_article_revisions WHERE article_revision_id=?",
+                            (article_id,))[0]
+            source = {**json_mapping(current[1]), "identity": str(current[0]),
+                      "stock_code": target_code, "stock_name": str(payload.get("stock_name") or target_code)}
+            candidates = grouped_candidate_identities(source, recent)
+            event_value = {"stock_code": target_code, "article_revision_id": article_id,
+                           "body_revision_id": body_id, "rule_version": version,
+                           "input_hash": rule_hash, "candidate_identities": candidates, "result": result}
+            output_ref = (_save_postgres_news_event(db, event_value) if postgres
+                          else _save_sqlite_news_event(db, event_value))
+    else:
+        raise ValueError("지원하지 않는 외부 뉴스 작업 단계입니다.")
+    query("UPDATE central_news_jobs SET state='COMPLETED',output_ref=?,error='',updated_at=? WHERE job_key=?",
+          (output_ref, time(), job_key))
+    return {"state": "completed", "output_ref": output_ref}
 
 
 def _save_sqlite_news_body(connection: sqlite3.Connection, value: dict[str, Any]) -> str:
@@ -4092,7 +4647,7 @@ def _save_sqlite_news_body(connection: sqlite3.Connection, value: dict[str, Any]
          str(value.get("error") or "")[:1000]),
     )
     article = connection.execute(
-        "SELECT stock_code,document_json FROM central_news_article_revisions WHERE article_revision_id=?",
+        "SELECT stock_code,document_json,collection_scope FROM central_news_article_revisions WHERE article_revision_id=?",
         (article_revision_id,),
     ).fetchone()
     if article is None:
@@ -4105,6 +4660,9 @@ def _save_sqlite_news_body(connection: sqlite3.Connection, value: dict[str, Any]
             "SELECT stock_code,stock_name FROM central_news_article_target_revisions "
             "WHERE article_revision_id=? AND relation_status='confirmed' ORDER BY accepted_sequence", (article_revision_id,),
         ).fetchall()]
+        if str(article[2]) in {"naver_stock_market", "historical_market_backfill",
+                               "historical_market_pc_backfill"}:
+            targets.insert(0, ("GLOBAL", "시황"))
     for target_code, target_name in targets:
         _insert_sqlite_news_job(
             connection, article_revision_id, stock, target_code, "RULE", content_hash,
@@ -4130,7 +4688,7 @@ def _save_postgres_news_body(cursor: Any, value: dict[str, Any]) -> str:
          str(value.get("error") or "")[:1000]),
     )
     cursor.execute(
-        "SELECT stock_code,document_json FROM central_news_article_revisions "
+        "SELECT stock_code,document_json,collection_scope FROM central_news_article_revisions "
         "WHERE article_revision_id=%s FOR UPDATE",
         (article_revision_id,),
     )
@@ -4147,6 +4705,9 @@ def _save_postgres_news_body(cursor: Any, value: dict[str, Any]) -> str:
             (article_revision_id,),
         )
         targets = [(str(row[0]), str(row[1])) for row in cursor.fetchall()]
+        if str(article[2]) in {"naver_stock_market", "historical_market_backfill",
+                               "historical_market_pc_backfill"}:
+            targets.insert(0, ("GLOBAL", "시황"))
     for target_code, target_name in targets:
         _insert_postgres_news_job(
             cursor, article_revision_id, stock, target_code, "RULE", content_hash,
@@ -4423,7 +4984,7 @@ def _save_sqlite_news_source_page(connection: sqlite3.Connection,
                 "collector_id,published_at,received_at,available_at,collection_scope,revision_of,document_json) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (article_revision_id, "GLOBAL", identity, content_hash, "naver", document.get("published_at"),
-                 now, available_at, "query_set", str(latest[0]) if latest else None,
+                 now, available_at, str(value.get("scope") or "query_set"), str(latest[0]) if latest else None,
                  json.dumps(document, ensure_ascii=False, separators=(",", ":"))),
             )
             new_count += 1
@@ -4566,7 +5127,7 @@ def _save_postgres_news_source_page(cursor: Any, value: dict[str, Any]) -> dict[
                 "collector_id,published_at,received_at,available_at,collection_scope,revision_of,document_json) "
                 "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (article_revision_id, "GLOBAL", identity, content_hash, "naver", document.get("published_at"),
-                 now, available_at, "query_set", str(latest[0]) if latest else None,
+                 now, available_at, str(value.get("scope") or "query_set"), str(latest[0]) if latest else None,
                  json.dumps(document, ensure_ascii=False, separators=(",", ":"))),
             )
             new_count += 1
@@ -5011,40 +5572,83 @@ def _load_postgres_news_history(cursor: Any, kind: str, target: str, identity: s
     return _decode_news_history(kind, cursor.fetchall())
 
 
-def _confirmed_news_articles_query(placeholder: str) -> str:
+def _confirmed_news_articles_query(placeholder: str, *, postgres: bool = False) -> str:
+    published_order = "ranked.published_at::timestamptz" if postgres else "julianday(ranked.published_at)"
     return (
         "WITH ranked AS ("
-        "SELECT a.document_json,a.accepted_sequence,a.article_revision_id,"
+        "SELECT a.document_json,a.accepted_sequence,a.article_revision_id,a.published_at,a.identity,"
         "ROW_NUMBER() OVER(PARTITION BY a.identity ORDER BY a.accepted_sequence DESC) AS identity_rank "
         "FROM central_news_article_target_revisions t "
         "JOIN central_news_article_revisions a ON a.article_revision_id=t.article_revision_id "
         f"WHERE t.stock_code={placeholder} AND t.relation_status='confirmed' AND a.stock_code='GLOBAL') "
-        "SELECT document_json,(SELECT b.status FROM central_news_body_revisions b "
+        "SELECT ranked.document_json,(SELECT b.status FROM central_news_body_revisions b "
         "WHERE b.article_revision_id=ranked.article_revision_id "
         "ORDER BY b.accepted_sequence DESC LIMIT 1),"
         "(SELECT b.body_text FROM central_news_body_revisions b "
         "WHERE b.article_revision_id=ranked.article_revision_id "
-        "ORDER BY b.accepted_sequence DESC LIMIT 1) "
-        "FROM ranked WHERE identity_rank=1 "
-        f"ORDER BY accepted_sequence DESC LIMIT {placeholder}"
+        "ORDER BY b.accepted_sequence DESC LIMIT 1),d.document_json "
+        "FROM ranked LEFT JOIN central_documents d ON d.collection='news_assessment' "
+        f"AND d.owner={placeholder} AND d.document_key=ranked.article_revision_id "
+        "WHERE identity_rank=1 "
+        f"ORDER BY {published_order} DESC NULLS LAST,ranked.identity ASC LIMIT {placeholder}"
     )
 
 
-def _stock_news_articles_query(placeholder: str) -> str:
+def _market_news_source_prefix(source: str) -> str:
+    if source == "common":
+        return "naver-query:%"
+    if source in {"flash", "world"}:
+        return f"naver-stock:{source}:%"
+    raise ValueError("unsupported market news source")
+
+
+def _market_news_feed_sql(placeholder: str) -> str:
+    return (
+        "WITH ranked AS (SELECT o.document_json,o.article_revision_id,o.identity,o.published_at,"
+        "ROW_NUMBER() OVER(PARTITION BY o.identity ORDER BY o.accepted_sequence DESC) AS rank "
+        "FROM central_news_source_observations o WHERE o.source_id LIKE " + placeholder + ") "
+        "SELECT ranked.document_json,d.document_json FROM ranked "
+        "LEFT JOIN central_documents d ON d.collection='news_assessment' "
+        "AND d.owner='GLOBAL' AND d.document_key=ranked.article_revision_id "
+        "WHERE ranked.rank=1 ORDER BY ranked.published_at DESC,ranked.identity LIMIT " + placeholder
+    )
+
+
+def _decode_market_news_feed(rows: list[tuple[object, ...]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for raw, assessment_raw in rows:
+        document = raw if isinstance(raw, dict) else json.loads(str(raw))
+        if not isinstance(document, dict):
+            continue
+        item = {key: document.get(key) for key in (
+            "title", "description", "link", "original_link", "published_at", "query_membership",
+        )}
+        if assessment_raw is not None:
+            assessment = assessment_raw if isinstance(assessment_raw, dict) else json.loads(str(assessment_raw))
+            if isinstance(assessment, dict):
+                item["core_sentences"] = assessment.get("core_sentences") or []
+        result.append(item)
+    return result
+
+
+def _stock_news_articles_query(placeholder: str, *, postgres: bool = False) -> str:
+    published_order = "ranked.published_at::timestamptz" if postgres else "julianday(ranked.published_at)"
     return (
         "WITH ranked AS ("
-        "SELECT a.document_json,a.accepted_sequence,a.article_revision_id,"
+        "SELECT a.document_json,a.accepted_sequence,a.article_revision_id,a.published_at,a.identity,"
         "ROW_NUMBER() OVER(PARTITION BY a.identity ORDER BY a.accepted_sequence DESC) AS identity_rank "
         "FROM central_news_article_revisions a "
         f"WHERE a.stock_code={placeholder} AND a.collection_scope='watchlist') "
-        "SELECT document_json,(SELECT b.status FROM central_news_body_revisions b "
+        "SELECT ranked.document_json,(SELECT b.status FROM central_news_body_revisions b "
         "WHERE b.article_revision_id=ranked.article_revision_id "
         "ORDER BY b.accepted_sequence DESC LIMIT 1),"
         "(SELECT b.body_text FROM central_news_body_revisions b "
         "WHERE b.article_revision_id=ranked.article_revision_id "
-        "ORDER BY b.accepted_sequence DESC LIMIT 1) "
-        "FROM ranked WHERE identity_rank=1 "
-        f"ORDER BY accepted_sequence DESC LIMIT {placeholder}"
+        "ORDER BY b.accepted_sequence DESC LIMIT 1),d.document_json "
+        "FROM ranked LEFT JOIN central_documents d ON d.collection='news_assessment' "
+        f"AND d.owner={placeholder} AND d.document_key=ranked.article_revision_id "
+        "WHERE identity_rank=1 "
+        f"ORDER BY {published_order} DESC NULLS LAST,ranked.identity ASC LIMIT {placeholder}"
     )
 
 
@@ -5056,6 +5660,8 @@ def _decode_confirmed_news_articles(rows: list[tuple[object, ...]]) -> list[dict
             value = dict(document)
             value["_body_status"] = str(row[1] or "")
             value["_body_text"] = str(row[2] or "")
+            if row[3] is not None:
+                value["_assessment"] = row[3] if isinstance(row[3], dict) else json.loads(str(row[3]))
             result.append(value)
     return result
 
@@ -5065,7 +5671,7 @@ def _load_sqlite_stock_news_articles(
 ) -> list[dict[str, Any]]:
     rows = connection.execute(
         _stock_news_articles_query("?"),
-        (stock_code, bounded_limit(limit, 1000)),
+        (stock_code, stock_code, bounded_limit(limit, 100_000)),
     ).fetchall()
     return _decode_confirmed_news_articles(rows)
 
@@ -5074,8 +5680,8 @@ def _load_postgres_stock_news_articles(
     cursor: Any, stock_code: str, limit: int,
 ) -> list[dict[str, Any]]:
     cursor.execute(
-        _stock_news_articles_query("%s"),
-        (stock_code, bounded_limit(limit, 1000)),
+        _stock_news_articles_query("%s", postgres=True),
+        (stock_code, stock_code, bounded_limit(limit, 100_000)),
     )
     return _decode_confirmed_news_articles(cursor.fetchall())
 
@@ -5085,7 +5691,7 @@ def _load_sqlite_confirmed_news_articles(
 ) -> list[dict[str, Any]]:
     rows = connection.execute(
         _confirmed_news_articles_query("?"),
-        (stock_code, bounded_limit(limit, 1000)),
+        (stock_code, stock_code, bounded_limit(limit, 100_000)),
     ).fetchall()
     return _decode_confirmed_news_articles(rows)
 
@@ -5094,8 +5700,8 @@ def _load_postgres_confirmed_news_articles(
     cursor: Any, stock_code: str, limit: int,
 ) -> list[dict[str, Any]]:
     cursor.execute(
-        _confirmed_news_articles_query("%s"),
-        (stock_code, bounded_limit(limit, 1000)),
+        _confirmed_news_articles_query("%s", postgres=True),
+        (stock_code, stock_code, bounded_limit(limit, 100_000)),
     )
     return _decode_confirmed_news_articles(cursor.fetchall())
 

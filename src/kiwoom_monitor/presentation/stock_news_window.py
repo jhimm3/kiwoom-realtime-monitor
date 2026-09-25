@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
+from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QSettings, QTimer, Qt, QUrl
 from PySide6.QtGui import QBrush, QColor, QCloseEvent, QDesktopServices, QGuiApplication, QPainter, QShowEvent
@@ -175,6 +176,8 @@ class StockNewsWindow(QDialog):
         self._items: tuple[StockNewsItem, ...] = ()
         self._visible_items: tuple[StockNewsItem, ...] = ()
         self._visible_groups: tuple[NewsEventGroup, ...] = ()
+        self._display_rows: list[int | None] = []
+        self._gap_labels: dict[int, str] = {}
         self._selected_news_cell: tuple[int, int] | None = None
         self._selected_news_identity = ""
         self._detail_identity = ""
@@ -193,6 +196,7 @@ class StockNewsWindow(QDialog):
         self._ai_result_cache: dict[str, StoredAINewsAnalysis] = {}
         self._render_generation = 0
         self._render_row = 0
+        self._render_started = 0.0
         self._settings_dialog: NaverNewsSettingsDialog | None = None
         self._ai_worker: AINewsWorker | None = None
         self._ai_item: StockNewsItem | None = None
@@ -203,6 +207,9 @@ class StockNewsWindow(QDialog):
         self._manual_ai_queue = False
         self._auto_ai_identities: set[str] = set()
         self._pending_refresh = False
+        self._news_next_offset: int | None = None
+        self._news_loaded_limit = 200
+        self._news_page_initialized = False
         self._auto_refresh = QTimer(self)
         self._auto_refresh.setInterval(self.AUTO_REFRESH_MS)
         self._auto_refresh.timeout.connect(self._schedule_prepare)
@@ -293,6 +300,7 @@ class StockNewsWindow(QDialog):
         self._table.cellClicked.connect(self._select_news_cell)
         self._table.currentCellChanged.connect(self._on_current_news_cell_changed)
         self._table.cellDoubleClicked.connect(self._on_news_cell_double_clicked)
+        self._table.verticalScrollBar().valueChanged.connect(self._maybe_load_more_news)
 
         self._detail = QTextBrowser()
         self._detail.setOpenExternalLinks(True)
@@ -342,6 +350,9 @@ class StockNewsWindow(QDialog):
             or account_scope != self._journal_account_scope
         )
         if changed:
+            self._news_next_offset = None
+            self._news_loaded_limit = 200
+            self._news_page_initialized = False
             self._pending_new_identities.clear()
             self._auto_ai_identities.clear()
             self._selected_news_identity = ""
@@ -385,7 +396,8 @@ class StockNewsWindow(QDialog):
         request_id, stock_code = pending
         worker = NewsPrepareWorker(
             request_id, stock_code, self._stock_name, self._database_path, self._news_filter,
-            self._show_low_relevance.isChecked(), self,
+            self._show_low_relevance.isChecked(),
+            self._news_loaded_limit if self._central_news_client is not None else None, self,
         )
         self._prepare_worker = worker
         worker.completed.connect(self._on_prepare_completed)
@@ -400,6 +412,7 @@ class StockNewsWindow(QDialog):
             return
         if not isinstance(items, tuple) or not isinstance(groups, tuple) or not isinstance(ai_results, dict):
             return
+        started = monotonic()
         self._items = items
         if self._journal_trade_date:
             try:
@@ -418,7 +431,10 @@ class StockNewsWindow(QDialog):
         self._count_label.setText(f"저장된 뉴스 {len(items)}건 · 증권 관련 {relevant_count}건")
         # 진행 결과를 잠시 보여준 뒤 맨 아래 기본 안내로 돌아간다.
         self._schedule_status_notice()
-        if not recently_checked:
+        if self._central_news_client is not None and not self._news_page_initialized:
+            self._news_page_initialized = True
+            self._start_news_search(None)
+        elif self._central_news_client is None and not recently_checked:
             self._start_news_search(
                 last_naver_check if isinstance(last_naver_check, datetime) else None,
             )
@@ -430,6 +446,12 @@ class StockNewsWindow(QDialog):
             # 현재 종목의 '최신 N건' 범위 안에서 미분석 대표 기사를 복구한다.
             self._configure_recent_auto_candidates()
         self._resume_auto_analysis()
+        elapsed_ms = (monotonic() - started) * 1000
+        if elapsed_ms >= 1000:
+            logger.warning(
+                "stored news UI preparation slow code=%s items=%s groups=%s elapsed_ms=%.0f",
+                stock_code, len(items), len(groups), elapsed_ms,
+            )
 
     def _on_prepare_failed(self, request_id: int, stock_code: str, message: str) -> None:
         if request_id == self._prepare_request_id and stock_code == self._stock_code:
@@ -441,6 +463,8 @@ class StockNewsWindow(QDialog):
         self._prepare_worker = None
         dispose_finished_worker(worker)
         self._start_pending_prepare()
+        if self._central_news_client is not None:
+            self._maybe_load_more_news(self._table.verticalScrollBar().value())
 
     def refresh(self, *, force: bool = False) -> None:
         if not self._stock_name:
@@ -455,7 +479,8 @@ class StockNewsWindow(QDialog):
             return
         self._start_news_search(self._repository.last_naver_checked_at(self._stock_code))
 
-    def _start_news_search(self, last_naver_check: datetime | None) -> None:
+    def _start_news_search(self, last_naver_check: datetime | None,
+                           *, page_offset: int = 0) -> None:
         if self._worker is not None and self._worker.isRunning():
             self._pending_refresh = True
             self._status_label.setText(f"{self._stock_name} 뉴스 조회 대기 중…")
@@ -472,16 +497,24 @@ class StockNewsWindow(QDialog):
             ai_settings = self._config.load_ai()
         except (OSError, ValueError):
             ai_settings = NewsAISettings()
-        if self._central_news_client is None and (not credentials.client_id or not credentials.client_secret) and not (official.dart_enabled and official.dart_api_key):
+        sources = self._config.load_sources()
+        api_available = sources.stock_name_enabled and credentials.client_id and credentials.client_secret
+        if (self._central_news_client is None and not api_available and not sources.stock_site_enabled
+                and not (official.dart_enabled and official.dart_api_key)):
             self._status_label.setText("뉴스 API 설정이 필요합니다. 저장된 뉴스는 그대로 표시합니다.")
             return
         requested_code = self._stock_code
         requested_name = self._stock_name
         two_days_ago = datetime.now(UTC) - timedelta(days=2)
-        naver_since = max(two_days_ago, last_naver_check.astimezone(UTC)) if last_naver_check else two_days_ago
+        if self._central_news_client is not None or last_naver_check is None:
+            naver_since = two_days_ago
+        else:
+            naver_since = max(two_days_ago, last_naver_check.astimezone(UTC))
         worker = NewsSearchWorker(requested_code, requested_name, credentials, official,
                                   self._config.directory / "dart_corp_codes.json", naver_since,
-                                  self._database_path, self._central_news_client, ai_settings, self)
+                                  self._database_path, self._central_news_client, ai_settings,
+                                  self._news_filter.stored_news_limit, page_offset, self,
+                                  source_settings=sources)
         self._worker = worker
         worker.completed.connect(self._on_completed)
         worker.failed.connect(self._on_failed)
@@ -490,14 +523,28 @@ class StockNewsWindow(QDialog):
         worker.start()
 
     def _on_completed(self, stock_code: str, stock_name: str, items: object,
-                      naver_succeeded: bool, new_identities: object, new_count: int) -> None:
+                      naver_succeeded: bool, new_identities: object, new_count: int,
+                      next_offset: object = None, page_offset: int = 0) -> None:
         if not isinstance(items, tuple) or not isinstance(new_identities, set):
             return
         if stock_code == self._stock_code:
+            if self._central_news_client is not None:
+                self._news_next_offset = next_offset if isinstance(next_offset, int) else None
+                self._news_loaded_limit = max(self._news_loaded_limit, page_offset + len(items))
             update_text = f"새 뉴스 {new_count}건 저장" if new_count else "새 뉴스 없음 · 저장된 내용 유지"
             self._status_label.setText(f"{update_text} · 뉴스 목록을 백그라운드에서 정리하는 중…")
-            self._pending_new_identities = new_identities
+            if page_offset == 0:
+                self._pending_new_identities = new_identities
             self._schedule_prepare()
+
+    def _maybe_load_more_news(self, position: int) -> None:
+        if self._central_news_client is None or self._news_next_offset is None or not self._stock_code:
+            return
+        scrollbar = self._table.verticalScrollBar()
+        if scrollbar.maximum() <= 0 or position < scrollbar.maximum() - 4:
+            return
+        if self._worker is None and self._prepare_worker is None:
+            self._start_news_search(None, page_offset=self._news_next_offset)
 
     def _configure_auto_candidates(self, new_identities: set[str]) -> None:
         try:
@@ -558,6 +605,7 @@ class StockNewsWindow(QDialog):
         # 계산해 메인 UI 이벤트까지 잠깐씩 밀린다. 채우는 동안은 현재 너비를
         # 고정하고, 소량의 행만 넣은 뒤 이벤트 루프에 제어를 돌려준다.
         self._render_generation += 1
+        self._render_started = monotonic()
         generation = self._render_generation
         selected_identity = self._selected_news_identity
         selected_column = (
@@ -567,7 +615,30 @@ class StockNewsWindow(QDialog):
         header = self._table.horizontalHeader()
         for column in range(self._table.columnCount()):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
-        self._table.setRowCount(len(self._visible_items))
+        self._display_rows = []
+        self._gap_labels = {}
+        known_dates = {
+            item.published_at.astimezone(ZoneInfo("Asia/Seoul")).date()
+            for item in self._items if item.published_at is not None
+        }
+        for index, item in enumerate(self._visible_items):
+            self._display_rows.append(index)
+            if self._central_news_client is None or index + 1 >= len(self._visible_items):
+                continue
+            newer = item.published_at
+            older = self._visible_items[index + 1].published_at
+            if newer is None or older is None:
+                continue
+            first = older.astimezone(ZoneInfo("Asia/Seoul")).date() + timedelta(days=1)
+            last = newer.astimezone(ZoneInfo("Asia/Seoul")).date() - timedelta(days=1)
+            missing = [first + timedelta(days=day) for day in range(max(0, (last - first).days + 1))
+                       if first + timedelta(days=day) not in known_dates]
+            if missing and len(missing) == (last - first).days + 1:
+                row = len(self._display_rows)
+                self._display_rows.append(None)
+                period = str(missing[0]) if missing[0] == missing[-1] else f"{missing[0]} ~ {missing[-1]}"
+                self._gap_labels[row] = f"{period} · 저장된 기사 없음 (수집 여부 미확인)"
+        self._table.setRowCount(len(self._display_rows))
         self._render_row = 0
         self._selected_news_cell = None
         self._evidence_request_id += 1
@@ -590,10 +661,18 @@ class StockNewsWindow(QDialog):
     ) -> None:
         if generation != self._render_generation:
             return
-        end = min(self._render_row + 12, len(self._visible_items))
+        end = min(self._render_row + 12, len(self._display_rows))
         for row in range(self._render_row, end):
-            item = self._visible_items[row]
-            group = self._visible_groups[row]
+            index = self._display_rows[row]
+            if index is None:
+                for column in range(self._table.columnCount()):
+                    cell = QTableWidgetItem(self._gap_labels[row] if column == 4 else "")
+                    cell.setForeground(QColor("#667085"))
+                    cell.setBackground(QColor("#F2F4F7"))
+                    self._table.setItem(row, column, cell)
+                continue
+            item = self._visible_items[index]
+            group = self._visible_groups[index]
             stored = self._ai_result_cache.get(news_identity(item))
             display = build_display_row(item, group, stored)
             values = (display.published, display.provider, display.category, display.outlook, display.title)
@@ -604,18 +683,24 @@ class StockNewsWindow(QDialog):
                     font = cell.font(); font.setBold(True); cell.setFont(font)
                 self._table.setItem(row, column, cell)
         self._render_row = end
-        if end < len(self._visible_items):
+        if end < len(self._display_rows):
             QTimer.singleShot(
                 0,
                 lambda: self._render_item_chunk(generation, selected_identity, selected_column),
             )
             return
         self._apply_column_visibility()
+        render_ms = (monotonic() - self._render_started) * 1000
+        if render_ms >= 1000:
+            logger.warning(
+                "stored news table render slow code=%s rows=%s render_ms=%.0f",
+                self._stock_code, len(self._display_rows), render_ms,
+            )
         if selected_identity:
             selected_row = next(
                 (
-                    row for row, item in enumerate(self._visible_items)
-                    if news_identity(item) == selected_identity
+                    row for row, index in enumerate(self._display_rows)
+                    if index is not None and news_identity(self._visible_items[index]) == selected_identity
                 ),
                 -1,
             )
@@ -651,9 +736,15 @@ class StockNewsWindow(QDialog):
             if column != last_visible and header.sectionSize(column) < 40:
                 header.resizeSection(column, width)
 
+    def _item_index(self, row: int) -> int | None:
+        return self._display_rows[row] if 0 <= row < len(self._display_rows) else None
+
     def _select_news_cell(self, row: int, column: int) -> None:
+        index = self._item_index(row)
+        if index is None:
+            return
         self._selected_news_cell = (row, column)
-        self._selected_news_identity = news_identity(self._visible_items[row])
+        self._selected_news_identity = news_identity(self._visible_items[index])
         self._table.setCurrentCell(row, column)
         for item_row in range(self._table.rowCount()):
             background = QColor("#DDEBF7") if item_row == row else QBrush()
@@ -665,17 +756,19 @@ class StockNewsWindow(QDialog):
         if isinstance(delegate, NewsCellMarkerDelegate):
             delegate.set_selected_cell(self._selected_news_cell)
         self._table.viewport().update()
-        self._schedule_evidence(self._visible_items[row])
+        self._schedule_evidence(self._visible_items[index])
         self._show_detail(row)
 
     def _on_current_news_cell_changed(
         self, row: int, column: int, _previous_row: int, _previous_column: int,
     ) -> None:
-        if row >= 0 and column >= 0 and self._selected_news_cell != (row, column):
+        if self._item_index(row) is not None and column >= 0 and self._selected_news_cell != (row, column):
             self._select_news_cell(row, column)
 
     def _on_news_cell_double_clicked(self, row: int, column: int) -> None:
         """판단 더블클릭은 AI 분석, 제목 더블클릭은 원문 열기로 동작한다."""
+        if self._item_index(row) is None:
+            return
         self._select_news_cell(row, column)
         if column == 3:
             self._analyze_selected(automatic=False)
@@ -683,10 +776,11 @@ class StockNewsWindow(QDialog):
             self._open_item(row)
 
     def _show_detail(self, row: int) -> None:
-        if row < 0 or row >= len(self._visible_items):
+        index = self._item_index(row)
+        if index is None:
             return
-        item = self._visible_items[row]
-        group = self._visible_groups[row]
+        item = self._visible_items[index]
+        group = self._visible_groups[index]
         assessment = item.assessment
         category, outlook, reason, judgment_source = self._effective_judgment(item)
         evidence_key = self._evidence_key(item)
@@ -698,6 +792,14 @@ class StockNewsWindow(QDialog):
         )
         ai_html = self._ai_html(item)
         core_sentences_html = stored_news_core_sentences_html(cached)
+        show_search_summary = (
+            self._central_evidence_client is None
+            or (not evidence_loading and (cached is None or cached.body_status != "fulltext"))
+        )
+        search_summary_html = (
+            f"<p><b>검색 요약:</b> {_html(item.description) or '제공된 요약이 없습니다.'}</p>"
+            if show_search_summary else ""
+        )
         identity = news_identity(item)
         preserve_scroll = self._detail_identity == identity
         scroll_bar = self._detail.verticalScrollBar()
@@ -708,8 +810,8 @@ class StockNewsWindow(QDialog):
             + f"<p><b>최종 판단: {_html(outlook)}</b> · {_html(category)} · 제공처: {_html(news_provider(item))}</p>"
             f"<hr><p><b>최종 판단 이유:</b> {_html(reason)}</p>"
             + core_sentences_html
-            + f"<p><b>검색 요약:</b> {_html(item.description) or '제공된 요약이 없습니다.'}</p>"
-            f"<p style='color:#667085'>판단 기준: {_html(judgment_source)} · 관련성 점수 {assessment.relevance_score}</p>"
+            + search_summary_html
+            + f"<p style='color:#667085'>판단 기준: {_html(judgment_source)} · 관련성 점수 {assessment.relevance_score}</p>"
             + (
                 stored_news_evidence_html(cached, loading=evidence_loading)
                 if self._central_evidence_client is not None else ""
@@ -779,9 +881,10 @@ class StockNewsWindow(QDialog):
         if request_id != self._evidence_request_id or stock_code != self._stock_code:
             return
         row = self._table.currentRow()
-        if row < 0 or row >= len(self._visible_items):
+        index = self._item_index(row)
+        if index is None:
             return
-        item = self._visible_items[row]
+        item = self._visible_items[index]
         key = self._evidence_key(item)
         if identity != news_identity(item) or key != self._selected_evidence_key:
             return
@@ -815,9 +918,10 @@ class StockNewsWindow(QDialog):
 
     def _toggle_journal_link(self) -> None:
         row = self._table.currentRow()
-        if not self._journal_group_id or row < 0 or row >= len(self._visible_items):
+        index = self._item_index(row)
+        if not self._journal_group_id or index is None:
             return
-        item = self._visible_items[row]; identity = news_identity(item)
+        item = self._visible_items[index]; identity = news_identity(item)
         linked = identity in self._repository.journal_linked_identities(
             self._journal_group_id, self._stock_code, self._journal_account_scope,
         )
@@ -844,9 +948,10 @@ class StockNewsWindow(QDialog):
 
     def _analyze_selected(self, *, automatic: bool = False) -> None:
         row = self._table.currentRow()
-        if row < 0 or row >= len(self._visible_items) or self._ai_worker is not None:
+        index = self._item_index(row)
+        if index is None or self._ai_worker is not None:
             return
-        self._start_ai_analysis(self._visible_groups[row], automatic=automatic)
+        self._start_ai_analysis(self._visible_groups[index], automatic=automatic)
 
     def _start_ai_analysis(self, group: NewsEventGroup, *, automatic: bool) -> None:
         self._start_ai_groups((group,), automatic=automatic)
@@ -894,7 +999,7 @@ class StockNewsWindow(QDialog):
         except (OSError, ValueError) as error:
             self._status_label.setText(f"AI 설정을 읽지 못했습니다: {error}")
             return
-        start = max(0, self._table.currentRow())
+        start = self._item_index(self._table.currentRow()) or 0
         candidates = unanalyzed_groups_from(
             self._visible_groups,
             start,
@@ -975,11 +1080,12 @@ class StockNewsWindow(QDialog):
         if self._ai_stock_code == self._stock_code:
             for group in self._ai_groups:
                 analyzed_identity = news_identity(group.representative)
-                row = next((index for index, item in enumerate(self._visible_items)
-                            if news_identity(item) == analyzed_identity), -1)
-                if not (0 <= row < len(self._visible_items)):
+                row = next((display_row for display_row, index in enumerate(self._display_rows)
+                            if index is not None and news_identity(self._visible_items[index]) == analyzed_identity), -1)
+                index = self._item_index(row)
+                if index is None:
                     continue
-                category, outlook, _reason, source = self._effective_judgment(self._visible_items[row])
+                category, outlook, _reason, source = self._effective_judgment(self._visible_items[index])
                 category_cell = self._table.item(row, 2)
                 if category_cell is not None:
                     category_cell.setText(category)
@@ -1019,7 +1125,7 @@ class StockNewsWindow(QDialog):
         self._ai_worker = None
         dispose_finished_worker(worker)
         self._ai_button.setText("AI 원문 분석")
-        self._ai_button.setEnabled(self._table.currentRow() >= 0)
+        self._ai_button.setEnabled(self._item_index(self._table.currentRow()) is not None)
         self._ai_automatic_run = False
         self._ai_groups = ()
         # 이전 작업이 끝나기 직전 또는 끝난 직후 마지막 종목의 후보가
@@ -1043,9 +1149,10 @@ class StockNewsWindow(QDialog):
         self._open_item(self._table.currentRow())
 
     def _open_item(self, row: int) -> None:
-        if row < 0 or row >= len(self._visible_items):
+        index = self._item_index(row)
+        if index is None:
             return
-        item = self._visible_items[row]
+        item = self._visible_items[index]
         url = item.link or item.original_link
         if url and not QDesktopServices.openUrl(QUrl(url)):
             QMessageBox.warning(self, "뉴스 원문", "기본 브라우저에서 기사를 열지 못했습니다.")

@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -29,19 +30,27 @@ class ResearchResourceLimits:
             raise ValueError("research batch must be between 0.01 and 0.2 seconds")
 
 
+@lru_cache(maxsize=1)
+def _windows_rss_api():
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [('cb', wintypes.DWORD), ('faults', wintypes.DWORD)] + [
+            (name, ctypes.c_size_t) for name in ('peak', 'working', 'peak_pool', 'pool',
+                                               'peak_nonpaged', 'nonpaged', 'pagefile', 'peak_pagefile')]
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    psapi = ctypes.WinDLL('psapi', use_last_error=True)
+    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+    return Counters, kernel, psapi
+
+
 def current_rss_bytes() -> int:
     if sys.platform == 'win32':
-        from ctypes import wintypes
-        class Counters(ctypes.Structure):
-            _fields_ = [('cb', wintypes.DWORD), ('faults', wintypes.DWORD)] + [
-                (name, ctypes.c_size_t) for name in ('peak', 'working', 'peak_pool', 'pool',
-                                                   'peak_nonpaged', 'nonpaged', 'pagefile', 'peak_pagefile')]
+        Counters, kernel, psapi = _windows_rss_api()
         counters = Counters()
-        counters.cb = ctypes.sizeof(counters)
-        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-        kernel.GetCurrentProcess.restype = wintypes.HANDLE
-        psapi = ctypes.WinDLL('psapi', use_last_error=True)
-        psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+        counters.cb = ctypes.sizeof(Counters)
         if not psapi.GetProcessMemoryInfo(kernel.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
             raise OSError(ctypes.get_last_error(), 'GetProcessMemoryInfo failed')
         return int(counters.working)

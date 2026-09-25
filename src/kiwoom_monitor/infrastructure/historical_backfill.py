@@ -19,6 +19,8 @@ from urllib.parse import unquote, urlencode
 from urllib.request import Request, urlopen
 
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
+from kiwoom_monitor.infrastructure.article_text import parse_article_text_with_metadata
+from kiwoom_monitor.domain.news_observation import ARTICLE_BODY_EXTRACTOR_VERSION
 
 
 NAVER_STOCK_NEWS_ENDPOINT = "https://stock.naver.com/api/domestic/detail/news"
@@ -27,6 +29,32 @@ NAVER_STOCK_NEWS_PROVIDER = "naver_stock"
 NAVER_HISTORICAL_SEARCH_PROVIDER = "naver_historical_search"
 DAISHIN_PROVIDER = "daishin_creon"
 DATABASE_TIMEOUT_SECONDS = 60
+
+
+def candidate_non_stock_codes(reference: Path) -> set[str]:
+    """Keep CREON stock backfill scoped to KOSPI/KOSDAQ company shares."""
+    uri = f"file:{reference.resolve().as_posix()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as connection:
+        if not connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stocks'"
+        ).fetchone():
+            return set()
+        return {str(row[0]).upper() for row in connection.execute(
+            "SELECT DISTINCT candidate_days.code FROM candidate_days "
+            "LEFT JOIN stocks ON stocks.code=candidate_days.code "
+            "WHERE COALESCE(stocks.market_code,'') NOT IN ('0','10')"
+        )}
+
+
+def individual_candidate_catalog(reference: Path) -> dict[str, str]:
+    """Read the existing candidate stock classification without changing its source DB."""
+    uri = f"file:{reference.resolve(strict=True).as_posix()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as connection:
+        return {str(code): str(name or "") for code, name in connection.execute(
+            "SELECT DISTINCT c.code,s.name FROM candidate_days c "
+            "JOIN stocks s ON s.code=c.code "
+            "WHERE s.market_code IN ('0','10') AND length(c.code)=6"
+        )}
 
 
 def _connect_database(path: Path) -> sqlite3.Connection:
@@ -148,6 +176,9 @@ class ArticlePublicationResult:
     final_url: str
     fetched_at: str
     attempts: tuple[ArticleFetchAttempt, ...] = ()
+    body_text: str = ""
+    body_source_url: str = ""
+    body_published_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -233,6 +264,8 @@ def seed_news_backfill_jobs(
         raise ValueError("name_transition_days must be between 0 and 365")
     initialize_probe_database(output_database)
     with closing(open_candidate_database(candidate_database)) as source:
+        stock_columns = {str(row[1]) for row in source.execute("PRAGMA table_info(stocks)")}
+        excluded_codes = candidate_non_stock_codes(candidate_database) if "market_code" in stock_columns else set()
         has_aliases = source.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stock_aliases'"
         ).fetchone() is not None
@@ -298,6 +331,7 @@ def seed_news_backfill_jobs(
                 """,
                 (start, end),
             ).fetchall()
+    rows = [row for row in rows if str(row[0]).upper() not in excluded_codes]
     now = datetime.now(UTC).isoformat()
     inserted = 0
     with closing(_connect_database(output_database)) as connection:
@@ -317,6 +351,35 @@ def seed_news_backfill_jobs(
                 )
                 inserted += max(0, cursor.rowcount)
     return inserted
+
+
+def exclude_non_stock_news_jobs(candidate_database: Path, output_database: Path) -> dict[str, int]:
+    """Remove unstarted non-stock work from the queue while preserving stored pages."""
+    excluded = candidate_non_stock_codes(candidate_database)
+    if not excluded:
+        return {"daily": 0, "ranges": 0}
+    initialize_probe_database(output_database)
+    now = datetime.now(UTC).isoformat()
+    daily = ranges = 0
+    with closing(_connect_database(output_database)) as connection, connection:
+        for code in sorted(excluded):
+            result = connection.execute(
+                "UPDATE news_backfill_jobs SET state='excluded',"
+                "last_error='excluded_non_stock_candidate; prior_state='||state||"
+                "'; prior_error='||COALESCE(last_error,''),updated_at=? "
+                "WHERE code=? AND state IN ('pending','failed','grouped')",
+                (now, code),
+            )
+            daily += result.rowcount
+            result = connection.execute(
+                "UPDATE news_range_jobs SET state='excluded',"
+                "last_error='excluded_non_stock_candidate; prior_state='||state||"
+                "'; prior_error='||COALESCE(last_error,''),updated_at=? "
+                "WHERE code=? AND state IN ('pending','failed')",
+                (now, code),
+            )
+            ranges += result.rowcount
+    return {"daily": daily, "ranges": ranges}
 
 
 def clear_news_backfill_jobs(output_database: Path) -> int:
@@ -1094,6 +1157,7 @@ def fetch_article_publication(
     attempts: list[ArticleFetchAttempt] = []
     last_status = "no_source_url"
     last_url = ""
+    cached_body = cached_body_url = cached_body_time = ""
     seen_urls: set[str] = set()
     for url_role, source_url in urls:
         if source_url in seen_urls:
@@ -1145,6 +1209,15 @@ def fetch_article_publication(
         published_at, precision, source, raw_or_status = parse_article_publication_html(
             document, expected_title=item.title,
         )
+        if raw_or_status != "title_mismatch":
+            try:
+                body_text, body_time = parse_article_text_with_metadata(document)
+            except ValueError:
+                pass
+            else:
+                if not cached_body or published_at:
+                    cached_body, cached_body_url = body_text, final_url
+                    cached_body_time = body_time or published_at
         if published_at:
             attempts.append(ArticleFetchAttempt(
                 url_role, source_url, final_url, "published_at_found",
@@ -1155,6 +1228,7 @@ def fetch_article_publication(
                 NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id,
                 "published_at_found", published_at, precision, source, raw_or_status,
                 source_url, final_url, fetched_at, tuple(attempts),
+                cached_body, cached_body_url, cached_body_time,
             )
         last_status = raw_or_status
         last_url = final_url
@@ -1166,7 +1240,7 @@ def fetch_article_publication(
     return ArticlePublicationResult(
         NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id,
         last_status, "", "", "", "", urls[0][1] if urls else "", last_url, fetched_at,
-        tuple(attempts),
+        tuple(attempts), cached_body, cached_body_url, cached_body_time,
     )
 
 
@@ -1258,6 +1332,21 @@ def initialize_probe_database(path: Path) -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_news_article_fetch_attempts_article
                     ON news_article_fetch_attempts(provider, office_id, article_id, attempted_at);
+                CREATE TABLE IF NOT EXISTS news_article_body_snapshots (
+                    provider TEXT NOT NULL,
+                    office_id TEXT NOT NULL,
+                    article_id TEXT NOT NULL,
+                    extractor_version TEXT NOT NULL,
+                    body_sha256 TEXT NOT NULL,
+                    body_text TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    published_at TEXT NOT NULL DEFAULT '',
+                    fetched_at TEXT NOT NULL,
+                    PRIMARY KEY (provider, office_id, article_id, extractor_version, body_sha256)
+                );
+                CREATE INDEX IF NOT EXISTS idx_news_article_body_snapshots_latest
+                    ON news_article_body_snapshots(provider, office_id, article_id,
+                                                   extractor_version, fetched_at DESC);
                 CREATE TABLE IF NOT EXISTS news_backfill_jobs (
                     code TEXT NOT NULL,
                     target_date TEXT NOT NULL,
@@ -1558,6 +1647,17 @@ def store_news_search_observation(
 def _store_article_publication_result(
     connection: sqlite3.Connection, result: ArticlePublicationResult,
 ) -> None:
+    if result.body_text:
+        connection.execute(
+            "INSERT OR IGNORE INTO news_article_body_snapshots "
+            "(provider,office_id,article_id,extractor_version,body_sha256,body_text,"
+            "source_url,published_at,fetched_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (result.provider, result.office_id, result.article_id,
+             ARTICLE_BODY_EXTRACTOR_VERSION,
+             hashlib.sha256(result.body_text.encode("utf-8")).hexdigest(),
+             result.body_text, result.body_source_url,
+             result.body_published_at, result.fetched_at),
+        )
     if result.published_at:
         connection.execute(
             """
@@ -1622,6 +1722,32 @@ def store_article_publication_results(
         with connection:
             for result in results:
                 _store_article_publication_result(connection, result)
+
+
+def load_article_body_snapshot(
+    path: Path, provider: str, office_id: str, article_id: str,
+    *, extractor_version: str = ARTICLE_BODY_EXTRACTOR_VERSION,
+) -> dict[str, str] | None:
+    """Read a captured BODY without modifying the live historical archive."""
+    if not path.is_file():
+        return None
+    uri = f"file:{path.resolve().as_posix()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=10)) as connection:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='news_article_body_snapshots'"
+        ).fetchone() is None:
+            return None
+        row = connection.execute(
+            "SELECT body_text,source_url,published_at,fetched_at "
+            "FROM news_article_body_snapshots WHERE provider=? AND office_id=? "
+            "AND article_id=? AND extractor_version=? "
+            "ORDER BY fetched_at DESC LIMIT 1",
+            (provider, office_id, article_id, extractor_version),
+        ).fetchone()
+    if row is None:
+        return None
+    return dict(zip(("body_text", "source_url", "published_at", "fetched_at"), row, strict=True))
 
 
 def store_article_publication_result(path: Path, result: ArticlePublicationResult) -> None:

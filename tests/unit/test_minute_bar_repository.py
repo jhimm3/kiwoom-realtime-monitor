@@ -287,6 +287,22 @@ class MinuteBarRepositoryTests(unittest.TestCase):
 
             self.assertEqual(loaded[0][4:7], (10.0, 5.0, 0.0))
 
+    def test_top20_market_repair_stops_between_rows_when_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"; Database(path).initialize()
+            repository = MinuteBarRepository(path)
+            repository.upsert_top20_trade_value_index(datetime(2026, 9, 2, 9, 1), 10.0, ("005930",))
+            repository.upsert_top20_trade_value_index(datetime(2026, 9, 2, 9, 2), 20.0, ("005930",))
+            checks = 0
+
+            def cancelled() -> bool:
+                nonlocal checks
+                checks += 1
+                return checks > 1
+
+            self.assertEqual(repository.repair_top20_market_splits(cancelled=cancelled), 1)
+            self.assertEqual(checks, 2)
+
     def test_top20_history_can_be_loaded_by_trade_date(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"; Database(path).initialize()
@@ -326,6 +342,35 @@ class MinuteBarRepositoryTests(unittest.TestCase):
             self.assertEqual(("16:00", 900.0), hourly[0][:2])
             self.assertIn(("10:00", 30.0, 1), hourly)
             self.assertEqual((30.0, 1_000.0, 500.0), comparisons[-1][1:])
+
+    def test_top20_statistics_reuses_past_day_and_invalidates_when_minute_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"; Database(path).initialize()
+            repository = MinuteBarRepository(path)
+            minute = datetime.now().replace(hour=10, minute=5, second=0, microsecond=0) - timedelta(days=1)
+            while minute.weekday() >= 5:
+                minute -= timedelta(days=1)
+            repository.upsert_top20_trade_value_index(minute, 10.0, ("005930",))
+            repository.upsert_top20_trade_value_index(minute.replace(hour=9), 0.0, ("005930",))
+            first = repository.load_top20_statistics(7)
+            with closing(sqlite3.connect(path)) as connection:
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM top20_statistics_daily_cache WHERE trade_date=?",
+                    (minute.date().isoformat(),),
+                ).fetchone()[0]
+            second = repository.load_top20_statistics(7)
+            repository.upsert_top20_trade_value_index(minute, 20.0, ("005930",))
+            with closing(sqlite3.connect(path)) as connection:
+                invalidated = connection.execute(
+                    "SELECT COUNT(*) FROM top20_statistics_daily_cache WHERE trade_date=?",
+                    (minute.date().isoformat(),),
+                ).fetchone()[0]
+            refreshed = repository.load_top20_statistics(7)
+            self.assertEqual(1, count)
+            self.assertEqual(first, second)
+            self.assertEqual(0, invalidated)
+            self.assertEqual(20.0, refreshed[1][-1][1])
+            self.assertNotIn("09:00", {row[0] for row in refreshed[0]})
 
     def test_top20_statistics_and_history_hide_rows_outside_collection_hours(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from kiwoom_monitor.application.news_analysis import NewsAssessment
 from kiwoom_monitor.central_server.news_service import CentralNewsService
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
+from kiwoom_monitor.infrastructure.naver_stock_news import StockNewsBatch
 
 
 class _NewsClient:
@@ -35,9 +36,11 @@ class _FailingNewsClient:
 class _EmptyNewsClient:
     def __init__(self) -> None:
         self.calls = 0
+        self.since_values = []
 
     def search(self, _name, *, since=None):
         self.calls += 1
+        self.since_values.append(since)
         return ()
 
 
@@ -46,6 +49,11 @@ class _Store:
         self.values = []
         self.confirmed = {}
         self.stock_bodies = {}
+        self.stock_assessments = {}
+        self.ranking = []
+
+    def load_dataset_snapshots(self, kind, subject="", limit=100):
+        return [{"payload": {"items": self.ranking}}] if kind == "top20_membership" and self.ranking else []
 
     def upsert_documents(self, collection, values):
         self.values.extend((collection, value) for value in values)
@@ -66,6 +74,8 @@ class _Store:
                 **value["document"],
                 "_body_status": "fulltext" if value["key"] in self.stock_bodies else "",
                 "_body_text": self.stock_bodies.get(value["key"], ""),
+                **({"_assessment": self.stock_assessments[value["key"]]}
+                   if value["key"] in self.stock_assessments else {}),
             }
             for saved_collection, value in self.values
             if saved_collection == "news_article" and value["owner"] == stock_code
@@ -95,6 +105,19 @@ class _DartClient:
         ),)
 
 
+class _StockSiteClient:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def search(self, code, name, *, since, start_page):
+        self.calls.append((code, name, since, start_page))
+        published = datetime.now(UTC)
+        return StockNewsBatch((StockNewsItem(
+            f"{name} 공급계약 체결", "500억원 수주", "https://n.news.naver.com/mnews/article/018/1",
+            "", published, NewsAssessment(True, "수주·계약", "호재 가능성", "근거", 8, 3),
+        ),), published, 1, True)
+
+
 class _AIService:
     def __init__(self) -> None:
         self.calls = []
@@ -105,6 +128,32 @@ class _AIService:
 
 
 class CentralNewsServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stored_pages_are_bounded_and_do_not_call_provider(self) -> None:
+        store = _Store()
+        for index in sorted(range(1, 451), key=lambda value: str(value)):
+            store.values.append(("news_article", {
+                "owner": "005930", "key": f"article-{index}",
+                "document": {
+                    "stock_code": "005930", "stock_name": "삼성전자",
+                    "title": f"삼성전자 뉴스 {index}", "description": "요약",
+                    "link": f"https://example.com/{index}", "original_link": "",
+                    "published_at": datetime(2026, 9, 1, tzinfo=UTC).isoformat(),
+                    "relevant": True, "category": "기타 증권뉴스",
+                },
+            }))
+        provider = _NewsClient()
+        service = CentralNewsService(provider, store, jobs_enabled=False, read_only_search=True)
+        first = await service.stored_page("005930", "삼성전자")
+        second = await service.stored_page("005930", "삼성전자", offset=200)
+        third = await service.stored_page("005930", "삼성전자", offset=400)
+        self.assertEqual((200, 200), (len(first["items"]), first["next_offset"]))
+        self.assertEqual((200, 400), (len(second["items"]), second["next_offset"]))
+        self.assertEqual((50, None), (len(third["items"]), third["next_offset"]))
+        self.assertEqual(450, len({
+            item["link"] for page in (first, second, third) for item in page["items"]
+        }))
+        self.assertEqual(0, provider.calls)
+
     async def test_client_none_returns_confirmed_global_news_with_recomputed_assessment(self) -> None:
         store = _Store()
         store.confirmed["005930"] = [{
@@ -183,7 +232,7 @@ class CentralNewsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, client.calls)
         self.assertEqual({"https://o/1", "https://o/stored"}, {item["original_link"] for item in cached})
 
-    async def test_recent_owner_cache_reclassifies_with_latest_stored_body(self) -> None:
+    async def test_recent_owner_cache_reads_persisted_body_assessment(self) -> None:
         client = _NewsClient()
         client.published_at = datetime(2026, 9, 8, tzinfo=UTC)
         store = _Store()
@@ -193,11 +242,57 @@ class CentralNewsServiceTests(unittest.IsolatedAsyncioTestCase):
         store.stock_bodies["https://o/1"] = (
             "삼성전자가 장중 7만원선을 회복했다. 거래대금 상위 종목에 이름을 올렸다."
         )
+        store.stock_assessments["https://o/1"] = {"assessment": {
+            "relevant": False, "category": "시세 반영·시장 요약", "outlook": "관련성 낮음",
+            "reason": "이미 반영된 주가 움직임", "relevance_score": 8, "outlook_score": 0,
+        }}
 
         cached = await service.search("005930", "삼성전자", None)
 
         self.assertEqual(1, client.calls)
         self.assertFalse(cached[0]["relevant"])
+
+    async def test_fresh_search_returns_recent_stored_owner_news_when_provider_has_no_new_items(self) -> None:
+        client, store = _EmptyNewsClient(), _Store()
+        store.upsert_documents("news_sync", [{
+            "owner": "005930", "key": "latest",
+            "document": {"checked_at": "2026-09-23T08:00:00+00:00"},
+        }])
+        store.upsert_documents("news_article", [{
+            "owner": "005930", "key": "https://o/stored",
+            "document": {
+                "stock_code": "005930", "stock_name": "삼성전자",
+                "title": "삼성전자 공급계약 체결", "description": "500억원 수주",
+                "link": "https://n/stored", "original_link": "https://o/stored",
+                "published_at": "2026-09-23T01:00:00+00:00",
+            },
+        }])
+        service = CentralNewsService(client, store)  # type: ignore[arg-type]
+
+        items = await service.search("005930", "삼성전자", datetime(2026, 9, 21, tzinfo=UTC))
+
+        self.assertEqual(1, client.calls)
+        self.assertEqual(datetime(2026, 9, 23, 8, tzinfo=UTC), client.since_values[0])
+        self.assertEqual(["https://o/stored"], [item["original_link"] for item in items])
+        self.assertEqual("수주·계약", items[0]["category"])
+
+    async def test_fresh_search_combines_new_and_previously_stored_owner_news(self) -> None:
+        client, store = _NewsClient(datetime(2026, 9, 23, 2, tzinfo=UTC)), _Store()
+        store.upsert_documents("news_article", [{
+            "owner": "005930", "key": "https://o/stored",
+            "document": {
+                "stock_code": "005930", "stock_name": "삼성전자",
+                "title": "삼성전자 공급계약 체결", "description": "500억원 수주",
+                "link": "https://n/stored", "original_link": "https://o/stored",
+                "published_at": "2026-09-23T01:00:00+00:00",
+            },
+        }])
+        service = CentralNewsService(client, store)  # type: ignore[arg-type]
+
+        items = await service.search("005930", "삼성전자", datetime(2026, 9, 22, tzinfo=UTC))
+
+        self.assertEqual(["https://o/1", "https://o/stored"],
+                         [item["original_link"] for item in items])
 
     async def test_provider_error_returns_confirmed_archive_but_still_raises_when_archive_is_empty(self) -> None:
         store = _Store()
@@ -302,6 +397,26 @@ class CentralNewsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, client.calls)
         watchlist = [value for collection, value in store.values if collection == "news_watchlist"]
         self.assertTrue(watchlist)
+
+    async def test_read_only_search_uses_saved_news_and_site_collects_current_ranking(self) -> None:
+        store = _Store()
+        store.ranking = [{"stk_cd": "A000660", "stk_nm": "SK하이닉스"}]
+        site = _StockSiteClient()
+        service = CentralNewsService(
+            None, store, jobs_enabled=False, query_set_enabled=False,
+            naver_api_enabled=False, naver_stock_enabled=True,
+            stock_client=site, read_only_search=True,
+        )  # type: ignore[arg-type]
+        before = await service.search("000660", "SK하이닉스", None)
+        self.assertEqual([], before)
+        self.assertEqual([], site.calls)
+        self.assertFalse(store.load_documents("news_watchlist", "000660"))
+
+        self.assertEqual(1, await service.refresh_once())
+        after = await service.search("000660", "SK하이닉스", None)
+        self.assertEqual(1, len(after))
+        self.assertEqual("000660", site.calls[0][0])
+        self.assertFalse(store.load_documents("news_watchlist", "000660"))
 
     async def test_refresh_uses_saved_automatic_analysis_settings(self) -> None:
         client, store, ai = _NewsClient(

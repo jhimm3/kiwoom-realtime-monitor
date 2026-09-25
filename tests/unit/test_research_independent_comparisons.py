@@ -195,7 +195,7 @@ class IndependentComparisonTests(unittest.TestCase):
         self.assertEqual('duplicate_run_reference', result.partitions[3].excluded_reason)
         self.assertFalse(any(row.status == 'INVALID' for row in result.partitions[:2]), result)
         self.assertEqual(before, repo.path.read_bytes())
-        self.assertEqual(23, repo.schema_version())
+        self.assertEqual(27, repo.schema_version())
         json.dumps(result.to_dict())
         for values in ((), ('',), ('a',) * 201):
             with self.assertRaises(ValueError):

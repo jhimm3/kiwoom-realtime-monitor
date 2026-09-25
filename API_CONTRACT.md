@@ -516,6 +516,9 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 | `POST /api/v1/news/search` | `stock_code`, `stock_name`, 선택 `since`, 자동분석 옵션 | `stock_code`, 최신순 `items[]`(최대 1000) |
 | `POST /api/v1/news/analyze` | 종목, provider/model, `events[1..20]`, `article_count` | 중앙 AI 서비스 분석 문서. 공급자 429/5xx는 상태 코드를 보존한다. |
 | `GET /api/v1/news/history/{kind}` | `kind=article/body/ai/event/membership`, 선택 `target`, `identity`, Unix 초 `as_of`, `limit` | `known`, `kind`, `revisions[]`. 서버 가용시각 역순의 불변 이력 |
+| `POST /api/v1/news/historical-jobs/claim?stage=BODY\|RULE` | Bearer 인증. 과거 기사 대기 작업 한 건 원자 선점. `scope=pc_market`은 신규 PC 시황, `pc_search`는 신규 PC 네이버 검색만 선점한다. `scope=pc`와 기본 `all`은 기존 NAS 적재분을 포함한 네 과거 범위를 선점한다. NAS 일반 작업기는 이 네 범위의 BODY/RULE을 선점하지 않는다. `excluded_codes`는 쉼표로 구분한 6자리 코드(최대 500개) | `job`·`article`, RULE이면 기존 저장 `body`; 없으면 `job=null`. 완료된 작업은 다시 선점하지 않고 시도 번호로 결과 소유권 검증 |
+| `POST /api/v1/news/historical-jobs/complete` | Bearer 인증. `job_key`, `attempts`, `stage`와 BODY 본문·원문시각 또는 RULE 평가·핵심문장·공급계약 결과; 실패 시 `error` | revision·작업 완료를 한 트랜잭션에 기록. 동일 시도 재전송은 `already_completed`; 만료·다른 시도는 409 |
+| `POST /api/v1/news/historical-market-articles` | Bearer 인증. `source=flash\|world`, `target_date`, 결정적 `batch_id`, `processing_owner=nas\|pc`(기본 nas), 해당 날짜 기사 `items` 1~100건. 각 기사는 identity·document·targets를 포함 | 기존 `central_news_source_observations`와 BODY/RULE 원장에 저장. `pc` 범위의 BODY/RULE은 NAS 일반 작업기가 선점하지 않음. 같은 batch_id 재전송은 `already_imported`; 종목 연결 여부와 무관하게 시황 탭 소속 유지 |
 | `GET /api/v1/news/sources` | 선택 `source_id`, `days=1..31`, `limit` | `scope=query_set`, `coverage=configured_query_set`, source별 cursor/checked/last success/최근 실행·관측과 raw/unique/distinct identity/duplicate/truncated/error/request/budget, 본문·규칙·target·job 요약 |
 
 사건은 `identity`, `title`, `body`, `body_hash`, `articles[]`를 가진다. 본문 최대 길이는 2,000,000자다. AI 결과의 요약·판정·근거는 요청한 `stock_name`의 주가·실적·사업 영향 관점이어야 하며, 종목이 단순 나열됐거나 직접 근거가 없으면 `판단 자료 부족`으로 반환한다. `body_hash`는 본문뿐 아니라 대상 종목과 분석 계약 버전(`target-company-v2`)을 포함하므로 이전의 시장 전체 관점 결과는 새 자동분석의 완료 캐시로 재사용하지 않는다. 캐시 재사용 여부와 사용량 구조는 중앙 AI 서비스와 클라이언트 테스트가 보호한다.
@@ -550,7 +553,9 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 
 `prefer_live=true`는 최신 `top20_membership` 한 건에만 적용된다. 목표 회차와 일치하고 종목코드·종목명이 채워진 20행 전체를 검증한 뒤 PostgreSQL 저장과 동시에 공개하는 것이 아니라 저장 전에 메모리 projection으로 반환한다. 부분 응답과 이전 회차 응답은 live 결과가 될 수 없다. live projection이 없거나 서버가 재시작된 때는 같은 요청도 DB 저장본으로 되돌아간다. 연구·과거 조회는 이 옵션을 사용하지 않는다.
 
-NAS 연결 중 TOP20 차트는 `top20_index` 중앙 스냅샷을 읽고, 통계는 서버가 같은 원본을 집계한 `top20-statistics`를 읽는다. PC 직접 연결 중에는 로컬 `monitor.sqlite3`를 사용한다. 정규장 TOP20 합계는 09:00부터 15:30 종가 단일가 체결분까지 포함한다. 과거 전체시장 분모는 `ka20006` 일봉의 코스피·코스닥 거래대금을 사용하므로 장중 `0J/0U` 최종 수신 전에 끝난 값으로 과거 통계를 고정하지 않는다.
+검증된 live projection을 게시할 때 동일한 메모리 종목 목록으로 KRX 0B 구독 요청도 즉시 갱신한다. `top20_membership`·당일 편입 원장·TOP20 지수의 DB 저장 완료를 기다리지 않는다. 구독 요청과 실제 수신 준비는 다르며, `subscription_ready`는 WebSocket `REG` 승인 뒤에만 공개한다.
+
+NAS 연결 중 TOP20 차트는 `top20_index` 중앙 스냅샷을 읽고, 통계는 서버의 날짜별 저장 집계 `top20_statistics_day`를 합쳐 읽는다. 과거일에 집계가 없으면 처음 한 번 계산해 저장하고, 원본 TOP20·시장 일봉이 보완되면 해당 날짜 집계를 무효화한다. 당일은 원본의 새 분을 반영해 조회한다. PC 직접 연결은 앱 실행 중에만 TOP20 자료를 자동 수집하며 로컬 `monitor.sqlite3`의 날짜별 집계를 재사용한다. 0원 TOP20 행은 관측 표본과 일별 비교에서 제외한다. 정규장 TOP20 합계는 09:00부터 15:30 종가 단일가 체결분까지 포함한다. 과거 전체시장 분모는 `ka20006` 일봉의 코스피·코스닥 거래대금을 사용하므로 장중 `0J/0U` 최종 수신 전에 끝난 값으로 과거 통계를 고정하지 않는다.
 
 거래대금 비교의 `summary.complete_count`와 차이 통계는 `query_scope=KRX+NXT`인 분만 대상으로 한다. `partial_count`와 `scope_counts`는 KRX 또는 NXT 한쪽만 보완된 중간 자료를 따로 보여준다. `total_difference_percent`는 완전 비교 합계의 `(SOR-조회)/조회`, `average_difference_percent`는 분별 차이율 평균이며 `mean_absolute_difference_percent`와 `max_absolute_difference_percent`는 방향을 제거한 오차 크기다.
 
@@ -627,6 +632,8 @@ runner를 시작한다. 중간 실패는 자동 bundle의 신규 주문을 닫�
 | `POST /api/v1/mock-automation/start` | 저장된 RUNNING/신규 control의 READY 명세를 계좌별 runner로 시작 |
 | `POST /api/v1/mock-automation/stop` | `expected_control_revision` CAS로 신규 주문 판단 중지 |
 | `POST /api/v1/mock-automation/resume` | 중지 뒤 새 broker 대사를 기록하고 같은 revision을 CAS로 재개 |
+
+상태 조회의 `runner.latency`는 선택적 읽기 전용 진단 값이다. 최근 poll의 전체·관측 DB 조회·관측당 최대 처리 시간(ms), 처리한 관측/분봉 수, 분봉 `available_at`부터 처리 완료까지의 마지막·최대 경과 시간(ms), 시각 누락·미래 분봉 수를 포함한다. 주문 gate나 checkpoint 근거로 사용하지 않으며 NAS 프로세스가 재시작되면 초기화된다. 분봉이 없는 poll에서도 마지막 분봉 시각과 경과 시간은 유지되므로 화면에 처리 시각을 함께 표시한다.
 
 중지·재개 요청은 account/profile/spec, 현재 `expected_control_revision`, 비어 있지 않은 `reason`을
 포함한다. 재개는 재시작 뒤 수동 bundle에서도 안전하게 자동 bundle을 다시 만들 수 있도록 현재

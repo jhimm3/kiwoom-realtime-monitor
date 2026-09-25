@@ -42,7 +42,7 @@ from kiwoom_monitor.infrastructure.persistence.schema_migrations import (
 )
 
 
-RESEARCH_SCHEMA_VERSION = 23
+RESEARCH_SCHEMA_VERSION = 27
 RESEARCH_STORAGE_PREPARATION_SECONDS = 120
 
 
@@ -602,6 +602,43 @@ def _migration_v23(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_v24(connection: sqlite3.Connection) -> None:
+    connection.execute('''CREATE TABLE research_independent_run_owners (
+        run_id TEXT PRIMARY KEY REFERENCES research_runs(run_id),
+        owner_token TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK(generation>=1),
+        claimed_at TEXT NOT NULL
+    )''')
+    connection.execute('CREATE INDEX idx_research_independent_run_owners_token '
+                       'ON research_independent_run_owners(owner_token)')
+    connection.execute('''CREATE TABLE research_independent_run_owner_history (
+        run_id TEXT NOT NULL REFERENCES research_runs(run_id),
+        owner_token TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK(generation>=1),
+        claimed_at TEXT NOT NULL,
+        PRIMARY KEY(run_id,owner_token),
+        UNIQUE(run_id,generation)
+    )''')
+
+
+def _migration_v25(connection: sqlite3.Connection) -> None:
+    connection.execute('ALTER TABLE research_campaign_input_sources ADD COLUMN rolling_daily INTEGER NOT NULL DEFAULT 0')
+
+
+def _migration_v26(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE research_campaign_input_sources ADD COLUMN rolling_next_start TEXT NOT NULL DEFAULT ''")
+
+
+def _migration_v27(connection: sqlite3.Connection) -> None:
+    connection.execute('''CREATE TABLE research_campaign_rolling_empty_days (
+        source_id TEXT NOT NULL REFERENCES research_campaign_input_sources(source_id),
+        range_start TEXT NOT NULL, attempts INTEGER NOT NULL CHECK(attempts>=1),
+        last_checked_at TEXT NOT NULL, next_retry_at TEXT NOT NULL,
+        PRIMARY KEY(source_id,range_start))''')
+    connection.execute('CREATE INDEX idx_research_campaign_rolling_empty_due '
+                       'ON research_campaign_rolling_empty_days(source_id,next_retry_at)')
+
+
 _MIGRATIONS = (
     SQLiteMigration(1, "research_run_ledger", _migration_v1),
     SQLiteMigration(2, "simulation_execution_and_outcomes", _migration_v2),
@@ -626,6 +663,10 @@ _MIGRATIONS = (
     SQLiteMigration(21, "immutable_research_hypothesis_lineage", _migration_v21),
     SQLiteMigration(22, "campaign_hypothesis_queue", _migration_v22),
     SQLiteMigration(23, "campaign_hypothesis_expansion_ledger", _migration_v23),
+    SQLiteMigration(24, "independent_development_run_ownership", _migration_v24),
+    SQLiteMigration(25, "opt_in_daily_development_expansion", _migration_v25),
+    SQLiteMigration(26, "nas_rolling_daily_cursor", _migration_v26),
+    SQLiteMigration(27, "nas_rolling_empty_day_rechecks", _migration_v27),
 )
 
 
@@ -636,8 +677,8 @@ class ResearchRepository:
         if read_only:
             if not self._path.is_file():
                 raise ValueError('read-only research database does not exist')
-            if self.schema_version() not in (17, 18, 19, 20, 21, 22, 23):
-                raise ValueError('comparison requires an already migrated research v17-v23 database')
+            if self.schema_version() not in (17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27):
+                raise ValueError('comparison requires an already migrated research v17-v27 database')
             return
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
@@ -913,6 +954,52 @@ class ResearchRepository:
                                'WHERE execution_id=?', (outcome, now, logical_result_hash, reason, row['execution_id']))
             return True
 
+    def cancel_exited_final_holdout_execution(self, batch: FinalHoldoutBatchSpec, *,
+                                              candidate_spec_hash: str, run_id: str,
+                                              owner_token: str, generation: int,
+                                              reason: str) -> bool:
+        """CAS-cancel an orphan whose OS exit and absent artifacts were checked by the caller."""
+        if not isinstance(batch, FinalHoldoutBatchSpec) or candidate_spec_hash not in batch.candidate_spec_hashes:
+            raise ValueError('orphan candidate is outside the locked final batch')
+        owner_token = _final_holdout_request_id(owner_token)
+        if type(generation) is not int or generation < 1:
+            raise ValueError('orphan execution generation is invalid')
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000 or '\x00' in reason:
+            raise ValueError('orphan cancellation requires a bounded reason')
+        now = datetime.now(UTC).isoformat(timespec='microseconds')
+        with closing(self._connect()) as connection, connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute('BEGIN IMMEDIATE')
+            window = connection.execute('SELECT * FROM research_final_holdout_windows WHERE window_id=?',
+                                        (batch.window_id,)).fetchone()
+            if (window is None or window['state'] != 'FINAL_RESERVED'
+                    or window['batch_id'] != batch.batch_id
+                    or window['spec_json'] != _canonical_json(batch.to_dict())):
+                raise ValueError('orphan cancellation requires the locked unexposed window')
+            row = connection.execute('SELECT * FROM research_final_holdout_executions '
+                                     'WHERE batch_id=? AND candidate_spec_hash=?',
+                                     (batch.batch_id, candidate_spec_hash)).fetchone()
+            if (row is None or row['window_id'] != batch.window_id or row['run_id'] != run_id
+                    or row['owner_token'] != owner_token or row['generation'] != generation):
+                raise ValueError('orphan execution owner or generation changed')
+            run = connection.execute('SELECT status,spec_json,logical_result_hash,error FROM research_runs '
+                                     'WHERE run_id=?', (run_id,)).fetchone()
+            if (run is None or json.loads(run['spec_json']).get('execution_scope')
+                    != 'independent_final_holdout/v1'):
+                raise ValueError('orphan scientific run is missing or out of scope')
+            if row['state'] == 'CANCELLED' and run['status'] == 'cancelled' and row['reason'] == run['error'] == reason:
+                return False
+            if (row['state'] != 'RUNNING' or run['status'] != 'running'
+                    or row['logical_result_hash'] or run['logical_result_hash']):
+                raise ValueError('orphan final execution is no longer running consistently')
+            connection.execute("UPDATE research_runs SET status='cancelled',finished_at=?,error=? "
+                               "WHERE run_id=? AND status='running'", (now, reason, run_id))
+            connection.execute("UPDATE research_final_holdout_executions SET state='CANCELLED',"
+                               "finished_at=?,reason=? WHERE execution_id=? AND state='RUNNING' "
+                               "AND generation=? AND owner_token=?",
+                               (now, reason, row['execution_id'], generation, owner_token))
+            return True
+
     def load_final_holdout_executions(self, batch_id: str) -> tuple[dict[str, Any], ...]:
         with closing(self._connect()) as connection:
             connection.row_factory = sqlite3.Row
@@ -939,12 +1026,18 @@ class ResearchRepository:
         spec: Mapping[str, Any],
         input_manifest: Mapping[str, Any],
         *, claim_independent: bool = False,
+        owner_token: str | None = None,
     ) -> str | None:
         normalized_id = str(run_id).strip()
         if not normalized_id:
             raise ValueError("run_id is required")
         spec_json = _canonical_json(spec)
         manifest_json = _canonical_json(input_manifest)
+        independent_scope = spec.get('execution_scope') == 'independent_development_validation/v1'
+        if owner_token is not None:
+            if not claim_independent:
+                raise ValueError('independent owner token requires an independent claim')
+            owner_token = _final_holdout_request_id(owner_token)
         if claim_independent:
             expected_id = 'run_' + hashlib.sha256(_canonical_json({
                 'dataset_id': input_manifest.get('dataset_id', ''),
@@ -965,21 +1058,95 @@ class ResearchRepository:
                 if row[0] != spec_json or row[1] != manifest_json:
                     raise ValueError("run_id already belongs to different immutable inputs")
                 if row[2] == "cancelled":
+                    if independent_scope and not claim_independent:
+                        raise ValueError('cancelled independent run requires an owned claim')
+                    owned = connection.execute(
+                        'SELECT owner_token,generation FROM research_independent_run_owners WHERE run_id=?',
+                        (normalized_id,)).fetchone() if claim_independent else None
+                    if owned is not None and owner_token is None:
+                        raise ValueError('owned independent run requires a new owner to resume')
+                    if owned is not None and owner_token == owned[0]:
+                        raise ValueError('resumed independent run requires a different owner token')
+                    if owner_token is not None and connection.execute(
+                            'SELECT 1 FROM research_independent_run_owner_history '
+                            'WHERE run_id=? AND owner_token=?', (normalized_id, owner_token)).fetchone():
+                        raise ValueError('independent owner token was already used for this run')
+                    now = datetime.now(UTC).isoformat()
                     connection.execute(
-                        "UPDATE research_runs SET status='running',finished_at='',error='' "
+                        "UPDATE research_runs SET status='running',started_at=?,finished_at='',error='' "
                         "WHERE run_id=?",
-                        (normalized_id,),
+                        (now, normalized_id),
                     )
+                    if owner_token is not None:
+                        generation = 1 if owned is None else owned[1] + 1
+                        if owned is None:
+                            connection.execute('INSERT INTO research_independent_run_owners '
+                                               '(run_id,owner_token,generation,claimed_at) VALUES(?,?,1,?)',
+                                               (normalized_id, owner_token, now))
+                        else:
+                            connection.execute('UPDATE research_independent_run_owners SET '
+                                               'owner_token=?,generation=?,claimed_at=? WHERE run_id=?',
+                                               (owner_token, generation, now, normalized_id))
+                        connection.execute('INSERT INTO research_independent_run_owner_history '
+                                           '(run_id,owner_token,generation,claimed_at) VALUES(?,?,?,?)',
+                                           (normalized_id, owner_token, generation, now))
                     return 'claimed' if claim_independent else None
                 if claim_independent:
                     return 'completed' if row[2] == 'completed' else 'failed' if row[2] == 'failed' else 'busy'
                 return
+            if independent_scope and not claim_independent:
+                raise ValueError('new independent run requires an owned claim')
             connection.execute(
                 "INSERT INTO research_runs(run_id,status,started_at,spec_json,input_manifest_json) "
                 "VALUES(?,?,?,?,?)",
                 (normalized_id, "running", datetime.now(UTC).isoformat(), spec_json, manifest_json),
             )
+            if owner_token is not None:
+                now = datetime.now(UTC).isoformat()
+                connection.execute('INSERT INTO research_independent_run_owners '
+                                   '(run_id,owner_token,generation,claimed_at) VALUES(?,?,1,?)',
+                                   (normalized_id, owner_token, now))
+                connection.execute('INSERT INTO research_independent_run_owner_history '
+                                   '(run_id,owner_token,generation,claimed_at) VALUES(?,?,1,?)',
+                                   (normalized_id, owner_token, now))
             return 'claimed' if claim_independent else None
+
+    def load_independent_run_owners(self, owner_token: str) -> tuple[dict[str, Any], ...]:
+        owner_token = _final_holdout_request_id(owner_token)
+        with closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute('SELECT o.run_id,o.owner_token,o.generation,r.status '
+                                      'FROM research_independent_run_owners o '
+                                      'JOIN research_runs r ON r.run_id=o.run_id '
+                                      'WHERE o.owner_token=? ORDER BY o.run_id', (owner_token,)).fetchall()
+        return tuple(dict(row) for row in rows)
+
+    def cancel_exited_independent_run(self, run_id: str, *, owner_token: str,
+                                      generation: int, reason: str) -> bool:
+        owner_token = _final_holdout_request_id(owner_token)
+        if type(generation) is not int or generation < 1:
+            raise ValueError('independent run generation is invalid')
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000 or '\x00' in reason:
+            raise ValueError('independent run cancellation requires a bounded reason')
+        with closing(self._connect()) as connection, connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute('BEGIN IMMEDIATE')
+            row = connection.execute('SELECT r.status,r.spec_json,r.logical_result_hash,r.error,'
+                                     'o.owner_token,o.generation FROM research_runs r '
+                                     'JOIN research_independent_run_owners o ON o.run_id=r.run_id '
+                                     'WHERE r.run_id=?', (run_id,)).fetchone()
+            if (row is None or row['owner_token'] != owner_token or row['generation'] != generation):
+                raise ValueError('independent run owner or generation changed')
+            if json.loads(row['spec_json']).get('execution_scope') != 'independent_development_validation/v1':
+                raise ValueError('independent run scope is invalid')
+            if row['status'] == 'cancelled' and row['error'] == reason:
+                return False
+            if row['status'] != 'running' or row['logical_result_hash']:
+                raise ValueError('independent run is no longer running')
+            connection.execute("UPDATE research_runs SET status='cancelled',finished_at=?,error=? "
+                               "WHERE run_id=? AND status='running'",
+                               (datetime.now(UTC).isoformat(), reason, run_id))
+            return True
 
     def save_search_experiment(self, experiment_id: str, spec: Mapping[str, Any]) -> bool:
         normalized_id = str(experiment_id).strip()
@@ -1544,7 +1711,7 @@ class ResearchRepository:
             _refresh_campaign_state(connection, campaign_id, now)
             return True
 
-    def save_campaign_input_source(self, campaign_id, template_job_id, root: Path, *, enabled=True, nas_auto_prepare=False, nas_config_path=None, storage_cap_bytes=0):
+    def save_campaign_input_source(self, campaign_id, template_job_id, root: Path, *, enabled=True, nas_auto_prepare=False, nas_config_path=None, storage_cap_bytes=0, rolling_daily=False):
         root = str(Path(root).resolve())
         if isinstance(storage_cap_bytes, bool) or not isinstance(storage_cap_bytes, int) or not 0 <= storage_cap_bytes <= 1000000 * 1024 ** 3:
             raise ValueError('invalid research storage capacity')
@@ -1557,8 +1724,17 @@ class ResearchRepository:
             campaign, _ = _campaign_policy(connection, campaign_id)
             if campaign['desired_state'] == 'RUNNING' or connection.execute("SELECT 1 FROM research_campaign_workers WHERE campaign_id=? AND state IN ('STARTING','RUNNING') AND lease_expires_at>?", (campaign_id, datetime.now(UTC).isoformat())).fetchone():
                 raise ValueError('pause campaign and wait for worker exit before configuring input sources')
-            if connection.execute('SELECT 1 FROM research_campaign_jobs WHERE campaign_id=? AND job_id=?', (campaign_id, template_job_id)).fetchone() is None:
+            template = connection.execute('SELECT * FROM research_campaign_jobs WHERE campaign_id=? AND job_id=?', (campaign_id, template_job_id)).fetchone()
+            if template is None:
                 raise ValueError('unknown source template job')
+            if rolling_daily:
+                spec = _campaign_source_spec(connection, template)
+                context = spec.research_context
+                evaluation = ResearchEvaluationSpec.from_dict(context['evaluation'])
+                if ('development_partition' in context or spec.final_holdout_accessed_at
+                        or evaluation.final_holdout_accessed_at or len(evaluation.folds) != 1
+                        or evaluation.folds[0].role not in ('TRAIN', 'VALIDATION')):
+                    raise ValueError('rolling daily requires one unpartitioned TRAIN or VALIDATION fold without final access')
             if enabled and nas_auto_prepare:
                 for other in connection.execute('SELECT source_id,root,storage_cap_bytes FROM research_campaign_input_sources WHERE enabled=1 AND nas_auto_prepare=1'):
                     if other['source_id'] == source_id:
@@ -1568,8 +1744,73 @@ class ResearchRepository:
                     if overlaps and (storage_cap_bytes or other['storage_cap_bytes']) and (Path(root) != other_root or storage_cap_bytes != other['storage_cap_bytes']):
                         raise ValueError('overlapping NAS research folders must use the same root and capacity; disable the other source before changing')
             connection.execute("INSERT INTO research_campaign_input_sources(source_id,campaign_id,template_job_id,root,enabled) VALUES(?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET root=excluded.root,enabled=excluded.enabled,state='READY',failure_count=0,next_scan_at='',reason=''", (source_id, campaign_id, template_job_id, root, int(enabled)))
-            connection.execute("UPDATE research_campaign_input_sources SET nas_auto_prepare=?,nas_config_path=?,remote_signature='',storage_cap_bytes=? WHERE source_id=?", (int(nas_auto_prepare), config_path, storage_cap_bytes, source_id))
+            connection.execute("UPDATE research_campaign_input_sources SET nas_auto_prepare=?,nas_config_path=?,remote_signature='',storage_cap_bytes=?,rolling_daily=?,rolling_next_start='' WHERE source_id=?", (int(nas_auto_prepare), config_path, storage_cap_bytes, int(rolling_daily), source_id))
+            connection.execute('DELETE FROM research_campaign_rolling_empty_days WHERE source_id=?', (source_id,))
         return source_id
+
+    def advance_campaign_rolling_day(self, source_id, expected_start, next_start, worker_claim, *, empty_checked_at=None):
+        """Commit a closed day only after it was accepted or verified empty."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute('BEGIN IMMEDIATE')
+            connection.row_factory = sqlite3.Row
+            source = connection.execute('SELECT * FROM research_campaign_input_sources WHERE source_id=?', (source_id,)).fetchone()
+            now = datetime.now(UTC).isoformat()
+            if (source is None or not source['enabled'] or not source['nas_auto_prepare'] or not source['rolling_daily']
+                    or source['campaign_id'] != worker_claim['campaign_id'] or not _campaign_worker_owned(connection, worker_claim, now)
+                    or _campaign_policy(connection, source['campaign_id'])[0]['desired_state'] != 'RUNNING'):
+                raise ValueError('rolling source or worker is no longer active')
+            baseline = datetime.fromisoformat(json.loads(source['scope_json'])['captured_range']['start'])
+            current = source['rolling_next_start'] or (baseline + timedelta(days=1)).isoformat()
+            if current != expected_start or datetime.fromisoformat(next_start) - datetime.fromisoformat(expected_start) != timedelta(days=1):
+                raise ValueError('rolling day cursor changed or is not consecutive')
+            if empty_checked_at is not None:
+                checked = datetime.fromisoformat(empty_checked_at)
+                if checked.tzinfo is None:
+                    raise ValueError('empty day check timestamp requires a timezone')
+                connection.execute('INSERT INTO research_campaign_rolling_empty_days VALUES(?,?,?,?,?)',
+                                   (source_id, expected_start, 1, empty_checked_at, (checked + timedelta(days=1)).isoformat()))
+            connection.execute('UPDATE research_campaign_input_sources SET rolling_next_start=? WHERE source_id=?', (next_start, source_id))
+
+    def load_due_campaign_rolling_empty_day(self, source_id, *, now):
+        """Allow one historical recheck per ten minutes while new days progress."""
+        with closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            last = connection.execute('SELECT MAX(last_checked_at) FROM research_campaign_rolling_empty_days WHERE source_id=?', (source_id,)).fetchone()[0]
+            if last is not None and datetime.fromisoformat(last) + timedelta(minutes=10) > now:
+                return None
+            row = connection.execute('SELECT * FROM research_campaign_rolling_empty_days '
+                                     'WHERE source_id=? AND next_retry_at<=? ORDER BY next_retry_at,range_start LIMIT 1',
+                                     (source_id, now.isoformat())).fetchone()
+            return dict(row) if row is not None else None
+
+    def finish_campaign_rolling_empty_day(self, source_id, range_start, worker_claim, *, checked_at, fingerprint=None):
+        """Remove a retry only after its frozen evidence has been accepted."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute('BEGIN IMMEDIATE')
+            connection.row_factory = sqlite3.Row
+            source = connection.execute('SELECT * FROM research_campaign_input_sources WHERE source_id=?', (source_id,)).fetchone()
+            now = datetime.now(UTC).isoformat()
+            if (source is None or not source['enabled'] or not source['nas_auto_prepare'] or not source['rolling_daily']
+                    or source['campaign_id'] != worker_claim['campaign_id'] or not _campaign_worker_owned(connection, worker_claim, now)
+                    or _campaign_policy(connection, source['campaign_id'])[0]['desired_state'] != 'RUNNING'):
+                raise ValueError('rolling source or worker is no longer active')
+            row = connection.execute('SELECT * FROM research_campaign_rolling_empty_days WHERE source_id=? AND range_start=?',
+                                     (source_id, range_start)).fetchone()
+            if row is None:
+                raise ValueError('rolling empty day is no longer pending')
+            if fingerprint is not None:
+                if connection.execute('SELECT 1 FROM research_campaign_input_acceptances WHERE source_id=? AND fingerprint=?',
+                                      (source_id, fingerprint)).fetchone() is None:
+                    raise ValueError('rolling retry has no accepted frozen input')
+                connection.execute('DELETE FROM research_campaign_rolling_empty_days WHERE source_id=? AND range_start=?',
+                                   (source_id, range_start))
+            else:
+                checked = datetime.fromisoformat(checked_at)
+                if checked.tzinfo is None:
+                    raise ValueError('empty day check timestamp requires a timezone')
+                connection.execute('UPDATE research_campaign_rolling_empty_days SET attempts=attempts+1,last_checked_at=?,next_retry_at=? '
+                                   'WHERE source_id=? AND range_start=?',
+                                   (checked_at, (checked + timedelta(days=1)).isoformat(), source_id, range_start))
 
     def begin_campaign_storage_preparation(self, source_id, worker_claim):
         """Serialize PC NAS file preparation; stale ownership is abandoned, never deleted."""
@@ -2376,60 +2617,79 @@ class ResearchRepository:
         return tuple(json.loads(row[0]) for row in rows)
 
     def append_evaluation(self, evaluation: StrategyEvaluation) -> bool:
-        snapshot = evaluation.snapshot.to_dict()
-        decision = evaluation.decision.to_dict()
-        candidate = evaluation.candidate_event.to_dict() if evaluation.candidate_event else None
-        if snapshot["run_id"] != decision["run_id"]:
-            raise ValueError("snapshot and decision run_id must match")
-        if decision["snapshot_id"] != snapshot["snapshot_id"]:
-            raise ValueError("decision must reference the appended snapshot")
+        return self.append_evaluations((evaluation,))[0]
+
+    def append_evaluations(self, evaluations: tuple[StrategyEvaluation, ...]) -> tuple[bool, ...]:
+        if not evaluations:
+            return ()
+        documents = []
+        for evaluation in evaluations:
+            snapshot = evaluation.snapshot.to_dict()
+            decision = evaluation.decision.to_dict()
+            candidate = evaluation.candidate_event.to_dict() if evaluation.candidate_event else None
+            if snapshot["run_id"] != decision["run_id"]:
+                raise ValueError("snapshot and decision run_id must match")
+            if decision["snapshot_id"] != snapshot["snapshot_id"]:
+                raise ValueError("decision must reference the appended snapshot")
+            documents.append((snapshot, decision, candidate))
+        run_id = documents[0][0]["run_id"]
+        if any(snapshot["run_id"] != run_id for snapshot, _, _ in documents):
+            raise ValueError("evaluation batch must belong to one run")
         with closing(self._connect()) as connection, connection:
             run = connection.execute(
-                "SELECT status FROM research_runs WHERE run_id=?", (snapshot["run_id"],),
+                "SELECT status FROM research_runs WHERE run_id=?", (run_id,),
             ).fetchone()
             if run is None:
                 raise ValueError("research run must be started before appending results")
             if run[0] == "completed":
-                _verify_existing_evaluation(connection, snapshot, decision, candidate)
-                return False
+                for snapshot, decision, candidate in documents:
+                    _verify_existing_evaluation(connection, snapshot, decision, candidate)
+                return tuple(False for _ in documents)
             if run[0] != "running":
                 raise ValueError(f"cannot append to research run in {run[0]} state")
-            inserted = _insert_immutable(
-                connection,
-                table="research_feature_snapshots",
-                id_column="snapshot_id",
-                identifier=snapshot["snapshot_id"],
-                document_json=_canonical_json(snapshot),
-                insert_sql=(
-                    "INSERT INTO research_feature_snapshots("
-                    "snapshot_id,run_id,decision_time,input_cutoff,symbol,document_json"
-                    ") VALUES(?,?,?,?,?,?)"
-                ),
-                insert_values=(
-                    snapshot["snapshot_id"], snapshot["run_id"], snapshot["decision_time"],
-                    snapshot["input_cutoff"], snapshot["symbol"], _canonical_json(snapshot),
-                ),
+            return tuple(
+                self._append_evaluation_on_connection(connection, snapshot, decision, candidate)
+                for snapshot, decision, candidate in documents
             )
-            _insert_immutable(
-                connection,
-                table="research_decisions",
-                id_column="decision_id",
-                identifier=decision["decision_id"],
-                document_json=_canonical_json(decision),
-                insert_sql=(
-                    "INSERT INTO research_decisions("
-                    "decision_id,run_id,snapshot_id,decided_at,symbol,proposal,final_action,document_json"
-                    ") VALUES(?,?,?,?,?,?,?,?)"
-                ),
-                insert_values=(
-                    decision["decision_id"], decision["run_id"], decision["snapshot_id"],
-                    decision["decided_at"], decision["symbol"], decision["proposal"],
-                    decision["final_action"], _canonical_json(decision),
-                ),
-            )
-            if candidate is not None:
-                _insert_candidate(connection, candidate)
-            return inserted
+
+    @staticmethod
+    def _append_evaluation_on_connection(connection, snapshot, decision, candidate) -> bool:
+        inserted = _insert_immutable(
+            connection,
+            table="research_feature_snapshots",
+            id_column="snapshot_id",
+            identifier=snapshot["snapshot_id"],
+            document_json=_canonical_json(snapshot),
+            insert_sql=(
+                "INSERT INTO research_feature_snapshots("
+                "snapshot_id,run_id,decision_time,input_cutoff,symbol,document_json"
+                ") VALUES(?,?,?,?,?,?)"
+            ),
+            insert_values=(
+                snapshot["snapshot_id"], snapshot["run_id"], snapshot["decision_time"],
+                snapshot["input_cutoff"], snapshot["symbol"], _canonical_json(snapshot),
+            ),
+        )
+        _insert_immutable(
+            connection,
+            table="research_decisions",
+            id_column="decision_id",
+            identifier=decision["decision_id"],
+            document_json=_canonical_json(decision),
+            insert_sql=(
+                "INSERT INTO research_decisions("
+                "decision_id,run_id,snapshot_id,decided_at,symbol,proposal,final_action,document_json"
+                ") VALUES(?,?,?,?,?,?,?,?)"
+            ),
+            insert_values=(
+                decision["decision_id"], decision["run_id"], decision["snapshot_id"],
+                decision["decided_at"], decision["symbol"], decision["proposal"],
+                decision["final_action"], _canonical_json(decision),
+            ),
+        )
+        if candidate is not None:
+            _insert_candidate(connection, candidate)
+        return inserted
 
     def finish_run(self, run_id: str, logical_result_hash: str) -> None:
         if not str(logical_result_hash).strip():

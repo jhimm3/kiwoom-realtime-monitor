@@ -13,6 +13,7 @@ from kiwoom_monitor.central_server.autonomous_top20 import (
     _collection_open,
     _ranking_collection_due,
     _ranking_expected_at,
+    _new_high_schedule_slot,
 )
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
@@ -64,6 +65,17 @@ class _FlakyIndexStore:
 
 
 class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_high_schedule_uses_one_delayed_after_close_slot(self) -> None:
+        self.assertEqual("", _new_high_schedule_slot(datetime(2026, 9, 24, 8, 59)))
+        self.assertEqual("2026-09-24T15:29", _new_high_schedule_slot(datetime(2026, 9, 24, 15, 29)))
+        self.assertEqual("", _new_high_schedule_slot(datetime(2026, 9, 24, 15, 30)))
+        self.assertEqual("", _new_high_schedule_slot(datetime(2026, 9, 24, 15, 59)))
+        self.assertEqual("2026-09-24:after_close", _new_high_schedule_slot(datetime(2026, 9, 24, 16, 0)))
+        self.assertEqual("2026-09-24:after_close", _new_high_schedule_slot(datetime(2026, 9, 24, 19, 59)))
+        self.assertEqual("", _new_high_schedule_slot(datetime(2026, 9, 24, 20, 0)))
+        self.assertEqual("", _new_high_schedule_slot(datetime(2026, 9, 25, 7, 59)))
+        self.assertEqual("", _new_high_schedule_slot(datetime(2026, 9, 26, 10, 0)))
+
     async def test_validated_membership_is_visible_while_database_save_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
@@ -78,9 +90,11 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
 
             store.save_dataset_snapshot = blocked_save  # type: ignore[method-assign]
             store.upsert_documents = lambda *args, **kwargs: None  # type: ignore[method-assign]
+            hub = RealtimeHub()
             service = AutonomousTop20Service(
-                _Broker(), RealtimeHub(), store, catalog_loader=lambda: (),
+                _Broker(), hub, store, catalog_loader=lambda: (),
             )
+            service._subscriber = hub.connect()
             service._entrants_day = "2026-09-10"
             refresh = asyncio.create_task(
                 service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0, 0)),
@@ -92,6 +106,8 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                 assert latest is not None
                 self.assertEqual("pending", latest["persistence_state"])
                 self.assertEqual(20, len(latest["payload"]["items"]))
+                requested, _nxt = hub.requested_codes()
+                self.assertEqual(set(latest["payload"]["codes"]), set(requested))
                 self.assertFalse(refresh.done())
             finally:
                 release.set()
@@ -102,6 +118,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             )
             if service._market_catalog_task is not None:
                 await service._market_catalog_task
+            await service.close()
             store.close()
 
     def test_nonboundary_start_uses_current_half_minute_as_freshness_target(self) -> None:

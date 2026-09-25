@@ -5,10 +5,36 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from enum import Enum
+from typing import Mapping
 from zoneinfo import ZoneInfo
 
 
 KST = ZoneInfo("Asia/Seoul")
+# KRX notices:
+# 2021 https://kind.krx.co.kr/external/2021/11/04/000107/20211104000121/99303.htm
+# 2022 CREON 005930 raw 5m: 10:05..16:20 plus 16:30; KRX delayed-day notice
+#      https://strn.krx.co.kr/corebbs5/BHPSTRN0401/view?bbsSeq=83
+# 2023 https://kind.krx.co.kr/external/2023/11/02/000068/20231102000001/99303.htm
+# 2024 https://kind.krx.co.kr/external/2024/10/31/000080/20241031000019/32104.htm
+# 2025 https://kind.krx.co.kr/external/2025/10/30/000102/20251030000137/99303.htm
+# Only dates checked against a venue notice and/or source bars belong here.
+KRX_VERIFIED_DELAYED_DATES = frozenset({
+    date(2021, 11, 18), date(2022, 11, 17), date(2023, 11, 16),
+    date(2024, 11, 14), date(2025, 11, 13),
+})
+
+
+def krx_regular_session_hours(trading_date: date) -> tuple[time, time]:
+    """Return verified regular-session open/close for a KRX trading date."""
+    if trading_date in KRX_VERIFIED_DELAYED_DATES:
+        return time(10, 0), time(16, 30)
+    return time(9, 0), time(15, 30)
+
+
+def krx_closing_auction_hours(trading_date: date) -> tuple[time, time]:
+    _, close = krx_regular_session_hours(trading_date)
+    start = (datetime.combine(trading_date, close) - timedelta(minutes=10)).time()
+    return start, close
 KRX_AFTER_MARKET_EFFECTIVE_DATE = date(2026, 9, 14)
 LEGACY_SCHEDULE_VERSION = "krx-nxt-schedule/2026-09-13"
 CURRENT_SCHEDULE_VERSION = "krx-nxt-schedule/2026-09-14"
@@ -277,14 +303,16 @@ def research_bar_allowed(
         session_profile == KRX_REGULAR_RESEARCH_PROFILE
         and
         start.date() < KRX_AFTER_MARKET_EFFECTIVE_DATE
+        and start.date() not in KRX_VERIFIED_DELAYED_DATES
         and declared_session in {None, ""}
         and declared_phase in {None, ""}
     ):
         # Old observations had no session metadata and the original reader accepted
         # every strict KRX bar. Preserve that interpretation for old dates only.
         return True
-    regular_start = datetime.combine(start.date(), time(9, 0), tzinfo=KST)
-    regular_end = datetime.combine(start.date(), time(15, 30), tzinfo=KST)
+    regular_open, regular_close = krx_regular_session_hours(start.date())
+    regular_start = datetime.combine(start.date(), regular_open, tzinfo=KST)
+    regular_end = datetime.combine(start.date(), regular_close, tzinfo=KST)
     after_start = datetime.combine(start.date(), time(16, 0), tzinfo=KST)
     after_end = datetime.combine(start.date(), time(20, 0), tzinfo=KST)
     in_regular = regular_start <= start and end <= regular_end
@@ -330,7 +358,8 @@ def research_session_key(at: datetime, *, session_profile: str) -> str | None:
         return None
     value = local.time()
     if session_profile in {KRX_REGULAR_RESEARCH_PROFILE, KRX_FULL_DAY_RESEARCH_PROFILE}:
-        if time(9, 0) <= value < time(15, 30):
+        regular_open, regular_close = krx_regular_session_hours(local.date())
+        if regular_open <= value < regular_close:
             return f"{local.date().isoformat()}:KRX_REGULAR"
     if session_profile in {KRX_AFTER_RESEARCH_PROFILE, KRX_FULL_DAY_RESEARCH_PROFILE}:
         if local.date() >= KRX_AFTER_MARKET_EFFECTIVE_DATE and time(16, 0) <= value < time(20, 0):
@@ -351,8 +380,11 @@ def research_session_profile_document(session_profile: str) -> dict[str, object]
         "profile": session_profile,
         "venue": "KRX",
         "schedule_version_policy": "by_trading_date/v1",
+        "verified_delayed_session_dates_kst": sorted(day.isoformat() for day in KRX_VERIFIED_DELAYED_DATES),
         "windows_kst": windows[session_profile],
+        "verified_delayed_regular_window_kst": "10:00-16:30",
         "excluded_windows_kst": ["15:30-16:00"],
+        "verified_delayed_excluded_window_kst": "16:30-17:00",
         "factor_session_policy": "reset_at_each_window/v1",
         "next_bar_policy": "continuous_next_minute_same_window/v1",
         "auction_execution_policy": "unsupported_without_orderbook/v1",
@@ -360,21 +392,46 @@ def research_session_profile_document(session_profile: str) -> dict[str, object]
     }
 
 
+def research_session_profile_contract_matches(document: object, session_profile: str) -> bool:
+    """Validate either the original frozen v1 contract or its dated-hours extension."""
+    if not isinstance(document, Mapping):
+        return False
+    try:
+        current = research_session_profile_document(session_profile)
+    except ValueError:
+        return False
+    if dict(document) == current:
+        return True
+    legacy = {key: value for key, value in current.items() if key not in {
+        "verified_delayed_session_dates_kst",
+        "verified_delayed_regular_window_kst",
+        "verified_delayed_excluded_window_kst",
+    }}
+    return dict(document) == legacy
+
+
 def _krx_window(
     local: datetime, environment: str, eligible: bool | None, version: str,
 ) -> SessionWindow:
     value = local.time()
+    regular_open, regular_close = krx_regular_session_hours(local.date())
+    auction_start, _ = krx_closing_auction_hours(local.date())
+    offset = timedelta(minutes=60 if local.date() in KRX_VERIFIED_DELAYED_DATES else 0)
+
+    def shifted(value: time) -> time:
+        return (datetime.combine(local.date(), value) + offset).time()
+
     definitions = [
-        (time(8, 30), time(9, 0), MarketSession.KRX_OPENING_AUCTION, MarketPhase.AUCTION_ORDER_ENTRY),
-        (time(9, 0), time(15, 20), MarketSession.KRX_REGULAR, MarketPhase.CONTINUOUS),
-        (time(15, 20), time(15, 30), MarketSession.KRX_CLOSING_AUCTION, MarketPhase.AUCTION_ORDER_ENTRY),
-        (time(15, 30), time(15, 40), MarketSession.KRX_AFTER_HOURS_CLOSE, MarketPhase.AUCTION_ORDER_ENTRY),
-        (time(15, 40), time(16, 0), MarketSession.KRX_AFTER_HOURS_CLOSE, MarketPhase.FIXED_PRICE),
+        (shifted(time(8, 30)), regular_open, MarketSession.KRX_OPENING_AUCTION, MarketPhase.AUCTION_ORDER_ENTRY),
+        (regular_open, auction_start, MarketSession.KRX_REGULAR, MarketPhase.CONTINUOUS),
+        (auction_start, regular_close, MarketSession.KRX_CLOSING_AUCTION, MarketPhase.AUCTION_ORDER_ENTRY),
+        (regular_close, shifted(time(15, 40)), MarketSession.KRX_AFTER_HOURS_CLOSE, MarketPhase.AUCTION_ORDER_ENTRY),
+        (shifted(time(15, 40)), shifted(time(16, 0)), MarketSession.KRX_AFTER_HOURS_CLOSE, MarketPhase.FIXED_PRICE),
     ]
     if local.date() >= KRX_AFTER_MARKET_EFFECTIVE_DATE:
         definitions.append((time(16, 0), time(20, 0), MarketSession.KRX_AFTER_MARKET, MarketPhase.CONTINUOUS))
     else:
-        definitions.append((time(16, 0), time(18, 0), MarketSession.KRX_LEGACY_PERIODIC_AUCTION,
+        definitions.append((shifted(time(16, 0)), time(18, 0), MarketSession.KRX_LEGACY_PERIODIC_AUCTION,
                             MarketPhase.PERIODIC_AUCTION))
     for start, end, session, phase in definitions:
         if start <= value < end:

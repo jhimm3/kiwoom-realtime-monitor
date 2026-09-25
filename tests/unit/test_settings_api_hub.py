@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import sqlite3
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -13,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QPushButton, QTabWidget
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
 from kiwoom_monitor.presentation.main_window import SettingsDialog
+from qt_settings_test_support import wait_until
 
 
 class SettingsApiHubTests(unittest.TestCase):
@@ -60,6 +63,25 @@ class SettingsApiHubTests(unittest.TestCase):
             open_shadow_settings.assert_called_once_with()
             open_research.assert_called_once_with()
             open_mock_automation.assert_called_once_with()
+
+    def test_saving_settings_does_not_wait_for_a_locked_database_on_gui_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            dialog = SettingsDialog(SettingsRepository(path))
+            dialog._ui_mode.setCurrentIndex(1)
+            lock = sqlite3.connect(path)
+            try:
+                lock.execute("BEGIN IMMEDIATE")
+                started = time.monotonic()
+                dialog._save()
+                self.assertLess(time.monotonic() - started, 0.5)
+                self.assertIsNotNone(dialog._save_request)
+            finally:
+                lock.rollback()
+                lock.close()
+            wait_until(lambda: dialog._save_request is None)
+            self.assertEqual(str(dialog._ui_mode.currentData()), SettingsRepository(path).get("ui_mode"))
 
 
 if __name__ == "__main__":

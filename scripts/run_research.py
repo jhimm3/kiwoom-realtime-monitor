@@ -27,6 +27,7 @@ from kiwoom_monitor.application.market_research_features import (
 from kiwoom_monitor.application.market_session_schedule import (
     SUPPORTED_RESEARCH_SESSION_PROFILES,
     research_session_profile_document,
+    research_session_profile_contract_matches,
 )
 from kiwoom_monitor.application.research_factors import (
     FACTOR_VERSION,
@@ -122,7 +123,7 @@ def execute_research(
     target_partition = (DevelopmentPartitionSpec.from_dict(dataset.manifest['development_partition']['spec']).symbol_partition
                         if active_start is not None and not final_scope else None)
     if active_start is not None and (session_profile is None or
-            research_session_profile_document(session_profile) != dataset.manifest.get('research_session_profile')):
+            not research_session_profile_contract_matches(dataset.manifest.get('research_session_profile'), session_profile)):
         raise ValueError('independent partition requires a matching explicit session profile')
     bundle_replay = dataset.manifest.get("runtime_input_version") == "continuous_bundle_replay/v1"
     partition_replay = dataset.manifest.get('runtime_input_version') in (DEVELOPMENT_INPUT_VERSION, FINAL_INPUT_VERSION)
@@ -139,7 +140,7 @@ def execute_research(
         if session_profile not in (None, 'krx-regular/v1'):
             raise ValueError('historical reconstruction currently supports krx-regular/v1 only')
     if bundle_replay and (session_profile is None or
-            research_session_profile_document(session_profile) != dataset.manifest.get("research_session_profile")):
+            not research_session_profile_contract_matches(dataset.manifest.get("research_session_profile"), session_profile)):
         raise ValueError("research bundle requires a matching explicit session profile")
     ordered_input = tuple(sorted(dataset.observations, key=research_observation_order)) if bundle_replay or partition_replay else ()
     def checkpoint():
@@ -169,7 +170,15 @@ def execute_research(
     elif final_execution is not None:
         raise ValueError('final execution ownership cannot be used outside final scope')
     repository.start_run(run_id, spec, dataset.manifest)
-    logical_rows: list[dict[str, Any]] = []
+    logical_digest = hashlib.sha256()
+    logical_row_count = 0
+
+    def append_logical(row: Mapping[str, Any]) -> None:
+        nonlocal logical_row_count
+        if logical_row_count:
+            logical_digest.update(b"\n")
+        logical_digest.update(_canonical_json(row).encode("utf-8"))
+        logical_row_count += 1
     engine = PaperExecutionEngine(
         run_id, execution_config, config, session_profile=session_profile,
     )
@@ -180,6 +189,13 @@ def execute_research(
     candidate_count = 0
     decision_count = 0
     last_available_at: datetime | None = None
+    pending_evaluations = []
+
+    def flush_evaluations() -> None:
+        if pending_evaluations:
+            repository.append_evaluations(tuple(pending_evaluations))
+            pending_evaluations.clear()
+
     try:
         if cancel_requested is not None and cancel_requested():
             raise ResearchRunCancelled("research run cancellation requested")
@@ -191,7 +207,7 @@ def execute_research(
             cutoff_utc = cutoff.astimezone(timezone.utc)
             last_available_at = max(last_available_at, cutoff_utc) if last_available_at else cutoff_utc
             if cursor is not None:
-                bars, universe = cursor.advance(research_observation_order(observation))
+                evaluation_bar, bars, universe = cursor.advance_for_observation(observation)
             else:
                 bars = replay_krx_minute_bars(dataset.observations, as_of=cutoff, strict=True,
                                             session_profile=session_profile or "krx-regular/v1")
@@ -199,25 +215,28 @@ def execute_research(
                     dataset.observations, as_of=cutoff,
                     kinds=("historical_candidate_population",) if historical_reconstruction else ("top20_membership",),
                 )
-            revision_id = str(observation.get("revision_id", ""))
-            evaluation_bar = next(
-                (bar for bar in bars if bar.revision_id == revision_id), None,
-            )
+                revision_id = str(observation.get("revision_id", ""))
+                evaluation_bar = next(
+                    (bar for bar in bars if bar.revision_id == revision_id), None,
+                )
             if evaluation_bar is None:
                 continue
             # Replay warmup history/universe, but keep the new portfolio empty until the active window.
             if active_start is not None and (cutoff_utc < active_start or _aware_datetime(evaluation_bar.bar_start).astimezone(timezone.utc) < active_start):
                 continue
-            # Keep full as-of TOP20/peer history for factors; only admitted targets reach the engine.
+            # Keep the full as-of universe, with same-code/day bar history for each admitted target.
             if target_partition is not None and not target_partition.allows(evaluation_bar.code):
                 continue
             latest_codes = universe[-1].codes if universe else ()
             execution_key = (evaluation_bar.code, evaluation_bar.observation_key)
             if execution_key not in processed_execution_bars:
                 bar_events = engine.process_bar(evaluation_bar)
+                if bar_events:
+                    flush_evaluations()
                 repository.append_execution_events(bar_events)
                 execution_events.extend(bar_events)
-                logical_rows.extend({"execution": event.to_dict()} for event in bar_events)
+                for event in bar_events:
+                    append_logical({"execution": event.to_dict()})
                 processed_execution_bars.add(execution_key)
             managed_symbol = (
                 engine.strategy_state.status in {"candidate", "open"}
@@ -236,21 +255,31 @@ def execute_research(
                 config=config,
                 state=engine.strategy_state,
             )
-            repository.append_evaluation(evaluation)
-            decision_rows.append(evaluation.decision.to_dict())
+            pending_evaluations.append(evaluation)
+            # The report only counts NO_TRADE reasons by fold. Keep that bounded
+            # projection, while the complete immutable decision is in the repository.
+            decision_rows.append({
+                "decided_at": evaluation.decision.decided_at,
+                "final_action": evaluation.decision.final_action,
+                "reasons": evaluation.decision.reasons,
+            })
             decision_count += 1
-            logical_rows.append({"strategy": logical_evaluation_document(evaluation)})
+            append_logical({"strategy": logical_evaluation_document(evaluation)})
             decision_events = engine.process_decision(
                 evaluation.decision, evaluation.state, source_bar=evaluation_bar,
             )
+            if decision_events or evaluation.candidate_event is not None or len(pending_evaluations) >= 128:
+                flush_evaluations()
             repository.append_execution_events(decision_events)
             execution_events.extend(decision_events)
-            logical_rows.extend({"execution": event.to_dict()} for event in decision_events)
+            for event in decision_events:
+                append_logical({"execution": event.to_dict()})
             if evaluation.candidate_event is not None:
                 candidate_count += 1
                 candidate_events.append(evaluation.candidate_event)
         if cancel_requested is not None and cancel_requested():
             raise ResearchRunCancelled("research run cancellation requested")
+        flush_evaluations()
         ended_at = last_available_at.isoformat() if last_available_at else str(
             dataset.manifest.get("end", "")
         )
@@ -262,7 +291,8 @@ def execute_research(
         final_events = engine.finalize(ended_at)
         repository.append_execution_events(final_events)
         execution_events.extend(final_events)
-        logical_rows.extend({"execution": event.to_dict()} for event in final_events)
+        for event in final_events:
+            append_logical({"execution": event.to_dict()})
         final_bars = replay_krx_minute_bars(
             dataset.observations, strict=True,
             session_profile=session_profile or "krx-regular/v1",
@@ -274,11 +304,12 @@ def execute_research(
         )
         checkpoint()
         repository.append_outcome_labels(outcomes)
-        logical_rows.extend({"outcome": label.to_dict()} for label in outcomes)
+        for label in outcomes:
+            append_logical({"outcome": label.to_dict()})
         market_regime = _final_market_regime(dataset, outcomes)
         checkpoint()
         if market_regime is not None:
-            logical_rows.append({"market_regime": market_regime})
+            append_logical({"market_regime": market_regime})
         performance = evaluate_performance(
             run_id, execution_events,
             initial_cash_won=execution_config.initial_cash_won,
@@ -286,10 +317,8 @@ def execute_research(
         )
         repository.save_run_evaluation(performance)
         checkpoint()
-        logical_rows.append({"performance": performance.to_dict()})
-        core_logical_hash = hashlib.sha256(
-            "\n".join(_canonical_json(row) for row in logical_rows).encode("utf-8"),
-        ).hexdigest()
+        append_logical({"performance": performance.to_dict()})
+        core_logical_hash = logical_digest.copy().hexdigest()
         report = None
         if evaluation_spec is not None:
             report = build_research_report(
@@ -310,10 +339,8 @@ def execute_research(
             )
             repository.save_research_report(report)
             checkpoint()
-            logical_rows.append({"research_report": report.to_dict()})
-        logical_hash = hashlib.sha256(
-            "\n".join(_canonical_json(row) for row in logical_rows).encode("utf-8"),
-        ).hexdigest()
+            append_logical({"research_report": report.to_dict()})
+        logical_hash = logical_digest.hexdigest()
     except ResearchResourceBlocked:
         current = repository.load_run(run_id)
         if execution_scope is None and current is not None and current["status"] != "completed":
@@ -617,9 +644,9 @@ def main() -> int:
     parser.add_argument("--initial-cash-won", required=True, type=int)
     parser.add_argument("--memory-mb", default=512, type=int)
     parser.add_argument("--cpu-duty-percent", default=50, type=int)
-    parser.add_argument("--commission-bps", required=True, type=int)
-    parser.add_argument("--sell-tax-bps", required=True, type=int)
-    parser.add_argument("--slippage-bps", required=True, type=int)
+    parser.add_argument("--commission-bps", required=True)
+    parser.add_argument("--sell-tax-bps", required=True)
+    parser.add_argument("--slippage-bps", required=True)
     parser.add_argument("--cost-rate-basis", default="unspecified")
     parser.add_argument("--cost-source", default="")
     parser.add_argument("--cost-valid-from", default="")
@@ -664,9 +691,12 @@ def main() -> int:
         initial_cash_won=args.initial_cash_won,
         cost_model=SimulationCostModel(
             version=args.cost_model_version,
-            commission_bps=args.commission_bps,
-            sell_tax_bps=args.sell_tax_bps,
-            slippage_bps=args.slippage_bps,
+            commission_bps=(int(args.commission_bps) if args.cost_model_version == COST_MODEL_VERSION
+                            else args.commission_bps),
+            sell_tax_bps=(int(args.sell_tax_bps) if args.cost_model_version == COST_MODEL_VERSION
+                          else args.sell_tax_bps),
+            slippage_bps=(int(args.slippage_bps) if args.cost_model_version == COST_MODEL_VERSION
+                          else args.slippage_bps),
             rate_basis=args.cost_rate_basis,
             source=args.cost_source,
             valid_from=args.cost_valid_from,

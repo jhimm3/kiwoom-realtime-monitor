@@ -11,14 +11,114 @@ from pathlib import Path
 
 
 DEFAULT_DATABASE = Path("data/historical_intelligence.sqlite3")
+DEFAULT_MARKET_NEWS_DATABASE = Path("data/naver_stock_market_news.sqlite3")
+DEFAULT_CONTEXT_DATABASE = Path("data/historical_market_context.sqlite3")
 DEFAULT_NAS_PROJECT = Path(r"X:\kiwoom-monitor")
+MARKET_NEWS_START = "2019-01-01"
+MARKET_NEWS_END = "2026-09-22"
 
 
 def _rows(connection: sqlite3.Connection, sql: str) -> list[list[object]]:
     return [list(row) for row in connection.execute(sql).fetchall()]
 
 
-def _status(database: Path, *, fast: bool = False) -> dict[str, object]:
+def _read_json(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _market_news_status(database: Path) -> dict[str, object]:
+    start = datetime.fromisoformat(MARKET_NEWS_START).date()
+    end = datetime.fromisoformat(MARKET_NEWS_END).date()
+    expected = ((end - start).days + 1) * 2
+    state_path = database.parent / "historical_collection" / "market-news-state.json"
+    collector = _read_json(state_path)
+    result: dict[str, object] = {
+        "available": database.is_file(),
+        "database": str(database.resolve()),
+        "database_bytes": database.stat().st_size if database.is_file() else 0,
+        "start_date": MARKET_NEWS_START,
+        "end_date": MARKET_NEWS_END,
+        "total_source_days": expected,
+        "finished_source_days": 0,
+        "progress_percent": 0.0,
+        "states": [],
+        "current": {},
+        "last_update": None,
+        "collector": collector,
+    }
+    if not database.is_file():
+        return result
+    with closing(sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True)) as connection:
+        connection.row_factory = sqlite3.Row
+        states = _rows(
+            connection,
+            "SELECT source,state,COUNT(*),COALESCE(SUM(pages),0),COALESCE(SUM(articles),0) "
+            "FROM market_news_days GROUP BY source,state ORDER BY source,state",
+        )
+        finished = sum(
+            int(row[2]) for row in states
+            if str(row[1]) in {"complete", "complete_boundary", "empty"}
+        )
+        current = connection.execute(
+            "SELECT source,target_date,state,pages,articles,last_error,updated_at "
+            "FROM market_news_days ORDER BY (state='running') DESC,updated_at DESC LIMIT 1"
+        ).fetchone()
+        result.update({
+            "finished_source_days": finished,
+            "progress_percent": round(100 * finished / expected, 4) if expected else 0.0,
+            "states": states,
+            "current": dict(current) if current else {},
+            "last_update": connection.execute(
+                "SELECT MAX(updated_at) FROM market_news_days"
+            ).fetchone()[0],
+        })
+    return result
+
+
+def _adjustment_status(database: Path) -> dict[str, object]:
+    result: dict[str, object] = {
+        "available": database.is_file(), "database": str(database.resolve()),
+        "creon_states": [], "dart_states": [], "events": 0,
+        "classifications": [], "collector": _read_json(
+            database.parent / "historical_collection" / "stock-adjustment-state.json"
+        ),
+    }
+    if not database.is_file():
+        return result
+    with closing(sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True)) as connection:
+        result["creon_states"] = _rows(
+            connection, "SELECT state,COUNT(*) FROM context_jobs "
+            "WHERE kind='stock_adjustment' GROUP BY state ORDER BY state"
+        )
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='historical_stock_adjustments'"
+        ).fetchone():
+            result["events"] = int(connection.execute(
+                "SELECT COUNT(*) FROM historical_stock_adjustments"
+            ).fetchone()[0])
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='adjustment_disclosure_jobs'"
+        ).fetchone():
+            result["dart_states"] = _rows(
+                connection, "SELECT state,COUNT(*) FROM adjustment_disclosure_jobs "
+                "GROUP BY state ORDER BY state"
+            )
+            result["classifications"] = _rows(
+                connection, "SELECT classification_status,event_type,COUNT(*) "
+                "FROM historical_stock_adjustment_classifications "
+                "GROUP BY classification_status,event_type ORDER BY 1,2"
+            )
+    return result
+
+
+def _status(
+    database: Path, *, fast: bool = False, market_news_database: Path | None = None,
+    context_database: Path | None = None,
+) -> dict[str, object]:
     with closing(sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True)) as connection:
         job_rows = _rows(
             connection,
@@ -27,7 +127,7 @@ def _status(database: Path, *, fast: bool = False) -> dict[str, object]:
             "COALESCE(SUM(unreadable_articles),0),COALESCE(SUM(missing_time_articles),0) "
             "FROM news_backfill_jobs GROUP BY state ORDER BY state",
         )
-        total_jobs = sum(int(row[1]) for row in job_rows)
+        total_jobs = sum(int(row[1]) for row in job_rows if str(row[0]) != "excluded")
         finished_jobs = sum(
             int(row[1]) for row in job_rows if str(row[0]) in {"complete", "truncated"}
         )
@@ -45,7 +145,7 @@ def _status(database: Path, *, fast: bool = False) -> dict[str, object]:
         ) if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_backfill_jobs'"
         ).fetchone() else []
-        market_total = sum(int(row[1]) for row in market_jobs)
+        market_total = sum(int(row[1]) for row in market_jobs if str(row[0]) != "excluded")
         market_finished = sum(
             int(row[1]) for row in market_jobs if str(row[0]) == "complete"
         )
@@ -94,6 +194,12 @@ def _status(database: Path, *, fast: bool = False) -> dict[str, object]:
                 "bar_counts_deferred": fast,
                 "jobs": market_jobs,
             },
+            "market_news": _market_news_status(
+                market_news_database or database.parent / "naver_stock_market_news.sqlite3"
+            ),
+            "stock_adjustments": _adjustment_status(
+                context_database or database.parent / "historical_market_context.sqlite3"
+            ),
         }
     return result
 
@@ -101,7 +207,10 @@ def _status(database: Path, *, fast: bool = False) -> dict[str, object]:
 def _markdown(status: dict[str, object], published_run: str) -> str:
     news = status["news"]
     market = status["market"]
-    assert isinstance(news, dict) and isinstance(market, dict)
+    market_news = status["market_news"]
+    adjustments = status["stock_adjustments"]
+    assert (isinstance(news, dict) and isinstance(market, dict)
+            and isinstance(market_news, dict) and isinstance(adjustments, dict))
     lines = [
         "# 과거자료 수집 현황",
         "",
@@ -158,6 +267,41 @@ def _markdown(status: dict[str, object], published_run: str) -> str:
             lines.append(f"- {state}: **{int(count):,}건**")
     else:
         lines.append("- 아직 반영 기록 없음")
+    current_market_news = market_news["current"]
+    collector = market_news["collector"]
+    assert isinstance(current_market_news, dict) and isinstance(collector, dict)
+    lines.extend([
+        "",
+        "## 네이버 증권 시황뉴스 (FLASH/WORLD)",
+        "",
+        f"- 완료 날짜·원천: **{market_news['finished_source_days']:,} / "
+        f"{market_news['total_source_days']:,}** (**{market_news['progress_percent']}%**)",
+        f"- 수집 범위: `{market_news['start_date']}` ~ `{market_news['end_date']}`",
+        f"- 수집기 상태: `{collector.get('status') or '확인 불가'}`",
+        f"- 마지막 저장: `{market_news['last_update'] or '없음'}`",
+    ])
+    if current_market_news:
+        lines.append(
+            f"- 현재 작업: `{str(current_market_news.get('source') or '').upper()} · "
+            f"{current_market_news.get('target_date')} · "
+            f"{int(current_market_news.get('pages') or 0):,}페이지 · "
+            f"{int(current_market_news.get('articles') or 0):,}건`"
+        )
+        if current_market_news.get("last_error"):
+            lines.append(f"- 마지막 오류: `{current_market_news['last_error']}`")
+    lines.extend([
+        "",
+        "| 원천 | 상태 | 날짜 | 페이지 | 기사 |",
+        "|---|---|---:|---:|---:|",
+    ])
+    if market_news["states"]:
+        for source, state, days, pages, articles in market_news["states"]:
+            lines.append(
+                f"| {str(source).upper()} | {state} | {int(days):,} | "
+                f"{int(pages):,} | {int(articles):,} |"
+            )
+    else:
+        lines.append("| - | 아직 수집 기록 없음 | 0 | 0 | 0 |")
     lines.extend([
         "",
         "## 대신증권 분봉",
@@ -184,6 +328,30 @@ def _markdown(status: dict[str, object], published_run: str) -> str:
             lines.append(f"- {state}: **{int(count):,}종목**")
     else:
         lines.append("- 아직 작업 원장 없음")
+    adjustment_collector = adjustments["collector"]
+    assert isinstance(adjustment_collector, dict)
+    lines.extend([
+        "", "## 주도후보 수정주가·DART 기업행동", "",
+        f"- 수집기 상태: `{adjustment_collector.get('status') or '확인 불가'}` "
+        f"· 단계 `{adjustment_collector.get('phase') or '-'}`",
+        f"- 중복 제거된 수정주가 사건: **{int(adjustments['events']):,}건**",
+        "", "### CREON 후보 종목 작업", "",
+    ])
+    if adjustments["creon_states"]:
+        for state, count in adjustments["creon_states"]:
+            lines.append(f"- {state}: **{int(count):,}종목**")
+    else:
+        lines.append("- 아직 작업 원장 없음")
+    lines.extend(["", "### DART 사건 분류 작업", ""])
+    if adjustments["dart_states"]:
+        for state, count in adjustments["dart_states"]:
+            lines.append(f"- {state}: **{int(count):,}사건**")
+    else:
+        lines.append("- CREON 수정주가 사건 수집 뒤 생성")
+    if adjustments["classifications"]:
+        lines.extend(["", "| 판정 | 사건 유형 | 건수 |", "|---|---|---:|"])
+        for state, event_type, count in adjustments["classifications"]:
+            lines.append(f"| {state} | {event_type} | {int(count):,} |")
     lines.extend([
         "",
         "> 이 문서는 수집 작업 원장의 현재 상태입니다. NAS 운영 뉴스 DB 반영 건수와는 별도입니다.",
@@ -195,6 +363,8 @@ def _markdown(status: dict[str, object], published_run: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="과거자료 수집 진행률을 NAS에서 볼 수 있게 게시합니다.")
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    parser.add_argument("--market-news-database", type=Path, default=DEFAULT_MARKET_NEWS_DATABASE)
+    parser.add_argument("--context-database", type=Path, default=DEFAULT_CONTEXT_DATABASE)
     parser.add_argument("--nas-project", type=Path, default=DEFAULT_NAS_PROJECT)
     parser.add_argument("--local-only", action="store_true")
     parser.add_argument(
@@ -204,7 +374,9 @@ def main() -> int:
     args = parser.parse_args()
 
     database = args.database.resolve(strict=True)
-    status = _status(database, fast=args.fast)
+    market_news_database = args.market_news_database.resolve()
+    status = _status(database, fast=args.fast, market_news_database=market_news_database,
+                     context_database=args.context_database.resolve())
     if args.local_only:
         print(json.dumps(status, ensure_ascii=False, indent=2))
         return 0
@@ -237,6 +409,7 @@ def main() -> int:
         "status": str(destination / "STATUS.md"),
         "json": str(destination / "status.json"),
         "news_progress_percent": status["news"]["progress_percent"],
+        "market_news_progress_percent": status["market_news"]["progress_percent"],
     }, ensure_ascii=False, indent=2))
     return 0
 

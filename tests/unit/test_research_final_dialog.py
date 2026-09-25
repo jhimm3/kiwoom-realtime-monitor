@@ -1,6 +1,7 @@
 from copy import deepcopy
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -77,6 +78,53 @@ class FinalHoldoutDialogTests(unittest.TestCase):
         self.child_result(dialog, process)
         dialog._poll_process()
 
+    def test_restart_restores_base_batch_and_reuses_completed_candidate(self):
+        dialog = self.dialog()
+        self.complete_final(dialog)
+        saved = dialog._saved_request_path
+        self.assertEqual({}, json.loads(saved.read_text(encoding='utf-8'))['recoveries'])
+        repository = ResearchRepository(self.fixture.request.database)
+        executions = repository.load_final_holdout_executions(self.fixture.fixture.batch.batch_id)
+        events = repository.load_final_holdout_events(self.fixture.fixture.batch.window_id)
+        self.fixture.path.write_text('{broken', encoding='utf-8')
+
+        restarted = FinalHoldoutDialog(self.root / 'state')
+        self.dialogs.append(restarted)
+        self.assertTrue(restarted._resume.isEnabled())
+        self.assertEqual(str(saved), restarted._request_path.text())
+        process, _ = self.launch(restarted, restarted._resume.click)
+        result = self.child_result(restarted, process)
+        self.assertEqual('CACHED', result['candidates'][0]['state'])
+        restarted._poll_process()
+        self.assertEqual(executions, repository.load_final_holdout_executions(self.fixture.fixture.batch.batch_id))
+        self.assertEqual(events, repository.load_final_holdout_events(self.fixture.fixture.batch.window_id))
+
+    def test_invalid_saved_final_request_does_not_enable_resume_or_open_database(self):
+        state = self.root / 'state'
+        state.mkdir()
+        saved = state / 'last_final_holdout_request.json'
+        saved.write_text('{broken', encoding='utf-8')
+        dialog = FinalHoldoutDialog(state)
+        self.dialogs.append(dialog)
+        self.assertFalse(dialog._resume.isEnabled())
+        self.assertIn('복원 실패', dialog._status.text())
+        self.assertFalse(self.fixture.request.database.exists())
+        self.assertEqual('{broken', saved.read_text(encoding='utf-8'))
+
+    def test_child_identity_receipt_is_preserved_on_forced_stop(self):
+        dialog = self.dialog()
+        process = MagicMock()
+        process.pid = os.getpid()
+        process.poll.return_value = None
+        self.processes.append(process)
+        with patch.object(dialog._manager, 'start', return_value=process):
+            dialog._start()
+        owner = dialog._operation['owner']
+        self.assertTrue(owner.is_file())
+        with patch.object(dialog._manager, 'stop'):
+            dialog.stop()
+        self.assertTrue(owner.exists())
+
     def child_exposure(self, dialog, process):
         operation = dialog._operation
         with patch('sys.stdout', new=StringIO()):
@@ -103,6 +151,38 @@ class FinalHoldoutDialogTests(unittest.TestCase):
         self.assertFalse(dialog._resume.isEnabled())
         self.assertTrue(all(not operation[key].exists() for key in ('request', 'result', 'cancel')))
 
+    def test_running_candidate_snapshot_updates_table_without_enabling_exposure(self):
+        dialog = self.dialog()
+        process, _ = self.launch(dialog)
+        execute = rp.execute_research
+
+        def inspect_progress(*args, **kwargs):
+            dialog._poll_process()
+            self.assertEqual('실행 중', dialog._table.item(0, 1).text())
+            self.assertIn('최종 평가 진행 중', dialog._status.text())
+            self.assertFalse(dialog._expose.isEnabled())
+            return execute(*args, **kwargs)
+
+        result = self.child_result(dialog, process, inspect_progress)
+        dialog._poll_process()
+        self.assertEqual('COMPLETED', result['candidates'][0]['state'])
+        self.assertEqual('실행 완료', dialog._table.item(0, 1).text())
+
+    def test_wrong_scope_running_snapshot_keeps_previous_table_until_valid_result(self):
+        dialog = self.dialog()
+        process, _ = self.launch(dialog)
+        dialog._operation['result'].write_text(json.dumps({
+            'status': 'running', 'kind': 'independent_final_holdout',
+            'version': 'independent_final_holdout_result/v1', 'batch_id': 'wrong',
+        }), encoding='utf-8')
+        dialog._poll_process()
+        self.assertIn('진행 확인 실패', dialog._status.text())
+        self.assertEqual('previous', dialog._table.item(0, 0).text())
+        self.assertFalse(dialog._expose.isEnabled())
+        self.child_result(dialog, process)
+        dialog._poll_process()
+        self.assertEqual('실행 완료', dialog._table.item(0, 1).text())
+
     def test_terminal_failure_requires_selected_reason_and_creates_explicit_recovery_snapshot(self):
         dialog = self.dialog()
         first_process, _ = self.launch(dialog)
@@ -120,6 +200,7 @@ class FinalHoldoutDialogTests(unittest.TestCase):
         self.assertNotEqual(previous_owner, recovery.owner_token)
         self.assertEqual(self.fixture.candidate_hash, recovery.recoveries[0][0])
         self.assertEqual('원인과 출력 부재를 확인함', recovery.recoveries[0][2])
+        self.assertEqual((), rp.load_final_holdout_execution_request(dialog._saved_request_path).recoveries)
         recovered = self.child_result(dialog, second_process)
         dialog._poll_process()
         self.assertEqual('COMPLETED', recovered['candidates'][0]['state'])
@@ -166,6 +247,8 @@ class FinalHoldoutDialogTests(unittest.TestCase):
         self.assertIn('EXPOSED_DEVELOPMENT', dialog._summary.text())
         self.assertEqual('실행 완료', dialog._table.item(0, 1).text())
         self.assertFalse(dialog._expose.isEnabled())
+        self.assertFalse(dialog._resume.isEnabled())
+        self.assertFalse(dialog._saved_request_path.exists())
         window = ResearchRepository(self.fixture.request.database).load_final_holdout_window(
             self.fixture.fixture.batch.window_id)
         self.assertEqual('EXPOSED_DEVELOPMENT', window['state'])
@@ -205,6 +288,7 @@ class FinalHoldoutDialogTests(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 dialog = self.dialog()
                 process, _ = self.launch(dialog)
+                frozen_request = dialog._operation['request']
                 if mutation == 'oversize':
                     dialog._operation['result'].write_bytes(b' ' * (16 * 1024 * 1024 + 1))
                     process.poll.return_value = 0
@@ -218,6 +302,7 @@ class FinalHoldoutDialogTests(unittest.TestCase):
                 dialog._poll_process()
                 self.assertIn('결과 확인 실패', dialog._status.text())
                 self.assertEqual('previous', dialog._table.item(0, 0).text())
+                self.assertTrue(frozen_request.is_file())
 
     def test_invalid_request_and_operation_collision_do_not_launch_or_create_database(self):
         dialog = self.dialog()
@@ -234,7 +319,7 @@ class FinalHoldoutDialogTests(unittest.TestCase):
         self.assertIn('outside', other._status.text())
         self.assertFalse(inside.exists())
 
-    def test_close_is_nonblocking_and_stop_cleans_only_owned_files(self):
+    def test_close_is_nonblocking_and_stop_preserves_recovery_evidence(self):
         dialog = self.dialog()
         process, _ = self.launch(dialog)
         operation = dict(dialog._operation)
@@ -250,7 +335,8 @@ class FinalHoldoutDialogTests(unittest.TestCase):
         self.assertEqual(3.0, stop.call_args.kwargs['graceful_timeout'])
         self.assertTrue(keep.exists())
         self.assertTrue(self.fixture.path.exists())
-        self.assertTrue(all(not operation[key].exists() for key in ('request', 'result', 'cancel')))
+        self.assertTrue(operation['request'].exists())
+        self.assertTrue(operation['cancel'].exists())
         process.poll.return_value = 0
 
     def test_parent_reuses_final_window_and_propagates_close_and_stop(self):

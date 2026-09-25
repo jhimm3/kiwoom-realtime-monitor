@@ -45,7 +45,7 @@ class CampaignBudgetTests(unittest.TestCase):
 
     def test_initial_revision_matches_immutable_spec(self):
         revisions = self.repo.load_campaign_job_budget_revisions('c', self.job_id)
-        self.assertEqual(23, self.repo.schema_version())
+        self.assertEqual(27, self.repo.schema_version())
         self.assertEqual(1, len(revisions))
         self.assertEqual(2, revisions[0]['budget']['max_trials'])
         self.assertEqual(1, self.work()['budget_revision'])

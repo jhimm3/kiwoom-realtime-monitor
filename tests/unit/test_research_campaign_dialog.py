@@ -175,6 +175,22 @@ class CampaignDialogTests(unittest.TestCase):
         self.assertEqual(2 * 1024 ** 3, source['storage_cap_bytes'])
         self.assertEqual(str((dialog._state_dir.parent / 'data_source.json').resolve()), source['nas_config_path'])
 
+    def test_rolling_daily_editor_can_combine_nas_preparation(self):
+        dialog = self.register()
+        def save_rolling(editor):
+            editor.findChild(QLineEdit).setText(str(self.root / 'prepared'))
+            boxes = {box.text(): box for box in editor.findChildren(QCheckBox)}
+            boxes['새 거래일의 TRAIN/VALIDATION 평가 기간 확장'].setChecked(True)
+            self.assertTrue(boxes['NAS에서 새 자료 자동 준비'].isEnabled())
+            boxes['NAS에서 새 자료 자동 준비'].setChecked(True)
+            editor.findChild(QDialogButtonBox).accepted.emit()
+            return 1
+        with patch.object(QDialog, 'exec', new=save_rolling):
+            dialog._edit_campaign_inputs()
+        source = dialog._campaign_repository().load_campaign_input_sources(dialog._campaign_selection['campaign_id'])[0]
+        self.assertEqual(1, source['rolling_daily'])
+        self.assertEqual(1, source['nas_auto_prepare'])
+
     def test_start_uses_database_campaign_arguments_not_external_request(self):
         dialog = self.register()
         with patch.object(dialog._manager, 'start') as start:

@@ -23,6 +23,22 @@ class Response(io.BytesIO):
 
 
 class CentralContentClientTests(unittest.TestCase):
+    def test_historical_pc_claim_scopes_and_health(self) -> None:
+        requests = []
+
+        def opener(request, **_kwargs):
+            requests.append(request)
+            if request.full_url.endswith("/health"):
+                return Response(b'{"historical_news_pc_scopes":["market","search","legacy_backlog"]}')
+            return Response(b'{"job":null}')
+
+        client = CentralContentClient("https://nas.test", "token", opener=opener)
+        self.assertIn("legacy_backlog", client.load_health()["historical_news_pc_scopes"])
+        self.assertIsNone(client.claim_historical_news_job("BODY", scope="pc")["job"])
+        self.assertIsNone(client.claim_historical_news_job("RULE", scope="pc_search")["job"])
+        self.assertIn("scope=pc", requests[1].full_url)
+        self.assertIn("scope=pc_search", requests[2].full_url)
+
     def test_upsert_and_load_use_authenticated_content_api(self) -> None:
         requests = []
 

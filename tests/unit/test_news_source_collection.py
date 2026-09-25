@@ -256,6 +256,38 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
             store.close()
         self.assertEqual(3, len(history))
 
+    def test_market_feed_separates_query_flash_and_world_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+            today = datetime.now().date().isoformat()
+            for source_id, title in (
+                ("naver-query:abc", "공통 기사"),
+                (f"naver-stock:flash:{today}", "속보 기사"),
+                (f"naver-stock:world:{today}", "해외 기사"),
+            ):
+                store.save_news_source_page({
+                    "source_id": source_id, "query_text": title, "run_id": title,
+                    "items": [{"identity": f"https://example.com/{title}", "document": {
+                        "title": title, "description": "요약", "link": "https://example.com/news",
+                            "published_at": f"{today}T10:00:00+09:00",
+                    }, "targets": []}],
+                })
+            store.save_news_source_page({
+                "source_id": "naver-stock:flash:2020-09-23", "query_text": "flash",
+                "run_id": "old", "items": [{"identity": "https://example.com/old",
+                    "document": {"title": "오래된 속보", "description": "과거 자료",
+                                 "link": "https://example.com/old",
+                                 "published_at": "2020-09-23T10:00:00+09:00"},
+                    "targets": []}],
+            })
+            self.assertEqual(["공통 기사"], [v["title"] for v in store.load_market_news_feed("common")])
+            self.assertEqual(["속보 기사", "오래된 속보"],
+                             [v["title"] for v in store.load_market_news_feed("flash")])
+            self.assertEqual(["속보 기사"],
+                             [v["title"] for v in store.load_market_news_feed("flash", limit=1)])
+            self.assertEqual(["해외 기사"], [v["title"] for v in store.load_market_news_feed("world")])
+            store.close()
+
     def test_confirmed_stock_news_query_excludes_unresolved_ambiguous_and_other_stock_and_uses_latest_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = self._store(directory)

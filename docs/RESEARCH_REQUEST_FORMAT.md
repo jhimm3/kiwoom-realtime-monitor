@@ -74,6 +74,9 @@ result/cancel은 request/DB를 덮어쓸 수 없다. 변경 전 취소는 exit 2
 - `COMPLETED/CACHED`는 재사용하고 `NOT_STARTED`만 같은 snapshot으로 이어서 실행한다. `FAILED/CANCELLED`는 자동 재시도하지 않는다.
 - 명시 복구는 선택한 terminal candidate 하나에 사용자 reason, 새 request ID, 새 owner token을 넣은 새 snapshot으로만 실행한다.
 - 취소·파싱·결과 범위 불일치에서는 이전 표를 유지한다. 창 닫기는 취소 파일만 쓰고 자식 종료를 기다리지 않는다.
+- 마지막 고정 배치 요청은 state 폴더의 `last_final_holdout_request.json`에 원자 저장하고 앱 재시작 뒤 수동 `남은 후보 이어서 실행`으로 복원한다. 저장본에서 명시 복구 항목은 제거해 복구를 자동 반복하지 않는다. child가 최종 접근 원장·기존 후보 소유권을 다시 검증하며 RUNNING 후보는 자동 회수하지 않는다.
+- child는 후보 claim 직후와 각 후보 종료 시 같은 결과 경로에 `status=running` 진행 snapshot을 원자 게시한다. 화면은 정렬된 전체 후보 상태와 batch/window/구현 hash를 검증한 뒤 표시하며, native exit와 최종 결과가 일치하기 전에는 명시 복구·최종 결과의 개발 사용을 활성화하지 않는다. 비정상 종료 시 마지막 진행 표시는 완료 판정이 아니다.
+- 순차·final 화면은 실제 child PID와 OS 시작 토큰을 확인할 수 있을 때만 작업별 `.owner.json`에 고정 요청 SHA-256을 함께 기록한다. 정상 종료 시 해당 기록을 지운다. `python scripts/inspect_research_operation_receipts.py <연구 상태 폴더>`는 남은 기록을 읽기 전용으로 검사한다. final UI 실행은 작업마다 고유 owner token을 사용한다. 프로젝트 루트에서 `python -m scripts.recover_final_holdout_orphan <final_holdout_...owner.json>`은 종료된 child·고정 요청 hash·완료 결과 부재·run 산출물 부재·잠긴 batch와 RUNNING 원장을 읽기 전용으로 미리 본다. 확인 후 같은 명령의 `--execute`로 해당 owner/generation의 RUNNING 후보만 원자적으로 `CANCELLED` 처리할 수 있다. 재실행에는 별도 명시 복구 사유가 필요하다. `running/unknown` 프로세스, 검증 불가 기록, 완료 산출물이 있는 실행은 회수하지 않는다. 순차 run은 owner/generation 원장 방어가 없어 이 명령의 대상이 아니다.
 
 ## CR3d3a 최종 평가 프로세스 요청 (2026-09-16)
 
@@ -244,12 +247,13 @@ CR3c2의 v2 batch는 그룹×시간 v3 partition을 실행한다. shared context
 
 새 --validate-partitions는 기존 single_run 객체에 원본 dataset_id/dataset_hash, 시간순 fold_names 2~20개,
 운영 max_seconds 1~3600을 묶은 independent_development_validation/v1 JSON을 받는다.
+순차·final UI는 종료 코드와 결과 계약이 모두 검증된 종료에서만 작업별 요청·결과·소유 기록을 지운다. 비정상 종료·강제 정지에서는 이 파일들을 회수 진단용으로 남긴다.
 기존 single_run/rank_comparison/limited_search 요청은 바꾸지 않는다. 전체 source는 한 번 읽으며 각 구간은 독립 엔진이다.
 완료 캐시는 재사용하고 취소/예산/자원 차단 구간은 명시 재개할 수 있다. failed/cache-invalid/running은 검토 없이 덮어쓰지 않는다.
 CR3b4에서 전략 연구 → 여러 구간 순차 검증 → 검증 파일 선택 → 검증 실행을 연결했다.
 같은 요청 이어서 실행은 마지막으로 실행한 파싱 snapshot을 재사용한다. 원본 JSON을 바꾸려면 검증 실행을 다시 누른다.
 취소/시간 예산 이후 완료 결과는 DB에서 재사용한다. 실패/소유자 확인 상태는 자동 재시도하지 않는다.
-250ms마다 진행 파일을 확인하며 모든 미시작 구간도 표시한다. 자동 반복과 앱 재시작 후 batch 복원은 아직 없다.
+250ms마다 진행 파일을 확인하며 모든 미시작 구간도 표시한다. 마지막 고정 요청은 앱 상태 폴더의 `last_development_validation_request.json`에 원자 저장하며, 앱 재시작 뒤 `같은 요청 이어서 실행`으로 기존 연구 원장의 완료 결과를 확인·재사용한다. 손상된 저장 요청은 자동 실행하거나 DB를 열지 않고 오류를 표시한다. 새 UI 실행은 `--validation-owner-token`으로 작업별 소유 토큰을 전달하고 v24 원장에 run 세대를 남긴다. 종료 프로세스의 `.owner.json`이 남았으면 프로젝트 루트에서 `python -m scripts.recover_development_validation_orphan <development_validation_...owner.json>`으로 대상만 미리 본다. 같은 명령의 `--execute`는 요청 hash·OS 시작 토큰과 종료·산출물 부재·원장의 소유 토큰/세대를 재검증한 RUNNING run만 CANCELLED 처리한다. 같은 요청을 다시 실행해야 새 소유자로 재개한다. 기존 소유 기록이 없는 RUNNING은 자동 회수하지 않으며 구간 자동 반복도 하지 않는다.
 [필수 JSON 객체와 결과 계약](archive/2026-09-22/reports/CR3B3_SEQUENTIAL_DEVELOPMENT_VALIDATION.md), [화면 실행 계약](archive/2026-09-22/reports/CR3B4_SEQUENTIAL_VALIDATION_DIALOG.md)을 따른다.
 
 ```text
@@ -411,6 +415,12 @@ NAS 자동 준비 설정은 v14에서 도입했으며 현재 연구 DB는 v23이
 기존 무표시 자료를 자동 채택하지 않고 완료된 연구 입력도 보호한다. 미완성 임시 파일만 위 CR2c3c1에서 정리한다.
 폴더 cap/준비 원장은 위 CR2c3b, 완성 게시 후 등록 복구는 CR2c3c2에 연결되어 있다. 완성 자료의 이동·압축·자동 삭제, 외부 매매일지 참조 전수 조사, 새 날짜 확장과 실제 NAS 장시간 운용 검증은 남아 있다.
 
+## R01 준비된 새 거래일 평가기간 확장 (2026-09-25)
+
+지속 연구를 일시정지하고 작업자 종료 후 **새 자료 폴더**에서 기준 실험과 폴더를 선택한 다음 **새 거래일의 TRAIN/VALIDATION 평가 기간 확장**을 켠다. 다시 시작하면 작업자가 직접 하위에 게시된 완성 일별 export를 60초마다 확인한다. 기준 입력과 날짜만 다른 입력은 같은 시간대·기간 길이, 관측 종류·종목 범위·세션 계약, 해당일 TOP20 후보와 KRX 1분봉 근거가 있을 때만 별도 실험으로 등록한다. 기존 기준 입력·실험·결과는 변경하지 않는다. 동일 파일 재검사는 중복 등록하지 않는다.
+
+현재는 **단일 TRAIN 또는 VALIDATION fold**와 유효기간이 새 날짜를 덮는 비용 모델만 지원한다. FINAL/OOS, 분할 개발 입력, 아직 끝나지 않은 날짜, 빈 거래일, 서로 다른 범위/계약은 제외한다. 이미 완성된 동결 export를 폴더에 넣거나 **NAS에서 새 자료 자동 준비**를 함께 켤 수 있다. 후자는 단일 일별 기준 입력 다음 날짜부터 종료 24시간이 지난 날짜를 60초 scan마다 하루씩 조회한다. 주말은 건너뛰고 NAS 관측 0건 평일은 v27 원장에 기록해 하루 뒤부터 재확인한다. 과거 빈 날짜 재확인은 10분에 최대 한 번이며, 늦게 들어온 자료도 동결·검증·불변 게시 뒤 등록한다. 자료가 없는 동안 새 날짜 cursor는 진행하고 과거 cursor를 되돌리지 않는다. 비용 유효기간 밖에서는 진행하지 않는다. 기존 고정 기간의 revision 발견 동작은 옵션을 끈 상태에서 유지된다.
+
 ## CR2c2a 새 자료 폴더 (2026-09-16)
 
 지속 연구를 **일시정지**하고 작업자 종료 후 **새 자료 폴더**를 연다.
@@ -427,7 +437,7 @@ NAS 자동 준비 설정은 v14에서 도입했으며 현재 연구 DB는 v23이
 오래된 implementation hash의 기준 실험은 새 요청을 명시 등록해야 하며 자동 우회하지 않는다.
 
 CR2c2a 자체는 이미 준비된 파일의 자동 등록이며 위 CR2c2b opt-in으로 NAS 파일 준비도 연결할 수 있다.
-이 discovery는 v13에서 도입한 같은 고정 범위의 입력 등록이다. 현재 연구 DB는 v23이며 새 거래일 추가·평가 기간 자동 이동은 아직 지원하지 않는다.
+이 discovery는 v13에서 도입한 같은 고정 범위의 입력 등록이다. 당시 연구 DB는 v23이었고 새 거래일 추가는 지원하지 않았다. 현재 v27의 opt-in 거래일 확장·NAS 날짜 cursor·빈 평일 재확인은 위 R01 절의 별도 경계를 따른다.
 
 ## CR2c1 작업자 복구 (2026-09-16)
 
@@ -559,7 +569,7 @@ S5 이전 구현 hash와 RunSpec 형태를 보존한다. 따라서 완료된 기
 하며, 등록되지 않은 venue/profile/phase는 거부하거나 `UNSUPPORTED`/`UNKNOWN`으로
 남긴다.
 
-앱의 `전략 연구` 창은 모든 조건을 한 번에 고정한 JSON 파일을 읽는다. 화면에서 파일을 선택하면 경로, 전략 버전, 비용 출처·유효기간, 시간순 평가 구간을 먼저 검사하고 별도 프로세스에서 실행한다. 아래 숫자는 형식 설명용 예시이며 운영 추천값이 아니다. 실제 연구에서는 사용자가 검토한 값과 해당 기간에 맞는 비용 근거로 바꿔야 한다.
+앱의 `전략 연구` 창은 모든 조건을 한 번에 고정한 JSON 파일을 읽는다. 화면에서 파일을 선택하면 경로, 전략 버전, 비용 출처·유효기간, 시간순 평가 구간을 먼저 검사하고 별도 프로세스에서 실행한다. `fixed_bps/v2`의 수수료·매도세·슬리피지는 소수 bp의 JSON 문자열로 기록하며, 수수료는 매수·매도 양쪽에 적용한다. 기존 `fixed_bps/v1` 정수 bp 요청은 호환해 읽는다. 아래 숫자는 형식 설명용 예시이며 운영 추천값이 아니다. 실제 연구에서는 사용자가 검토한 값과 해당 기간에 맞는 비용 근거로 바꿔야 한다.
 
 ```json
 {
@@ -594,10 +604,10 @@ S5 이전 구현 hash와 RunSpec 형태를 보존한다. 따라서 완료된 기
     "same_bar_path_version": "conservative_with_optimistic_bound/v1",
     "initial_cash_won": 1000000,
     "cost_model": {
-      "version": "fixed_bps/v1",
-      "commission_bps": 0,
-      "sell_tax_bps": 0,
-      "slippage_bps": 0,
+      "version": "fixed_bps/v2",
+      "commission_bps": "1.5",
+      "sell_tax_bps": "20",
+      "slippage_bps": "0",
       "rate_basis": "model_estimate",
       "source": "여기에 확인한 비용 근거를 기록",
       "valid_from": "2026-09-01T00:00:00+09:00",

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from kiwoom_monitor.application.news_analysis import assess_stock_news
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
 from kiwoom_monitor.presentation.news_workers import NewsEvidenceWorker, load_stored_news_evidence
+from kiwoom_monitor.presentation.news_view_model import stored_news_core_sentences_html
 
 
 def _item(description: str = "검색 요약") -> StockNewsItem:
@@ -18,14 +19,19 @@ def _item(description: str = "검색 요약") -> StockNewsItem:
 
 
 class _Client:
-    def __init__(self, values: dict[tuple[str, str, str], list[dict]]) -> None:
+    def __init__(self, values: dict[tuple[str, str, str], list[dict]],
+                 assessments: dict[str, dict] | None = None) -> None:
         self.values = values
+        self.assessments = assessments or {}
         self.calls: list[tuple[str, str, str, int]] = []
 
     def load_news_history(self, kind: str, *, target: str = "", identity: str = "",
                           limit: int = 100, **_kwargs) -> dict:
         self.calls.append((kind, target, identity, limit))
-        return {"known": True, "revisions": self.values.get((kind, target, identity), [])}
+        result = {"known": True, "revisions": self.values.get((kind, target, identity), [])}
+        if kind == "body":
+            result["assessment"] = self.assessments.get(target)
+        return result
 
 
 class NewsEvidenceTests(unittest.TestCase):
@@ -88,14 +94,41 @@ class NewsEvidenceTests(unittest.TestCase):
             ("body", "article-r1", ""): [body],
             ("membership", "", "article-r1"): [membership],
             ("event", "005930", "event-1"): [wrong_event, event],
-        })
+        }, {"article-r1": {
+            "article_revision_id": "article-r1", "body_revision_id": "body-r1",
+            "core_sentences": ["NAS가 저장한 핵심 문장"],
+        }})
 
         evidence = load_stored_news_evidence(client, "005930", item)  # type: ignore[arg-type]
 
         self.assertEqual("article-r1", evidence.article_revision_id)
         self.assertEqual("body-r1", evidence.body_revision_id)
         self.assertEqual("저장 본문", evidence.body_text)
+        self.assertEqual(("NAS가 저장한 핵심 문장",), evidence.core_sentences)
+        self.assertIn("NAS가 저장한 핵심 문장", stored_news_core_sentences_html(evidence))
         self.assertEqual("event-r1", evidence.event["event_revision_id"] if evidence.event else None)
+
+    def test_ignores_core_sentences_from_another_body_revision(self) -> None:
+        item = _item()
+        client = _Client({
+            ("article", "005930", item.original_link): [{
+                "article_revision_id": "article-r1", "stock_code": "005930",
+                "identity": item.original_link,
+                "document": {"title": item.title, "description": item.description},
+            }],
+            ("body", "article-r1", ""): [{
+                "body_revision_id": "body-r2", "article_revision_id": "article-r1",
+                "status": "fulltext", "body_text": "새 본문", "error": "",
+            }],
+        }, {"article-r1": {
+            "article_revision_id": "article-r1", "body_revision_id": "body-r1",
+            "core_sentences": ["오래된 본문 요약"],
+        }})
+
+        evidence = load_stored_news_evidence(client, "005930", item)  # type: ignore[arg-type]
+
+        self.assertEqual("body-r2", evidence.body_revision_id)
+        self.assertEqual((), evidence.core_sentences)
 
     def test_global_body_is_reused_but_other_stock_event_is_not_mixed(self) -> None:
         item = _item()

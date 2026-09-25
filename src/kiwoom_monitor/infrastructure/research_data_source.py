@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol, Callable
 
 from kiwoom_monitor.application.market_session_schedule import (
-    research_session_profile_document,
+    research_session_profile_document, research_session_profile_contract_matches,
 )
 from kiwoom_monitor.application.research_splits import DevelopmentPartitionSpec, ResearchEvaluationSpec, FinalHoldoutBatchSpec, warmup_start
 
@@ -52,7 +52,9 @@ def prepare_final_holdout_partition(dataset: FrozenResearchDataset, batch: Final
         raise ValueError('a locked final batch is required')
     if (dataset.manifest.get('dataset_id'), dataset.manifest.get('revision_ids_hash')) != (batch.dataset_id, batch.dataset_hash):
         raise ValueError('final source identity differs from the locked batch')
-    if dataset.manifest.get('research_session_profile') != research_session_profile_document(batch.session_profile):
+    if not research_session_profile_contract_matches(
+        dataset.manifest.get('research_session_profile'), batch.session_profile,
+    ):
         raise ValueError('final source session profile differs from the locked batch')
     if (dataset.manifest.get('runtime_input_version') not in (None, 'continuous_bundle_replay/v1')
             or 'development_partition' in dataset.manifest or 'final_holdout_partition' in dataset.manifest):
@@ -188,7 +190,8 @@ def final_holdout_partition_start(dataset: FrozenResearchDataset, evaluation: Re
             or policy['version'] != 'final_holdout_partition/v1'
             or policy['evaluation'] != selected.to_dict()
             or canonical != selected.to_dict()
-            or research_session_profile_document(policy['session_profile']) != dataset.manifest.get('research_session_profile')):
+            or not research_session_profile_contract_matches(
+                dataset.manifest.get('research_session_profile'), policy['session_profile'])):
         raise ValueError('final input requires its matching single OOS evaluation')
     if len(selected.folds) != 1 or selected.folds[0].role != 'OOS':
         raise ValueError('final input requires exactly one OOS fold')
@@ -351,7 +354,7 @@ def load_frozen_research_export(path: Path, *, checkpoint: Callable[[], None] = 
     if profile is not None:
         if not isinstance(profile, dict) or not str(profile.get("profile", "")):
             raise ValueError("research manifest session profile contract is invalid")
-        if profile != research_session_profile_document(str(profile["profile"])):
+        if not research_session_profile_contract_matches(profile, str(profile["profile"])):
             raise ValueError("research manifest session profile contract does not match its version")
     checkpoint()
     theme_snapshots = _load_optional_theme_snapshots(root, manifest, checkpoint=checkpoint)
@@ -441,7 +444,9 @@ def _bundle_manifest(children: list[tuple[str, FrozenResearchDataset]], *,
         dates.add(selected_date)
         previous_end = end
         profile = manifest.get("research_session_profile")
-        if not isinstance(profile, dict) or profile != research_session_profile_document(str(profile.get("profile", ""))):
+        if not isinstance(profile, dict) or not research_session_profile_contract_matches(
+            profile, str(profile.get("profile", "")),
+        ):
             raise ValueError("research bundle requires an explicit supported session profile")
         current_contract = (kinds, manifest.get("subject", ""), profile, manifest.get("universe_rule"),
                             manifest.get("order_policy_version"))
@@ -546,7 +551,9 @@ def load_research_input(root: Path, *, session_profile: str | None = None,
         return load_frozen_research_export(root, checkpoint=checkpoint)
     bundle = load_frozen_research_bundle(root, checkpoint=checkpoint)
     first = bundle.datasets[0]
-    if session_profile is None or research_session_profile_document(session_profile) != first.manifest["research_session_profile"]:
+    if session_profile is None or not research_session_profile_contract_matches(
+        first.manifest["research_session_profile"], session_profile,
+    ):
         raise ValueError("research bundle requires a matching explicit session profile")
     # Validate even a one-day bundle, but preserve its exact historical identity/results.
     for dataset in bundle.datasets:

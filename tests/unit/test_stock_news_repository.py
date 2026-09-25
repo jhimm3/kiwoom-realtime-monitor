@@ -61,6 +61,23 @@ class StockNewsRepositoryTest(unittest.TestCase):
             self.assertIn(news_identity(pinned), repository.journal_linked_identities("group-1", "005930"))
             self.assertEqual((pinned.title,), tuple(item.title for item in repository.load_journal_linked("group-1", "005930")))
 
+    def test_configured_limit_controls_both_storage_and_default_load(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "news.sqlite3"
+            items = tuple(self._item(index) for index in range(250))
+            repository = StockNewsRepository(path, stored_news_limit=300)
+            repository.upsert("005930", items)
+            self.assertEqual(250, len(repository.load("005930")))
+            self.assertEqual(200, len(repository.load("005930", limit=200)))
+
+            smaller = StockNewsRepository(path, stored_news_limit=100)
+            smaller.upsert("005930", ())
+            self.assertEqual(100, len(smaller.load("005930")))
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(100, connection.execute(
+                    "SELECT COUNT(*) FROM stock_news WHERE stock_code='005930'",
+                ).fetchone()[0])
+
     def test_journal_news_links_are_separated_by_account_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             repository = StockNewsRepository(Path(temporary_directory) / "news.sqlite3")

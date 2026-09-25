@@ -1,6 +1,8 @@
 # 데이터베이스 스키마 지도
 
-기준: 2.1.0 / 2026-09-22. 이 문서는 테이블·마이그레이션 상세 참조다. 연구 현재 버전은 v23이며 아래 도입 버전은 이력이다. [현재 상태](docs/CURRENT_STATUS.md)와 [남은 작업](docs/OPEN_ITEMS.md)으로 구현·운영 범위를 구분한다. 신규 대신/뉴스 백필의 입력 저장 계약은 [수집 기획](docs/HISTORICAL_BACKFILL_PLAN.md) 단계에서 확정한다.
+2026-09-24 과거 검색뉴스 로컬 캐시: `data/historical_intelligence.sqlite3.news_article_body_snapshots`는 `(provider, office_id, article_id, extractor_version, body_sha256)`를 기본키로 하여 발행시각 확인에 사용한 동일 HTML에서 추출한 `body_text`, `source_url`, `published_at`, `fetched_at`을 불변 보존한다. 기존 `news_articles`나 NAS 본문 revision을 덮어쓰지 않는다. PC 역사 BODY 작업은 해당 extractor 버전의 최신 스냅샷을 우선 읽고 없을 때만 원문을 조회한다. NAS의 `central_news_jobs` 완료 상태가 재처리를 방지하며 NAS 실시간 뉴스 작업과는 별개다.
+
+기준: 2.1.0 / 2026-09-22. 이 문서는 테이블·마이그레이션 상세 참조다. 연구 현재 버전은 v27이며 아래 도입 버전은 이력이다. [현재 상태](docs/CURRENT_STATUS.md)와 [남은 작업](docs/OPEN_ITEMS.md)으로 구현·운영 범위를 구분한다. 신규 대신/뉴스 백필의 입력 저장 계약은 [수집 기획](docs/HISTORICAL_BACKFILL_PLAN.md) 단계에서 확정한다.
 
 CR3d1 연구 v18은 final_holdout_access_ledger migration으로 아래 두 표를 추가한다. CR3d2b 연구 v19는 소유권 표를, CR3d2c 연구 v20은 세대와 복구 감사 표를 추가한다. CR4a 연구 v21은 불변 자동 가설과 부모 계보 표를, CR4b 연구 v22는 campaign별 가설 큐를, CR4c 백엔드는 v23 후속 생성 원장을 추가한다. 기존 v17의 run/report/campaign과 migration 이력은 그대로 유지한다.
 
@@ -15,7 +17,7 @@ CR3d1 연구 v18은 final_holdout_access_ledger migration으로 아래 두 표�
 
 원장 mutation은 BEGIN IMMEDIATE로 batch/overlap/nonce와 event 시각을 확인하며, 노출 상태를 되돌리거나 기록을 삭제하는 API는 없다.
 동일 request의 완전 일치만 멱등이고 내용 변경은 오류/롤백한다. 창 identity에 dataset revision/profile을 포함하지 않아 같은 KRX 기간의 우회 재사용을 차단한다.
-기존 read-only 비교는 v17부터 v23까지 허용하며 마이그레이션/DB 생성 없이 조회한다. 접근 원장은 v18, 실행 소유권은 v19, 명시 복구는 v20 표를 사용한다.
+기존 read-only 비교는 v17부터 v27까지 허용하며 마이그레이션/DB 생성 없이 조회한다. 접근 원장은 v18, final 실행 소유권은 v19, 명시 복구는 v20, 순차 검증 소유권은 v24 표를 사용한다.
 기존 본문의 v17-only 설명은 CR3b 당시 계약 기록이며 현재 비교 reader는 위 두 버전을 지원한다.
 
 CR3d2a는 migration/column 없이 v18 원장 동작만 확장한다. 최종 준비 경로의 FINAL_ACCESS 전에 같은 BEGIN IMMEDIATE에서
@@ -36,21 +38,21 @@ research_runs와 final execution을 같은 트랜잭션에서 RUNNING으로 되�
 이미 CLAIMED인 요청은 새 실행권이 아니며 다음 복구에는 새 요청이 필요하다. output manifest 부재 검사는 run storage를 아는 application 경계에서 선행한다.
 COMPLETED/RUNNING/미실행/노출 창은 복구하지 않으며 RUNNING orphan의 lease 회수는 이 migration 범위 밖이다.
 
-CR3b3 순차 검증도 연구 v17의 기존 research_runs/spec_json을 사용한다. 새 migration/column은 없다.
+CR3b3 순차 검증은 기존 research_runs/spec_json을 유지한다. 후속 v24 `research_independent_run_owners`와 `research_independent_run_owner_history`는 새 UI 순차 실행의 run별 현재 owner token·generation과 재사용 금지 이력을 추가한다. 기존 무소유 run은 소급 소유자로 간주하지 않는다.
 spec.execution_scope=independent_development_validation/v1은 기존 단일 실행과 구분하는 scientific ID 범위다.
-start_run(claim_independent=True)은 BEGIN IMMEDIATE로 신규/취소 행을 선점하며 running/failed/완료를 보존한다.
-새 scope의 예외 종료는 batch가 한 번 확정한다. 기본 start_run/execute_research 계약은 유지한다.
+start_run(claim_independent=True)은 BEGIN IMMEDIATE로 신규/취소 행을 선점하며 running/failed/완료를 보존한다. 새 UI claim은 owner token을 기록하고 같은 run에서 이전 토큰 재사용을 거부한다.
+새 scope의 예외 종료는 batch가 한 번 확정한다. 독립 순차 run의 신규 생성과 취소 run 재선점은 일반 start_run 호출로 우회할 수 없다.
 
 CR3b2 연구 결과 비교는 기존 연구 v17을 `ResearchRepository(path, read_only=True)`로 연다.
 SQLite mode=ro/timeout 1초이며 새 DB/폴더/마이그레이션/테이블을 만들지 않는다.
-이미 마이그레이션된 v17만 허용하며 기본 생성자의 쓰기/마이그레이션 동작은 유지한다.
+이미 마이그레이션된 v17~v27을 허용하며 기본 생성자의 쓰기/마이그레이션 동작은 유지한다.
 
 R3g 선택 계좌 모의 주문도 기존 intent/event 원장을 사용한다(중앙 v19 유지).
 새 `manual_mock_scoped_` intent ID는 environment/account_ref/run/request_id로 분리하고,
 기존 v1 `manual_mock_` 행과 ID 계산은 변경하지 않는다. 조회·취소는 저장 intent의 account_ref/run을 검증한다.
 페이지 cursor와 owned query는 bundle별 메모리 상태이며 새 DB 테이블은 추가하지 않았다.
 
-스키마의 실행 원본은 각 `CREATE TABLE` 코드다. 이 문서는 수정 범위 파악용이다. 로컬 SQLite 마이그레이션 실행기는 `infrastructure/persistence/schema_migrations.py`에 있다. 메인 DB는 v7, 매매일지 DB는 v9다. 메인 v2와 매매일지 v1은 기존에 멱등적 `CREATE TABLE`·호환 `ALTER TABLE`로 형성된 스키마의 기준선이고, v3에서 공통 시장 관측 메타데이터 표를, v4에서 종목별 당일 실제 상한가 가격 캐시를, v5에서 프로필별 테마 이름 결정 원장을, v6에서 AI 테마 제안 검토 원장을, v7에서 제안 판단에 필요한 기사 제목·발행시각·원문 URL을 추가했다. 기존 시장 데이터 행의 시각·출처를 추정해 변환하지 않는다. 이후 필드 변경은 시작 코드에 임의 SQL을 더하지 말고 다음 연속 버전의 명시적 마이그레이션과 이전 DB fixture를 함께 추가한다.
+스키마의 실행 원본은 각 `CREATE TABLE` 코드다. 이 문서는 수정 범위 파악용이다. 로컬 SQLite 마이그레이션 실행기는 `infrastructure/persistence/schema_migrations.py`에 있다. 메인 DB는 v8, 매매일지 DB는 v9다. 메인 v2와 매매일지 v1은 기존에 멱등적 `CREATE TABLE`·호환 `ALTER TABLE`로 형성된 스키마의 기준선이고, v3에서 공통 시장 관측 메타데이터 표를, v4에서 종목별 당일 실제 상한가 가격 캐시를, v5에서 프로필별 테마 이름 결정 원장을, v6에서 AI 테마 제안 검토 원장을, v7에서 제안 판단에 필요한 기사 제목·발행시각·원문 URL을, v8에서 메인→뉴스 DB 데이터 이관 완료 원장을 추가했다. 기존 시장 데이터 행의 시각·출처를 추정해 변환하지 않는다. 이후 필드 변경은 시작 코드에 임의 SQL을 더하지 말고 다음 연속 버전의 명시적 마이그레이션과 이전 DB fixture를 함께 추가한다.
 
 마이그레이션 원장은 `version`, 변경 불가한 `name`, `applied_at`을 저장한다. 실행기는 버전 연속성과 이름 일치를 검사하고 각 변경을 savepoint 안에서 수행한다. 실패한 변경은 DDL과 원장을 함께 되돌리고, 앱이 지원하는 버전보다 새로운 DB는 조용히 열지 않고 오류로 거부한다. 중앙 SQLite/PostgreSQL도 동일한 중앙 마이그레이션 계획을 각 DB 방언의 한 트랜잭션에서 실행한다.
 
@@ -70,7 +72,8 @@ R3g 선택 계좌 모의 주문도 기존 intent/event 원장을 사용한다(�
 
 | 분류 | 테이블 | 역할/주요 키 |
 | --- | --- | --- |
-| 메타 | `schema_migrations` | 메인 스키마 버전·이름·적용 시각. 현재 v7 |
+| 메타 | `schema_migrations` | 메인 스키마 버전·이름·적용 시각. 현재 v8 |
+| 이관 완료 원장 | `legacy_news_transfer_migrations` | 메인 DB의 옛 뉴스 표를 전용 `news.sqlite3`로 옮긴 데이터 이관 v1 완료 시각. 대상 저장·건수 확인 뒤 원본 표 제거와 같은 메인 DB 트랜잭션에서 기록 |
 | 관측 메타 | `market_data_observation_meta` | `(dataset_kind, subject, observation_key)`별 시장 기준/가용 시각·시장·단위·실제/추정·완결성·출처·후보군. 신규 실시간/조회 분봉·일봉과 같은 트랜잭션으로 저장 |
 | 설정 | `settings`, `central_setting_versions`, `column_settings` | 앱 값, 중앙 병합 시각, 표 열 구성 |
 | 종목 | `stocks` | `code` PK, 이름·시장·기본정보·신고가/NXT·당일 상한가 가격 캐시 |
@@ -83,9 +86,12 @@ R3g 선택 계좌 모의 주문도 기존 intent/event 원장을 사용한다(�
 | 원시/보정 봉 | `minute_bars`, `daily_bars` | 종목·날짜·분/일 OHLCV와 거래대금 |
 | 지수 봉 | `market_index_minute_bars`, `market_index_daily_bars` | KOSPI/KOSDAQ OHLCV·거래대금 |
 | 파생 지표 | `top20_trade_value_index` | 분별 TOP20 합계, 시장별 분해, 구성 종목/구간, 수집 상태 |
+| 파생 통계 캐시 | `top20_statistics_daily_cache` | PC 직접 연결의 완료일 시간대 합계·표본 수·정규장 합계·시장 분모. 원본 보완 시 해당 날짜를 무효화하고 다음 조회에서 재생성 |
 | 수집 상태 | `minute_history_sync_log`, `daily_bar_sync_log`, `market_data_finalization_log`, `market_data_unconfirmed_log` | 백필·확정·최종 실패 상태 |
 
 `stocks.code`가 테마·신고가의 논리적 부모다. 일부 봉 테이블은 성능과 과거 호환 때문에 외래키를 강제하지 않는다. `top20_trade_value_index`는 원시 체결이 아니라 순위 코호트와 분봉에서 계산된 파생 데이터다.
+
+NAS `central_dataset_snapshots(kind='top20_statistics_day')`는 완료된 날짜의 TOP20 시간대·정규장 파생 집계다. `top20_index` 또는 `market_index_chart`가 같은 날짜에 다시 저장되면 같은 트랜잭션에서 해당 집계를 삭제하고 다음 통계 조회에서 재생성한다. 당일은 캐시하지 않는다.
 
 `themes/stock_themes`는 프로필 기능 도입 전 자료와 구형 설정·테마 백업 복원을 위한 호환 원본이다. 최초 `theme_profiles_initialized` 이전 때 기본 프로필로 한 번 이전하며, 현재 테마 편집과 새 설정/Google/NAS 백업의 쓰기 원본은 `theme_profiles/profile_themes/profile_stock_themes`다. `profile_theme_name_decisions`는 이후 가져오기와 LLM 제안이 같은 사용자 결정을 재사용하도록 이름 관계를 프로필 범위로 보존한다. 새 백업은 활성 프로필, 이름 결정과 테마 가져오기 규칙을 함께 보존한다. 두 구조를 활성 이중 쓰기로 맞추거나 구형 표를 바로 삭제하지 않는다.
 
@@ -94,6 +100,8 @@ R3g 선택 계좌 모의 주문도 기존 intent/event 원장을 사용한다(�
 | 테이블 | 역할/관계 |
 | --- | --- |
 | `news_schema_migrations` | 뉴스 스키마 버전·이름·적용 시각. 현재 v4 |
+
+뉴스 DB 시작 경로는 `news_schema_migrations`의 v1~v4 이름·버전이 모두 일치하면 스키마 변경 실행기를 건너뛴다. 새 버전이나 불완전한 원장은 기존 변경 실행기가 처리한다. 옛 메인 DB 뉴스 표의 별도 이관은 `legacy_news_transfer_migrations` v1이 있으면 재실행하지 않는다. 완료 표식이 있는데 전용 뉴스 DB 파일이 없거나 메인 DB에 옛 뉴스 표가 다시 나타나면 빈 DB 생성·재이관 대신 오류로 알린다.
 | `stock_news` | `(stock_code, identity)` PK. 제목·요약·링크·게시시각·기본 판정 |
 | `stock_news_sync` | 종목별 전체/네이버 마지막 확인 시각 |
 | `journal_news_links` | origin/canonical 계좌 scope와 `(group_id, stock_code, identity)`로 계좌별 복기 묶음과 기사 연결. v3는 `is_deleted/updated_at` tombstone과 source collection/owner/key/content hash를 보존 |
@@ -134,15 +142,16 @@ R3g 선택 계좌 모의 주문도 기존 intent/event 원장을 사용한다(�
 
 ## 로컬 연구 DB: `research.sqlite3`
 
-실행 스키마와 저장 구현은 `infrastructure/persistence/research_repository.py`가 소유한다. v1 `research_run_ledger`부터 v20 `explicit_final_holdout_recovery`까지의 원장을 보존하고, v21 `immutable_research_hypothesis_lineage`가 가설 문서와 parent edge를, v22 `campaign_hypothesis_queue`가 campaign별 단방향 실행 바인딩을, 현재 v23 `campaign_hypothesis_expansion_ledger`가 완료 부모의 후속 생성 결과를 추가한다. v21~v23은 기존 run/report/campaign/job/trial/final 행을 변경하지 않는다. v20은 final execution generation과 명시 복구 이력을, v19는 후보별 final execution 소유권을, v18은 final 접근 원장을 소유한다. v17은 campaign job에 source_request_json 기본 빈값만 추가하며 독립 구간의 원본 spec은 이 필드에, 유효 실행 spec은 기존 request_json에 보존한다. 실제·모의 체결을 기존 `trade_fills`에 넣지 않는다. 이전 실행기로의 DB downgrade는 지원하지 않는다.
+실행 스키마와 저장 구현은 `infrastructure/persistence/research_repository.py`가 소유한다. v1 `research_run_ledger`부터 v20 `explicit_final_holdout_recovery`까지의 원장을 보존하고, v21 `immutable_research_hypothesis_lineage`가 가설 문서와 parent edge를, v22 `campaign_hypothesis_queue`가 campaign별 단방향 실행 바인딩을, v23 `campaign_hypothesis_expansion_ledger`가 완료 부모의 후속 생성 결과를, v24 `independent_development_run_ownership`이 새 순차 UI 실행의 소유 토큰·세대를 추가한다. v25 `opt_in_daily_development_expansion`은 기존 source에 `rolling_daily` 기본 0을 추가하고 v26 `nas_rolling_daily_cursor`는 다음 NAS 날짜 cursor를, v27 `nas_rolling_empty_day_rechecks`는 NAS 관측 0건 평일의 재확인 원장을 추가한다. v21~v27은 기존 run/report/campaign/job/trial/final 행을 변경하지 않는다. v20은 final execution generation과 명시 복구 이력을, v19는 후보별 final execution 소유권을, v18은 final 접근 원장을 소유한다. v17은 campaign job에 source_request_json 기본 빈값만 추가하며 독립 구간의 원본 spec은 이 필드에, 유효 실행 spec은 기존 request_json에 보존한다. 실제·모의 체결을 기존 `trade_fills`에 넣지 않는다. 이전 실행기로의 DB downgrade는 지원하지 않는다.
 
 | 테이블 | 역할/주요 키 |
 | --- | --- |
-| `research_schema_migrations` | 연구 스키마 버전·이름·적용 시각. 현재 v19 |
+| `research_schema_migrations` | 연구 스키마 버전·이름·적용 시각. 현재 v27 |
 | `research_campaign_staging_cleanups` | v16 operation_id PK/FK, source_id FK, 임시 경로/marker hash, READY/DELETED/MISSING/PROTECTED/FAILED, 실패 횟수/다음 재시도/예상 파일 byte/이유/갱신시각. 작업별 한 행. 삭제 전 intent를 보존하고 marker 마지막 삭제로 중단을 재개. 실패는 60초부터 최대 1시간 backoff이며 수집 실패와 별도. 완성 자료는 삭제하지 않음 |
-| `research_campaign_input_sources` | source_id PK(캠페인+기준 job), campaign/template FK, 명시 상위 폴더·enabled·동결 scope JSON, READY/BACKOFF/NEEDS_ATTENTION/WAITING_STORAGE, 독립 실패 횟수·다음 scan/이유. v14 nas_auto_prepare 기본 OFF, PC NAS config 경로, remote signature. v15 storage_cap_bytes 기본 0 무제한. 용량/다른 준비 대기는 실패 횟수 0, 60초 후 확인. 토큰 없음. 설정은 일시정지/worker 종료 후 변경 |
+| `research_campaign_input_sources` | source_id PK(캠페인+기준 job), campaign/template FK, 명시 상위 폴더·enabled·동결 scope JSON, READY/BACKOFF/NEEDS_ATTENTION/WAITING_STORAGE, 독립 실패 횟수·다음 scan/이유. v14 nas_auto_prepare 기본 OFF, PC NAS config 경로, remote signature. v15 storage_cap_bytes 기본 0 무제한. v25 rolling_daily 기본 OFF이며 준비된 일별 입력에서 단일 TRAIN/VALIDATION 평가 날짜만 확장한다. v26 `rolling_next_start`는 NAS 자동 준비를 함께 켰을 때 다음 조회 날짜를 작업자 소유권으로 저장한다. 용량/다른 준비 대기는 실패 횟수 0, 60초 후 확인. 토큰 없음. 설정은 일시정지/worker 종료 후 변경 |
 | `research_campaign_storage_operations` | v15 operation_id PK, source/campaign FK, root/cap/owner/generation, PREPARING/PUBLISHED/UNCHANGED/BLOCKED/FAILED/CANCELLED/ABANDONED, 시작·종료, staging_path/input_path/이유. 기존 worker lease로 DB당 한 자료 준비만 허용. 오래된 작업은 ABANDONED 기록만 하며 삭제하지 않음. sidecar operation_id로 파일과 대조. 변경 없는 signature 확인에는 새 행을 만들지 않음 |
 | `research_campaign_input_acceptances` | (source_id,evidence fingerprint) PK, (source_id,input_path) UNIQUE, 등록 job_id와 manifest hash. 기준 입력도 seed하여 중복 근거를 차단. job/budget/acceptance는 한 트랜잭션 |
+| `research_campaign_rolling_empty_days` | v27 (source_id,range_start) PK, NAS 관측 0건 평일의 시도 횟수·마지막 확인·다음 재확인 시각. 새 날짜 cursor와 같은 거래일 조회 후 원자 기록하며 최소 1일 뒤 재확인한다. 완료된 입력이 acceptance에 등록된 뒤에만 삭제하고, 재확인은 전체 source에서 10분에 최대 한 번이다 |
 | `research_campaign_workers` | campaign_id PK/FK, 단조 증가 generation, 현재 owner/lease, IDLE/STARTING/RUNNING/FAILED/NEEDS_ATTENTION, 연속 실패 횟수, 다음 재시도 시각/이유. 시작/완료/만료 기록은 원자 처리 |
 | `research_campaign_worker_attempts` | (campaign_id,generation) PK, owner, 시작 시 campaign policy revision, STARTING/RUNNING/EXPECTED_EXIT/FAILED, 시작/종료 시각·exit_code·이유. 중복 종료는 재기록하지 않음 |
 | `research_campaigns` | campaign_id, 현재 설정 revision, desired_state(RUNNING/PAUSED/STOPPED), operational_state/이유, cycle_sequence, 생성/갱신 시각 |
@@ -151,6 +160,8 @@ R3g 선택 계좌 모의 주문도 기존 intent/event 원장을 사용한다(�
 | `research_campaign_job_budgets` | (campaign_id,job_id,revision)별 불변 canonical 운영 예산 JSON(max_trials/max_seconds/resource_budget)/created_at. 과학 명세/원래 request_json은 변경하지 않음 |
 | `research_campaign_cycles` | (campaign_id,sequence)별 예약 attempt와 해당 정책 revision/budget_revision/job/generation/owner, 종료 상태/이유. cycle 생성과 sequence/claim 증가를 단일 BEGIN IMMEDIATE 트랜잭션으로 저장 |
 | `research_runs` | 고정 dataset manifest와 Factor/전략/정책/파라미터, 코드 hash, 실행 상태와 논리 결과 hash. S5 신규 RunSpec은 버전 있는 session profile 문서를 포함하고 필드가 없는 기존 run은 기존 ID/hash를 유지. 같은 run ID의 입력은 변경 불가 |
+| `research_independent_run_owners` | v24 이후 순차 개발 검증 UI가 claim한 run의 현재 owner token·세대·claim 시각. 기존 run은 채우지 않음 |
+| `research_independent_run_owner_history` | 같은 run에서 이전 owner token을 다시 쓰지 못하도록 generation별 claim을 보존 |
 | `research_feature_snapshots` | 판단 시각·입력 cutoff·당시 universe·Factor 값/결측 사유·입력 revision·판단 전 상태 |
 | `research_decisions` | Snapshot별 proposal/final action, 이유·제약·판단 전후 상태 |
 | `research_candidate_events` | 종목+setup+기준 관측+전이+전략 버전의 중복 키를 가진 후보 사건. run 안에서 같은 키는 한 번만 저장 |
@@ -273,6 +284,7 @@ DB 스키마 변경 없이 내부 쓰기 메서드의 선택 ownership 인자로
 | `central_realtime_latest` | 이벤트 종류·종목별 최신 실시간 값; 재접속 초기 복원 |
 | `central_second_trade_bars` | 날짜·초·종목·시장별 OHLC, 거래량(주), 체결가×체결량 거래대금(원), 체결 건수와 최종 가용 시각. 최근 5초 안의 늦은 체결은 같은 행을 절대값으로 갱신하고 동일 저장 재시도는 합산하지 않음 |
 | `central_minute_bars` | 날짜·분·종목·시장별 OHLCV/거래대금 백만원. 조회 봉과 실시간 형성 중 봉의 메타데이터를 같은 트랜잭션으로 기록 |
+| `central_five_minute_bars` | 날짜·5분 구간 종료시각·종목·시장·공급자·원/수정주가 기준별 OHLCV와 공급자 원시 거래대금. 1분봉과 다른 키로 보존하며 원시 거래대금 단위는 검증 전 환산하지 않음 |
 | `central_daily_bars` | 날짜·종목·시장별 일봉. 장 마감 여부에 따른 진행 중/확정 메타데이터를 같은 트랜잭션으로 기록 |
 | `central_dataset_snapshots` | `ranking/top20_membership/top20_index/market_state/investor_flow/program_flow/new_high/stock_fundamentals/nxt_eligibility` 시계열 JSON |
 | `central_market_data_observation_meta` | 관측 종류·대상·키별 실제 기준/가용 시각·시장·단위·실제/추정·완결성·출처·후보군. 순위·TOP20·시장 상태는 원본 스냅샷과 같은 트랜잭션으로 기록하며, 종류·대상·기준시각 범위 조회가 coverage 진단의 입력이 됨 |
@@ -393,3 +405,7 @@ allowlist에 포함하지 않는다.
 모두 내용 주소형 불변 문서다. 같은 key에 다른 JSON은 거절한다. receipt는 현재 검증된 mock binding과
 package/policy 계보가 일치할 때만 저장되며 `BLOCKED`도 감사 근거로 저장할 수 있다. 이 저장은 operating
 spec, admission, runtime lease, execution intent를 만들지 않는다.
+
+## 과거 시장 맥락 SQLite의 거래소 효력일
+
+`data/historical_market_context.sqlite3`는 운영 PostgreSQL과 분리된 연구 원장이다. `historical_exchange_document_fetch`는 DART 원문 접수번호별 수집 상태·원문 ZIP 경로·SHA-256을 보존한다. `historical_exchange_effective_events`는 후보 종목 코드와 접수번호별 `receipt_date`, 거래정지/재개/상폐의 `effective_date`·`effective_time`·`precision`, 원문 필드 근거를 보존한다. `historical_exchange_effective_daily_checks`는 같은 사건에 대한 키움 일봉 거래량·전후 거래일·접수일과 효력일의 날짜 차이, `review_status`, 대조한 원본 DB 식별자를 기록한다. 일봉 대조는 공식 효력일을 덮어쓰지 않는다. 정정 공시나 효력 날짜가 없는 공시는 근거와 상태를 남기고 자동 단일 사건으로 확정하지 않는다.

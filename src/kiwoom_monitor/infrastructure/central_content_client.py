@@ -43,6 +43,9 @@ class CentralContentClient:
         self._opener = opener
         self._timeout = timeout_seconds
 
+    def load_health(self) -> dict[str, Any]:
+        return self._request("GET", "/health")
+
     def load(
         self, collection: str, owner: str = "", limit: int = 1000, *, offset: int = 0,
         updated_after: float = 0.0,
@@ -91,14 +94,34 @@ class CentralContentClient:
 
     def load_news_history(
         self, kind: str, *, target: str = "", identity: str = "",
-        as_of: float | None = None, limit: int = 100,
+        as_of: float | None = None, limit: int = 100, stock_code: str = "",
     ) -> dict[str, Any]:
         query: dict[str, object] = {
             "target": target, "identity": identity, "limit": max(1, min(limit, 1000)),
         }
         if as_of is not None:
             query["as_of"] = max(0.0, float(as_of))
+        if stock_code:
+            query["stock_code"] = stock_code
         return self._request("GET", f"/api/v1/news/history/{kind}?{urlencode(query)}")
+
+    def claim_historical_news_job(self, stage: str,
+                                  excluded_codes: tuple[str, ...] = (),
+                                  scope: str = "all") -> dict[str, Any]:
+        if stage not in {"BODY", "RULE"}:
+            raise ValueError("BODY 또는 RULE 작업만 요청할 수 있습니다.")
+        if scope not in {"all", "pc", "pc_market", "pc_search"}:
+            raise ValueError("지원하지 않는 과거 뉴스 작업 범위입니다.")
+        query = {"stage": stage, "scope": scope}
+        if excluded_codes:
+            query["excluded_codes"] = ",".join(excluded_codes)
+        return self._request("POST", f"/api/v1/news/historical-jobs/claim?{urlencode(query)}")
+
+    def complete_historical_news_job(self, result: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/news/historical-jobs/complete", result)
+
+    def import_historical_market_articles(self, batch: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/news/historical-market-articles", batch)
 
     def load_research_observations_page(
         self,

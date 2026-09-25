@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,8 @@ from kiwoom_monitor.presentation.process_control import (
     process_is_alive,
     process_identity_document,
     process_identity_is_alive,
+    process_identity_state,
+    process_start_token,
     read_process_identity,
     stop_auxiliary_process,
     write_json_command,
@@ -32,6 +35,21 @@ class ProcessControlTests(unittest.TestCase):
         identity = process_identity_document()
         self.assertTrue(process_identity_is_alive(identity["pid"], identity["start_token"]))
         self.assertFalse(process_identity_is_alive(identity["pid"], "wrong-token"))
+        self.assertEqual('running', process_identity_state(identity['pid'], identity['start_token']))
+        self.assertEqual('exited', process_identity_state(identity['pid'], 'wrong-token'))
+
+    def test_exited_child_is_distinguished_from_unverifiable_identity(self) -> None:
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(1)'])
+        try:
+            token = process_start_token(child.pid)
+            self.assertTrue(token)
+            child.wait(timeout=5)
+            self.assertEqual('exited', process_identity_state(child.pid, token))
+            self.assertEqual('unknown', process_identity_state(child.pid, ''))
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
 
     def test_legacy_pid_file_is_read_as_unverified_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

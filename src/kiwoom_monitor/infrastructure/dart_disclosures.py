@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -81,6 +81,40 @@ class DartDisclosureClient:
             link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}"
             results.append(StockNewsItem(title, description, link, link, published, assess_stock_news(stock_name, title, description)))
         return tuple(results)
+
+    def list_disclosures(
+        self, stock_code: str, begin: date, end: date,
+        *, disclosure_type: str = "",
+    ) -> tuple[dict[str, object], ...]:
+        """Return complete raw DART list rows for one listed company and date range."""
+        if not self._api_key or end < begin:
+            return ()
+        corp_code = self._corp_codes().get(stock_code[:6])
+        if not corp_code:
+            return ()
+        page = 1
+        results: list[dict[str, object]] = []
+        while True:
+            query = urlencode({
+                "crtfc_key": self._api_key, "corp_code": corp_code,
+                "bgn_de": begin.strftime("%Y%m%d"), "end_de": end.strftime("%Y%m%d"),
+                "page_no": page, "page_count": 100,
+                **({"pblntf_ty": disclosure_type} if disclosure_type else {}),
+            })
+            payload = self._json(f"https://opendart.fss.or.kr/api/list.json?{query}")
+            status = str(payload.get("status", "000"))
+            if status == "013":
+                return tuple(results)
+            if status != "000":
+                raise ValueError(f"DART 조회 실패: {payload.get('message', status)}")
+            rows = payload.get("list", ()) or ()
+            if not isinstance(rows, list):
+                raise ValueError("DART 조회 응답의 list 형식이 올바르지 않습니다.")
+            results.extend(dict(row) for row in rows if isinstance(row, dict))
+            total_pages = int(payload.get("total_page") or 1)
+            if page >= total_pages:
+                return tuple(results)
+            page += 1
 
     def _corp_codes(self) -> dict[str, str]:
         if self._cache_path.exists() and datetime.now().timestamp() - self._cache_path.stat().st_mtime < 86400 * 30:

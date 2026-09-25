@@ -28,6 +28,39 @@ class FakeClient:
 
 
 class CentralRestBrokerTests(unittest.TestCase):
+    def test_two_second_cache_is_memory_only_but_records_market_response(self) -> None:
+        class RecordingStore:
+            def __init__(self) -> None:
+                self.loads: list[str] = []
+                self.saves: list[str] = []
+
+            def load_query(self, key: str) -> None:
+                self.loads.append(key)
+                return None
+
+            def save_query(self, key: str, *_args: object) -> None:
+                self.saves.append(key)
+
+        async def scenario() -> None:
+            store = RecordingStore()
+            client = FakeClient()
+            handled: list[str] = []
+            broker = CentralRestBroker(
+                client, store=store,
+                response_handler=lambda api_id, _body, _payload: handled.append(api_id),
+            )
+            first = await broker.request("ka10080", "/api/dostk/chart", {"stk_cd": "005930"})
+            second = await broker.request("ka10080", "/api/dostk/chart", {"stk_cd": "005930"})
+            self.assertFalse(first.cache_hit)
+            self.assertTrue(second.cache_hit)
+            self.assertEqual(1, len(client.calls))
+            self.assertEqual(["ka10080"], handled)
+            self.assertEqual([], store.loads)
+            self.assertEqual([], store.saves)
+            await broker.close()
+
+        asyncio.run(scenario())
+
     def test_low_priority_work_reserves_the_upcoming_ranking_boundary(self) -> None:
         self.assertAlmostEqual(8.001, ranking_reservation_delay(26.999), places=3)
         self.assertEqual(5.0, ranking_reservation_delay(30.0))
@@ -128,6 +161,73 @@ class CentralRestBrokerTests(unittest.TestCase):
                     [call[0] for call in client.calls],
                 )
             await broker.close()
+
+        asyncio.run(scenario())
+
+    def test_slow_response_persistence_does_not_hold_ranking_transport(self) -> None:
+        async def scenario() -> None:
+            storage_started = threading.Event()
+            release_storage = threading.Event()
+
+            def persist(api_id: str, _body: dict[str, Any], _payload: dict[str, Any]) -> None:
+                if api_id == "ka10001":
+                    storage_started.set()
+                    release_storage.wait(2)
+
+            client = FakeClient()
+            broker = CentralRestBroker(client, response_handler=persist)
+            try:
+                low = asyncio.create_task(
+                    broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
+                )
+                self.assertTrue(await asyncio.to_thread(storage_started.wait, 2))
+                ranking = await asyncio.wait_for(
+                    broker.request_unrecorded("ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"}),
+                    0.5,
+                )
+                self.assertEqual("ka00198", ranking.payload["api_id"])
+                self.assertFalse(low.done())
+                self.assertEqual(["ka10001", "ka00198"], [call[0] for call in client.calls])
+                release_storage.set()
+                await low
+            finally:
+                release_storage.set()
+                await broker.close()
+
+        asyncio.run(scenario())
+
+    def test_slow_query_cache_save_does_not_hold_ranking_transport(self) -> None:
+        class BlockingStore:
+            def __init__(self) -> None:
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def load_query(self, _key: str) -> None:
+                return None
+
+            def save_query(self, *_args: object) -> None:
+                self.started.set()
+                self.release.wait(2)
+
+        async def scenario() -> None:
+            store = BlockingStore()
+            broker = CentralRestBroker(FakeClient(), store=store)
+            try:
+                low = asyncio.create_task(
+                    broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
+                )
+                self.assertTrue(await asyncio.to_thread(store.started.wait, 2))
+                ranking = await asyncio.wait_for(
+                    broker.request_unrecorded("ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"}),
+                    0.5,
+                )
+                self.assertEqual("ka00198", ranking.payload["api_id"])
+                self.assertFalse(low.done())
+                store.release.set()
+                await low
+            finally:
+                store.release.set()
+                await broker.close()
 
         asyncio.run(scenario())
 

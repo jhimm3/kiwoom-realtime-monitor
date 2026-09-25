@@ -22,12 +22,18 @@ def main() -> int:
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--date")
     selection.add_argument("--dates", help="쉼표로 구분한 YYYY-MM-DD")
+    parser.add_argument("--individual-stocks-only", action="store_true",
+                        help="동결된 후보의 market_code 0/10만 연구 모집단에 포함합니다.")
+    parser.add_argument("--exclude-noncontinuous-minute-candidates", action="store_true",
+                        help="결과일에 연속 1분봉 한 쌍도 없는 종목은 연구 모집단에서 제외하고 원장에 기록합니다.")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     source = load_historical_reconstruction(args.source)
     selected_dates = [value.strip() for value in (args.dates or "").split(",") if value.strip()]
     dataset = adapt_historical_reconstruction_for_research(
         source, selected_date=args.date, selected_dates=selected_dates,
+        individual_stocks_only=args.individual_stocks_only,
+        exclude_noncontinuous_minute_candidates=args.exclude_noncontinuous_minute_candidates,
     )
     manifest = write_historical_research_input(dataset, args.output)
     verified = load_frozen_research_export(args.output)

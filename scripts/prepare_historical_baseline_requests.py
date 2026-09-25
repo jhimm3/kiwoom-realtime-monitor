@@ -29,7 +29,10 @@ PULLBACK_FAMILY = "krx_pullback_reacceleration/v1"
 
 def prepare_requests(
     package: Path, output: Path, *, allow_partial: bool = False,
+    memory_mb: int = 512,
 ) -> tuple[Path, ...]:
+    if not 128 <= memory_mb <= 4096:
+        raise ValueError("research memory budget must be between 128MB and 4096MB")
     package = package.resolve()
     output = output.resolve()
     manifest = _read_mapping(package / "manifest.json", "development package manifest")
@@ -77,7 +80,7 @@ def prepare_requests(
                 "strategy": strategy,
                 "execution": _execution_model(),
                 "evaluation": dict(evaluation),
-                "resource_budget": {"memory_mb": 512, "cpu_duty_percent": 50},
+                "resource_budget": {"memory_mb": memory_mb, "cpu_duty_percent": 50},
                 "historical_baseline_context": {
                     "version": "historical_baseline_context/v1",
                     "purpose": "structural_train_validation_comparison",
@@ -136,12 +139,12 @@ def _execution_model() -> dict[str, Any]:
         "same_bar_path_version": "conservative_with_optimistic_bound/v1",
         "initial_cash_won": 1_000_000,
         "cost_model": {
-            "version": "fixed_bps/v1",
-            "commission_bps": 1,
-            "sell_tax_bps": 18,
-            "slippage_bps": 5,
+            "version": "fixed_bps/v2",
+            "commission_bps": "1.5",
+            "sell_tax_bps": "20",
+            "slippage_bps": "5",
             "rate_basis": "model_estimate",
-            "source": "historical development structural baseline; not broker verified",
+            "source": "user-agreed fee 0.015% each side and sell tax 0.200%; slippage model estimate",
             "valid_from": "2024-01-01T00:00:00+09:00",
             "valid_to": "2027-01-01T00:00:00+09:00",
         },
@@ -177,8 +180,11 @@ def main() -> int:
         "--allow-partial", action="store_true",
         help="Allow an explicitly labelled structural run on incomplete candidate coverage.",
     )
+    parser.add_argument("--memory-mb", type=int, default=512,
+                        help="Per-process RSS guard for the structural run (128-4096 MB).")
     args = parser.parse_args()
-    paths = prepare_requests(args.package, args.output, allow_partial=args.allow_partial)
+    paths = prepare_requests(args.package, args.output,
+                             allow_partial=args.allow_partial, memory_mb=args.memory_mb)
     print(json.dumps({"status": "ok", "requests": [str(path) for path in paths]}, ensure_ascii=False))
     return 0
 

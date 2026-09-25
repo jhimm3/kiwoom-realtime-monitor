@@ -33,6 +33,12 @@ class CentralServerSettings:
     anthropic_api_key: str = ""
     ai_daily_limit: int = 0
     news_refresh_seconds: int = 300
+    news_naver_api_enabled: bool = True
+    news_naver_stock_enabled: bool = False
+    news_naver_market_enabled: bool = True
+    news_naver_stock_url: str = "https://stock.naver.com/api/domestic/detail/news"
+    news_naver_flash_url: str = "https://stock.naver.com/api/domestic/news/list"
+    news_naver_world_url: str = "https://stock.naver.com/api/foreign/news/worldNews"
     news_history_jobs_enabled: bool = True
     news_query_set_enabled: bool = True
     news_query_set: str = "증권,코스피,코스닥,상장사,수주 계약,유상증자,인수합병,실적 전망,최대주주"
@@ -194,6 +200,21 @@ class CentralServerSettings:
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
             ai_daily_limit=ai_daily_limit,
             news_refresh_seconds=news_refresh_seconds,
+            news_naver_api_enabled=os.environ.get("NEWS_NAVER_API_ENABLED", "true").strip().lower()
+            in {"1", "true", "yes", "on"},
+            news_naver_stock_enabled=os.environ.get("NEWS_NAVER_STOCK_ENABLED", "false").strip().lower()
+            in {"1", "true", "yes", "on"},
+            news_naver_market_enabled=os.environ.get("NEWS_NAVER_MARKET_ENABLED", "true").strip().lower()
+            in {"1", "true", "yes", "on"},
+            news_naver_stock_url=os.environ.get(
+                "NEWS_NAVER_STOCK_URL", "https://stock.naver.com/api/domestic/detail/news",
+            ).strip(),
+            news_naver_flash_url=os.environ.get(
+                "NEWS_NAVER_FLASH_URL", "https://stock.naver.com/api/domestic/news/list",
+            ).strip(),
+            news_naver_world_url=os.environ.get(
+                "NEWS_NAVER_WORLD_URL", "https://stock.naver.com/api/foreign/news/worldNews",
+            ).strip(),
             news_history_jobs_enabled=os.environ.get("NEWS_HISTORY_JOBS_ENABLED", "true").strip().lower()
             in {"1", "true", "yes", "on"},
             news_query_set_enabled=os.environ.get("NEWS_QUERY_SET_ENABLED", "true").strip().lower()

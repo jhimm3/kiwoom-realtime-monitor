@@ -232,11 +232,16 @@ class CentralServerAppTests(unittest.TestCase):
                 items = CentralNewsClient(
                     "http://testserver", "private-token", opener=opener,
                 ).search("005930", "삼성전자")
+                stored_items, next_offset = CentralNewsClient(
+                    "http://testserver", "private-token", opener=opener,
+                ).stored_page("005930", "삼성전자")
             with closing(sqlite3.connect(path)) as connection:
                 jobs_after = int(connection.execute("SELECT COUNT(*) FROM central_news_jobs").fetchone()[0])
 
         self.assertEqual("https://o/n3", items[0].original_link)
         self.assertEqual("수주·계약", items[0].assessment.category)
+        self.assertEqual("https://o/n3", stored_items[0].original_link)
+        self.assertIsNone(next_offset)
         self.assertEqual(jobs_before, jobs_after)
 
     def test_app_starts_with_kiwoom_and_autonomous_top20_enabled(self) -> None:
@@ -588,6 +593,35 @@ class CentralServerAppTests(unittest.TestCase):
             [call[0] for call in FakeClient.instances[0].order_calls],
         )
 
+    def test_market_feed_returns_only_requested_stored_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            today = datetime.now().date().isoformat()
+            path = Path(directory) / "monitor.sqlite3"
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            store.save_news_source_page({
+                "source_id": f"naver-stock:flash:{today}", "query_text": "flash",
+                "run_id": "flash-run", "items": [{
+                    "identity": "https://example.com/flash-1",
+                    "document": {"title": "속보", "description": "저장된 요약",
+                                 "link": "https://example.com/flash-1",
+                                 "published_at": f"{today}T10:00:00+09:00"},
+                    "targets": [],
+                }],
+            })
+            store.close()
+            settings = CentralServerSettings(f"sqlite:///{path}", "private-token",
+                                             news_query_set_enabled=False)
+            with TestClient(create_app(settings)) as client:
+                headers = {"Authorization": "Bearer private-token"}
+                flash = client.get("/api/v1/news/market-feed?source=flash", headers=headers)
+                world = client.get("/api/v1/news/market-feed?source=world", headers=headers)
+                denied = client.get("/api/v1/news/market-feed?source=flash")
+            self.assertEqual(200, flash.status_code)
+            self.assertEqual("저장된 요약", flash.json()["items"][0]["description"])
+            self.assertEqual([], world.json()["items"])
+            self.assertEqual(401, denied.status_code)
+
     def test_public_api_route_contract_is_stable(self) -> None:
         """Protect the paths and methods used by released desktop clients."""
         with tempfile.TemporaryDirectory() as directory:
@@ -623,9 +657,14 @@ class CentralServerAppTests(unittest.TestCase):
             ("GET", "/api/v1/diagnostics/resources"),
             ("POST", "/api/v1/kiwoom/query"),
             ("POST", "/api/v1/news/search"),
+            ("POST", "/api/v1/news/stored-page"),
             ("POST", "/api/v1/news/analyze"),
+            ("POST", "/api/v1/news/historical-jobs/claim"),
+            ("POST", "/api/v1/news/historical-jobs/complete"),
+            ("POST", "/api/v1/news/historical-market-articles"),
             ("GET", "/api/v1/news/history/{kind}"),
             ("GET", "/api/v1/news/sources"),
+            ("GET", "/api/v1/news/market-feed"),
             ("GET", "/api/v1/market/minute-bars"),
             ("GET", "/api/v1/market/recent-minute-bars"),
             ("GET", "/api/v1/market/latest-market-caps"),

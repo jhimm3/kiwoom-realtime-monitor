@@ -177,7 +177,9 @@ class ResearchStorageCapacityTests(unittest.TestCase):
         migrated = ResearchRepository(path)
         with closing(sqlite3.connect(path)) as connection:
             after = connection.execute('SELECT * FROM research_campaign_input_sources').fetchone()
-        self.assertEqual(before, after[:-1])
-        self.assertEqual(0, after[-1])
-        self.assertEqual(23, migrated.schema_version())
+        self.assertEqual(before, after[:-3])
+        self.assertEqual(0, after[-3])
+        self.assertEqual(0, after[-2])
+        self.assertEqual('', after[-1])
+        self.assertEqual(27, migrated.schema_version())
         self.assertEqual((), migrated.load_campaign_storage_operations(self.source_id))

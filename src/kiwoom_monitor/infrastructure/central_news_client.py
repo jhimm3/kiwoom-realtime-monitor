@@ -14,6 +14,15 @@ class CentralNewsClient(CentralContentClient):
         kwargs = {"opener": opener} if opener is not None else {}
         super().__init__(server_url, access_token, timeout_seconds=timeout_seconds, **kwargs)
 
+    def market_feed(self, source: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        if source not in {"common", "flash", "world"}:
+            raise ValueError("지원하지 않는 시장 뉴스 수집원입니다.")
+        result = self._request("GET", f"/api/v1/news/market-feed?source={source}&limit={max(1, min(limit, 1000))}")
+        items = result.get("items")
+        if not isinstance(items, list):
+            raise RuntimeError("NAS 시장 뉴스 응답 형식이 올바르지 않습니다.")
+        return [item for item in items if isinstance(item, dict)]
+
     def search(
         self, code: str, name: str, since: datetime | None = None,
         ai: NewsAISettings | None = None,
@@ -31,6 +40,23 @@ class CentralNewsClient(CentralContentClient):
         if not isinstance(values, list):
             raise RuntimeError("중앙 뉴스 응답 형식이 올바르지 않습니다.")
         return tuple(_deserialize(value) for value in values if isinstance(value, dict))
+
+    def stored_page(self, code: str, name: str, *, offset: int = 0,
+                    ai: NewsAISettings | None = None) -> tuple[tuple[StockNewsItem, ...], int | None]:
+        payload: dict[str, Any] = {"stock_code": code, "stock_name": name, "offset": offset}
+        if ai is not None:
+            payload.update({
+                "ai_auto_analyze": ai.auto_analyze, "ai_auto_recent_limit": ai.auto_recent_limit,
+                "ai_provider": ai.provider, "ai_model": ai.model,
+            })
+        result = self._request("POST", "/api/v1/news/stored-page", payload)
+        values = result.get("items", [])
+        if not isinstance(values, list):
+            raise RuntimeError("중앙 뉴스 페이지 응답 형식이 올바르지 않습니다.")
+        next_offset = result.get("next_offset")
+        if next_offset is not None and (not isinstance(next_offset, int) or next_offset <= offset):
+            raise RuntimeError("중앙 뉴스 다음 페이지 위치가 올바르지 않습니다.")
+        return tuple(_deserialize(value) for value in values if isinstance(value, dict)), next_offset
 
 
 def _deserialize(value: dict[str, Any]) -> StockNewsItem:

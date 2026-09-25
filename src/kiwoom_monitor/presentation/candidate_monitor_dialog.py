@@ -136,6 +136,9 @@ class CandidateMonitorDialog(QDialog):
         layout.addLayout(top)
         layout.addWidget(self._settings_group)
         layout.addWidget(self._table)
+        geometry = self._settings.value("geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
 
         self._worker = CandidatePollWorker(client, self)
         self._worker.pageReceived.connect(self._apply_page)
@@ -277,6 +280,7 @@ class CandidateMonitorDialog(QDialog):
         self._start_settings_request(changes)
 
     def stop(self) -> None:
+        self._settings.setValue("geometry", self.saveGeometry())
         if self._worker.isRunning():
             self._worker.requestInterruption()
             self._worker.wait(6000)
@@ -285,6 +289,7 @@ class CandidateMonitorDialog(QDialog):
             self._settings_worker.wait(11_000)
 
     def closeEvent(self, event) -> None:
+        self._settings.setValue("geometry", self.saveGeometry())
         event.ignore()
         self.hide()
 

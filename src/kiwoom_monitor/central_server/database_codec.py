@@ -13,6 +13,11 @@ DAILY_BAR_COLUMNS = (
     "trading_date", "code", "market", "open", "high", "low", "close", "volume",
     "trade_value_million_won", "updated_at",
 )
+FIVE_MINUTE_BAR_COLUMNS = (
+    "trading_date", "minute", "code", "market", "provider", "adjustment_mode",
+    "bar_time_semantics", "open", "high", "low", "close", "volume",
+    "trading_value_raw", "observed_at",
+)
 SECOND_TRADE_BAR_COLUMNS = (
     "trading_date", "trade_second", "code", "market", "open", "high", "low", "close",
     "volume", "trade_value_won", "trade_count", "available_at",
@@ -32,6 +37,19 @@ def bar_value_rows(values: Iterable[Mapping[str, Any]], *, minute: bool) -> list
 def bar_result_rows(rows: Iterable[Sequence[Any]], *, minute: bool) -> list[dict[str, Any]]:
     columns = bar_columns(minute=minute)
     return [dict(zip(columns, row, strict=True)) for row in rows]
+
+
+def five_minute_bar_value_rows(values: Iterable[Mapping[str, Any]]) -> list[tuple[Any, ...]]:
+    return [tuple(value[column] for column in FIVE_MINUTE_BAR_COLUMNS) for value in values]
+
+
+def five_minute_bar_result_rows(rows: Iterable[Sequence[Any]]) -> list[dict[str, Any]]:
+    result = [dict(zip(FIVE_MINUTE_BAR_COLUMNS, row, strict=True)) for row in rows]
+    for value in result:
+        for key in ("trading_date", "minute", "observed_at"):
+            if not isinstance(value[key], str):
+                value[key] = value[key].isoformat()
+    return result
 
 
 def second_trade_bar_value_rows(

@@ -5,6 +5,7 @@ CENTRAL_TABLES = (
     "central_api_query_cache",
     "central_realtime_latest",
     "central_minute_bars",
+    "central_five_minute_bars",
     "central_second_trade_bars",
     "central_daily_bars",
     "central_dataset_snapshots",
@@ -47,6 +48,7 @@ CENTRAL_TABLES = (
 CENTRAL_INDEXES = (
     "idx_central_api_query_expiry",
     "idx_central_minute_bars_lookup",
+    "idx_central_five_minute_bars_lookup",
     "idx_central_second_trade_bars_lookup",
     "idx_central_dataset_lookup",
     "idx_central_observation_lookup",
@@ -76,7 +78,7 @@ CENTRAL_INDEXES = (
     "idx_central_account_scope_alias_target",
 )
 
-CENTRAL_SCHEMA_VERSION = 19
+CENTRAL_SCHEMA_VERSION = 20
 CENTRAL_SCHEMA_BASELINE_NAME = "current_central_storage_baseline"
 CENTRAL_MARKET_METADATA_MIGRATION_NAME = "market_data_observation_metadata"
 CENTRAL_MARKET_STATE_TIME_REPAIR_MIGRATION_NAME = "repair_market_state_special_trade_time"
@@ -96,6 +98,7 @@ CENTRAL_MOCK_EXECUTION_MIGRATION_NAME = "mock_execution_ledger"
 CENTRAL_ACCOUNT_IDENTITY_MIGRATION_NAME = "verified_account_identity_registry"
 CENTRAL_ACCOUNT_SCOPE_ALIAS_MIGRATION_NAME = "verified_account_scope_aliases"
 CENTRAL_CREDENTIAL_ACTIVATION_MIGRATION_NAME = "encrypted_credential_activation_ledger"
+CENTRAL_FIVE_MINUTE_BARS_MIGRATION_NAME = "historical_five_minute_bars"
 
 
 def sqlite_schema_statements() -> tuple[str, ...]:
@@ -811,6 +814,32 @@ def central_schema_migrations():
             _credential_schema_statements("sqlite"),
             _credential_schema_statements("postgres"),
         ),
+        CentralSchemaMigration(
+            20,
+            CENTRAL_FIVE_MINUTE_BARS_MIGRATION_NAME,
+            _five_minute_bar_schema_statements("sqlite"),
+            _five_minute_bar_schema_statements("postgres"),
+        ),
+    )
+
+
+def _five_minute_bar_schema_statements(dialect: str) -> tuple[str, ...]:
+    day = "TEXT" if dialect == "sqlite" else "DATE"
+    minute = "TEXT" if dialect == "sqlite" else "TIME"
+    number = "INTEGER" if dialect == "sqlite" else "BIGINT"
+    timestamp = "TEXT" if dialect == "sqlite" else "TIMESTAMPTZ"
+    return (
+        "CREATE TABLE IF NOT EXISTS central_five_minute_bars ("
+        f"trading_date {day} NOT NULL, minute {minute} NOT NULL, "
+        "code TEXT NOT NULL, market TEXT NOT NULL, provider TEXT NOT NULL, "
+        "adjustment_mode TEXT NOT NULL CHECK(adjustment_mode IN ('raw','adjusted')), "
+        "bar_time_semantics TEXT NOT NULL CHECK(bar_time_semantics='interval_end'), "
+        f"open {number} NOT NULL, high {number} NOT NULL, low {number} NOT NULL, "
+        f"close {number} NOT NULL, volume {number} NOT NULL, "
+        f"trading_value_raw {number}, observed_at {timestamp} NOT NULL, "
+        "PRIMARY KEY(trading_date,minute,code,market,provider,adjustment_mode))",
+        "CREATE INDEX IF NOT EXISTS idx_central_five_minute_bars_lookup "
+        "ON central_five_minute_bars(code,trading_date,minute)",
     )
 
 

@@ -9,6 +9,7 @@ from collections import defaultdict
 from contextlib import closing
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
 from kiwoom_monitor.domain.market_data_contract import CandidateUniverse, ObservationOrigin
@@ -123,6 +124,10 @@ class MinuteBarRepository:
                 "close_value=excluded.close_value, trade_value_eok=excluded.trade_value_eok",
                 values,
             )
+            connection.executemany(
+                "DELETE FROM top20_statistics_daily_cache WHERE trade_date=?",
+                {(str(row[0]),) for row in values},
+            )
             connection.commit()
         finally:
             connection.close()
@@ -136,6 +141,10 @@ class MinuteBarRepository:
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
                 self._replace_market_index_minutes(connection, rows)
+                connection.executemany(
+                    "DELETE FROM top20_statistics_daily_cache WHERE trade_date=?",
+                    {(minute.date().isoformat(),) for _, minute in rows},
+                )
 
     def replace_market_index_daily(self, market: str, rows: tuple[tuple[object, ...], ...]) -> None:
         if not rows:
@@ -143,6 +152,10 @@ class MinuteBarRepository:
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
                 self._replace_market_index_daily(connection, market, rows)
+                connection.executemany(
+                    "DELETE FROM top20_statistics_daily_cache WHERE trade_date=?",
+                    {(str(row[0])[:10],) for row in rows},
+                )
 
     def replace_market_index_history(
         self,
@@ -155,6 +168,12 @@ class MinuteBarRepository:
                 self._replace_market_index_minutes(connection, minute_rows)
                 for market, rows in daily_rows.items():
                     self._replace_market_index_daily(connection, market, rows)
+                affected = {minute.date().isoformat() for _, minute in minute_rows}
+                affected.update(str(row[0])[:10] for rows in daily_rows.values() for row in rows)
+                connection.executemany(
+                    "DELETE FROM top20_statistics_daily_cache WHERE trade_date=?",
+                    ((day,) for day in affected),
+                )
 
     @staticmethod
     def _replace_market_index_minutes(
@@ -225,6 +244,10 @@ class MinuteBarRepository:
                     json.dumps(cohort_segments, ensure_ascii=False),
                 ),
             )
+            connection.execute(
+                "DELETE FROM top20_statistics_daily_cache WHERE trade_date=?",
+                (minute.date().isoformat(),),
+            )
             connection.commit()
         finally:
             connection.close()
@@ -285,81 +308,134 @@ class MinuteBarRepository:
         """
         connection = sqlite3.connect(self._path)
         try:
-            rows = connection.execute(
-                "SELECT trade_date,SUM(kospi_trade_value_eok),SUM(kosdaq_trade_value_eok),"
-                "SUM(CASE WHEN kospi_trade_value_eok+kosdaq_trade_value_eok+unknown_trade_value_eok<=0 "
-                "THEN trade_value_eok ELSE unknown_trade_value_eok END) FROM top20_trade_value_index "
-                "WHERE capture_state='realtime_complete' AND strftime('%w',trade_date) NOT IN ('0','6') "
+            days = [str(row[0]) for row in connection.execute(
+                "SELECT DISTINCT trade_date FROM top20_trade_value_index "
+                "WHERE capture_state='realtime_complete' AND trade_value_eok>0 "
+                "AND strftime('%w',trade_date) NOT IN ('0','6') "
                 "AND substr(minute,12,5)>=? AND substr(minute,12,5)<? "
-                "GROUP BY trade_date "
                 "ORDER BY trade_date DESC LIMIT ?",
                 (TOP20_REGULAR_START, TOP20_REGULAR_END_EXCLUSIVE, max(1, int(limit))),
-            ).fetchall()
+            )]
+            summaries = self._load_top20_cached_summaries(connection, days)
         finally:
             connection.close()
         return tuple(
-            (date.fromisoformat(str(day)), float(kospi or 0), float(kosdaq or 0), float(unknown or 0))
-            for day, kospi, kosdaq, unknown in reversed(rows)
+            (date.fromisoformat(day), *(float(value) for value in summaries[day]["splits"]))
+            for day in reversed(days)
         )
 
     def load_top20_statistics(self, days: int) -> tuple[
         tuple[tuple[str, float, int], ...],
         tuple[tuple[date, float, float, float], ...],
     ]:
-        """수집 시간대 평균과 정규장 전체시장 대비 TOP20 비중을 반환한다."""
-        cutoff = (date.today() - timedelta(days=max(1, int(days)) - 1)).isoformat()
+        """완료된 날짜는 저장된 일별 집계를 읽고 당일만 원자료로 계산한다."""
+        today = date.today()
+        first = today - timedelta(days=max(1, int(days)) - 1)
+        calendar = [(first + timedelta(days=offset)).isoformat() for offset in range((today - first).days + 1)]
         connection = sqlite3.connect(self._path)
         try:
-            hourly = connection.execute(
-                "SELECT substr(minute,12,2)||':00',AVG(trade_value_eok),COUNT(DISTINCT trade_date) "
-                "FROM top20_trade_value_index WHERE capture_state='realtime_complete' AND trade_date>=? "
-                "AND strftime('%w',trade_date) NOT IN ('0','6') "
-                "AND substr(minute,12,5)>='08:00' AND substr(minute,12,5)<'20:00' "
-                "GROUP BY substr(minute,12,2) "
-                "ORDER BY AVG(trade_value_eok) DESC",
-                (cutoff,),
-            ).fetchall()
-            top20 = connection.execute(
-                "SELECT trade_date,SUM(trade_value_eok) FROM top20_trade_value_index "
-                "WHERE capture_state='realtime_complete' AND trade_date>=? "
-                "AND substr(minute,12,5)>=? AND substr(minute,12,5)<? "
-                "GROUP BY trade_date ORDER BY trade_date",
-                (cutoff, TOP20_REGULAR_START, TOP20_REGULAR_END_EXCLUSIVE),
-            ).fetchall()
-            market = connection.execute(
-                "SELECT trade_date,market,MAX(trade_value_eok) FROM market_index_minute_bars "
-                "WHERE trade_date>=? AND substr(minute,12,5)>=? AND substr(minute,12,5)<? "
-                "GROUP BY trade_date,market",
-                (cutoff, TOP20_REGULAR_START, TOP20_REGULAR_END_EXCLUSIVE),
-            ).fetchall()
-            finalized_market = connection.execute(
-                "SELECT trade_date,market,trade_value_eok FROM market_index_daily_bars "
-                "WHERE trade_date>=?",
-                (cutoff,),
-            ).fetchall()
+            cached = self._load_top20_cached_summaries(connection, calendar)
         finally:
             connection.close()
-        market_by_day: dict[str, dict[str, float]] = defaultdict(dict)
-        for day, name, value in market:
-            market_by_day[str(day)][str(name)] = float(value or 0)
-        # Closed days use ka20006. Today's not-yet-finalized row naturally falls
-        # back to the latest 0J/0U cumulative amount above.
-        for day, name, value in finalized_market:
-            market_by_day[str(day)][str(name)] = float(value or 0)
-        comparisons = tuple(
-            (
-                date.fromisoformat(str(day)), float(value or 0),
-                market_by_day.get(str(day), {}).get("kospi", 0.0),
-                market_by_day.get(str(day), {}).get("kosdaq", 0.0),
-            )
-            for day, value in top20
+        hourly_totals: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+        comparisons: list[tuple[date, float, float, float]] = []
+        for day in calendar:
+            summary = cached[day]
+            for hour, values in summary["hourly"].items():
+                total = hourly_totals[hour]
+                total[0] += float(values[0]); total[1] += int(values[1]); total[2] += 1
+            if summary["has_top20"]:
+                market = summary["market"]
+                comparisons.append((date.fromisoformat(day), float(summary["top20"]),
+                                    float(market.get("kospi", 0.0)), float(market.get("kosdaq", 0.0))))
+        hourly = tuple(
+            (hour, values[0] / values[1], int(values[2]))
+            for hour, values in sorted(hourly_totals.items(), key=lambda item: item[1][0] / item[1][1], reverse=True)
+            if values[1] > 0
         )
-        return (
-            tuple((str(hour), float(value or 0), int(day_count or 0)) for hour, value, day_count in hourly),
-            comparisons,
-        )
+        return hourly, tuple(comparisons)
 
-    def repair_top20_market_splits(self) -> int:
+    def _load_top20_cached_summaries(
+        self, connection: sqlite3.Connection, days: list[str],
+    ) -> dict[str, dict[str, object]]:
+        if not days:
+            return {}
+        today = date.today().isoformat()
+        cached = {
+            str(day): json.loads(str(raw)) for day, raw in connection.execute(
+                "SELECT trade_date,summary_json FROM top20_statistics_daily_cache "
+                "WHERE trade_date>=? AND trade_date<=?", (min(days), max(days)),
+            )
+        }
+        missing = [day for day in days if day < today and (day not in cached or "splits" not in cached[day])]
+        if missing:
+            summaries = self._calculate_top20_daily_summaries(connection, missing)
+            connection.executemany(
+                "INSERT INTO top20_statistics_daily_cache(trade_date,summary_json) VALUES(?,?) "
+                "ON CONFLICT(trade_date) DO UPDATE SET summary_json=excluded.summary_json",
+                ((day, json.dumps(summaries[day], ensure_ascii=False)) for day in missing),
+            )
+            connection.commit()
+            cached.update(summaries)
+        live = [day for day in days if day >= today]
+        cached.update(self._calculate_top20_daily_summaries(connection, live))
+        return cached
+
+    @staticmethod
+    def _calculate_top20_daily_summaries(
+        connection: sqlite3.Connection, days: list[str],
+    ) -> dict[str, dict[str, object]]:
+        if not days:
+            return {}
+        summaries: dict[str, dict[str, object]] = {
+            day: {"hourly": {}, "has_top20": False, "top20": 0.0,
+                  "splits": [0.0, 0.0, 0.0], "market": {}}
+            for day in days
+        }
+        placeholders = ",".join("?" for _ in days)
+        for day, hour, total, count in connection.execute(
+            "SELECT trade_date,substr(minute,12,2)||':00',SUM(trade_value_eok),COUNT(*) "
+            f"FROM top20_trade_value_index WHERE trade_date IN ({placeholders}) "
+            "AND capture_state='realtime_complete' AND trade_value_eok>0 "
+            "AND strftime('%w',trade_date) NOT IN ('0','6') "
+            "AND substr(minute,12,5)>='08:00' AND substr(minute,12,5)<'20:00' "
+            "GROUP BY trade_date,substr(minute,12,2)", days,
+        ):
+            summaries[str(day)]["hourly"][str(hour)] = [float(total or 0), int(count)]
+        for day, total in connection.execute(
+            "SELECT trade_date,SUM(trade_value_eok) FROM top20_trade_value_index "
+            f"WHERE trade_date IN ({placeholders}) AND capture_state='realtime_complete' "
+            "AND trade_value_eok>0 "
+            "AND substr(minute,12,5)>=? AND substr(minute,12,5)<? GROUP BY trade_date",
+            (*days, TOP20_REGULAR_START, TOP20_REGULAR_END_EXCLUSIVE),
+        ):
+            summaries[str(day)]["top20"] = float(total or 0)
+            summaries[str(day)]["has_top20"] = True
+        for day, kospi, kosdaq, unknown in connection.execute(
+            "SELECT trade_date,SUM(kospi_trade_value_eok),SUM(kosdaq_trade_value_eok),"
+            "SUM(CASE WHEN kospi_trade_value_eok+kosdaq_trade_value_eok+unknown_trade_value_eok<=0 "
+            "THEN trade_value_eok ELSE unknown_trade_value_eok END) FROM top20_trade_value_index "
+            f"WHERE trade_date IN ({placeholders}) AND capture_state='realtime_complete' "
+            "AND trade_value_eok>0 AND strftime('%w',trade_date) NOT IN ('0','6') "
+            "AND substr(minute,12,5)>=? AND substr(minute,12,5)<? GROUP BY trade_date",
+            (*days, TOP20_REGULAR_START, TOP20_REGULAR_END_EXCLUSIVE),
+        ):
+            summaries[str(day)]["splits"] = [float(kospi or 0), float(kosdaq or 0), float(unknown or 0)]
+        for day, market, total in connection.execute(
+            "SELECT trade_date,market,MAX(trade_value_eok) FROM market_index_minute_bars "
+            f"WHERE trade_date IN ({placeholders}) AND substr(minute,12,5)>=? "
+            "AND substr(minute,12,5)<? GROUP BY trade_date,market",
+            (*days, TOP20_REGULAR_START, TOP20_REGULAR_END_EXCLUSIVE),
+        ):
+            summaries[str(day)]["market"][str(market)] = float(total or 0)
+        for day, market, total in connection.execute(
+            "SELECT trade_date,market,trade_value_eok FROM market_index_daily_bars "
+            f"WHERE trade_date IN ({placeholders})", days,
+        ):
+            summaries[str(day)]["market"][str(market)] = float(total or 0)
+        return summaries
+
+    def repair_top20_market_splits(self, *, cancelled: Callable[[], bool] | None = None) -> int:
         """과거 합계 기록을 저장된 구성 종목·분봉·시장 정보로 다시 분리한다."""
         connection = sqlite3.connect(self._path)
         repaired = 0
@@ -367,8 +443,10 @@ class MinuteBarRepository:
             rows = connection.execute(
                 "SELECT minute,trade_value_eok,stock_codes FROM top20_trade_value_index "
                 "WHERE trade_value_eok>0 AND kospi_trade_value_eok=0 AND kosdaq_trade_value_eok=0"
-            ).fetchall()
+            )
             for minute, total, raw_codes in rows:
+                if cancelled is not None and cancelled():
+                    break
                 try:
                     codes = tuple(str(code) for code in json.loads(str(raw_codes)))
                 except (TypeError, ValueError, json.JSONDecodeError):

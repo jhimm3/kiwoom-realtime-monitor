@@ -147,15 +147,14 @@ class DevelopmentPartitionTests(unittest.TestCase):
         prepared = self.prepare()
         repo = ResearchRepository(self.root / 'warmup.sqlite3')
         events, candidates = [], []
-        original_events, original_evaluation = repo.append_execution_events, repo.append_evaluation
+        original_events, original_evaluations = repo.append_execution_events, repo.append_evaluations
         def record_events(values):
             events.extend(values)
             return original_events(values)
-        def record_evaluation(value):
-            if value.candidate_event is not None:
-                candidates.append(value.candidate_event)
-            return original_evaluation(value)
-        with patch.object(repo, 'append_execution_events', side_effect=record_events), patch.object(repo, 'append_evaluation', side_effect=record_evaluation):
+        def record_evaluations(values):
+            candidates.extend(value.candidate_event for value in values if value.candidate_event is not None)
+            return original_evaluations(values)
+        with patch.object(repo, 'append_execution_events', side_effect=record_events), patch.object(repo, 'append_evaluations', side_effect=record_evaluations):
             execute_research(prepared, repo, self.root / 'runs', _strategy(), _execution(), self.partition.evaluation_for(self.evaluation), session_profile=PROFILE)
         self.assertTrue(candidates)
         active = datetime.fromisoformat(self.at(2))

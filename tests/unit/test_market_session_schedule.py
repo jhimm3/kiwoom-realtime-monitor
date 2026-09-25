@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 
 from kiwoom_monitor.application.market_session_schedule import (
     CURRENT_SCHEDULE_VERSION,
+    KST,
     KRX_AFTER_RESEARCH_PROFILE,
     KRX_FULL_DAY_RESEARCH_PROFILE,
     KRX_REGULAR_RESEARCH_PROFILE,
+    krx_regular_session_hours,
     LEGACY_SCHEDULE_VERSION,
     LEGACY_UNFILTERED_REPLAY_PROFILE,
     MarketPhase,
@@ -22,6 +24,7 @@ from kiwoom_monitor.application.market_session_schedule import (
     realtime_subscription_target,
     research_bar_allowed,
     research_session_profile_document,
+    research_session_profile_contract_matches,
     session_window_at,
     top20_collection_available,
     top20_collection_open,
@@ -29,6 +32,32 @@ from kiwoom_monitor.application.market_session_schedule import (
 
 
 class MarketSessionScheduleTests(unittest.TestCase):
+    def test_old_frozen_session_profile_remains_readable_without_accepting_mutations(self) -> None:
+        current = research_session_profile_document(KRX_REGULAR_RESEARCH_PROFILE)
+        legacy = {key: value for key, value in current.items() if not key.startswith("verified_delayed_")}
+        self.assertTrue(research_session_profile_contract_matches(current, KRX_REGULAR_RESEARCH_PROFILE))
+        self.assertTrue(research_session_profile_contract_matches(legacy, KRX_REGULAR_RESEARCH_PROFILE))
+        self.assertFalse(research_session_profile_contract_matches(
+            {**legacy, "windows_kst": ["09:00-16:00"]}, KRX_REGULAR_RESEARCH_PROFILE,
+        ))
+        self.assertFalse(research_session_profile_contract_matches(
+            {**legacy, "unexpected": True}, KRX_REGULAR_RESEARCH_PROFILE,
+        ))
+
+    def test_verified_delayed_krx_date_has_ordinary_1530_and_1630_close(self) -> None:
+        day = date(2025, 11, 13)
+        self.assertEqual((time(10, 0), time(16, 30)),
+                         krx_regular_session_hours(day))
+        self.assertEqual(MarketSession.KRX_REGULAR,
+                         session_window_at(datetime(2025, 11, 13, 15, 30), venue="KRX").session)
+        self.assertEqual(MarketSession.KRX_CLOSING_AUCTION,
+                         session_window_at(datetime(2025, 11, 13, 16, 25), venue="KRX").session)
+        self.assertTrue(research_bar_allowed(
+            datetime(2025, 11, 13, 15, 29, tzinfo=KST),
+            datetime(2025, 11, 13, 15, 30, tzinfo=KST),
+            venue="KRX", declared_session="KRX_REGULAR", declared_phase="CONTINUOUS",
+        ))
+
     def setUp(self) -> None:
         self.codes = ("A", "B")
         self.nxt_codes = {"B"}

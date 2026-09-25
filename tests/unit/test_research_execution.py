@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from kiwoom_monitor.application.breakout_strategy import (
@@ -73,6 +74,29 @@ def _profile_bar(start: str, *, session: str, phase: str) -> KrxMinuteBarFrame:
 
 
 class ResearchExecutionTests(unittest.TestCase):
+    def test_decimal_cost_contract_uses_agreed_fee_and_sell_tax(self) -> None:
+        cost = SimulationCostModel("fixed_bps/v2", "1.5", "20", "0")
+        self.assertEqual(SimulationCostModel(**cost.to_dict()), cost)
+        self.assertEqual(cost.to_dict()["commission_bps"], "1.5")
+        engine = PaperExecutionEngine(
+            "run-1", replace(_execution(), cost_model=cost, initial_cash_won=2_000_000),
+            _strategy(),
+        )
+        engine.process_decision(
+            replace(_decision(), signal_reference_price=100_000,
+                    required_capital_won=1_000_000),
+            StrategyState(status="candidate", symbol="005930"),
+        )
+        events = engine.process_bar(_bar(4, open_=100_000, low=90_000, high=110_000))
+        self.assertEqual([event.event_type for event in events], ["FILL", "RISK_FILL"])
+        self.assertEqual(events[0].notional_won, 1_000_000)
+        self.assertEqual(events[0].commission_won, 150)
+        self.assertEqual(events[1].tax_won, 1_900)
+        with self.assertRaises(ValueError):
+            SimulationCostModel("fixed_bps/v1", "1.5", 20, 0)
+        with self.assertRaises(ValueError):
+            SimulationCostModel("fixed_bps/v2", "1.234", "20", "0")
+
     def test_unregistered_execution_and_cost_models_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "unregistered cost model"):
             SimulationCostModel("unknown", 0, 0, 0)
@@ -106,6 +130,48 @@ class ResearchExecutionTests(unittest.TestCase):
         self.assertEqual("FILL", filled[0].event_type)
         self.assertEqual("2026-09-12T00:04:00+00:00", filled[0].occurred_at)
         self.assertEqual("open", engine.strategy_state.status)
+
+    def test_exact_minute_close_can_fill_at_next_bar_start(self) -> None:
+        source = _profile_bar(
+            "2026-09-14T06:18:00+00:00", session="2026-09-14:KRX_REGULAR",
+            phase="CONTINUOUS",
+        )
+        next_bar = _profile_bar(
+            "2026-09-14T06:19:00+00:00", session="2026-09-14:KRX_REGULAR",
+            phase="CONTINUOUS",
+        )
+        engine = PaperExecutionEngine(
+            "run-1", _execution(), _strategy(),
+            session_profile=KRX_FULL_DAY_RESEARCH_PROFILE,
+        )
+        engine.process_decision(
+            _decision("2026-09-14T06:19:00+00:00"),
+            StrategyState(status="candidate", symbol="005930"), source_bar=source,
+        )
+        event = engine.process_bar(next_bar)[0]
+        self.assertEqual("FILL", event.event_type)
+        self.assertEqual("2026-09-14T06:19:00+00:00", event.occurred_at)
+
+    def test_exact_minute_close_still_censors_missing_next_bar(self) -> None:
+        source = _profile_bar(
+            "2026-09-14T06:18:00+00:00", session="2026-09-14:KRX_REGULAR",
+            phase="CONTINUOUS",
+        )
+        later_bar = _profile_bar(
+            "2026-09-14T06:20:00+00:00", session="2026-09-14:KRX_REGULAR",
+            phase="CONTINUOUS",
+        )
+        engine = PaperExecutionEngine(
+            "run-1", _execution(), _strategy(),
+            session_profile=KRX_FULL_DAY_RESEARCH_PROFILE,
+        )
+        engine.process_decision(
+            _decision("2026-09-14T06:19:00+00:00"),
+            StrategyState(status="candidate", symbol="005930"), source_bar=source,
+        )
+        event = engine.process_bar(later_bar)[0]
+        self.assertEqual(("ORDER_CENSORED", "next_tradable_bar_gap"),
+                         (event.event_type, event.reason))
 
     def test_cash_reservation_and_fill_never_exceed_available_cash(self) -> None:
         execution = SimulationExecutionConfig(
@@ -188,6 +254,35 @@ class ResearchExecutionTests(unittest.TestCase):
             source_bar=regular_source,
         )
         self.assertEqual("ORDER_CENSORED", engine.process_bar(next_day)[0].event_type)
+
+    def test_pending_close_order_is_censored_by_next_session_other_symbol(self) -> None:
+        close = _profile_bar(
+            "2025-04-02T06:20:00+00:00", session="2025-04-02:KRX_REGULAR",
+            phase="AUCTION_ORDER_ENTRY",
+        )
+        next_session = replace(_profile_bar(
+            "2025-05-07T00:00:00+00:00", session="2025-05-07:KRX_REGULAR",
+            phase="CONTINUOUS",
+        ), code="000660")
+        engine = PaperExecutionEngine(
+            "run-1", _execution(), _strategy(),
+            session_profile=KRX_FULL_DAY_RESEARCH_PROFILE,
+        )
+        engine.process_decision(
+            _decision("2025-04-02T06:30:00+00:00"),
+            StrategyState(status="candidate", symbol="005930"), source_bar=close,
+        )
+        [event] = engine.process_bar(next_session)
+        self.assertEqual(("ORDER_CENSORED", "session_boundary_before_fill"),
+                         (event.event_type, event.reason))
+        self.assertEqual("", event.source_revision_id)
+        self.assertIsNone(engine.portfolio.pending_order)
+        self.assertEqual("flat", engine.strategy_state.status)
+        [submitted] = engine.process_decision(
+            replace(_decision("2025-05-07T00:04:00+00:00"), decision_id="next-day"),
+            StrategyState(status="candidate", symbol="005930"),
+        )
+        self.assertEqual("ORDER_SUBMITTED", submitted.event_type)
 
     def test_profiled_next_bar_open_is_unsupported_for_auction_bar(self) -> None:
         source = _profile_bar(

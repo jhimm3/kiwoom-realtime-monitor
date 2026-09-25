@@ -15,7 +15,7 @@ services:
       retries: 10
 
   server:
-    image: kiwoom-monitor-server:2026.09.22-theme-suggestion-review-v1
+    image: kiwoom-monitor-server:2026.09.25-followup-newhigh-cache-v1
     build:
       context: ../..
       dockerfile: deploy/synology/server.Dockerfile
@@ -53,6 +53,8 @@ services:
       NAVER_NEWS_CLIENT_ID: ${NAVER_NEWS_CLIENT_ID}
       NAVER_NEWS_CLIENT_SECRET: ${NAVER_NEWS_CLIENT_SECRET}
       NEWS_REFRESH_SECONDS: ${NEWS_REFRESH_SECONDS}
+      NEWS_NAVER_API_ENABLED: ${NEWS_NAVER_API_ENABLED:-true}
+      NEWS_NAVER_STOCK_ENABLED: ${NEWS_NAVER_STOCK_ENABLED:-false}
       NEWS_HISTORY_JOBS_ENABLED: ${NEWS_HISTORY_JOBS_ENABLED:-true}
       NEWS_QUERY_SET_ENABLED: ${NEWS_QUERY_SET_ENABLED:-true}
       NEWS_QUERY_SET: "${NEWS_QUERY_SET:-증권,코스피,코스닥,상장사,수주 계약,유상증자,인수합병,실적 전망,최대주주}"

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QSettings, QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
@@ -343,6 +343,10 @@ class MockAutomationDialog(QDialog):
         layout.addLayout(buttons)
         layout.addWidget(self._message)
         self._set_busy(False)
+        self._window_settings = QSettings("KiwoomMonitor", "MockAutomationDialog")
+        geometry = self._window_settings.value("geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -528,9 +532,26 @@ class MockAutomationDialog(QDialog):
             runner = status.get("runner")
             runner_state = runner.get("state") if isinstance(runner, dict) else "없음"
             error = str(status.get("restore_error", ""))
+            latency = runner.get("latency") if isinstance(runner, dict) else None
+            latency_text = ""
+            if isinstance(latency, dict):
+                latency_text = (
+                    f" · 최근 조회 {latency.get('observation_count', 0)}건/"
+                    f"{latency.get('last_poll_duration_ms', 0)}ms"
+                    f" (DB {latency.get('load_duration_ms', 0)}ms)"
+                )
+                if latency.get("last_bar_age_ms") is not None:
+                    processed_at = str(latency.get("last_bar_processed_at") or "")
+                    latency_text += (
+                        f" · 마지막 분봉 가용→처리 {latency['last_bar_age_ms']}ms"
+                        f" ({processed_at[11:19]} UTC)"
+                    )
+                if latency.get("future_or_invalid_bar_time_count"):
+                    latency_text += " · 분봉 시각 확인 필요"
             self._runtime.setText(
                 f"모드 {status.get('runtime_mode') or '수동'} · 제어 {desired} · runner {runner_state}"
                 + (f" · 복원 오류 {error}" if error else "")
+                + latency_text
             )
         else:
             self._runtime.setText("상태를 확인할 수 없습니다.")
@@ -556,10 +577,12 @@ class MockAutomationDialog(QDialog):
             self._apply_button_state()
 
     def stop(self) -> None:
+        self._window_settings.setValue("geometry", self.saveGeometry())
         if self._worker is not None and self._worker.isRunning():
             self._worker.requestInterruption()
             self._worker.wait(12_000)
 
     def closeEvent(self, event) -> None:
+        self._window_settings.setValue("geometry", self.saveGeometry())
         event.ignore()
         self.hide()

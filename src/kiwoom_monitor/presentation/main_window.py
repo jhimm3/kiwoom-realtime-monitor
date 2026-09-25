@@ -222,6 +222,7 @@ from kiwoom_monitor.presentation.settings_dialog import (
     SettingsDialog,
     selected_high_cycle_periods,
 )
+from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
 from kiwoom_monitor.presentation.similar_stock_dialog import (
     SimilarStockDialog,
     choose_similar_stock,
@@ -452,6 +453,8 @@ class MainWindow(QMainWindow):
         self._columns = columns
         self._stock_lookup = stock_lookup
         self._theme_store = theme_store
+        self._theme_save_request: SettingsRequestWorker | None = None
+        self._theme_confirmation_active = False
         self._google_drive_sync = google_drive_sync
         self._api_runtime_factory = api_runtime_factory
         self._market_data_client = market_data_client
@@ -476,8 +479,20 @@ class MainWindow(QMainWindow):
             self._market_cache_writer.minute_saved.connect(self._start_top20_market_repair)
             self._market_cache_writer.minute_failed.connect(self._on_minute_cache_write_failed)
             self._market_cache_writer.price_failed.connect(self._on_price_cache_write_failed)
+            self._market_cache_writer.fundamentals_failed.connect(
+                lambda code, message: logger.warning("%s 기초정보 캐시 저장 실패: %s", code, message)
+            )
             self._market_cache_writer.history_saved.connect(self._on_history_cache_saved)
             self._market_cache_writer.history_failed.connect(self._on_history_cache_failed)
+            self._market_cache_writer.daily_high_failed.connect(
+                lambda code, message: logger.warning("일봉 캐시 저장 실패 (%s): %s", code, message)
+            )
+            self._market_cache_writer.comparison_saved.connect(
+                lambda count: logger.info("분봉·일봉 거래대금 비교 CSV 갱신: %s건", count)
+            )
+            self._market_cache_writer.comparison_failed.connect(
+                lambda message: logger.warning("분봉·일봉 거래대금 비교 CSV 저장 실패: %s", message)
+            )
             self._market_cache_writer.start()
         self._candidate_dialog = (
             CandidateMonitorDialog(candidate_client, candidate_settings_client, self)
@@ -590,6 +605,7 @@ class MainWindow(QMainWindow):
         self._ranking_worker_controller.failed.connect(self._on_ranking_failed)
         self._ranking_worker_controller.finished.connect(self._on_ranking_worker_finished)
         self._settings_dialog: SettingsDialog | None = None
+        self._theme_manager_dialog: ThemeManagerDialog | None = None
         self._deferred_ranking_flush_scheduled = False
         self._table_update_deferred = False
         self._table_update_flush_scheduled = False
@@ -600,6 +616,8 @@ class MainWindow(QMainWindow):
             lambda: str(self._environment_selector.currentData()),
         )
         self._rank_changed_codes: set[str] = set()
+        self._ranking_followup_revision = 0
+        self._started_followup_revision = -1
         self._selected_table_cell: tuple[int, int] | None = None
         self._selected_table_code: str | None = None
         self._syncing_row_heights = False
@@ -781,7 +799,6 @@ class MainWindow(QMainWindow):
         self._minute_bar_repository = minute_bar_repository
         if self._minute_bar_repository is not None:
             try:
-                self._minute_bar_repository.repair_top20_market_splits()
                 saved_index = self._minute_bar_repository.load_recent_top20_trade_value_index(
                     1_440, trade_date=date.today(),
                 )
@@ -871,6 +888,11 @@ class MainWindow(QMainWindow):
         top20_index_button.setObjectName("top20_index_button")
         top20_index_button.setToolTip("각 순위의 20종목을 다음 30초에 적용하고 두 구간을 1분으로 합산합니다.")
         top20_index_button.clicked.connect(self._show_top20_trade_value_window)
+        market_news_button = QPushButton("뉴스")
+        market_news_button.setObjectName("market_news_button")
+        market_news_button.setToolTip("공통뉴스·실시간 속보·해외뉴스")
+        market_news_button.clicked.connect(self._show_market_news)
+        toolbar.addWidget(market_news_button)
         toolbar.addWidget(top20_index_button)
         journal_button = QPushButton("매매일지")
         journal_button.setToolTip("과거 매매목록을 열고, 종목이 선택되어 있으면 오늘 분봉도 함께 표시합니다.")
@@ -1810,6 +1832,10 @@ class MainWindow(QMainWindow):
             logger.warning("뉴스 프로세스를 시작하지 못했습니다: %s", error)
             self.statusBar().showMessage("뉴스창을 시작하지 못했습니다.")
 
+    def _show_market_news(self) -> None:
+        self._ensure_news_process()
+        self._send_news_command(action="market_news")
+
     def _stop_current_news_process(self) -> None:
         """메인 앱 종료 시 뉴스 자식 프로세스까지 확실히 정리한다."""
         process = self._news_process_manager.process
@@ -1916,8 +1942,21 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("신고가 근접 알림을 " + ("사용합니다." if enabled else "사용하지 않습니다."))
 
     def _open_theme_manager(self) -> None:
-        if self._theme_store is not None:
-            ThemeManagerDialog(self._theme_store, self._settings, self._select_excel, self._select_theme_image, self._sync_krx_stock_catalog, self, self._on_themes_changed, self._news_database_path).exec()
+        if self._theme_store is None:
+            return
+        if self._theme_manager_dialog is not None and self._theme_manager_dialog.isVisible():
+            self._theme_manager_dialog.raise_()
+            self._theme_manager_dialog.activateWindow()
+            return
+        dialog = ThemeManagerDialog(self._theme_store, self._settings, self._select_excel, self._select_theme_image, self._sync_krx_stock_catalog, self, self._on_themes_changed, self._news_database_path)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.finished.connect(lambda _result, source=dialog: self._clear_theme_manager_dialog(source))
+        self._theme_manager_dialog = dialog
+        dialog.show()
+
+    def _clear_theme_manager_dialog(self, dialog: ThemeManagerDialog) -> None:
+        if self._theme_manager_dialog is dialog:
+            self._theme_manager_dialog = None
 
     def _set_api_status(self, text: str, color: str) -> None:
         self._api_status.setText(text)
@@ -2021,7 +2060,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         if QMessageBox.question(
-            self,
+            dialog,
             "설정 복원",
             "현재 공통 설정과 표 표시·순서를 백업 파일 내용으로 바꿉니다. "
             "테마 DB와 이 PC의 창 위치·크기는 바뀌지 않습니다. 계속할까요?",
@@ -2134,14 +2173,49 @@ class MainWindow(QMainWindow):
         if not dialog.exec():
             return
         after = dialog.themes
-        if QMessageBox.question(
-            self,
-            "테마 변경 확인",
-            f"종목: {name}\n\n기존: {before or '-'}\n변경: {', '.join(after) or '-'}\n\n변경사항을 저장할까요?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        ) == QMessageBox.StandardButton.Yes:
-            self._theme_store.replace_for_stock(code, after)
-            self._on_themes_changed()
+        self._theme_confirmation_active = True
+        try:
+            confirmed = QMessageBox.question(
+                self,
+                "테마 변경 확인",
+                f"종목: {name}\n\n기존: {before or '-'}\n변경: {', '.join(after) or '-'}\n\n변경사항을 저장할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            ) == QMessageBox.StandardButton.Yes
+        finally:
+            self._theme_confirmation_active = False
+        if confirmed:
+            store = self._theme_store
+            self._submit_main_theme_change(lambda: store.replace_for_stock(code, after))
+
+    def _submit_main_theme_change(self, task: Callable[[], object]) -> None:
+        if self._theme_save_request is not None or self._theme_store is None:
+            self.statusBar().showMessage("이전 테마 저장이 끝나면 다시 시도하세요.", 5_000)
+            return
+        store = self._theme_store
+
+        def persist() -> object:
+            task()
+            return store.all_by_name()
+
+        worker = SettingsRequestWorker(persist)
+        self._theme_save_request = worker
+        worker.succeeded.connect(self._main_theme_change_saved)
+        worker.failed.connect(self._main_theme_change_failed)
+        worker.start()
+
+    def _main_theme_change_saved(self, themes: object) -> None:
+        self._theme_save_request = None
+        if self._closing:
+            return
+        self._themes = dict(themes)
+        self._refresh_theme_badges()
+        self._refresh_rankings()
+        self._schedule_google_drive_upload("both")
+
+    def _main_theme_change_failed(self, message: str) -> None:
+        self._theme_save_request = None
+        if not self._closing:
+            self._on_background_failure(f"테마 저장: {message}")
 
     @staticmethod
     def _api_config_path() -> Path:
@@ -2505,9 +2579,9 @@ class MainWindow(QMainWindow):
                 preview = ThemePreviewDialog(changes, len(unmatched), self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get("theme_excel_import_exclusions"), separators)))
                 if preview.exec() and self._theme_store:
                     changes = preview.changes(separators)
-                    applied = sum(change.status != "변경 없음" for change in changes)
-                    for change in changes:
-                        if change.status != "변경 없음": self._theme_store.replace_for_stock(change.code, change.after)
+                    pending = tuple((change.code, change.after) for change in changes if change.status != "변경 없음")
+                    applied = len(pending)
+                    self._theme_store.replace_many(pending)
                     self._themes = self._theme_store.all_by_name()
                     self._refresh_rankings()
                     QMessageBox.information(self, "Excel 테마 업데이트 완료", f"{applied}개 종목의 테마를 적용했습니다.")
@@ -2914,6 +2988,7 @@ class MainWindow(QMainWindow):
         self._ranked_stock_names.clear()
         self._visible_theme_frequency = visible_theme_frequency(stocks, self._themes)
         codes = tuple(stock.code for stock in stocks)
+        self._ranking_followup_revision += 1
         self._prepare_top20_trade_value_index(codes, self._ranking_now())
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_markets"):
             self._stock_markets.update(self._stock_lookup.load_markets(self._top20_realtime_codes(codes)))
@@ -3060,10 +3135,18 @@ class MainWindow(QMainWindow):
         self._table.viewport().update()
 
     def _has_blocking_modal(self) -> bool:
-        """Image-theme review is allowed to coexist with the live ranking table."""
-        return QApplication.activeModalWidget() is not None and not bool(
-            getattr(self, "_image_theme_workflow_active", False)
-        )
+        """Keep live ranking visible while settings and theme editors are open."""
+        modal = QApplication.activeModalWidget()
+        if modal is None or bool(getattr(self, "_image_theme_workflow_active", False)) or bool(getattr(self, "_theme_confirmation_active", False)):
+            return False
+        while modal is not None:
+            if isinstance(modal, (SettingsDialog, ThemeManagerDialog, ThemeEditDialog,
+                                  ThemePreviewDialog, ThemeColorDialog, ImageThemeRowsDialog,
+                                  TextThemeImportDialog, ThemeBulkDeleteDialog,
+                                  ThemeBulkEditDialog, ApiSettingsDialog)):
+                return False
+            modal = modal.parentWidget()
+        return True
 
     def _theme_badges(self, code: str, name: str) -> QWidget:
         widget = QWidget(); layout = QHBoxLayout(widget); layout.setContentsMargins(2, 2, 2, 2); layout.setSpacing(3)
@@ -3132,9 +3215,11 @@ class MainWindow(QMainWindow):
         if not self._theme_store: return
         dialog=ThemeColorDialog(theme, self._theme_store.color_for_stock_theme(code, theme), self)
         if dialog.exec():
-            if dialog.stock_only: self._theme_store.set_stock_theme_color(code, theme, dialog.color)
-            else: self._theme_store.set_color(theme, dialog.color)
-            self._refresh_rankings()
+            store, color, stock_only = self._theme_store, dialog.color, dialog.stock_only
+            if stock_only:
+                self._submit_main_theme_change(lambda: store.set_stock_theme_color(code, theme, color))
+            else:
+                self._submit_main_theme_change(lambda: store.set_color(theme, color))
 
     def _trade_display_mode(self, period: str) -> str:
         try:
@@ -3390,7 +3475,14 @@ class MainWindow(QMainWindow):
         """실시간 순위 뒤의 저우선순위 보완 조회를 시작한다."""
         if self._closing or self._ranking_execution.priority_preparing:
             return
+        # 이전 구독의 늦은 승인이나 이전 회차의 fallback은 새 순위를 시작하지 않는다.
+        if not self._row_by_code or not set(self._row_by_code).issubset(codes):
+            return
+        revision = self._ranking_followup_revision
+        if self._started_followup_revision == revision:
+            return
         self._start_secondary_loading(codes)
+        self._started_followup_revision = revision
 
     def _ensure_today_minute_bar_storage(self, now: datetime) -> None:
         """날짜가 바뀌면 메모리를 비우고, DB에서는 30일보다 오래된 분봉만 정리한다."""
@@ -3453,6 +3545,9 @@ class MainWindow(QMainWindow):
         """이미 받은 ka10081 일봉값을 재사용해 개발 확인용 CSV를 갱신한다."""
         pending, self._pending_daily_trade_comparisons = self._pending_daily_trade_comparisons, {}
         if not pending or self._minute_bar_repository is None:
+            return
+        if self._market_cache_writer is not None:
+            self._market_cache_writer.enqueue_trade_comparisons(pending, self._ranking_now().date())
             return
         try:
             count = self._minute_bar_repository.update_comparison_reports(pending, self._ranking_now().date())
@@ -3896,6 +3991,15 @@ class MainWindow(QMainWindow):
             period.addItem(label, value)
         period.setCurrentIndex(max(0, period.findData(days)))
         controls.addWidget(period); controls.addStretch(1); layout.addLayout(controls)
+        collection_notice = QLabel()
+        collection_notice.setWordWrap(True)
+        collection_notice.setText(
+            "NAS 연결: 과거일 통계는 NAS에 저장된 집계 결과를 조회하고, 당일은 실시간 자료를 반영합니다."
+            if self._uses_nas_top20_source() else
+            "PC 직접 연결: 앱이 켜져 있을 때만 TOP20 자료를 자동 수집합니다. "
+            "과거일은 마지막으로 저장된 분까지의 집계를 재사용하고, 당일은 새 분을 반영합니다."
+        )
+        layout.addWidget(collection_notice)
         content = QTextEdit(); content.setReadOnly(True)
         layout.addWidget(content)
         def refresh_statistics() -> None:
@@ -3953,12 +4057,12 @@ class MainWindow(QMainWindow):
             f"최근 {days}일 범위 · 자료 원본: {source}",
             "", "[시간대별 TOP20 1분 평균 · 높은 순]",
         ]
-        for value in hourly:
+        for rank, value in enumerate(hourly, start=1):
             if not isinstance(value, dict):
                 continue
             try:
                 lines.append(
-                    f"{value.get('hour', '')}  {Top20TradeValueChart._amount(float(value.get('average_eok', 0) or 0))}  "
+                    f"{rank}위  {value.get('hour', '')}  {Top20TradeValueChart._amount(float(value.get('average_eok', 0) or 0))}  "
                     f"(수집일 {int(value.get('day_count', 0) or 0)}일)"
                 )
             except (TypeError, ValueError):
@@ -4625,9 +4729,13 @@ class MainWindow(QMainWindow):
                 self._after_close_daily_received.add(code)
             self._daily_highs[code] = targets
             self._daily_high_basis_refresh_received.add(code)
-            if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_adjusted_high_250_price"):
-                self._stock_lookup.update_adjusted_high_250_price(code, targets.high_250_price)
-            if self._daily_bar_repository is not None:
+            if self._market_cache_writer is not None and self._daily_bar_repository is not None:
+                now = self._ranking_now()
+                self._market_cache_writer.enqueue_daily_high(code, targets, now.date(), now)
+            else:
+                if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_adjusted_high_250_price"):
+                    self._stock_lookup.update_adjusted_high_250_price(code, targets.high_250_price)
+            if self._daily_bar_repository is not None and self._market_cache_writer is None:
                 try:
                     now = self._ranking_now()
                     self._daily_bar_repository.upsert_targets(
@@ -5101,13 +5209,21 @@ class MainWindow(QMainWindow):
                 daily=self._daily_highs.get(code),
             )
             self._fundamentals[code] = fundamentals
-            if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_fundamentals"):
+            if self._market_cache_writer is not None:
                 # ka10001 원본 250일 고가는 권리 조정 전 가격일 수 있으므로
                 # daily high 작업이 저장한 수정주가 기준 캐시를 덮어쓰지 않는다.
-                self._stock_lookup.update_fundamentals(
+                self._market_cache_writer.enqueue_fundamentals(
                     code, fundamentals.market_cap_eok, fundamentals.float_ratio_percent,
-                    None, fundamentals.float_shares, fundamentals.upper_limit_price,
+                    fundamentals.float_shares, fundamentals.upper_limit_price,
                 )
+            elif self._stock_lookup is not None and hasattr(self._stock_lookup, "update_fundamentals"):
+                try:
+                    self._stock_lookup.update_fundamentals(
+                        code, fundamentals.market_cap_eok, fundamentals.float_ratio_percent,
+                        None, fundamentals.float_shares, fundamentals.upper_limit_price,
+                    )
+                except Exception:
+                    logger.exception("기초정보 캐시 저장 실패: %s", code)
             if self._defer_table_update_while_modal():
                 return
             self._render_market_cap(code)

@@ -17,6 +17,9 @@ param(
     [ValidateRange(1, 16)]
     [int]$ArticleWorkers = 16,
 
+    [ValidateRange(1, 8)]
+    [int]$PrepareWorkers = 4,
+
     [ValidateRange(1, 1000)]
     [int]$PublishEvery = 10,
 
@@ -43,6 +46,19 @@ $stamp = [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')
 $logFile = Join-Path $logRoot "news-$stamp.log"
 
 [IO.Directory]::CreateDirectory($logRoot) | Out-Null
+$lockFile = Join-Path $stateRoot 'news-collector.lock'
+try {
+    $singleInstance = [IO.File]::Open(
+        $lockFile, [IO.FileMode]::OpenOrCreate,
+        [IO.FileAccess]::ReadWrite, [IO.FileShare]::None
+    )
+}
+catch [IO.IOException] {
+    $message = 'News collector is already running; duplicate launch skipped.'
+    [IO.File]::AppendAllText($logFile, "$([DateTimeOffset]::Now.ToString('o')) $message$([Environment]::NewLine)")
+    Write-Output $message
+    exit 0
+}
 if (Test-Path -LiteralPath $stopFile) {
     Remove-Item -LiteralPath $stopFile -Force
 }
@@ -74,6 +90,12 @@ $stopRequested = $false
 Write-State 'running' $completed
 Write-Log "collector started jobs=$Jobs max_pages=$MaxPages search_workers=$SearchWorkers article_workers=$ArticleWorkers publish_every=$PublishEvery status_every=$StatusEvery"
 try {
+    $excludeOutput = & $python scripts\probe_historical_backfill.py news-exclude-nonstocks `
+        --output $Database 2>&1
+    foreach ($line in $excludeOutput) { Write-Log ([string]$line) }
+    if ($LASTEXITCODE -ne 0) {
+        throw "news-exclude-nonstocks exited with code $LASTEXITCODE"
+    }
     $rangeSeedOutput = & $python scripts\probe_historical_backfill.py news-range-seed `
         --minimum-density 0.5 --output $Database 2>&1
     foreach ($line in $rangeSeedOutput) { Write-Log ([string]$line) }
@@ -92,6 +114,7 @@ try {
             --jobs 1 --max-pages $MaxPages --request-delay $RequestDelay `
             --search-workers $SearchWorkers `
             --article-delay $ArticleDelay --article-workers $ArticleWorkers `
+            --prepare-workers $PrepareWorkers `
             --heartbeat-file $heartbeatFile `
             --output $Database 2>&1
         $collectorExitCode = $LASTEXITCODE
@@ -125,12 +148,7 @@ try {
             continue
         }
         try {
-            $importOutput = & $python scripts\import_historical_news_to_nas.py `
-                --database $Database --batch-size 100 2>&1
-            foreach ($line in $importOutput) { Write-Log ([string]$line) }
-            if ($LASTEXITCODE -ne 0) {
-                Write-Log "NAS news import exited with code $LASTEXITCODE"
-            }
+            Write-Log 'Collected articles are prepared on PC; raw NAS import remains disabled.'
             if (($completed % $StatusEvery) -eq 0) {
                 $statusOutput = & $python scripts\report_historical_collection_status.py `
                     --database $Database --nas-project $NasProject --fast 2>&1
@@ -154,15 +172,8 @@ try {
         Write-Log "collector stopped completed=$completed"
         exit 0
     }
-    Write-State 'publishing' $completed
-    $publishOutput = & $python scripts\publish_historical_intelligence_to_nas.py `
-        --database $Database --nas-project $NasProject 2>&1
-    foreach ($line in $publishOutput) { Write-Log ([string]$line) }
-    if ($LASTEXITCODE -ne 0) {
-        throw "NAS snapshot publish exited with code $LASTEXITCODE"
-    }
     & $python scripts\report_historical_collection_status.py `
-        --database $Database --nas-project $NasProject 2>&1 |
+        --database $Database --nas-project $NasProject --fast 2>&1 |
         ForEach-Object { Write-Log ([string]$_) }
     Write-State 'complete' $completed
     Write-Log "collector finished completed=$completed"
@@ -172,4 +183,7 @@ catch {
     Write-State 'failed' $completed $_.Exception.Message
     Write-Log "collector failed: $($_.Exception.Message)"
     exit 2
+}
+finally {
+    $singleInstance.Dispose()
 }

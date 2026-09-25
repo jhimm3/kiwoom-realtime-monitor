@@ -119,7 +119,7 @@ class SymbolPartitionTests(unittest.TestCase):
             session_profile=fixtures.PROFILE)
         return result, repo
 
-    def test_only_admitted_targets_reach_engine_and_strategy_with_full_peer_context(self):
+    def test_only_admitted_targets_reach_engine_with_own_bars_and_full_universe(self):
         dataset = self.multi_symbol(); prepared = self.prepare(dataset)
         processed, evaluated, histories, universes = [], [], [], []
         original_bar = runner.PaperExecutionEngine.process_bar
@@ -136,7 +136,7 @@ class SymbolPartitionTests(unittest.TestCase):
             result, repo = self.execute(prepared, 'targets')
         self.assertTrue(processed); self.assertEqual({'005930'}, set(processed))
         self.assertTrue(evaluated); self.assertEqual({'005930'}, set(evaluated))
-        self.assertTrue(any(values == {'005930', '0710A0'} for values in histories))
+        self.assertTrue(all(values == {'005930'} for values in histories))
         self.assertTrue(all(values == ('005930', '0710A0') for values in universes))
         report = repo.load_research_report(result.run_id)
         self.assertEqual('PASS', report['data_quality']['status'])

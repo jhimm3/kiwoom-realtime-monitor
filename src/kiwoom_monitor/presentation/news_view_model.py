@@ -5,7 +5,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from kiwoom_monitor.application.news_analysis import extractive_news_summary
 from kiwoom_monitor.application.news_grouping import NewsEventGroup
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem, news_provider
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import StoredAINewsAnalysis
@@ -30,6 +29,7 @@ class StoredNewsEvidence:
     body_revision_id: str = ""
     body_status: str = "missing"
     body_text: str = ""
+    core_sentences: tuple[str, ...] = ()
     body_error: str = ""
     event: Mapping[str, Any] | None = None
     historical_revision: bool = False
@@ -166,14 +166,11 @@ def stored_news_evidence_html(evidence: StoredNewsEvidence | None, *, loading: b
 
 def stored_news_core_sentences_html(evidence: StoredNewsEvidence | None) -> str:
     """최종 판단 바로 뒤에 둘 비AI 원문 핵심 문장만 렌더링한다."""
-    if evidence is None or evidence.body_status != "fulltext" or not evidence.body_text:
-        return ""
-    summary_sentences = extractive_news_summary("", evidence.title, evidence.body_text[:20_000])
-    if not summary_sentences:
+    if evidence is None or evidence.body_status != "fulltext" or not evidence.core_sentences:
         return ""
     summary = "".join(
         "<li style='margin:0 0 8px 0; line-height:1.65'>" + escape_html(sentence) + "</li>"
-        for sentence in summary_sentences
+        for sentence in evidence.core_sentences
     )
     return (
         "<div style='background:#FFF; border-left:4px solid #2563EB; padding:8px 12px; margin-bottom:16px;'>"

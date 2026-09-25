@@ -322,7 +322,9 @@ class Top20MarketRepairWorker(QThread):
 
     def run(self) -> None:
         try:
-            self.completed.emit(self._repository.repair_top20_market_splits())
+            self.completed.emit(self._repository.repair_top20_market_splits(
+                cancelled=self.isInterruptionRequested,
+            ))
         except Exception as error:
             self.failed.emit(str(error))
 

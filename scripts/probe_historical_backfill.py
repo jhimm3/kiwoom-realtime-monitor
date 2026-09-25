@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait as wait_for_futures
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -15,15 +16,21 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
-SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = PROJECT_ROOT / "src"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
+
+from scripts.preprocess_historical_news_locally import ConcurrentArticlePreparation
 
 from kiwoom_monitor.infrastructure.historical_backfill import (
     article_publication_records,
     claim_news_backfill_job,
     claim_news_range_job,
     clear_news_backfill_jobs,
+    exclude_non_stock_news_jobs,
     fetch_article_publication,
     fetch_naver_historical_search_page,
     fetch_naver_stock_news_page,
@@ -272,7 +279,7 @@ def _write_news_heartbeat(
         "updated_at": datetime.now(UTC).isoformat(),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
         for retry in range(5):
@@ -286,7 +293,10 @@ def _write_news_heartbeat(
     except OSError:
         return
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def main() -> int:
@@ -340,6 +350,12 @@ def main() -> int:
     news_range_seed.add_argument("--minimum-density", type=float, default=0.5)
     news_range_seed.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
 
+    news_exclude = subparsers.add_parser(
+        "news-exclude-nonstocks", help="기존 대기 원장에서 ETF·ETN·리츠 등 비주식을 제외합니다."
+    )
+    news_exclude.add_argument("--database", type=Path, default=DEFAULT_CANDIDATE_DB)
+    news_exclude.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
+
     news_run = subparsers.add_parser(
         "news-run", help="대기 중인 과거 뉴스 작업을 재개 가능하게 실행합니다."
     )
@@ -350,6 +366,9 @@ def main() -> int:
     news_run.add_argument("--article-delay", type=float, default=0.2)
     news_run.add_argument("--article-workers", type=int, default=1)
     news_run.add_argument("--heartbeat-file", type=Path)
+    news_run.add_argument("--prepared-output", type=Path,
+                          default=Path("data/historical_collection/prepared_news.sqlite3"))
+    news_run.add_argument("--prepare-workers", type=int, default=4)
     news_run.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
 
     daishin = subparsers.add_parser("daishin-preflight", help="CREON Plus 조회 환경만 점검합니다.")
@@ -402,6 +421,10 @@ def main() -> int:
             "output": str(args.output.resolve()),
         }, ensure_ascii=False, indent=2))
         return 0
+    if args.command == "news-exclude-nonstocks":
+        result = exclude_non_stock_news_jobs(args.database, args.output)
+        print(json.dumps(result, ensure_ascii=False), flush=True)
+        return 0
     if args.command == "news-run":
         if args.jobs < 1 or args.jobs > 10000:
             parser.error("--jobs must be between 1 and 10000")
@@ -411,6 +434,8 @@ def main() -> int:
             parser.error("--search-workers must be between 1 and 8")
         if args.article_workers < 1 or args.article_workers > 16:
             parser.error("--article-workers must be between 1 and 16")
+        if args.prepare_workers < 1 or args.prepare_workers > 8:
+            parser.error("--prepare-workers must be between 1 and 8")
         completed_jobs = 0
         failed_jobs = 0
         truncated_jobs = 0
@@ -450,7 +475,11 @@ def main() -> int:
                     throttle_observer=record_search_throttle,
                 ) as search_pool, _ArticleFetchPool(
                     workers=args.article_workers, article_delay=args.article_delay,
-                ) as article_pool:
+                ) as article_pool, ConcurrentArticlePreparation(
+                    output=args.prepared_output, search_database=args.output,
+                    market_database=Path("data/naver_stock_market_news.sqlite3"),
+                    matcher=(), workers=args.prepare_workers, allow_network=False,
+                ) as preparation:
                     batch_start = 0
                     while batch_start < args.max_pages:
                         batch_width = 1 if batch_start == 0 else args.search_workers
@@ -491,6 +520,12 @@ def main() -> int:
                                     _store_resolved_observation(
                                         args.output, page, item, published_at,
                                     )
+                                    if status == "published_at_found":
+                                        preparation.submit(
+                                            "historical_backfill", page.code,
+                                            item.original_url or item.portal_url or
+                                            f"naver:{item.office_id}:{item.article_id}",
+                                        )
                             drained = list(article_pool.drain())
                             store_article_publication_results(
                                 args.output, [result for _item, result in drained],
@@ -501,6 +536,12 @@ def main() -> int:
                                     args.output, item_pages[key], item, result.published_at,
                                 )
                                 statuses[key] = result.status
+                                if result.status == "published_at_found":
+                                    preparation.submit(
+                                        "historical_backfill", item_pages[key].code,
+                                        item.original_url or item.portal_url or
+                                        f"naver:{item.office_id}:{item.article_id}",
+                                    )
                                 completed_articles += 1
                                 _write_news_heartbeat(
                                     args.heartbeat_file, job, "article",
@@ -524,12 +565,19 @@ def main() -> int:
                             args.output, item_pages[key], item, result.published_at,
                         )
                         statuses[key] = result.status
+                        if result.status == "published_at_found":
+                            preparation.submit(
+                                "historical_backfill", item_pages[key].code,
+                                item.original_url or item.portal_url or
+                                f"naver:{item.office_id}:{item.article_id}",
+                            )
                         completed_articles += 1
                         _write_news_heartbeat(
                             args.heartbeat_file, job, "article",
                             page=pages_observed, pages_observed=pages_observed,
                             items_observed=items_observed, article=completed_articles,
                         )
+                    preparation.drain(all_pending=True)
                 for key in occurrences:
                     status = statuses[key]
                     if status == "published_at_found":

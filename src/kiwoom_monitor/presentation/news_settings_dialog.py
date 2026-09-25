@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QSettings, QUrl, Slot
 from PySide6.QtGui import QColor, QDesktopServices
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from kiwoom_monitor.infrastructure.naver_news import (
     LocalNaverNewsConfig,
+    LocalNewsSources,
     NaverNewsCredentials,
     NewsAISettings,
     NewsFilterSettings,
@@ -65,6 +67,7 @@ class NaverNewsSettingsDialog(QDialog):
         ai = config.load_ai()
         official = config.load_official()
         shortcuts = config.load_shortcuts()
+        local_sources = config.load_sources()
         operations: dict[str, object] = {}
         self._client_id = QLineEdit(credentials.client_id)
         self._client_secret = QLineEdit(credentials.client_secret)
@@ -79,6 +82,31 @@ class NaverNewsSettingsDialog(QDialog):
         api_layout.addRow("Client ID", self._client_id)
         api_layout.addRow("Client Secret", self._client_secret)
         api_layout.addRow(link)
+
+        local_sources_box = QGroupBox("이 PC 뉴스 수집원")
+        local_sources_box.setParent(self)
+        local_sources_layout = QFormLayout(local_sources_box)
+        self._local_stock_name_enabled = QCheckBox("종목명 뉴스 수집 사용 (네이버 검색 API)")
+        self._local_stock_name_enabled.setChecked(local_sources.stock_name_enabled)
+        self._local_common_enabled = QCheckBox("공통 검색어 뉴스 수집 사용")
+        self._local_common_enabled.setChecked(local_sources.common_enabled)
+        self._local_common_queries = QPlainTextEdit("\n".join(local_sources.common_queries))
+        self._local_common_queries.setMaximumHeight(90)
+        self._local_stock_site_enabled = QCheckBox("네이버 증권 종목뉴스 수집 사용")
+        self._local_stock_site_enabled.setChecked(local_sources.stock_site_enabled)
+        self._local_market_enabled = QCheckBox("네이버 증권 시황뉴스 수집 사용 (FLASH/WORLD)")
+        self._local_market_enabled.setChecked(local_sources.market_enabled)
+        self._local_stock_site_url = QLineEdit(local_sources.stock_site_url)
+        self._local_flash_url = QLineEdit(local_sources.flash_url)
+        self._local_world_url = QLineEdit(local_sources.world_url)
+        local_sources_layout.addRow(self._local_stock_name_enabled)
+        local_sources_layout.addRow(self._local_common_enabled)
+        local_sources_layout.addRow("공통 검색어", self._local_common_queries)
+        local_sources_layout.addRow(self._local_stock_site_enabled)
+        local_sources_layout.addRow("종목뉴스 API 주소", self._local_stock_site_url)
+        local_sources_layout.addRow(self._local_market_enabled)
+        local_sources_layout.addRow("FLASH API 주소", self._local_flash_url)
+        local_sources_layout.addRow("WORLD API 주소", self._local_world_url)
 
         self._dart_enabled = QCheckBox("DART 공시 함께 조회")
         self._dart_enabled.setChecked(official.dart_enabled)
@@ -219,6 +247,14 @@ class NaverNewsSettingsDialog(QDialog):
         provider_layout.addWidget(provider_guide)
         provider_layout.addWidget(self._excluded_providers)
 
+        self._stored_news_limit = QSpinBox()
+        self._stored_news_limit.setRange(50, 1000)
+        self._stored_news_limit.setSingleStep(50)
+        self._stored_news_limit.setValue(news_filter.stored_news_limit)
+        history_box = QGroupBox("뉴스 저장·표시")
+        history_layout = QFormLayout(history_box)
+        history_layout.addRow("종목별 최신 기사 건수", self._stored_news_limit)
+
         raw_processing_providers = operations.get("news_processing_excluded_providers", [])
         processing_providers = raw_processing_providers if isinstance(raw_processing_providers, list) else []
         self._processing_excluded_providers = QPlainTextEdit()
@@ -276,6 +312,8 @@ class NaverNewsSettingsDialog(QDialog):
         content_layout.setContentsMargins(4, 4, 4, 4)
         if self._section in {"connections", "all"}:
             content_layout.addWidget(api_box)
+            if operational_client is None:
+                content_layout.addWidget(local_sources_box)
             content_layout.addWidget(dart_box)
             content_layout.addWidget(ai_box)
         if self._section in {"news", "all"}:
@@ -303,6 +341,7 @@ class NaverNewsSettingsDialog(QDialog):
             content_layout.addWidget(shortcut_box)
             content_layout.addWidget(filter_box)
             content_layout.addWidget(provider_box)
+            content_layout.addWidget(history_box)
             if operational_client is not None:
                 content_layout.addWidget(processing_box)
             content_layout.addWidget(column_box)
@@ -373,7 +412,8 @@ class NaverNewsSettingsDialog(QDialog):
 
     def _set_operational_controls_enabled(self, enabled: bool) -> None:
         for widget in (self._ai_provider, self._ai_model, self._ai_limit,
-                       self._dart_enabled, self._processing_excluded_providers):
+                       self._dart_enabled, self._processing_excluded_providers,
+                       ):
             widget.setEnabled(enabled)
         self._buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(enabled)
 
@@ -423,7 +463,8 @@ class NaverNewsSettingsDialog(QDialog):
         self._set_operational_controls_enabled(True)
         # Loaded shared values cannot be edited/saved after a conflict.
         for widget in (self._ai_provider, self._ai_model, self._ai_limit,
-                       self._dart_enabled, self._processing_excluded_providers):
+                       self._dart_enabled, self._processing_excluded_providers,
+                       ):
             widget.setEnabled(False)
 
     @Slot(object)
@@ -440,6 +481,7 @@ class NaverNewsSettingsDialog(QDialog):
         ai_settings = self._config.load_ai()
         official_settings = self._config.load_official()
         shortcuts = self._config.load_shortcuts()
+        sources = self._config.load_sources()
 
         if self._section in {"connections", "all"}:
             credentials = NaverNewsCredentials(self._client_id.text().strip(), self._client_secret.text().strip())
@@ -454,6 +496,34 @@ class NaverNewsSettingsDialog(QDialog):
                 ai_settings, provider=ai_provider, api_key=self._ai_key.text().strip(),
             )
             official_settings = replace(official_settings, dart_api_key=self._dart_key.text().strip())
+            if self._operational_client is None:
+                queries = tuple(dict.fromkeys(
+                    value.strip() for value in self._local_common_queries.toPlainText().splitlines()
+                    if value.strip()
+                ))
+                if len(queries) > 50:
+                    QMessageBox.warning(self, "입력 확인", "공통 뉴스 검색어는 최대 50개까지 입력하세요.")
+                    return
+                if self._local_common_enabled.isChecked() and not queries:
+                    QMessageBox.warning(self, "입력 확인", "공통 뉴스 수집을 사용하려면 검색어를 입력하세요.")
+                    return
+                for label, widget in (("종목뉴스", self._local_stock_site_url),
+                                      ("FLASH", self._local_flash_url),
+                                      ("WORLD", self._local_world_url)):
+                    parsed = urlsplit(widget.text().strip())
+                    if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+                            or parsed.password or parsed.query or parsed.fragment or not parsed.path):
+                        QMessageBox.warning(self, "입력 확인", f"{label} 주소에는 HTTPS API 경로를 입력하세요.")
+                        return
+                sources = LocalNewsSources(
+                    self._local_stock_name_enabled.isChecked(),
+                    self._local_common_enabled.isChecked(), queries,
+                    self._local_stock_site_enabled.isChecked(),
+                    self._local_market_enabled.isChecked(),
+                    self._local_stock_site_url.text().strip(),
+                    self._local_flash_url.text().strip(),
+                    self._local_world_url.text().strip(),
+                )
 
         if self._section in {"news", "all"}:
             words = tuple(dict.fromkeys(
@@ -489,6 +559,7 @@ class NaverNewsSettingsDialog(QDialog):
                 str(self._outlook_color_buttons["negative"].property("selectedColor")),
                 str(self._outlook_color_buttons["mixed"].property("selectedColor")),
                 str(self._outlook_color_buttons["neutral"].property("selectedColor")),
+                self._stored_news_limit.value(),
             )
             ai_settings = replace(
                 ai_settings,
@@ -501,7 +572,8 @@ class NaverNewsSettingsDialog(QDialog):
             )
             official_settings = replace(official_settings, dart_enabled=self._dart_enabled.isChecked())
         try:
-            self._config.save(credentials, news_filter, ai_settings, official_settings, shortcuts)
+            self._config.save(credentials, news_filter, ai_settings, official_settings, shortcuts,
+                              sources=sources)
         except (OSError, ValueError) as error:
             QMessageBox.warning(self, "뉴스 설정 저장", f"로컬 뉴스 설정을 저장하지 못했습니다.\n{error}")
             return

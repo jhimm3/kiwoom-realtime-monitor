@@ -39,6 +39,7 @@ class NewsFilterSettings:
     negative_color: str = "#0070C0"
     mixed_color: str = "#7030A0"
     neutral_color: str = "#666666"
+    stored_news_limit: int = 200
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,18 @@ class NewsAISettings:
 class OfficialNewsSettings:
     dart_api_key: str = ""
     dart_enabled: bool = False
+
+
+@dataclass(frozen=True)
+class LocalNewsSources:
+    stock_name_enabled: bool = True
+    common_enabled: bool = False
+    common_queries: tuple[str, ...] = ()
+    stock_site_enabled: bool = False
+    market_enabled: bool = False
+    stock_site_url: str = "https://stock.naver.com/api/domestic/detail/news"
+    flash_url: str = "https://stock.naver.com/api/domestic/news/list"
+    world_url: str = "https://stock.naver.com/api/foreign/news/worldNews"
 
 
 @dataclass(frozen=True)
@@ -104,6 +117,7 @@ class LocalNaverNewsConfig:
             _color_setting(values, "news_negative_color", "#0070C0"),
             _color_setting(values, "news_mixed_color", "#7030A0"),
             _color_setting(values, "news_neutral_color", "#666666"),
+            _stored_news_limit(values.get("stored_news_limit")),
         )
 
     def load_ai(self) -> NewsAISettings:
@@ -157,6 +171,22 @@ class LocalNaverNewsConfig:
                 shortcuts.append((name, url))
         return tuple(shortcuts)
 
+    def load_sources(self) -> LocalNewsSources:
+        values = self._load_values()
+        defaults = LocalNewsSources()
+        queries = values.get("local_news_common_queries")
+        return LocalNewsSources(
+            bool(values.get("local_news_stock_name_enabled", defaults.stock_name_enabled)),
+            bool(values.get("local_news_common_enabled", defaults.common_enabled)),
+            tuple(str(value).strip() for value in queries if str(value).strip())
+            if isinstance(queries, list) else defaults.common_queries,
+            bool(values.get("local_news_stock_site_enabled", defaults.stock_site_enabled)),
+            bool(values.get("local_news_market_enabled", defaults.market_enabled)),
+            str(values.get("local_news_stock_site_url") or defaults.stock_site_url),
+            str(values.get("local_news_flash_url") or defaults.flash_url),
+            str(values.get("local_news_world_url") or defaults.world_url),
+        )
+
     def _load_values(self) -> dict[str, object]:
         if not self._path.exists():
             return {}
@@ -171,13 +201,14 @@ class LocalNaverNewsConfig:
         self, credentials: NaverNewsCredentials, news_filter: NewsFilterSettings | None = None,
         ai: NewsAISettings | None = None, official: OfficialNewsSettings | None = None,
         shortcuts: tuple[tuple[str, str], ...] | None = None,
+        sources: LocalNewsSources | None = None,
     ) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         current_filter = news_filter or self.load_filter()
         current_ai = ai or self.load_ai()
         current_official = official or self.load_official()
         current_shortcuts = self.load_shortcuts() if shortcuts is None else shortcuts[:5]
-        values = {
+        values = {**self._load_values(),
             "client_id": credentials.client_id,
             "client_secret": credentials.client_secret,
             "ad_filter_enabled": current_filter.enabled,
@@ -189,6 +220,7 @@ class LocalNaverNewsConfig:
             "news_negative_color": current_filter.negative_color,
             "news_mixed_color": current_filter.mixed_color,
             "news_neutral_color": current_filter.neutral_color,
+            "stored_news_limit": _stored_news_limit(current_filter.stored_news_limit),
             "ai_provider": current_ai.provider,
             "ai_api_key": current_ai.api_key,
             "ai_model": current_ai.model,
@@ -201,6 +233,17 @@ class LocalNaverNewsConfig:
             "dart_enabled": current_official.dart_enabled,
             "news_shortcuts": [{"name": name, "url": url} for name, url in current_shortcuts],
         }
+        if sources is not None:
+            values.update(
+                local_news_stock_name_enabled=sources.stock_name_enabled,
+                local_news_common_enabled=sources.common_enabled,
+                local_news_common_queries=list(sources.common_queries),
+                local_news_stock_site_enabled=sources.stock_site_enabled,
+                local_news_market_enabled=sources.market_enabled,
+                local_news_stock_site_url=sources.stock_site_url,
+                local_news_flash_url=sources.flash_url,
+                local_news_world_url=sources.world_url,
+            )
         payload = json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         encrypted = base64.b64encode(_protect(payload)).decode("ascii")
         temporary = self._path.with_name(
@@ -213,6 +256,13 @@ class LocalNaverNewsConfig:
 def _color_setting(values: dict[str, object], key: str, default: str) -> str:
     value = str(values.get(key, default)).strip().upper()
     return value if re.fullmatch(r"#[0-9A-F]{6}", value) else default
+
+
+def _stored_news_limit(value: object) -> int:
+    try:
+        return max(50, min(1000, int(value)))
+    except (TypeError, ValueError):
+        return 200
 
 
 def is_excluded_news(item: StockNewsItem, settings: NewsFilterSettings) -> bool:

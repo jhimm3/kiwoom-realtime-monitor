@@ -49,7 +49,7 @@ class ResearchHypothesisRepositoryTests(unittest.TestCase):
                 connection.commit()
 
             repository = ResearchRepository(path)
-            self.assertEqual(23, repository.schema_version())
+            self.assertEqual(27, repository.schema_version())
             with closing(sqlite3.connect(path)) as connection:
                 self.assertEqual(
                     "existing",
@@ -105,8 +105,8 @@ class ResearchHypothesisRepositoryTests(unittest.TestCase):
                 repository.load_research_hypotheses(limit=0)
 
     def test_schema_constant_matches_migration_tail(self) -> None:
-        self.assertEqual(23, RESEARCH_SCHEMA_VERSION)
-        self.assertEqual(23, _MIGRATIONS[-1].version)
+        self.assertEqual(27, RESEARCH_SCHEMA_VERSION)
+        self.assertEqual(27, _MIGRATIONS[-1].version)
 
 
 if __name__ == "__main__":

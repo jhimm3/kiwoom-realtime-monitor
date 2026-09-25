@@ -18,6 +18,7 @@ class ThemeRepository:
         self._path = path
         self._profile_name = profile_name.strip() or "기본 테마"
         self._change_callback: Callable[[], None] | None = None
+        self._stock_color_cache: dict[tuple[str, str], str] | None = None
         self._ensure_active_profile()
         self._merge_case_insensitive_themes()
 
@@ -29,6 +30,7 @@ class ThemeRepository:
         self._change_callback = callback
 
     def _changed(self) -> None:
+        self._stock_color_cache = None
         if self._change_callback is not None:
             self._change_callback()
 
@@ -62,6 +64,7 @@ class ThemeRepository:
 
     def select_profile(self, name: str) -> str:
         self._profile_name = name.strip() or "기본 테마"
+        self._stock_color_cache = None
         self._ensure_active_profile()
         self._merge_case_insensitive_themes()
         return self._profile_name
@@ -281,6 +284,9 @@ class ThemeRepository:
         self._changed()
 
     def all_by_name(self) -> dict[str, str]:
+        # External theme snapshot restores can update this database without using
+        # this repository's write methods; a full list reload resets badge colors.
+        self._stock_color_cache = None
         connection = self._connect()
         try:
             rows = connection.execute("SELECT s.name, GROUP_CONCAT(st.theme_name, ', ') FROM stocks s JOIN profile_stock_themes st ON st.stock_code=s.code AND st.profile_id=? GROUP BY s.code, s.name", (self._profile_id(connection),)).fetchall()
@@ -305,13 +311,23 @@ class ThemeRepository:
         return str(row[0]) if row else "#DCE6F1"
 
     def color_for_stock_theme(self, code: str, name: str) -> str:
-        connection = self._connect()
-        try:
-            profile_id = self._profile_id(connection)
-            row = connection.execute("SELECT COALESCE(st.custom_color, pt.default_color) FROM profile_stock_themes st JOIN profile_themes pt ON pt.profile_id=st.profile_id AND pt.theme_name=st.theme_name WHERE st.profile_id=? AND st.stock_code=? AND st.theme_name=? COLLATE NOCASE", (profile_id, code, name)).fetchone()
-        finally:
-            connection.close()
-        return str(row[0]) if row else "#DCE6F1"
+        if self._stock_color_cache is None:
+            connection = self._connect()
+            try:
+                rows = connection.execute(
+                    "SELECT st.stock_code, st.theme_name, COALESCE(st.custom_color, pt.default_color) "
+                    "FROM profile_stock_themes st JOIN profile_themes pt "
+                    "ON pt.profile_id=st.profile_id AND pt.theme_name=st.theme_name "
+                    "WHERE st.profile_id=?",
+                    (self._profile_id(connection),),
+                ).fetchall()
+            finally:
+                connection.close()
+            self._stock_color_cache = {
+                (str(stock_code), str(theme_name).casefold()): str(color)
+                for stock_code, theme_name, color in rows
+            }
+        return self._stock_color_cache.get((code, name.casefold()), "#DCE6F1")
 
     def list_themes(self) -> tuple[tuple[str, str], ...]:
         connection = self._connect()

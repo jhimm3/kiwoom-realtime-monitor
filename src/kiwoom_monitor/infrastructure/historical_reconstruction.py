@@ -14,7 +14,9 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from kiwoom_monitor.application.market_session_schedule import research_session_profile_document
+from kiwoom_monitor.application.market_session_schedule import (
+    KST, MarketPhase, MarketSession, krx_regular_session_hours, research_session_profile_document,
+)
 
 
 CONTRACT_VERSION = "historical_reconstruction/v1"
@@ -72,6 +74,8 @@ def export_historical_reconstruction(
         intelligence.row_factory = sqlite3.Row
         candidates.execute("BEGIN")
         intelligence.execute("BEGIN")
+        stock_columns = {str(row[1]) for row in candidates.execute("PRAGMA table_info(stocks)")}
+        market_code_expr = "COALESCE(s.market_code, '')" if "market_code" in stock_columns else "''"
         for selected_date in selected_dates:
             next_session = candidates.execute(
                 "SELECT MIN(dt) FROM candidate_days WHERE dt > ? AND dt <= ?",
@@ -81,8 +85,9 @@ def export_historical_reconstruction(
         for selected_date in selected_dates:
             case_outcome_end = case_outcome_ends[selected_date]
             candidate_rows = candidates.execute(
-                """
-                SELECT c.dt, c.code, COALESCE(s.name, '') AS name, c.score,
+                f"""
+                SELECT c.dt, c.code, COALESCE(s.name, '') AS name,
+                       {market_code_expr} AS market_code, c.score,
                        COALESCE(c.reasons, '') AS reasons, c.rank_value, c.rank_gain,
                        c.rank_high, c.rank_volume_ratio, c.gain_pct, c.high_pct,
                        c.volume_ratio, c.trading_value
@@ -102,6 +107,7 @@ def export_historical_reconstruction(
                     "date": selected_date,
                     "code": code,
                     "name": str(row["name"] or ""),
+                    "market_code": str(row["market_code"] or ""),
                     "score": float(row["score"]),
                     "reasons": str(row["reasons"] or ""),
                     "rank_value": row["rank_value"],
@@ -332,6 +338,8 @@ def adapt_historical_reconstruction_for_research(
     *,
     selected_date: str | None = None,
     selected_dates: Iterable[str] = (),
+    individual_stocks_only: bool = False,
+    exclude_noncontinuous_minute_candidates: bool = False,
 ) -> "FrozenResearchDataset":
     """Create a one- or multi-case strategy input without changing source availability.
 
@@ -356,13 +364,31 @@ def adapt_historical_reconstruction_for_research(
     observations: list[dict[str, Any]] = []
     included_cases: list[dict[str, Any]] = []
     excluded_cases: list[dict[str, str]] = []
+    excluded_non_stock_candidates: list[dict[str, str]] = []
+    excluded_noncontinuous_minute_candidates: list[dict[str, object]] = []
     for case_date in requested:
-        candidates = tuple(
+        source_candidates = tuple(
             row for row in dataset.records_of_kind("historical_candidate")
             if row.get("payload", {}).get("date") == case_date
         )
-        if not candidates:
+        if not source_candidates:
             raise ValueError("historical reconstruction case has no candidates")
+        if individual_stocks_only and any(
+            "market_code" not in row.get("payload", {}) for row in source_candidates
+        ):
+            raise ValueError("stock-only research requires frozen candidate market_code")
+        candidates = tuple(
+            row for row in source_candidates
+            if not individual_stocks_only or row["payload"]["market_code"] in {"0", "10"}
+        )
+        if not candidates:
+            raise ValueError("historical reconstruction case has no eligible stocks")
+        if individual_stocks_only:
+            excluded_non_stock_candidates.extend({
+                "selection_date": case_date,
+                "code": str(row["payload"]["code"]),
+                "market_code": str(row["payload"]["market_code"]),
+            } for row in source_candidates if row not in candidates)
         codes = tuple(dict.fromkeys(
             str(row["payload"].get("code", "")) for row in candidates
             if str(row["payload"].get("code", ""))
@@ -370,10 +396,36 @@ def adapt_historical_reconstruction_for_research(
         source_bars = tuple(
             row for row in dataset.records_of_kind("historical_market_bar")
             if row.get("payload", {}).get("case_date") == case_date
+            and row.get("payload", {}).get("code") in codes
             and row.get("payload", {}).get("phase") == "outcome"
             and int(row.get("payload", {}).get("interval_seconds", 0)) == 60
             and row.get("payload", {}).get("source_job_state") == "complete"
         )
+        if exclude_noncontinuous_minute_candidates:
+            bars_by_code: dict[str, list[datetime]] = {code: [] for code in codes}
+            for row in source_bars:
+                bars_by_code[str(row["payload"]["code"])].append(
+                    _aware_datetime(row["payload"]["bar_time"])
+                )
+            retained_codes: list[str] = []
+            for code in codes:
+                times = sorted(set(bars_by_code[code]))
+                if any((current - previous).total_seconds() == 60
+                       for previous, current in zip(times, times[1:])):
+                    retained_codes.append(code)
+                else:
+                    excluded_noncontinuous_minute_candidates.append({
+                        "selection_date": case_date,
+                        "code": code,
+                        "outcome_minute_bar_count": len(times),
+                        "reason": "no_continuous_one_minute_outcome_pair",
+                    })
+            retained = set(retained_codes)
+            candidates = tuple(row for row in candidates
+                               if str(row["payload"]["code"]) in retained)
+            codes = tuple(retained_codes)
+            source_bars = tuple(row for row in source_bars
+                                if str(row["payload"]["code"]) in retained)
         if not source_bars:
             excluded_cases.append({
                 "selection_date": case_date,
@@ -381,7 +433,7 @@ def adapt_historical_reconstruction_for_research(
             })
             continue
         first_start = min(
-            (_aware_datetime(row["payload"]["bar_time"]) - timedelta(minutes=1)).isoformat()
+            _historical_replay_bar_start(_aware_datetime(row["payload"]["bar_time"])).isoformat()
             for row in source_bars
         )
         observations.append({
@@ -418,7 +470,11 @@ def adapt_historical_reconstruction_for_research(
         for source in ordered_bars:
             payload = source["payload"]
             bar_end = _aware_datetime(payload["bar_time"])
-            bar_start = bar_end - timedelta(minutes=1)
+            # CREON labels the close print as a one-minute bar. Its actual
+            # clock follows the trading-date schedule (16:30 on verified delays).
+            local_end = bar_end.astimezone(KST)
+            closing_auction = local_end.time() == krx_regular_session_hours(local_end.date())[1]
+            bar_start = _historical_replay_bar_start(bar_end)
             trading_value = int(payload.get("trading_value") or 0)
             observation_payload = {
                 "market": "KRX",
@@ -439,6 +495,11 @@ def adapt_historical_reconstruction_for_research(
                 "replay_clock_policy": "historical_bar_close",
                 "historical_case_date": case_date,
             }
+            if closing_auction:
+                observation_payload["source_interval_seconds"] = 60
+                observation_payload["replay_interval_seconds"] = 600
+                observation_payload["session"] = MarketSession.KRX_CLOSING_AUCTION.value
+                observation_payload["phase"] = MarketPhase.AUCTION_ORDER_ENTRY.value
             scientific = {
                 "kind": "minute_bar",
                 "subject": f"{payload['code']}:KRX",
@@ -473,6 +534,10 @@ def adapt_historical_reconstruction_for_research(
         "selected_dates": requested,
         "revision_ids_hash": revision_hash,
     }
+    if individual_stocks_only:
+        identity["individual_stocks_only"] = True
+    if exclude_noncontinuous_minute_candidates:
+        identity["exclude_noncontinuous_minute_candidates"] = True
     manifest = {
         "schema_version": 1,
         "runtime_input_version": "historical_reconstruction_strategy/v1",
@@ -485,12 +550,18 @@ def adapt_historical_reconstruction_for_research(
         "selected_dates": list(requested),
         "included_cases": included_cases,
         "excluded_cases": excluded_cases,
+        "individual_stocks_only": individual_stocks_only,
+        "excluded_non_stock_candidates": excluded_non_stock_candidates,
+        "exclude_noncontinuous_minute_candidates": exclude_noncontinuous_minute_candidates,
+        "excluded_noncontinuous_minute_candidates": excluded_noncontinuous_minute_candidates,
         "population_id": POPULATION_ID,
         "not_contemporaneous_top20": True,
         "simulation_clock": "historical_bar_close",
+        "closing_auction_clock_policy": "date-specific regular close print spans previous 10 minutes; auction phase, never a fabricated continuous minute",
         "source_availability_preserved_in_payload": True,
         "strategy_entry_phase": "sessions_after_selection_date",
         "supported_interval_seconds": 60,
+        "closing_auction_replay_interval_seconds": 600,
         "excluded_interval_seconds": [300],
         "research_session_profile": research_session_profile_document("krx-regular/v1"),
     }
@@ -561,6 +632,14 @@ def _aware_datetime(value: object) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("historical reconstruction timestamps must be timezone-aware")
     return parsed
+
+
+def _historical_replay_bar_start(bar_end: datetime) -> datetime:
+    local_end = bar_end.astimezone(KST)
+    close = krx_regular_session_hours(local_end.date())[1]
+    return bar_end - timedelta(
+        minutes=10 if local_end.time() == close else 1
+    )
 
 
 def _record(kind: str, subject: str, effective_at: str, available_at: str,

@@ -44,6 +44,30 @@ from kiwoom_monitor.domain.theme_text_import import parse_theme_text
 from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository
 from kiwoom_monitor.presentation.similar_stock_dialog import choose_similar_stock, confirm_pending_name_change
+from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
+
+
+def _save_preferences_then_accept(dialog: QDialog, settings: SettingsRepository, values: dict[str, str]) -> None:
+    """Keep a theme input dialog open until its preferences are durably saved off the GUI thread."""
+    if getattr(dialog, "_settings_save_request", None) is not None:
+        return
+    dialog.setEnabled(False)
+    worker = SettingsRequestWorker(lambda: settings.set_many(values))
+    dialog._settings_save_request = worker
+
+    def saved(_result: object) -> None:
+        dialog._settings_save_request = None
+        dialog.setEnabled(True)
+        dialog.accept()
+
+    def failed(message: str) -> None:
+        dialog._settings_save_request = None
+        dialog.setEnabled(True)
+        QMessageBox.warning(dialog, "테마 입력 설정 저장", message)
+
+    worker.succeeded.connect(saved)
+    worker.failed.connect(failed)
+    worker.start()
 
 
 def _section_separator() -> QFrame:
@@ -224,9 +248,12 @@ class ImageThemeRowsDialog(QDialog):
         if not duplicates:
             self._validation_message.clear()
             if self._settings is not None:
-                self._settings.set(f"{self._settings_prefix}_custom_separators", self._custom_separators.text().strip())
-                self._settings.set(f"{self._settings_prefix}_exclusions", self._import_exclusions.text().strip())
-            self.accept()
+                _save_preferences_then_accept(self, self._settings, {
+                    f"{self._settings_prefix}_custom_separators": self._custom_separators.text().strip(),
+                    f"{self._settings_prefix}_exclusions": self._import_exclusions.text().strip(),
+                })
+            else:
+                self.accept()
             return
         for first_row, duplicate_row, _ in duplicates:
             for row in (first_row, duplicate_row):
@@ -309,9 +336,10 @@ class ImageThemeImportOptionsDialog(QDialog):
         return str(self._mode.currentData())
 
     def _save_and_accept(self) -> None:
-        self._settings.set("theme_image_import_mode", self.mode)
-        self._settings.set("theme_image_import_theme_header", self._theme_header.text().strip())
-        self.accept()
+        _save_preferences_then_accept(self, self._settings, {
+            "theme_image_import_mode": self.mode,
+            "theme_image_import_theme_header": self._theme_header.text().strip(),
+        })
 
 
 class TextThemeImportDialog(QDialog):
@@ -350,15 +378,15 @@ class TextThemeImportDialog(QDialog):
         layout.addWidget(buttons)
 
     def _save_heading_marker(self, value: str) -> None:
-        self._settings.set("theme_text_heading_marker", value.strip() or "🔥")
         self._update_placeholder()
 
     def _save_and_accept(self) -> None:
-        self._save_heading_marker(self._heading_marker.text())
-        self._settings.set("theme_text_import_custom_separators", self._custom_separators.text().strip())
-        self._settings.set("theme_text_import_exclusions", self._import_exclusions.text().strip())
-        self._settings.set("theme_text_include_subcategories", "1" if self._include_subcategories.isChecked() else "0")
-        self.accept()
+        _save_preferences_then_accept(self, self._settings, {
+            "theme_text_heading_marker": self._heading_marker.text().strip() or "🔥",
+            "theme_text_import_custom_separators": self._custom_separators.text().strip(),
+            "theme_text_import_exclusions": self._import_exclusions.text().strip(),
+            "theme_text_include_subcategories": "1" if self._include_subcategories.isChecked() else "0",
+        })
 
     def _update_placeholder(self) -> None:
         marker = self._heading_marker.text().strip() or "🔥"
@@ -671,6 +699,10 @@ class ThemeSuggestionReviewDialog(QDialog):
 class ThemeManagerDialog(QDialog):
     def __init__(self, repository: object, settings: SettingsRepository, on_excel_update: Callable[[], None] | None = None, on_image_update: Callable[[str], None] | None = None, on_catalog_sync: Callable[[], None] | None = None, parent: QWidget | None = None, on_themes_changed: Callable[[], None] | None = None, news_database_path: Path | None = None) -> None:
         super().__init__(parent); self._repository=repository; self._settings=settings; self._separators=",/|;" + settings.get("theme_custom_separators"); self._on_excel_update=on_excel_update; self._on_image_update=on_image_update; self._on_themes_changed=on_themes_changed; self._news_database_path=news_database_path; self.setWindowTitle("종목/테마 관리"); self.resize(560,420)
+        self._save_request: SettingsRequestWorker | None = None
+        self._save_completion_message = ""
+        self._pending_column_widths: dict[str, str] = {}
+        self._column_width_request: SettingsRequestWorker | None = None
         self._search=QLineEdit(); self._search.setPlaceholderText("종목명 검색"); self._table=QTableWidget(0,2); self._table.setHorizontalHeaderLabels(("종목명","테마"))
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -802,9 +834,31 @@ class ThemeManagerDialog(QDialog):
             self._on_image_update(dialog.mode)
     def _save_table_column_width(self, logical_index: int, _old_width: int, new_width: int) -> None:
         if logical_index == 0:
-            self._settings.set("theme_manager_stock_column_width", str(new_width))
+            self._pending_column_widths["theme_manager_stock_column_width"] = str(new_width)
         elif logical_index == 1:
-            self._settings.set("theme_manager_theme_column_width", str(new_width))
+            self._pending_column_widths["theme_manager_theme_column_width"] = str(new_width)
+        self._flush_column_widths()
+
+    def _flush_column_widths(self) -> None:
+        if self._column_width_request is not None or not self._pending_column_widths:
+            return
+        values = self._pending_column_widths
+        self._pending_column_widths = {}
+        settings = self._settings
+        worker = SettingsRequestWorker(lambda: settings.set_many(values))
+        self._column_width_request = worker
+        worker.succeeded.connect(self._column_widths_saved)
+        worker.failed.connect(self._column_widths_failed)
+        worker.start()
+
+    def _column_widths_saved(self, _result: object) -> None:
+        self._column_width_request = None
+        self._flush_column_widths()
+
+    def _column_widths_failed(self, message: str) -> None:
+        self._column_width_request = None
+        self._pending_column_widths = {}
+        QMessageBox.warning(self, "테마 표 너비 저장", message)
     def _filter_import_exclusions(
         self,
         rows: tuple[tuple[str, str], ...],
@@ -862,9 +916,9 @@ class ThemeManagerDialog(QDialog):
         code, name, themes = self._rows[row]
         dialog = ThemeEditDialog(name, parse_themes(themes, self._separators), self._separators, self)
         if dialog.exec() and QMessageBox.question(self, "테마 변경 확인", f"{name}\n\n기존: {themes or '-'}\n변경: {', '.join(dialog.themes) or '-'}\n\n저장할까요?") == QMessageBox.StandardButton.Yes:
-            self._repository.replace_for_stock(code, dialog.themes)
-            self._reload()
-            self._notify_themes_changed()
+            after = dialog.themes
+            repository = self._repository
+            self._submit_theme_change(lambda: repository.replace_for_stock(code, after))
     def _add_new(self) -> None:
         dialog = ImageThemeRowsDialog((), self, self._settings, "theme_new_import")
         dialog.setWindowTitle("신규 종목 테마 추가")
@@ -915,13 +969,13 @@ class ThemeManagerDialog(QDialog):
         preview = ThemePreviewDialog(changes, skipped, self, frozenset(theme_key(theme) for theme in parse_themes(self._settings.get(exclusion_setting_key), separators)))
         if preview.exec():
             changes = preview.changes(separators)
-            applied = sum(change.status != "변경 없음" for change in changes)
-            for change in changes:
-                if change.status != "변경 없음":
-                    self._repository.replace_for_stock(change.code, change.after)
-            self._reload()
-            self._notify_themes_changed()
-            QMessageBox.information(self, "테마 업데이트 완료", f"{applied}개 종목의 테마를 적용했습니다.")
+            pending = tuple((change.code, change.after) for change in changes if change.status != "변경 없음")
+            applied = len(pending)
+            repository = self._repository
+            self._submit_theme_change(
+                lambda: repository.replace_many(pending),
+                f"{applied}개 종목의 테마를 적용했습니다.",
+            )
 
     def _resolve_unmatched_new_rows(self, rows: tuple[object, ...]) -> tuple[tuple[MatchedThemeRow, ...], bool]:
         resolved: list[MatchedThemeRow] = []
@@ -993,16 +1047,15 @@ class ThemeManagerDialog(QDialog):
         labels = ", ".join(dialog.themes)
         if QMessageBox.question(self, "테마 일괄 삭제", f"선택한 테마를 모든 종목에서 삭제합니다.\n\n{labels}\n\n계속할까요?") != QMessageBox.StandardButton.Yes:
             return
-        self._repository.delete_themes(dialog.themes)
-        self._reload()
-        self._notify_themes_changed()
+        selected = dialog.themes
+        repository = self._repository
+        self._submit_theme_change(lambda: repository.delete_themes(selected))
 
     def _clear_all_themes(self) -> None:
         if QMessageBox.question(self, "전체 테마 초기화", "모든 종목의 테마와 테마 색상을 삭제합니다.\n이 작업은 되돌릴 수 없습니다.\n\n계속할까요?") != QMessageBox.StandardButton.Yes:
             return
-        self._repository.clear_all_themes()
-        self._reload()
-        self._notify_themes_changed()
+        repository = self._repository
+        self._submit_theme_change(repository.clear_all_themes)
 
     def _rename_theme(self) -> None:
         names = [name for name, _ in self._repository.list_themes()]
@@ -1019,20 +1072,45 @@ class ThemeManagerDialog(QDialog):
         )
         if QMessageBox.question(self, "테마 일괄 수정", f"다음 변경을 모든 종목에 적용합니다.\n\n{preview}\n\n계속할까요?") != QMessageBox.StandardButton.Yes:
             return
-        for before, targets in parsed_changes:
-            try:
+        repository = self._repository
+
+        def apply_changes() -> None:
+            for before, targets in parsed_changes:
                 if len(targets) > 1:
-                    self._repository.split_theme(before, targets)
+                    repository.split_theme(before, targets)
                 elif targets:
-                    self._repository.rename_theme(before, targets[0])
+                    repository.rename_theme(before, targets[0])
                 else:
-                    self._repository.delete_themes((before,))
-            except ValueError as error:
-                QMessageBox.warning(self, "테마 일괄 수정", str(error))
-                return
-        self._reload()
-        self._notify_themes_changed()
+                    repository.delete_themes((before,))
+        self._submit_theme_change(apply_changes)
 
     def _notify_themes_changed(self) -> None:
         if self._on_themes_changed is not None:
             self._on_themes_changed()
+
+    def _submit_theme_change(self, task: Callable[[], object], message: str = "") -> None:
+        if self._save_request is not None:
+            return
+        self.setEnabled(False)
+        worker = SettingsRequestWorker(task)
+        self._save_request = worker
+        self._save_completion_message = message
+        worker.succeeded.connect(self._theme_change_saved)
+        worker.failed.connect(self._theme_change_failed)
+        worker.start()
+
+    def _theme_change_saved(self, _result: object) -> None:
+        self._save_request = None
+        message = self._save_completion_message
+        self._save_completion_message = ""
+        self.setEnabled(True)
+        self._reload()
+        self._notify_themes_changed()
+        if message:
+            QMessageBox.information(self, "테마 업데이트 완료", message)
+
+    def _theme_change_failed(self, message: str) -> None:
+        self._save_request = None
+        self._save_completion_message = ""
+        self.setEnabled(True)
+        QMessageBox.warning(self, "테마 저장", f"테마를 저장하지 못했습니다.\n{message}")

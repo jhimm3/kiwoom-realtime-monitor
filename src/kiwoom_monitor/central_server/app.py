@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import uuid
+from urllib.parse import urlsplit
 from pathlib import Path
 from contextlib import asynccontextmanager
 from contextlib import suppress
@@ -34,7 +35,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.09.22-theme-suggestion-review-v1"
+SERVER_BUILD = "2026.09.25-followup-newhigh-cache-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -118,6 +119,12 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         "ai_model": active.ai_model,
         "ai_daily_limit": active.ai_daily_limit,
         "news_refresh_seconds": active.news_refresh_seconds,
+        "news_naver_api_enabled": active.news_naver_api_enabled,
+        "news_naver_stock_enabled": active.news_naver_stock_enabled,
+        "news_naver_market_enabled": active.news_naver_market_enabled,
+        "news_naver_stock_url": active.news_naver_stock_url,
+        "news_naver_flash_url": active.news_naver_flash_url,
+        "news_naver_world_url": active.news_naver_world_url,
         "dart_enabled": active.dart_enabled,
         "news_query_set_enabled": active.news_query_set_enabled,
         "news_query_set": list(active.parsed_news_query_set()),
@@ -285,7 +292,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         if collector is not None:
             collector._account_event_handler = real_owner.on_market_account_event
         credential_runtime.register("kiwoom_real", real_owner.hooks())
-    if active.news_configured or credential_runtime is not None:
+    if active.news_configured or credential_runtime is not None or bool(operational["news_naver_stock_enabled"]):
         from kiwoom_monitor.infrastructure.dart_disclosures import DartDisclosureClient
         from kiwoom_monitor.infrastructure.naver_news import NaverNewsClient, NaverNewsCredentials
         from .news_service import CentralNewsService
@@ -301,12 +308,17 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         news_service = CentralNewsService(
             naver_client, store, dart_client, refresh_seconds=int(operational["news_refresh_seconds"]),
             jobs_enabled=active.news_history_jobs_enabled,
+            jobs_parallelism=3,
             query_set_enabled=bool(operational["news_query_set_enabled"]),
+            naver_api_enabled=bool(operational["news_naver_api_enabled"]),
+            naver_stock_enabled=bool(operational["news_naver_stock_enabled"]),
+            read_only_search=True,
             query_set=tuple(str(value) for value in operational["news_query_set"]),
             query_set_refresh_seconds=int(operational["news_query_set_refresh_seconds"]),
             request_hard_limit=active.news_request_hard_limit,
             watchlist_request_limit=active.news_watchlist_request_limit,
             query_set_request_limit=active.news_query_set_request_limit,
+            market_feed_enabled=True,
             processing_excluded_providers=tuple(
                 str(value) for value in operational["news_processing_excluded_providers"]
             ),
@@ -315,6 +327,12 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             refresh_seconds=int(operational["news_refresh_seconds"]),
             dart_enabled=bool(operational["dart_enabled"]),
             query_set_enabled=bool(operational["news_query_set_enabled"]),
+            naver_api_enabled=bool(operational["news_naver_api_enabled"]),
+            naver_stock_enabled=bool(operational["news_naver_stock_enabled"]),
+            naver_market_enabled=bool(operational["news_naver_market_enabled"]),
+            naver_stock_url=str(operational["news_naver_stock_url"]),
+            naver_flash_url=str(operational["news_naver_flash_url"]),
+            naver_world_url=str(operational["news_naver_world_url"]),
             query_set=tuple(str(value) for value in operational["news_query_set"]),
             query_set_refresh_seconds=int(operational["news_query_set_refresh_seconds"]),
             processing_excluded_providers=tuple(
@@ -584,6 +602,30 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         ai_provider: str = Field(default="none", max_length=20)
         ai_model: str = Field(default="", max_length=100)
 
+    class NewsStoredPageRequest(NewsSearchRequest):
+        offset: int = Field(default=0, ge=0, le=99_800)
+
+    class HistoricalNewsJobResult(BaseModel):
+        job_key: str = Field(min_length=64, max_length=64)
+        attempts: int = Field(ge=1)
+        stage: str = Field(pattern="^(BODY|RULE)$")
+        body_text: str = Field(default="", max_length=2_000_000)
+        body_status: str = Field(default="", max_length=20)
+        fetched_at: float | None = None
+        original_published_at: str = Field(default="", max_length=100)
+        source_url: str = Field(default="", max_length=2000)
+        assessment: dict[str, Any] | None = None
+        core_sentences: list[str] | None = Field(default=None, max_length=10)
+        rule_result: dict[str, Any] | None = None
+        error: str = Field(default="", max_length=1000)
+
+    class HistoricalMarketNewsBatch(BaseModel):
+        source: str = Field(pattern="^(flash|world)$")
+        target_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+        batch_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+        processing_owner: str = Field(default="nas", pattern="^(nas|pc)$")
+        items: list[dict[str, Any]] = Field(min_length=1, max_length=100)
+
     class AIEventInput(BaseModel):
         identity: str = Field(min_length=1, max_length=2000)
         title: str = Field(max_length=1000)
@@ -644,6 +686,12 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         ai_model: str | None = Field(default=None, max_length=100)
         ai_daily_limit: int | None = Field(default=None, ge=0, le=1_000_000)
         news_refresh_seconds: int | None = Field(default=None, ge=60, le=86_400)
+        news_naver_api_enabled: bool | None = Field(default=None, strict=True)
+        news_naver_stock_enabled: bool | None = Field(default=None, strict=True)
+        news_naver_market_enabled: bool | None = Field(default=None, strict=True)
+        news_naver_stock_url: str | None = Field(default=None, max_length=500, strict=True)
+        news_naver_flash_url: str | None = Field(default=None, max_length=500, strict=True)
+        news_naver_world_url: str | None = Field(default=None, max_length=500, strict=True)
         dart_enabled: bool | None = None
         news_query_set_enabled: bool | None = None
         news_query_set: list[str] | None = Field(default=None, max_length=50)
@@ -756,6 +804,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     async def health() -> dict[str, object]:
         document = health_document()
         document["server_build"] = SERVER_BUILD
+        document["historical_news_pc_scopes"] = ["market", "search", "legacy_backlog"]
         document["realtime_connection"] = collector.credential_connection_status() if collector is not None else None
         document["mock_account_available"] = (
             any(bundle.monitor._task is not None for bundle in mock_owner._bundles.values())
@@ -1011,6 +1060,13 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             if values.expected_revision is not None and values.expected_revision != int(operational["revision"]):
                 raise HTTPException(status_code=409, detail="OPERATIONAL_SETTINGS_REVISION_CONFLICT")
             proposed = {**operational, **changes}
+            for field in ("news_naver_stock_url", "news_naver_flash_url", "news_naver_world_url"):
+                endpoint = str(proposed[field]).strip()
+                parsed = urlsplit(endpoint)
+                if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+                        or parsed.password or parsed.query or parsed.fragment or not parsed.path):
+                    raise HTTPException(status_code=422, detail=f"{field}: HTTPS API 주소를 입력하세요.")
+                proposed[field] = endpoint
             condition_fields = {"hot_cohort_condition_enabled", "hot_cohort_condition_name", "hot_cohort_condition_substring"}
             if condition_fields.intersection(changes) and market_event_service is None:
                 raise HTTPException(status_code=422, detail="CONDITION_RUNTIME_NOT_READY")
@@ -1086,6 +1142,12 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                 if news_service is not None:
                     news_service.update_operational_settings(
                         refresh_seconds=int(proposed["news_refresh_seconds"]),
+                        naver_api_enabled=bool(proposed["news_naver_api_enabled"]),
+                        naver_stock_enabled=bool(proposed["news_naver_stock_enabled"]),
+                        naver_market_enabled=bool(proposed["news_naver_market_enabled"]),
+                        naver_stock_url=str(proposed["news_naver_stock_url"]),
+                        naver_flash_url=str(proposed["news_naver_flash_url"]),
+                        naver_world_url=str(proposed["news_naver_world_url"]),
                         dart_enabled=bool(proposed["dart_enabled"]),
                         query_set_enabled=bool(proposed["news_query_set_enabled"]),
                         query_set=tuple(str(value) for value in proposed["news_query_set"]),
@@ -1199,6 +1261,19 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             raise HTTPException(status_code=502, detail=str(error)) from error
         return {"stock_code": query.stock_code, "items": items}
 
+    @app.post("/api/v1/news/stored-page", dependencies=[Depends(authorize)])
+    async def news_stored_page(query: NewsStoredPageRequest) -> dict[str, object]:
+        if news_service is None:
+            raise HTTPException(status_code=503, detail="서버 뉴스 저장소가 준비되지 않았습니다.")
+        page = await news_service.stored_page(query.stock_code, query.stock_name, offset=query.offset,
+            automation={
+                "auto_analyze": query.ai_auto_analyze,
+                "auto_recent_limit": query.ai_auto_recent_limit,
+                "provider": query.ai_provider,
+                "model": query.ai_model,
+            })
+        return {"stock_code": query.stock_code, **page}
+
     @app.post("/api/v1/news/analyze", dependencies=[Depends(authorize)])
     async def news_analyze(query: AIAnalysisRequest) -> dict[str, object]:
         if ai_service is None:
@@ -1215,11 +1290,63 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         except RuntimeError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
 
+    @app.post("/api/v1/news/historical-jobs/claim", dependencies=[Depends(authorize)])
+    async def claim_historical_news_job(
+        stage: str = Query(pattern="^(BODY|RULE)$"),
+        excluded_codes: str = Query(default="", max_length=6000),
+        scope: str = Query(default="all", pattern="^(all|pc_market|pc_search|pc)$"),
+    ) -> dict[str, object]:
+        excluded = tuple(dict.fromkeys(code.strip().upper() for code in excluded_codes.split(",") if code.strip()))
+        if len(excluded) > 500 or any(not re.fullmatch(r"[0-9A-Z]{6}", code) for code in excluded):
+            raise HTTPException(status_code=422, detail="제외 종목코드 형식이 올바르지 않습니다.")
+        job = await asyncio.to_thread(store.claim_external_historical_news_job, stage, excluded, scope)
+        if job is None:
+            return {"job": None}
+        article = await asyncio.to_thread(store.load_news_article_revision, job["article_revision_id"])
+        if article is None:
+            raise HTTPException(status_code=409, detail="기사 리비전이 없어 작업을 처리할 수 없습니다.")
+        response: dict[str, object] = {"job": job, "article": article}
+        if stage == "RULE":
+            body_id = str(job["payload"].get("body_revision_id") or "")
+            response["body"] = await asyncio.to_thread(store.load_news_body_revision, body_id)
+        return response
+
+    @app.post("/api/v1/news/historical-market-articles", dependencies=[Depends(authorize)])
+    async def import_historical_market_articles(batch: HistoricalMarketNewsBatch) -> dict[str, Any]:
+        for item in batch.items:
+            document = item.get("document")
+            published = str(document.get("published_at") or "") if isinstance(document, dict) else ""
+            try:
+                publication_time = datetime.fromisoformat(published)
+                matching_date = (publication_time.tzinfo is not None
+                                 and publication_time.astimezone(KST).date().isoformat() == batch.target_date)
+            except ValueError:
+                matching_date = False
+            if (not isinstance(document, dict) or not str(item.get("identity") or "")
+                    or not str(document.get("title") or "")
+                    or not matching_date
+                    or not isinstance(item.get("targets"), list)):
+                raise HTTPException(status_code=422, detail="과거 시황 기사 형식·날짜가 올바르지 않습니다.")
+        try:
+            return await asyncio.to_thread(store.save_historical_market_news_batch,
+                                           batch.source, batch.target_date, batch.batch_id, batch.items,
+                                           batch.processing_owner)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.post("/api/v1/news/historical-jobs/complete", dependencies=[Depends(authorize)])
+    async def complete_historical_news_job(result: HistoricalNewsJobResult) -> dict[str, str]:
+        try:
+            return await asyncio.to_thread(store.complete_external_historical_news_job, result.model_dump())
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
     @app.get("/api/v1/news/history/{kind}", dependencies=[Depends(authorize)])
     async def news_history(
         kind: str,
         target: str = Query(default="", max_length=200),
         identity: str = Query(default="", max_length=2000),
+        stock_code: str = Query(default="", max_length=20),
         as_of: float | None = Query(default=None, ge=0.0),
         limit: int = Query(default=100, ge=1, le=1000),
     ) -> dict[str, object]:
@@ -1229,8 +1356,14 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             store.load_news_history, kind, target=target, identity=identity,
             available_at=as_of, limit=limit,
         )
-        return {"kind": kind, "target": target, "as_of": as_of,
-                "known": bool(values), "revisions": values}
+        result = {"kind": kind, "target": target, "as_of": as_of,
+                  "known": bool(values), "revisions": values}
+        if kind == "body" and target and stock_code and as_of is None:
+            stored = await asyncio.to_thread(
+                store.load_document, "news_assessment", stock_code, target,
+            )
+            result["assessment"] = stored.get("document") if stored else None
+        return result
 
     @app.get("/api/v1/news/sources", dependencies=[Depends(authorize)])
     async def news_sources(
@@ -1241,6 +1374,15 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         return await asyncio.to_thread(
             store.load_news_source_diagnostics, source_id=source_id, days=days, limit=limit,
         )
+
+    @app.get("/api/v1/news/market-feed", dependencies=[Depends(authorize)])
+    async def market_news_feed(
+        source: str = Query(pattern="^(common|flash|world)$"),
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> dict[str, object]:
+        return {"source": source, "items": await asyncio.to_thread(
+            store.load_market_news_feed, source, limit=limit,
+        )}
 
     @app.get("/api/v1/market/minute-bars", dependencies=[Depends(authorize)])
     async def minute_bars(

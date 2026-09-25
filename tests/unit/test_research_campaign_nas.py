@@ -5,7 +5,7 @@ import hashlib
 import sqlite3
 import secrets
 from contextlib import closing
-from datetime import date, datetime, UTC
+from datetime import date, datetime, timedelta, UTC
 from pathlib import Path
 from unittest.mock import patch
 import unittest
@@ -16,7 +16,7 @@ from kiwoom_monitor.infrastructure.research_data_source import load_research_inp
 from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository, _MIGRATIONS
 from kiwoom_monitor.infrastructure.persistence.schema_migrations import SQLiteMigrationRunner
-from kiwoom_monitor.research_process import execute_campaign_cycle
+from kiwoom_monitor.research_process import execute_campaign_cycle, discover_campaign_inputs
 from scripts.export_research_dataset import prepare_campaign_nas_input
 import test_research_campaign_inputs as fixture_module
 from test_research_bundle import write_child
@@ -165,10 +165,11 @@ class CampaignNasTests(unittest.TestCase):
         row = migrated.load_campaign_input_sources('old')[0]
         with closing(sqlite3.connect(path)) as connection:
             self.assertEqual(before, connection.execute('SELECT * FROM research_campaign_input_sources').fetchone()[:len(before)])
-        self.assertEqual(23, migrated.schema_version())
+        self.assertEqual(27, migrated.schema_version())
         self.assertEqual(0, row['nas_auto_prepare'])
         self.assertEqual('', row['nas_config_path'])
         self.assertEqual('', row['remote_signature'])
+        self.assertEqual('', row['rolling_next_start'])
 
     def test_cached_signature_survives_repository_restart(self):
         self.scan()
@@ -231,6 +232,185 @@ class CampaignNasTests(unittest.TestCase):
         dataset = load_research_input(published, session_profile='krx-regular/v1')
         self.assertEqual(scope, campaign_input_scope(dataset))
         self.assertEqual([day.isoformat() for day in days], [entry['selected_date'] for entry in json.loads((published / 'manifest.json').read_text())['children']])
+
+
+class RollingNasTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = fixture_module.RollingDailyInputTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.repo, self.root, self.watch = self.fixture.repo, self.fixture.root, self.fixture.watch
+        self.repo.set_campaign_desired_state('c', 'PAUSED')
+        self.repo.finish_campaign_worker('c', owner_token='rolling-worker', generation=self.fixture.claim['generation'], outcome='EXPECTED_EXIT')
+        self.repo.save_campaign_input_source('c', self.fixture.job, self.watch, rolling_daily=True,
+                                             nas_auto_prepare=True, nas_config_path=self.root / 'data_source.json')
+        self.repo.set_campaign_desired_state('c', 'RUNNING')
+        self.fixture.claim = self.repo.claim_campaign_worker('c', owner_token='rolling-worker', lease_seconds=3600)
+        remote = self.fixture.candidate('remote-monday', 14)
+        self.remote = self.root / 'remote-monday'
+        remote.rename(self.remote)
+        self.client = SnapshotClient({'2026-09-14T00:00:00+00:00': self.remote})
+        settings = DataSourceSettings(mode='personal_server', server_url='https://nas.invalid', access_token=secrets.token_urlsafe(24))
+        for item in (patch('kiwoom_monitor.research_process.DataSourceConfig.load', return_value=settings),
+                     patch('kiwoom_monitor.research_process.CentralContentClient', return_value=self.client)):
+            item.start()
+            self.addCleanup(item.stop)
+
+    def scan(self, seconds=0):
+        return discover_campaign_inputs(self.repo, 'c', self.fixture.claim,
+                                        now=self.fixture.now + timedelta(seconds=seconds))
+
+    def test_weekend_then_monday_is_published_registered_and_cursor_survives_restart(self):
+        first = self.scan()
+        self.assertEqual([], first['errors'])
+        self.assertEqual(1, first['non_trading_days'])
+        self.assertEqual([], self.client.calls)
+        second = self.scan(61)
+        self.assertEqual([], second['errors'])
+        self.assertEqual(1, second['registered'])
+        self.assertEqual('2026-09-15T00:00:00+00:00', self.repo.load_campaign_input_sources('c')[0]['rolling_next_start'])
+        self.assertEqual(2, len(self.repo.load_campaign_jobs('c')))
+        self.assertEqual('2026-09-14T00:00:00+00:00', self.repo.load_campaign_jobs('c')[1]['request']['research_context']['evaluation']['folds'][0]['start'])
+        self.fixture.repo = ResearchRepository(self.fixture.request.database)
+        self.assertEqual('2026-09-15T00:00:00+00:00', self.fixture.repo.load_campaign_input_sources('c')[0]['rolling_next_start'])
+
+    def test_empty_weekday_is_skipped_without_export(self):
+        path = self.remote / 'manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['revision_count'] = 0
+        manifest['revision_ids_hash'] = hashlib.sha256(b'').hexdigest()
+        (self.remote / 'observations.jsonl').write_text('')
+        path.write_text(json.dumps(manifest))
+        self.scan()
+        with patch('scripts.export_research_dataset.export_daily_dataset') as export:
+            second = self.scan(61)
+        export.assert_not_called()
+        self.assertEqual([], second['errors'])
+        self.assertEqual(1, second['non_trading_days'])
+        self.assertEqual('2026-09-15T00:00:00+00:00', self.repo.load_campaign_input_sources('c')[0]['rolling_next_start'])
+        with closing(sqlite3.connect(self.repo.path)) as connection:
+            self.assertEqual(1, connection.execute('SELECT COUNT(*) FROM research_campaign_rolling_empty_days').fetchone()[0])
+
+    def test_late_nas_day_is_rechecked_and_registered_without_rewinding_cursor(self):
+        manifest_path = self.remote / 'manifest.json'
+        full_manifest = manifest_path.read_bytes()
+        full_rows = (self.remote / 'observations.jsonl').read_bytes()
+        manifest = json.loads(full_manifest)
+        manifest['revision_count'] = 0
+        manifest['revision_ids_hash'] = hashlib.sha256(b'').hexdigest()
+        (self.remote / 'observations.jsonl').write_bytes(b'')
+        manifest_path.write_text(json.dumps(manifest))
+        self.scan()
+        self.scan(61)
+        self.assertEqual(1, len(self.repo.load_campaign_jobs('c')))
+        self.assertEqual('2026-09-15T00:00:00+00:00', self.repo.load_campaign_input_sources('c')[0]['rolling_next_start'])
+        manifest_path.write_bytes(full_manifest)
+        (self.remote / 'observations.jsonl').write_bytes(full_rows)
+        self.repo = ResearchRepository(self.fixture.request.database)
+        recovered = self.scan(86400 + 122)
+        self.assertEqual([], recovered['errors'])
+        self.assertEqual(1, recovered['recovered_late_days'])
+        self.assertEqual(1, recovered['registered'])
+        self.assertEqual('2026-09-15T00:00:00+00:00', self.repo.load_campaign_input_sources('c')[0]['rolling_next_start'])
+        with closing(sqlite3.connect(self.repo.path)) as connection:
+            self.assertEqual(0, connection.execute('SELECT COUNT(*) FROM research_campaign_rolling_empty_days').fetchone()[0])
+
+    def test_still_empty_retry_remains_due_later_and_new_cursor_is_preserved(self):
+        manifest_path = self.remote / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['revision_count'] = 0
+        manifest['revision_ids_hash'] = hashlib.sha256(b'').hexdigest()
+        (self.remote / 'observations.jsonl').write_bytes(b'')
+        manifest_path.write_text(json.dumps(manifest))
+        self.scan()
+        self.scan(61)
+        result = self.scan(86400 + 122)
+        self.assertEqual([], result['errors'])
+        self.assertEqual(1, result['rechecked_empty_days'])
+        with closing(sqlite3.connect(self.repo.path)) as connection:
+            row = connection.execute('SELECT attempts,next_retry_at FROM research_campaign_rolling_empty_days').fetchone()
+        self.assertEqual(2, row[0])
+        self.assertGreater(datetime.fromisoformat(row[1]), self.fixture.now + timedelta(days=1, seconds=122))
+        self.assertEqual('2026-09-15T00:00:00+00:00', self.repo.load_campaign_input_sources('c')[0]['rolling_next_start'])
+
+    def test_reconfiguration_clears_old_empty_day_schedule(self):
+        manifest_path = self.remote / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['revision_count'] = 0
+        manifest['revision_ids_hash'] = hashlib.sha256(b'').hexdigest()
+        (self.remote / 'observations.jsonl').write_bytes(b'')
+        manifest_path.write_text(json.dumps(manifest))
+        self.scan()
+        self.scan(61)
+        self.repo.set_campaign_desired_state('c', 'PAUSED')
+        self.repo.finish_campaign_worker('c', owner_token='rolling-worker', generation=self.fixture.claim['generation'], outcome='EXPECTED_EXIT')
+        self.repo.save_campaign_input_source('c', self.fixture.job, self.watch, rolling_daily=True,
+                                             nas_auto_prepare=True, nas_config_path=self.root / 'data_source.json')
+        with closing(sqlite3.connect(self.repo.path)) as connection:
+            self.assertEqual(0, connection.execute('SELECT COUNT(*) FROM research_campaign_rolling_empty_days').fetchone()[0])
+        self.assertEqual('', self.repo.load_campaign_input_sources('c')[0]['rolling_next_start'])
+
+    def test_expired_new_day_cost_does_not_disable_late_day_rechecks(self):
+        manifest_path = self.remote / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['revision_count'] = 0
+        manifest['revision_ids_hash'] = hashlib.sha256(b'').hexdigest()
+        (self.remote / 'observations.jsonl').write_bytes(b'')
+        manifest_path.write_text(json.dumps(manifest))
+        self.scan()
+        self.scan(61)
+        with closing(sqlite3.connect(self.repo.path)) as connection, connection:
+            connection.execute("UPDATE research_campaign_input_sources SET rolling_next_start='2026-09-21T00:00:00+00:00'")
+        due = self.scan(10 * 86400)
+        self.assertEqual(1, due['rechecked_empty_days'])
+        closed = self.scan(10 * 86400 + 61)
+        self.assertEqual([], closed['errors'])
+        self.assertEqual(1, closed['cost_window_closed'])
+        self.assertEqual('READY', self.repo.load_campaign_input_sources('c')[0]['state'])
+
+    def test_v26_source_and_cursor_survive_v27_empty_day_migration(self):
+        self.scan()
+        old_path = self.root / 'research-v26.sqlite3'
+        with closing(sqlite3.connect(self.repo.path)) as current, closing(sqlite3.connect(old_path)) as old:
+            current.backup(old)
+        with closing(sqlite3.connect(old_path)) as old, old:
+            old.execute('DROP TABLE research_campaign_rolling_empty_days')
+            old.execute('DELETE FROM research_schema_migrations WHERE version=27')
+            original = old.execute('SELECT * FROM research_campaign_input_sources').fetchone()
+        migrated = ResearchRepository(old_path)
+        with closing(sqlite3.connect(old_path)) as connection:
+            self.assertEqual(original, connection.execute('SELECT * FROM research_campaign_input_sources').fetchone())
+            self.assertEqual(0, connection.execute('SELECT COUNT(*) FROM research_campaign_rolling_empty_days').fetchone()[0])
+        self.assertEqual(27, migrated.schema_version())
+
+    def test_published_but_unregistered_day_is_recovered_before_cursor_advances(self):
+        self.scan()
+        with patch.object(self.repo, 'enqueue_campaign_experiment', side_effect=ValueError('simulated enqueue failure')):
+            failed = self.scan(61)
+        self.assertIn('simulated enqueue failure', failed['errors'][0])
+        self.assertEqual('2026-09-14T00:00:00+00:00', self.repo.load_campaign_input_sources('c')[0]['rolling_next_start'])
+        self.assertEqual(1, len(list(self.watch.glob('nas-*/manifest.json'))))
+        recovered = self.scan(122)
+        self.assertEqual([], recovered['errors'])
+        self.assertEqual(1, recovered['registered'])
+        self.assertEqual(2, len(self.repo.load_campaign_jobs('c')))
+        self.assertEqual('2026-09-15T00:00:00+00:00', self.repo.load_campaign_input_sources('c')[0]['rolling_next_start'])
+
+    def test_partial_trading_day_is_not_published_or_skipped(self):
+        rows = [json.loads(line) for line in (self.remote / 'observations.jsonl').read_text().splitlines()]
+        encoded = (json.dumps(rows[0]) + '\n').encode()
+        (self.remote / 'observations.jsonl').write_bytes(encoded)
+        path = self.remote / 'manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['revision_count'] = 1
+        manifest['revision_ids_hash'] = hashlib.sha256(rows[0]['revision_id'].encode()).hexdigest()
+        manifest['observations_file_hash'] = hashlib.sha256(encoded).hexdigest()
+        path.write_text(json.dumps(manifest))
+        self.scan()
+        result = self.scan(61)
+        self.assertIn('trading_day_evidence_missing', result['errors'][0])
+        self.assertEqual([], list(self.watch.glob('nas-*/manifest.json')))
+        self.assertEqual('2026-09-14T00:00:00+00:00', self.repo.load_campaign_input_sources('c')[0]['rolling_next_start'])
 
 
 if __name__ == '__main__':

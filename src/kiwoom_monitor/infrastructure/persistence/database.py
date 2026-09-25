@@ -109,7 +109,7 @@ DEFAULT_COLUMNS = (
 )
 
 
-MAIN_SCHEMA_VERSION = 7
+MAIN_SCHEMA_VERSION = 8
 
 
 class Database:
@@ -209,6 +209,10 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_top20_trade_value_index_date
                 ON top20_trade_value_index(trade_date, minute);
+            CREATE TABLE IF NOT EXISTS top20_statistics_daily_cache (
+                trade_date TEXT PRIMARY KEY,
+                summary_json TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS market_index_daily_bars (
                 trade_date TEXT NOT NULL, market TEXT NOT NULL,
                 open_value REAL NOT NULL, high_value REAL NOT NULL,
@@ -306,6 +310,11 @@ class Database:
                         7,
                         "profile_theme_suggestion_article_context",
                         self._add_theme_suggestion_article_context,
+                    ),
+                    SQLiteMigration(
+                        8,
+                        "legacy_news_transfer_ledger",
+                        self._create_legacy_news_transfer_ledger,
                     ),
                 )
             )
@@ -425,6 +434,13 @@ class Database:
                 connection.execute(
                     f"ALTER TABLE profile_theme_suggestions ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
                 )
+
+    @staticmethod
+    def _create_legacy_news_transfer_ledger(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS legacy_news_transfer_migrations ("
+            "version INTEGER PRIMARY KEY,name TEXT NOT NULL,completed_at TEXT NOT NULL)"
+        )
 
     @staticmethod
     def _add_daily_bar_columns(connection: sqlite3.Connection) -> None:

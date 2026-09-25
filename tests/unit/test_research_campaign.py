@@ -54,7 +54,7 @@ class ResearchCampaignTests(unittest.TestCase):
         self.assertEqual(900, ResearchCampaignPolicy().retry_seconds(100000))
 
     def test_schema_default_state_and_idempotent_creation_survive_restart(self):
-        self.assertEqual(23, RESEARCH_SCHEMA_VERSION)
+        self.assertEqual(27, RESEARCH_SCHEMA_VERSION)
         self.assertFalse(self.repo.create_campaign('c', '연구', ResearchCampaignPolicy()))
         restored = ResearchRepository(self.path).load_campaign('c')
         self.assertEqual('PAUSED', restored['desired_state'])
@@ -271,7 +271,7 @@ class ResearchCampaignTests(unittest.TestCase):
             before_job = connection.execute('SELECT * FROM research_search_jobs').fetchone()
             before_attempt = connection.execute('SELECT * FROM research_trial_attempts').fetchone()
         migrated = ResearchRepository(path)
-        self.assertEqual(23, migrated.schema_version())
+        self.assertEqual(27, migrated.schema_version())
         with closing(sqlite3.connect(path)) as connection:
             self.assertEqual(before_job, connection.execute('SELECT * FROM research_search_jobs').fetchone())
             self.assertEqual(before_attempt, connection.execute('SELECT * FROM research_trial_attempts').fetchone())

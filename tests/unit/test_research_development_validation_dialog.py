@@ -1,6 +1,7 @@
 from copy import deepcopy
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import time
 import unittest
@@ -11,7 +12,9 @@ from PySide6.QtWidgets import QApplication, QTableWidgetItem
 
 import test_research_development_validation as fixtures
 from kiwoom_monitor import research_process as rp
-from kiwoom_monitor.presentation.research_dialog import DevelopmentValidationDialog, ResearchDialog
+from kiwoom_monitor.presentation.research_dialog import (
+    DevelopmentValidationDialog, ResearchDialog, _record_research_operation_owner,
+)
 
 
 class DevelopmentValidationDialogTests(unittest.TestCase):
@@ -54,6 +57,9 @@ class DevelopmentValidationDialogTests(unittest.TestCase):
             else: dialog._start()
         self.assertIsNotNone(dialog._operation, dialog._status.text())
         self.assertTrue(launch.call_args.kwargs['below_normal_priority'])
+        command = launch.call_args.args[0]
+        marker = command.index('--validation-owner-token')
+        self.assertTrue(command[marker + 1].startswith('development-ui-owner-'))
         return dialog, process, launch.call_args.args[0]
 
     def child_result(self, dialog, process):
@@ -92,6 +98,34 @@ class DevelopmentValidationDialogTests(unittest.TestCase):
         self.assertEqual(0, result['attempted_now']); self.assertEqual(2, result['cached_count'])
         dialog._poll_process()
         self.assertEqual('완료 결과 재사용', dialog._table.item(1, 2).text())
+
+    def test_restart_restores_frozen_request_and_reuses_completed_runs(self):
+        dialog, process, _ = self.begin()
+        saved = dialog._saved_request_path
+        self.assertEqual(self.fixture.batch.to_dict(), rp.load_development_validation_request(saved).to_dict())
+        self.child_result(dialog, process); dialog._poll_process()
+        self.path.write_text('{broken', encoding='utf-8')
+
+        restarted = DevelopmentValidationDialog(self.root / 'state')
+        self.dialogs.append(restarted)
+        self.assertTrue(restarted._resume.isEnabled())
+        self.assertEqual(str(saved), restarted._request_path.text())
+        restarted, process, _ = self.begin(restarted, resume=True)
+        result = self.child_result(restarted, process)
+        self.assertEqual(0, result['attempted_now'])
+        self.assertEqual(2, result['cached_count'])
+        restarted._poll_process()
+
+    def test_invalid_saved_request_does_not_enable_resume_or_touch_database(self):
+        state = self.root / 'state'
+        state.mkdir()
+        saved = state / 'last_development_validation_request.json'
+        saved.write_text('{broken', encoding='utf-8')
+        dialog = self.dialog(state)
+        self.assertFalse(dialog._resume.isEnabled())
+        self.assertIn('복원 실패', dialog._status.text())
+        self.assertFalse(self.fixture.batch.request.database.exists())
+        self.assertEqual('{broken', saved.read_text(encoding='utf-8'))
 
     def test_duplicate_launch_after_native_exit_before_poll_is_blocked(self):
         dialog, process, _ = self.begin()
@@ -157,10 +191,12 @@ class DevelopmentValidationDialogTests(unittest.TestCase):
     def test_native_zero_with_stale_running_checkpoint_is_not_success(self):
         dialog, process, _ = self.begin()
         document = self.progress(); document['steps'][0].update(run_id='one', state='RUNNING'); document['run_ids'] = ['one']
+        frozen_request = dialog._operation['request']
         dialog._operation['result'].write_text(json.dumps(document)); process.poll.return_value = 0
         dialog._poll_process()
         self.assertIn('완료 상태 불일치', dialog._status.text())
         self.assertEqual('previous', dialog._table.item(0, 0).text())
+        self.assertTrue(frozen_request.is_file())
 
     def test_failure_busy_and_cache_invalid_visible_without_automatic_retry(self):
         for state in ('FAILED', 'BUSY', 'CACHE_INVALID', 'BUDGET_EXHAUSTED'):
@@ -206,6 +242,7 @@ class DevelopmentValidationDialogTests(unittest.TestCase):
         self.assertEqual(original, self.path.read_bytes())
         self.assertFalse(self.fixture.batch.request.database.exists())
         self.assertEqual([], list((self.root / 'state').glob('development_validation_*')))
+        self.assertTrue((self.root / 'state' / 'last_development_validation_request.json').exists())
         self.path.write_text('{}'); dialog._start()
         self.assertIn('요청 확인 실패', dialog._status.text())
 
@@ -228,12 +265,16 @@ class DevelopmentValidationDialogTests(unittest.TestCase):
 
     def test_app_stop_cancels_owned_child_and_preserves_other_files(self):
         dialog, process, _ = self.begin(); operation = dict(dialog._operation)
+        process.pid = os.getpid()
+        self.assertTrue(_record_research_operation_owner(operation, process, 'development_validation'))
         unrelated = self.root / 'state' / 'keep.json'; unrelated.write_text('keep')
         with patch.object(dialog._manager, 'stop') as stop:
             dialog.stop()
         self.assertEqual(3.0, stop.call_args.kwargs['graceful_timeout'])
         self.assertTrue(unrelated.exists()); self.assertTrue(self.path.exists())
-        self.assertTrue(all(not operation[key].exists() for key in ('request', 'result', 'cancel')))
+        self.assertTrue(operation['request'].exists())
+        self.assertTrue(operation['cancel'].exists())
+        self.assertTrue(operation['owner'].exists())
 
     def test_parent_reuses_window_and_propagates_close_and_stop(self):
         with patch('kiwoom_monitor.presentation.research_dialog.QSettings') as settings:

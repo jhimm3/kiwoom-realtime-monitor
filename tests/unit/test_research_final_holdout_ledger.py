@@ -188,7 +188,7 @@ class FinalHoldoutLedgerTests(unittest.TestCase):
         self.assertEqual(17, ResearchRepository(old_path, read_only=True).schema_version())
         self.assertEqual(before, old_path.read_bytes())
         migrated = ResearchRepository(old_path)
-        self.assertEqual(23, migrated.schema_version())
+        self.assertEqual(27, migrated.schema_version())
         with closing(sqlite3.connect(old_path)) as connection:
             self.assertEqual(runs, connection.execute('SELECT * FROM research_runs').fetchall())
             self.assertEqual(reports, connection.execute('SELECT * FROM research_reports').fetchall())
@@ -207,7 +207,7 @@ class FinalHoldoutLedgerTests(unittest.TestCase):
         self.assertEqual(18,ResearchRepository(old_path,read_only=True).schema_version())
         self.assertEqual(before,old_path.read_bytes())
         migrated = ResearchRepository(old_path)
-        self.assertEqual(23,migrated.schema_version())
+        self.assertEqual(27, migrated.schema_version())
         self.assertEqual('completed',migrated.load_run('v18-run')['status'])
         self.assertEqual((),migrated.load_final_holdout_executions('absent'))
 
@@ -228,7 +228,7 @@ class FinalHoldoutLedgerTests(unittest.TestCase):
         self.assertEqual(19, ResearchRepository(old_path, read_only=True).schema_version())
         self.assertEqual(before, old_path.read_bytes())
         migrated = ResearchRepository(old_path)
-        self.assertEqual(23, migrated.schema_version())
+        self.assertEqual(27, migrated.schema_version())
         self.assertEqual(1, migrated.load_final_holdout_executions('batch-v19')[0]['generation'])
         self.assertEqual((), migrated.load_final_holdout_recoveries('batch-v19'))
 

@@ -58,7 +58,8 @@ class HistoricalBaselineRequestTests(unittest.TestCase):
                 "scripts.prepare_historical_baseline_requests.assess_historical_development_readiness",
                 return_value=readiness,
             ):
-                paths = prepare_requests(package, root / "output", allow_partial=True)
+                paths = prepare_requests(package, root / "output", allow_partial=True,
+                                         memory_mb=1024)
 
             self.assertEqual(4, len(paths))
             documents = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
@@ -68,6 +69,8 @@ class HistoricalBaselineRequestTests(unittest.TestCase):
             )
             self.assertTrue(all(item["historical_baseline_context"]["oos_included"] is False for item in documents))
             self.assertTrue(all(item["strategy"]["rank_persistence_enabled"] is False for item in documents))
+            self.assertTrue(all(item["resource_budget"]["memory_mb"] == 1024
+                                for item in documents))
 
     def test_prepare_requests_rejects_package_that_includes_oos(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

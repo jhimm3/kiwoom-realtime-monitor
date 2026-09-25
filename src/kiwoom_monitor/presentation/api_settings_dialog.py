@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 from pathlib import Path
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from PySide6.QtCore import Slot, Qt
@@ -120,6 +121,13 @@ class ApiSettingsDialog(QDialog):
         self._nas_ai_daily_limit.setSpecialValueText("무제한")
         self._nas_news_refresh = QSpinBox(); self._nas_news_refresh.setRange(60, 86_400); self._nas_news_refresh.setSuffix("초")
         self._nas_dart_enabled = QCheckBox("DART 공시 수집 사용")
+        self._nas_sources_available = False
+        self._nas_stock_search_enabled = QCheckBox("종목명 뉴스 수집 사용 (네이버 검색 API)")
+        self._nas_stock_site_enabled = QCheckBox("네이버 증권 종목뉴스 수집 사용")
+        self._nas_market_news_enabled = QCheckBox("네이버 증권 시황뉴스 수집 사용 (FLASH/WORLD)")
+        self._nas_stock_site_url = QLineEdit()
+        self._nas_flash_url = QLineEdit()
+        self._nas_world_url = QLineEdit()
         self._nas_query_available = False
         self._nas_query_enabled = QCheckBox("공통 검색어 뉴스 수집 사용")
         self._nas_query_text = QPlainTextEdit()
@@ -234,10 +242,16 @@ class ApiSettingsDialog(QDialog):
             layout.addRow("AI 하루 최대 요청", self._nas_ai_daily_limit)
             layout.addRow("등록 종목 뉴스 수집 주기", self._nas_news_refresh)
             layout.addRow(self._nas_dart_enabled)
-            layout.addRow(_section_title("공통 뉴스 검색"))
+            layout.addRow(_section_title("NAS 뉴스 수집원"))
+            layout.addRow(self._nas_stock_search_enabled)
             layout.addRow(self._nas_query_enabled)
             layout.addRow("검색어 (최대 50개)", self._nas_query_text)
             layout.addRow("검색어별 수집 주기", self._nas_query_refresh)
+            layout.addRow(self._nas_stock_site_enabled)
+            layout.addRow("종목뉴스 API 주소", self._nas_stock_site_url)
+            layout.addRow(self._nas_market_news_enabled)
+            layout.addRow("FLASH API 주소", self._nas_flash_url)
+            layout.addRow("WORLD API 주소", self._nas_world_url)
             query_note = QLabel("검색어는 한 줄에 하나씩 입력합니다. 공통 검색은 종목별 수집과 별도로 실행되며 하루 요청 한도 안에서 수집합니다.")
             query_note.setWordWrap(True)
             layout.addRow(query_note)
@@ -409,6 +423,10 @@ class ApiSettingsDialog(QDialog):
         self._nas_operations_available = True
         self._nas_query_available = all(name in values for name in (
             "news_query_set_enabled", "news_query_set", "news_query_set_refresh_seconds"))
+        self._nas_sources_available = all(name in values for name in (
+            "news_naver_api_enabled", "news_naver_stock_enabled", "news_naver_market_enabled",
+            "news_naver_stock_url", "news_naver_flash_url", "news_naver_world_url",
+        ))
         self._nas_condition_available = values.get("condition_runtime_supported") is True and all(name in values for name in (
             "hot_cohort_condition_enabled", "hot_cohort_condition_name", "hot_cohort_condition_substring"))
         self._nas_external_available = all(name in values for name in (
@@ -426,6 +444,12 @@ class ApiSettingsDialog(QDialog):
         self._nas_ai_daily_limit.setValue(int(values.get("ai_daily_limit", 0)))
         self._nas_news_refresh.setValue(int(values.get("news_refresh_seconds", 300)))
         self._nas_dart_enabled.setChecked(bool(values.get("dart_enabled", False)))
+        self._nas_stock_search_enabled.setChecked(bool(values.get("news_naver_api_enabled", True)))
+        self._nas_stock_site_enabled.setChecked(bool(values.get("news_naver_stock_enabled", False)))
+        self._nas_market_news_enabled.setChecked(bool(values.get("news_naver_market_enabled", True)))
+        self._nas_stock_site_url.setText(str(values.get("news_naver_stock_url", "https://stock.naver.com/api/domestic/detail/news")))
+        self._nas_flash_url.setText(str(values.get("news_naver_flash_url", "https://stock.naver.com/api/domestic/news/list")))
+        self._nas_world_url.setText(str(values.get("news_naver_world_url", "https://stock.naver.com/api/foreign/news/worldNews")))
         self._nas_query_enabled.setChecked(bool(values.get("news_query_set_enabled", False)))
         self._nas_query_text.setPlainText("\n".join(str(query) for query in values.get("news_query_set", [])))
         self._nas_query_refresh.setValue(int(values.get("news_query_set_refresh_seconds", 300)))
@@ -479,6 +503,10 @@ class ApiSettingsDialog(QDialog):
             widget.setEnabled(enabled and self._nas_condition_available)
         for widget in (self._nas_query_enabled, self._nas_query_text, self._nas_query_refresh):
             widget.setEnabled(enabled and self._nas_query_available)
+        for widget in (self._nas_stock_search_enabled, self._nas_stock_site_enabled,
+                       self._nas_market_news_enabled, self._nas_stock_site_url,
+                       self._nas_flash_url, self._nas_world_url):
+            widget.setEnabled(enabled and self._nas_sources_available)
 
     def _nas_operation_values(self) -> dict[str, object]:
         values = {
@@ -501,9 +529,26 @@ class ApiSettingsDialog(QDialog):
             values.update(news_query_set_enabled=self._nas_query_enabled.isChecked(),
                 news_query_set=list(dict.fromkeys(query.strip() for query in self._nas_query_text.toPlainText().splitlines() if query.strip())),
                 news_query_set_refresh_seconds=self._nas_query_refresh.value())
+        if self._nas_sources_available:
+            values.update(
+                news_naver_api_enabled=self._nas_stock_search_enabled.isChecked(),
+                news_naver_stock_enabled=self._nas_stock_site_enabled.isChecked(),
+                news_naver_market_enabled=self._nas_market_news_enabled.isChecked(),
+                news_naver_stock_url=self._nas_stock_site_url.text().strip(),
+                news_naver_flash_url=self._nas_flash_url.text().strip(),
+                news_naver_world_url=self._nas_world_url.text().strip(),
+            )
         return values
 
     def _save_nas_operational_settings(self, source: DataSourceSettings) -> None:
+        if self._nas_sources_available:
+            for label, widget in (("종목뉴스", self._nas_stock_site_url),
+                                  ("FLASH", self._nas_flash_url), ("WORLD", self._nas_world_url)):
+                parsed = urlsplit(widget.text().strip())
+                if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+                        or parsed.password or parsed.query or parsed.fragment or not parsed.path):
+                    QMessageBox.warning(self, "입력 확인", f"{label} 주소에는 HTTPS API 경로를 입력하세요.")
+                    return
         if self._nas_query_available:
             queries = self._nas_operation_values()["news_query_set"]
             if len(queries) > 50:

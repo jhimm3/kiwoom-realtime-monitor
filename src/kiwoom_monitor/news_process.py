@@ -208,6 +208,8 @@ def main(arguments: list[str] | None = None) -> int:
     # 사용자가 뉴스창을 닫아도 프로세스는 대기하고 다음 더블클릭에 재사용한다.
     app.setQuitOnLastWindowClosed(False)
     window = StockNewsWindow(config_path, database_path)
+    from kiwoom_monitor.presentation.market_news_window import MarketNewsWindow
+    market_window = MarketNewsWindow(config_path, database_path)
     window.setWindowIcon(app.windowIcon())
     logger = logging.getLogger(__name__)
     logger.info("뉴스 전용 프로세스 시작: parent=%s", options.parent_pid)
@@ -282,6 +284,7 @@ def main(arguments: list[str] | None = None) -> int:
         mode = str(document.get("window_mode", "independent"))
         if action == "shutdown":
             logger.info("뉴스 전용 프로세스 종료 명령 수신")
+            market_window.shutdown()
             window.shutdown()
             publish_visibility(force=True)
             app.quit()
@@ -312,6 +315,9 @@ def main(arguments: list[str] | None = None) -> int:
             if (mode == "linked" or mode.startswith("docked_") or mode == "docked") and window.isVisible():
                 raise_without_focus()
             return
+        if action == "market_news":
+            market_window.show_news()
+            return
         if _apply_show_command(window, document):
             if mode.startswith("docked_") or mode == "docked":
                 dock_beside_main(document.get("main_geometry"), "docked_right" if mode == "docked" else mode)
@@ -331,6 +337,7 @@ def main(arguments: list[str] | None = None) -> int:
             return
         logger.info("메인 프로세스 종료 감지: parent=%s", options.parent_pid)
         window.shutdown()
+        market_window.shutdown()
         app.quit()
 
     parent_timer.timeout.connect(stop_if_parent_exited)

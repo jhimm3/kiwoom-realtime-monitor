@@ -1,6 +1,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import sys
 import tempfile
 import unittest
 from datetime import date, datetime
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 from kiwoom_monitor.application.research_resources import (
     ResearchResourceGuard, ResearchResourceLimits, ResearchResourceBlocked, current_rss_bytes,
+    _windows_rss_api,
 )
 from kiwoom_monitor.application.research_replay import ResearchReplayCursor, replay_krx_minute_bars, replay_candidate_universe
 from kiwoom_monitor.infrastructure.research_data_source import research_observation_order, research_input_encoded_bytes
@@ -21,6 +23,14 @@ from test_research_process import _request_document, _write_empty_dataset
 class ResearchResourcesTests(unittest.TestCase):
     def test_real_platform_rss_is_positive(self):
         self.assertGreater(current_rss_bytes(), 0)
+
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows process memory API')
+    def test_windows_rss_reuses_native_api_bindings(self):
+        first = _windows_rss_api()
+        for _ in range(1000):
+            self.assertGreater(current_rss_bytes(), 0)
+        self.assertIs(first, _windows_rss_api())
+        self.assertEqual(_windows_rss_api.cache_info().misses, 1)
 
     def test_limits_and_missing_rss_fail_closed(self):
         for kwargs in ({'memory_mb': 127}, {'cpu_duty_percent': 0}, {'batch_seconds': 1}):
@@ -69,6 +79,31 @@ class ResearchResourcesTests(unittest.TestCase):
             cutoff = datetime.fromisoformat(row['available_at'])
             self.assertEqual(replay_krx_minute_bars(prefix, as_of=cutoff, session_profile=PROFILE), bars)
             self.assertEqual(replay_candidate_universe(prefix, as_of=cutoff, chronological=True), universe)
+
+    def test_target_cursor_matches_same_code_day_full_replay_after_correction(self):
+        rows = rows_for(date(2026, 9, 14), count=3)
+        other = dict(rows[2], revision_id='other-code', subject='000660:KRX', accepted_sequence=20,
+                     payload=dict(rows[2]['payload'], code='000660'))
+        invalid = dict(rows[2], revision_id='invalid-correction', accepted_sequence=21,
+                       available_at='2026-09-14T09:04:00+09:00', completeness='partial')
+        rows.extend((other, invalid))
+        rows.extend(rows_for(date(2026, 9, 15), count=1))
+        rows = tuple(sorted(rows, key=research_observation_order))
+        cursor = ResearchReplayCursor(rows, session_profile=PROFILE)
+        for index, row in enumerate(rows):
+            if row.get('kind') != 'minute_bar':
+                continue
+            current, history, _ = cursor.advance_for_observation(row)
+            prefix = rows[:index + 1]
+            cutoff = datetime.fromisoformat(row['available_at'])
+            full = replay_krx_minute_bars(prefix, as_of=cutoff, session_profile=PROFILE)
+            expected_current = next((bar for bar in full if bar.revision_id == row['revision_id']), None)
+            self.assertEqual(expected_current, current)
+            if current is not None:
+                expected_history = tuple(bar for bar in full if bar.code == current.code
+                                         and datetime.fromisoformat(bar.bar_start).date()
+                                         == datetime.fromisoformat(current.bar_start).date())
+                self.assertEqual(expected_history, history)
 
     def test_preflight_failure_never_creates_output_database(self):
         with tempfile.TemporaryDirectory() as directory:

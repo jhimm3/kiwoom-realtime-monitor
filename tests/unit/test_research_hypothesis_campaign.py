@@ -239,7 +239,7 @@ class ResearchHypothesisCampaignTests(unittest.TestCase):
             )
             connection.commit()
         migrated = ResearchRepository(path)
-        self.assertEqual(23, migrated.schema_version())
+        self.assertEqual(27, migrated.schema_version())
         self.assertEqual(hypothesis, migrated.load_research_hypothesis(hypothesis.hypothesis_id))
 
     def test_v22_available_campaign_hypothesis_is_preserved_by_expansion_migration(self) -> None:
@@ -281,7 +281,7 @@ class ResearchHypothesisCampaignTests(unittest.TestCase):
             )
             connection.commit()
         migrated = ResearchRepository(path)
-        self.assertEqual(23, migrated.schema_version())
+        self.assertEqual(27, migrated.schema_version())
         self.assertEqual(
             hypothesis.hypothesis_id,
             migrated.load_campaign_hypothesis_bindings('legacy-campaign')[0]['hypothesis_id'],

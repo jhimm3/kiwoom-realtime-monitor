@@ -88,6 +88,7 @@ class SettingsBackupService:
                         "negative_color": news_filter.negative_color,
                         "mixed_color": news_filter.mixed_color,
                         "neutral_color": news_filter.neutral_color,
+                        "stored_news_limit": news_filter.stored_news_limit,
                     },
                     "ai": {
                         "provider": news_ai.provider,
@@ -258,6 +259,7 @@ class SettingsBackupService:
             self._color(filter_data.get("negative_color"), current_filter.negative_color),
             self._color(filter_data.get("mixed_color"), current_filter.mixed_color),
             self._color(filter_data.get("neutral_color"), current_filter.neutral_color),
+            self._bounded_int(filter_data.get("stored_news_limit"), current_filter.stored_news_limit, 50, 1000),
         )
         provider = str(ai_data.get("provider", current_ai.provider))
         request_mode = str(ai_data.get("request_mode", current_ai.request_mode))

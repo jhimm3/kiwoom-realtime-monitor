@@ -57,17 +57,18 @@ try {
     $collectorExitCode = $LASTEXITCODE
     $ErrorActionPreference = $previousErrorAction
     Append-Output $output
+    if ($collectorExitCode -eq 3) {
+        Write-State 'environment_unavailable' 'CREON Plus connection was lost. Reconnect CREON Plus before restarting the collector.'
+        exit 3
+    }
     if ($collectorExitCode -ne 0) {
-        $detail = (($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine).Trim()
-        if (-not $detail) {
-            $detail = "Daishin candidate collector exited with code $collectorExitCode"
-        }
+        $detail = "Daishin candidate collector exited with code $collectorExitCode. See $logFile"
         throw $detail
     }
     # Elevated CREON sessions do not reliably inherit the user's X: mapping.
     # Publish the closed DB snapshot from the ordinary user session afterward.
     Append-Output (& $python scripts\report_historical_collection_status.py `
-        --database $Database --local-only 2>&1)
+        --database $Database --local-only --fast 2>&1)
     Write-State 'complete'
 }
 catch {
