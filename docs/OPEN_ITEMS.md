@@ -1,5 +1,9 @@
 # 남은 작업과 보류 사항
 
+2026-09-25 A04~A07·A09 로컬 구현 뒤 남은 검증: NAS 재빌드 후 TOP20 `partial`/`realtime_gap` 운영 계측, 장후 실패 후 같은 날짜 재시도, 순위 요청의 guard 대기와 DB 저장 지연 전후를 같은 조건에서 비교한다. 장후 자료별 성공은 기존 `market_data_coverage*`·수급·지수 coverage에 남고 실패일은 재시도한다. A08은 제외하고 A10 collector lock 변경도 사용자 결정에 따라 보류한다. A11·A12는 개발 단계로 별도 검증한다.
+
+2026-09-25 `ka10016` 후속 결정: 이전 부하 감사에서 줄였던 NAS 자동 목록 조회는 현재 화면의 신고가 가격·거리·강조에 소비되지 않아 전부 제거했다. PC 직접 연결의 초기 목록 조회도 제거했다. 기존 저장 스냅샷은 읽기 호환성을 위해 보존한다. NAS 소스는 `2026.09.25-no-ka10016-v1`로 동기화했고, 사용자 컨테이너 재빌드 뒤 실제 `ka10016` 완료 로그가 0건인지 확인해야 한다.
+
 2026-09-25 첨부 감사 재검증: 신규주 장후 `ka10081` 저장행 재사용은 확정 coverage 확인 없이 가능하지만, 이것만으로 네오사피엔스 9/21 저녁 10,000원 표시가 입증되지는 않는다. 현재 PC `intraday_highs`에는 9/21 07:00 UTC(16:00 KST)에 고가 40,000원이 저장돼 있고 화면 정책은 이 당일고가와 일봉 최고가 중 큰 값을 고른다. 당시 사용 빌드·표시 입력값이 필요하다. TOP20 정상 분 마감은 시장별 값과 함께 저장되고 다음 앱 실행은 저장본을 읽는다. 별도 legacy repair는 현재 PC 8,446행 중 대상 0행이며 `unknown_trade_value_eok>0`인 1,222행의 전부가 시장 미분류라고 볼 수 없다. 따라서 날짜 watermark만으로 과거 보정을 영구 종료하기보다, 시장 카탈로그와 분봉 공백이 새로 채워진 행을 구분해 필요한 행만 다시 계산하는 방식이 적합하다.
 
 같은 첨부의 성능 제안 중 현재 사실: 로컬 1초 가격 캐시 flush는 현재가·시총·당일고가를 각각 commit하고, 당일고가 저장은 매번 35일 이전 행을 삭제한다. 분봉 본문/시장지수와 history/sync도 별도 commit이다. GUI의 날짜 변경 정리와 시작 후 background 정리가 중복된다. 단, 개발 확인 CSV는 MarketCacheWriter가 있으면 이미 worker에서 처리하고 GUI 직접 경로는 fallback이다. NAS `program_flow`는 종목별 `save_dataset_snapshot` 반복이 아니라 `save_dataset_snapshots` 배치다. 새 TOP20 메모리 구독은 로컬에서 DB await 앞으로 이동했으나 현재 NAS 실행 빌드는 이전 `2026.09.24-news-claim-diagnostics-v6`이며, `_index_loop`는 여전히 collector lock 안에서 index DB 저장을 await한다. 2초 query cache의 PostgreSQL 저장, failover 15초 재확인/기본 30초 요청 timeout, 숨긴 ResearchDialog의 campaign 복원 시작은 실제 코드에 있다. 각 항목의 지연 기여는 동일 시각 계측으로 판단한다.

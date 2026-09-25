@@ -35,7 +35,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.09.25-followup-newhigh-cache-v1"
+SERVER_BUILD = "2026.09.25-top20-quality-lock-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -2147,8 +2147,14 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         subscriber = realtime_hub.connect()
 
         async def send_events() -> None:
+            reported_drops = 0
             while True:
-                await websocket.send_json(await subscriber.queue.get())
+                event = await subscriber.queue.get()
+                if subscriber.dropped_events != reported_drops:
+                    lost = subscriber.dropped_events - reported_drops
+                    reported_drops = subscriber.dropped_events
+                    await websocket.send_json({"type": "realtime_gap", "dropped_events": lost})
+                await websocket.send_json(event)
 
         sender = asyncio.create_task(send_events())
         try:

@@ -65,7 +65,7 @@ R3g 선택 계좌 모의 주문도 기존 intent/event 원장을 사용한다(�
 - `top20_membership`: 30초 관측별 실제 구성과 키움 원본 행
 - `top20_index`: 1분 거래대금 합계, 시장별 값, 구성 종목과 코호트
 - `top20_daily_entrants`: 거래일 중 한 번이라도 편입된 모든 종목
-- `market_data_coverage`: 거래일·종목·시장별 분봉 장후 보완 완료 근거
+- `market_data_coverage`: 거래일·종목·시장별 분봉 장후 보완 완료 근거. 조회 성공만으로 완료하지 않고 대상일 응답 분봉의 중앙 저장 확인 후 `window_closed/session_finalized`를 기록한다. 유효한 대상일 봉이 없으면 미완료로 둔다.
 - `market_data_coverage_daily`: 종목·시장별 최근 250일 일봉 보완 기준일
 
 ## 로컬 메인 DB: `monitor.sqlite3`

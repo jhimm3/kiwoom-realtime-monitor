@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import Any, Callable, Protocol
 
@@ -127,6 +127,8 @@ class BrokerResult:
     has_next: bool
     next_key: str
     cache_hit: bool = False
+    # None means persistence has not been confirmed (or was not requested).
+    recording_succeeded: bool | None = None
 
 
 @dataclass
@@ -174,6 +176,7 @@ class CentralRestBroker:
         self._persist_queue: asyncio.Queue[tuple[_Job, BrokerResult] | None] = asyncio.Queue()
         self._sequence = count()
         self._inflight: dict[str, asyncio.Future[BrokerResult]] = {}
+        self._lookup_tasks: set[asyncio.Task[None]] = set()
         self._cache: dict[str, tuple[float, BrokerResult]] = {}
         self._guard = asyncio.Lock()
         self._worker: asyncio.Task[None] | None = None
@@ -311,6 +314,8 @@ class CentralRestBroker:
         await asyncio.shield(self._close_task)
 
     async def _close(self) -> None:
+        if self._lookup_tasks:
+            await asyncio.gather(*tuple(self._lookup_tasks), return_exceptions=True)
         worker, self._worker = self._worker, None
         if worker is not None:
             await self._queue.put((10_000, next(self._sequence), None))
@@ -360,32 +365,75 @@ class CentralRestBroker:
             cached = self._cache.get(key)
             if cached and cached[0] > time.monotonic():
                 value = cached[1]
-                return BrokerResult(copy.deepcopy(value.payload), value.has_next, value.next_key, True)
-            ttl = CACHE_SECONDS.get(api_id, 0.0) if cont_yn == "N" else 0.0
-            if record_response and _persistent_cache_ttl(api_id, cont_yn) and self._store is not None:
-                stored = await asyncio.to_thread(self._store.load_query, key)
-                if stored is not None:
-                    if self._response_handler is not None:
-                        try:
-                            await asyncio.to_thread(self._response_handler, api_id, body, stored.payload)
-                        except Exception:
-                            logger.exception(
-                                "recording_gap: 중앙 캐시 응답 저장에 실패했습니다: %s", api_id,
-                            )
-                    result = BrokerResult(stored.payload, stored.has_next, stored.next_key, True)
-                    self._cache[key] = (time.monotonic() + ttl, result)
-                    return copy.deepcopy(result)
+                return BrokerResult(
+                    copy.deepcopy(value.payload), value.has_next, value.next_key,
+                    True, value.recording_succeeded,
+                )
             existing = self._inflight.get(key)
             if existing is None:
                 future = asyncio.get_running_loop().create_future()
                 self._inflight[key] = future
-                job = _Job(
-                    key, api_id, path, copy.deepcopy(body), cont_yn, next_key,
-                    future, record_response,
+                future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+                generation = self._credential_generation
+                task = asyncio.create_task(
+                    self._resolve_cache_or_queue(
+                        key, api_id, path, copy.deepcopy(body), cont_yn,
+                        next_key, record_response, generation, future,
+                    ),
+                    name=f"broker-cache-lookup-{api_id}",
                 )
-                await self._queue.put((REQUEST_PRIORITIES.get(api_id, 50), next(self._sequence), job))
+                self._lookup_tasks.add(task)
+                task.add_done_callback(self._lookup_tasks.discard)
                 existing = future
         return await asyncio.shield(existing)
+
+    async def _resolve_cache_or_queue(
+        self, key: str, api_id: str, path: str, body: dict[str, Any],
+        cont_yn: str, next_key: str, record_response: bool, generation: int,
+        future: asyncio.Future[BrokerResult],
+    ) -> None:
+        try:
+            stored = None
+            if record_response and _persistent_cache_ttl(api_id, cont_yn) and self._store is not None:
+                stored = await asyncio.to_thread(self._store.load_query, key)
+            recording_succeeded: bool | None = None
+            if stored is not None and self._response_handler is not None:
+                try:
+                    await asyncio.to_thread(self._response_handler, api_id, body, stored.payload)
+                    recording_succeeded = True
+                except Exception:
+                    recording_succeeded = False
+                    logger.exception("recording_gap: 중앙 캐시 응답 저장에 실패했습니다: %s", api_id)
+            async with self._guard:
+                if self._inflight.get(key) is not future:
+                    raise BrokerCredentialBusyError("REQUEST_OWNERSHIP_CHANGED")
+                if self._credential_paused or self._credential_generation != generation:
+                    raise BrokerCredentialBusyError("CREDENTIAL_CHANGE_IN_PROGRESS")
+                # A separate request may have populated RAM while the DB lookup ran.
+                cached = self._cache.get(key)
+                if cached and cached[0] > time.monotonic():
+                    value = cached[1]
+                    self._inflight.pop(key, None)
+                    future.set_result(BrokerResult(copy.deepcopy(value.payload), value.has_next, value.next_key, True, value.recording_succeeded))
+                elif stored is not None:
+                    result = BrokerResult(stored.payload, stored.has_next, stored.next_key, True, recording_succeeded)
+                    ttl = CACHE_SECONDS.get(api_id, 0.0) if cont_yn == "N" else 0.0
+                    if recording_succeeded is not False:
+                        self._cache[key] = (time.monotonic() + ttl, result)
+                    self._inflight.pop(key, None)
+                    future.set_result(copy.deepcopy(result))
+                else:
+                    job = _Job(key, api_id, path, body, cont_yn, next_key, future, record_response)
+                    self._queue.put_nowait((REQUEST_PRIORITIES.get(api_id, 50), next(self._sequence), job))
+        except BaseException as error:
+            async with self._guard:
+                if self._inflight.get(key) is future:
+                    self._inflight.pop(key, None)
+                if not future.done():
+                    if isinstance(error, asyncio.CancelledError):
+                        future.cancel()
+                    else:
+                        future.set_exception(error)
 
     async def _run(self) -> None:
         while True:
@@ -466,11 +514,14 @@ class CentralRestBroker:
                 try:
                     started_at = time.monotonic()
                     handler_ms = cache_ms = 0
+                    recording_succeeded: bool | None = None
                     if self._response_handler is not None:
                         phase_started = time.monotonic()
                         try:
                             await asyncio.to_thread(self._response_handler, job.api_id, job.body, result.payload)
+                            recording_succeeded = True
                         except Exception:
+                            recording_succeeded = False
                             logger.exception("recording_gap: 중앙 조회 응답 저장에 실패했습니다: %s", job.api_id)
                         handler_ms = round((time.monotonic() - phase_started) * 1000)
                     ttl = _persistent_cache_ttl(job.api_id, job.cont_yn)
@@ -490,8 +541,17 @@ class CentralRestBroker:
                             "slow broker persistence namespace=%s api_id=%s handler_ms=%d cache_ms=%d total_ms=%d",
                             self._namespace, job.api_id, handler_ms, cache_ms, total_ms,
                         )
+                    recorded_result = replace(result, recording_succeeded=recording_succeeded)
+                    if recording_succeeded is False:
+                        async with self._guard:
+                            self._cache.pop(job.key, None)
+                    elif recording_succeeded is True and job.key in self._cache:
+                        async with self._guard:
+                            cached = self._cache.get(job.key)
+                            if cached is not None:
+                                self._cache[job.key] = (cached[0], recorded_result)
                     if not job.future.done():
-                        job.future.set_result(result)
+                        job.future.set_result(recorded_result)
                 except Exception as error:
                     logger.exception("broker persistence failed unexpectedly: %s", job.api_id)
                     if not job.future.done():

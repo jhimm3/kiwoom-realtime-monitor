@@ -89,7 +89,6 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker import RealtimeTradeWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.minute_history_worker import MinuteHistoryWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.fundamentals_worker import FundamentalsWorker
-from kiwoom_monitor.infrastructure.kiwoom_rest.new_high_worker import NewHighWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.ranking_worker import RankingWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.daily_high_worker import DailyHighWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.historical_high_worker import HistoricalHighWorker
@@ -200,9 +199,6 @@ from kiwoom_monitor.presentation.main_window_layout import (
 )
 from kiwoom_monitor.presentation.minute_history_worker_controller import (
     MinuteHistoryWorkerController,
-)
-from kiwoom_monitor.presentation.new_high_worker_controller import (
-    NewHighWorkerController,
 )
 from kiwoom_monitor.presentation.nxt_eligibility_worker_controller import (
     NxtEligibilityWorkerController,
@@ -360,11 +356,6 @@ class MainWindow(QMainWindow):
     def _nxt_eligibility_worker(self) -> NxtEligibilityWorker | None:
         """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
         return self._nxt_eligibility_worker_controller.worker
-
-    @property
-    def _new_high_worker(self) -> NewHighWorker | None:
-        """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
-        return self._new_high_worker_controller.worker
 
     @property
     def _krx_stock_catalog_worker(self) -> KrxStockCatalogWorker | None:
@@ -624,8 +615,6 @@ class MainWindow(QMainWindow):
         self._row_height_dragging = False
         self._row_height_drag_start_y = 0
         self._row_height_drag_start_height = 0
-        self._initial_new_high_refresh_started = False
-        self._initial_nxt_codes: tuple[str, ...] = ()
         self._secondary_data_coordinator = SecondaryDataFollowupCoordinator(
             start_minute_history=lambda codes, force: self._start_minute_history_loading(codes, force=force),
             start_daily_high=lambda codes, force: self._start_daily_high_loading(codes, force=force),
@@ -633,7 +622,6 @@ class MainWindow(QMainWindow):
             start_fundamentals=self._start_fundamentals_loading,
             start_fundamentals_phase=self._start_fundamentals_phase,
             start_nxt_phase=self._start_nxt_phase,
-            start_new_high_phase=self._start_initial_new_high_refresh,
         )
         self._closing = False
         self._row_by_code: dict[str, int] = {}
@@ -647,7 +635,6 @@ class MainWindow(QMainWindow):
         self._latest_program_trade: dict[str, dict[str, object]] = {}
         # 0B FID 311 수신값. 장중 표 시가총액에는 ka10001 캐시보다 우선한다.
         self._realtime_market_caps: dict[str, float] = {}
-        self._today_high_codes: set[str] = set()
         self._today_high_prices: dict[str, int] = {}
         self._near_high_codes: set[str] = set()
         self._near_high_levels: dict[str, str] = {}
@@ -655,7 +642,6 @@ class MainWindow(QMainWindow):
         self._nxt_checked_codes: set[str] = set()
         self._nxt_enabled_codes: set[str] = set()
         self._near_high_sound_players: dict[str, tuple[QMediaPlayer, QAudioOutput]] = {}
-        self._new_high_periods: dict[str, frozenset[int]] = {}
         self._minute_history_codes: set[str] = set()
         self._minute_aggregator = minute_aggregator or MinuteTradeValueAggregator()
         self._minute_history_worker_controller = MinuteHistoryWorkerController(
@@ -728,16 +714,6 @@ class MainWindow(QMainWindow):
         )
         self._nxt_eligibility_worker_controller.finished.connect(
             lambda: self._start_realtime_followups(tuple(self._row_by_code))
-        )
-        self._new_high_worker_controller = NewHighWorkerController(self)
-        self._new_high_worker_controller.completed.connect(
-            self._on_new_high_refresh_completed
-        )
-        self._new_high_worker_controller.failed.connect(
-            self._on_new_high_refresh_failed
-        )
-        self._new_high_worker_controller.finished.connect(
-            lambda: self._new_high_button.setEnabled(True)
         )
         self._krx_stock_catalog_worker_controller = KrxStockCatalogWorkerController(self)
         self._image_theme_ocr_worker_controller = ImageThemeOcrWorkerController(self)
@@ -875,10 +851,6 @@ class MainWindow(QMainWindow):
         self._refresh_button.clicked.connect(self._refresh_rankings)
         self._refresh_button.setEnabled(ranking_loader is not None)
         self._refresh_button.hide()
-        self._new_high_button = QPushButton("신고가 새로고침", self)
-        self._new_high_button.clicked.connect(self._refresh_new_highs)
-        self._new_high_button.setEnabled(ranking_loader is not None)
-        self._new_high_button.hide()
         settings_button = QPushButton("⚙")
         settings_button.setObjectName("main_settings_button")
         settings_button.setToolTip("기본 설정")
@@ -2293,7 +2265,6 @@ class MainWindow(QMainWindow):
                 self._daily_high_worker,
                 self._historical_high_worker,
                 self._nxt_eligibility_worker,
-                self._new_high_worker,
                 self._ranking_worker,
             )
             if worker is not None and worker.isRunning()
@@ -2349,8 +2320,6 @@ class MainWindow(QMainWindow):
         self._realtime_subscription.reset()
         self._minute_history_codes.clear()
         self._minute_aggregator = MinuteTradeValueAggregator()
-        self._initial_new_high_refresh_started = False
-        self._initial_nxt_codes = ()
         self._api_reloading = False
         self._ranking_execution.end_priority_preparation()
         self._restore_environment_selector()
@@ -3012,7 +2981,6 @@ class MainWindow(QMainWindow):
                 self._last_change_rates[stock.code] = float(stock.change_rate)
             except (TypeError, ValueError):
                 pass
-            self._new_high_periods[stock.code] = frozenset(getattr(stock, "new_high_periods", ()))
             ranking_price = getattr(stock, "current_price", None)
             if use_ranking_price and isinstance(ranking_price, int) and ranking_price > 0:
                 self._current_prices[stock.code] = ranking_price
@@ -3182,15 +3150,6 @@ class MainWindow(QMainWindow):
                 badge.clicked.connect(lambda _, value=theme, stock_code=code: self._edit_badge_color(stock_code, value))
                 layout.addWidget(badge)
         layout.addStretch(); return widget
-
-    def _new_high_label(self, code: str, label: str) -> str:
-        period_text = self._settings.get("high_distance_period")
-        if period_text == "historical":
-            target = self._historical_high_prices.get(code)
-            current = self._current_prices.get(code)
-            return "신고가" if target is not None and current is not None and current >= target else "-"
-        period = int(period_text)
-        return "신고가" if code in self._today_high_codes or period in self._new_high_periods.get(code, frozenset()) else "-"
 
     def _render_new_high_price(self, code: str) -> None:
         row = self._row_by_code.get(code)
@@ -3376,38 +3335,6 @@ class MainWindow(QMainWindow):
         for code in self._row_by_code:
             self._render_trade_values(code)
         self.statusBar().showMessage(f"{label} 거래대금·{label}강도: " + (f"직전 완료 {label}" if completed else f"실시간 진행 중 {label}"))
-
-    def _refresh_new_highs(self) -> None:
-        self._start_new_high_refresh()
-
-    def _start_new_high_refresh(self) -> None:
-        if self._closing or self._ranking_loader is None or not hasattr(self._ranking_loader, "refresh_new_highs"):
-            return
-        if self._new_high_worker_controller.is_running:
-            return
-        self._new_high_button.setEnabled(False)
-        self.statusBar().showMessage("신고가 목록을 갱신하는 중입니다…")
-        if not self._new_high_worker_controller.start(self._ranking_loader):
-            self._new_high_button.setEnabled(True)
-
-    def _on_new_high_refresh_completed(self) -> None:
-        self.statusBar().showMessage("신고가 목록 갱신 완료")
-        # 신고가 갱신 완료가 임의 시각의 순위 재조회로 이어지면 00/30초
-        # 순위 스냅샷 흐름이 섞인다. 현재 표의 신고가 정보만 갱신하고,
-        # 다음 순위 회차는 순위 타이머가 전담한다.
-        for code in self._row_by_code:
-            self._render_new_high_price(code)
-            self._render_high_distance(code)
-        if self._initial_nxt_codes:
-            codes, self._initial_nxt_codes = self._initial_nxt_codes, ()
-            self._start_nxt_phase(codes)
-
-    def _on_new_high_refresh_failed(self, message: str) -> None:
-        logger.warning("신고가 갱신에 실패했습니다: %s", message)
-        self.statusBar().showMessage("신고가 갱신에 실패했습니다. 잠시 후 다시 시도하세요.")
-        if self._initial_nxt_codes:
-            codes, self._initial_nxt_codes = self._initial_nxt_codes, ()
-            self._start_nxt_phase(codes)
 
     def _start_realtime_subscription(self, codes: tuple[str, ...]) -> None:
         worker_exists = self._realtime_worker is not None
@@ -3595,8 +3522,6 @@ class MainWindow(QMainWindow):
                 if tick.high_price > previous_high:
                     self._today_high_prices[tick.code] = tick.high_price
                     self._pending_today_high_cache[tick.code] = tick.high_price
-                if tick.current_price >= tick.high_price:
-                    self._today_high_codes.add(tick.code)
             self._ensure_today_minute_bar_storage(observed_at)
             bar = self._minute_aggregator.ingest(tick, observed_at)
             if bar is not None:
@@ -4471,25 +4396,13 @@ class MainWindow(QMainWindow):
         if self._ranking_execution.priority_preparing:
             return
         if not self._start_fundamentals_loading(codes):
-            self._start_initial_new_high_refresh(codes)
+            self._start_nxt_phase(codes)
 
     def _start_nxt_phase(self, codes: tuple[str, ...]) -> None:
         if self._ranking_execution.priority_preparing:
             return
         if not self._start_nxt_eligibility_loading(codes):
             self._start_daily_krx_catalog_sync()
-
-    def _start_initial_new_high_refresh(self, codes: tuple[str, ...]) -> None:
-        if self._ranking_execution.priority_preparing:
-            return
-        if self._initial_new_high_refresh_started:
-            if self._initial_nxt_codes:
-                nxt_codes, self._initial_nxt_codes = self._initial_nxt_codes, ()
-                self._start_nxt_phase(nxt_codes)
-            return
-        self._initial_new_high_refresh_started = True
-        self._initial_nxt_codes = codes
-        self._start_new_high_refresh()
 
     def _start_minute_history_loading(self, codes: tuple[str, ...], *, force: bool = False) -> bool:
         if self._closing or self._ranking_execution.priority_preparing or (self._is_after_hours_data_pause() and not force) or not self._minute_history_worker_controller.available:
@@ -5387,7 +5300,6 @@ class MainWindow(QMainWindow):
             self._daily_high_worker,
             self._historical_high_worker,
             self._nxt_eligibility_worker,
-            self._new_high_worker,
             self._ranking_worker,
             self._image_theme_ocr_worker,
             self._krx_stock_catalog_worker,
@@ -5416,7 +5328,6 @@ class MainWindow(QMainWindow):
                 self._daily_high_worker: "신고가",
                 self._historical_high_worker: "역사적 신고가",
                 self._nxt_eligibility_worker: "NXT 확인",
-                self._new_high_worker: "신고가 목록",
                 self._ranking_worker: "실시간 순위",
                 self._image_theme_ocr_worker: "이미지 OCR",
                 self._google_drive_worker: "Google Drive",

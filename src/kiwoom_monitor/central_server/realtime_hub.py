@@ -12,6 +12,7 @@ class RealtimeSubscriber:
     nxt_codes: set[str] = field(default_factory=set)
     program_codes: set[str] = field(default_factory=set)
     priority_codes: tuple[str, ...] = ()
+    dropped_events: int = 0
 
 
 class RealtimeHub:
@@ -75,6 +76,7 @@ class RealtimeHub:
             if subscriber.queue.full():
                 try:
                     subscriber.queue.get_nowait()
+                    subscriber.dropped_events += 1
                 except asyncio.QueueEmpty:
                     pass
             subscriber.queue.put_nowait(event)

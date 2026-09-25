@@ -51,6 +51,7 @@ class AutonomousTop20Service:
         self._catalog_loader = catalog_loader
         self._outbox = JsonRecordOutbox(outbox_path) if outbox_path is not None else None
         self._subscriber: RealtimeSubscriber | None = None
+        self._observed_dropped_events = 0
         self._tasks: list[asyncio.Task[None]] = []
         self._collector = Top20TradeValueCollector()
         self._collector_lock = asyncio.Lock()
@@ -66,14 +67,17 @@ class AutonomousTop20Service:
         self._subscription_revision = 0
         self._subscription_day = ""
         self._last_ranking_slot = ""
-        self._last_new_high_slot = ""
         self._last_aux_ranking_slots: dict[str, str] = {}
         self._last_backfill_day = ""
-        self._backfill_task: asyncio.Task[None] | None = None
+        self._backfill_task: asyncio.Task[bool] | None = None
+        self._backfill_retry_day = ""
+        self._backfill_retry_at = 0.0
+        self._backfill_attempts = 0
         self._entrants_day = ""
         self._entrant_first_seen: dict[str, str] = {}
         self._account_entry_codes: tuple[str, ...] = ()
         self._pending_index_records: dict[str, dict[str, Any]] = {}
+        self._index_outbox_lock = asyncio.Lock()
         self._pending_program_snapshots: dict[str, dict[str, Any]] = {}
         self._latest_membership_snapshot: dict[str, Any] | None = None
 
@@ -103,6 +107,7 @@ class AutonomousTop20Service:
                 except Exception as error:
                     logger.warning("NAS TOP20 영속 재시도 복구 실패(계속 실행): %s", error)
         self._subscriber = self._hub.connect()
+        self._observed_dropped_events = self._subscriber.dropped_events
         self._tasks = [
             asyncio.create_task(self._schedule_loop(), name="nas-top20-schedule"),
             asyncio.create_task(self._event_loop(), name="nas-top20-events"),
@@ -203,6 +208,10 @@ class AutonomousTop20Service:
             update = self._advance(now)
             self._collector.prepare(codes, now, enabled=True, collection_open=_collection_open(now))
         self._schedule_subscription_update(day)
+        # The collector has already moved to the next minute. Preserve its
+        # completed record before any unrelated membership/entrant DB write.
+        if update.completed is not None:
+            await self._queue_index(update.completed)
         persistence_started_at = time.monotonic()
         await asyncio.to_thread(
             self._store.save_dataset_snapshot,
@@ -249,12 +258,11 @@ class AutonomousTop20Service:
             ])
         if update.completed is not None:
             try:
-                await self._save_index(update.completed)
+                await self._flush_pending_indexes()
             except Exception as error:
                 logger.warning("NAS TOP20 지수 저장 실패(재시도 예정): %s", error)
         if self._tasks:
             self._schedule_fundamentals(codes, day)
-            self._schedule_new_highs(now)
             self._schedule_aux_rankings(now)
         return codes
 
@@ -346,30 +354,6 @@ class AutonomousTop20Service:
             except Exception as error:
                 logger.warning("NAS 순위 기준 %s 갱신 실패: %s", query_type, error)
 
-    def _schedule_new_highs(self, now: datetime) -> None:
-        slot = _new_high_schedule_slot(now)
-        if not slot:
-            return
-        if slot == self._last_new_high_slot:
-            return
-        self._last_new_high_slot = slot
-        task = asyncio.create_task(self._refresh_new_highs(), name="nas-new-highs")
-        self._fundamentals_tasks.add(task)
-        task.add_done_callback(self._fundamentals_tasks.discard)
-
-    async def _refresh_new_highs(self) -> None:
-        for period in (5, 20, 250):
-            try:
-                await self._broker.request("ka10016", "/api/dostk/stkinfo", {
-                    "mrkt_tp": "000", "ntl_tp": "1", "high_low_close_tp": "1",
-                    "stk_cnd": "0", "trde_qty_tp": "00000", "crd_cnd": "0",
-                    "updown_incls": "0", "dt": str(period), "stex_tp": "1",
-                })
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.warning("NAS %d일 신고가 갱신 실패: %s", period, error)
-
     async def _ensure_market_catalog(self, day: str) -> None:
         if self._market_catalog_day == day and self._markets:
             return
@@ -422,7 +406,7 @@ class AutonomousTop20Service:
         }
         self._market_catalog_day = day
 
-    async def backfill_day(self, day: str) -> None:
+    async def backfill_day(self, day: str) -> bool:
         target_day = datetime.fromisoformat(day).date()
         now = self._now()
         close_at = full_day_close_at(target_day, venue="KRX")
@@ -432,10 +416,12 @@ class AutonomousTop20Service:
             and (close_at is None or now.time().replace(tzinfo=None) < close_at.time().replace(tzinfo=None))
         ):
             logger.info("KRX 전체일 차트 보완 대기: %s (20:00 종료 전)", day)
-            return
+            return False
+        succeeded = True
         try:
             await self._backfill_market_indexes(day)
         except Exception as error:
+            succeeded = False
             logger.warning("시장지수 장후 보완 실패: %s %s", day, error)
         documents = await asyncio.to_thread(self._store.load_documents, "top20_daily_entrants", day, 5000)
         account_entries = await asyncio.to_thread(
@@ -450,6 +436,7 @@ class AutonomousTop20Service:
         ]))
         for code in codes:
             if self._now().time().replace(tzinfo=None) >= clock_time(7, 40) and self._now().date().isoformat() != day:
+                succeeded = False
                 break
             try:
                 eligible = await self._nxt_enabled(code)
@@ -459,11 +446,14 @@ class AutonomousTop20Service:
                     await self._backfill_daily(code, day, "NXT")
                     await self._backfill_minutes(code, day, "NXT")
             except Exception as error:
+                succeeded = False
                 logger.warning("TOP20 편입종목 장후 보완 실패: %s %s", code, error)
             try:
                 await self._backfill_candidate_flows(code, day)
             except Exception as error:
+                succeeded = False
                 logger.warning("TOP20 편입종목 장후 수급 보완 실패: %s %s", code, error)
+        return succeeded
 
     async def _schedule_loop(self) -> None:
         first_iteration = True
@@ -480,18 +470,18 @@ class AutonomousTop20Service:
             if now.weekday() < 5 and now.time().replace(tzinfo=None) >= clock_time(20, 5):
                 day = now.date().isoformat()
                 if self._last_backfill_day != day:
-                    self._last_backfill_day = day
                     self._schedule_backfill(day)
             elif now.weekday() < 5 and now.time().replace(tzinfo=None) < clock_time(7, 40):
                 day = _previous_trading_day(now).date().isoformat()
                 if self._last_backfill_day != day:
-                    self._last_backfill_day = day
                     self._schedule_backfill(day)
             await asyncio.sleep(0.25)
 
     def _schedule_backfill(self, day: str) -> None:
         task = self._backfill_task
         if task is not None and not task.done():
+            return
+        if self._backfill_retry_day == day and time.monotonic() < self._backfill_retry_at:
             return
         task = asyncio.create_task(
             self.backfill_day(day), name=f"nas-top20-backfill-{day}",
@@ -500,15 +490,25 @@ class AutonomousTop20Service:
         self._fundamentals_tasks.add(task)
         task.add_done_callback(self._backfill_done)
 
-    def _backfill_done(self, task: asyncio.Task[None]) -> None:
+    def _backfill_done(self, task: asyncio.Task[bool]) -> None:
         self._fundamentals_tasks.discard(task)
         if self._backfill_task is task:
             self._backfill_task = None
         if task.cancelled():
             return
         error = task.exception()
-        if error is not None:
-            logger.warning("TOP20 장후 보완 실패(다음 거래일 재확인): %s", error)
+        day = task.get_name().removeprefix("nas-top20-backfill-")
+        if error is None and task.result():
+            self._last_backfill_day = day
+            self._backfill_retry_day = ""
+            self._backfill_attempts = 0
+            return
+        attempts = self._backfill_attempts + 1 if self._backfill_retry_day == day else 1
+        self._backfill_retry_day = day
+        self._backfill_attempts = attempts
+        delay = min(300, 30 * 2 ** (attempts - 1))
+        self._backfill_retry_at = time.monotonic() + delay
+        logger.warning("TOP20 장후 보완 미완료: %s; %d초 후 재시도; error=%s", day, delay, error)
 
     async def _event_loop(self) -> None:
         while True:
@@ -591,6 +591,12 @@ class AutonomousTop20Service:
         ])
 
     def _advance(self, now: datetime):
+        subscriber = self._subscriber
+        if subscriber is not None and subscriber.dropped_events != self._observed_dropped_events:
+            lost = subscriber.dropped_events - self._observed_dropped_events
+            self._observed_dropped_events = subscriber.dropped_events
+            self._collector.mark_gap()
+            logger.warning("recording_gap: TOP20 실시간 소비자 큐에서 %d건 누락", lost)
         return self._collector.advance(
             now, enabled=True,
             # 순위 요청 성공만으로는 1분 거래대금이 완전하지 않다. NAS와
@@ -602,22 +608,27 @@ class AutonomousTop20Service:
         )
 
     async def _save_index(self, record: Top20MinuteRecord) -> None:
+        await self._queue_index(record)
+        await self._flush_pending_indexes()
+
+    async def _queue_index(self, record: Top20MinuteRecord) -> None:
         payload = asdict(record)
         payload["minute"] = record.minute.isoformat(timespec="minutes")
         payload["total"] = record.total
         snapshot_key = str(payload["minute"])
-        self._pending_index_records[snapshot_key] = payload
-        if self._outbox is not None:
-            await asyncio.to_thread(self._outbox.put, snapshot_key, payload)
-        await self._flush_pending_indexes()
+        async with self._index_outbox_lock:
+            self._pending_index_records[snapshot_key] = payload
+            if self._outbox is not None:
+                await asyncio.to_thread(self._outbox.put, snapshot_key, payload)
 
     async def _flush_pending_indexes(self) -> None:
         for snapshot_key, payload in tuple(self._pending_index_records.items()):
             await self._write_index(payload)
-            if self._outbox is not None:
-                await asyncio.to_thread(self._outbox.remove, snapshot_key)
-            if self._pending_index_records.get(snapshot_key) is payload:
-                self._pending_index_records.pop(snapshot_key, None)
+            async with self._index_outbox_lock:
+                if self._pending_index_records.get(snapshot_key) is payload:
+                    if self._outbox is not None:
+                        await asyncio.to_thread(self._outbox.remove, snapshot_key)
+                    self._pending_index_records.pop(snapshot_key, None)
 
     async def _write_index(self, payload: dict[str, Any]) -> None:
         snapshot_key = str(payload["minute"])
@@ -663,8 +674,8 @@ class AutonomousTop20Service:
             if code not in self._nxt_eligible:
                 try:
                     await self._nxt_enabled(code)
-                except Exception:
-                    self._nxt_eligible[code] = False
+                except Exception as error:
+                    logger.warning("NXT 적격 조회 미완료(다음 구독 갱신 때 재시도): %s %s", code, error)
         self._publish_known_subscription()
 
     async def _load_account_entry_codes(self, day: str) -> tuple[str, ...]:
@@ -763,12 +774,17 @@ class AutonomousTop20Service:
             )
             if stored:
                 continue
-            await self._broker.request(
+            result = await self._broker.request(
                 "ka10081", "/api/dostk/chart", {
                     "stk_cd": f"{code}_NX" if market == "NXT" else code,
                     "base_dt": day.replace("-", ""), "upd_stkpc_tp": "1",
                 },
             )
+            if isinstance(self._broker, CentralRestBroker) and result.recording_succeeded is not True:
+                raise RuntimeError(f"{market} 편입 종목 일봉 조회 후 저장이 확인되지 않았습니다.")
+            stored = await asyncio.to_thread(self._store.load_daily_bars, code, market, 1)
+            if not stored:
+                raise RuntimeError(f"{market} 편입 종목 일봉이 저장되지 않았습니다.")
 
     async def _backfill_entry_minutes(self, code: str, day: str) -> None:
         """새 편입 종목의 등장 전 당일 분봉을 NAS가 한 번 준비한다."""
@@ -787,12 +803,14 @@ class AutonomousTop20Service:
                 "tic_scope": "1", "upd_stkpc_tp": "1", "base_dt": day.replace("-", ""),
             }
             cont_yn, next_key, pages = "N", "", 0
+            expected_minutes: set[str] = set()
             while pages < 8:
                 result = await self._request_with_retries(
                     "ka10080", "/api/dostk/chart", body, cont_yn, next_key,
                 )
                 pages += 1
                 rows = result.payload.get("stk_min_pole_chart_qry", [])
+                expected_minutes.update(_response_day_minutes(rows, day))
                 dates = {
                     _raw_bar_date(row, day) for row in rows if isinstance(row, dict)
                 } if isinstance(rows, list) else set()
@@ -804,6 +822,7 @@ class AutonomousTop20Service:
                 cont_yn, next_key = "Y", result.next_key
             else:
                 raise RuntimeError("편입 전 분봉 종료점을 8페이지 안에 확인하지 못했습니다.")
+            await self._verify_backfilled_minutes(code, day, market, expected_minutes)
             await asyncio.to_thread(self._store.upsert_documents, "market_data_coverage_intraday", [{
                 "owner": owner, "key": "entry_backfill", "document": {
                     "kind": "minute", "scope": "through_entry", "pages": pages,
@@ -960,6 +979,7 @@ class AutonomousTop20Service:
                 and document.get("kind") == "minute"
                 and document.get("window_closed") is True
                 and document.get("session_finalized") is True
+                and await asyncio.to_thread(self._store.load_minute_bars, code, day, market)
             ):
                 return
             # 구 빌드는 kind만 기록했다. 행이 있다는 이유로 건너뛰지 않고
@@ -968,10 +988,12 @@ class AutonomousTop20Service:
                 "tic_scope": "1", "upd_stkpc_tp": "1", "base_dt": day.replace("-", "")}
         cont_yn, next_key, pages = "N", "", 0
         complete = False
+        expected_minutes: set[str] = set()
         while pages < 8:
             result = await self._request_with_retries("ka10080", "/api/dostk/chart", body, cont_yn, next_key)
             pages += 1
             rows = result.payload.get("stk_min_pole_chart_qry", [])
+            expected_minutes.update(_response_day_minutes(rows, day))
             dates = {_raw_bar_date(row, day) for row in rows if isinstance(row, dict)} if isinstance(rows, list) else set()
             if not result.has_next or not result.next_key or any(value < day.replace("-", "") for value in dates if value):
                 complete = True
@@ -979,6 +1001,7 @@ class AutonomousTop20Service:
             cont_yn, next_key = "Y", result.next_key
         if not complete:
             raise RuntimeError("분봉 연속조회 8페이지 안에 대상일 종료점을 확인하지 못했습니다.")
+        await self._verify_backfilled_minutes(code, day, market, expected_minutes)
         await asyncio.to_thread(self._store.upsert_documents, "market_data_coverage", [{
             "owner": owner, "key": "complete", "document": {
                 "kind": "minute", "pages": pages, "scope": "full_day",
@@ -986,6 +1009,16 @@ class AutonomousTop20Service:
                 "as_of": day, "completed_at": self._now().isoformat(),
             }
         }])
+
+    async def _verify_backfilled_minutes(
+        self, code: str, day: str, market: str, expected_minutes: set[str],
+    ) -> None:
+        if not expected_minutes:
+            raise RuntimeError(f"{market} {day} 대상일 분봉이 없어 완료로 표시하지 않습니다.")
+        stored = await asyncio.to_thread(self._store.load_minute_bars, code, day, market)
+        stored_minutes = {str(row.get("minute", ""))[:5] for row in stored}
+        if not expected_minutes.issubset(stored_minutes):
+            raise RuntimeError(f"{market} {day} 응답 분봉 중 저장되지 않은 봉이 있습니다.")
 
     async def _backfill_daily(self, code: str, day: str, market: str) -> None:
         owner = f"{code}:{market}"
@@ -1013,7 +1046,11 @@ class AutonomousTop20Service:
         error: Exception | None = None
         for attempt in range(3):
             try:
-                return await self._broker.request(api_id, path, body, cont_yn=cont_yn, next_key=next_key)
+                result = await self._broker.request(api_id, path, body, cont_yn=cont_yn, next_key=next_key)
+                if isinstance(self._broker, CentralRestBroker) and api_id in {"ka10080", "ka10081"}:
+                    if result.recording_succeeded is not True:
+                        raise RuntimeError(f"{api_id} 조회는 성공했지만 봉 저장이 확인되지 않았습니다.")
+                return result
             except Exception as current:
                 error = current
                 if attempt < 2:
@@ -1025,18 +1062,6 @@ class AutonomousTop20Service:
 def _collection_open(value: datetime) -> bool:
     current = value.time().replace(tzinfo=None)
     return value.weekday() < 5 and clock_time(8) <= current < clock_time(20)
-
-
-def _new_high_schedule_slot(value: datetime) -> str:
-    """KRX 장중 매분, 종가 반영 시간을 둔 16시 이후 한 번 갱신한다."""
-    if value.weekday() >= 5:
-        return ""
-    current = value.time().replace(tzinfo=None)
-    if clock_time(9) <= current < clock_time(15, 30):
-        return value.strftime("%Y-%m-%dT%H:%M")
-    if clock_time(16) <= current < clock_time(20):
-        return value.strftime("%Y-%m-%d:after_close")
-    return ""
 
 
 def _ranking_collection_due(value: datetime) -> bool:
@@ -1098,6 +1123,22 @@ def _stale_ranking_retry_delay(retry_index: int) -> float:
 def _raw_bar_date(row: dict[str, Any], fallback_day: str) -> str:
     raw = str(row.get("cntr_tm", "")).strip()
     return raw[:8] if len(raw) >= 14 and raw[:8].isdigit() else fallback_day.replace("-", "")
+
+
+def _response_day_minutes(rows: object, day: str) -> set[str]:
+    if not isinstance(rows, list):
+        return set()
+    minutes: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw = str(row.get("cntr_tm", "")).strip()
+        if _raw_bar_date(row, day) != day.replace("-", ""):
+            continue
+        clock = raw[8:14] if len(raw) == 14 else raw if len(raw) == 6 else ""
+        if len(clock) == 6 and clock.isdigit() and int(clock[:2]) < 24 and int(clock[2:4]) < 60:
+            minutes.add(f"{clock[:2]}:{clock[2:4]}")
+    return minutes
 
 
 def _previous_trading_day(value: datetime) -> datetime:

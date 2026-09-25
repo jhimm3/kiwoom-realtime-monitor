@@ -11,6 +11,14 @@ from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
 
 
 class RealtimeHubTests(unittest.TestCase):
+    def test_overflow_records_the_missing_event_count(self) -> None:
+        hub = RealtimeHub()
+        subscriber = hub.connect()
+        for number in range(1001):
+            hub.publish({"type": "trade", "number": number})
+        self.assertEqual(1, subscriber.dropped_events)
+        self.assertEqual(1, subscriber.queue.get_nowait()["number"])
+
     def test_unions_client_subscriptions_and_filters_events(self) -> None:
         hub = RealtimeHub()
         first, second = hub.connect(), hub.connect()

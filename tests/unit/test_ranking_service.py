@@ -16,9 +16,7 @@ class FakeClient:
                     {"bigd_rank": "2", "stk_cd": "000660", "stk_nm": "SK하이닉스", "base_comp_chgr": "-0.50", "cur_prc": "-260000"},
                 ]
             }
-        period = body["dt"]
-        codes = {"5": ["005930"], "20": ["005930", "000660"], "250": ["000660"]}[str(period)]
-        return {"ntl_pric": [{"stk_cd": code} for code in codes]}
+        raise AssertionError(f"unexpected API request: {api_id}")
 
 
 class RankingServiceTests(unittest.TestCase):
@@ -130,22 +128,6 @@ class RankingServiceTests(unittest.TestCase):
         self.assertEqual(5, client.loads)
         self.assertEqual([0.25, 0.25, 0.5, 0.5], [call.args[0] for call in sleeper.call_args_list])
 
-    def test_new_high_refresh_uses_nas_snapshot_without_ka10016(self) -> None:
-        class StoredClient(FakeClient):
-            def __init__(self): self.requests = 0
-            def load_stored_new_highs(self, periods):
-                return {5: {"005930"}, 20: set(), 250: {"000660"}}
-            def request(self, api_id, path, body):
-                self.requests += 1
-                return super().request(api_id, path, body)
-
-        client = StoredClient()
-        service = RankingService(client)
-        service.refresh_new_highs()
-
-        self.assertEqual(0, client.requests)
-        self.assertEqual({"005930"}, service._new_high_cache[5])
-
     def test_default_ranking_uses_nas_snapshot_without_ka00198(self) -> None:
         class StoredRankingClient(FakeClient):
             def __init__(self) -> None:
@@ -186,14 +168,11 @@ class RankingServiceTests(unittest.TestCase):
         self.assertEqual("2", client.query_type)
         self.assertEqual(0, client.requests)
 
-    def test_combines_rankings_with_new_high_periods(self) -> None:
+    def test_rankings_do_not_request_unused_new_high_list(self) -> None:
         service = RankingService(FakeClient())
-        service.refresh_new_highs()
         stocks = service.load_top_stocks()
 
         self.assertEqual(2, len(stocks))
-        self.assertEqual(frozenset({5, 20}), stocks[0].new_high_periods)
-        self.assertEqual("5일, 20일", stocks[0].new_high_label)
-        self.assertEqual(frozenset({20, 250}), stocks[1].new_high_periods)
+        self.assertEqual(frozenset(), stocks[0].new_high_periods)
         self.assertEqual(72_000, stocks[0].current_price)
         self.assertEqual(260_000, stocks[1].current_price)

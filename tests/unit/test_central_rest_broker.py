@@ -28,6 +28,77 @@ class FakeClient:
 
 
 class CentralRestBrokerTests(unittest.TestCase):
+    def test_slow_persistent_lookup_does_not_hold_ranking_or_duplicate_request(self) -> None:
+        class BlockingStore:
+            def __init__(self) -> None:
+                self.entered = threading.Event()
+                self.release = threading.Event()
+                self.loads = 0
+
+            def load_query(self, _key: str) -> None:
+                self.loads += 1
+                self.entered.set()
+                self.release.wait(timeout=3)
+                return None
+
+            def save_query(self, *_args: object) -> None:
+                pass
+
+        async def scenario() -> None:
+            store = BlockingStore()
+            client = FakeClient()
+            broker = CentralRestBroker(client, store=store)
+            first = asyncio.create_task(broker.request("ka10081", "/api/dostk/chart", {"stk_cd": "005930"}))
+            self.assertTrue(await asyncio.to_thread(store.entered.wait, 2))
+            second = asyncio.create_task(broker.request("ka10081", "/api/dostk/chart", {"stk_cd": "005930"}))
+            ranking = await asyncio.wait_for(
+                broker.request("ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"}), 1,
+            )
+            self.assertEqual("ka00198", ranking.payload["api_id"])
+            store.release.set()
+            await asyncio.gather(first, second)
+            self.assertEqual(1, store.loads)
+            self.assertEqual(1, sum(call[0] == "ka10081" for call in client.calls))
+            await broker.close()
+
+        asyncio.run(scenario())
+
+    def test_credential_pause_during_cache_lookup_does_not_queue_old_request(self) -> None:
+        class BlockingStore:
+            def __init__(self) -> None:
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def load_query(self, _key: str) -> None:
+                self.entered.set()
+                self.release.wait(timeout=3)
+                return None
+
+        class RotatingClient(FakeClient):
+            def begin_credential_change(self) -> None:
+                pass
+
+        async def scenario() -> None:
+            store = BlockingStore()
+            client = RotatingClient()
+            broker = CentralRestBroker(client, store=store)
+            request = asyncio.create_task(
+                broker.request("ka10081", "/api/dostk/chart", {"stk_cd": "005930"}),
+            )
+            self.assertTrue(await asyncio.to_thread(store.entered.wait, 2))
+            rotation = asyncio.create_task(broker.begin_credential_change())
+            await asyncio.sleep(0)
+            self.assertTrue(broker._credential_paused)
+            store.release.set()
+            await rotation
+            with self.assertRaises(Exception) as error:
+                await request
+            self.assertIn("CREDENTIAL_CHANGE_IN_PROGRESS", str(error.exception))
+            self.assertEqual([], client.calls)
+            await broker.close()
+
+        asyncio.run(scenario())
+
     def test_two_second_cache_is_memory_only_but_records_market_response(self) -> None:
         class RecordingStore:
             def __init__(self) -> None:
@@ -336,6 +407,7 @@ class CentralRestBrokerTests(unittest.TestCase):
                 )
             await broker.close()
             self.assertIsInstance(result.payload, dict)
+            self.assertFalse(result.recording_succeeded)
             self.assertTrue(any("recording_gap" in line for line in captured.output))
 
         asyncio.run(scenario())

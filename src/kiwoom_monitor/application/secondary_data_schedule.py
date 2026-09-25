@@ -6,11 +6,6 @@ from collections.abc import Callable, Collection, Mapping
 from enum import Enum
 
 
-class FollowupPhase(str, Enum):
-    NEW_HIGH = "new_high"
-    NXT = "nxt"
-
-
 class SecondaryStartPhase(str, Enum):
     FINALIZATION = "finalization"
     WEEKEND_DAILY_HIGH = "weekend_daily_high"
@@ -30,7 +25,6 @@ class SecondaryDataFollowupCoordinator:
         start_fundamentals: Callable[[tuple[str, ...]], bool],
         start_fundamentals_phase: Callable[[tuple[str, ...]], None],
         start_nxt_phase: Callable[[tuple[str, ...]], None],
-        start_new_high_phase: Callable[[tuple[str, ...]], None],
     ) -> None:
         self._start_minute_history = start_minute_history
         self._start_daily_high = start_daily_high
@@ -38,7 +32,6 @@ class SecondaryDataFollowupCoordinator:
         self._start_fundamentals = start_fundamentals
         self._start_fundamentals_phase = start_fundamentals_phase
         self._start_nxt_phase = start_nxt_phase
-        self._start_new_high_phase = start_new_high_phase
 
     def start(
         self,
@@ -70,10 +63,7 @@ class SecondaryDataFollowupCoordinator:
         self._start_fundamentals_phase(codes)
 
     def fundamentals_finished(self, codes: tuple[str, ...], *, after_hours_pause: bool) -> None:
-        if phase_after_fundamentals(after_hours_pause) is FollowupPhase.NXT:
-            self._start_nxt_phase(codes)
-        else:
-            self._start_new_high_phase(codes)
+        self._start_nxt_phase(codes)
 
 
 def minute_history_candidates(
@@ -116,10 +106,6 @@ def nxt_eligibility_candidates(
     if cached is not None:
         return tuple(code for code in codes if code not in cached)
     return tuple(code for code in codes if code not in checked_codes)
-
-
-def phase_after_fundamentals(after_hours_pause: bool) -> FollowupPhase:
-    return FollowupPhase.NXT if after_hours_pause else FollowupPhase.NEW_HIGH
 
 
 def daily_catalog_sync_due(last_success: str, today: str) -> bool:

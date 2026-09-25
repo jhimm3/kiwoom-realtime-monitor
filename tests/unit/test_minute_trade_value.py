@@ -12,6 +12,31 @@ def tick(price: int, volume: int, trade_time: str = "101500") -> TradeTick:
 
 
 class MinuteTradeValueTests(unittest.TestCase):
+    def test_missing_cumulative_value_is_not_counted_twice_on_recovery(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 9, 25, 10, 0, 1)
+        aggregator.ingest(TradeTick("005930", 10_000, None, 100, 10, None, "100001"), now)
+        aggregator.ingest(TradeTick("005930", 10_000, None, None, 100, None, "100002"), now)
+        aggregator.ingest(TradeTick("005930", 10_000, None, 102, 100, None, "100003"), now)
+        self.assertAlmostEqual(0.02, aggregator.bucket_trade_value_eok("005930", 1, now))
+
+    def test_cumulative_recovery_reduces_an_overestimate_in_its_original_minute(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 9, 25, 10, 0, 1)
+        aggregator.ingest(TradeTick("005930", 10_000, None, 100, 10, None, "100001"), now)
+        aggregator.ingest(TradeTick("005930", 20_000, None, None, 100, None, "100059"), now)
+        aggregator.ingest(TradeTick("005930", 10_000, None, 101, 10, None, "100100"), now.replace(minute=1))
+        self.assertAlmostEqual(0.01, aggregator.bucket_trade_value_eok("005930", 1, now))
+        self.assertAlmostEqual(0.0, aggregator.bucket_trade_value_eok("005930", 1, now.replace(minute=1)))
+
+    def test_unchanged_cumulative_value_clears_intervening_estimates(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 9, 25, 10, 0, 1)
+        aggregator.ingest(TradeTick("005930", 10_000, None, 100, 10, None, "100001"), now)
+        aggregator.ingest(TradeTick("005930", 10_000, None, None, 100, None, "100002"), now)
+        aggregator.ingest(TradeTick("005930", 10_000, None, 100, 10, None, "100003"), now)
+        self.assertEqual(0.0, aggregator.bucket_trade_value_eok("005930", 1, now))
+
 
     def test_source_mode_change_resets_cumulative_baseline(self) -> None:
         aggregator = MinuteTradeValueAggregator()

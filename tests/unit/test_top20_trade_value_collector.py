@@ -30,8 +30,37 @@ class Top20TradeValueCollectorTests(unittest.TestCase):
         self.assertIsNotNone(update.completed)
         assert update.completed is not None
         self.assertEqual((2.5, 0.0, 0.0), update.completed.market_values)
-        self.assertEqual("realtime_complete", update.completed.capture_state)
+        self.assertEqual("partial", update.completed.capture_state)
         self.assertEqual([(datetime(2026, 9, 9, 9, 0), 2.5, 0.0, 0.0)], list(collector.completed))
+
+    def test_full_minute_is_complete_until_a_queue_gap_is_reported(self) -> None:
+        collector = Top20TradeValueCollector()
+        collector.active_codes = ("A",)
+        collector.advance(datetime(2026, 9, 9, 9, 0), enabled=True, collection_open=True,
+                          value_provider=self.value, market_provider=self.market)
+        for second in range(1, 60):
+            collector.advance(datetime(2026, 9, 9, 9, 0, second), enabled=True, collection_open=True,
+                              value_provider=self.value, market_provider=self.market)
+        self.values["A"] = 2.0
+        first = collector.advance(datetime(2026, 9, 9, 9, 1), enabled=True, collection_open=True,
+                                  value_provider=self.value, market_provider=self.market)
+        self.assertEqual("realtime_complete", first.completed.capture_state)
+        collector.mark_gap()
+        self.values["A"] = 3.0
+        second = collector.advance(datetime(2026, 9, 9, 9, 2), enabled=True, collection_open=True,
+                                   value_provider=self.value, market_provider=self.market)
+        self.assertEqual("partial", second.completed.capture_state)
+
+    def test_collector_loop_gap_marks_minute_partial_without_tick_count_assumption(self) -> None:
+        collector = Top20TradeValueCollector()
+        collector.active_codes = ("A",)
+        collector.advance(datetime(2026, 9, 9, 9, 0), enabled=True, collection_open=True,
+                          value_provider=self.value, market_provider=self.market)
+        collector.advance(datetime(2026, 9, 9, 9, 0, 5), enabled=True, collection_open=True,
+                          value_provider=self.value, market_provider=self.market)
+        finished = collector.advance(datetime(2026, 9, 9, 9, 1), enabled=True, collection_open=True,
+                                     value_provider=self.value, market_provider=self.market)
+        self.assertEqual("partial", finished.completed.capture_state)
 
     def test_cohort_change_preserves_old_segment_and_starts_new_baseline(self) -> None:
         collector = Top20TradeValueCollector()

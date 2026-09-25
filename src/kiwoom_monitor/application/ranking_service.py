@@ -19,24 +19,18 @@ class RestClient(Protocol):
 class StockWriter(Protocol):
     def upsert(self, code: str, name: str, market: str = "") -> None: ...
     def upsert_many(self, stocks: tuple[tuple[str, str, str], ...]) -> None: ...
-    def load_new_highs(self, periods: tuple[int, ...]) -> dict[int, set[str]]: ...
-    def update_new_highs(self, values: dict[int, set[str]], checked_at: str) -> None: ...
 
 
 class RankingService:
-    """ka00198 Top 20에 ka10016 신고가 상태를 결합한다."""
+    """ka00198 Top 20 순위를 화면 모델로 변환한다."""
 
-    NEW_HIGH_PERIODS = (5, 20, 250)
     EXPECTED_STOCKS = 20
     STOCK_INFO_PATH = "/api/dostk/stkinfo"
     STALE_SNAPSHOT_RETRY_LIMIT = 20
     STALE_SNAPSHOT_RETRY_MAX_SECONDS = 0.75
 
-    def __init__(self, client: RestClient, high_cache_seconds: float = 60.0, stocks: StockWriter | None = None, query_type: str = "5") -> None:
+    def __init__(self, client: RestClient, stocks: StockWriter | None = None, query_type: str = "5") -> None:
         self._client = client
-        self._high_cache_seconds = high_cache_seconds
-        self._new_high_cache: dict[int, set[str]] = {}
-        self._new_high_cached_at = 0.0
         self._stocks = stocks
         self._query_type = query_type if query_type in {"1", "2", "3", "4", "5"} else "5"
         self._missing_current_price_logged: set[str] = set()
@@ -52,11 +46,6 @@ class RankingService:
         return provider() if callable(provider) else None
 
     def load_top_stocks(self) -> tuple[RankedStock, ...]:
-        if not self._new_high_cache and self._stocks is not None:
-            loader = getattr(self._stocks, "load_new_highs", None)
-            if callable(loader):
-                self._new_high_cache = loader(self.NEW_HIGH_PERIODS)
-        new_high_codes = self._new_high_cache or {period: set() for period in self.NEW_HIGH_PERIODS}
         response: dict[str, Any] = {}
         stale_stored_response = False
         partial_stored_response = False
@@ -170,7 +159,6 @@ class RankingService:
             if not code or not name:
                 continue
             stock_rows.append((code, name, ""))
-            periods = frozenset(period for period, codes in new_high_codes.items() if code in codes)
             current_price = self._ranking_current_price(record)
             if current_price is None and code not in self._missing_current_price_logged:
                 self._missing_current_price_logged.add(code)
@@ -186,7 +174,7 @@ class RankingService:
                     code=code,
                     name=name,
                     change_rate=str(record.get("base_comp_chgr", "-")).strip() or "-",
-                    new_high_periods=periods,
+                    new_high_periods=frozenset(),
                     current_price=current_price,
                 )
             )
@@ -274,50 +262,6 @@ class RankingService:
             return datetime.strptime(f"{date}{clock}", "%Y%m%d%H%M%S")
         except ValueError:
             return None
-
-    def _load_new_high_codes(self, period: int) -> set[str]:
-        response = self._client.request(
-            "ka10016",
-            self.STOCK_INFO_PATH,
-            {
-                "mrkt_tp": "000",
-                "ntl_tp": "1",
-                "high_low_close_tp": "1",
-                "stk_cnd": "0",
-                "trde_qty_tp": "00000",
-                "crd_cnd": "0",
-                "updown_incls": "0",
-                "dt": str(period),
-                "stex_tp": "1",
-            },
-        )
-        records = response.get("ntl_pric", [])
-        if not isinstance(records, list):
-            raise ValueError("ka10016의 ntl_pric 형식이 올바르지 않습니다.")
-        return {str(record.get("stk_cd", "")).strip() for record in records if isinstance(record, dict)} - {""}
-
-    def _load_new_high_codes_cached(self) -> dict[int, set[str]]:
-        if self._new_high_cache and time.monotonic() - self._new_high_cached_at < self._high_cache_seconds:
-            return self._new_high_cache
-        self._new_high_cache = {period: self._load_new_high_codes(period) for period in self.NEW_HIGH_PERIODS}
-        self._new_high_cached_at = time.monotonic()
-        return self._new_high_cache
-
-    def refresh_new_highs(self) -> None:
-        """사용자가 요청할 때만 신고가 목록을 다시 조회한다."""
-        stored_loader = getattr(self._client, "load_stored_new_highs", None)
-        stored = stored_loader(self.NEW_HIGH_PERIODS) if callable(stored_loader) else None
-        self._new_high_cache = (
-            stored if isinstance(stored, dict)
-            else {period: self._load_new_high_codes(period) for period in self.NEW_HIGH_PERIODS}
-        )
-        self._new_high_cached_at = time.monotonic()
-        if self._stocks is not None:
-            updater = getattr(self._stocks, "update_new_highs", None)
-            if callable(updater):
-                now = self.server_now()
-                checked_at = now.strftime("%Y-%m-%d %H:%M:%S") if isinstance(now, datetime) else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                updater(self._new_high_cache, checked_at)
 
     @staticmethod
     def _to_int(value: object, fallback: int) -> int:

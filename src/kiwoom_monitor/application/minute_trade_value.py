@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
@@ -37,12 +37,15 @@ class MinuteTradeValueAggregator:
         self._bars: dict[str, deque[MinuteOhlcv]] = defaultdict(lambda: deque(maxlen=max_minutes))
         self._last_cumulative_volume: dict[tuple[str, str], int] = {}
         self._last_cumulative_trade_value: dict[tuple[str, str], int] = {}
+        self._estimated_since_cumulative: dict[tuple[str, str], dict[datetime, float]] = {}
         self._source_mode_by_code: dict[str, str] = {}
 
     def ingest(self, tick: TradeTick, observed_at: datetime) -> MinuteOhlcv | None:
         if tick.current_price is None:
             return None
         self._reset_baselines_on_source_mode_change(tick)
+        key = (tick.code, tick.market)
+        previous_cumulative = self._last_cumulative_trade_value.get(key)
         minute = _trade_minute(tick, observed_at)
         bars = self._bars[tick.code]
         volume = self._trade_volume(tick)
@@ -50,6 +53,20 @@ class MinuteTradeValueAggregator:
         if volume is None and trade_value_delta is None:
             return None
         volume = volume or 0
+        if trade_value_delta is None and self._last_cumulative_trade_value.get(key, 0) > 0:
+            estimates = self._estimated_since_cumulative.setdefault(key, {})
+            estimates[minute] = estimates.get(minute, 0.0) + tick.current_price * volume / 100_000_000
+        elif trade_value_delta is not None:
+            estimated = self._estimated_since_cumulative.pop(key, {})
+            if (
+                estimated and previous_cumulative is not None and previous_cumulative > 0
+                and tick.cumulative_trade_value is not None
+                and abs(tick.cumulative_trade_value) >= previous_cumulative
+            ):
+                correction = trade_value_delta - sum(estimated.values())
+                if correction < 0:
+                    self._reduce_estimated_bars(tick.code, estimated, -correction)
+                trade_value_delta = max(0.0, correction)
         previous_index = next((index for index in range(len(bars) - 1, -1, -1) if bars[index].minute == minute), None)
         if previous_index is not None:
             previous = bars[previous_index]
@@ -91,6 +108,25 @@ class MinuteTradeValueAggregator:
             self._bars[tick.code] = deque(sorted(bars, key=lambda value: value.minute)[-self._max_minutes :], maxlen=self._max_minutes)
         return bar
 
+    def _reduce_estimated_bars(
+        self, code: str, estimates: dict[datetime, float], excess: float,
+    ) -> None:
+        """Reconcile an overestimate against the minutes that contained it."""
+        bars = self._bars[code]
+        for minute, estimated in sorted(estimates.items(), reverse=True):
+            if excess <= 0:
+                break
+            for index in range(len(bars) - 1, -1, -1):
+                bar = bars[index]
+                if bar.minute != minute:
+                    continue
+                reduction = min(excess, estimated, bar.trade_value_eok)
+                bars[index] = replace(
+                    bar, trade_value_eok_override=bar.trade_value_eok - reduction,
+                )
+                excess -= reduction
+                break
+
     def _reset_baselines_on_source_mode_change(self, tick: TradeTick) -> None:
         """SOR와 거래소 상세가 전환될 때 비수신 구간 누적분을 더하지 않는다."""
         market = str(tick.market or "KRX").upper()
@@ -105,6 +141,10 @@ class MinuteTradeValueAggregator:
         }
         self._last_cumulative_trade_value = {
             key: value for key, value in self._last_cumulative_trade_value.items()
+            if key[0] != tick.code
+        }
+        self._estimated_since_cumulative = {
+            key: value for key, value in self._estimated_since_cumulative.items()
             if key[0] != tick.code
         }
 
@@ -234,6 +274,7 @@ class MinuteTradeValueAggregator:
         )
         self._last_cumulative_volume.clear()
         self._last_cumulative_trade_value.clear()
+        self._estimated_since_cumulative.clear()
 
     def reset_cumulative_baselines(self, codes: tuple[str, ...]) -> None:
         """신규 구독·재접속 뒤 공백 누적분을 현재 1분에 몰아 넣지 않는다."""
@@ -243,6 +284,9 @@ class MinuteTradeValueAggregator:
         }
         self._last_cumulative_trade_value = {
             key: value for key, value in self._last_cumulative_trade_value.items() if key[0] not in selected
+        }
+        self._estimated_since_cumulative = {
+            key: value for key, value in self._estimated_since_cumulative.items() if key[0] not in selected
         }
 
 

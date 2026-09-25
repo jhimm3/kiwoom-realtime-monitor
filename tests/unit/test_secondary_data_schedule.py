@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 
 from kiwoom_monitor.application.secondary_data_schedule import (
-    FollowupPhase,
     SecondaryDataFollowupCoordinator,
     SecondaryStartPhase,
     daily_catalog_sync_due,
@@ -11,7 +10,6 @@ from kiwoom_monitor.application.secondary_data_schedule import (
     fundamentals_candidates,
     minute_history_candidates,
     nxt_eligibility_candidates,
-    phase_after_fundamentals,
 )
 
 
@@ -30,7 +28,6 @@ class SecondaryDataScheduleTests(unittest.TestCase):
             start_fundamentals=lambda codes: worker("fundamentals")(codes),
             start_fundamentals_phase=lambda codes: calls.append(("fundamentals_phase", codes)),
             start_nxt_phase=lambda codes: calls.append(("nxt", codes)),
-            start_new_high_phase=lambda codes: calls.append(("new_high", codes)),
         )
 
     def test_coordinator_prioritizes_finalization_and_stops_chain(self) -> None:
@@ -77,7 +74,7 @@ class SecondaryDataScheduleTests(unittest.TestCase):
             ("daily_phase", ("A",)),
             ("daily", ("B",), True),
             ("fundamentals_phase", ("C",)),
-            ("new_high", ("D",)),
+            ("nxt", ("D",)),
             ("nxt", ("E",)),
         ], calls)
 
@@ -107,10 +104,6 @@ class SecondaryDataScheduleTests(unittest.TestCase):
         codes = ("A", "B", "C")
         self.assertEqual(("B",), nxt_eligibility_candidates(codes, {"A": True, "C": False}, {"B"}))
         self.assertEqual(("A", "C"), nxt_eligibility_candidates(codes, None, {"B"}))
-
-    def test_after_hours_skips_new_high_and_moves_to_nxt(self) -> None:
-        self.assertIs(FollowupPhase.NEW_HIGH, phase_after_fundamentals(False))
-        self.assertIs(FollowupPhase.NXT, phase_after_fundamentals(True))
 
     def test_krx_catalog_sync_is_due_only_until_today_succeeds(self) -> None:
         self.assertTrue(daily_catalog_sync_due("", "2026-09-12"))

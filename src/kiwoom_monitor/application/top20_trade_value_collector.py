@@ -79,6 +79,8 @@ class Top20TradeValueCollector:
         self.next_codes: tuple[str, ...] = ()
         self.next_activation: datetime | None = None
         self.minute: datetime | None = None
+        self.minute_complete = False
+        self.last_observed_at: datetime | None = None
         self.samples: list[tuple[int, float]] = []
         self.segment_baselines: dict[str, float] = {}
         self.segment_accumulated: MarketValues = (0.0, 0.0, 0.0)
@@ -114,10 +116,13 @@ class Top20TradeValueCollector:
         if not enabled:
             self._clear_collection()
             return Top20CollectionUpdate(None, minute, None, collection_open)
-        completed = self._roll_minute(minute, value_provider, market_provider)
+        if self.last_observed_at is not None and (now - self.last_observed_at).total_seconds() > 2:
+            self.mark_gap()
+        completed = self._roll_minute(now, minute, value_provider, market_provider)
         if not collection_open:
             self._clear_collection()
             return Top20CollectionUpdate(completed, minute, None, False)
+        self.last_observed_at = now
 
         cohort_changed = self._activate_with_market(now, minute, value_provider, market_provider)
         live_values: MarketValues | None = None
@@ -157,7 +162,7 @@ class Top20TradeValueCollector:
         return counts[0], counts[1], counts[2]
 
     def _roll_minute(
-        self, minute: datetime, value_provider: ValueProvider, market_provider: MarketProvider,
+        self, now: datetime, minute: datetime, value_provider: ValueProvider, market_provider: MarketProvider,
     ) -> Top20MinuteRecord | None:
         if self.minute == minute:
             return None
@@ -165,10 +170,12 @@ class Top20TradeValueCollector:
         if self.samples and self.minute is not None:
             active = self.active_segment_values(self.minute, value_provider, market_provider)
             market_values = tuple(self.segment_accumulated[index] + active[index] for index in range(3))
-            completed = self._record(self.minute, market_values, market_provider, "realtime_complete")
+            state = "realtime_complete" if self.minute_complete else "partial"
+            completed = self._record(self.minute, market_values, market_provider, state)
             self.completed.append((self.minute, *market_values))
         self.samples = []
         self.minute = minute
+        self.minute_complete = now.second == 0 and bool(self.active_codes)
         self.segment_accumulated = (0.0, 0.0, 0.0)
         self.segment_baselines = {code: value_provider(code, minute) for code in self.active_codes}
         self.minute_codes = set(self.active_codes)
@@ -204,6 +211,8 @@ class Top20TradeValueCollector:
         )
 
     def _clear_collection(self) -> None:
+        self.minute_complete = False
+        self.last_observed_at = None
         self.active_codes = ()
         self.next_codes = ()
         self.next_activation = None
@@ -212,6 +221,10 @@ class Top20TradeValueCollector:
         self.segment_accumulated = (0.0, 0.0, 0.0)
         self.minute_codes.clear()
         self.cohort_segments = []
+
+    def mark_gap(self) -> None:
+        """A disconnected upstream or dropped subscriber event invalidates the minute."""
+        self.minute_complete = False
 
 
 def _market_index(market: str) -> int:
