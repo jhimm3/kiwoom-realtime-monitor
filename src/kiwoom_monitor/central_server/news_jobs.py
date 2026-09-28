@@ -16,6 +16,7 @@ from kiwoom_monitor.application.news_rules import (
 from kiwoom_monitor.application.news_analysis import assess_stock_news, extractive_news_summary
 from kiwoom_monitor.domain.news_observation import ARTICLE_BODY_EXTRACTOR_VERSION
 from kiwoom_monitor.infrastructure.article_text import clean_article_text, fetch_article_text_with_metadata
+from .diagnostic_workloads import is_paused
 
 
 LOGGER = logging.getLogger(__name__)
@@ -267,7 +268,7 @@ class NewsJobRunner:
     async def _loop(self, preferred_stage: str | None = None) -> None:
         while not self._closing.is_set():
             try:
-                processed = await (
+                processed = 0 if is_paused("news_jobs") else await (
                     self.run_once(preferred_stage=preferred_stage)
                     if preferred_stage else self.run_once()
                 )

@@ -66,6 +66,17 @@ class _FlakyIndexStore:
 
 
 class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_minute_backfill_can_be_disabled_without_store_or_broker_work(self) -> None:
+        broker = _Broker()
+        service = AutonomousTop20Service(
+            broker, RealtimeHub(), object(), minute_backfill_enabled=False,
+        )
+
+        await service._backfill_entry_minutes("005930", "2026-09-14")
+        await service._backfill_minutes("005930", "2026-09-14", "KRX")
+
+        self.assertEqual([], broker.calls)
+
     async def test_stale_nxt_document_is_queried_again(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")

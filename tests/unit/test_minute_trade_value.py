@@ -132,6 +132,38 @@ class MinuteTradeValueTests(unittest.TestCase):
         self.assertEqual(datetime(2026, 8, 14, 10, 15), bar.minute)
         self.assertEqual(15, bar.volume)
 
+    def test_direct_query_completed_minute_rejects_late_0b_in_memory(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 9, 26, 10, 2, 0)
+        query_minute = now.replace(minute=0)
+        query_bar = MinuteOhlcv(query_minute, 100, 120, 90, 110, 100)
+        aggregator.seed("005930", (query_bar,), now, query_authoritative=True)
+
+        late = aggregator.ingest(
+            TradeTick("005930", 999, 10_000, 12_000, 50, None, "100059"), now,
+        )
+
+        self.assertIsNone(late)
+        self.assertEqual(query_bar, aggregator._bars["005930"][0])
+        self.assertEqual(query_bar.trade_value_eok, aggregator.completed_today_trade_value_eok("005930", now))
+        current = aggregator.ingest(
+            TradeTick("005930", 130, 10_010, 12_100, 10, None, "100201"),
+            now.replace(second=1),
+        )
+        self.assertIsNotNone(current)
+        assert current is not None
+        self.assertEqual(10, current.volume)
+        self.assertAlmostEqual(1.0, current.trade_value_eok)
+
+    def test_nas_seed_does_not_mark_closed_minute_as_query_authoritative(self) -> None:
+        aggregator = MinuteTradeValueAggregator()
+        now = datetime(2026, 9, 26, 10, 2, 0)
+        minute = now.replace(minute=0)
+        aggregator.seed("005930", (MinuteOhlcv(minute, 100, 100, 100, 100, 10),), now,
+                        include_current_snapshot=True)
+
+        self.assertIsNotNone(aggregator.ingest(tick(120, 5, "100059"), now))
+
     def test_does_not_duplicate_the_in_progress_rest_minute(self) -> None:
         aggregator = MinuteTradeValueAggregator()
         current_minute = datetime.now().replace(second=0, microsecond=0)
@@ -160,6 +192,7 @@ class MinuteTradeValueTests(unittest.TestCase):
                 MinuteOhlcv(now.replace(second=0), 500, 500, 500, 500, 9_999_999),
             ),
             now,
+            query_authoritative=True,
         )
 
         self.assertAlmostEqual((1_000 + 2_000) / 100_000_000, aggregator.trade_value_eok("005930", 5))

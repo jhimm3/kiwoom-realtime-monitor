@@ -4,7 +4,7 @@ param(
     [string]$EndDate = "2026-09-22",
     [double]$RequestDelay = 0.7,
     [ValidateRange(1, 8)]
-    [int]$PrepareWorkers = 4,
+    [int]$PrepareWorkers = 8,
     [int]$PublishEveryDays = 30,
     [int]$StatusEveryDays = 1,
     [string]$NasProject = 'X:\kiwoom-monitor'

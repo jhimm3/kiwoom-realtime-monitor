@@ -24,6 +24,7 @@ from kiwoom_monitor.infrastructure.krx.stock_catalog import fetch_krx_stock_cata
 from kiwoom_monitor.domain.ranking import normalize_stock_code
 
 from .database import QueryStore
+from .diagnostic_workloads import is_paused
 from .market_ingest import fundamentals_document_is_current, nxt_eligibility_document_is_current
 from .market_observations import ranking_observation, top20_index_observation
 from .persistent_outbox import JsonRecordOutbox
@@ -45,12 +46,16 @@ class AutonomousTop20Service:
         *, now_provider: Callable[[], datetime] | None = None,
         catalog_loader: Callable[[], tuple[tuple[str, str, str], ...]] = fetch_krx_stock_catalog,
         outbox_path: Path | None = None,
+        minute_backfill_enabled: bool = True,
     ) -> None:
         self._broker = broker
         self._hub = hub
         self._store = store
         self._now = now_provider or (lambda: datetime.now(KST))
         self._catalog_loader = catalog_loader
+        self._minute_backfill_enabled = minute_backfill_enabled
+        if not minute_backfill_enabled:
+            logger.info("NAS TOP20 자동 분봉 백필 비활성화: ka10080 보완 조회를 건너뜁니다.")
         self._outbox = JsonRecordOutbox(outbox_path) if outbox_path is not None else None
         self._subscriber: RealtimeSubscriber | None = None
         self._observed_dropped_events = 0
@@ -458,7 +463,7 @@ class AutonomousTop20Service:
             except Exception as error:
                 succeeded = False
                 logger.warning("TOP20 편입종목 장후 수급 보완 실패: %s %s", code, error)
-        return succeeded
+        return succeeded and not is_paused("minute_backfill")
 
     async def _schedule_loop(self) -> None:
         first_iteration = True
@@ -541,6 +546,8 @@ class AutonomousTop20Service:
             logger.warning("키움 0s 거래일 증거 저장 실패: %s", error)
 
     def _schedule_backfill(self, day: str) -> None:
+        if is_paused("top20_after_close"):
+            return
         task = self._backfill_task
         if task is not None and not task.done():
             return
@@ -846,7 +853,8 @@ class AutonomousTop20Service:
                         await self._ensure_entry_daily_history(code, day)
                         await self._capture_candidate_investor_flow(code, day)
                         await self._ensure_historical_high(code, day)
-                    self._fundamentals_ready[code] = target_day
+                    if not (day and is_paused("minute_backfill")):
+                        self._fundamentals_ready[code] = target_day
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -879,6 +887,8 @@ class AutonomousTop20Service:
 
     async def _backfill_entry_minutes(self, code: str, day: str) -> None:
         """새 편입 종목의 등장 전 당일 분봉을 NAS가 한 번 준비한다."""
+        if not self._minute_backfill_enabled or is_paused("minute_backfill"):
+            return
         markets = ["KRX"]
         if await self._nxt_enabled(code):
             markets.append("NXT")
@@ -896,6 +906,8 @@ class AutonomousTop20Service:
             cont_yn, next_key, pages = "N", "", 0
             expected_minutes: set[str] = set()
             while pages < 8:
+                if is_paused("minute_backfill"):
+                    raise RuntimeError("diagnostic minute backfill pause")
                 result = await self._request_with_retries(
                     "ka10080", "/api/dostk/chart", body, cont_yn, next_key,
                 )
@@ -1069,6 +1081,8 @@ class AutonomousTop20Service:
         }])
 
     async def _backfill_minutes(self, code: str, day: str, market: str) -> None:
+        if not self._minute_backfill_enabled or is_paused("minute_backfill"):
+            return
         owner = f"{day}:{code}:{market}"
         coverage = await asyncio.to_thread(
             self._store.load_documents, "market_data_coverage", owner, 1,
@@ -1091,6 +1105,8 @@ class AutonomousTop20Service:
         complete = False
         expected_minutes: set[str] = set()
         while pages < 8:
+            if is_paused("minute_backfill"):
+                raise RuntimeError("diagnostic minute backfill pause")
             result = await self._request_with_retries("ka10080", "/api/dostk/chart", body, cont_yn, next_key)
             pages += 1
             rows = result.payload.get("stk_min_pole_chart_qry", [])

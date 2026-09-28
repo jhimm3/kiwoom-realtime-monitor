@@ -6,7 +6,7 @@ import time
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from kiwoom_monitor.central_server.ai_service import CentralAIService
 from kiwoom_monitor.central_server.config import CentralServerSettings
@@ -30,6 +30,22 @@ class _AI:
 
 
 class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_diagnostic_pause_resumes_claiming_without_restarting_worker(self) -> None:
+        runner = NewsJobRunner(object(), poll_seconds=0.05)
+        runner.run_once = AsyncMock(return_value=0)
+        paused = {"value": True}
+        with patch("kiwoom_monitor.central_server.news_jobs.is_paused",
+                   side_effect=lambda _name: paused["value"]):
+            await runner.start()
+            try:
+                await asyncio.sleep(0.12)
+                self.assertEqual(0, runner.run_once.await_count)
+                paused["value"] = False
+                await asyncio.sleep(0.12)
+                self.assertGreater(runner.run_once.await_count, 0)
+            finally:
+                await runner.close()
+
     async def test_selected_stock_body_is_claimed_before_newer_backlog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "central.sqlite3")

@@ -98,6 +98,32 @@ class CandidateMonitorTests(unittest.TestCase):
         self.assertEqual(0, restarted.run_once())
         self.assertEqual(1, len(store.candidates))
 
+    def test_checkpoint_failure_after_candidate_commit_replays_without_duplicate_event(self) -> None:
+        class CheckpointFailureStore(FakeStore):
+            fail_checkpoint = False
+
+            def save_shadow_monitor_state(self, monitor_id, document):
+                if self.fail_checkpoint:
+                    raise RuntimeError("checkpoint failed")
+                super().save_shadow_monitor_state(monitor_id, document)
+
+        store = CheckpointFailureStore((
+            _rank(1), _bar(2, 0, 1000, 1010),
+            _bar(3, 1, 1010, 1020), _bar(4, 2, 1030, 1040),
+        ))
+        monitor = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)
+        store.fail_checkpoint = True
+        with self.assertRaisesRegex(RuntimeError, "checkpoint failed"):
+            monitor.run_once()
+        self.assertEqual(1, len(store.candidates))
+        self.assertEqual(0, store.checkpoints[monitor.monitor_id]["cursor"])
+
+        store.fail_checkpoint = False
+        restarted = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)
+        self.assertEqual(4, restarted.run_once())
+        self.assertEqual(1, len(store.candidates))
+        self.assertEqual(4, store.checkpoints[monitor.monitor_id]["cursor"])
+
     def test_stale_universe_blocks_candidate_and_reports_quality(self) -> None:
         store = FakeStore((_rank(1), _bar(2, 10, 1000, 1010), _bar(3, 11, 1010, 1020), _bar(4, 12, 1030, 1040)))
         monitor = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=30)

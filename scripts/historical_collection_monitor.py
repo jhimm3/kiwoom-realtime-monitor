@@ -21,9 +21,11 @@ STATE_ROOT = PROJECT_ROOT / "data" / "historical_collection"
 DATABASE = PROJECT_ROOT / "data" / "historical_intelligence.sqlite3"
 MARKET_NEWS_DATABASE = PROJECT_ROOT / "data" / "naver_stock_market_news.sqlite3"
 NEWS_STATE = STATE_ROOT / "news-collector-state.json"
+NEWS_ARTICLE_STATE = STATE_ROOT / "news-article-collector-state.json"
 MARKET_NEWS_STATE = STATE_ROOT / "market-news-state.json"
 NEWS_HEARTBEAT = STATE_ROOT / "news-job-heartbeat.json"
 NEWS_STOP = STATE_ROOT / "STOP_NEWS"
+NEWS_ARTICLE_STOP = STATE_ROOT / "STOP_NEWS_ARTICLES"
 MARKET_NEWS_STOP = STATE_ROOT / "STOP_MARKET_NEWS"
 PREPARED_NEWS_DATABASE = STATE_ROOT / "prepared_news.sqlite3"
 PREPARED_MARKET_DATABASE = STATE_ROOT / "prepared-market-news.sqlite3"
@@ -83,7 +85,8 @@ def _process_alive(pid: object) -> bool:
 
 
 def _database_snapshot() -> dict[str, object]:
-    result: dict[str, object] = {"news_counts": {}, "news_current": {}}
+    result: dict[str, object] = {"news_counts": {}, "news_current": {},
+                                 "article_queue_counts": {}}
     if not DATABASE.is_file():
         return result
     uri = f"file:{DATABASE.resolve().as_posix()}?mode=ro"
@@ -96,6 +99,17 @@ def _database_snapshot() -> dict[str, object]:
                     "SELECT state,COUNT(*) AS count FROM news_backfill_jobs GROUP BY state"
                 )
             }
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='news_article_pipeline'"
+            ).fetchone():
+                result["article_queue_counts"] = {
+                    str(row["state"]): int(row["count"])
+                    for row in connection.execute(
+                        "SELECT state,COUNT(*) AS count FROM news_article_pipeline "
+                        "GROUP BY state"
+                    )
+                }
             news = connection.execute(
                 "SELECT code,target_date,query_text,attempts,pages_observed,items_observed,updated_at "
                 "FROM news_backfill_jobs WHERE state='running' ORDER BY updated_at DESC LIMIT 1"
@@ -206,6 +220,17 @@ def _collector_health(
         heartbeat_age is not None and heartbeat_age < 180
         and _process_alive(heartbeat.get("pid"))
     )
+    if state_name == "running" and heartbeat_alive and heartbeat.get("phase") == "article_wait":
+        progress_age = _age_seconds(heartbeat.get("last_article_progress_at"))
+        if progress_age is not None and progress_age >= 180:
+            fetch = heartbeat.get("article_fetch", {})
+            if not isinstance(fetch, dict):
+                fetch = {}
+            return (
+                f"기사 응답 지연 · {fetch.get('active', 0)}개 진행 / "
+                f"{fetch.get('queued', 0)}개 대기",
+                "#b54708",
+            )
     current_fresh = current_age is not None and current_age < 600
     state_alive = _process_alive(state.get("pid"))
     if state_name == "running" and (heartbeat_alive or (state_alive and current_fresh)):
@@ -230,7 +255,7 @@ def _counts_text(counts: dict[str, int]) -> tuple[str, float]:
     detail = " · ".join(
         f"{name} {counts.get(name, 0):,}"
         for name in (
-            "complete", "complete_boundary", "empty", "truncated", "running",
+            "complete", "search_complete", "complete_boundary", "empty", "truncated", "running",
             "pending", "grouped", "failed", "unavailable", "error",
             "excluded",
         )
@@ -372,10 +397,16 @@ class HistoricalCollectionMonitor(tk.Tk):
         if _collector_health(state, _read_json(NEWS_HEARTBEAT), current)[0] in {
             "정상 실행 중", "시작 중",
         }:
-            messagebox.showinfo("뉴스 수집기", "뉴스 수집기가 이미 실행 중입니다.")
+            article_state = _read_json(NEWS_ARTICLE_STATE)
+            if not _process_alive(article_state.get("pid")):
+                NEWS_ARTICLE_STOP.unlink(missing_ok=True)
+                self._launch("run_historical_news_article_collector.ps1", 1000000)
+            messagebox.showinfo("뉴스 수집기", "검색 수집기가 실행 중입니다. 원문 수집기도 확인했습니다.")
             return
         NEWS_STOP.unlink(missing_ok=True)
+        NEWS_ARTICLE_STOP.unlink(missing_ok=True)
         self._launch("run_historical_news_collector.ps1", 100000)
+        self._launch("run_historical_news_article_collector.ps1", 1000000)
 
     def start_market_news(self) -> None:
         state = _read_json(MARKET_NEWS_STATE)
@@ -391,7 +422,8 @@ class HistoricalCollectionMonitor(tk.Tk):
     def stop_news(self) -> None:
         NEWS_STOP.parent.mkdir(parents=True, exist_ok=True)
         NEWS_STOP.touch()
-        messagebox.showinfo("뉴스 수집기", "현재 작업을 마친 뒤 정지하도록 요청했습니다.")
+        NEWS_ARTICLE_STOP.touch()
+        messagebox.showinfo("뉴스 수집기", "검색 작업과 원문 묶음을 각각 마친 뒤 정지하도록 요청했습니다.")
 
     def stop_market_news(self) -> None:
         MARKET_NEWS_STOP.parent.mkdir(parents=True, exist_ok=True)
@@ -426,9 +458,32 @@ class HistoricalCollectionMonitor(tk.Tk):
             f"{_local_time(news_heartbeat.get('updated_at'))} · "
             f"{news_heartbeat.get('phase', '-')} · 페이지 {news_heartbeat.get('page', 0)}"
         )
+        article_fetch = news_heartbeat.get("article_fetch", {})
+        if isinstance(article_fetch, dict):
+            oldest = float(article_fetch.get("oldest_seconds") or 0)
+            host = str(article_fetch.get("oldest_host") or "")
+            fetch_text = (
+                f" · 기사 {news_heartbeat.get('article', 0)}건"
+                f" · 진행 {article_fetch.get('active', 0)} / "
+                f"대기 {article_fetch.get('queued', 0)}"
+            )
+            if oldest:
+                fetch_text += f" · 최장 {oldest:.0f}초"
+            if host:
+                fetch_text += f" ({host})"
+            news_heartbeat_text += fetch_text
         self.news_panel.update_view(
             _collector_health(news_state, news_heartbeat, news_current),
             news_counts, news_label, news_heartbeat_text, str(news_state.get("error") or ""),
+            progress_detail=(
+                " · 원문 대기 {pending:,} / 처리 중 {running:,} / 완료 {complete:,}"
+                " · 원문 수집기 {worker}"
+            ).format(
+                pending=int((snapshot.get("article_queue_counts") or {}).get("pending", 0)),
+                running=int((snapshot.get("article_queue_counts") or {}).get("running", 0)),
+                complete=int((snapshot.get("article_queue_counts") or {}).get("complete", 0)),
+                worker=str(_read_json(NEWS_ARTICLE_STATE).get("status") or "미시작"),
+            ),
         )
 
         market_news_snapshot = _market_news_snapshot()

@@ -4174,6 +4174,7 @@ class MainWindow(QMainWindow):
         self._minute_aggregator.seed(
             code, bars, now,
             include_current_snapshot=self._uses_nas_market_data_source(),
+            query_authoritative=not self._uses_nas_market_data_source(),
         )
         if code in self._after_close_finalization_codes and self._finalization_minute_bars_complete(code, bars):
             self._after_close_minute_received.add(code)

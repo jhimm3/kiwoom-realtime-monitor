@@ -1,5 +1,90 @@
 # Changelog
 
+## 2026-09-29 NAS 진단 API 확장 (로컬 후보)
+
+- 인증 API에서 기존 진단 master/capture/선택 작업 제어와 고정 읽기 전용 PostgreSQL·host 표본, 단일 측정·A/B/A 비교의 시작/취소/상태, 보존 보고서·제어 이력 조회를 연결했다. CLI와 제어 파일 잠금·TTL 및 표본 계산을 공유한다. NAS 이미지 적용과 실 DB 수집 결과 검증은 진행 중이다.
+
+## 2026-09-27 PostgreSQL 공통 관측 pilot (로컬)
+
+- `save_query` 한 경로에 선택적 공통 관측 연결을 적용했다. 캐시 UPSERT→만료 DELETE→명시 COMMIT→close의 기존 순서와 실패 시 명시 rollback 없음, 별도 연결/동시성을 유지한다. call ID·writer family/kind·backend PID·연결/실행/COMMIT/close 시간·오류/미확정 상태를 기존 진단 capture TTL과 함께 기록한다.
+- 인증 진단 API에 제한된 summary/verbose/raw 조회를 추가하고 기존 성공 경로 계측과 call ID를 연결했다. 신규 runtime writer 이관은 이 한 종류뿐이며 미이관 PostgreSQL 경로는 계속 원장으로 추적한다.
+- fake connection 의미 검증 및 중앙 DB/진단/서버 회귀 134건 통과. 가짜 driver 1,000회씩 순수 Python 사전 p95 raw 0.0077ms, wrapper capture OFF 0.0213ms, ON 0.3075ms였으나 실제 PostgreSQL 성능 근거는 아니다. 전용 PostgreSQL 통합검사는 URL 미설정으로 skip했고 실측 overhead는 남아 있다. NAS 이미지 재빌드·운영 적용은 하지 않았다. 로컬 marker `2026.09.27-db-access-pilot-v1`.
+
+## 2026-09-26 PC SQLite 분봉 revision batch
+
+- SQLite `replace_minute_bars` 경로의 revision 최신값 조회를 80개 키씩 묶고, 변경 revision은 40행씩 multi-row INSERT한다. 한 번의 `ka10080` 응답에서 같은 분 키의 연속 payload는 입력 순서대로 `revision_of` chain에 연결하고 동일 payload 재전송은 건너뛴다. SQLite transaction 안에서 sequence를 순서대로 할당해 canonical 봉·metadata·revision rollback을 함께 보장한다.
+- SQLite canonical 분봉도 PostgreSQL과 같이 OHLCV 동일 시 UPDATE를 건너뛰며 observation metadata/revision 확인은 계속한다. PC 직접 연결의 SQLite 회귀 63건 통과. NAS PostgreSQL 분봉 처리 방식은 이미 적용돼 있으며 이 SQLite 변경은 NAS에 아직 배포하지 않았다. marker `2026.09.26-daily-minute-batch-storage-v1`.
+
+## 2026-09-26 일봉 canonical·metadata batch UPSERT (로컬 검증)
+
+- `ka10081` 일봉 canonical과 관측 metadata의 행별 UPSERT를 제한된 multi-row UPSERT로 변경했다. PostgreSQL은 1,000행, SQLite는 구형 999 bind-variable 한도를 지키도록 80행씩 처리한다. 900행 기준 PostgreSQL은 canonical 1문장과 metadata 1문장, SQLite는 각각 12문장으로 줄어든다.
+- 한 응답 안의 중복 키는 기존 순차 UPSERT와 같은 마지막 입력 우선으로 정리한다. 기존 단일 transaction, OHLCV 동일 시 canonical UPDATE 생략, metadata 최신 관측 갱신, 오류 시 canonical·metadata 전체 rollback 의미를 유지한다.
+- SQLite 실제 DB 및 PostgreSQL SQL 경계 단위검사를 포함한 관련 회귀 61건이 통과했다. 전용 PostgreSQL DB 통합검사는 새 중복키·metadata·rollback 2건을 포함하도록 확장했으며 NAS에서 실행이 남았다. marker `2026.09.26-daily-bar-batch-upsert-v1`.
+
+## 2026-09-26 분봉 revision INSERT batch (전용 PostgreSQL 통합검증 완료)
+
+- Paired NAS 표본 `20260926T072545Z-588bd4f0`에서 revision 584행 INSERT execute가 같은 저장 호출에서 4.66초 걸린 반면 COMMIT은 32ms였다. 별도 호출에서 INSERT 0행 COMMIT 14.68초와 canonical bar write 4.79초도 관측돼 revision 삽입만이 전체 병목은 아니다.
+- PostgreSQL 분봉 경로는 변경된 revision들을 최대 1,000행씩 multi-row INSERT하도록 바꿨다. UUID와 `revision_of`는 입력순서로 미리 구성한다. 검토에서 VALUES 행 순서에 따른 `accepted_sequence` 배정을 보장할 근거가 부족해, PostgreSQL sequence 값들을 batch마다 발급·정렬하고 입력 순서로 명시하도록 수정했다. canonical·metadata·revision의 기존 transaction 경계는 유지한다. `revision_insert_statements`는 batch INSERT SQL 수로 바뀌며 신규 `revision_insert_rows`가 revision 행 수를 기록한다. 관련 unit 47건과 NAS 전용 `kiwoom_monitor_diagnostic_test` PostgreSQL 통합검사 7건이 통과했다. 초기 검사 2건은 테스트의 잘못된 subject 조회 조건을 고친 뒤 통과했다. NAS `/health`는 해당 build와 `status=ok`를 반환했다. 전용 테스트 DB에서 합성 900행 중 584 revision 변경을 각 3회 비교해 revision 처리 중앙값이 399.048ms→191.358ms(52% 감소)를 보였다. COMMIT 포함 중앙값도 2,042.357ms→812.893ms였지만 commit 편차가 커 그 차이를 묶음 처리 효과로 귀속하지 않는다. 실제 운영 부하에서의 개선 폭과 원인 제거는 아직 검증되지 않았다. marker `2026.09.26-minute-revision-batch-insert-v1`.
+
+## 2026-09-26 분봉 저장 호출별 phase 결합 계측 (로컬 구현)
+
+- `market_bar_saves.kinds.*.call_samples`에 각 저장 호출의 revision 하위단계와 같은 호출의 COMMIT/total 지연을 묶어 반환한다. 집계 percentile의 outlier가 동일 호출에서 함께 발생했는지 확인하며 payload·종목 봉 데이터는 기록하지 않는다.
+- 서버 저장 순서와 transaction 경계는 바꾸지 않았다. 관련 단위검사와 NAS 재빌드·운영 계측은 남아 있다. marker는 `2026.09.26-minute-revision-call-samples-v1`이다.
+
+## 2026-09-26 분봉 revision 세부 시간 계측 (로컬 검증)
+
+- revision payload 구성, advisory lock 획득, 배치 최신값 SELECT/fetch, 행별 비교·처리, 실제 INSERT execute 시간을 분리해 진단 표본과 느린 저장 로그에 기록한다. 저장 순서와 transaction 경계는 바꾸지 않았다.
+- 관련 단위검사 57건 통과. 서버 marker는 `2026.09.26-minute-revision-phase-metrics-v1`; NAS 재빌드와 같은 조건의 운영 측정은 남아 있다.
+
+## 2026-09-26 닫힌 분봉 원천 우선순위·revision 조회 묶음 (로컬 검증)
+
+- 마감된 분봉은 `ka10080` OHLCV와 앱 계산 거래대금을 최종값으로 채택한다. 뒤늦은 0B flush/finalize는 완료된 조회값을 바꾸지 않으며 PostgreSQL에서는 종목·시장·날짜 단위로 동시 쓰기를 직렬화한다. 진행 중 조회봉은 0B의 새 관측이 이어받되 중복 합산되지 않는다.
+- PostgreSQL 분봉 revision 최신값은 응답 단위 배치 조회로 바꿨다. 관련 단위검사는 통과했다. 전용 PostgreSQL 동시성/rollback 통합검사는 설정되지 않아 미실행이며 NAS 반영 전 검증이 남아 있다.
+- 서버 빌드 식별자는 `2026.09.26-minute-source-authority-v1`이다.
+
+## 2026-09-26 진단 세션 수명·측정 취소 (로컬 검증)
+
+- master 반복 ON은 기존 자식·만료를 유지하고, OFF→ON마다 새 세션을 발급한다. 오래된 run cleanup은 새 세션을 건드리지 않으며 부모·자식을 한 제어 파일 세대로 읽는다.
+- 측정 구간의 TTL을 사전에 확인하고 master 종료·DB 진단 조회 실패 시 부분 보고서를 `aborted`로 저장한다. 진단 상태 API의 경로 변수 오류를 수정했다. 진단 단위 20건과 서버 API 56건 통과. build marker는 `2026.09.26-diagnostic-session-control-v1`이다.
+
+## 2026-09-26 진단 제어 설계 검토·master 보존 v2 (로컬 검증)
+
+- 실제 `pause`/`capture` 변경이 제어 파일의 master lease를 지우는 결함을 재현하고 수정했다. 자식 조작·정리 후 부모 및 다른 자식 유지 검사와 기존 회귀 합계 68건 통과. build marker는 `2026.09.26-diagnostic-master-switch-v2`다.
+- 보호 수신·계좌·주문·체결·writer별 스위치의 중지 지점, durable 인계, TTL·세대·실제 중지 확인, 보존/동시성 검사를 설계 문서로 남겼다. 이 경로의 구현이나 NAS 배포가 완료된 것은 아니다.
+
+## 2026-09-26 진단도구 master 스위치 (로컬 검증)
+
+- 진단도구 전체를 최상단 `tool on/off/status` 아래로 두고, `capture`, 작업별 `pause/resume`, 측정·비교·보고서 명령은 master ON일 때만 유효하게 했다. master를 끄거나 TTL이 끝나면 하위 제어가 비활성화되며, 새로 켤 때 이전 하위 override를 비운다.
+- NAS runtime 상태 응답에 master 상태와 자식 제어 가능 여부를 추가했다. build marker는 `2026.09.26-diagnostic-master-switch-v1`이다.
+- 현재 pause가 연결된 선택 작업은 8개이고 계측 writer는 12개다. 실시간·계좌·주문·체결의 개별 자식 스위치는 아직 연결되지 않았다. NAS 재빌드·운영 master/TTL 검증은 남았다.
+
+## 2026-09-26 저장 경계 검증과 진단 v4 (로컬 검증)
+
+- REST·실시간 등록·계좌/주문 상수·PostgreSQL SQL 쓰기 위치의 정적 원장을 만들고 동적 호출의 소유 함수를 기록했다. 선언된 API와 실제 호출은 구분한다.
+- 0B flush별 성공한 계측 writer의 독립 COMMIT 수를 묶어 보고한다. WAL FPI·buffer-full 구간 증가량과 NAS 저장장치 연결 그래프를 A/B/A 결과에 포함하되, writer별 WAL 귀속으로 해석하지 않는다.
+- 격리 SQLite와 실제 collector의 중복·병렬·rollback·재시도·finalization 보존 검사 7건, 전용 PostgreSQL DB만 허용하는 선택적 통합 검사를 추가했다. 로컬 관련 회귀 78건이 통과했다.
+- 뉴스 검색 회귀 검사에 무관한 FLASH/WORLD 백그라운드 수집이 간헐적으로 기사 15건의 BODY 작업을 만들던 테스트 간섭을 확인했다. 해당 검사에서 시황 수집만 끄고, 서버 준비 후의 작업 수를 비교하도록 격리했다(단독 15회 반복 통과).
+- 서버 build marker는 `2026.09.26-writer-diagnostics-v4`다. NAS `/health.server_build`와 인증 writer registry(12개)를 확인했다. 실제 A/B/A 부하 측정은 남았다.
+
+## 2026-09-26 NAS PostgreSQL writer 진단 확장 (로컬 반영)
+
+- 현재 계측 중인 12개 PostgreSQL writer의 기계 판독 registry와 인증 진단 API를 추가했다. 진단 결과에서 호출·transaction·commit 수, 시도 행수, 전체 시간과 계측된 연결·실행·commit의 percentile(p50 포함 min/p90/p95/p99/max)을 구분한다.
+- 분봉/일봉, 조회 캐시, dataset snapshot의 실제 측정 가능한 commit 시간을 연결했다. 다른 writer는 성공 호출 시간만 기록하며 COMMIT 시간을 추정하지 않는다. 오류·재시도·실제 반영 행수·payload bytes와 writer별 WAL attribution은 미계측으로 표시한다.
+- `/api/v1/diagnostics/writers`와 `docs/KIWOOM_STORAGE_WRITE_AUDIT.md`를 추가했다. 감사는 첫 범위이며 계좌·주문·Journal·전체 FID/API·PC 복제경로 전수조사와 중복/통합 판정은 미완료다. 저장 트랜잭션은 변경하지 않았다.
+- 서버 build marker: `2026.09.26-writer-diagnostics-v3`. 로컬 테스트 후 NAS 누적 재빌드와 운영 확인이 필요하다.
+
+## 2026-09-26 NAS 진단 메트릭 수집 스위치 (로컬 반영)
+
+- DB 저장 단계·writer 계측은 평소 비활성화한다. `nas_workload_diagnostic.py capture on --ttl 10m`, `capture status`, `capture off`로 런타임에서 켜고 끌 수 있고, 만료 시 계측을 중단한다.
+- `measure`와 A/B/A `test`는 꺼져 있을 때만 자기 측정 시간 동안 임시 수집을 켜고 종료 시 소유 lease를 확인해 OFF로 복귀한다. 수집을 끌 때 메모리 표본을 비운다.
+- PostgreSQL 쓰기, 실시간 수집, 운영 설정은 계측 상태와 독립이다. 로컬 정적 검토 후 NAS 누적 빌드와 실제 OFF/ON 복구 검증이 남아 있다.
+
+## 2026-09-26 NAS 분봉 재저장 축소 (로컬 검증)
+
+- `AUTONOMOUS_TOP20_MINUTE_BACKFILL_ENABLED=0`으로 NAS TOP20 자동 `ka10080` 보완만 중지할 수 있다. TOP20 순위 수집과 실시간 구독은 유지한다. 저장장치 지연의 기여도를 판별하기 위한 임시 A/B 운용 설정이며 기본값은 `1`이다.
+- 장중 신규 편입 분봉과 장후 확정 백필은 기본 동작을 유지한다. PostgreSQL의 과거 분봉 재수신 시 OHLCV·거래대금이 같으면 정규 봉 행의 UPDATE를 생략한다. 관측 메타데이터와 확정 이력은 계속 처리한다.
+- NAS 빌드 식별자: `2026.09.26-minute-noop-upsert-v2`. 분봉 저장 경로 회귀 검사 91건 통과. 이 빌드의 NAS 반영과 운영 중 지연 감소는 아직 확인되지 않았다. 이미 확보한 병목 증거로 수정했으며 장중 ON/OFF 재시험을 완료 조건으로 삼지 않는다. 메타데이터·확정 이력 쓰기와 저장장치 자체 지연은 남아 있을 수 있다.
+
 ## 2026-09-25 Google Drive v2 백업 세대 manifest
 
 - 설정·테마·뉴스 AI를 세대별 불변 파일로 먼저 올리고 manifest를 마지막에 게시한다. 새 클라이언트는 manifest의 파일 ID·크기·SHA-256이 맞는 구성요소만 읽으며, 설정·테마는 같은 SQLite 읽기 시점에서 내보낸다. 기존 폴더는 v1 입력으로 읽고 구형 앱용 고정 별칭도 갱신한다. 뉴스 AI DB와 monitor DB의 동시 시점 일치, 구형 앱의 다중 파일 원자성, Drive 실계정 검증은 별도 한계다.

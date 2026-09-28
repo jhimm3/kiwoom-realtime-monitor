@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import re
+import sqlite3
 import uuid
 from urllib.parse import urlsplit
 from pathlib import Path
@@ -27,6 +28,9 @@ from .autonomous_top20 import AutonomousTop20Service
 from .external_market_collector import YahooDelayedMarketCollector
 from .market_observations import KST, as_kst
 from .market_events import MarketEventService
+from .historical_news_archive import (
+    ArchiveUnavailableError, HistoricalNewsArchiveReader, InvalidArchiveCursorError,
+)
 from .candidate_monitor import CandidateMonitor
 from .account_query import AccountQuerySessionManager
 from kiwoom_monitor.application.breakout_strategy import (
@@ -38,7 +42,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.09.26-market-ingest-db-timing-v1"
+SERVER_BUILD = "2026.09.29-diagnostic-api-v5"
 logger = logging.getLogger(__name__)
 
 
@@ -67,6 +71,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         raise RuntimeError("중앙 서버 의존성을 설치하세요: pip install -e .[server]") from error
 
     active = settings or CentralServerSettings.from_environment()
+    diagnostic_runs = None
     broker: CentralRestBroker | None = None
     account_broker: CentralRestBroker | None = None
     collector: CentralRealtimeCollector | None = None
@@ -114,6 +119,21 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                              openai_api_key="", gemini_api_key="", anthropic_api_key="",
                              mock_account_monitor_enabled=False, mock_order_transport_enabled=False)
             credential_statuses = {provider: "RECOVERY_REQUIRED" for provider in PROVIDER_FIELDS}
+    historical_archive: HistoricalNewsArchiveReader | None = None
+    historical_archive_state = "unconfigured"
+    if active.historical_news_archive_path:
+        historical_archive_state = "unavailable"
+        try:
+            archive_path = Path(active.historical_news_archive_path)
+            if not archive_path.is_absolute():
+                raise ValueError("historical archive path must be absolute")
+            cursor_key = hmac.digest(
+                active.access_token.encode("utf-8"), b"historical-news-archive-cursor/v1", "sha256",
+            )
+            historical_archive = HistoricalNewsArchiveReader(archive_path, cursor_key=cursor_key)
+            historical_archive_state = "ready"
+        except (OSError, ValueError, sqlite3.DatabaseError) as error:
+            logger.warning("historical news archive unavailable: %s", type(error).__name__)
     from .credential_runtime import CredentialRuntime, install_credential_routes
     credential_runtime = CredentialRuntime(credential_vault, store) if credential_vault is not None else None
     operational = {
@@ -229,6 +249,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         if active.autonomous_top20_enabled:
             top20_service = AutonomousTop20Service(
                 broker, realtime_hub, store,
+                minute_backfill_enabled=active.autonomous_top20_minute_backfill_enabled,
                 outbox_path=Path(active.top20_outbox_path),
             )
     if active.mock_account_monitor_enabled:
@@ -455,6 +476,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         if candidate_monitor is not None:
             await candidate_monitor.start()
         yield
+        if diagnostic_runs is not None:
+            await asyncio.to_thread(diagnostic_runs.close)
         if credential_runtime is not None:
             await credential_runtime.close()
         if mock_automation_supervisor is not None:
@@ -490,6 +513,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     @asynccontextmanager
     async def lifespan(_app: Any):
         try:
+            _app.state.diagnostic_loop = asyncio.get_running_loop()
             if credential_runtime is not None:
                 await credential_runtime.start()
             async with service_lifespan(_app):
@@ -527,6 +551,27 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     app.state.real_credential_owner = real_owner
     app.state.mock_account_startup_error = ""
     app.state.verified_account_bindings = ()
+
+    class DiagnosticControlRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        target: str = Field(pattern=r"^(master|capture|workload)$")
+        enabled: bool | None = None
+        paused: bool | None = None
+        workload: str = ""
+        ttl_seconds: int = Field(default=600, ge=60, le=3600)
+        expected_session: str | None = None
+        expected_revision: int = Field(ge=0)
+        expected_instance: str | None = None
+
+    class DiagnosticRunRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        kind: str = Field(pattern=r"^(measure|compare)$")
+        seconds: int = Field(ge=5, le=1100)
+        label: str = Field(default="manual", max_length=80)
+        workload: str = ""
+        request_id: str = Field(default="", max_length=80)
+        expected_session: str | None = None
+        expected_revision: int | None = Field(default=None, ge=0)
 
     class QueryRequest(BaseModel):
         api_id: str = Field(min_length=7, max_length=7)
@@ -807,6 +852,10 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     async def health() -> dict[str, object]:
         document = health_document()
         document["server_build"] = SERVER_BUILD
+        document["historical_news_archive"] = {
+            "state": historical_archive_state,
+            "dataset_id": historical_archive.dataset_id if historical_archive else None,
+        }
         document["historical_news_pc_scopes"] = ["market", "search", "legacy_backlog"]
         document["realtime_connection"] = collector.credential_connection_status() if collector is not None else None
         document["mock_account_available"] = (
@@ -842,6 +891,10 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             mock_automation_runtime_v1=mock_automation_supervisor is not None,
         ).as_document()
         document["realtime_connection"] = collector.credential_connection_status() if collector is not None else None
+        document["capabilities"]["historical_news_archive_v1"] = historical_archive is not None
+        document["historical_news_archive_dataset_id"] = (
+            historical_archive.dataset_id if historical_archive else None
+        )
         return document
 
     @app.post("/api/v1/mock/orders", dependencies=[Depends(authorize)])
@@ -1054,6 +1107,290 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                 "automatic_deletion_enabled": False,
             },
         }
+
+    @app.get("/api/v1/diagnostics/workloads", dependencies=[Depends(authorize)])
+    async def diagnostic_workloads() -> dict[str, object]:
+        from .diagnostic_workloads import WORKLOADS, control_path, control_snapshot
+        from .diagnostic_metrics import refresh_capture_state
+
+        refresh_capture_state(force=True)
+        path = control_path()
+        control = control_snapshot(path)
+        capture = control["metrics_capture"]
+        diagnostic_tool = control["diagnostic_tool"]
+        paused = control["paused"]
+        configured = {
+            "minute_backfill": bool(top20_service and top20_service._minute_backfill_enabled),
+            "top20_after_close": top20_service is not None,
+            "news_jobs": bool(news_service and news_service._job_runner),
+            "news_stock_refresh": bool(news_service and (
+                news_service._naver_api_enabled or news_service._naver_stock_enabled
+                or news_service._dart_enabled)),
+            "news_query_set": bool(news_service and news_service._query_collector._enabled),
+            "news_market_feed": bool(news_service and news_service._market_collector
+                                     and news_service._market_collector._enabled),
+            "external_market": external_market_service is not None,
+            "candidate_monitor": candidate_monitor is not None,
+            "historical_news_archive": historical_archive is not None,
+        }
+        external_runtime = (external_market_service.diagnostic_status()
+                            if external_market_service is not None else {
+                                "configured": False, "operational_enabled": False,
+                                "running": False, "poll_seconds": None,
+                                "collection_attempts": 0,
+                                "collection_completions": 0,
+                                "collection_saved_rows_total": 0,
+                                "last_collection_started_at": None,
+                                "last_collection_completed_at": None,
+                                "last_collection_saved_rows": 0,
+                                "last_collection_error": None,
+                            })
+        expiries = control["workload_expiries"]
+        workloads = {}
+        for name in sorted(WORKLOADS):
+            effective = configured[name] and name not in paused
+            item = {"configured": configured[name], "effective": effective,
+                    "diagnostic_switch_available": diagnostic_tool["enabled"],
+                    "paused_by_diagnostic": name in paused,
+                    "expires_at": expiries.get(name)}
+            if name == "external_market":
+                item["effective"] = bool(external_runtime["operational_enabled"]
+                                         and external_runtime["running"]
+                                         and name not in paused)
+                item["runtime"] = external_runtime
+            workloads[name] = item
+        return {"diagnostic_tool": diagnostic_tool, "workloads": workloads,
+            "metrics_capture": capture, "expires_at": control["expires_at"],
+            "control_revision": control["control_revision"]}
+
+    @app.get("/api/v1/diagnostics/market-bar-saves", dependencies=[Depends(authorize)])
+    async def diagnostic_market_bar_saves(start: float, end: float) -> dict[str, object]:
+        from .diagnostic_metrics import refresh_capture_state, summarize_market_bar_saves
+
+        if end <= start or end - start > 1800:
+            raise HTTPException(400, detail="DIAGNOSTIC_TIME_RANGE_INVALID")
+        refresh_capture_state(force=True)
+        return summarize_market_bar_saves(start, end)
+
+    @app.get("/api/v1/diagnostics/writers", dependencies=[Depends(authorize)])
+    async def diagnostic_writers() -> dict[str, object]:
+        from .diagnostic_writer_registry import writer_registry
+
+        return {"coverage": "instrumented_postgres_writers_only",
+                "writers": writer_registry(),
+                "unmeasured": ["raw/unmigrated PostgreSQL writers", "PC SQLite", "Journal SQLite",
+                               "errors/retries outside common DB pilot", "payload byte estimates",
+                               "per-backend wait attribution"]}
+
+    @app.get("/api/v1/diagnostics/db-calls", dependencies=[Depends(authorize)])
+    async def diagnostic_db_calls(start: float, end: float,
+                                  mode: str = "summary", limit: int = 200,
+                                  slow_ms: int = 500) -> dict[str, object]:
+        from .diagnostic_metrics import summarize_db_calls
+
+        if end <= start or end - start > 1800:
+            raise HTTPException(400, detail="DIAGNOSTIC_TIME_RANGE_INVALID")
+        if (mode not in {"summary", "verbose", "raw"}
+                or not 1 <= limit <= 500 or not 1 <= slow_ms <= 30_000):
+            raise HTTPException(400, detail="DIAGNOSTIC_DB_MODE_INVALID")
+        return summarize_db_calls(start, end, mode=mode, limit=limit, slow_ms=slow_ms)
+
+    @app.get("/api/v1/diagnostics/news-job-claim-plan", dependencies=[Depends(authorize)])
+    async def diagnostic_news_job_claim_plan() -> dict[str, object]:
+        explain = getattr(store, "explain_news_job_claim_plan", None)
+        if not callable(explain):
+            raise HTTPException(501, detail="POSTGRES_DIAGNOSTIC_UNAVAILABLE")
+        result = await asyncio.to_thread(explain)
+        if len(json.dumps(result).encode("utf-8")) > 1_048_576:
+            raise HTTPException(503, detail="DIAGNOSTIC_PLAN_TOO_LARGE")
+        return result
+
+    from .diagnostic_workloads import (
+        WORKLOADS, _history as record_diagnostic_history,
+        _set as set_diagnostic_workload, _set_capture as set_diagnostic_capture,
+        _set_tool as set_diagnostic_master, capture_status as diagnostic_capture_status,
+        control_path as diagnostic_control_path, control_snapshot as diagnostic_control_snapshot,
+        instance_id as diagnostic_instance_id,
+    )
+    from .diagnostic_runs import DiagnosticRuns
+
+    def diagnostic_internal_api(path: str, query: dict | None = None) -> dict:
+        query = query or {}
+        if path.endswith("/workloads"):
+            loop = app.state.diagnostic_loop
+            return asyncio.run_coroutine_threadsafe(diagnostic_workloads(), loop).result(timeout=10)
+        if path.endswith("/writers"):
+            from .diagnostic_writer_registry import writer_registry
+            return {"writers": writer_registry(), "coverage": "instrumented_postgres_writers_only"}
+        if path.endswith("/db-calls"):
+            from .diagnostic_metrics import summarize_db_calls
+            return summarize_db_calls(query["start"], query["end"],
+                                      mode=query.get("mode", "summary"),
+                                      limit=int(query.get("limit", 200)))
+        if path.endswith("/market-bar-saves"):
+            from .diagnostic_metrics import summarize_market_bar_saves
+            return summarize_market_bar_saves(query["start"], query["end"])
+        raise ValueError("unsupported_diagnostic_section")
+
+    diagnostic_path = diagnostic_control_path()
+    diagnostic_runs = DiagnosticRuns(diagnostic_path, diagnostic_internal_api) if diagnostic_path else None
+    app.state.diagnostic_runs = diagnostic_runs
+
+    def require_diagnostic_runs():
+        if diagnostic_runs is None:
+            raise HTTPException(501, detail="DIAGNOSTIC_CONTROL_UNAVAILABLE")
+        return diagnostic_runs
+
+    @app.get("/api/v1/diagnostics/capabilities", dependencies=[Depends(authorize)])
+    async def diagnostic_capabilities() -> dict[str, object]:
+        return {"server_build": SERVER_BUILD, "producer_instance": diagnostic_instance_id(),
+                "control_available": diagnostic_runs is not None,
+                "postgres_available": active.database_url.startswith("postgres"),
+                "sections": ["postgres", "activity", "news_jobs", "host", "storage"],
+                "run_kinds": ["measure", "compare"],
+                "limits": {"measure_seconds": 300, "compare_phase_seconds": 1100,
+                           "ttl_seconds": 3600, "activity_rows": 200},
+                "scope_note": "server-process metrics, database-wide counters and host samples; independent PC/importer memory unavailable"}
+
+    @app.put("/api/v1/diagnostics/control", dependencies=[Depends(authorize)])
+    async def diagnostic_control_update(body: DiagnosticControlRequest) -> dict[str, object]:
+        require_diagnostic_runs()
+        if (body.target in {"master", "capture"} and
+                (body.enabled is None or body.paused is not None or body.workload)
+                or body.target == "workload" and
+                (body.paused is None or body.enabled is not None or body.workload not in WORKLOADS)):
+            raise HTTPException(422, detail="DIAGNOSTIC_CONTROL_INPUT_INVALID")
+        kwargs = {"expected_revision": body.expected_revision,
+                  "expected_instance": body.expected_instance}
+        try:
+            if body.target == "master":
+                await asyncio.to_thread(set_diagnostic_master, diagnostic_path,
+                                        body.enabled, body.ttl_seconds,
+                                        expected_session=body.expected_session, **kwargs)
+            elif body.target == "capture":
+                if body.expected_session is None:
+                    raise ValueError("diagnostic_control_conflict")
+                await asyncio.to_thread(set_diagnostic_capture, diagnostic_path,
+                                        body.enabled, body.ttl_seconds,
+                                        expected_session=body.expected_session, **kwargs)
+            else:
+                if body.expected_session is None:
+                    raise ValueError("diagnostic_control_conflict")
+                await asyncio.to_thread(set_diagnostic_workload, diagnostic_path,
+                                        body.workload, body.paused, body.ttl_seconds,
+                                        expected_session=body.expected_session, **kwargs)
+        except ValueError as error:
+            raise HTTPException(409, detail=str(error)) from error
+        history_error = None
+        try:
+            record_diagnostic_history("api_control", workload=body.workload,
+                                      detail={"target": body.target,
+                                              "revision": body.expected_revision})
+        except OSError as error:
+            history_error = type(error).__name__
+        from .diagnostic_metrics import refresh_capture_state
+        refresh_capture_state(force=True)
+        result = await diagnostic_workloads()
+        if history_error:
+            result["history_error_type"] = history_error
+        return result
+
+    @app.get("/api/v1/diagnostics/snapshot", dependencies=[Depends(authorize)])
+    async def diagnostic_snapshot(sections: str = "postgres,activity,news_jobs,host,storage",
+                                  pid: int | None = None) -> dict[str, object]:
+        from .diagnostic_sampling import read_host_snapshot, read_postgres_snapshot
+        selected = frozenset(part.strip() for part in sections.split(","))
+        valid = {"postgres", "activity", "news_jobs", "host", "storage"}
+        if not selected or not selected.issubset(valid) or len(sections) > 100 or (pid is not None and pid <= 0):
+            raise HTTPException(400, detail="DIAGNOSTIC_SECTION_INVALID")
+        result: dict[str, object] = {"server_build": SERVER_BUILD, "sections": {}}
+        if selected & {"postgres", "activity", "news_jobs"}:
+            if not active.database_url.startswith("postgres"):
+                raise HTTPException(501, detail="POSTGRES_DIAGNOSTIC_UNAVAILABLE")
+            try:
+                database = await asyncio.to_thread(read_postgres_snapshot, active.database_url,
+                                                   sections=selected, pid=pid)
+            except Exception as error:
+                logger.warning("diagnostic PostgreSQL snapshot unavailable: %s", type(error).__name__)
+                raise HTTPException(503, detail="DIAGNOSTIC_POSTGRES_SNAPSHOT_UNAVAILABLE") from error
+            result.update(database)
+        if selected & {"host", "storage"}:
+            host = await asyncio.to_thread(read_host_snapshot)
+            if "host" in selected:
+                result["sections"]["host"] = {
+                    key: value for key, value in host.items() if key != "storage_mapping"}
+            if "storage" in selected:
+                result["sections"]["storage"] = host["storage_mapping"]
+        return result
+
+    @app.post("/api/v1/diagnostics/runs", status_code=202,
+              dependencies=[Depends(authorize)])
+    async def diagnostic_run_start(body: DiagnosticRunRequest) -> dict[str, object]:
+        runs = require_diagnostic_runs()
+        if not active.database_url.startswith("postgres"):
+            raise HTTPException(501, detail="POSTGRES_DIAGNOSTIC_UNAVAILABLE")
+        try:
+            return await asyncio.to_thread(runs.start, kind=body.kind, seconds=body.seconds,
+                                           label=body.label, workload=body.workload,
+                                           request_id=body.request_id,
+                                           expected_session=body.expected_session,
+                                           expected_revision=body.expected_revision)
+        except ValueError as error:
+            raise HTTPException(409 if "busy" in str(error) or "conflict" in str(error)
+                                else 400, detail=str(error)) from error
+
+    @app.get("/api/v1/diagnostics/runs/{run_id}", dependencies=[Depends(authorize)])
+    async def diagnostic_run_status(run_id: str) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(require_diagnostic_runs().status, run_id)
+        except KeyError as error:
+            raise HTTPException(404, detail="DIAGNOSTIC_RUN_NOT_FOUND") from error
+
+    @app.post("/api/v1/diagnostics/runs/{run_id}/cancel", status_code=202,
+              dependencies=[Depends(authorize)])
+    async def diagnostic_run_cancel(run_id: str) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(require_diagnostic_runs().cancel, run_id)
+        except KeyError as error:
+            raise HTTPException(404, detail="DIAGNOSTIC_RUN_NOT_FOUND") from error
+
+    @app.get("/api/v1/diagnostics/reports", dependencies=[Depends(authorize)])
+    async def diagnostic_reports(limit: int = 100, offset: int = 0) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(require_diagnostic_runs().reports,
+                                           limit=limit, offset=offset)
+        except ValueError as error:
+            raise HTTPException(400, detail=str(error)) from error
+
+    @app.get("/api/v1/diagnostics/reports/{report_id}", dependencies=[Depends(authorize)])
+    async def diagnostic_report(report_id: str, mode: str = "summary") -> dict[str, object]:
+        if mode not in {"summary", "raw"}:
+            raise HTTPException(400, detail="DIAGNOSTIC_REPORT_MODE_INVALID")
+        try:
+            report = await asyncio.to_thread(require_diagnostic_runs().report, report_id)
+        except KeyError as error:
+            raise HTTPException(404, detail="DIAGNOSTIC_REPORT_NOT_FOUND") from error
+        if mode == "summary":
+            result = report.get("result", report)
+            if isinstance(result, dict):
+                phases = ([result.get("phase", {})] if result.get("kind") == "measure"
+                          else result.get("phases", []))
+                for phase in phases:
+                    if not isinstance(phase, dict):
+                        continue
+                    phase.pop("db_calls_raw", None)
+                    phase.pop("db_calls_raw_last_checkpoint", None)
+                    for kind in phase.get("market_bar_saves", {}).get("kinds", {}).values():
+                        kind.pop("call_samples", None)
+        return report
+
+    @app.get("/api/v1/diagnostics/history", dependencies=[Depends(authorize)])
+    async def diagnostic_history(limit: int = 100, offset: int = 0) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(require_diagnostic_runs().history,
+                                           limit=limit, offset=offset)
+        except ValueError as error:
+            raise HTTPException(400, detail=str(error)) from error
 
     @app.put("/api/v1/settings/operations", dependencies=[Depends(authorize)])
     async def put_operational_settings(values: OperationalSettingsUpdate) -> dict[str, object]:
@@ -1276,6 +1613,52 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                 "model": query.ai_model,
             })
         return {"stock_code": query.stock_code, **page}
+
+    def archive_reader() -> HistoricalNewsArchiveReader:
+        if historical_archive is None:
+            raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_UNAVAILABLE")
+        from .diagnostic_workloads import is_paused
+        if is_paused("historical_news_archive"):
+            raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_PAUSED")
+        return historical_archive
+
+    @app.get("/api/v1/news/historical-archive/search", dependencies=[Depends(authorize)])
+    async def historical_archive_search(
+        stock_code: str = Query(pattern=r"^[0-9A-Z]{6}$"),
+        limit: int = Query(default=100, ge=1, le=200),
+        cursor: str | None = Query(default=None, max_length=2048),
+    ) -> dict[str, object]:
+        reader = archive_reader()
+        try:
+            return await asyncio.to_thread(reader.search_page, stock_code, limit=limit, cursor=cursor)
+        except InvalidArchiveCursorError:
+            raise HTTPException(status_code=400, detail="HISTORICAL_NEWS_ARCHIVE_CURSOR_INVALID") from None
+        except (ArchiveUnavailableError, OSError, sqlite3.DatabaseError):
+            raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_UNAVAILABLE") from None
+
+    @app.get("/api/v1/news/historical-archive/articles/{article_revision_id}",
+             dependencies=[Depends(authorize)])
+    async def historical_archive_article(
+        article_revision_id: str,
+        dataset_id: str = Query(min_length=1, max_length=128),
+        body_revision_id: str | None = Query(default=None, max_length=128),
+    ) -> dict[str, object]:
+        reader = archive_reader()
+        if dataset_id != reader.dataset_id:
+            raise HTTPException(status_code=409, detail="HISTORICAL_NEWS_ARCHIVE_DATASET_CHANGED")
+        try:
+            result = await asyncio.to_thread(
+                reader.article_by_id, article_revision_id, body_revision_id=body_revision_id,
+            )
+        except ValueError as error:
+            if isinstance(error, ArchiveUnavailableError):
+                raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_UNAVAILABLE") from None
+            raise HTTPException(status_code=400, detail="HISTORICAL_NEWS_ARCHIVE_ID_MISMATCH") from None
+        except (OSError, sqlite3.DatabaseError):
+            raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_UNAVAILABLE") from None
+        if result is None:
+            raise HTTPException(status_code=404, detail="HISTORICAL_NEWS_ARCHIVE_ARTICLE_NOT_FOUND")
+        return result
 
     @app.post("/api/v1/news/analyze", dependencies=[Depends(authorize)])
     async def news_analyze(query: AIAnalysisRequest) -> dict[str, object]:

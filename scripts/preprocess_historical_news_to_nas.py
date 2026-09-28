@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_ROOT) not in sys.path:
@@ -27,11 +28,21 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
 
 def prepare_job(job: dict, article: dict, body: dict | None = None,
                 *, search_database: Path | None = None,
-                allow_network: bool = True) -> dict:
+                allow_network: bool = True,
+                body_timeout_seconds: float = 15.0,
+                body_request_observer: Callable[[str, str, int, str], None] | None = None) -> dict:
     """Use the same extraction and rule functions as the NAS runner."""
     result: dict = {"job_key": job["job_key"], "attempts": job["attempts"], "stage": job["stage"]}
     document = dict(article["document"])
     if job["stage"] == "BODY":
+        def record_request(url: str, status: str, started: float, error: str = "") -> None:
+            if body_request_observer is not None:
+                try:
+                    body_request_observer(url, status,
+                                          round((time.monotonic() - started) * 1000), error)
+                except Exception:
+                    pass  # Optional diagnostics cannot change BODY/RULE results.
+
         if job["processing_version"] != ARTICLE_BODY_EXTRACTOR_VERSION:
             raise ValueError("PC와 NAS의 본문 추출기 버전이 다릅니다.")
         source = document.get("historical_source")
@@ -56,12 +67,16 @@ def prepare_job(job: dict, article: dict, body: dict | None = None,
         for url in urls:
             if not url:
                 continue
+            request_started = time.monotonic()
             try:
-                fetched = fetch_article_text_with_metadata(url, timeout_seconds=15.0)
+                fetched = fetch_article_text_with_metadata(url, timeout_seconds=body_timeout_seconds)
                 text, published_at = fetched if isinstance(fetched, tuple) else (fetched, "")
                 fetched_url = url
+                record_request(url, "ok" if text else "empty", request_started)
                 break
-            except Exception:
+            except Exception as error:
+                record_request(url, "error", request_started,
+                               f"{type(error).__name__}: {error}"[:400])
                 continue
         status = "fulltext" if text else "summary_only"
         if not text:

@@ -19,6 +19,7 @@ from kiwoom_monitor.infrastructure.naver_news import (
     news_provider_domain,
 )
 from kiwoom_monitor.infrastructure.krx.stock_catalog import fetch_krx_stock_catalog
+from .diagnostic_workloads import is_paused
 
 
 DEFAULT_NEWS_QUERY_SET = (
@@ -115,11 +116,15 @@ class QuerySetNewsCollector:
             await asyncio.gather(*(asyncio.shield(t) for t in tuple(self._collecting)), return_exceptions=True)
 
     async def run_once(self) -> int:
+        if is_paused("news_query_set"):
+            return 0
         if self._credential_paused or self._closing.is_set() or self._client is None or not self._enabled or not self._queries or self._query_limit <= 0:
             return 0
         completed = 0
         policy = (self._enabled, self._queries, self._poll_seconds)
         for query in policy[1]:
+            if is_paused("news_query_set"):
+                break
             if policy != (self._enabled, self._queries, self._poll_seconds):
                 break
             source_id = _source_id(query)
@@ -154,6 +159,8 @@ class QuerySetNewsCollector:
         pending = (str(cursor.get("pending_published_at") or ""), str(cursor.get("pending_identity") or ""))
         run_id, checked_at = uuid.uuid4().hex, time()
         while start <= 1000:
+            if is_paused("news_query_set"):
+                return
             requests = 0
 
             def claim() -> bool:

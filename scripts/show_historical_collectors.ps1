@@ -53,6 +53,15 @@ if (Test-Path -LiteralPath $heartbeatPath) {
     $jobLabel = if ($heartbeatAlive) { 'active_job' } else { 'last_job' }
     Write-Host "  $jobLabel=$($heartbeat.code) $($heartbeat.target_date) $($heartbeat.query)"
     Write-Host "  phase=$($heartbeat.phase) page=$($heartbeat.page) article=$($heartbeat.article) heartbeat_age=${heartbeatAge}s"
+    if ($heartbeat.article_fetch) {
+        $fetch = $heartbeat.article_fetch
+        Write-Host "  article_fetch active=$($fetch.active) queued=$($fetch.queued) oldest=$($fetch.oldest_seconds)s host=$($fetch.oldest_host)"
+        if ($heartbeat.last_article_progress_at) {
+            $lastProgress = [DateTimeOffset]::Parse([string]$heartbeat.last_article_progress_at)
+            $progressAge = [math]::Round(([DateTimeOffset]::Now - $lastProgress).TotalSeconds)
+            Write-Host "  last_article_progress_age=${progressAge}s"
+        }
+    }
 }
 Show-Collector 'DAISHIN' 'daishin-collector-state.json'
 

@@ -4,14 +4,17 @@ import json
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from kiwoom_monitor.infrastructure.historical_backfill import (
     ArticleFetchAttempt,
     ArticlePublicationResult,
+    article_publication_records,
     NaverHistoricalNewsItem,
     NAVER_HISTORICAL_SEARCH_PROVIDER,
     NAVER_STOCK_NEWS_PROVIDER,
@@ -36,9 +39,149 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
     store_daishin_probe_payload,
     split_news_range_job,
 )
+from scripts.preprocess_historical_news_locally import _search_article
 
 
 class HistoricalBackfillTest(unittest.TestCase):
+    def test_collection_identity_index_and_publication_status_preserve_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.sqlite3"
+            initialize_probe_database(path)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO news_articles "
+                    "(provider,office_id,article_id,published_at,published_precision,"
+                    "office_name,title,summary,article_url,image_url,first_observed_at,"
+                    "last_observed_at,article_fetch_status) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (NAVER_HISTORICAL_SEARCH_PROVIDER, "001", "known", "2026-09-27", "date",
+                     "매체", "제목", "요약", "https://example.test", "", "now", "now",
+                     "published_at_found"),
+                )
+                connection.execute(
+                    "INSERT INTO news_search_observations "
+                    "(provider,office_id,article_id,code,source_date,query_text,"
+                    "start,position,observed_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (NAVER_HISTORICAL_SEARCH_PROVIDER, "001", "known", "005930",
+                     "2026-09-27", "삼성전자", 1, 1, "now"),
+                )
+                plan = connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT a.article_id FROM news_articles a "
+                    "JOIN news_search_observations o ON o.provider=a.provider "
+                    "AND o.office_id=a.office_id AND o.article_id=a.article_id "
+                    "WHERE o.code=? AND COALESCE(NULLIF(a.original_url,''),"
+                    "NULLIF(a.portal_url,''),'naver:'||a.office_id||':'||a.article_id)=?",
+                    ("005930", "naver:001:known"),
+                ).fetchall()
+            self.assertTrue(any("idx_news_articles_collection_identity" in row[3]
+                                for row in plan), plan)
+            self.assertEqual("naver:001:known",
+                             _search_article(path, "005930", "naver:001:known")["identity"])
+            items = [SimpleNamespace(office_id="001", article_id="known")]
+            items.extend(SimpleNamespace(office_id="001", article_id=f"missing-{n}")
+                         for n in range(9))
+            items.append(items[0])
+            result = article_publication_records(path, items)
+            self.assertEqual(10, len(result))
+            self.assertEqual(("published_at_found", "2026-09-27"), result[("001", "known")])
+            self.assertEqual(("not_fetched", ""), result[("001", "missing-8")])
+
+    def test_publication_fetch_enforces_total_deadline_for_slow_streams(self) -> None:
+        class Response:
+            status = 200
+
+            def __init__(self) -> None:
+                self.chunks = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read1(self, _size: int) -> bytes:
+                time.sleep(0.02)
+                self.chunks += 1
+                return b"x" if self.chunks < 10 else b""
+
+            def geturl(self) -> str:
+                return "https://publisher.test/article"
+
+            class headers:
+                @staticmethod
+                def get_content_charset():
+                    return "utf-8"
+
+        item = NaverHistoricalNewsItem(
+            "key", "001", "123", "매체", "제목", "요약",
+            "https://publisher.test/article", "https://publisher.test/article", "", 1,
+        )
+        started = time.monotonic()
+        result = fetch_article_publication(
+            item, total_timeout=0.04, opener=lambda *_args, **_kwargs: Response(),
+        )
+
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual("fetch_error", result.status)
+        self.assertIn("deadline exceeded", result.attempts[0].error)
+
+    def test_publication_fetch_limits_each_site_read_independently(self) -> None:
+        class SlowResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read1(self, _size: int) -> bytes:
+                time.sleep(0.02)
+                return b"x"
+
+        item = NaverHistoricalNewsItem(
+            "key", "001", "123", "매체", "제목", "요약",
+            "https://publisher.test/article", "https://publisher.test/article", "", 1,
+        )
+        result = fetch_article_publication(
+            item, timeout=0.04, total_timeout=1,
+            opener=lambda *_args, **_kwargs: SlowResponse(),
+        )
+        self.assertEqual("fetch_error", result.status)
+        self.assertEqual("response_read", result.attempts[0].failure_phase)
+        self.assertLess(result.attempts[0].elapsed_ms, 200)
+
+    def test_publication_fetch_uses_two_second_limit_per_url_and_tries_archive(self) -> None:
+        timeouts = []
+        def unavailable(_request, *, timeout, context):
+            timeouts.append(timeout)
+            raise TimeoutError("timed out")
+        item = NaverHistoricalNewsItem(
+            "key", "001", "123", "매체", "제목", "요약",
+            "https://publisher.test/article", "https://publisher.test/article",
+            "https://n.news.naver.com/article/001/123", 1,
+        )
+        result = fetch_article_publication(item, timeout=2, opener=unavailable)
+        self.assertEqual(["publisher_original", "naver_archive"],
+                         [attempt.url_role for attempt in result.attempts])
+        self.assertEqual(2, len(timeouts))
+        self.assertTrue(all(0 < timeout <= 2 for timeout in timeouts))
+
+    def test_publication_fetch_can_defer_archive_without_requesting_it(self) -> None:
+        requested = []
+        def unavailable(request, *, timeout, context):
+            requested.append(request.full_url)
+            raise TimeoutError("timed out")
+        item = NaverHistoricalNewsItem(
+            "key", "001", "123", "매체", "제목", "요약",
+            "https://publisher.test/article", "https://publisher.test/article",
+            "https://n.news.naver.com/article/001/123", 1,
+        )
+        result = fetch_article_publication(
+            item, opener=unavailable, source_roles=("publisher_original",),
+        )
+        self.assertEqual(["https://publisher.test/article"], requested)
+        self.assertEqual(["publisher_original"],
+                         [attempt.url_role for attempt in result.attempts])
+
     def test_publication_fetch_reuses_same_html_for_body_snapshot(self) -> None:
         html = (
             '<html><head><title>삼성전자 공급계약</title>'

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -161,6 +162,8 @@ def initialize_database(path: Path) -> None:
                     PRIMARY KEY(source,office_id,article_id));
                 CREATE INDEX IF NOT EXISTS idx_market_news_articles_date
                     ON market_news_articles(source,published_at);
+                CREATE INDEX IF NOT EXISTS idx_market_news_articles_url
+                    ON market_news_articles(article_url);
             """)
 
 
@@ -225,7 +228,16 @@ def record_error(path: Path, source: str, target_date: str, page: int, error: Ex
 def collect_day(path: Path, source: str, target_date: str, *, max_pages: int = 300,
                 delay_seconds: float = 0.7,
                 fetcher: Callable[..., MarketNewsPage] = fetch_page,
-                on_page: Callable[[MarketNewsPage], None] | None = None) -> dict[str, Any]:
+                on_page: Callable[[MarketNewsPage], None] | None = None,
+                on_diagnostic: Callable[[str, dict[str, Any]], None] | None = None) -> dict[str, Any]:
+    def record(event: str, **fields: Any) -> None:
+        if on_diagnostic is not None:
+            try:
+                on_diagnostic(event, {"source": source, "target_date": target_date,
+                                      "page": page_number, **fields})
+            except Exception:
+                pass  # Diagnostics must not change the collector's data path.
+
     initialize_database(path)
     current = day_state(path, source, target_date)
     if current and current["state"] in {"complete", "complete_boundary", "empty"}:
@@ -246,36 +258,63 @@ def collect_day(path: Path, source: str, target_date: str, *, max_pages: int = 3
             # callback. Replaying the last committed page closes that gap; the
             # prepared-results ledger skips articles already completed.
             if on_page is not None:
+                callback_started = time.monotonic()
                 on_page(prior)
+                record("market_page_callback", replayed=True, articles=len(prior.articles),
+                       elapsed_ms=round((time.monotonic() - callback_started) * 1000))
     for _ in range(max_pages):
         try:
             for attempt in range(5):
+                request_started = time.monotonic()
                 try:
                     page = fetcher(source, target_date, page_number)
+                    record("market_page_request", attempt=attempt + 1, status="ok",
+                           articles=len(page.articles),
+                           elapsed_ms=round((time.monotonic() - request_started) * 1000))
                     break
                 except HTTPError as error:
+                    record("market_page_request", attempt=attempt + 1, status="http_error",
+                           http_status=error.code, error=f"HTTP {error.code}",
+                           elapsed_ms=round((time.monotonic() - request_started) * 1000))
                     if error.code not in {429, 500, 502, 503, 504} or attempt == 4:
                         raise
-                    sleep(min(30.0, 2 ** attempt))
+                    wait_seconds = min(30.0, 2 ** attempt)
+                    record("market_page_retry_wait", attempt=attempt + 1,
+                           http_status=error.code, wait_seconds=wait_seconds)
+                    sleep(wait_seconds)
+                except Exception as error:
+                    record("market_page_request", attempt=attempt + 1, status="error",
+                           error=f"{type(error).__name__}: {error}"[:400],
+                           elapsed_ms=round((time.monotonic() - request_started) * 1000))
+                    raise
             if page.invalid_count:
                 raise ValueError(f"page {page_number} has {page.invalid_count} invalid or other-date rows")
             if page.older_count and page_number == 1 and not page.articles:
                 raise ValueError("first page contains only earlier-date rows; target coverage unknown")
             last = (page.articles[-1].office_id, page.articles[-1].article_id) if page.articles else None
-            if last is not None and last == seen_last:
+            boundary_complete = bool(page.older_count)
+            # Naver may repeat the prior page's final same-day article as the
+            # first item at the date boundary. Older rows prove coverage is done.
+            if last is not None and last == seen_last and not boundary_complete:
                 raise ValueError(f"page {page_number} repeats the previous page")
             seen_last = last
-            boundary_complete = bool(page.older_count)
             complete = boundary_complete or len(page.articles) < PAGE_SIZE[source]
+            store_started = time.monotonic()
             store_page(path, page, complete=complete, boundary_complete=boundary_complete)
+            record("market_page_store", articles=len(page.articles),
+                   elapsed_ms=round((time.monotonic() - store_started) * 1000))
             if on_page is not None:
+                callback_started = time.monotonic()
                 on_page(page)
+                record("market_page_callback", replayed=False, articles=len(page.articles),
+                       elapsed_ms=round((time.monotonic() - callback_started) * 1000))
             if complete:
                 return day_state(path, source, target_date) or {}
             page_number += 1
             if delay_seconds:
                 sleep(delay_seconds)
         except Exception as error:
+            record("market_page_error", error=f"{type(error).__name__}: {error}"[:400])
             record_error(path, source, target_date, page_number, error)
             raise
     return day_state(path, source, target_date) or {}

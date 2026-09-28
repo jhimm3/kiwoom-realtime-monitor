@@ -27,6 +27,88 @@ from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import Minu
 
 
 class MinuteBarRepositoryTests(unittest.TestCase):
+    def test_open_0b_snapshot_replaces_provisional_bar_without_double_accumulating(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = MinuteBarRepository(path)
+            minute = datetime.now().replace(second=0, microsecond=0)
+
+            repository.upsert_many({
+                "005930": (MinuteOhlcv(minute, 100, 105, 99, 104, 20, 1.25),),
+            })
+            repository.upsert_many({
+                "005930": (MinuteOhlcv(minute, 100, 110, 98, 108, 35, 2.75),),
+            })
+
+            with closing(sqlite3.connect(path)) as connection:
+                bar = connection.execute(
+                    "SELECT open_price,high_price,low_price,close_price,volume,trade_value_eok "
+                    "FROM minute_bars WHERE stock_code=? AND minute=?",
+                    ("005930", minute.isoformat(timespec="minutes")),
+                ).fetchone()
+            metadata = MarketDataMetadataRepository(path).load(
+                MarketDatasetKind.MINUTE_BAR, "005930", minute.isoformat(timespec="minutes"),
+            )
+
+        self.assertEqual((100, 110, 98, 108, 35, 2.75), bar)
+        assert metadata is not None
+        self.assertEqual(ObservationOrigin.REALTIME, metadata.origin)
+        self.assertEqual(DataCompleteness.IN_PROGRESS, metadata.completeness)
+        self.assertEqual("kiwoom-websocket-0B", metadata.source)
+
+    def test_completed_ka10080_bar_is_not_changed_by_late_0b_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = MinuteBarRepository(path)
+            minute = datetime.now().replace(second=0, microsecond=0) - timedelta(minutes=5)
+            key = minute.isoformat(timespec="minutes")
+
+            repository.upsert_many({
+                "005930": (MinuteOhlcv(minute, 100, 105, 99, 104, 20, 1.25),),
+            })
+            query_bar = MinuteOhlcv(minute, 101, 120, 95, 118, 80)
+            repository.upsert_bars("005930", (query_bar,))
+            expected_trade_value = query_bar.trade_value_eok
+            repository.upsert_many({
+                "005930": (MinuteOhlcv(minute, 100, 999, 1, 2, 50_000, 900_000),),
+            })
+
+            with closing(sqlite3.connect(path)) as connection:
+                bar = connection.execute(
+                    "SELECT open_price,high_price,low_price,close_price,volume,trade_value_eok "
+                    "FROM minute_bars WHERE stock_code=? AND minute=?",
+                    ("005930", key),
+                ).fetchone()
+            metadata = MarketDataMetadataRepository(path).load(
+                MarketDatasetKind.MINUTE_BAR, "005930", key,
+            )
+
+        self.assertEqual((101, 120, 95, 118, 80, expected_trade_value), bar)
+        assert metadata is not None
+        self.assertEqual(ObservationOrigin.QUERY, metadata.origin)
+        self.assertEqual(DataCompleteness.COMPLETE, metadata.completeness)
+        self.assertEqual("kiwoom-ka10080", metadata.source)
+        self.assertEqual(DataValueKind.ESTIMATED, metadata.value_kind)
+
+    def test_combined_query_value_remains_classified_as_estimate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = MinuteBarRepository(path)
+            minute = datetime.now().replace(second=0, microsecond=0) - timedelta(minutes=5)
+            repository.upsert_bars("005930", (
+                MinuteOhlcv(minute, 100, 110, 90, 105, 20, 0.002),
+            ))
+            metadata = MarketDataMetadataRepository(path).load(
+                MarketDatasetKind.MINUTE_BAR, "005930", minute.isoformat(timespec="minutes"),
+            )
+
+        assert metadata is not None
+        self.assertEqual(ObservationOrigin.QUERY, metadata.origin)
+        self.assertEqual(DataValueKind.ESTIMATED, metadata.value_kind)
+
     def test_realtime_and_query_minute_bars_store_distinct_observation_meaning(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

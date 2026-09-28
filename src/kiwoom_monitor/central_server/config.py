@@ -44,10 +44,12 @@ class CentralServerSettings:
     news_query_set: str = "증권,코스피,코스닥,상장사,수주 계약,유상증자,인수합병,실적 전망,최대주주"
     news_query_set_refresh_seconds: int = 300
     news_processing_excluded_providers: str = ""
+    historical_news_archive_path: str = ""
     news_request_hard_limit: int = 24_000
     news_watchlist_request_limit: int = 8_000
     news_query_set_request_limit: int = 16_000
     autonomous_top20_enabled: bool = True
+    autonomous_top20_minute_backfill_enabled: bool = True
     market_event_collection_enabled: bool = True
     research_observation_history_enabled: bool = True
     hot_cohort_condition_name: str = ""
@@ -226,11 +228,17 @@ class CentralServerSettings:
             news_processing_excluded_providers=os.environ.get(
                 "NEWS_PROCESSING_EXCLUDED_PROVIDERS", "",
             ).strip(),
+            historical_news_archive_path=os.environ.get(
+                "HISTORICAL_NEWS_ARCHIVE_PATH", "",
+            ).strip(),
             news_request_hard_limit=hard_limit,
             news_watchlist_request_limit=watchlist_limit,
             news_query_set_request_limit=query_limit,
             autonomous_top20_enabled=os.environ.get("AUTONOMOUS_TOP20_ENABLED", "1").strip().casefold()
             in {"1", "true", "yes", "on"},
+            autonomous_top20_minute_backfill_enabled=os.environ.get(
+                "AUTONOMOUS_TOP20_MINUTE_BACKFILL_ENABLED", "1",
+            ).strip().casefold() in {"1", "true", "yes", "on"},
             market_event_collection_enabled=os.environ.get(
                 "MARKET_EVENT_COLLECTION_ENABLED", "true",
             ).strip().casefold() in {"1", "true", "yes", "on"},

@@ -20,6 +20,9 @@
 | TOP20 | `application/top20_trade_value_collector.py`, `presentation/top20_trade_value.py` | 코호트·지수·차트 |
 | 로컬 쓰기 | `infrastructure/persistence/market_cache_writer.py`, `infrastructure/persistence/minute_bar_repository.py` | 비동기 직렬 쓰기·봉 저장 |
 | 중앙 DB/API | `central_server/app.py`, `central_server/database.py`, `central_server/central_schema.py` | 라우트·DB 트랜잭션·스키마 |
+| PostgreSQL 공통 관측 pilot | `central_server/postgres_access.py`, `central_server/database.py:PostgresQueryStore`, `central_server/diagnostic_metrics.py`, `central_server/diagnostic_writer_registry.py` | 기존 호출별 연결과 transaction 경계를 유지한 명시적 writer 계측 및 query-cache·document-collection·market-bar·observation-revision·shadow·dataset snapshot·market metadata·news READ grouping. writer kind는 활성 호출 경계를 따라 점진 이관한다. 전체 store coverage나 pool 도입을 뜻하지 않는다. 상세 writer/kind와 검증 범위는 `docs/COMMON_DB_ACCESS_OBSERVABILITY_REVIEW.md` 참조 |
+| PostgreSQL pilot 전용 통합검사 실행 | `scripts/run_postgres_access_integration.py`, `tests/integration/test_postgres_access_postgres.py` | 서버 컨테이너의 운영 DSN으로 읽기 전용 preflight 후 DB명만 전용 진단 DB로 바꿔 pilot 통합검사에 전달. URL·자격증명을 파일에 저장하지 않음 |
+| NAS 작업·writer 진단 | `central_server/diagnostic_workloads.py`, `central_server/diagnostic_sampling.py`, `central_server/diagnostic_runs.py`, `central_server/diagnostic_metrics.py`, `central_server/diagnostic_writer_registry.py`, `scripts/nas_workload_diagnostic.py` | 공통 master/자식 제어 파일·잠금, CLI/API 공유 표본, API가 소유하는 단일 run·취소·보고서. 실제 작업 drain ACK와 전수 writer 감사는 `docs/KIWOOM_STORAGE_WRITE_AUDIT.md` 진행 중 |
 | 화면 | `presentation/main_window.py`, `presentation/main_table_formatting.py` | 조정·표시, 계산/수명 책임은 기존 모듈 재사용 |
 
 ## 뉴스·테마·일지
@@ -28,13 +31,14 @@
 |---|---|---|
 | 뉴스 입력·작업 | `central_server/news_sources.py`, `central_server/news_service.py`, `central_server/news_jobs.py`, `infrastructure/naver_stock_news.py` | Naver 검색·증권 종목 목록, TOP20 수집 범위와 BODY/RULE/AI 단계 |
 | 과거 뉴스 PC 전처리·시황 업로드 | `scripts/preprocess_historical_news_locally.py`, `scripts/probe_historical_backfill.py`, `scripts/run_naver_stock_market_news.py`, `scripts/import_prepared_historical_news_to_nas.py`, `scripts/historical_collection_monitor.py`, `central_server/database.py` | 두 원천 수집기가 기사별 BODY/RULE 준비를 병렬 실행해 PC 원장에 저장하고, 준비된 결과만 불변 스냅샷으로 NAS 정상 뉴스 테이블에 적재 |
-| 종목 뉴스 조회 | `central_server/app.py`, `central_server/database.py`, `infrastructure/central_news_client.py`, `presentation/news_workers.py`, `presentation/stock_news_window.py`, `infrastructure/persistence/stock_news_repository.py` | NAS 저장분 200건 페이지, 스크롤 추가 조회, PC 직접 연결 보존 건수 |
+| 종목 뉴스 조회 | `central_server/app.py`, `central_server/database.py`, `infrastructure/central_news_client.py`, `presentation/news_workers.py`, `presentation/stock_news_window.py`, `presentation/historical_news_archive_dialog.py`, `infrastructure/persistence/stock_news_repository.py` | NAS 저장분 200건 offset 페이지와 별도 과거 archive의 dataset/cursor·정확 ID 클라이언트/읽기 전용 창. 기존 화면 스크롤 추가 조회와 PC 직접 연결 보존 건수는 기존 경로 유지 |
 | 뉴스창 실행·명령 | `presentation/news_window_coordinator.py`, `presentation/process_control.py`, `presentation/main_window.py` | 독립 뉴스 프로세스·명령 번호·창 복원 상태는 coordinator가 소유하고 메인 표는 사용자 입력만 전달 |
 | 네이버 증권 시황 피드 | `infrastructure/naver_stock_market_news.py`, `central_server/market_news_sources.py`, `scripts/run_naver_stock_market_news.py`, `scripts/historical_collection_monitor.py` | FLASH/WORLD 날짜별 응답·발행시각, NAS 독립 cursor 수집, 역사 원응답 보존·진행 확인·재시작/정지 |
 | 시장 뉴스 화면 | `presentation/market_news_window.py`, `news_process.py`, `infrastructure/central_news_client.py`, `central_server/database.py` | TOP20 앞 뉴스 진입, 공통/속보/해외 탭. NAS 저장 소스 조회와 PC 직접 연결의 화면 요청을 분리 |
 | 후보 기업행동 백필 | `scripts/collect_historical_market_context.py`, `scripts/daishin_market_context_backfill.ps1`, `scripts/classify_historical_stock_adjustments.py`, `scripts/collect_candidate_event_disclosures.py`, `scripts/collect_candidate_exchange_disclosures.py`, `infrastructure/dart_disclosures.py` | 주도후보에 한정한 CREON 누적 수정계수 경계와 상장·거래량 0·거래 재개 후보 날짜 수집, DART 사건 인접 및 전체 거래소 공시 목록 연결, 원응답·재개·NAS 게시 gate |
 | 거래소 공시 효력일 | `scripts/collect_candidate_exchange_effective_dates.py`, `infrastructure/exchange_effective_dates.py`, `scripts/reconcile_candidate_exchange_effective_dates.py`, `scripts/publish_historical_market_context_to_nas.py` | DART 접수일과 거래정지·재개·상폐 효력일/시각을 별도 보존하고 키움 일봉 거래량으로 대조. 원문 ZIP과 대조 원장을 시장 맥락 NAS 스냅샷에 게시 |
 | 뉴스 판단 | `application/news_rules.py`, `application/news_grouping.py`, `application/news_analysis.py` | 규칙·사건 묶음·분석 |
+| 단발성 과거뉴스 archive | `scripts/audit_prepared_historical_archive_readiness.py`, `scripts/build_prepared_historical_search_projection.py`, `central_server/historical_news_archive.py`, `central_server/app.py`, `infrastructure/central_news_client.py`, `presentation/historical_news_archive_dialog.py` | PC 미완성 파일의 봉인 차단 조건을 읽기 전용 감사하고, 봉인된 파일의 검색 페이지·정확한 기사 ID만 읽는 별도 인증 API와 PC 조회 창. 시황 projection·전체 봉인·실자료 검증은 미완료 |
 | AI 공급자 | `infrastructure/news_ai.py` | 기존 외부 공급자 연동 |
 | 테마 | `infrastructure/persistence/theme_repository.py`, `application/theme_matching.py`, `application/theme_preview.py` | 프로필·종목연결·가져오기·미리보기, 프로필별 대표명/분리 결정 재적용 |
 | 테마 동기화 | `infrastructure/central_theme_sync.py` | 로컬 편집·pending·retry·NAS 스냅샷 |

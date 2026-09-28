@@ -109,6 +109,27 @@ def _bar(
 
 
 class ExternalMarketAutomaticRollTests(unittest.IsolatedAsyncioTestCase):
+    async def test_diagnostic_status_reports_live_collection_activity(self) -> None:
+        collector = _SyntheticCollector(  # type: ignore[arg-type]
+            _MemoryStore(), {"WTI_FUTURES": "CLV26.NYM"}, poll_seconds=60,
+        )
+        before = collector.diagnostic_status()
+        self.assertTrue(before["configured"])
+        self.assertFalse(before["operational_enabled"])
+        self.assertFalse(before["running"])
+        self.assertEqual(60, before["poll_seconds"])
+        self.assertEqual(0, before["collection_attempts"])
+
+        await collector.collect_once(include_daily=False)
+        after = collector.diagnostic_status()
+        self.assertEqual(1, after["collection_attempts"])
+        self.assertEqual(1, after["collection_completions"])
+        self.assertIsNotNone(after["last_collection_started_at"])
+        self.assertIsNotNone(after["last_collection_completed_at"])
+        self.assertGreater(int(after["collection_saved_rows_total"]), 0)
+        self.assertGreater(int(after["last_collection_saved_rows"]), 0)
+        self.assertIsNone(after["last_collection_error"])
+
     async def test_collects_both_contracts_and_persists_forward_roll(self) -> None:
         store = _MemoryStore()
         collector = _SyntheticCollector(  # type: ignore[arg-type]

@@ -9,11 +9,21 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.run_naver_stock_market_news import publish_snapshot, write_status
+from scripts.run_naver_stock_market_news import (
+    publish_snapshot,
+    should_publish_periodic_snapshot,
+    write_status,
+)
 from kiwoom_monitor.infrastructure.naver_stock_market_news import initialize_database
 
 
 class MarketNewsSnapshotTests(unittest.TestCase):
+    def test_zero_interval_skips_interim_snapshots_but_keeps_positive_interval_schedule(self) -> None:
+        self.assertFalse(should_publish_periodic_snapshot(1, 0))
+        self.assertFalse(should_publish_periodic_snapshot(29, 30))
+        self.assertTrue(should_publish_periodic_snapshot(1, 30))
+        self.assertTrue(should_publish_periodic_snapshot(30, 30))
+
     def test_status_replace_retries_transient_windows_file_access(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             status = Path(temporary) / "market-news-state.json"
@@ -51,7 +61,9 @@ class MarketNewsSnapshotTests(unittest.TestCase):
             nas = root / "nas"
             nas.mkdir()
             (nas / "AGENTS.md").write_text("sentinel", encoding="utf-8")
-            published = publish_snapshot(database, nas)
+            timing = root / "snapshot-timing.jsonl"
+            from scripts.historical_news_timing_log import NewsTimingLog
+            published = publish_snapshot(database, nas, NewsTimingLog(timing))
             self.assertTrue(published.is_dir())
             with closing(sqlite3.connect(published / "naver_stock_market_news.sqlite3")) as copy:
                 self.assertEqual(copy.execute("PRAGMA integrity_check").fetchone()[0], "ok")
@@ -60,6 +72,15 @@ class MarketNewsSnapshotTests(unittest.TestCase):
             self.assertEqual(manifest["summary"], [["flash", "complete", 1, 3]])
             pointer = published.parent.parent / "latest.json"
             self.assertEqual(json.loads(pointer.read_text(encoding="utf-8"))["run"], published.name)
+            records = [json.loads(line) for line in timing.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(
+                [("backup_to_nas", "started"), ("backup_to_nas", "complete"),
+                 ("integrity_check", "started"), ("integrity_check", "complete"),
+                 ("publish_pointer", "started"), ("publish_pointer", "complete")],
+                [(row["stage"], row["state"]) for row in records
+                 if row["event"] == "market_snapshot_stage"],
+            )
+            self.assertEqual("complete", records[-1]["state"])
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ from kiwoom_monitor.infrastructure.naver_stock_news import NaverStockNewsClient
 
 from .database import QueryStore
 from .news_jobs import NewsJobRunner
+from .diagnostic_workloads import is_paused
 from .market_news_sources import MarketFeedNewsCollector
 from .news_sources import DEFAULT_NEWS_QUERY_SET, QuerySetNewsCollector
 
@@ -282,6 +283,8 @@ class CentralNewsService:
             task.exception()  # Observe orphan failures; active waiters still receive the exception.
 
     async def refresh_once(self) -> int:
+        if is_paused("news_stock_refresh"):
+            return 0
         if not (self._naver_api_enabled or self._naver_stock_enabled or self._dart_enabled):
             return 0
         snapshots = await asyncio.to_thread(
@@ -307,6 +310,8 @@ class CentralNewsService:
         since = datetime.now(UTC) - timedelta(days=2)
         seen: set[str] = set()
         for row in rows:
+            if is_paused("news_stock_refresh"):
+                break
             document = row.get("document")
             if not isinstance(document, dict):
                 continue

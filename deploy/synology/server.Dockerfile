@@ -6,17 +6,20 @@ COPY src ./src
 COPY scripts/check_postgres_integration.py ./scripts/check_postgres_integration.py
 COPY scripts/register_account_identity.py ./scripts/register_account_identity.py
 COPY scripts/run_research.py ./scripts/run_research.py
+COPY scripts/nas_workload_diagnostic.py ./scripts/nas_workload_diagnostic.py
 # 잘못된 구버전 소스를 재사용하면 컨테이너 실행 뒤 404가 나는 대신
 # 빌드 단계에서 즉시 발견한다.
 RUN grep -q '/api/v1/settings/operations' /app/src/kiwoom_monitor/central_server/app.py \
     && grep -q '/api/v1/diagnostics/resources' /app/src/kiwoom_monitor/central_server/app.py \
     && grep -q '/api/v1/market/latest-market-caps' /app/src/kiwoom_monitor/central_server/app.py \
+    && grep -q '/api/v1/diagnostics/news-job-claim-plan' /app/src/kiwoom_monitor/central_server/app.py \
     && grep -q 'def update_operational_settings' /app/src/kiwoom_monitor/central_server/news_service.py \
-    && grep -q '2026.09.26-market-ingest-db-timing-v1' /app/src/kiwoom_monitor/central_server/app.py \
+    && grep -q '2026.09.29-diagnostic-api-v5' /app/src/kiwoom_monitor/central_server/app.py \
     && test -f /app/src/kiwoom_monitor/central_server/credential_store.py \
     && test -f /app/src/kiwoom_monitor/central_server/credential_runtime.py \
     && test -f /app/src/kiwoom_monitor/central_server/schema_migrations.py \
     && test -f /app/src/kiwoom_monitor/central_server/persistent_outbox.py \
+    && test -f /app/src/kiwoom_monitor/central_server/postgres_access.py \
     && test -f /app/src/kiwoom_monitor/infrastructure/krx/stock_catalog.py \
     && test -f /app/scripts/check_postgres_integration.py \
     && test -f /app/scripts/register_account_identity.py \

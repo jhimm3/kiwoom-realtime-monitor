@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any, Callable
+from urllib.parse import quote, urlencode
 
 from kiwoom_monitor.application.news_analysis import NewsAssessment
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
@@ -57,6 +58,48 @@ class CentralNewsClient(CentralContentClient):
         if next_offset is not None and (not isinstance(next_offset, int) or next_offset <= offset):
             raise RuntimeError("중앙 뉴스 다음 페이지 위치가 올바르지 않습니다.")
         return tuple(_deserialize(value) for value in values if isinstance(value, dict)), next_offset
+
+    def historical_archive_page(self, stock_code: str, *, limit: int = 100,
+                                cursor: str | None = None) -> dict[str, Any]:
+        """Read a separate, immutable historical dataset; never merge offset pages."""
+        if not 1 <= limit <= 200:
+            raise ValueError("과거 뉴스 페이지 크기는 1~200이어야 합니다.")
+        query: dict[str, str | int] = {"stock_code": stock_code, "limit": limit}
+        if cursor is not None:
+            query["cursor"] = cursor
+        result = self._request(
+            "GET", f"/api/v1/news/historical-archive/search?{urlencode(query)}",
+        )
+        if (not isinstance(result.get("dataset_id"), str) or not result["dataset_id"]
+                or not isinstance(result.get("items"), list)
+                or any(not isinstance(item, dict)
+                       or not isinstance(item.get("article_revision_id"), str)
+                       or not isinstance(item.get("display"), dict)
+                       for item in result["items"])
+                or result.get("next_cursor") is not None
+                and not isinstance(result["next_cursor"], str)):
+            raise RuntimeError("과거 뉴스 archive 페이지 응답 형식이 올바르지 않습니다.")
+        return result
+
+    def historical_archive_article(self, dataset_id: str, article_revision_id: str, *,
+                                   body_revision_id: str | None = None) -> dict[str, Any]:
+        if not dataset_id or not article_revision_id:
+            raise ValueError("과거 뉴스 dataset과 기사 ID가 필요합니다.")
+        query: dict[str, str] = {"dataset_id": dataset_id}
+        if body_revision_id is not None:
+            query["body_revision_id"] = body_revision_id
+        path = ("/api/v1/news/historical-archive/articles/"
+                f"{quote(article_revision_id, safe='')}?{urlencode(query)}")
+        result = self._request("GET", path)
+        if result.get("dataset_id") != dataset_id or result.get("article_revision_id") != article_revision_id:
+            raise RuntimeError("과거 뉴스 archive 상세 응답의 dataset 또는 기사 ID가 다릅니다.")
+        if not isinstance(result.get("document"), dict):
+            raise RuntimeError("과거 뉴스 archive 기사 문서 형식이 올바르지 않습니다.")
+        if body_revision_id is not None:
+            body = result.get("body")
+            if not isinstance(body, dict) or body.get("body_revision_id") != body_revision_id:
+                raise RuntimeError("과거 뉴스 archive 본문 ID가 다릅니다.")
+        return result
 
 
 def _deserialize(value: dict[str, Any]) -> StockNewsItem:

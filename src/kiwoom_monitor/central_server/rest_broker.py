@@ -398,12 +398,16 @@ class CentralRestBroker:
                 stored = await asyncio.to_thread(self._store.load_query, key)
             recording_succeeded: bool | None = None
             if stored is not None and self._response_handler is not None:
+                from .diagnostic_metrics import CURRENT_API_ID
+                api_token = CURRENT_API_ID.set(api_id)
                 try:
                     await asyncio.to_thread(self._response_handler, api_id, body, stored.payload)
                     recording_succeeded = True
                 except Exception:
                     recording_succeeded = False
                     logger.exception("recording_gap: 중앙 캐시 응답 저장에 실패했습니다: %s", api_id)
+                finally:
+                    CURRENT_API_ID.reset(api_token)
             async with self._guard:
                 if self._inflight.get(key) is not future:
                     raise BrokerCredentialBusyError("REQUEST_OWNERSHIP_CHANGED")
@@ -505,12 +509,14 @@ class CentralRestBroker:
                 self._queue.task_done()
 
     async def _run_persistence(self) -> None:
+        from .diagnostic_metrics import CURRENT_API_ID
         while True:
             item = await self._persist_queue.get()
             try:
                 if item is None:
                     return
                 job, result = item
+                api_token = CURRENT_API_ID.set(job.api_id)
                 try:
                     started_at = time.monotonic()
                     handler_ms = cache_ms = 0
@@ -557,6 +563,7 @@ class CentralRestBroker:
                     if not job.future.done():
                         job.future.set_exception(error)
                 finally:
+                    CURRENT_API_ID.reset(api_token)
                     async with self._guard:
                         self._inflight.pop(job.key, None)
             finally:

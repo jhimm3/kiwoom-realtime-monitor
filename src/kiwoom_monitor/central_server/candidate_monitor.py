@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .diagnostic_workloads import is_paused
+
 import asyncio
 import json
 import logging
@@ -108,7 +110,8 @@ class CandidateMonitor:
     async def _run(self) -> None:
         while True:
             try:
-                await asyncio.to_thread(self.run_once)
+                if not is_paused("candidate_monitor"):
+                    await asyncio.to_thread(self.run_once)
             except Exception as error:  # keep the NAS collector alive; quality exposes the failure
                 logger.exception("shadow candidate monitor iteration failed")
                 self._quality = {

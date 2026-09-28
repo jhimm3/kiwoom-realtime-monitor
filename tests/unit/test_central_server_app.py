@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from datetime import datetime, timezone
@@ -38,6 +40,62 @@ from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRe
 
 
 class CentralServerAppTests(unittest.TestCase):
+    def test_db_call_diagnostic_requires_auth_and_rejects_unbounded_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = CentralServerSettings(
+                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
+            )
+            with TestClient(create_app(settings)) as client:
+                endpoint = "/api/v1/diagnostics/db-calls"
+                now = time.time()
+                self.assertEqual(401, client.get(endpoint, params={"start": now - 10,
+                                                                 "end": now}).status_code)
+                headers = {"Authorization": "Bearer private-token"}
+                response = client.get(endpoint, params={"start": now - 10, "end": now},
+                                      headers=headers)
+                self.assertEqual(200, response.status_code)
+                self.assertEqual("opt_in_observed_calls_only", response.json()["coverage"])
+                self.assertEqual(os.getpid(), response.json()["producer"]["pid"])
+                self.assertTrue(response.json()["producer"]["process_id"])
+                self.assertEqual({}, response.json()["writers"])
+                self.assertEqual({}, response.json()["readers"])
+                self.assertEqual(400, client.get(endpoint,
+                    params={"start": now - 3600, "end": now}, headers=headers).status_code)
+                self.assertEqual(400, client.get(endpoint,
+                    params={"start": now - 10, "end": now, "mode": "invalid"},
+                    headers=headers).status_code)
+
+    def test_news_job_claim_plan_api_requires_auth_and_postgres(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = CentralServerSettings(
+                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
+            )
+            with TestClient(create_app(settings)) as client:
+                endpoint = "/api/v1/diagnostics/news-job-claim-plan"
+                self.assertEqual(401, client.get(endpoint).status_code)
+                response = client.get(endpoint, headers={"Authorization": "Bearer private-token"})
+        self.assertEqual(501, response.status_code)
+        self.assertEqual("POSTGRES_DIAGNOSTIC_UNAVAILABLE", response.json()["detail"])
+
+    def test_diagnostic_status_reads_master_and_children_together(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "monitor.sqlite3"
+            control = Path(directory) / "diagnostic.json"
+            settings = CentralServerSettings(f"sqlite:///{database}", "private-token")
+            with patch.dict("os.environ", {"KIWOOM_DIAGNOSTIC_WORKLOAD_PATH": str(control)}):
+                with TestClient(create_app(settings)) as client:
+                    response = client.get("/api/v1/diagnostics/workloads",
+                                          headers={"Authorization": "Bearer private-token"})
+        self.assertEqual(200, response.status_code)
+        self.assertFalse(response.json()["diagnostic_tool"]["enabled"])
+        self.assertFalse(response.json()["metrics_capture"]["enabled"])
+        external = response.json()["workloads"]["external_market"]
+        self.assertTrue(external["configured"])
+        self.assertFalse(external["effective"])
+        self.assertFalse(external["runtime"]["operational_enabled"])
+        self.assertFalse(external["runtime"]["running"])
+        self.assertEqual(300, external["runtime"]["poll_seconds"])
+
     def test_latest_market_caps_returns_old_0b_reference_without_old_price(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
@@ -212,16 +270,19 @@ class CentralServerAppTests(unittest.TestCase):
                 }],
             })
             store.close()
-            with closing(sqlite3.connect(path)) as connection:
-                jobs_before = int(connection.execute("SELECT COUNT(*) FROM central_news_jobs").fetchone()[0])
             settings = CentralServerSettings(
                 f"sqlite:///{path}", "private-token",
                 naver_news_client_id="configured", naver_news_client_secret="configured",
                 news_query_set_enabled=False, news_history_jobs_enabled=False,
+                news_naver_market_enabled=False,
             )
             with patch(
                 "kiwoom_monitor.infrastructure.naver_news.NaverNewsClient.search", return_value=(),
             ), TestClient(create_app(settings)) as api_client:
+                # Startup may enqueue background news work. Only attribute new
+                # jobs created after the client is ready to these reads.
+                with closing(sqlite3.connect(path)) as connection:
+                    jobs_before = int(connection.execute("SELECT COUNT(*) FROM central_news_jobs").fetchone()[0])
                 def opener(request, **_kwargs):
                     path_and_query = urlsplit(request.full_url)
                     response = api_client.request(
@@ -236,8 +297,8 @@ class CentralServerAppTests(unittest.TestCase):
                 stored_items, next_offset = CentralNewsClient(
                     "http://testserver", "private-token", opener=opener,
                 ).stored_page("005930", "삼성전자")
-            with closing(sqlite3.connect(path)) as connection:
-                jobs_after = int(connection.execute("SELECT COUNT(*) FROM central_news_jobs").fetchone()[0])
+                with closing(sqlite3.connect(path)) as connection:
+                    jobs_after = int(connection.execute("SELECT COUNT(*) FROM central_news_jobs").fetchone()[0])
 
         self.assertEqual("https://o/n3", items[0].original_link)
         self.assertEqual("수주·계약", items[0].assessment.category)
@@ -252,12 +313,14 @@ class CentralServerAppTests(unittest.TestCase):
                 f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
                 kiwoom_app_key="app-key", kiwoom_secret_key="secret-key",
                 autonomous_top20_enabled=True,
+                autonomous_top20_minute_backfill_enabled=False,
                 top20_outbox_path=str(Path(directory) / "top20-outbox.json"),
             )
 
             app = create_app(settings)
 
         self.assertIsNotNone(app)
+        self.assertFalse(app.state.autonomous_top20_service._minute_backfill_enabled)
 
     def test_live_top20_endpoint_does_not_wait_for_database_projection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -656,9 +719,25 @@ class CentralServerAppTests(unittest.TestCase):
             ("POST", "/api/v1/settings/credential-operations/{operation_id}/apply"),
             ("DELETE", "/api/v1/settings/credential-operations/{operation_id}"),
             ("GET", "/api/v1/diagnostics/resources"),
+            ("GET", "/api/v1/diagnostics/workloads"),
+            ("GET", "/api/v1/diagnostics/market-bar-saves"),
+            ("GET", "/api/v1/diagnostics/writers"),
+            ("GET", "/api/v1/diagnostics/db-calls"),
+            ("GET", "/api/v1/diagnostics/news-job-claim-plan"),
+            ("GET", "/api/v1/diagnostics/capabilities"),
+            ("PUT", "/api/v1/diagnostics/control"),
+            ("GET", "/api/v1/diagnostics/snapshot"),
+            ("POST", "/api/v1/diagnostics/runs"),
+            ("GET", "/api/v1/diagnostics/runs/{run_id}"),
+            ("POST", "/api/v1/diagnostics/runs/{run_id}/cancel"),
+            ("GET", "/api/v1/diagnostics/reports"),
+            ("GET", "/api/v1/diagnostics/reports/{report_id}"),
+            ("GET", "/api/v1/diagnostics/history"),
             ("POST", "/api/v1/kiwoom/query"),
             ("POST", "/api/v1/news/search"),
             ("POST", "/api/v1/news/stored-page"),
+            ("GET", "/api/v1/news/historical-archive/search"),
+            ("GET", "/api/v1/news/historical-archive/articles/{article_revision_id}"),
             ("POST", "/api/v1/news/analyze"),
             ("POST", "/api/v1/news/historical-jobs/claim"),
             ("POST", "/api/v1/news/historical-jobs/complete"),

@@ -147,7 +147,10 @@ class MarketDataIngestor:
             pairs = tuple(
                 (value, observation)
                 for value, observation in zip(values, observations)
-                if observation[0] not in actual_keys
+                if (
+                    observation[1].metadata.completeness == DataCompleteness.COMPLETE
+                    or observation[0] not in actual_keys
+                )
             )
             values = [pair[0] for pair in pairs]
             observations = [pair[1] for pair in pairs]

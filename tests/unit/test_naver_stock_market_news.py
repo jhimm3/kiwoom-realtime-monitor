@@ -6,13 +6,58 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 from kiwoom_monitor.infrastructure.naver_stock_market_news import (
-    collect_day, day_state, page_url, parse_page,
+    collect_day, day_state, initialize_database, page_url, parse_page,
 )
 
 
 class NaverStockMarketNewsTests(unittest.TestCase):
+    def test_existing_archive_adds_article_url_lookup_index(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "market.sqlite3"
+            initialize_database(database)
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute("DROP INDEX idx_market_news_articles_url")
+                connection.commit()
+            initialize_database(database)
+            with closing(sqlite3.connect(database)) as connection:
+                plan = connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT source FROM market_news_articles "
+                    "WHERE article_url=? LIMIT 1", ("https://example.com/article",)
+                ).fetchall()
+                self.assertTrue(any("idx_market_news_articles_url" in str(part)
+                                    for row in plan for part in row))
+
+    def test_flash_and_world_request_diagnostics_keep_page_retry_and_save_semantics(self) -> None:
+        for source in ("flash", "world"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                database = Path(directory) / "market.sqlite3"
+                events = []
+                attempts = 0
+
+                def fetch(current_source: str, day: str, page: int):
+                    nonlocal attempts
+                    attempts += 1
+                    if attempts == 1:
+                        raise HTTPError("https://stock.naver.com/", 429, "rate limit", {}, None)
+                    return parse_page(current_source, day, page,
+                                      {"articles": []} if source == "flash" else [])
+
+                with patch("kiwoom_monitor.infrastructure.naver_stock_market_news.sleep"):
+                    result = collect_day(database, source, "2026-09-22", fetcher=fetch,
+                                         delay_seconds=0,
+                                         on_diagnostic=lambda event, fields: events.append((event, fields)))
+                self.assertEqual("empty", result["state"])
+                self.assertEqual(2, attempts)
+                self.assertEqual(["http_error", "ok"],
+                                 [fields["status"] for event, fields in events
+                                  if event == "market_page_request"])
+                self.assertEqual(1, sum(event == "market_page_retry_wait" for event, _ in events))
+                self.assertEqual(1, sum(event == "market_page_store" for event, _ in events))
+
     def test_source_specific_timestamp_and_url(self) -> None:
         flash = parse_page("flash", "2026-09-22", 1, {"articles": [{
             "officeId": "011", "articleId": "0004664738", "officeHname": "서울경제",
@@ -52,6 +97,37 @@ class NaverStockMarketNewsTests(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM market_news_articles").fetchone()[0], 101)
                 self.assertEqual(json.loads(connection.execute(
                     "SELECT payload_json FROM market_news_pages WHERE page=1").fetchone()[0])[0]["aid"], "0")
+
+    def test_repeated_tail_item_at_verified_date_boundary_completes_day(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "market.sqlite3"
+            current_rows = [{
+                "officeId": "018", "articleId": f"{index:010d}",
+                "datetime": "2020-07-08 12:00:00", "title": "시황",
+            } for index in range(15)]
+            older_rows = [{
+                "officeId": "018", "articleId": f"old-{index:02d}",
+                "datetime": "2020-07-07 12:00:00", "title": "이전 시황",
+            } for index in range(15)]
+            calls = []
+
+            def fetch(source: str, target_date: str, page_number: int):
+                calls.append(page_number)
+                rows = current_rows if page_number == 1 else [current_rows[-1], *older_rows]
+                return parse_page(source, target_date, page_number, {"articles": rows})
+
+            result = collect_day(database, "flash", "2020-07-08", delay_seconds=0,
+                                 fetcher=fetch)
+
+            self.assertEqual("complete_boundary", result["state"])
+            self.assertEqual(2, result["pages"])
+            self.assertEqual(15, result["articles"])
+            self.assertEqual([1, 2], calls)
+            with closing(sqlite3.connect(database)) as connection:
+                self.assertEqual(2, connection.execute(
+                    "SELECT COUNT(*) FROM market_news_pages WHERE source='flash' "
+                    "AND target_date='2020-07-08'"
+                ).fetchone()[0])
 
     def test_page_callback_runs_after_raw_page_is_saved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

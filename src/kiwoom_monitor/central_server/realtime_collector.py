@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from uuid import uuid4
 from dataclasses import asdict
 from datetime import datetime, time as clock_time, timezone
 from typing import Any, Callable
@@ -653,7 +654,12 @@ class CentralRealtimeCollector:
 
     async def _flush_serialized(self) -> None:
         async with self._flush_lock:
-            await self._flush_snapshot_cycle()
+            from .diagnostic_metrics import CURRENT_FLUSH_ID
+            token = CURRENT_FLUSH_ID.set(uuid4().hex)
+            try:
+                await self._flush_snapshot_cycle()
+            finally:
+                CURRENT_FLUSH_ID.reset(token)
 
     async def _flush_snapshot_cycle(self) -> None:
         if self._store is None:

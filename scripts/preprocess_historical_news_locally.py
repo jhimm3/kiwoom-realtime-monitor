@@ -14,6 +14,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import closing
 from pathlib import Path
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = ROOT / "src"
@@ -90,26 +91,61 @@ def _market_article(database: Path, identity: str, matcher: tuple) -> dict:
 
 def _prepare(scope: str, stock_code: str, identity: str, search_database: Path,
              market_database: Path, matcher: tuple, *,
-             allow_network: bool = True) -> tuple[dict, dict, list[dict]]:
-    article = (_search_article(search_database, stock_code, identity)
-               if scope == "historical_backfill" else
-               _market_article(market_database, identity, matcher))
-    body = prepare_job({"job_key": "local", "attempts": 1, "stage": "BODY",
-                        "processing_version": ARTICLE_BODY_EXTRACTOR_VERSION},
-                       article, search_database=search_database if scope == "historical_backfill" else None,
-                       allow_network=allow_network)
-    body_revision = {"body_text": body["body_text"], "status": body["body_status"]}
-    rules = []
-    for target_code, target_name in article["targets"]:
-        rule = prepare_job({"job_key": "local", "attempts": 1, "stage": "RULE",
-                            "target_id": target_code,
-                            "payload": {"stock_code": target_code, "stock_name": target_name}},
-                           article, body_revision)
-        rules.append({"target_id": target_code, "stock_name": target_name,
-                      "assessment": rule["assessment"],
-                      "core_sentences": rule["core_sentences"],
-                      "rule_result": rule["rule_result"]})
-    return article, body, rules
+             allow_network: bool = True, body_timeout_seconds: float = 15.0,
+             body_request_observer: Callable[[str, str, int, str], None] | None = None,
+             timing_observer: Callable[[str, dict[str, object]], None] | None = None,
+             submitted_at: float | None = None,
+             ) -> tuple[dict, dict, list[dict]]:
+    started = time.monotonic()
+    timings: dict[str, object] = {"scope": scope, "status": "ok"}
+    if submitted_at is not None:
+        timings["queue_ms"] = round((started - submitted_at) * 1000)
+    phase = "lookup"
+    phase_started = started
+    try:
+        article = (_search_article(search_database, stock_code, identity)
+                   if scope == "historical_backfill" else
+                   _market_article(market_database, identity, matcher))
+        timings["lookup_ms"] = round((time.monotonic() - phase_started) * 1000)
+        phase = "body"
+        phase_started = time.monotonic()
+        body = prepare_job({"job_key": "local", "attempts": 1, "stage": "BODY",
+                            "processing_version": ARTICLE_BODY_EXTRACTOR_VERSION},
+                           article, search_database=search_database if scope == "historical_backfill" else None,
+                           allow_network=allow_network,
+                           body_timeout_seconds=body_timeout_seconds,
+                           body_request_observer=body_request_observer)
+        timings["body_ms"] = round((time.monotonic() - phase_started) * 1000)
+        phase = "rule"
+        phase_started = time.monotonic()
+        body_revision = {"body_text": body["body_text"], "status": body["body_status"]}
+        rules = []
+        for target_code, target_name in article["targets"]:
+            rule = prepare_job({"job_key": "local", "attempts": 1, "stage": "RULE",
+                                "target_id": target_code,
+                                "payload": {"stock_code": target_code, "stock_name": target_name}},
+                               article, body_revision)
+            rules.append({"target_id": target_code, "stock_name": target_name,
+                          "assessment": rule["assessment"],
+                          "core_sentences": rule["core_sentences"],
+                          "rule_result": rule["rule_result"]})
+        timings["rule_ms"] = round((time.monotonic() - phase_started) * 1000)
+        phase = ""
+        return article, body, rules
+    except Exception as error:
+        timings["status"] = "error"
+        timings["failed_phase"] = phase
+        timings["error"] = f"{type(error).__name__}: {error}"[:400]
+        raise
+    finally:
+        if phase:
+            timings[f"{phase}_ms"] = round((time.monotonic() - phase_started) * 1000)
+        timings["total_ms"] = round((time.monotonic() - started) * 1000)
+        if timing_observer is not None:
+            try:
+                timing_observer("market_prepare_article", timings)
+            except Exception:
+                pass
 
 
 def _open_results(path: Path) -> sqlite3.Connection:
@@ -144,9 +180,24 @@ def _write_prepared_rows(output: sqlite3.Connection,
     output.commit()
 
 
-def save_prepared_batch(path: Path, rows: list[tuple[str, str, str, dict, dict, list[dict], str]]) -> None:
-    with closing(_open_results(path)) as output:
-        _write_prepared_rows(output, rows)
+def save_prepared_batch(
+    path: Path,
+    rows: list[tuple[str, str, str, dict, dict, list[dict], str]],
+    *,
+    connection: sqlite3.Connection | None = None,
+) -> None:
+    if connection is None:
+        with closing(_open_results(path)) as output:
+            _write_prepared_rows(output, rows)
+        return
+    try:
+        _write_prepared_rows(connection, rows)
+    except Exception:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        raise
 
 
 class ConcurrentArticlePreparation:
@@ -154,7 +205,12 @@ class ConcurrentArticlePreparation:
 
     def __init__(self, *, output: Path, search_database: Path,
                  market_database: Path, matcher: tuple, workers: int = 4,
-                 allow_network: bool = True) -> None:
+                 allow_network: bool = True,
+                 error_observer: Callable[[str, str, str, str], None] | None = None,
+                 body_timeout_seconds: float = 15.0,
+                 body_request_observer: Callable[[str, str, int, str], None] | None = None,
+                 timing_observer: Callable[[str, dict[str, object]], None] | None = None,
+                 ) -> None:
         if not 1 <= workers <= 8:
             raise ValueError("workers must be 1..8")
         self.output = output
@@ -163,63 +219,154 @@ class ConcurrentArticlePreparation:
         self.matcher = matcher
         self.workers = workers
         self.allow_network = allow_network
+        self.error_observer = error_observer
+        self.body_timeout_seconds = body_timeout_seconds
+        self.body_request_observer = body_request_observer
+        self.timing_observer = timing_observer
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="news-prepare")
         self.pending: dict = {}
         self.queued: set[tuple[str, str, str]] = set()
         self.ready = self.failed = self.skipped = 0
+        self._output_connection: sqlite3.Connection | None = None
+
+    def _observe(self, event: str, **fields: object) -> None:
+        if self.timing_observer is not None:
+            try:
+                self.timing_observer(event, fields)
+            except Exception:
+                pass
 
     def submit(self, scope: str, code: str, identity: str) -> None:
+        started = time.monotonic()
         key = (scope, code, identity)
         if key in self.queued:
+            self._observe("market_prepare_submit", scope=scope, state="already_queued",
+                          lookup_ms=0, capacity_drain_ms=0)
             return
-        with closing(sqlite3.connect(f"file:{self.output.resolve().as_posix()}?mode=ro",
-                                     uri=True, timeout=10)) as output:
-            if output.execute("SELECT state FROM prepared_news WHERE scope=? AND stock_code=? "
-                              "AND identity=?", key).fetchone() == ("ready",):
-                self.skipped += 1
-                return
+        output = self._output_connection
+        if output is None:
+            with closing(sqlite3.connect(f"file:{self.output.resolve().as_posix()}?mode=ro",
+                                         uri=True, timeout=10)) as reader:
+                state = reader.execute(
+                    "SELECT state FROM prepared_news WHERE scope=? AND stock_code=? AND identity=?",
+                    key,
+                ).fetchone()
+        else:
+            state = output.execute(
+                "SELECT state FROM prepared_news WHERE scope=? AND stock_code=? AND identity=?",
+                key,
+            ).fetchone()
+        if state == ("ready",):
+            self.skipped += 1
+            self._observe("market_prepare_submit", scope=scope, state="already_ready",
+                          lookup_ms=round((time.monotonic() - started) * 1000),
+                          capacity_drain_ms=0)
+            return
+        lookup_ms = round((time.monotonic() - started) * 1000)
+        submitted_at = time.monotonic()
         future = self.pool.submit(_prepare, scope, code, identity,
                                   self.search_database, self.market_database,
-                                  self.matcher, allow_network=self.allow_network)
+                                  self.matcher, allow_network=self.allow_network,
+                                  body_timeout_seconds=self.body_timeout_seconds,
+                                  body_request_observer=self.body_request_observer,
+                                  timing_observer=self.timing_observer,
+                                  submitted_at=submitted_at)
         self.pending[future] = key
         self.queued.add(key)
+        capacity_drain_ms = 0
         if len(self.pending) >= self.workers * 4:
+            drain_started = time.monotonic()
             self.drain(wait_for_one=True)
+            capacity_drain_ms = round((time.monotonic() - drain_started) * 1000)
+        self._observe("market_prepare_submit", scope=scope, state="submitted",
+                      lookup_ms=lookup_ms, capacity_drain_ms=capacity_drain_ms,
+                      pending_after=len(self.pending))
 
     def drain(self, *, wait_for_one: bool = False, all_pending: bool = False) -> None:
         if not self.pending:
             return
+        started = time.monotonic()
+        future_wait_ms = 0.0
         if all_pending:
             done = list(self.pending)
         elif wait_for_one:
-            done = list(wait(self.pending, return_when=FIRST_COMPLETED).done)
+            wait_started = time.monotonic()
+            # Free one worker-sized group before accepting more articles. This
+            # bounds pending work as before while avoiding a COMMIT for each
+            # small set that happens to complete at the first wake-up.
+            target = min(self.workers, len(self.pending))
+            completed = {future for future in self.pending if future.done()}
+            while len(completed) < target:
+                newly_done = wait(self.pending.keys() - completed,
+                                  return_when=FIRST_COMPLETED).done
+                completed.update(newly_done)
+            done = [future for future in self.pending if future in completed]
+            future_wait_ms += (time.monotonic() - wait_started) * 1000
         else:
             done = [future for future in self.pending if future.done()]
         rows = []
+        ready_count = failed_count = 0
+        errors = []
         for future in done:
-            scope, code, identity = self.pending.pop(future)
-            self.queued.discard((scope, code, identity))
+            scope, code, identity = self.pending[future]
             try:
+                wait_started = time.monotonic()
                 article, body, rules = future.result()
+                future_wait_ms += (time.monotonic() - wait_started) * 1000
             except Exception as error:
+                future_wait_ms += (time.monotonic() - wait_started) * 1000
                 article, body, rules = {}, {}, []
                 detail = f"{type(error).__name__}: {error}"
-                self.failed += 1
+                failed_count += 1
+                errors.append((scope, code, identity, detail))
             else:
                 detail = ""
-                self.ready += 1
+                ready_count += 1
             rows.append((scope, code, identity, article, body, rules, detail))
-        save_prepared_batch(self.output, rows)
+        save_started = time.monotonic()
+        save_status = "ok"
+        save_error = ""
+        try:
+            if rows:
+                save_prepared_batch(self.output, rows, connection=self._output_connection)
+        except Exception as error:
+            save_status = "error"
+            save_error = f"{type(error).__name__}: {error}"[:400]
+            if self._output_connection is not None:
+                self._output_connection.close()
+                self._output_connection = None
+            raise
+        else:
+            for future in done:
+                self.queued.discard(self.pending.pop(future))
+            self.ready += ready_count
+            self.failed += failed_count
+        finally:
+            self._observe("market_prepare_drain", scope=rows[0][0] if rows else "unknown",
+                          mode="all_pending" if all_pending else "capacity" if wait_for_one else "ready",
+                          rows=len(rows), pending_after=len(self.pending), status=save_status,
+                          error=save_error,
+                          future_wait_ms=round(future_wait_ms),
+                          save_ms=round((time.monotonic() - save_started) * 1000),
+                          total_ms=round((time.monotonic() - started) * 1000))
+        if self.error_observer is not None:
+            for scope, code, identity, detail in errors:
+                self.error_observer(scope, code, identity, detail)
 
     def close(self) -> None:
         try:
             self.drain(all_pending=True)
         finally:
-            self.pool.shutdown(wait=True)
+            try:
+                self.pool.shutdown(wait=True)
+            finally:
+                if self._output_connection is not None:
+                    self._output_connection.close()
+                    self._output_connection = None
 
     def __enter__(self) -> "ConcurrentArticlePreparation":
-        with closing(_open_results(self.output)):
-            pass
+        if self._output_connection is None:
+            self._output_connection = _open_results(self.output)
         return self
 
     def __exit__(self, _type, _value, _traceback) -> None:

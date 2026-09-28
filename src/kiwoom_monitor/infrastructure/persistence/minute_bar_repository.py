@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Callable
 
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
-from kiwoom_monitor.domain.market_data_contract import CandidateUniverse, ObservationOrigin
+from kiwoom_monitor.domain.market_data_contract import (
+    CandidateUniverse,
+    DataCompleteness,
+    MarketDatasetKind,
+    ObservationOrigin,
+)
 from kiwoom_monitor.infrastructure.persistence.local_bar_observations import (
     local_minute_bar_observation,
 )
@@ -57,49 +62,58 @@ class MinuteBarRepository:
         origin: ObservationOrigin,
         candidate_universe: CandidateUniverse,
     ) -> None:
-        rows = tuple(
-            (
-                bar.minute.date().isoformat(),
-                code,
-                bar.minute.isoformat(timespec="minutes"),
-                int(bar.open_price), int(bar.high_price), int(bar.low_price), int(bar.close_price), int(bar.volume),
-                float(bar.trade_value_eok),
-            )
-            for code, bars in bars_by_code.items()
-            if code
-            for bar in bars
-        )
-        if not rows:
+        if not any(code and bars for code, bars in bars_by_code.items()):
             return
         connection = sqlite3.connect(self._path)
         try:
-            connection.executemany(
-                "INSERT INTO minute_bars(trade_date, stock_code, minute, open_price, high_price, low_price, close_price, volume, trade_value_eok) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(trade_date, stock_code, minute) DO UPDATE SET "
-                "open_price=excluded.open_price, high_price=excluded.high_price, low_price=excluded.low_price, "
-                "close_price=excluded.close_price, volume=excluded.volume, trade_value_eok=excluded.trade_value_eok",
-                rows,
-            )
+            # Acquire the SQLite writer lock before checking source authority.
+            # Otherwise a concurrent REST/0B writer could change the metadata
+            # between the check and the canonical bar upsert.
+            connection.execute("BEGIN IMMEDIATE")
+            writable_rows = []
             available_at = datetime.now()
             for code, bars in bars_by_code.items():
                 if not code:
                     continue
                 for bar in bars:
+                    observation_key = bar.minute.isoformat(timespec="minutes")
+                    if source == "kiwoom-websocket-0B" and _has_completed_ka10080(
+                        connection, code, observation_key,
+                    ):
+                        continue
+                    writable_rows.append((
+                        bar.minute.date().isoformat(), code, observation_key,
+                        int(bar.open_price), int(bar.high_price), int(bar.low_price),
+                        int(bar.close_price), int(bar.volume), float(bar.trade_value_eok),
+                    ))
                     observation = local_minute_bar_observation(
                         code,
                         bar.minute,
                         bar,
                         available_at=available_at,
                         source=source,
-                        actual_trade_value=bar.trade_value_eok_override is not None,
+                        actual_trade_value=(
+                            origin == ObservationOrigin.REALTIME
+                            and bar.trade_value_eok_override is not None
+                        ),
                         origin=origin,
                         candidate_universe=candidate_universe,
                     )
                     upsert_market_data_metadata(
-                        connection, bar.minute.isoformat(timespec="minutes"), observation
+                        connection, observation_key, observation
                     )
+            connection.executemany(
+                "INSERT INTO minute_bars(trade_date, stock_code, minute, open_price, high_price, low_price, close_price, volume, trade_value_eok) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(trade_date, stock_code, minute) DO UPDATE SET "
+                "open_price=excluded.open_price, high_price=excluded.high_price, low_price=excluded.low_price, "
+                "close_price=excluded.close_price, volume=excluded.volume, trade_value_eok=excluded.trade_value_eok",
+                writable_rows,
+            )
             connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -587,3 +601,19 @@ class MinuteBarRepository:
             connection.commit()
         finally:
             connection.close()
+
+
+def _has_completed_ka10080(
+    connection: sqlite3.Connection, code: str, observation_key: str,
+) -> bool:
+    row = connection.execute(
+        "SELECT completeness,origin,source FROM market_data_observation_meta "
+        "WHERE dataset_kind=? AND subject=? AND observation_key=?",
+        (MarketDatasetKind.MINUTE_BAR.value, code, observation_key),
+    ).fetchone()
+    return bool(
+        row
+        and str(row[0]) == DataCompleteness.COMPLETE.value
+        and str(row[1]) == ObservationOrigin.QUERY.value
+        and str(row[2]).startswith("kiwoom-ka10080")
+    )

@@ -11,12 +11,16 @@
 | 실제 있는 기능과 확인되지 않은 범위 | [현재 상태](CURRENT_STATUS.md) |
 | 앞으로의 제품 방향과 개발 순서 | [개발 로드맵](../FUTURE_DEVELOPMENT_ROADMAP.md) |
 | **다음 작업: 과거 봉·뉴스 확보** | [과거 자료 확보 실행 기획](HISTORICAL_BACKFILL_PLAN.md) |
+| PC에서 완성한 과거뉴스를 NAS가 읽기만 하는 단발성 이관 | [과거뉴스 archive 설계·구현 계약](PREPARED_NEWS_ARCHIVE_DESIGN_REVIEW.md) |
 | 미완료·보류·실환경 검증 | [남은 작업](OPEN_ITEMS.md) |
+| 키움 PostgreSQL writer 계측과 미완료 전수 감사 | [저장 경로 감사](KIWOOM_STORAGE_WRITE_AUDIT.md) |
+| PostgreSQL 공통 접근·관측 계층 검토와 이관 기준 | [공통 DB 경계 검토](COMMON_DB_ACCESS_OBSERVABILITY_REVIEW.md) |
 | 시스템 책임과 데이터 흐름 | [현재 아키텍처](../ARCHITECTURE_CURRENT.md) · [모듈 지도](../MODULE_MAP.md) |
 
 ## 개발할 때 적용하는 계약
 
 - [작업 지침](../AGENTS.md)과 [개발 불변 규칙](../DEVELOPMENT_GUARDRAILS.md)을 먼저 읽는다.
+- 모델 선택·상향/하향 handoff는 [모델 단계 전환 정책](MODEL_HANDOFF_POLICY.md)을 따른다.
 - [API 계약](../API_CONTRACT.md), [DB 스키마](../DB_SCHEMA.md), [과거 데이터 계약](../HISTORICAL_DATA_CONTRACT.md)은 세부 필드·저장·시간 계약의 참조다. 이번 기획만으로 인터페이스를 변경하지 않는다.
 - [연구 요청 형식](RESEARCH_REQUEST_FORMAT.md), [전진 평가](FORWARD_EVALUATION_CONTRACT.md), [키움 모의 실행](KIWOOM_MOCK_EXECUTION_CONTRACT.md)은 기존 연구·실행 경계다.
 - 현재 기능의 존재는 코드·계약으로, 실제 NAS 적용과 장시간 검증 여부는 현재 상태와 남은 작업으로 확인한다.
@@ -24,6 +28,9 @@
 ## 운영·사용 가이드
 
 - [NAS 설치·운영](../deploy/synology/README.md)
+- [NAS 작업별 병목 진단](NAS_RUNTIME_DIAGNOSTICS.md) — 작업 일시중지, writer 통계, 메트릭 수집 ON/OFF·자동 만료·전후 측정
+- [NAS 진단 API 연결 설계](NAS_DIAGNOSTIC_API_DESIGN.md) — 기존 운영 진단도구의 정보·제어·측정·보고서를 API로 제공하는 구현 계약(구현 전)
+- [진단 스위치 설계 검토](DIAGNOSTIC_CONTROL_DESIGN_REVIEW.md) — master 하위 제어, 보호 수신·주문·저장 중지/복구 계약과 미구현 범위
 - [패키징·업데이트](UPDATE_PACKAGING.md)
 - [Google Drive 엄격 복원](GOOGLE_DRIVE_RESTORE_DESIGN.md) — 명시 예약 후 다음 실행에서 적용·중단 복구하는 로컬 경계와 원격 백업의 남은 한계
 - [API 발급](API_발급_가이드.md) · [OCR 설치](OCR_모델_직접_설치.md) · [강의 전략팩](AI_강의_전략팩_적용_가이드.md)

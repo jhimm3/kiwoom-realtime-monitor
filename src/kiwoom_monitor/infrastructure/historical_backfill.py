@@ -9,13 +9,15 @@ import platform
 import re
 import sqlite3
 import sys
+import time
+import uuid
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import unquote, urlencode
+from urllib.parse import unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
@@ -149,6 +151,24 @@ class NaverHistoricalNewsPage:
 
 
 @dataclass(frozen=True)
+class PendingNewsArticle:
+    queue_id: int
+    claim_token: str
+    attempts: int
+    job_key: str
+    code: str
+    query_text: str
+    target_date: str
+    target_end_date: str
+    start: int
+    position: int
+    search_published_date: str
+    item: NaverHistoricalNewsItem
+    article_fetch_status: str
+    published_at: str
+
+
+@dataclass(frozen=True)
 class ArticleFetchAttempt:
     url_role: str
     requested_url: str
@@ -160,6 +180,11 @@ class ArticleFetchAttempt:
     published_precision: str
     published_at_source: str
     published_at_raw: str
+    elapsed_ms: int | None = None
+    open_ms: int | None = None
+    read_ms: int | None = None
+    parse_ms: int | None = None
+    failure_phase: str = ""
 
 
 @dataclass(frozen=True)
@@ -648,8 +673,8 @@ def finish_news_range_job(
     pages_observed: int, items_observed: int, usable_articles: int,
     unreadable_articles: int, missing_time_articles: int, error: str = "",
 ) -> None:
-    if state not in {"complete", "failed", "truncated"}:
-        raise ValueError("news range state must be complete, failed or truncated")
+    if state not in {"complete", "search_complete", "failed", "truncated"}:
+        raise ValueError("invalid news range state")
     now = datetime.now(UTC).isoformat()
     with closing(_connect_database(output_database)) as connection:
         member_dates = [
@@ -713,8 +738,8 @@ def finish_news_backfill_job(
     missing_time_articles: int = 0,
     error: str = "",
 ) -> None:
-    if state not in {"complete", "failed", "truncated"}:
-        raise ValueError("news backfill job state must be complete, failed or truncated")
+    if state not in {"complete", "search_complete", "failed", "truncated"}:
+        raise ValueError("invalid news backfill job state")
     with closing(_connect_database(output_database)) as connection:
         with connection:
             connection.execute(
@@ -813,7 +838,8 @@ def article_publication_records(
                 SELECT article_fetch_status, published_at FROM news_articles
                 WHERE provider=? AND office_id=? AND article_id=?
                 """,
-                (NAVER_HISTORICAL_SEARCH_PROVIDER, *key),
+                (NAVER_HISTORICAL_SEARCH_PROVIDER,
+                 *key),
             ).fetchone()
             records[key] = (
                 (str(row[0]), str(row[1])) if row is not None
@@ -1142,17 +1168,38 @@ def parse_article_publication_html(
     return "", "", "", "time_not_found"
 
 
+def _article_response_socket(response: object) -> object | None:
+    pending = [response]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        sock = getattr(current, "_sock", None)
+        if callable(getattr(sock, "settimeout", None)):
+            return sock
+        for name in ("fp", "raw", "_fp"):
+            child = getattr(current, name, None)
+            if child is not None:
+                pending.append(child)
+    return None
+
+
 def fetch_article_publication(
     item: NaverHistoricalNewsItem,
     *,
     timeout: float = 15,
+    total_timeout: float = 45,
     opener: Callable[..., Any] = urlopen,
+    source_roles: tuple[str, ...] = ("publisher_original", "naver_archive"),
 ) -> ArticlePublicationResult:
     fetched_at = datetime.now(UTC).isoformat()
+    deadline = time.monotonic() + max(0.1, total_timeout)
     urls = [
         (role, url) for role, url in (
             ("publisher_original", item.original_url), ("naver_archive", item.portal_url),
-        ) if url
+        ) if url and role in source_roles
     ]
     attempts: list[ArticleFetchAttempt] = []
     last_status = "no_source_url"
@@ -1163,19 +1210,65 @@ def fetch_article_publication(
         if source_url in seen_urls:
             continue
         seen_urls.add(source_url)
+        attempt_started = time.monotonic()
+        attempt_deadline = min(deadline, attempt_started + max(0.1, timeout))
+        opened_at: float | None = None
+        read_at: float | None = None
+        remaining = attempt_deadline - time.monotonic()
+        if remaining <= 0:
+            last_status = "fetch_error"
+            last_url = source_url
+            attempts.append(ArticleFetchAttempt(
+                url_role, source_url, source_url, last_status, None,
+                "article fetch deadline exceeded", "", "", "", "",
+            ))
+            break
         request = Request(source_url, headers={
             "Accept": "text/html,application/xhtml+xml",
             "Accept-Language": "ko-KR,ko;q=0.9",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) KiwoomMonitor/2.1",
         })
         try:
-            with opener(request, timeout=timeout, context=system_ssl_context()) as response:
-                body = response.read()
+            with opener(
+                request, timeout=min(timeout, remaining), context=system_ssl_context(),
+            ) as response:
+                opened_at = time.monotonic()
+                chunks: list[bytes] = []
+                while True:
+                    remaining = attempt_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("article fetch deadline exceeded")
+                    response_socket = _article_response_socket(response)
+                    if response_socket is not None:
+                        response_socket.settimeout(remaining)
+                    reader = getattr(response, "fp", response)
+                    read_chunk = getattr(reader, "read1", None)
+                    if callable(read_chunk):
+                        chunk = read_chunk(64 * 1024)
+                    else:
+                        read = response.read
+                        try:
+                            chunk = read(64 * 1024)
+                        except TypeError:
+                            # Lightweight test doubles and a few wrappers expose
+                            # only read() with no size argument.
+                            chunk = read()
+                            if chunk:
+                                chunks.append(chunk)
+                            break
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+                read_at = time.monotonic()
+                if read_at > attempt_deadline:
+                    raise TimeoutError("article fetch deadline exceeded")
                 charset = response.headers.get_content_charset() or "utf-8"
                 document = body.decode(charset, errors="replace")
                 final_url = str(response.geturl())
                 http_status = getattr(response, "status", None)
         except Exception as error:
+            failed_at = time.monotonic()
             code = getattr(error, "code", None)
             last_status = "blocked" if code in {401, 403, 429} else (
                 "article_unavailable" if code in {404, 410} else "fetch_error"
@@ -1185,6 +1278,10 @@ def fetch_article_publication(
                 url_role, source_url, source_url, last_status,
                 int(code) if isinstance(code, int) else None,
                 f"{type(error).__name__}: {error}", "", "", "", "",
+                elapsed_ms=round((failed_at - attempt_started) * 1000),
+                open_ms=round((opened_at - attempt_started) * 1000) if opened_at else None,
+                read_ms=round((failed_at - opened_at) * 1000) if opened_at else None,
+                failure_phase="response_read" if opened_at else "request_open",
             ))
             continue
         lowered = document.lower()
@@ -1195,6 +1292,9 @@ def fetch_article_publication(
                 url_role, source_url, final_url, last_status,
                 int(http_status) if isinstance(http_status, int) else None,
                 "blocked page marker", "", "", "", "",
+                elapsed_ms=round((time.monotonic() - attempt_started) * 1000),
+                open_ms=round((opened_at - attempt_started) * 1000) if opened_at else None,
+                read_ms=round((read_at - opened_at) * 1000) if opened_at and read_at else None,
             ))
             continue
         if any(marker in document for marker in ("삭제된 기사", "페이지를 찾을 수 없습니다", "존재하지 않는 기사")):
@@ -1204,11 +1304,15 @@ def fetch_article_publication(
                 url_role, source_url, final_url, last_status,
                 int(http_status) if isinstance(http_status, int) else None,
                 "unavailable page marker", "", "", "", "",
+                elapsed_ms=round((time.monotonic() - attempt_started) * 1000),
+                open_ms=round((opened_at - attempt_started) * 1000) if opened_at else None,
+                read_ms=round((read_at - opened_at) * 1000) if opened_at and read_at else None,
             ))
             continue
         published_at, precision, source, raw_or_status = parse_article_publication_html(
             document, expected_title=item.title,
         )
+        parsed_at = time.monotonic()
         if raw_or_status != "title_mismatch":
             try:
                 body_text, body_time = parse_article_text_with_metadata(document)
@@ -1223,6 +1327,10 @@ def fetch_article_publication(
                 url_role, source_url, final_url, "published_at_found",
                 int(http_status) if isinstance(http_status, int) else None, "",
                 published_at, precision, source, raw_or_status,
+                elapsed_ms=round((time.monotonic() - attempt_started) * 1000),
+                open_ms=round((opened_at - attempt_started) * 1000) if opened_at else None,
+                read_ms=round((read_at - opened_at) * 1000) if opened_at and read_at else None,
+                parse_ms=round((parsed_at - read_at) * 1000) if read_at else None,
             ))
             return ArticlePublicationResult(
                 NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id,
@@ -1236,6 +1344,10 @@ def fetch_article_publication(
             url_role, source_url, final_url, last_status,
             int(http_status) if isinstance(http_status, int) else None, "",
             "", "", "", "",
+            elapsed_ms=round((time.monotonic() - attempt_started) * 1000),
+            open_ms=round((opened_at - attempt_started) * 1000) if opened_at else None,
+            read_ms=round((read_at - opened_at) * 1000) if opened_at and read_at else None,
+            parse_ms=round((parsed_at - read_at) * 1000) if read_at else None,
         ))
     return ArticlePublicationResult(
         NAVER_HISTORICAL_SEARCH_PROVIDER, item.office_id, item.article_id,
@@ -1299,6 +1411,9 @@ def initialize_probe_database(path: Path) -> None:
                     observed_at TEXT NOT NULL,
                     PRIMARY KEY (provider, office_id, article_id, code)
                 );
+                CREATE INDEX IF NOT EXISTS idx_news_articles_collection_identity
+                    ON news_articles(COALESCE(NULLIF(original_url,''),
+                        NULLIF(portal_url,''),'naver:'||office_id||':'||article_id));
                 CREATE TABLE IF NOT EXISTS news_search_observations (
                     provider TEXT NOT NULL,
                     office_id TEXT NOT NULL,
@@ -1332,6 +1447,37 @@ def initialize_probe_database(path: Path) -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_news_article_fetch_attempts_article
                     ON news_article_fetch_attempts(provider, office_id, article_id, attempted_at);
+                CREATE TABLE IF NOT EXISTS news_article_pipeline (
+                    queue_id INTEGER PRIMARY KEY,
+                    job_key TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    office_id TEXT NOT NULL,
+                    article_id TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    query_text TEXT NOT NULL,
+                    target_date TEXT NOT NULL,
+                    target_end_date TEXT NOT NULL,
+                    start INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    search_published_date TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    claim_token TEXT NOT NULL DEFAULT '',
+                    claimed_at TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(job_key, provider, office_id, article_id, code)
+                );
+                CREATE INDEX IF NOT EXISTS idx_news_article_pipeline_state
+                    ON news_article_pipeline(state, updated_at, queue_id);
+                CREATE INDEX IF NOT EXISTS idx_news_article_pipeline_job
+                    ON news_article_pipeline(job_key, state);
+                CREATE TABLE IF NOT EXISTS news_article_host_cooldowns (
+                    host TEXT PRIMARY KEY,
+                    retry_after TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS news_article_body_snapshots (
                     provider TEXT NOT NULL,
                     office_id TEXT NOT NULL,
@@ -1469,6 +1615,16 @@ def initialize_probe_database(path: Path) -> None:
                     connection.execute(
                         f"ALTER TABLE news_backfill_jobs ADD COLUMN {column} {declaration}"
                     )
+            pipeline_columns = {
+                str(row[1]) for row in connection.execute(
+                    "PRAGMA table_info(news_article_pipeline)"
+                )
+            }
+            if "attempts" not in pipeline_columns:
+                connection.execute(
+                    "ALTER TABLE news_article_pipeline ADD COLUMN attempts "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
 
 
 def store_naver_stock_news_page(path: Path, page: NaverStockNewsPage) -> None:
@@ -1540,7 +1696,16 @@ def store_naver_stock_news_page(path: Path, page: NaverStockNewsPage) -> None:
                 )
 
 
-def store_naver_historical_search_page(path: Path, page: NaverHistoricalNewsPage) -> None:
+def news_job_key(job: NewsBackfillJob) -> str:
+    if job.range_id:
+        return f"range:{job.range_id}"
+    identity = "|".join((job.code, job.target_date, job.query_text))
+    return "day:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def store_naver_historical_search_page(
+    path: Path, page: NaverHistoricalNewsPage, *, deferred_job_key: str = "",
+) -> None:
     initialize_probe_database(path)
     end_date = page.target_end_date or page.target_date
     request_key = (
@@ -1593,6 +1758,25 @@ def store_naver_historical_search_page(path: Path, page: NaverHistoricalNewsPage
                         source_date, page.observed_at, page.observed_at,
                     ),
                 )
+                if deferred_job_key:
+                    connection.execute(
+                        """
+                        INSERT INTO news_article_pipeline
+                        (job_key,provider,office_id,article_id,code,query_text,
+                         target_date,target_end_date,start,position,search_published_date,
+                         updated_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(job_key,provider,office_id,article_id,code)
+                        DO UPDATE SET start=excluded.start,
+                            position=excluded.position,
+                            search_published_date=excluded.search_published_date,
+                            updated_at=excluded.updated_at
+                        """,
+                        (deferred_job_key, NAVER_HISTORICAL_SEARCH_PROVIDER,
+                         item.office_id, item.article_id, page.code, page.query,
+                         page.target_date, end_date, page.start, item.position,
+                         item.search_published_date, page.observed_at),
+                    )
                 if not source_date:
                     continue
                 connection.execute(
@@ -1688,6 +1872,12 @@ def _store_article_publication_result(
                 result.status, result.provider, result.office_id, result.article_id,
             ),
         )
+    _store_article_fetch_attempts(connection, result)
+
+
+def _store_article_fetch_attempts(
+    connection: sqlite3.Connection, result: ArticlePublicationResult,
+) -> None:
     for position, attempt in enumerate(result.attempts):
         identity = "|".join((
             result.provider, result.office_id, result.article_id, result.fetched_at,
@@ -1712,6 +1902,17 @@ def _store_article_publication_result(
         )
 
 
+def store_article_fetch_attempts_only(
+    path: Path, results: list[ArticlePublicationResult],
+) -> None:
+    """Audit retryable responses without marking the article as resolved."""
+    if not results:
+        return
+    with closing(_connect_database(path)) as connection, connection:
+        for result in results:
+            _store_article_fetch_attempts(connection, result)
+
+
 def store_article_publication_results(
     path: Path, results: list[ArticlePublicationResult],
 ) -> None:
@@ -1722,6 +1923,219 @@ def store_article_publication_results(
         with connection:
             for result in results:
                 _store_article_publication_result(connection, result)
+
+
+def claim_news_article_pipeline(path: Path, *, limit: int = 50) -> list[PendingNewsArticle]:
+    """Claim persisted search results independently of search-job execution."""
+    if not 1 <= limit <= 100:
+        raise ValueError("article claim limit must be between 1 and 100")
+    initialize_probe_database(path)
+    now = datetime.now(UTC)
+    stale_before = (now - timedelta(minutes=10)).isoformat()
+    claimed: list[PendingNewsArticle] = []
+    with closing(_connect_database(path)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.create_function(
+            "article_host", 1,
+            lambda url: (urlparse(str(url or "")).hostname or "").lower(),
+        )
+        with connection:
+            connection.execute(
+                "UPDATE news_article_pipeline SET state='pending',claim_token='',"
+                "claimed_at='',last_error='stale_article_claim_recovered',updated_at=? "
+                "WHERE state='running' AND claimed_at<?",
+                (now.isoformat(), stale_before),
+            )
+            rows = connection.execute(
+                "SELECT q.*,a.office_name,a.title,a.summary,a.article_url,"
+                "a.original_url,a.portal_url,a.article_fetch_status,a.published_at "
+                "FROM news_article_pipeline q JOIN news_articles a ON "
+                "a.provider=q.provider AND a.office_id=q.office_id "
+                "AND a.article_id=q.article_id WHERE q.state='pending' "
+                "AND NOT EXISTS (SELECT 1 FROM news_article_host_cooldowns h "
+                "WHERE h.host=article_host(a.original_url) AND h.retry_after>?) "
+                "ORDER BY q.updated_at,q.queue_id LIMIT ?", (now.isoformat(), limit),
+            ).fetchall()
+            for row in rows:
+                token = uuid.uuid4().hex
+                updated = connection.execute(
+                    "UPDATE news_article_pipeline SET state='running',claim_token=?,"
+                    "claimed_at=?,updated_at=?,attempts=attempts+1 "
+                    "WHERE queue_id=? AND state='pending'",
+                    (token, now.isoformat(), now.isoformat(), row["queue_id"]),
+                )
+                if updated.rowcount != 1:
+                    continue
+                item = NaverHistoricalNewsItem(
+                    f"{row['office_id']}:{row['article_id']}", row["office_id"],
+                    row["article_id"], row["office_name"], row["title"],
+                    row["summary"], row["article_url"], row["original_url"],
+                    row["portal_url"], row["position"], row["search_published_date"],
+                )
+                claimed.append(PendingNewsArticle(
+                    row["queue_id"], token, int(row["attempts"]) + 1,
+                    row["job_key"], row["code"],
+                    row["query_text"], row["target_date"], row["target_end_date"],
+                    row["start"], row["position"], row["search_published_date"],
+                    item, row["article_fetch_status"], row["published_at"],
+                ))
+    return claimed
+
+
+def unfinished_news_article_pipeline_count(path: Path) -> int:
+    with closing(_connect_database(path)) as connection:
+        return int(connection.execute(
+            "SELECT COUNT(*) FROM news_article_pipeline WHERE state!='complete'"
+        ).fetchone()[0])
+
+
+def finish_news_article_pipeline(
+    path: Path, article: PendingNewsArticle, *, error: str = "",
+) -> bool:
+    try:
+        return finish_news_article_pipeline_batch(path, [article], error=error) == 1
+    except RuntimeError:
+        return False
+
+
+def finish_news_article_pipeline_batch(
+    path: Path, articles: list[PendingNewsArticle], *, error: str = "",
+) -> int:
+    if not articles:
+        return 0
+    with closing(_connect_database(path)) as connection, connection:
+        updated = 0
+        now = datetime.now(UTC).isoformat()
+        for article in articles:
+            result = connection.execute(
+                "UPDATE news_article_pipeline SET state=?,claim_token='',claimed_at='',"
+                "last_error=?,updated_at=? WHERE queue_id=? AND state='running' "
+                "AND claim_token=?",
+                ("pending" if error else "complete", error,
+                 now, article.queue_id, article.claim_token),
+            )
+            updated += result.rowcount
+        if updated != len(articles):
+            raise RuntimeError("article claim changed before batch completion")
+        return updated
+
+
+def defer_news_article_host_403(
+    path: Path, articles: list[PendingNewsArticle], *, host: str,
+    cooldown: timedelta = timedelta(minutes=30),
+) -> str:
+    """Keep claimed articles pending and pause this publisher across worker restarts."""
+    if not articles or not host:
+        raise ValueError("403 deferral requires claimed articles and a publisher host")
+    now = datetime.now(UTC)
+    retry_after = (now + cooldown).isoformat()
+    with closing(_connect_database(path)) as connection, connection:
+        for article in articles:
+            if (urlparse(article.item.original_url).hostname or "").lower() != host:
+                raise ValueError("403 deferral contains an article from another host")
+            result = connection.execute(
+                "UPDATE news_article_pipeline SET state='pending',claim_token='',"
+                "claimed_at='',last_error=?,updated_at=? "
+                "WHERE queue_id=? AND state='running' AND claim_token=?",
+                (f"publisher_http_403_cooldown_until:{retry_after}", now.isoformat(),
+                 article.queue_id, article.claim_token),
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("article claim changed before 403 deferral")
+        connection.execute(
+            "INSERT INTO news_article_host_cooldowns(host,retry_after,reason,updated_at) "
+            "VALUES(?,?,?,?) ON CONFLICT(host) DO UPDATE SET "
+            "retry_after=excluded.retry_after,reason=excluded.reason,"
+            "updated_at=excluded.updated_at",
+            (host, retry_after, "three_consecutive_http_403", now.isoformat()),
+        )
+    return retry_after
+
+
+def finalize_news_article_jobs(path: Path, job_keys: set[str] | None = None) -> int:
+    """Mark search jobs complete only when every persisted article task is done."""
+    initialize_probe_database(path)
+    with closing(_connect_database(path)) as connection:
+        if job_keys is None:
+            job_keys = {
+                f"range:{row[0]}" for row in connection.execute(
+                    "SELECT range_id FROM news_range_jobs WHERE state='search_complete'"
+                )
+            }
+            for code, target_date, query_text in connection.execute(
+                "SELECT code,target_date,query_text FROM news_backfill_jobs "
+                "WHERE state='search_complete'"
+            ):
+                identity = "|".join((str(code), str(target_date), str(query_text)))
+                job_keys.add("day:" + hashlib.sha256(identity.encode("utf-8")).hexdigest())
+        finished = 0
+        with connection:
+            for key in job_keys:
+                if connection.execute(
+                    "SELECT 1 FROM news_article_pipeline WHERE job_key=? "
+                    "AND state!='complete' LIMIT 1", (key,),
+                ).fetchone():
+                    continue
+                row = connection.execute(
+                    "SELECT code,target_date,query_text FROM news_article_pipeline "
+                    "WHERE job_key=? LIMIT 1", (key,),
+                ).fetchone()
+                if row is None:
+                    continue
+                code, target_date, query_text = map(str, row)
+                counts = connection.execute(
+                    "SELECT COUNT(*),COALESCE(SUM(a.article_fetch_status="
+                    "'published_at_found'),0),COALESCE(SUM(a.article_fetch_status="
+                    "'time_not_found'),0) FROM news_article_pipeline q "
+                    "JOIN news_articles a ON a.provider=q.provider AND "
+                    "a.office_id=q.office_id AND a.article_id=q.article_id "
+                    "WHERE q.job_key=?", (key,),
+                ).fetchone()
+                total, usable, missing = map(int, counts)
+                if key.startswith("range:"):
+                    range_id = key.removeprefix("range:")
+                    updated = connection.execute(
+                        "UPDATE news_range_jobs SET state='complete',"
+                        "usable_articles=?,unreadable_articles=?,missing_time_articles=?,"
+                        "updated_at=? WHERE range_id=? AND state='search_complete'",
+                        (usable, total - usable - missing, missing,
+                         datetime.now(UTC).isoformat(), range_id),
+                    )
+                    if updated.rowcount:
+                        for (member_date,) in connection.execute(
+                            "SELECT target_date FROM news_range_members WHERE range_id=?",
+                            (range_id,),
+                        ).fetchall():
+                            member_counts = connection.execute(
+                                "SELECT COUNT(*),COALESCE(SUM(a.article_fetch_status="
+                                "'published_at_found'),0),COALESCE(SUM(a.article_fetch_status="
+                                "'time_not_found'),0) FROM news_search_observations o "
+                                "JOIN news_articles a ON a.provider=o.provider AND "
+                                "a.office_id=o.office_id AND a.article_id=o.article_id "
+                                "WHERE o.code=? AND o.query_text=? AND o.source_date=?",
+                                (code, query_text, member_date),
+                            ).fetchone()
+                            member_total, member_usable, member_missing = map(int, member_counts)
+                            connection.execute(
+                                "UPDATE news_backfill_jobs SET state='complete',"
+                                "usable_articles=?,unreadable_articles=?,"
+                                "missing_time_articles=?,updated_at=? WHERE code=? "
+                                "AND target_date=? AND query_text=? AND state='search_complete'",
+                                (member_usable, member_total - member_usable - member_missing,
+                                 member_missing, datetime.now(UTC).isoformat(),
+                                 code, member_date, query_text),
+                            )
+                else:
+                    updated = connection.execute(
+                        "UPDATE news_backfill_jobs SET state='complete',"
+                        "usable_articles=?,unreadable_articles=?,missing_time_articles=?,"
+                        "updated_at=? WHERE code=? AND target_date=? AND query_text=? "
+                        "AND state='search_complete'",
+                        (usable, total - usable - missing, missing,
+                         datetime.now(UTC).isoformat(), code, target_date, query_text),
+                    )
+                finished += max(0, updated.rowcount)
+        return finished
 
 
 def load_article_body_snapshot(

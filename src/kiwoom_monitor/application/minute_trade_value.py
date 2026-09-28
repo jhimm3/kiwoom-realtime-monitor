@@ -39,6 +39,7 @@ class MinuteTradeValueAggregator:
         self._last_cumulative_trade_value: dict[tuple[str, str], int] = {}
         self._estimated_since_cumulative: dict[tuple[str, str], dict[datetime, float]] = {}
         self._source_mode_by_code: dict[str, str] = {}
+        self._query_completed_minutes: dict[str, set[datetime]] = defaultdict(set)
 
     def ingest(self, tick: TradeTick, observed_at: datetime) -> MinuteOhlcv | None:
         if tick.current_price is None:
@@ -47,6 +48,18 @@ class MinuteTradeValueAggregator:
         key = (tick.code, tick.market)
         previous_cumulative = self._last_cumulative_trade_value.get(key)
         minute = _trade_minute(tick, observed_at)
+        if minute in self._query_completed_minutes.get(tick.code, ()):
+            # A delayed 0B belongs to an already reconciled REST minute. Keep
+            # cumulative baselines current without changing its OHLCV or value.
+            if tick.cumulative_volume is not None:
+                self._last_cumulative_volume[key] = max(
+                    self._last_cumulative_volume.get(key, 0), abs(tick.cumulative_volume),
+                )
+            if tick.cumulative_trade_value is not None:
+                self._last_cumulative_trade_value[key] = max(
+                    self._last_cumulative_trade_value.get(key, 0), abs(tick.cumulative_trade_value),
+                )
+            return None
         bars = self._bars[tick.code]
         volume = self._trade_volume(tick)
         trade_value_delta = self._trade_value_delta_eok(tick)
@@ -116,6 +129,8 @@ class MinuteTradeValueAggregator:
         for minute, estimated in sorted(estimates.items(), reverse=True):
             if excess <= 0:
                 break
+            if minute in self._query_completed_minutes.get(code, ()):
+                continue
             for index in range(len(bars) - 1, -1, -1):
                 bar = bars[index]
                 if bar.minute != minute:
@@ -215,7 +230,7 @@ class MinuteTradeValueAggregator:
 
     def seed(
         self, code: str, bars: tuple[MinuteOhlcv, ...], now: datetime | None = None,
-        *, include_current_snapshot: bool = False,
+        *, include_current_snapshot: bool = False, query_authoritative: bool = False,
     ) -> None:
         """REST로 받은 과거 1분봉을 시간순으로 넣어 접속 전 누락분을 보완한다."""
         now = now or datetime.now()
@@ -223,6 +238,13 @@ class MinuteTradeValueAggregator:
         by_minute = {
             bar.minute: bar for bar in bars if bar.minute.date() == now.date() and bar.minute < current_minute
         }
+        if query_authoritative:
+            completed = self._query_completed_minutes[code]
+            completed.update(by_minute)
+            for key, estimates in self._estimated_since_cumulative.items():
+                if key[0] == code:
+                    for minute in by_minute:
+                        estimates.pop(minute, None)
         live_current = {
             bar.minute: bar
             for bar in self._bars.get(code, ())
@@ -275,6 +297,7 @@ class MinuteTradeValueAggregator:
         self._last_cumulative_volume.clear()
         self._last_cumulative_trade_value.clear()
         self._estimated_since_cumulative.clear()
+        self._query_completed_minutes.clear()
 
     def reset_cumulative_baselines(self, codes: tuple[str, ...]) -> None:
         """신규 구독·재접속 뒤 공백 누적분을 현재 1분에 몰아 넣지 않는다."""

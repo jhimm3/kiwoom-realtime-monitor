@@ -40,6 +40,28 @@ class HistoricalCollectionMonitorTests(unittest.TestCase):
         self.assertEqual(health[0], "응답 지연 · 프로세스 실행 중")
         self.assertEqual(monitor.PROCESSING_REFRESH_SECONDS, 60)
 
+    def test_article_wait_without_completed_fetches_is_reported_as_delayed(self) -> None:
+        with (
+            patch.object(monitor, "_process_alive", return_value=True),
+            patch.object(
+                monitor, "_age_seconds",
+                side_effect=lambda value: 300 if value == "old" else 10,
+            ),
+        ):
+            health = monitor._collector_health(
+                {"status": "running", "pid": 1234},
+                {
+                    "pid": 5678,
+                    "updated_at": "fresh",
+                    "phase": "article_wait",
+                    "last_article_progress_at": "old",
+                    "article_fetch": {"active": 4, "queued": 200},
+                },
+                {},
+            )
+        self.assertIn("4", health[0])
+        self.assertIn("200", health[0])
+
     def test_completed_collector_is_labeled_complete(self) -> None:
         self.assertEqual(monitor._collector_health({"status": "complete"}, {}, {})[0], "완료")
 

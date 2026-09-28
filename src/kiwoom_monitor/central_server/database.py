@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, RLock, Thread
 from time import monotonic, time
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -80,6 +80,25 @@ class StoredQuery:
     next_key: str
 
 
+_NEWS_JOB_CLAIM_SELECT_SQL = (
+    "SELECT job_key,article_revision_id,stock_code,target_id,stage,input_hash,"
+    "processing_version,attempts,payload_json,updated_at FROM central_news_jobs "
+    "WHERE state='PENDING' AND next_retry_at<=%s "
+    "AND (stage NOT IN ('BODY','RULE') OR NOT EXISTS ("
+    "SELECT 1 FROM central_news_article_revisions a "
+    "WHERE a.article_revision_id=central_news_jobs.article_revision_id "
+    "AND a.collection_scope IN ('historical_backfill','historical_market_backfill',"
+    "'historical_market_pc_backfill','historical_news_pc_backfill'))) "
+    "ORDER BY CASE WHEN %s<>'' AND stage=%s THEN -1 "
+    "WHEN %s<>'' AND (stock_code=%s OR target_id=%s) AND stage='BODY' THEN 0 "
+    "WHEN %s<>'' AND (stock_code=%s OR target_id=%s) THEN 1 "
+    "WHEN stage='BODY' AND stock_code<>'GLOBAL' THEN 2 "
+    "WHEN stage='BODY' THEN 3 WHEN stage='AI' THEN 4 ELSE 5 END,"
+    "CASE WHEN stage='BODY' THEN -updated_at ELSE updated_at END "
+    "FOR UPDATE SKIP LOCKED LIMIT %s"
+)
+
+
 DatasetSnapshotWrite = tuple[
     str, str, str, dict[str, Any], MarketDataObservation[object] | None,
 ]
@@ -91,6 +110,20 @@ DatasetSnapshotWrite = tuple[
 ASYNC_COMMIT_DATASET_KINDS = frozenset({
     "market_state", "new_high", "program_flow", "ranking", "top20_membership",
 })
+COMMON_OBSERVED_DATASET_KINDS = frozenset({
+    "market_state", "new_high", "program_flow", "ranking", "top20_membership",
+    "top20_index", "market_index_chart",
+    "investor_flow", "stock_fundamentals", "nxt_eligibility",
+})
+
+# SQLite builds can still use the historical 999-variable limit. Daily bars
+# use 10 values and observation metadata uses 12, so 80 rows remain below it.
+# PostgreSQL's protocol limit is much larger; 1,000 keeps one ka10081 page in
+# one statement while bounding statement size for other callers.
+SQLITE_MULTIROW_UPSERT_ROWS = 80
+POSTGRES_MULTIROW_UPSERT_ROWS = 1_000
+SQLITE_REVISION_BATCH_ROWS = 40  # 24 columns incl. accepted_sequence, <= 999 binds.
+SQLITE_REVISION_LOOKUP_ROWS = 80  # 4 key columns per requested revision scope.
 
 
 def _uses_async_dataset_commit(values: list[DatasetSnapshotWrite]) -> bool:
@@ -134,6 +167,143 @@ def _postgres_wait_summary(samples: list[tuple[str, str, tuple[int, ...]]]) -> s
         f" blockers={','.join(map(str, blockers)) or '-'} samples={count}"
         for (wait_type, wait_event, blockers), count in counts.most_common()
     ) or "no-sample"
+
+
+def _sample_postgres_commit_waits(
+    database_url: str, backend_pid: int, stop: Event,
+    samples: list[dict[str, object]], errors: list[str],
+) -> None:
+    """Sample one writer backend while a measured SQL phase is running.
+
+    The first probe is delayed to avoid adding a second connection for ordinary
+    sub-100ms commits. This runs only while diagnostic metric capture is enabled.
+    """
+    if stop.wait(0.1):
+        return
+    try:
+        import psycopg
+
+        with psycopg.connect(
+            database_url, autocommit=True, connect_timeout=2,
+            application_name="kiwoom-market-wait-probe",
+        ) as connection, connection.cursor() as cursor:
+            if stop.is_set():
+                return
+            cursor.execute("SET statement_timeout TO '500ms'")
+            while not stop.is_set():
+                cursor.execute(
+                    "SELECT clock_timestamp(),state,COALESCE(wait_event_type,''),"
+                    "COALESCE(wait_event,''),pg_blocking_pids(pid) "
+                    "FROM pg_stat_activity WHERE pid=%s",
+                    (backend_pid,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return
+                samples.append({
+                    "at": row[0].timestamp(), "state": str(row[1]),
+                    "wait_type": str(row[2]), "wait_event": str(row[3]),
+                    "blocking_pids": [int(value) for value in row[4]],
+                })
+                if stop.wait(0.025):
+                    return
+    except Exception as error:
+        errors.append(type(error).__name__)
+
+
+def _execute_with_postgres_wait_probe(
+    execute: Callable[[], object], database_url: str, backend_pid: int,
+    enabled: bool,
+) -> tuple[object, dict[str, object] | None]:
+    """Measure one cursor call without including probe cleanup in SQL duration."""
+    if not enabled:
+        return execute(), None
+    samples: list[dict[str, object]] = []
+    errors: list[str] = []
+    stop = Event()
+    probe: Thread | None = None
+    probe_startup_ms = 0
+    if backend_pid > 0:
+        startup_started = monotonic()
+        try:
+            probe = Thread(
+                target=_sample_postgres_commit_waits,
+                args=(database_url, backend_pid, stop, samples, errors),
+                name="market-sql-wait-probe", daemon=True,
+            )
+            probe.start()
+        except Exception as error:
+            errors.append(type(error).__name__)
+            probe = None
+        probe_startup_ms = round((monotonic() - startup_started) * 1000)
+    else:
+        errors.append("backend_pid_unavailable")
+    started_at = time()
+    started_mono = monotonic()
+    try:
+        result = execute()
+    finally:
+        ended_at = time()
+        duration_seconds = monotonic() - started_mono
+        duration_ms = round(duration_seconds * 1000)
+        stop.set()
+    # The probe owns a separate connection and sees the stop event. Waiting for
+    # connection setup/teardown here would inflate the caller's bars_ms.
+    probe_pending = bool(probe is not None and probe.is_alive())
+    sample_snapshot = list(samples)
+    window_samples = [dict(sample) for sample in sample_snapshot
+                      if started_at <= float(sample["at"]) <= ended_at]
+    sampling_status = (
+        "sampled" if window_samples else
+        "probe_error" if errors else
+        "below_initial_delay" if duration_seconds < 0.1 else
+        "probe_pending" if probe_pending else
+        "no_sample"
+    )
+    return result, {
+        "started_at": started_at, "ended_at": ended_at,
+        "duration_ms": duration_ms, "backend_pid": backend_pid or None,
+        "probe_startup_ms": probe_startup_ms,
+        "probe_pending_at_capture": probe_pending,
+        "sampling_interval_ms": 25, "initial_delay_ms": 100,
+        "sampling_status": sampling_status,
+        "samples": window_samples,
+        "probe_errors": list(errors),
+    }
+
+
+class _PostgresObservedCursor:
+    """Narrow cursor proxy that records the waits for bar UPSERT statements."""
+
+    def __init__(self, cursor, database_url: str, backend_pid: int,
+                 enabled: bool, records: list[dict[str, object]]) -> None:
+        self._cursor = cursor
+        self._database_url = database_url
+        self._backend_pid = backend_pid
+        self._enabled = enabled
+        self._records = records
+
+    def execute(self, *args, **kwargs):
+        result, record = _execute_with_postgres_wait_probe(
+            lambda: self._cursor.execute(*args, **kwargs), self._database_url,
+            self._backend_pid, self._enabled,
+        )
+        if record is not None:
+            record["method"] = "execute"
+            record["sql_operations"] = 1
+            self._records.append(record)
+        return result
+
+    def executemany(self, *args, **kwargs):
+        result, record = _execute_with_postgres_wait_probe(
+            lambda: self._cursor.executemany(*args, **kwargs), self._database_url,
+            self._backend_pid, self._enabled,
+        )
+        if record is not None:
+            record["method"] = "executemany"
+            record["sql_operations"] = len(args[1]) if len(args) > 1 else None
+            self._records.append(record)
+        return result
 
 
 def _top20_statistics_document(
@@ -1141,6 +1311,7 @@ class SQLiteQueryStore:
             return
         observation_by_key = dict(observations or ())
         with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             for value in values:
                 operation_id, operation_hash = _minute_operation(value)
                 processed = connection.execute(
@@ -1151,19 +1322,29 @@ class SQLiteQueryStore:
                     if str(processed[0]) != operation_hash:
                         raise ValueError("minute bar operation_id payload changed")
                     continue
-                connection.execute(
-                    "INSERT INTO central_minute_bars VALUES(?,?,?,?,?,?,?,?,?,?,?) "
-                    "ON CONFLICT(trading_date,minute,code,market) DO UPDATE SET "
-                    "high=MAX(central_minute_bars.high,excluded.high),"
-                    "low=MIN(central_minute_bars.low,excluded.low),close=excluded.close,"
-                    "volume=central_minute_bars.volume+excluded.volume,"
-                    "trade_value_million_won=central_minute_bars.trade_value_million_won+excluded.trade_value_million_won,"
-                    "updated_at=excluded.updated_at",
-                    bar_value_rows((value,), minute=True)[0],
-                )
+                query_authority = _minute_query_authority(connection, value, postgres=False)
+                if query_authority != DataCompleteness.COMPLETE.value:
+                    if query_authority == DataCompleteness.IN_PROGRESS.value:
+                        updates = ",".join(
+                            f"{column}=excluded.{column}" for column in bar_columns(minute=True)
+                            if column not in BAR_KEY_COLUMNS
+                        )
+                    else:
+                        updates = (
+                            "high=MAX(central_minute_bars.high,excluded.high),"
+                            "low=MIN(central_minute_bars.low,excluded.low),close=excluded.close,"
+                            "volume=central_minute_bars.volume+excluded.volume,"
+                            "trade_value_million_won=central_minute_bars.trade_value_million_won+excluded.trade_value_million_won,"
+                            "updated_at=excluded.updated_at"
+                        )
+                    connection.execute(
+                        "INSERT INTO central_minute_bars VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(trading_date,minute,code,market) DO UPDATE SET " + updates,
+                        bar_value_rows((value,), minute=True)[0],
+                    )
                 key = _minute_key(value)
                 observation = observation_by_key.get(key)
-                if observation is not None:
+                if observation is not None and query_authority != DataCompleteness.COMPLETE.value:
                     merged = _load_sqlite_minute_bar(connection, value)
                     merged_observation = MarketDataObservation(
                         observation.kind, observation.subject, merged, observation.metadata,
@@ -1191,6 +1372,7 @@ class SQLiteQueryStore:
         if not values:
             return
         with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             for closure in values:
                 operation_id, operation_hash = _minute_operation(closure, finalization=True)
                 processed = connection.execute(
@@ -1202,7 +1384,7 @@ class SQLiteQueryStore:
                         raise ValueError("minute bar operation_id payload changed")
                     continue
                 merged = _load_sqlite_minute_bar(connection, closure)
-                if merged is not None:
+                if merged is not None and _minute_query_authority(connection, closure, postgres=False) != DataCompleteness.COMPLETE.value:
                     _save_final_minute_revision_sqlite(
                         connection, merged, closure, self._observation_history_enabled,
                     )
@@ -1288,20 +1470,52 @@ class SQLiteQueryStore:
         if not values:
             return
         columns = bar_columns(minute=minute)
-        placeholders = ",".join("?" for _ in columns)
         updates = ",".join(f"{column}=excluded.{column}" for column in columns if column not in BAR_KEY_COLUMNS)
         conflict = "trading_date,minute,code,market" if minute else "trading_date,code,market"
-        with self._lock, self._connection() as connection:
-            connection.executemany(
-                f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders}) "
-                f"ON CONFLICT({conflict}) DO UPDATE SET {updates}",
-                bar_value_rows(values, minute=minute),
+        changed_columns = tuple(
+            column for column in columns
+            if column not in BAR_KEY_COLUMNS and column != "updated_at"
+        )
+        # Identical OHLCV payloads do not rewrite the canonical row, while
+        # metadata still records the latest observation time below.
+        changed_guard = (
+            " WHERE " + " OR ".join(
+                f"{table}.{column} IS NOT excluded.{column}"
+                for column in changed_columns
             )
-            _save_sqlite_metadata(connection, observations)
+            if not minute else ""
+        )
+        with self._lock, self._connection() as connection:
+            bar_rows = bar_value_rows(values, minute=minute)
+            if minute:
+                changed_guard = (
+                    " WHERE " + " OR ".join(
+                        f"{table}.{column} IS NOT excluded.{column}"
+                        for column in changed_columns
+                    )
+                )
+            earlier_rows, latest_rows = _partition_rows_by_last_key(
+                bar_rows, (0, 1, 2, 3) if minute else (0, 1, 2),
+            )
+            for row in earlier_rows:
+                _execute_multirow_upsert(
+                    connection,
+                    f"INSERT INTO {table}({','.join(columns)}) VALUES",
+                    [row], f"ON CONFLICT({conflict}) DO UPDATE SET {updates}{changed_guard}",
+                    placeholder="?", batch_size=1,
+                )
+            _execute_multirow_upsert(
+                connection,
+                f"INSERT INTO {table}({','.join(columns)}) VALUES",
+                latest_rows,
+                f"ON CONFLICT({conflict}) DO UPDATE SET {updates}{changed_guard}",
+                placeholder="?", batch_size=SQLITE_MULTIROW_UPSERT_ROWS,
+            )
+            _save_sqlite_metadata(connection, observations, multirow=True)
             if minute and observations and self._observation_history_enabled:
-                for value, (key, observation) in zip(values, observations, strict=True):
-                    _append_sqlite_observation_revision(
-                        connection, "minute_bar", observation.subject, key,
+                revision_sources = [
+                    ObservationRevisionSource.from_observation(
+                        "minute_bar", observation.subject, key,
                         minute_bar_revision_payload(
                             value,
                             window_closed=observation.metadata.completeness in {
@@ -1315,6 +1529,12 @@ class SQLiteQueryStore:
                         ),
                         observation,
                     )
+                    for value, (key, observation) in zip(values, observations, strict=True)
+                ]
+                latest_by_key = _load_sqlite_latest_revisions(connection, revision_sources)
+                _insert_sqlite_observation_revisions_batch(
+                    connection, revision_sources, latest_by_key,
+                )
 
     def load_daily_bars(self, code: str, market: str = "", limit: int = 250) -> list[dict[str, Any]]:
         sql = ("SELECT trading_date,code,market,open,high,low,close,volume,trade_value_million_won,updated_at "
@@ -2283,7 +2503,13 @@ class SQLiteQueryStore:
 
 class PostgresQueryStore:
     def release_execution_runtime(self, owner_key: str, owner_token: str) -> bool:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="execution.runtime_lease", writer_kind="execution_runtime_release",
+            operation="release_execution_runtime", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "DELETE FROM central_execution_runtime_leases WHERE owner_key=%s AND owner_token=%s",
                 (owner_key, owner_token),
@@ -2291,67 +2517,151 @@ class PostgresQueryStore:
             return cursor.rowcount == 1
 
     def find_credential_activation(self, *, operation_id: str = "", provider: str = "", profile_id: str = "", request_id: str = "") -> dict[str, Any] | None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.credential", writer_kind="activation_lookup",
+            operation="find_credential_activation", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             return _find_credential_activation(cursor, operation_id, provider, profile_id, request_id, "%s")
 
     def list_credential_profiles(self) -> list[dict[str, Any]]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.credential", writer_kind="profile_list",
+            operation="list_credential_profiles", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             return _list_credential_profiles(cursor)
 
     def create_credential_profile(self, provider: str, request_id: str, label: str, digest: str) -> dict[str, Any]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="credential.profile", writer_kind="credential_profile_create",
+            operation="create_credential_profile", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
             return _create_credential_profile(cursor, provider, request_id, label, digest, "%s")
 
     def archive_credential_profile(self, provider: str, profile_id: str) -> dict[str, Any]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="credential.profile", writer_kind="credential_profile_archive",
+            operation="archive_credential_profile", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
             return _archive_credential_profile(cursor, provider, profile_id, "%s")
 
     def rename_credential_profile(self, provider: str, profile_id: str, label: str) -> dict[str, Any]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="credential.profile", writer_kind="credential_profile_rename",
+            operation="rename_credential_profile", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
             return _rename_credential_profile(cursor, provider, profile_id, label, "%s")
 
     def register_credential_profile(self, provider: str, profile_id: str, created_at: str) -> None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="credential.profile", writer_kind="credential_profile_register",
+            operation="register_credential_profile", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
             _register_credential_profile(cursor, provider, profile_id, created_at, "%s")
 
     def finalize_credential_activation(self, value: dict[str, Any]) -> dict[str, Any]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="credential.activation", writer_kind="credential_activation_finalize",
+            operation="finalize_credential_activation", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
             return _finalize_credential_activation(cursor, value, "%s")
 
     def load_account_settings(self, scope: dict[str, str]) -> dict[str, Any]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.account", writer_kind="account_settings",
+            operation="load_account_settings", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             return _load_account_settings(cursor, scope, "%s")
 
     def save_real_account_recovery(self, binding, recovery, received_at, *, settings_revision):
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="account.real_monitor", writer_kind="real_account_recovery",
+            operation="save_real_account_recovery", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
             return _save_real_account_recovery(cursor, binding, recovery, received_at, settings_revision, "%s")
 
     def save_real_account_event(self, binding, event_type, event, received_at, *, settings_revision):
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="account.real_monitor", writer_kind="real_account_event",
+            operation="save_real_account_event", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
             return _save_real_account_event(cursor, binding, event_type, event, received_at, settings_revision, "%s")
 
     def save_account_settings(self, value: dict[str, Any], *, expected_revision: int) -> dict[str, Any]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="account.settings", writer_kind="account_settings_save",
+            operation="save_account_settings", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
             return _save_account_settings(cursor, value, expected_revision, "%s")
 
     def load_credential_activations(self, profile_id: str) -> list[dict[str, Any]]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.credential", writer_kind="profile_activations",
+            operation="load_credential_activations", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             return _load_credential_activations(cursor, profile_id, "%s")
 
     def load_market_profile_settings(self) -> dict[str, Any]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.account", writer_kind="market_profile_settings",
+            operation="load_market_profile_settings", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             return _load_market_profile_settings(cursor, "%s")
 
     def save_market_profile_settings(self, value: dict[str, Any], *, expected_revision: int) -> dict[str, Any]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="account.settings", writer_kind="market_profile_settings_save",
+            operation="save_market_profile_settings", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
             return _save_market_profile_settings(cursor, value, expected_revision, "%s")
 
@@ -2362,13 +2672,25 @@ class PostgresQueryStore:
         self._observation_history_enabled = observation_history_enabled
 
     def initialize(self) -> None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="schema.migration", writer_kind="central_schema",
+            operation="initialize",
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             CentralSchemaMigrationRunner(cursor, "postgres").apply(
                 central_schema_migrations()
             )
 
     def load_query(self, cache_key: str) -> StoredQuery | None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.query_cache", writer_kind="query_cache",
+            operation="load_query", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT payload_json,has_next,next_key FROM central_api_query_cache "
                 "WHERE cache_key=%s AND expires_at>%s", (cache_key, time()),
@@ -2380,13 +2702,19 @@ class PostgresQueryStore:
         return StoredQuery(payload, bool(row[1]), str(row[2]))
 
     def save_query(self, cache_key: str, api_id: str, expires_at: float, value: StoredQuery) -> None:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         total_started = monotonic()
         encode_started = monotonic()
         payload_json = json.dumps(value.payload, ensure_ascii=False)
         encode_ms = round((monotonic() - encode_started) * 1000)
 
         connect_started = monotonic()
-        connection = self._connect()
+        writer = DBWriterContext(
+            writer_family="rest.query_cache", writer_kind="query_cache",
+            operation="save_query", rows_attempted=1, api_id=api_id,
+        )
+        connection = open_observed_connection(self._connect, writer)
         connect_ms = round((monotonic() - connect_started) * 1000)
         upsert_ms = cleanup_ms = commit_ms = 0
         try:
@@ -2412,6 +2740,16 @@ class PostgresQueryStore:
             connection.close()
 
         total_ms = round((monotonic() - total_started) * 1000)
+        from .diagnostic_metrics import record_writer_transaction
+        try:
+            record_writer_transaction("query_cache", 1, total_ms,
+                                      commit_ms=commit_ms, connect_ms=connect_ms,
+                                      execute_ms=upsert_ms + cleanup_ms,
+                                      db_call_id=writer.call_id)
+        except Exception:
+            # The cache write has already committed; a diagnostic sink failure
+            # must not turn that successful write into a caller-visible error.
+            pass
         if total_ms >= 1000:
             logger.warning(
                 "slow postgres query cache save api_id=%s encode_ms=%d connect_ms=%d "
@@ -2423,13 +2761,25 @@ class PostgresQueryStore:
         return
 
     def storage_size_bytes(self) -> int | None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.diagnostics", writer_kind="database_size",
+            operation="storage_size_bytes", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_database_size(current_database())")
             row = cursor.fetchone()
         return int(row[0]) if row else None
 
     def storage_breakdown(self) -> list[dict[str, object]]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.diagnostics", writer_kind="storage_breakdown",
+            operation="storage_breakdown", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT relname,COALESCE(n_live_tup,0)::bigint,"
                 "pg_total_relation_size(relid)::bigint "
@@ -2448,7 +2798,14 @@ class PostgresQueryStore:
     def save_realtime_snapshots(self, values: list[dict[str, Any]]) -> None:
         if not values:
             return
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        started_at = monotonic()
+        writer = DBWriterContext(
+            writer_family="realtime.latest", writer_kind="realtime_latest",
+            operation="save_realtime_snapshots", rows_attempted=len(values),
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO central_realtime_latest(event_type,item_key,received_at,event_json) "
                 "VALUES(%s,%s,%s,%s) ON CONFLICT(event_type,item_key) DO UPDATE SET "
@@ -2456,9 +2813,19 @@ class PostgresQueryStore:
                 [(str(v["event_type"]), str(v["item_key"]), float(v["received_at"]),
                   json.dumps(v["event"], ensure_ascii=False)) for v in values],
             )
+        from .diagnostic_metrics import record_writer_transaction
+        record_writer_transaction("realtime_latest", len(values),
+                                  round((monotonic() - started_at) * 1000),
+                                  db_call_id=writer.call_id)
 
     def load_realtime_snapshots(self, codes: list[str]) -> list[dict[str, Any]]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.realtime_market_state", writer_kind="realtime_snapshots",
+            operation="load_realtime_snapshots", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT event_json FROM central_realtime_latest "
                 "WHERE (item_key=ANY(%s) OR event_type='market_state') AND received_at>%s "
@@ -2471,7 +2838,13 @@ class PostgresQueryStore:
         """Return the last persisted 0B market cap without a freshness cutoff."""
         if not codes:
             return []
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.realtime_market_state", writer_kind="latest_market_caps",
+            operation="load_latest_market_caps", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT item_key,received_at,event_json FROM central_realtime_latest "
                 "WHERE event_type='trade' AND item_key=ANY(%s)",
@@ -2486,8 +2859,16 @@ class PostgresQueryStore:
     ) -> None:
         if not values:
             return
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        started_at = monotonic()
         observation_by_key = dict(observations or ())
-        with self._connect() as connection, connection.cursor() as cursor:
+        writer = DBWriterContext(
+            writer_family="realtime.minute", writer_kind="realtime_minute",
+            operation="save_minute_bars", rows_attempted=len(values),
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+            _lock_postgres_minute_day_scopes(cursor, values)
             for value in values:
                 operation_id, operation_hash = _minute_operation(value)
                 cursor.execute(
@@ -2499,19 +2880,29 @@ class PostgresQueryStore:
                     if str(processed[0]) != operation_hash:
                         raise ValueError("minute bar operation_id payload changed")
                     continue
-                cursor.execute(
-                    "INSERT INTO central_minute_bars VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-                    "ON CONFLICT(trading_date,minute,code,market) DO UPDATE SET "
-                    "high=GREATEST(central_minute_bars.high,EXCLUDED.high),"
-                    "low=LEAST(central_minute_bars.low,EXCLUDED.low),close=EXCLUDED.close,"
-                    "volume=central_minute_bars.volume+EXCLUDED.volume,"
-                    "trade_value_million_won=central_minute_bars.trade_value_million_won+EXCLUDED.trade_value_million_won,"
-                    "updated_at=EXCLUDED.updated_at",
-                    bar_value_rows((value,), minute=True)[0],
-                )
+                query_authority = _minute_query_authority(cursor, value, postgres=True)
+                if query_authority != DataCompleteness.COMPLETE.value:
+                    if query_authority == DataCompleteness.IN_PROGRESS.value:
+                        updates = ",".join(
+                            f"{column}=EXCLUDED.{column}" for column in bar_columns(minute=True)
+                            if column not in BAR_KEY_COLUMNS
+                        )
+                    else:
+                        updates = (
+                            "high=GREATEST(central_minute_bars.high,EXCLUDED.high),"
+                            "low=LEAST(central_minute_bars.low,EXCLUDED.low),close=EXCLUDED.close,"
+                            "volume=central_minute_bars.volume+EXCLUDED.volume,"
+                            "trade_value_million_won=central_minute_bars.trade_value_million_won+EXCLUDED.trade_value_million_won,"
+                            "updated_at=EXCLUDED.updated_at"
+                        )
+                    cursor.execute(
+                        "INSERT INTO central_minute_bars VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                        "ON CONFLICT(trading_date,minute,code,market) DO UPDATE SET " + updates,
+                        bar_value_rows((value,), minute=True)[0],
+                    )
                 key = _minute_key(value)
                 observation = observation_by_key.get(key)
-                if observation is not None:
+                if observation is not None and query_authority != DataCompleteness.COMPLETE.value:
                     merged = _load_postgres_minute_bar(cursor, value)
                     merged_observation = MarketDataObservation(
                         observation.kind, observation.subject, merged, observation.metadata,
@@ -2534,11 +2925,23 @@ class PostgresQueryStore:
                     "VALUES(%s,%s,%s)",
                     (operation_id, operation_hash, datetime.now(timezone.utc)),
                 )
+        from .diagnostic_metrics import record_writer_transaction
+        record_writer_transaction("realtime_minute", len(values),
+                                  round((monotonic() - started_at) * 1000),
+                                  db_call_id=writer.call_id)
 
     def finalize_minute_bars(self, values: list[dict[str, Any]]) -> None:
         if not values:
             return
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        started_at = monotonic()
+        writer = DBWriterContext(
+            writer_family="realtime.minute_finalize", writer_kind="realtime_minute_finalize",
+            operation="finalize_minute_bars", rows_attempted=len(values),
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+            _lock_postgres_minute_day_scopes(cursor, values)
             for closure in values:
                 operation_id, operation_hash = _minute_operation(closure, finalization=True)
                 cursor.execute(
@@ -2551,7 +2954,7 @@ class PostgresQueryStore:
                         raise ValueError("minute bar operation_id payload changed")
                     continue
                 merged = _load_postgres_minute_bar(cursor, closure)
-                if merged is not None:
+                if merged is not None and _minute_query_authority(cursor, closure, postgres=True) != DataCompleteness.COMPLETE.value:
                     _save_final_minute_revision_postgres(
                         cursor, merged, closure, self._observation_history_enabled,
                     )
@@ -2560,11 +2963,22 @@ class PostgresQueryStore:
                     "VALUES(%s,%s,%s)",
                     (operation_id, operation_hash, datetime.now(timezone.utc)),
                 )
+        from .diagnostic_metrics import record_writer_transaction
+        record_writer_transaction("realtime_minute_finalize", len(values),
+                                  round((monotonic() - started_at) * 1000),
+                                  db_call_id=writer.call_id)
 
     def save_second_trade_bars(self, values: list[dict[str, Any]]) -> None:
         if not values:
             return
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        started_at = monotonic()
+        writer = DBWriterContext(
+            writer_family="realtime.second_bar", writer_kind="realtime_second_bar",
+            operation="save_second_trade_bars", rows_attempted=len(values),
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO central_second_trade_bars VALUES("
                 "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
@@ -2577,8 +2991,14 @@ class PostgresQueryStore:
                 "EXCLUDED.trade_count>=central_second_trade_bars.trade_count)",
                 second_trade_bar_value_rows(values),
             )
+        from .diagnostic_metrics import record_writer_transaction
+        record_writer_transaction("realtime_second_bar", len(values),
+                                  round((monotonic() - started_at) * 1000),
+                                  db_call_id=writer.call_id)
 
     def load_minute_bars(self, code: str, trading_date: str, market: str = "") -> list[dict[str, Any]]:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         sql = (
             "SELECT trading_date::text,to_char(minute,'HH24:MI'),code,market,open,high,low,close,volume,"
             "trade_value_million_won,updated_at FROM central_minute_bars WHERE code=%s AND trading_date=%s"
@@ -2588,7 +3008,11 @@ class PostgresQueryStore:
             sql += " AND market=%s"
             parameters.append(market)
         sql += " ORDER BY minute"
-        with self._connect() as connection, connection.cursor() as cursor:
+        reader = DBWriterContext(
+            writer_family="read.market_bars", writer_kind="minute_bar",
+            operation="load_minute_bars", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(sql, parameters)
             rows = cursor.fetchall()
         return bar_result_rows(rows, minute=True)
@@ -2640,33 +3064,108 @@ class PostgresQueryStore:
         if not values:
             return
         columns = bar_columns(minute=minute)
-        placeholders = ",".join("%s" for _ in columns)
         updates = ",".join(f"{column}=EXCLUDED.{column}" for column in columns if column not in BAR_KEY_COLUMNS)
         conflict = "trading_date,minute,code,market" if minute else "trading_date,code,market"
+        # A repeated page must not rewrite an unchanged canonical bar. Metadata
+        # and minute observation revisions still run below, including finalization.
+        changed_columns = tuple(column for column in columns if column not in BAR_KEY_COLUMNS and column != "updated_at")
+        changed_guard = (
+            " WHERE (" + ",".join(f"{table}.{column}" for column in changed_columns) + ")"
+            " IS DISTINCT FROM (" + ",".join(f"EXCLUDED.{column}" for column in changed_columns) + ")"
+            if changed_columns else ""
+        )
+        from .postgres_access import DBWriterContext, open_observed_connection
+        from .diagnostic_metrics import CURRENT_API_ID, refresh_capture_state
+
+        writer_kind = "query_minute" if minute else "query_daily"
+        writer = DBWriterContext(
+            writer_family="rest.market_bars.minute" if minute else "rest.market_bars.daily",
+            writer_kind=writer_kind,
+            operation="replace_minute_bars" if minute else "replace_daily_bars",
+            rows_attempted=len(values), api_id=CURRENT_API_ID.get(),
+        )
         total_started = monotonic()
         connect_started = monotonic()
-        connection = self._connect()
+        connection = open_observed_connection(self._connect, writer)
         connect_ms = round((monotonic() - connect_started) * 1000)
         bar_write_ms = metadata_ms = revision_ms = commit_ms = close_ms = 0
+        revision_lookup_statements = revision_lookup_keys = revision_insert_statements = 0
+        revision_sources_ms = revision_locks_ms = revision_lookup_ms = 0
+        revision_rows_ms = revision_insert_execute_ms = 0
+        revision_insert_rows = 0
+        commit_wait_samples: list[dict[str, object]] = []
+        commit_probe_errors: list[str] = []
+        commit_probe_stop: Event | None = None
+        commit_probe_thread: Thread | None = None
+        commit_backend_pid = 0
+        commit_started_at: float | None = None
+        commit_ended_at: float | None = None
+        commit_probe_incomplete = False
+        bar_statement_diagnostics: list[dict[str, object]] = []
+        capture_enabled = bool(refresh_capture_state().get("enabled"))
+        if capture_enabled:
+            commit_probe_stop = Event()
+        bar_backend_pid = int(getattr(getattr(connection, "info", None), "backend_pid", 0) or 0)
+        wal_timing_for_commit: bool | None = None
+        wal_timing_error = ""
         try:
             with connection.cursor() as cursor:
+                if capture_enabled:
+                    try:
+                        cursor.execute("SAVEPOINT diagnostic_wal_timing")
+                        try:
+                            cursor.execute("SET LOCAL track_wal_io_timing TO on")
+                            cursor.execute("SHOW track_wal_io_timing")
+                            wal_timing_for_commit = str(cursor.fetchone()[0]).lower() == "on"
+                        except Exception as error:
+                            wal_timing_error = type(error).__name__
+                            cursor.execute("ROLLBACK TO SAVEPOINT diagnostic_wal_timing")
+                        finally:
+                            cursor.execute("RELEASE SAVEPOINT diagnostic_wal_timing")
+                    except Exception as error:
+                        # No bar write has happened yet. If savepoint recovery
+                        # itself failed, clear the aborted diagnostic transaction.
+                        wal_timing_error = type(error).__name__
+                        connection.rollback()
+                observed_cursor = (
+                    _PostgresObservedCursor(
+                        cursor, self._database_url, bar_backend_pid,
+                        True, bar_statement_diagnostics,
+                    ) if capture_enabled else cursor
+                )
+                if minute:
+                    _lock_postgres_minute_day_scopes(cursor, values)
                 phase_started = monotonic()
-                cursor.executemany(
-                    f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders}) "
-                    f"ON CONFLICT({conflict}) DO UPDATE SET {updates}",
-                    bar_value_rows(values, minute=minute),
+                bar_rows = bar_value_rows(values, minute=minute)
+                earlier_rows, latest_rows = _partition_rows_by_last_key(
+                    bar_rows, (0, 1, 2, 3) if minute else (0, 1, 2),
+                )
+                for row in earlier_rows:
+                    _execute_multirow_upsert(
+                        observed_cursor,
+                        f"INSERT INTO {table}({','.join(columns)}) VALUES",
+                        [row], f"ON CONFLICT({conflict}) DO UPDATE SET {updates}{changed_guard}",
+                        placeholder="%s", batch_size=1,
+                    )
+                _execute_multirow_upsert(
+                    observed_cursor,
+                    f"INSERT INTO {table}({','.join(columns)}) VALUES",
+                    latest_rows,
+                    f"ON CONFLICT({conflict}) DO UPDATE SET {updates}{changed_guard}",
+                    placeholder="%s", batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
                 )
                 bar_write_ms = round((monotonic() - phase_started) * 1000)
 
                 phase_started = monotonic()
-                _save_postgres_metadata(cursor, observations)
+                _save_postgres_metadata(cursor, observations, multirow=True)
                 metadata_ms = round((monotonic() - phase_started) * 1000)
 
                 phase_started = monotonic()
                 if minute and observations and self._observation_history_enabled:
-                    for value, (key, observation) in zip(values, observations, strict=True):
-                        _append_postgres_observation_revision(
-                            cursor, "minute_bar", observation.subject, key,
+                    phase_started = monotonic()
+                    revision_sources = [
+                        ObservationRevisionSource.from_observation(
+                            "minute_bar", observation.subject, key,
                             minute_bar_revision_payload(
                                 value,
                                 window_closed=observation.metadata.completeness in {
@@ -2680,11 +3179,66 @@ class PostgresQueryStore:
                             ),
                             observation,
                         )
+                        for value, (key, observation) in zip(values, observations, strict=True)
+                    ]
+                    revision_sources_ms = round((monotonic() - phase_started) * 1000)
+                    revision_timings: dict[str, float] = {}
+                    latest_by_key = _load_postgres_latest_revisions(
+                        cursor, revision_sources, timings=revision_timings,
+                    )
+                    revision_locks_ms = round(revision_timings.get("lock_seconds", 0.0) * 1000)
+                    revision_lookup_ms = round(revision_timings.get("lookup_seconds", 0.0) * 1000)
+                    revision_lookup_statements = 1
+                    revision_lookup_keys = len(latest_by_key)
+                    row_phase_started = monotonic()
+                    insert_execute_seconds = [0.0]
+                    (revision_insert_statements,
+                     revision_insert_rows) = _insert_postgres_observation_revisions_batch(
+                        cursor, revision_sources, latest_by_key,
+                        execute_seconds=insert_execute_seconds,
+                    )
+                    revision_rows_ms = round((monotonic() - row_phase_started) * 1000)
+                    revision_insert_execute_ms = round(insert_execute_seconds[0] * 1000)
+                else:
+                    revision_insert_rows = 0
                 revision_ms = round((monotonic() - phase_started) * 1000)
 
+            # During an explicitly enabled diagnostic capture, sample this exact
+            # backend while COMMIT is in progress. WAL timing was enabled locally
+            # before the bar UPSERT, never through cluster configuration.
+            if capture_enabled:
+                commit_backend_pid = bar_backend_pid
+                if bar_backend_pid > 0:
+                    try:
+                        commit_probe_thread = Thread(
+                            target=_sample_postgres_commit_waits,
+                            args=(self._database_url, bar_backend_pid, commit_probe_stop,
+                                  commit_wait_samples, commit_probe_errors),
+                            name="market-commit-wait-probe", daemon=True,
+                        )
+                        commit_probe_thread.start()
+                    except Exception as error:
+                        commit_probe_errors.append(type(error).__name__)
+                        commit_probe_thread = None
             phase_started = monotonic()
-            connection.commit()
-            commit_ms = round((monotonic() - phase_started) * 1000)
+            commit_started_at = time()
+            try:
+                connection.commit()
+            finally:
+                commit_ended_at = time()
+                commit_ms = round((monotonic() - phase_started) * 1000)
+                if commit_probe_stop is not None:
+                    commit_probe_stop.set()
+                if commit_probe_thread is not None:
+                    try:
+                        # A slow probe connection must not become part of the
+                        # measured save latency after COMMIT has finished.
+                        commit_probe_incomplete = commit_probe_thread.is_alive()
+                    except Exception as error:
+                        commit_probe_errors.append(type(error).__name__)
+                        commit_probe_incomplete = True
+                commit_wait_samples = list(commit_wait_samples)
+                commit_probe_errors = list(commit_probe_errors)
         except BaseException:
             connection.rollback()
             raise
@@ -2694,16 +3248,60 @@ class PostgresQueryStore:
             close_ms = round((monotonic() - phase_started) * 1000)
 
         total_ms = round((monotonic() - total_started) * 1000)
+        from .diagnostic_metrics import record_market_bar_save
+        record_market_bar_save(
+            kind="minute" if minute else "daily", rows=len(values),
+            db_call_id=writer.call_id,
+            observations=len(observations or ()), connect_ms=connect_ms,
+            bars_ms=bar_write_ms, metadata_ms=metadata_ms,
+            revisions_ms=revision_ms, commit_ms=commit_ms,
+            close_ms=close_ms, total_ms=total_ms,
+            revision_lookup_statements=revision_lookup_statements,
+            revision_lookup_keys=revision_lookup_keys,
+            revision_insert_statements=revision_insert_statements,
+            revision_insert_rows=revision_insert_rows,
+            revision_sources_ms=revision_sources_ms,
+            revision_locks_ms=revision_locks_ms,
+            revision_lookup_ms=revision_lookup_ms,
+            revision_rows_ms=revision_rows_ms,
+            revision_insert_execute_ms=revision_insert_execute_ms,
+            commit_wait_samples=commit_wait_samples,
+            commit_probe_errors=commit_probe_errors,
+            commit_backend_pid=commit_backend_pid,
+            commit_started_at=commit_started_at,
+            commit_ended_at=commit_ended_at,
+            commit_probe_incomplete=commit_probe_incomplete,
+            wal_timing_for_commit=wal_timing_for_commit,
+            wal_timing_error=wal_timing_error,
+            bar_statement_diagnostics=bar_statement_diagnostics,
+        )
+        from .diagnostic_metrics import record_writer_transaction
+        record_writer_transaction(writer_kind,
+                                  len(values), total_ms, commit_ms=commit_ms,
+                                  connect_ms=connect_ms,
+                                  execute_ms=bar_write_ms + metadata_ms + revision_ms,
+                                  db_call_id=writer.call_id)
         if total_ms >= 1000:
             logger.warning(
                 "slow PostgreSQL market bar save kind=%s rows=%d observations=%d "
                 "connect_ms=%d bars_ms=%d metadata_ms=%d revisions_ms=%d "
+                "revision_sources_ms=%d revision_locks_ms=%d revision_lookup_ms=%d "
+                "revision_rows_ms=%d revision_insert_execute_ms=%d "
+                "revision_lookup_statements=%d revision_lookup_keys=%d "
+                "revision_insert_statements=%d revision_insert_rows=%d "
                 "commit_ms=%d close_ms=%d total_ms=%d",
                 "minute" if minute else "daily", len(values), len(observations or ()),
-                connect_ms, bar_write_ms, metadata_ms, revision_ms, commit_ms, close_ms, total_ms,
+                connect_ms, bar_write_ms, metadata_ms, revision_ms,
+                revision_sources_ms, revision_locks_ms, revision_lookup_ms,
+                revision_rows_ms, revision_insert_execute_ms,
+                revision_lookup_statements, revision_lookup_keys,
+                revision_insert_statements, revision_insert_rows,
+                commit_ms, close_ms, total_ms,
             )
 
     def load_daily_bars(self, code: str, market: str = "", limit: int = 250) -> list[dict[str, Any]]:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         sql = ("SELECT trading_date::text,code,market,open,high,low,close,volume,trade_value_million_won,updated_at "
                "FROM central_daily_bars WHERE code=%s")
         parameters: list[object] = [code]
@@ -2712,7 +3310,11 @@ class PostgresQueryStore:
             parameters.append(market)
         sql += " ORDER BY trading_date DESC LIMIT %s"
         parameters.append(bounded_limit(limit, 5000))
-        with self._connect() as connection, connection.cursor() as cursor:
+        reader = DBWriterContext(
+            writer_family="read.market_bars", writer_kind="daily_bar",
+            operation="load_daily_bars", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(sql, parameters)
             rows = cursor.fetchall()
         return bar_result_rows(rows, minute=False)
@@ -2726,6 +3328,18 @@ class PostgresQueryStore:
     def save_dataset_snapshots(self, values: list[DatasetSnapshotWrite]) -> None:
         if not values:
             return
+        snapshot_kinds = {value[0] for value in values}
+        writer = None
+        if len(snapshot_kinds) == 1 and snapshot_kinds <= COMMON_OBSERVED_DATASET_KINDS:
+            from .postgres_access import DBWriterContext, open_observed_connection
+
+            snapshot_kind = next(iter(snapshot_kinds))
+            writer = DBWriterContext(
+                writer_family="dataset.snapshot",
+                writer_kind=f"dataset:{snapshot_kind}",
+                operation="save_dataset_snapshots",
+                rows_attempted=len(values),
+            )
         saved_at = time()
         started_at = monotonic()
         serialized = [
@@ -2733,7 +3347,10 @@ class PostgresQueryStore:
             for kind, subject, snapshot_key, payload, observation in values
         ]
         serialized_at = monotonic()
-        connection = self._connect()
+        connection = (
+            open_observed_connection(self._connect, writer)
+            if writer is not None else self._connect()
+        )
         backend_pid = int(getattr(getattr(connection, "info", None), "backend_pid", 0) or 0)
         trace_top20 = backend_pid > 0 and any(value[0] == "top20_membership" for value in values)
         wait_stop = Event()
@@ -2748,6 +3365,7 @@ class PostgresQueryStore:
         )
         asynchronous_commit = _uses_async_dataset_commit(values)
         connected_at = monotonic()
+        commit_ms = 0
         snapshot_at = connected_at
         metadata_at = connected_at
         revision_at = connected_at
@@ -2792,7 +3410,9 @@ class PostgresQueryStore:
                 snapshot_at = monotonic()
                 metadata_at = snapshot_at
                 revision_at = snapshot_at
+            phase_started = monotonic()
             connection.commit()
+            commit_ms = round((monotonic() - phase_started) * 1000)
         except BaseException:
             connection.rollback()
             raise
@@ -2803,6 +3423,15 @@ class PostgresQueryStore:
             connection.close()
         completed_at = monotonic()
         elapsed_ms = round((completed_at - started_at) * 1000)
+        from .diagnostic_metrics import record_writer_transaction
+        snapshot_kind = next(iter(snapshot_kinds)) if len(snapshot_kinds) == 1 else "mixed"
+        record_writer_transaction(
+            f"dataset:{snapshot_kind}", len(values), elapsed_ms,
+            commit_ms=commit_ms,
+            connect_ms=round((connected_at - serialized_at) * 1000),
+            execute_ms=round((revision_at - connected_at) * 1000),
+            db_call_id=writer.call_id if writer is not None else None,
+        )
         if elapsed_ms >= 1000:
             kinds = ",".join(sorted({value[0] for value in values}))
             logger.warning(
@@ -2823,6 +3452,8 @@ class PostgresQueryStore:
                 )
 
     def load_dataset_snapshots(self, kind: str, subject: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         started_at = monotonic()
         sql = "SELECT subject,snapshot_key,saved_at,payload_json FROM central_dataset_snapshots WHERE kind=%s"
         parameters: list[object] = [kind]
@@ -2832,7 +3463,13 @@ class PostgresQueryStore:
         sql += " ORDER BY snapshot_key DESC LIMIT %s"
         parameters.append(bounded_limit(limit, 5000))
         connection_started_at = monotonic()
-        with self._connect() as connection, connection.cursor() as cursor:
+        context = DBWriterContext(
+            writer_family="read.dataset_snapshots",
+            writer_kind=f"dataset:{kind}",
+            operation="load_dataset_snapshots",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             connected_at = monotonic()
             cursor.execute(sql, parameters)
             rows = cursor.fetchall()
@@ -2856,7 +3493,14 @@ class PostgresQueryStore:
         if not days:
             return {"hourly": [], "comparisons": []}
         completed = [day for day in days if day < _top20_today().isoformat()]
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="dataset.statistics_cache",
+            writer_kind="dataset:top20_statistics_day",
+            operation="load_top20_statistics",
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT subject,payload_json FROM central_dataset_snapshots "
                 "WHERE kind='top20_statistics_day' AND subject>=%s AND subject<=%s",
@@ -2901,6 +3545,8 @@ class PostgresQueryStore:
     def load_observation_revisions(
         self, kind: str, subject: str = "", limit: int = 100,
     ) -> list[dict[str, Any]]:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         sql = _observation_revision_select("%s", postgres=True)
         parameters: list[object] = [kind]
         if subject:
@@ -2908,7 +3554,13 @@ class PostgresQueryStore:
             parameters.append(subject)
         sql += " ORDER BY accepted_sequence DESC LIMIT %s"
         parameters.append(bounded_limit(limit, 5000))
-        with self._connect() as connection, connection.cursor() as cursor:
+        context = DBWriterContext(
+            writer_family="read.observation_revisions",
+            writer_kind="observation_revision",
+            operation="load_observation_revisions",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             cursor.execute(sql, parameters)
             rows = cursor.fetchall()
         return observation_revision_result_rows(rows)
@@ -2919,6 +3571,8 @@ class PostgresQueryStore:
         normalized = tuple(dict.fromkeys(str(value) for value in kinds if str(value)))
         if not normalized:
             return []
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         placeholders = ",".join("%s" for _ in normalized)
         sql = (
             f"SELECT {_observation_revision_columns(postgres=True)} "
@@ -2926,13 +3580,27 @@ class PostgresQueryStore:
             f"AND kind IN ({placeholders}) ORDER BY accepted_sequence LIMIT %s"
         )
         parameters = [max(0, int(after_sequence)), *normalized, bounded_limit(limit, 5000)]
-        with self._connect() as connection, connection.cursor() as cursor:
+        context = DBWriterContext(
+            writer_family="read.observation_revisions",
+            writer_kind="observation_revisions_after",
+            operation="load_observation_revisions_after",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             cursor.execute(sql, parameters)
             rows = cursor.fetchall()
         return observation_revision_result_rows(rows)
 
     def load_shadow_monitor_state(self, monitor_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        context = DBWriterContext(
+            writer_family="read.shadow_monitor",
+            writer_kind="monitor_state",
+            operation="load_shadow_monitor_state",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT document_json FROM central_shadow_monitor_state WHERE monitor_id=%s",
                 (monitor_id,),
@@ -2941,7 +3609,14 @@ class PostgresQueryStore:
         return json_mapping(row[0]) if row else None
 
     def save_shadow_monitor_state(self, monitor_id: str, document: dict[str, Any]) -> None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="candidate.shadow_checkpoint",
+            writer_kind="shadow_monitor_state",
+            operation="save_shadow_monitor_state", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO central_shadow_monitor_state VALUES(%s,%s,%s) "
                 "ON CONFLICT(monitor_id) DO UPDATE SET updated_at=EXCLUDED.updated_at,document_json=EXCLUDED.document_json",
@@ -2952,12 +3627,28 @@ class PostgresQueryStore:
         self, monitor_id: str, decision: dict[str, Any],
         candidate: dict[str, Any] | None, expires_at: str = "",
     ) -> None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="candidate.shadow_evaluation",
+            writer_kind="shadow_evaluation",
+            operation="save_shadow_evaluation",
+            rows_attempted=1 + int(candidate is not None),
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             _save_postgres_shadow_evaluation(cursor, monitor_id, decision, candidate, expires_at)
 
     def load_shadow_candidates(self, after_sequence: int = 0, limit: int = 100) -> dict[str, Any]:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         page_limit = bounded_limit(limit, 1000)
-        with self._connect() as connection, connection.cursor() as cursor:
+        context = DBWriterContext(
+            writer_family="read.shadow_monitor",
+            writer_kind="candidate_events",
+            operation="load_shadow_candidates",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT COALESCE(MAX(accepted_sequence),0) FROM central_shadow_candidate_events")
             watermark_row = cursor.fetchone()
             cursor.execute(
@@ -2975,6 +3666,13 @@ class PostgresQueryStore:
         normalized_start, normalized_end, normalized_kinds = _observation_export_inputs(
             start, end, kinds,
         )
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="research.observation_export",
+            writer_kind="research_observation_export_create",
+            operation="create_observation_export",
+        )
         placeholders = ",".join("%s" for _ in normalized_kinds)
         sql = (
             "SELECT revision_id,source_id,available_at FROM central_observation_revisions "
@@ -2985,7 +3683,7 @@ class PostgresQueryStore:
             sql += " AND subject=%s"
             parameters.append(subject)
         sql += " ORDER BY available_at,accepted_sequence,revision_id"
-        with self._connect() as connection, connection.cursor() as cursor:
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute(sql, parameters)
             selected = cursor.fetchall()
             manifest = _observation_export_manifest(
@@ -3005,8 +3703,14 @@ class PostgresQueryStore:
     def load_observation_export_page(
         self, watermark: str, cursor: int = 0, limit: int = 1000,
     ) -> dict[str, Any]:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         page_limit = bounded_limit(limit, 1000)
-        with self._connect() as connection, connection.cursor() as db_cursor:
+        reader = DBWriterContext(
+            writer_family="read.research_export", writer_kind="export_page",
+            operation="load_observation_export_page", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as db_cursor:
             db_cursor.execute(
                 "SELECT manifest_json FROM central_research_exports WHERE dataset_id=%s", (watermark,),
             )
@@ -3046,7 +3750,15 @@ class PostgresQueryStore:
     def load_market_data_metadata_range(
         self, kind: MarketDatasetKind, subject: str, start: datetime, end: datetime,
     ) -> list[CoverageObservation]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        context = DBWriterContext(
+            writer_family="read.market_data_metadata",
+            writer_kind="metadata_range",
+            operation="load_market_data_metadata_range",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT observation_key,effective_at,available_at,venue,unit,value_kind,"
                 "completeness,origin,source,candidate_universe "
@@ -3063,8 +3775,154 @@ class PostgresQueryStore:
     def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None:
         if not values:
             return
+        started_at = monotonic()
         now = time()
-        with self._connect() as connection, connection.cursor() as cursor:
+        writer = None
+        observed_kinds = {
+            "news_article": "document:news_article",
+            "news_ai": "document:news_ai",
+            "news_ai_shared": "document:news_ai_shared",
+            "news_request_usage": "document:news_request_usage",
+            "journal_news_link": "document:journal_news_link",
+            "journal_v2_news_links": "document:journal_v2_news_links",
+            "journal_settings": "document:journal_settings",
+            "journal_fills": "document:journal_fills",
+            "journal_reviews": "document:journal_reviews",
+            "journal_setups": "document:journal_setups",
+            "journal_cycle_overrides": "document:journal_cycle_overrides",
+            "journal_group_overrides": "document:journal_group_overrides",
+            "journal_entry_snapshots": "document:journal_entry_snapshots",
+            "journal_costs": "document:journal_costs",
+            "journal_stocks": "document:journal_stocks",
+            "journal_backfill": "document:journal_backfill",
+            "journal_v2_fills": "document:journal_v2_fills",
+            "journal_v2_reviews": "document:journal_v2_reviews",
+            "journal_v2_setups": "document:journal_v2_setups",
+            "journal_v2_cycle_overrides": "document:journal_v2_cycle_overrides",
+            "journal_v2_group_overrides": "document:journal_v2_group_overrides",
+            "journal_v2_entry_snapshots": "document:journal_v2_entry_snapshots",
+            "journal_v2_costs": "document:journal_v2_costs",
+            "journal_v2_enrichment_tasks": "document:journal_v2_enrichment_tasks",
+            "journal_v2_analysis_revisions": "document:journal_v2_analysis_revisions",
+            "journal_v2_research_links": "document:journal_v2_research_links",
+            "journal_sync_states": "document:journal_sync_states",
+            "journal_v2_sync_states": "document:journal_v2_sync_states",
+            "app_settings": "document:app_settings",
+            "app_column_settings": "document:app_column_settings",
+            "news_sync": "document:news_sync",
+            "news_watchlist": "document:news_watchlist",
+            "news_automation_settings": "document:news_automation_settings",
+            "server_operational_settings": "document:server_operational_settings",
+            "theme_profile": "document:theme_profile",
+            "theme_stock": "document:theme_stock",
+            "theme_metadata": "document:theme_metadata",
+            "krx_trading_day_observations": "document:krx_trading_day_observations",
+            "external_market_roll_state": "document:external_market_roll_state",
+            "stock_catalog": "document:stock_catalog",
+            "minute_trade_value_comparisons": "document:minute_trade_value_comparisons",
+            "stock_nxt_eligibility": "document:stock_nxt_eligibility",
+            "stock_fundamentals": "document:stock_fundamentals",
+            "account_entry_symbols_daily": "document:account_entry_symbols_daily",
+            "stock_price_references": "document:stock_price_references",
+            "top20_daily_entrants": "document:top20_daily_entrants",
+            "historical_highs": "document:historical_highs",
+            "market_index_chart_coverage": "document:market_index_chart_coverage",
+            "market_data_coverage_daily": "document:market_data_coverage_daily",
+            "market_data_coverage": "document:market_data_coverage",
+            "market_data_coverage_intraday": "document:market_data_coverage_intraday",
+            "candidate_flow_capture": "document:candidate_flow_capture",
+            "candidate_flow_finalization": "document:candidate_flow_finalization",
+            "condition_search_status": "document:condition_search_status",
+            "market_event_sessions": "document:market_event_sessions",
+            "news_original_publication": "document:news_original_publication",
+            "external_market_collection_status": "document:external_market_collection_status",
+            "news_assessment": "document:news_assessment",
+            "execution_forward_profiles": "document:execution_forward_profiles",
+            "execution_forward_reports": "document:execution_forward_reports",
+            "execution_strategy_stage_revisions": "document:execution_strategy_stage_revisions",
+            "execution_feedback_evidence": "document:execution_feedback_evidence",
+            "execution_feedback_reviews": "document:execution_feedback_reviews",
+            "execution_feedback_improvement_proposals": (
+                "document:execution_feedback_improvement_proposals"
+            ),
+            "execution_feedback_strategy_versions": (
+                "document:execution_feedback_strategy_versions"
+            ),
+            "execution_feedback_revalidation_requests": (
+                "document:execution_feedback_revalidation_requests"
+            ),
+            "execution_feedback_revalidation_receipts": (
+                "document:execution_feedback_revalidation_receipts"
+            ),
+            "execution_mock_automation_specs": "document:execution_mock_automation_specs",
+            "execution_mock_automation_admissions": (
+                "document:execution_mock_automation_admissions"
+            ),
+            "execution_mock_automation_admission_by_spec": (
+                "document:execution_mock_automation_admission_by_spec"
+            ),
+            "execution_mock_automation_lease_receipts": (
+                "document:execution_mock_automation_lease_receipts"
+            ),
+            "execution_mock_automation_lease_by_admission": (
+                "document:execution_mock_automation_lease_by_admission"
+            ),
+            "execution_mock_automation_candidate_packages": (
+                "document:execution_mock_automation_candidate_packages"
+            ),
+            "execution_mock_automation_eligibility_policies": (
+                "document:execution_mock_automation_eligibility_policies"
+            ),
+            "execution_mock_automation_eligibility_receipts": (
+                "document:execution_mock_automation_eligibility_receipts"
+            ),
+            "execution_mock_automation_runner_current": (
+                "document:execution_mock_automation_runner_current"
+            ),
+            "credential_vault_state": "document:credential_vault_state",
+            "execution_mock_automation_risk_snapshots": (
+                "document:execution_mock_automation_risk_snapshots"
+            ),
+            "execution_mock_automation_current_risk": (
+                "document:execution_mock_automation_current_risk"
+            ),
+            "execution_mock_automation_recovery_decisions": (
+                "document:execution_mock_automation_recovery_decisions"
+            ),
+            "execution_mock_automation_current_recovery": (
+                "document:execution_mock_automation_current_recovery"
+            ),
+            "execution_mock_automation_decision_gates": (
+                "document:execution_mock_automation_decision_gates"
+            ),
+            "execution_mock_automation_approved_gates": (
+                "document:execution_mock_automation_approved_gates"
+            ),
+            "execution_mock_automation_dispatch_receipts": (
+                "document:execution_mock_automation_dispatch_receipts"
+            ),
+            "execution_mock_automation_dispatch_by_intent": (
+                "document:execution_mock_automation_dispatch_by_intent"
+            ),
+            "execution_mock_automation_stop_revisions": (
+                "document:execution_mock_automation_stop_revisions"
+            ),
+            "execution_mock_automation_current_stop": (
+                "document:execution_mock_automation_current_stop"
+            ),
+        }
+        writer_kind = observed_kinds.get(collection)
+        if writer_kind is not None:
+            from .postgres_access import DBWriterContext, open_observed_connection
+
+            writer = DBWriterContext(
+                writer_family="document.collection", writer_kind=writer_kind,
+                operation="upsert_documents", rows_attempted=len(values),
+            )
+            db_connection = open_observed_connection(self._connect, writer)
+        else:
+            db_connection = self._connect()
+        with db_connection as connection, connection.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
                 "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
@@ -3076,12 +3934,28 @@ class PostgresQueryStore:
                 _append_postgres_theme_snapshot(cursor, values, received_at=now)
             elif collection == "news_article":
                 _append_postgres_news_articles(cursor, values, received_at=now)
+        from .diagnostic_metrics import record_writer_transaction
+        record_writer_transaction(f"document:{collection}", len(values),
+                                  round((monotonic() - started_at) * 1000),
+                                  db_call_id=writer.call_id if writer else None)
 
     def replace_documents(self, collection: str, values: list[dict[str, Any]]) -> None:
         """컬렉션 전체를 한 트랜잭션에서 현재 스냅샷으로 교체한다."""
         now = time()
         rows = document_value_rows(collection, values, now)
-        with self._connect() as connection, connection.cursor() as cursor:
+        db_connection = self._connect
+        if collection in {"theme_profile", "theme_stock", "theme_metadata"}:
+            from .postgres_access import DBWriterContext, open_observed_connection
+
+            writer = DBWriterContext(
+                writer_family="document.collection",
+                writer_kind=f"document:{collection}",
+                operation="replace_documents", rows_attempted=len(values),
+            )
+            connection_context = open_observed_connection(db_connection, writer)
+        else:
+            connection_context = db_connection()
+        with connection_context as connection, connection.cursor() as cursor:
             cursor.execute("DELETE FROM central_documents WHERE collection=%s", (collection,))
             if rows:
                 cursor.executemany(
@@ -3095,10 +3969,17 @@ class PostgresQueryStore:
         self, collection: str, owner: str = "", limit: int = 1000, offset: int = 0,
         updated_after: float = 0.0,
     ) -> list[dict[str, Any]]:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         sql, parameters = document_select_query(
             collection, owner, limit, offset, updated_after, placeholder="%s",
         )
-        with self._connect() as connection, connection.cursor() as cursor:
+        reader = DBWriterContext(
+            writer_family="read.document_collection",
+            writer_kind=f"document:{collection}",
+            operation="load_documents", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(sql, parameters)
             rows = cursor.fetchall()
         return document_result_rows(rows)
@@ -3106,7 +3987,14 @@ class PostgresQueryStore:
     def load_document(
         self, collection: str, owner: str, key: str,
     ) -> dict[str, Any] | None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.document_collection",
+            writer_kind=f"document:{collection}:single",
+            operation="load_document", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT owner,document_key,updated_at,document_json "
                 "FROM central_documents WHERE collection=%s AND owner=%s AND document_key=%s",
@@ -3118,6 +4006,8 @@ class PostgresQueryStore:
     def load_theme_snapshots(
         self, *, available_at: float | None = None, limit: int = 100,
     ) -> list[dict[str, Any]]:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         sql = (
             "SELECT snapshot_id,profile_id,content_hash,effective_at,received_at,available_at,"
             "origin_device,revision_of,document_json FROM central_theme_snapshots"
@@ -3128,40 +4018,43 @@ class PostgresQueryStore:
             parameters.append(float(available_at))
         sql += " ORDER BY accepted_sequence DESC LIMIT %s"
         parameters.append(bounded_limit(limit, 1000))
-        with self._connect() as connection, connection.cursor() as cursor:
+        reader = DBWriterContext(
+            writer_family="read.theme_snapshots", writer_kind="theme_snapshots",
+            operation="load_theme_snapshots", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(sql, parameters)
             rows = cursor.fetchall()
         return _theme_snapshot_result_rows(rows)
 
     def enqueue_news_ai_jobs(self, values: list[dict[str, Any]]) -> int:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="news.job_enqueue", writer_kind="news_ai_job_enqueue",
+            operation="enqueue_news_ai_jobs", rows_attempted=len(values),
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             return _enqueue_postgres_news_ai_jobs(cursor, values)
 
     def claim_news_jobs(self, *, limit: int = 1, now: float | None = None,
                         priority_stock_code: str = "", preferred_stage: str = "") -> list[dict[str, Any]]:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         claimed_at = float(now if now is not None else time())
-        with self._connect() as connection, connection.cursor() as cursor:
+        started_at = monotonic()
+        writer = DBWriterContext(
+            writer_family="news.job_claim", writer_kind="news_job_claim",
+            operation="claim_news_jobs",
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "UPDATE central_news_jobs SET state='PENDING',updated_at=%s "
                 "WHERE state='RUNNING' AND updated_at<%s", (claimed_at, claimed_at - 120.0),
             )
             priority = str(priority_stock_code or "").strip()
             cursor.execute(
-                "SELECT job_key,article_revision_id,stock_code,target_id,stage,input_hash,"
-                "processing_version,attempts,payload_json,updated_at FROM central_news_jobs "
-                "WHERE state='PENDING' AND next_retry_at<=%s "
-                "AND (stage NOT IN ('BODY','RULE') OR NOT EXISTS ("
-                "SELECT 1 FROM central_news_article_revisions a "
-                "WHERE a.article_revision_id=central_news_jobs.article_revision_id "
-                "AND a.collection_scope IN ('historical_backfill','historical_market_backfill',"
-                "'historical_market_pc_backfill','historical_news_pc_backfill'))) "
-                "ORDER BY CASE WHEN %s<>'' AND stage=%s THEN -1 "
-                "WHEN %s<>'' AND (stock_code=%s OR target_id=%s) AND stage='BODY' THEN 0 "
-                "WHEN %s<>'' AND (stock_code=%s OR target_id=%s) THEN 1 "
-                "WHEN stage='BODY' AND stock_code<>'GLOBAL' THEN 2 "
-                "WHEN stage='BODY' THEN 3 WHEN stage='AI' THEN 4 ELSE 5 END,"
-                "CASE WHEN stage='BODY' THEN -updated_at ELSE updated_at END "
-                "FOR UPDATE SKIP LOCKED LIMIT %s",
+                _NEWS_JOB_CLAIM_SELECT_SQL,
                 (claimed_at, preferred_stage, preferred_stage,
                  priority, priority, priority, priority, priority, priority,
                  bounded_limit(limit, 4)),
@@ -3172,7 +4065,71 @@ class PostgresQueryStore:
                     "UPDATE central_news_jobs SET state='RUNNING',attempts=attempts+1,updated_at=%s "
                     "WHERE job_key=%s", (claimed_at, row[0]),
                 )
+        from .diagnostic_metrics import record_writer_transaction
+        record_writer_transaction("news_job_claim", len(rows),
+                                  round((monotonic() - started_at) * 1000),
+                                  db_call_id=writer.call_id)
         return _news_job_rows(rows)
+
+    def explain_news_job_claim_plan(self) -> dict[str, Any]:
+        """Return bounded plan-only diagnostics for the news job claim SQL."""
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        def plan_summary(raw_plan: Any) -> list[dict[str, Any]]:
+            """Return a bounded, connected view of planner nodes without row data."""
+            if not isinstance(raw_plan, list) or not raw_plan:
+                return []
+            root = raw_plan[0].get("Plan", {}) if isinstance(raw_plan[0], dict) else {}
+            nodes: list[dict[str, Any]] = []
+            pending = [(root, None, 0)] if isinstance(root, dict) else []
+            while pending and len(nodes) < 256:
+                node, parent_node, depth = pending.pop(0)
+                node_index = len(nodes)
+                summary = {key: node[key] for key in (
+                    "Node Type", "Parent Relationship", "Subplan Name", "Join Type",
+                    "Relation Name", "Index Name", "Index Cond", "Filter", "Hash Cond",
+                    "Merge Cond", "Sort Key", "Startup Cost", "Total Cost", "Plan Rows",
+                    "Plan Width",
+                ) if key in node}
+                summary["parent_node"] = parent_node
+                summary["depth"] = depth
+                nodes.append(summary)
+                children = node.get("Plans", ())
+                if isinstance(children, list):
+                    pending.extend((child, node_index, depth + 1)
+                                   for child in children if isinstance(child, dict))
+            if pending and nodes:
+                nodes[-1]["children_truncated"] = True
+            return nodes
+
+        now_epoch = time()
+        reader = DBWriterContext(
+            writer_family="diagnostic.query_plan", writer_kind="news_job_claim_plan",
+            operation="explain_news_job_claim_plan", access_mode="read",
+        )
+        plans: list[dict[str, Any]] = []
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute("SELECT current_database(),current_setting('server_version')")
+            database_name, server_version = cursor.fetchone()
+            cursor.execute(
+                "EXPLAIN (FORMAT JSON) UPDATE central_news_jobs "
+                "SET state='PENDING',updated_at=%s "
+                "WHERE state='RUNNING' AND updated_at<%s",
+                (now_epoch, now_epoch - 120.0),
+            )
+            plans.append({"operation": "recover_stale_running", "nodes": plan_summary(cursor.fetchone()[0])})
+            for stage in ("BODY", "RULE"):
+                priority = ""
+                cursor.execute(
+                    "EXPLAIN (FORMAT JSON) " + _NEWS_JOB_CLAIM_SELECT_SQL,
+                    (now_epoch, stage, stage, priority, priority, priority, priority,
+                     priority, priority, 1),
+                )
+                plans.append({"operation": "claim_candidate_select", "preferred_stage": stage,
+                              "nodes": plan_summary(cursor.fetchone()[0])})
+        return {"mode": "read_only_explain_without_analyze", "database": database_name,
+                "postgresql": server_version, "plans": plans}
 
     def claim_external_historical_news_job(self, stage: str,
                                            excluded_codes: tuple[str, ...] = (),
@@ -3181,6 +4138,12 @@ class PostgresQueryStore:
             raise ValueError("BODY 또는 RULE 작업만 외부 처리할 수 있습니다.")
         if scope not in {"all", "pc_market", "pc_search", "pc"}:
             raise ValueError("지원하지 않는 과거 뉴스 작업 범위입니다.")
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="news.external_claim", writer_kind="news_external_claim",
+            operation="claim_external_historical_news_job", source=scope,
+        )
         claimed_at = time()
         excluded = tuple(sorted(set(excluded_codes)))
         exclusion_sql = f" AND j.target_id NOT IN ({','.join('%s' for _ in excluded)})" if excluded else ""
@@ -3196,7 +4159,7 @@ class PostgresQueryStore:
         outcome = "no_job"
         phase = "connect"
         try:
-            connection = self._connect()
+            connection = open_observed_connection(self._connect, writer)
             connected_at = monotonic()
             phase = "select"
             backend_pid = int(getattr(getattr(connection, "info", None), "backend_pid", 0) or 0)
@@ -3257,23 +4220,41 @@ class PostgresQueryStore:
                 logger.warning(
                     "slow PostgreSQL historical news claim stage=%s scope=%s outcome=%s "
                     "excluded_count=%d total_ms=%d connect_ms=%d select_ms=%d "
-                    "update_commit_ms=%d backend_pid=%d waits=%s",
+                    "update_commit_ms=%d backend_pid=%d waits=%s db_call_id=%s",
                     stage, scope, outcome, len(excluded), elapsed_ms,
                     round((connected_at - started_at) * 1000),
                     round((selected_at - connected_at) * 1000),
                     round((completed_at - selected_at) * 1000),
                     backend_pid,
                     _postgres_wait_summary(wait_samples),
+                    writer.call_id,
                 )
 
     def complete_external_historical_news_job(self, value: dict[str, Any]) -> dict[str, str]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        stage = str(value.get("stage") or "")
+        writer = DBWriterContext(
+            writer_family="news.external_finish",
+            writer_kind=f"news_external_finish:{stage}" if stage in {"BODY", "RULE"}
+            else "news_external_finish:invalid",
+            operation="complete_external_historical_news_job", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             return _complete_external_news_job(cursor, value, postgres=True)
 
     def save_historical_market_news_batch(self, source: str, target_date: str,
                                           batch_id: str, items: list[dict[str, Any]],
                                           processing_owner: str = "nas") -> dict[str, Any]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="news.historical_market_batch",
+            writer_kind=f"news_historical_market:{source}",
+            operation="save_historical_market_news_batch",
+            rows_attempted=len(items), source=processing_owner,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (batch_id,))
             cursor.execute("SELECT 1 FROM central_news_source_runs WHERE run_id=%s LIMIT 1", (batch_id,))
             if cursor.fetchone():
@@ -3283,15 +4264,32 @@ class PostgresQueryStore:
             return {"state": "imported", **result}
 
     def finish_news_job(self, job_key: str, output_ref: str) -> None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        started_at = monotonic()
+        writer = DBWriterContext(
+            writer_family="news.job_finish", writer_kind="news_job_finish",
+            operation="finish_news_job", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "UPDATE central_news_jobs SET state='COMPLETED',output_ref=%s,error='',updated_at=%s "
                 "WHERE job_key=%s", (output_ref, time(), job_key),
             )
+        from .diagnostic_metrics import record_writer_transaction
+        record_writer_transaction("news_job_finish", 1,
+                                  round((monotonic() - started_at) * 1000),
+                                  db_call_id=writer.call_id)
 
     def retry_news_job(self, job_key: str, error: str, next_retry_at: float,
                        output_ref: str = "") -> None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="news.job_retry", writer_kind="news_job_retry",
+            operation="retry_news_job", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT attempts FROM central_news_jobs WHERE job_key=%s", (job_key,))
             row = cursor.fetchone()
             state = "FAILED" if row is not None and int(row[0]) >= 3 else "PENDING"
@@ -3302,14 +4300,33 @@ class PostgresQueryStore:
             )
 
     def save_news_body_revision(self, value: dict[str, Any]) -> str:
-        with self._connect() as connection, connection.cursor() as cursor:
-            return _save_postgres_news_body(cursor, value)
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        started_at = monotonic()
+        writer = DBWriterContext(
+            writer_family="news.body", writer_kind="news_body",
+            operation="save_news_body_revision", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+            revision_id = _save_postgres_news_body(cursor, value)
+        from .diagnostic_metrics import record_writer_transaction
+        record_writer_transaction("news_body", 1,
+                                  round((monotonic() - started_at) * 1000),
+                                  db_call_id=writer.call_id)
+        return revision_id
 
     def save_news_ai_results(self, documents: list[dict[str, Any]],
                              revisions: list[dict[str, Any]],
                              usage_documents: list[dict[str, Any]] | None = None) -> None:
         now = time()
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="news.ai_results", writer_kind="news_ai_results",
+            operation="save_news_ai_results",
+            rows_attempted=len(documents) + len(revisions) + len(usage_documents or ()),
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
                 "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
@@ -3329,7 +4346,15 @@ class PostgresQueryStore:
 
     def load_news_history(self, kind: str, *, target: str = "", identity: str = "",
                           available_at: float | None = None, limit: int = 100) -> list[dict[str, Any]]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        context = DBWriterContext(
+            writer_family="read.news_history",
+            writer_kind=f"history:{kind}",
+            operation="load_news_history",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             return _load_postgres_news_history(
                 cursor, kind, target, identity, available_at, limit,
             )
@@ -3339,7 +4364,15 @@ class PostgresQueryStore:
         return values[0] if values else None
 
     def load_news_body_revision(self, body_revision_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        context = DBWriterContext(
+            writer_family="read.news_revision",
+            writer_kind="body_revision",
+            operation="load_news_body_revision",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT body_revision_id,article_revision_id,content_hash,extractor_version,fetched_at,"
                 "available_at,status,body_text,error FROM central_news_body_revisions "
@@ -3349,7 +4382,15 @@ class PostgresQueryStore:
         return _decode_news_history("body", [row])[0] if row else None
 
     def load_news_article_revision(self, article_revision_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        context = DBWriterContext(
+            writer_family="read.news_revision",
+            writer_kind="article_revision",
+            operation="load_news_article_revision",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT article_revision_id,stock_code,identity,content_hash,collector_id,published_at,"
                 "received_at,available_at,collection_scope,revision_of,document_json "
@@ -3359,20 +4400,48 @@ class PostgresQueryStore:
             return _decode_news_history("article", [row])[0] if row else None
 
     def load_stock_news_articles(self, stock_code: str, *, limit: int = 1000) -> list[dict[str, Any]]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        context = DBWriterContext(
+            writer_family="read.news_publications",
+            writer_kind="stock_articles",
+            operation="load_stock_news_articles",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             return _load_postgres_stock_news_articles(cursor, stock_code, limit)
 
     def load_confirmed_news_articles(self, stock_code: str, *, limit: int = 1000) -> list[dict[str, Any]]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        context = DBWriterContext(
+            writer_family="read.news_publications",
+            writer_kind="confirmed_articles",
+            operation="load_confirmed_news_articles",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             return _load_postgres_confirmed_news_articles(cursor, stock_code, limit)
 
     def save_news_event_revision(self, value: dict[str, Any]) -> str:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="news.event", writer_kind="news_event",
+            operation="save_news_event_revision", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             return _save_postgres_news_event(cursor, value)
 
     def claim_news_request(self, scope: str, *, scope_limit: int, hard_limit: int,
                            budget_date: str) -> bool:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="news.request_budget", writer_kind=f"news_request:{scope}",
+            operation="claim_news_request", rows_attempted=None,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("LOCK TABLE central_news_request_budget IN EXCLUSIVE MODE")
             cursor.execute(
                 "SELECT COALESCE(SUM(request_count),0) FROM central_news_request_budget WHERE budget_date=%s",
@@ -3395,7 +4464,13 @@ class PostgresQueryStore:
             return True
 
     def news_request_count(self, budget_date: str) -> int:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.news_request_budget", writer_kind="request_count",
+            operation="news_request_count", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT COALESCE(SUM(request_count),0) FROM central_news_request_budget WHERE budget_date=%s",
                 (budget_date,),
@@ -3404,7 +4479,15 @@ class PostgresQueryStore:
         return int(row[0]) if row else 0
 
     def load_news_source_cursor(self, source_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        context = DBWriterContext(
+            writer_family="read.news_source",
+            writer_kind="source_cursor",
+            operation="load_news_source_cursor",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT source_id,scope,query_text,cursor_published_at,cursor_identity,pending_published_at,"
                 "pending_identity,next_start,next_schedule_at,checked_at,last_success,coverage,truncated,error,updated_at "
@@ -3414,16 +4497,41 @@ class PostgresQueryStore:
         return _news_source_cursor(row) if row else None
 
     def save_news_source_page(self, value: dict[str, Any]) -> dict[str, Any]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        scope = str(value.get("scope") or "query_set")
+        items = value.get("items", [])
+        writer = DBWriterContext(
+            writer_family="news.source_page", writer_kind=f"news_source:{scope}",
+            operation="save_news_source_page",
+            rows_attempted=len(items) if isinstance(items, (list, tuple)) else None,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             return _save_postgres_news_source_page(cursor, value)
 
     def load_news_source_diagnostics(self, *, source_id: str = "", days: int = 7,
                                      limit: int = 100) -> dict[str, Any]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        context = DBWriterContext(
+            writer_family="read.news_source",
+            writer_kind="source_diagnostics",
+            operation="load_news_source_diagnostics",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             return _load_postgres_news_source_diagnostics(cursor, source_id, days, limit)
 
     def load_market_news_feed(self, source: str, *, limit: int = 200) -> list[dict[str, Any]]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        context = DBWriterContext(
+            writer_family="read.news_publications",
+            writer_kind="market_feed",
+            operation="load_market_news_feed",
+            access_mode="read",
+        )
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             cursor.execute(_market_news_feed_sql("%s"),
                            (_market_news_source_prefix(source),
                             bounded_limit(limit, 1000)))
@@ -3435,7 +4543,13 @@ class PostgresQueryStore:
         provider: str, model: str, prompt_version: str, schema_version: str,
         input_hash: str,
     ) -> str | None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.news_ai_revisions", writer_kind="analysis_revision",
+            operation="find_news_ai_revision", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT analysis_revision_id FROM central_news_ai_revisions WHERE target_id=%s "
                 "AND article_revision_id=%s AND body_revision_id=%s AND provider=%s AND model=%s "
@@ -3448,8 +4562,14 @@ class PostgresQueryStore:
         return str(row[0]) if row else None
 
     def append_vi_events(self, values: list[dict[str, Any]]) -> int:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         inserted = 0
-        with self._connect() as connection, connection.cursor() as cursor:
+        writer = DBWriterContext(
+            writer_family="market_event.revision", writer_kind="market_event:vi",
+            operation="append_vi_events", rows_attempted=len(values),
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             for value in values:
                 cursor.execute(
                     "INSERT INTO central_vi_event_revisions(event_id,event_key,stock_code,event_kind,vi_type,"
@@ -3462,7 +4582,14 @@ class PostgresQueryStore:
 
     def record_hot_cohort_revision(self, value: dict[str, Any],
                                    current: dict[str, Any] | None = None) -> bool:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="market_event.revision", writer_kind="market_event:hot_cohort",
+            operation="record_hot_cohort_revision",
+            rows_attempted=1 + int(current is not None),
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO central_hot_cohort_revisions(revision_id,revision_key,stock_code,event_type,"
                 "condition_name,condition_seq,session_id,effective_at,available_at,document_json) "
@@ -3485,19 +4612,31 @@ class PostgresQueryStore:
             return inserted
 
     def load_hot_cohort(self, *, active_only: bool = False) -> list[dict[str, Any]]:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         sql = ("SELECT stock_code,stock_name,condition_name,first_seen_at,entry_session,last_signal,"
                "last_signal_at,active,nxt_eligible,expired_at,document_json FROM central_hot_cohort_current")
         if active_only:
             sql += " WHERE active=TRUE"
         sql += " ORDER BY first_seen_at,stock_code"
-        with self._connect() as connection, connection.cursor() as cursor:
+        reader = DBWriterContext(
+            writer_family="read.market_events", writer_kind="hot_cohort",
+            operation="load_hot_cohort", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(sql)
             rows = cursor.fetchall()
         return _cohort_current_rows(rows)
 
     def append_upper_limit_facts(self, values: list[dict[str, Any]]) -> int:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         inserted = 0
-        with self._connect() as connection, connection.cursor() as cursor:
+        writer = DBWriterContext(
+            writer_family="market_event.revision", writer_kind="market_event:upper_limit",
+            operation="append_upper_limit_facts", rows_attempted=len(values),
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             for value in values:
                 cursor.execute(
                     "INSERT INTO central_upper_limit_fact_revisions(fact_id,fact_key,stock_code,session_id,status,"
@@ -3510,6 +4649,8 @@ class PostgresQueryStore:
 
     def load_market_event_history(self, kind: str, *, code: str = "",
                                   limit: int = 100) -> list[dict[str, Any]]:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         table, code_column = _market_event_table(kind)
         sql = f"SELECT document_json FROM {table}"
         parameters: list[object] = []
@@ -3518,7 +4659,11 @@ class PostgresQueryStore:
             parameters.append(code)
         sql += " ORDER BY accepted_sequence DESC LIMIT %s"
         parameters.append(bounded_limit(limit, 1000))
-        with self._connect() as connection, connection.cursor() as cursor:
+        reader = DBWriterContext(
+            writer_family="read.market_events", writer_kind=f"history:{kind}",
+            operation="load_market_event_history", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(sql, parameters)
             rows = cursor.fetchall()
         return [json_mapping(row[0]) for row in rows]
@@ -3526,7 +4671,13 @@ class PostgresQueryStore:
     def save_external_bars(self, values: list[dict[str, Any]]) -> None:
         if not values:
             return
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="external_market.bars", writer_kind="external_market:bars",
+            operation="save_external_bars", rows_attempted=len(values),
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO central_external_bars VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT(provider,instrument,contract,timeframe,bar_time) DO UPDATE SET "
@@ -3536,7 +4687,13 @@ class PostgresQueryStore:
             )
 
     def load_external_bars(self, instrument: str, timeframe: str, limit: int = 1000) -> list[dict[str, Any]]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.external_market_bars", writer_kind=f"bars:{timeframe}",
+            operation="load_external_bars", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT provider,instrument,contract,timeframe,bar_time::text,open,high,low,close,volume,updated_at "
                 "FROM central_external_bars WHERE instrument=%s AND timeframe=%s "
@@ -3546,7 +4703,13 @@ class PostgresQueryStore:
         return [_external_bar_result(row) for row in reversed(rows)]
 
     def create_execution_intent(self, value: dict[str, Any], *, ownership: dict[str, str] | None = None) -> bool:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="execution.intent", writer_kind="execution_intent",
+            operation="create_execution_intent", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             _require_execution_ownership(cursor, ownership, value, "%s")
             cursor.execute(
                 "INSERT INTO central_execution_intents("
@@ -3558,7 +4721,13 @@ class PostgresQueryStore:
             return cursor.rowcount == 1
 
     def append_execution_event(self, intent: dict[str, Any], event: dict[str, Any], *, ownership: dict[str, str] | None = None) -> bool:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="execution.event", writer_kind="execution_event",
+            operation="append_execution_event", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             _require_execution_ownership(cursor, ownership, intent, "%s")
             cursor.execute(
                 "INSERT INTO central_execution_events("
@@ -3582,7 +4751,13 @@ class PostgresQueryStore:
             return True
 
     def load_execution_intent(self, intent_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.execution", writer_kind="intent_by_id",
+            operation="load_execution_intent", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT document_json FROM central_execution_intents WHERE intent_id=%s", (intent_id,),
             )
@@ -3592,7 +4767,13 @@ class PostgresQueryStore:
     def find_execution_intent_by_broker_order_id(
         self, environment: str, account_ref: str, run_id: str, broker_order_id: str,
     ) -> dict[str, Any] | None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.execution", writer_kind="intent_by_broker_order",
+            operation="find_execution_intent_by_broker_order_id", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT document_json FROM central_execution_intents "
                 "WHERE environment=%s AND account_ref=%s AND run_id=%s AND broker_order_id=%s LIMIT 2",
@@ -3604,7 +4785,13 @@ class PostgresQueryStore:
         return _json_document(rows[0][0]) if rows else None
 
     def load_execution_events(self, intent_id: str) -> list[dict[str, Any]]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.execution", writer_kind="intent_events",
+            operation="load_execution_events", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT document_json FROM central_execution_events WHERE intent_id=%s ORDER BY accepted_sequence",
                 (intent_id,),
@@ -3615,7 +4802,13 @@ class PostgresQueryStore:
     def load_account_execution_events(
         self, environment: str, account_ref: str, after_sequence: int, limit: int,
     ) -> list[dict[str, Any]]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.execution", writer_kind="account_events",
+            operation="load_account_execution_events", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT e.accepted_sequence,i.document_json,e.document_json "
                 "FROM central_execution_events e JOIN central_execution_intents i "
@@ -3631,7 +4824,13 @@ class PostgresQueryStore:
         ]
 
     def save_execution_account_snapshot(self, value: dict[str, Any], *, ownership: dict[str, str] | None = None) -> bool:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="execution.account_snapshot", writer_kind="execution_account_snapshot",
+            operation="save_execution_account_snapshot", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             _require_execution_ownership(cursor, ownership, value, "%s")
             cursor.execute(
                 "INSERT INTO central_execution_account_snapshots("
@@ -3645,7 +4844,13 @@ class PostgresQueryStore:
             return cursor.rowcount == 1
 
     def load_mock_automation_control(self, account_ref: str) -> dict[str, Any] | None:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.mock_automation", writer_kind="control_state",
+            operation="load_mock_automation_control", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT document_json FROM central_documents WHERE collection=%s AND owner=%s "
                 "AND document_key=%s",
@@ -3658,7 +4863,13 @@ class PostgresQueryStore:
         self, environment: str, account_ref: str, run_id: str,
     ) -> list[dict[str, Any]]:
         terminal = ("FILLED", "CANCELLED", "REJECTED", "EXPIRED")
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.execution", writer_kind="active_intents",
+            operation="load_active_execution_intents", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT document_json FROM central_execution_intents WHERE environment=%s "
                 "AND account_ref=%s AND run_id=%s AND state NOT IN (%s,%s,%s,%s) ORDER BY created_at",
@@ -3670,11 +4881,18 @@ class PostgresQueryStore:
     def save_mock_automation_control(
         self, value: dict[str, Any], *, expected_revision: int,
     ) -> bool:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
         account_ref = str(value.get("account_ref") or "")
         revision = int(value.get("control_revision") or 0)
         if not account_ref or revision != expected_revision + 1:
             raise ValueError("invalid mock automation control revision")
-        with self._connect() as connection, connection.cursor() as cursor:
+        writer = DBWriterContext(
+            writer_family="mock_automation.control",
+            writer_kind="mock_automation_control",
+            operation="save_mock_automation_control",
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (
                 f"mock-automation-control:{account_ref}",
             ))
@@ -3702,7 +4920,13 @@ class PostgresQueryStore:
     def acquire_execution_runtime(
         self, owner_key: str, owner_token: str, now: str, lease_expires_at: str,
     ) -> bool:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="execution.runtime_lease", writer_kind="execution_runtime_acquire",
+            operation="acquire_execution_runtime", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO central_execution_runtime_leases(owner_key,owner_token,lease_expires_at,updated_at) "
                 "VALUES(%s,%s,%s,%s) ON CONFLICT(owner_key) DO UPDATE SET owner_token=EXCLUDED.owner_token,"
@@ -3719,7 +4943,13 @@ class PostgresQueryStore:
         if len(fingerprint) != 64:
             raise ValueError("account identity fingerprint is invalid")
         candidate = _canonical_account_ref(value.get("account_ref") or uuid.uuid4())
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="account.identity", writer_kind="account_identity_register",
+            operation="register_account_identity", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO central_account_registry("
                 "account_ref,broker,environment,identity_fingerprint,created_at,status) "
@@ -3739,7 +4969,13 @@ class PostgresQueryStore:
 
     def append_account_binding(self, value: dict[str, Any]) -> dict[str, Any]:
         document = _account_binding_document(value)
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(
+            writer_family="account.binding", writer_kind="account_binding_append",
+            operation="append_account_binding", rows_attempted=1,
+        )
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT pg_advisory_xact_lock(hashtext(%s))",
                 (
@@ -3775,7 +5011,13 @@ class PostgresQueryStore:
         return document
 
     def load_account_bindings(self) -> list[dict[str, Any]]:
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.account", writer_kind="account_bindings",
+            operation="load_account_bindings", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT binding_id,credential_profile_id,broker,environment,account_ref,"
                 "binding_revision,verified_at,verification_method "
@@ -3812,7 +5054,13 @@ class PostgresQueryStore:
 
     def resolve_account_scope(self, broker: str, environment: str, account_ref: str) -> dict[str, Any]:
         scope = _scope_document(broker, environment, account_ref)
-        with self._connect() as connection, connection.cursor() as cursor:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        reader = DBWriterContext(
+            writer_family="read.account", writer_kind="account_scope",
+            operation="resolve_account_scope", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT a.canonical_account_ref FROM central_account_scope_aliases a "
                 "JOIN central_account_registry r ON r.account_ref=a.canonical_account_ref "
@@ -5774,6 +7022,12 @@ def _market_metadata_upsert_sql(placeholder: str, excluded: str) -> str:
     placeholders = ",".join((placeholder,) * 12)
     return (
         f"INSERT INTO central_market_data_observation_meta VALUES({placeholders}) "
+        + _market_metadata_upsert_suffix(excluded)
+    )
+
+
+def _market_metadata_upsert_suffix(excluded: str) -> str:
+    return (
         "ON CONFLICT(dataset_kind,subject,observation_key) DO UPDATE SET "
         f"effective_at={excluded}.effective_at,available_at={excluded}.available_at,"
         f"venue={excluded}.venue,unit={excluded}.unit,value_kind={excluded}.value_kind,"
@@ -6147,6 +7401,92 @@ def _append_sqlite_observation_revision(
     )
 
 
+def _load_sqlite_latest_revisions(
+    connection: sqlite3.Connection,
+    sources: list[ObservationRevisionSource],
+) -> dict[tuple[str, str, str], tuple[object, object] | None]:
+    """Load the current revision for each minute key using bounded queries."""
+    keys = sorted({(source.kind, source.subject, source.observation_key, source.source_id)
+                   for source in sources})
+    latest_by_key: dict[tuple[str, str, str], tuple[object, object] | None] = {
+        (kind, subject, observation_key, source_id)[1:]: None
+        for kind, subject, observation_key, source_id in keys
+    }
+    for offset in range(0, len(keys), SQLITE_REVISION_LOOKUP_ROWS):
+        batch = keys[offset:offset + SQLITE_REVISION_LOOKUP_ROWS]
+        value_group = "(" + ",".join("?" for _ in range(4)) + ")"
+        requested = ",".join(value_group for _ in batch)
+        parameters = tuple(value for key in batch for value in key)
+        rows = connection.execute(
+            "WITH requested(kind,subject,observation_key,source_id) AS (VALUES "
+            + requested + ") "
+            "SELECT q.kind,q.subject,q.observation_key,q.source_id,r.revision_id,r.payload_hash "
+            "FROM requested q LEFT JOIN central_observation_revisions r "
+            "ON r.kind=q.kind AND r.subject=q.subject AND r.observation_key=q.observation_key "
+            "AND r.source_id=q.source_id AND r.accepted_sequence=("
+            "SELECT MAX(latest.accepted_sequence) FROM central_observation_revisions latest "
+            "WHERE latest.kind=q.kind AND latest.subject=q.subject "
+            "AND latest.observation_key=q.observation_key AND latest.source_id=q.source_id)",
+            parameters,
+        ).fetchall()
+        for kind, subject, observation_key, source_id, revision_id, payload_hash in rows:
+            latest_by_key[(str(subject), str(observation_key), str(source_id))] = (
+                (revision_id, payload_hash) if revision_id is not None else None
+            )
+    return latest_by_key
+
+
+def _insert_sqlite_observation_revisions_batch(
+    connection: sqlite3.Connection,
+    sources: list[ObservationRevisionSource],
+    latest_by_key: dict[tuple[str, str, str], tuple[object, object] | None],
+) -> tuple[int, int]:
+    """Insert changed revisions in bounded statements, preserving input chains."""
+    columns = (
+        "accepted_sequence,revision_id,observation_key,schema_version,source_id,source_session_id,"
+        "source_sequence,kind,subject,venue,effective_at,received_at,available_at,revision_of,"
+        "payload_hash,unit,value_kind,completeness,origin,candidate_universe,quality_flags_json,"
+        "clock_quality,source_ref_json,payload_json"
+    )
+    column_count = 24
+    pending: list[tuple[object, ...]] = []
+    statements = inserted_rows = 0
+
+    def flush() -> None:
+        nonlocal statements, inserted_rows
+        if not pending:
+            return
+        sequence_row = connection.execute(
+            "SELECT COALESCE((SELECT seq FROM sqlite_sequence "
+            "WHERE name='central_observation_revisions'),0),"
+            "COALESCE((SELECT MAX(accepted_sequence) FROM central_observation_revisions),0)"
+        ).fetchone()
+        next_sequence = max(int(sequence_row[0]), int(sequence_row[1])) + 1
+        rows = [tuple((next_sequence + index, *row))
+                for index, row in enumerate(pending)]
+        placeholders = "(" + ",".join("?" for _ in range(column_count)) + ")"
+        sql = (
+            "INSERT INTO central_observation_revisions(" + columns + ") VALUES "
+            + ",".join(placeholders for _ in rows)
+        )
+        connection.execute(sql, tuple(value for row in rows for value in row))
+        statements += 1
+        inserted_rows += len(rows)
+        pending.clear()
+
+    for source in sources:
+        key = (source.subject, source.observation_key, source.source_id)
+        latest = latest_by_key[key]
+        if latest is not None and str(latest[1]) == source.payload_hash:
+            continue
+        pending.append(_observation_revision_values(source, latest, sqlite=True))
+        latest_by_key[key] = (str(pending[-1][0]), source.payload_hash)
+        if len(pending) >= SQLITE_REVISION_BATCH_ROWS:
+            flush()
+    flush()
+    return statements, inserted_rows
+
+
 def _append_postgres_observation_revision(
     cursor: Any,
     kind: str,
@@ -6154,7 +7494,7 @@ def _append_postgres_observation_revision(
     observation_key: str,
     payload: dict[str, Any],
     observation: MarketDataObservation[object],
-) -> None:
+) -> bool:
     source = ObservationRevisionSource.from_observation(
         kind, subject, observation_key, payload, observation,
     )
@@ -6165,16 +7505,172 @@ def _append_postgres_observation_revision(
         (source.kind, source.subject, source.observation_key, source.source_id),
     )
     latest = cursor.fetchone()
+    return _insert_postgres_observation_revision(cursor, source, latest) is not None
+
+
+def _minute_query_authority(cursor: Any, value: dict[str, Any], *, postgres: bool) -> str:
+    """Return the ka10080 ownership state for this minute's canonical bar."""
+    placeholder = "%s" if postgres else "?"
+    result = cursor.execute(
+        "SELECT origin,source,completeness FROM central_market_data_observation_meta "
+        f"WHERE dataset_kind='minute_bar' AND subject={placeholder} "
+        f"AND observation_key={placeholder}",
+        (f"{value['code']}:{value['market']}", _minute_key(value)),
+    )
+    row = result.fetchone()
+    if row and str(row[0]) == ObservationOrigin.QUERY.value and str(row[1]).startswith("kiwoom-ka10080"):
+        return str(row[2])
+    return ""
+
+
+def _lock_postgres_minute_day_scopes(cursor: Any, values: list[dict[str, Any]]) -> None:
+    """Serialize query replacement and late 0B writes for the same stock/day."""
+    scopes = sorted({(str(value["trading_date"]), str(value["code"]), str(value.get("market", "KRX")))
+                     for value in values})
+    for scope in scopes:
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,1))",
+            (json.dumps(scope, ensure_ascii=False, separators=(",", ":")),),
+        )
+
+
+def _load_postgres_latest_revisions(
+    cursor: Any, sources: list[ObservationRevisionSource], *,
+    timings: dict[str, float] | None = None,
+) -> dict[tuple[str, str, str], tuple[object, object] | None]:
+    """Read one latest revision per logical key, holding each source/subject writer scope.
+
+    Query-response pages for a stock use one scope. Sorting the scopes keeps
+    overlapping multi-stock batches from taking transaction locks out of order.
+    The realtime writer has a different source ID and remains independent.
+    """
+    keys = sorted({(source.subject, source.observation_key, source.source_id)
+                   for source in sources})
+    lock_started = monotonic()
+    for kind, subject, source_id in sorted({(source.kind, source.subject, source.source_id)
+                                           for source in sources}):
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (json.dumps((kind, subject, source_id), ensure_ascii=False, separators=(",", ":")),),
+        )
+    if timings is not None:
+        timings["lock_seconds"] = monotonic() - lock_started
+    lookup_started = monotonic()
+    cursor.execute(
+        "SELECT k.subject,k.observation_key,k.source_id,r.revision_id,r.payload_hash "
+        "FROM unnest(%s::text[],%s::text[],%s::text[]) "
+        "AS k(subject,observation_key,source_id) "
+        "LEFT JOIN LATERAL ("
+        "SELECT revision_id,payload_hash FROM central_observation_revisions "
+        "WHERE kind='minute_bar' AND subject=k.subject "
+        "AND observation_key=k.observation_key AND source_id=k.source_id "
+        "ORDER BY accepted_sequence DESC LIMIT 1"
+        ") AS r ON true",
+        ([key[0] for key in keys], [key[1] for key in keys], [key[2] for key in keys]),
+    )
+    latest_by_key = {key: None for key in keys}
+    for subject, observation_key, source_id, revision_id, payload_hash in cursor.fetchall():
+        latest_by_key[(subject, observation_key, source_id)] = (
+            (revision_id, payload_hash) if revision_id is not None else None
+        )
+    if timings is not None:
+        timings["lookup_seconds"] = monotonic() - lookup_started
+    return latest_by_key
+
+
+def _insert_postgres_observation_revision(
+    cursor: Any, source: ObservationRevisionSource,
+    latest: tuple[object, object] | None,
+    *, execute_seconds: list[float] | None = None,
+) -> str | None:
     if latest is not None and str(latest[1]) == source.payload_hash:
-        return
+        return None
+    values = _observation_revision_values(source, latest, sqlite=False)
+    execute_started = monotonic() if execute_seconds is not None else 0.0
     cursor.execute(
         "INSERT INTO central_observation_revisions("
         "revision_id,observation_key,schema_version,source_id,source_session_id,source_sequence,"
         "kind,subject,venue,effective_at,received_at,available_at,revision_of,payload_hash,unit,"
         "value_kind,completeness,origin,candidate_universe,quality_flags_json,clock_quality,"
         "source_ref_json,payload_json) VALUES(" + ",".join(("%s",) * 23) + ")",
-        _observation_revision_values(source, latest, sqlite=False),
+        values,
     )
+    if execute_seconds is not None:
+        execute_seconds[0] += monotonic() - execute_started
+    return str(values[0])
+
+
+def _insert_postgres_observation_revisions_batch(
+    cursor: Any,
+    sources: list[ObservationRevisionSource],
+    latest_by_key: dict[tuple[str, str, str], tuple[object, object] | None],
+    *,
+    execute_seconds: list[float] | None = None,
+) -> tuple[int, int]:
+    """Insert changed revisions in bounded multi-row statements, preserving input order.
+
+    Revision IDs are allocated before each batch is sent so repeated logical keys
+    can link to the immediately preceding input observation. Sequence values are
+    also assigned in input order; a multi-row VALUES statement alone does not
+    establish the accepted_sequence ordering used by latest-revision queries.
+    Advisory locks are acquired by the caller, and canonical bars, metadata,
+    and history remain in the same transaction.
+    """
+    columns = (
+        "revision_id,observation_key,schema_version,source_id,source_session_id,source_sequence,"
+        "kind,subject,venue,effective_at,received_at,available_at,revision_of,payload_hash,unit,"
+        "value_kind,completeness,origin,candidate_universe,quality_flags_json,clock_quality,"
+        "source_ref_json,payload_json"
+    )
+    column_count = 24
+    batch_size = 1000  # 24,000 bind parameters, below PostgreSQL's 65,535 limit.
+    pending: list[tuple[object, ...]] = []
+    statements = inserted_rows = 0
+    execute_elapsed = 0.0
+
+    def flush() -> None:
+        nonlocal statements, inserted_rows, execute_elapsed
+        if not pending:
+            return
+        cursor.execute(
+            "SELECT nextval(pg_get_serial_sequence("
+            "'central_observation_revisions','accepted_sequence')) "
+            "FROM generate_series(1,%s) ORDER BY 1",
+            (len(pending),),
+        )
+        sequences = [int(row[0]) for row in cursor.fetchall()]
+        if len(sequences) != len(pending) or any(
+            current <= previous for previous, current in zip(sequences, sequences[1:])
+        ):
+            raise RuntimeError("observation revision sequence allocation was incomplete or unordered")
+        row_placeholders = "(" + ",".join(("%s",) * column_count) + ")"
+        sql = (
+            "INSERT INTO central_observation_revisions(accepted_sequence," + columns + ") VALUES "
+            + ",".join(row_placeholders for _ in pending)
+        )
+        parameters = tuple(value for sequence, row in zip(sequences, pending)
+                           for value in (sequence, *row))
+        started = monotonic()
+        cursor.execute(sql, parameters)
+        execute_elapsed += monotonic() - started
+        statements += 1
+        inserted_rows += len(pending)
+        pending.clear()
+
+    for source in sources:
+        key = (source.subject, source.observation_key, source.source_id)
+        latest = latest_by_key[key]
+        if latest is not None and str(latest[1]) == source.payload_hash:
+            continue
+        values = _observation_revision_values(source, latest, sqlite=False)
+        pending.append(values)
+        latest_by_key[key] = (str(values[0]), source.payload_hash)
+        if len(pending) >= batch_size:
+            flush()
+    flush()
+    if execute_seconds is not None:
+        execute_seconds[0] += execute_elapsed
+    return statements, inserted_rows
 
 
 def _observation_revision_values(
@@ -6224,19 +7720,87 @@ def _metadata_from_range_row(row: tuple[object, ...]) -> MarketDataMetadata:
     return metadata
 
 
-def _save_sqlite_metadata(connection, observations) -> None:
-    if not observations:
-        return
-    connection.executemany(
-        _market_metadata_upsert_sql("?", "excluded"),
-        [market_metadata_storage_values(key, observation) for key, observation in observations],
-    )
+def _partition_rows_by_last_key(
+    rows: list[tuple[Any, ...]], key_indexes: tuple[int, ...],
+) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+    """Separate earlier duplicate rows from each key's final occurrence."""
+    seen: set[tuple[Any, ...]] = set()
+    earlier: list[tuple[Any, ...]] = []
+    latest: list[tuple[Any, ...]] = []
+    for row in reversed(rows):
+        key = tuple(row[index] for index in key_indexes)
+        if key in seen:
+            earlier.append(row)
+            continue
+        seen.add(key)
+        latest.append(row)
+    earlier.reverse()
+    latest.reverse()
+    return earlier, latest
 
 
-def _save_postgres_metadata(cursor, observations) -> None:
+def _last_rows_by_key(
+    rows: list[tuple[Any, ...]], key_indexes: tuple[int, ...],
+) -> list[tuple[Any, ...]]:
+    """Keep the final metadata observation for each key."""
+    return _partition_rows_by_last_key(rows, key_indexes)[1]
+
+
+def _execute_multirow_upsert(
+    executor: Any,
+    insert_prefix: str,
+    rows: list[tuple[Any, ...]],
+    upsert_suffix: str,
+    *,
+    placeholder: str,
+    batch_size: int,
+) -> int:
+    """Execute a bounded multi-row UPSERT and return its statement count."""
+    if not rows:
+        return 0
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    width = len(rows[0])
+    if width <= 0 or any(len(row) != width for row in rows):
+        raise ValueError("multi-row UPSERT rows must have one non-empty width")
+    value_group = "(" + ",".join((placeholder,) * width) + ")"
+    statements = 0
+    for offset in range(0, len(rows), batch_size):
+        batch = rows[offset:offset + batch_size]
+        sql = f"{insert_prefix}{','.join(value_group for _ in batch)} {upsert_suffix}"
+        parameters = tuple(value for row in batch for value in row)
+        executor.execute(sql, parameters)
+        statements += 1
+    return statements
+
+
+def _save_sqlite_metadata(connection, observations, *, multirow: bool = False) -> None:
     if not observations:
         return
-    cursor.executemany(
-        _market_metadata_upsert_sql("%s", "EXCLUDED"),
-        [market_metadata_storage_values(key, observation) for key, observation in observations],
-    )
+    rows = [market_metadata_storage_values(key, observation) for key, observation in observations]
+    if multirow:
+        _execute_multirow_upsert(
+            connection,
+            "INSERT INTO central_market_data_observation_meta VALUES",
+            _last_rows_by_key(rows, (0, 1, 2)),
+            _market_metadata_upsert_suffix("excluded"),
+            placeholder="?", batch_size=SQLITE_MULTIROW_UPSERT_ROWS,
+        )
+    else:
+        connection.executemany(_market_metadata_upsert_sql("?", "excluded"), rows)
+
+
+def _save_postgres_metadata(cursor, observations, *, multirow: bool = False) -> None:
+    if not observations:
+        return
+    rows = [market_metadata_storage_values(key, observation) for key, observation in observations]
+    if multirow:
+        _execute_multirow_upsert(
+            cursor,
+            "INSERT INTO central_market_data_observation_meta VALUES",
+            _last_rows_by_key(rows, (0, 1, 2)),
+            _market_metadata_upsert_suffix("EXCLUDED"),
+            placeholder="%s", batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
+        )
+    else:
+        cursor.executemany(_market_metadata_upsert_sql("%s", "EXCLUDED"), rows)

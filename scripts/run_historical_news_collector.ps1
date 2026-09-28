@@ -44,6 +44,7 @@ $stateFile = Join-Path $stateRoot 'news-collector-state.json'
 $heartbeatFile = Join-Path $stateRoot 'news-job-heartbeat.json'
 $stamp = [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')
 $logFile = Join-Path $logRoot "news-$stamp.log"
+$diagnosticLog = Join-Path $logRoot "news-timing-$stamp.jsonl"
 
 [IO.Directory]::CreateDirectory($logRoot) | Out-Null
 $lockFile = Join-Path $stateRoot 'news-collector.lock'
@@ -74,6 +75,7 @@ function Write-State([string]$Status, [int]$Completed, [string]$ErrorText = '') 
         finished_this_run = $Completed
         database = [IO.Path]::GetFullPath((Join-Path $projectRoot $Database))
         log = $logFile
+        diagnostic_log = $diagnosticLog
         error = $ErrorText
         updated_at = [DateTimeOffset]::UtcNow.ToString('o')
     } | ConvertTo-Json | Set-Content -LiteralPath $stateFile -Encoding utf8
@@ -88,7 +90,8 @@ Set-Location $projectRoot
 $completed = 0
 $stopRequested = $false
 Write-State 'running' $completed
-Write-Log "collector started jobs=$Jobs max_pages=$MaxPages search_workers=$SearchWorkers article_workers=$ArticleWorkers publish_every=$PublishEvery status_every=$StatusEvery"
+Write-Log "search collector started jobs=$Jobs max_pages=$MaxPages search_workers=$SearchWorkers; original/BODY/RULE run in the separate article collector"
+Write-Log "request timing and errors: $diagnosticLog"
 try {
     $excludeOutput = & $python scripts\probe_historical_backfill.py news-exclude-nonstocks `
         --output $Database 2>&1
@@ -111,11 +114,10 @@ try {
         $previousErrorAction = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         $output = & $python scripts\probe_historical_backfill.py news-run `
-            --jobs 1 --max-pages $MaxPages --request-delay $RequestDelay `
+            --jobs 1 --search-only --max-pages $MaxPages --request-delay $RequestDelay `
             --search-workers $SearchWorkers `
-            --article-delay $ArticleDelay --article-workers $ArticleWorkers `
-            --prepare-workers $PrepareWorkers `
             --heartbeat-file $heartbeatFile `
+            --diagnostic-log $diagnosticLog `
             --output $Database 2>&1
         $collectorExitCode = $LASTEXITCODE
         $ErrorActionPreference = $previousErrorAction

@@ -20,6 +20,7 @@ from kiwoom_monitor.infrastructure.naver_stock_market_news import (
 )
 
 from .news_sources import _marker, _page_items
+from .diagnostic_workloads import is_paused
 
 
 LOGGER = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ class MarketFeedNewsCollector:
         self._endpoints = dict(endpoints)
 
     async def run_once(self, *, now: datetime | None = None) -> None:
-        if not self._enabled:
+        if not self._enabled or is_paused("news_market_feed"):
             return
         current = (now or datetime.now(KST)).astimezone(KST)
         dates = [current.date().isoformat()]
@@ -83,7 +84,7 @@ class MarketFeedNewsCollector:
             dates.append((current.date() - timedelta(days=1)).isoformat())
         for target_date in dates:
             for source in SOURCES:
-                if self._closing.is_set() or not self._enabled:
+                if self._closing.is_set() or not self._enabled or is_paused("news_market_feed"):
                     return
                 try:
                     await self._collect(source, target_date)
@@ -104,7 +105,8 @@ class MarketFeedNewsCollector:
         last_marker: tuple[str, str] | None = None
         catalog = await asyncio.to_thread(self._catalog)
         pages_this_run = 0
-        while page_number <= 300 and pages_this_run < 10 and not self._closing.is_set() and self._enabled:
+        while (page_number <= 300 and pages_this_run < 10 and not self._closing.is_set()
+               and self._enabled and not is_paused("news_market_feed")):
             try:
                 for attempt in range(3):
                     try:

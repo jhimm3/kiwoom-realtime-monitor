@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .diagnostic_workloads import is_paused
+
 import asyncio
 import json
 import logging
@@ -51,16 +53,43 @@ class YahooDelayedMarketCollector:
         self._settings_lock = asyncio.Lock()
         self._closing = False
         self._shutdown = False
+        self._operational_enabled = False
+        self._collection_attempts = 0
+        self._collection_completions = 0
+        self._collection_saved_rows_total = 0
+        self._last_collection_started_at: float | None = None
+        self._last_collection_completed_at: float | None = None
+        self._last_collection_saved_rows = 0
+        self._last_collection_error: str | None = None
+
+    def diagnostic_status(self) -> dict[str, Any]:
+        task = self._task
+        running = task is not None and not task.done()
+        return {
+            "configured": bool(self._symbols),
+            "operational_enabled": self._operational_enabled,
+            "running": running,
+            "poll_seconds": self._poll_seconds,
+            "collection_attempts": self._collection_attempts,
+            "collection_completions": self._collection_completions,
+            "collection_saved_rows_total": self._collection_saved_rows_total,
+            "last_collection_started_at": self._last_collection_started_at,
+            "last_collection_completed_at": self._last_collection_completed_at,
+            "last_collection_saved_rows": self._last_collection_saved_rows,
+            "last_collection_error": self._last_collection_error,
+        }
 
     async def start(self) -> None:
         if self._shutdown:
             raise RuntimeError("EXTERNAL_MARKET_CLOSED")
         self._closing = False
+        self._operational_enabled = True
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run(), name="yahoo-delayed-market-collector")
 
     async def close(self) -> None:
         self._shutdown = True
+        self._operational_enabled = False
         if self._updates:
             await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._updates)), return_exceptions=True)
         await self._stop()
@@ -97,6 +126,7 @@ class YahooDelayedMarketCollector:
             self._poll_seconds = max(60, int(poll_seconds))
             self._auto_roll_enabled = bool(auto_roll_enabled)
             self._roll_confirmations = max(1, int(roll_confirmations))
+            self._operational_enabled = bool(enabled)
             if enabled and not self._shutdown:
                 await self.start()
 
@@ -109,10 +139,29 @@ class YahooDelayedMarketCollector:
             return await self.collect_once(include_daily=True)
         if task is None:
             self._collection_daily = include_daily
-            task = asyncio.create_task(self._collect_once(include_daily=include_daily))
+            task = asyncio.create_task(self._tracked_collect_once(include_daily=include_daily))
             self._collection = task
             task.add_done_callback(self._collection_finished)
         return await asyncio.shield(task)
+
+    async def _tracked_collect_once(self, *, include_daily: bool) -> dict[str, int]:
+        self._collection_attempts += 1
+        self._last_collection_started_at = time.time()
+        self._last_collection_error = None
+        try:
+            saved = await self._collect_once(include_daily=include_daily)
+        except Exception as error:
+            self._last_collection_error = f"{type(error).__name__}: {error}"[:1000]
+            self._last_collection_saved_rows = 0
+            self._collection_completions += 1
+            self._last_collection_completed_at = time.time()
+            raise
+        else:
+            self._last_collection_saved_rows = sum(saved.values())
+            self._collection_saved_rows_total += self._last_collection_saved_rows
+            self._collection_completions += 1
+            self._last_collection_completed_at = time.time()
+            return saved
 
     def _collection_finished(self, task) -> None:
         if self._collection is task: self._collection = None
@@ -189,11 +238,12 @@ class YahooDelayedMarketCollector:
 
     async def _run(self) -> None:
         while True:
-            today = datetime.now(timezone.utc).date().isoformat()
-            include_daily = self._last_daily_date != today
-            await self.collect_once(include_daily=include_daily)
-            if include_daily:
-                self._last_daily_date = today
+            if not is_paused("external_market"):
+                today = datetime.now(timezone.utc).date().isoformat()
+                include_daily = self._last_daily_date != today
+                await self.collect_once(include_daily=include_daily)
+                if include_daily:
+                    self._last_daily_date = today
             await asyncio.sleep(self._poll_seconds)
 
     def _fetch(self, instrument: str, contract: str, interval: str, range_value: str) -> list[dict[str, Any]]:

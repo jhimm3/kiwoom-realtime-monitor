@@ -1,0 +1,246 @@
+{
+  "schema": 1,
+  "reviewed_on": "2026-09-29",
+  "approved_sites": [
+    {
+      "file": "scripts/benchmark_minute_revision_batch_postgres.py",
+      "owner": "_check_database",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_benchmark",
+      "reason": "Explicit benchmark tool; target database is guarded as the dedicated diagnostic database."
+    },
+    {
+      "file": "scripts/benchmark_minute_revision_batch_postgres.py",
+      "owner": "_current_batch",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_benchmark",
+      "reason": "Explicit benchmark tool; target database is guarded as the dedicated diagnostic database."
+    },
+    {
+      "file": "scripts/benchmark_minute_revision_batch_postgres.py",
+      "owner": "_legacy_rowwise",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_benchmark",
+      "reason": "Explicit benchmark tool; target database is guarded as the dedicated diagnostic database."
+    },
+    {
+      "file": "scripts/benchmark_minute_revision_batch_postgres.py",
+      "owner": "_seed",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_benchmark",
+      "reason": "Explicit benchmark tool; target database is guarded as the dedicated diagnostic database."
+    },
+    {
+      "file": "scripts/benchmark_minute_revision_batch_postgres.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_benchmark",
+      "reason": "Explicit benchmark tool; target database is guarded as the dedicated diagnostic database."
+    },
+    {
+      "file": "scripts/benchmark_postgres_access_cache_writer.py",
+      "owner": "_connect",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_benchmark",
+      "reason": "Explicit benchmark tool; target database is guarded as the dedicated diagnostic database."
+    },
+    {
+      "file": "scripts/benchmark_postgres_access_cache_writer.py",
+      "owner": "_preflight",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_benchmark",
+      "reason": "Explicit benchmark tool; target database is guarded as the dedicated diagnostic database."
+    },
+    {
+      "file": "scripts/benchmark_postgres_access_pilot.py",
+      "owner": "_check_database",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_benchmark",
+      "reason": "Explicit benchmark tool; target database is guarded as the dedicated diagnostic database."
+    },
+    {
+      "file": "scripts/benchmark_postgres_access_pilot.py",
+      "owner": "_run_block.connect",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_benchmark",
+      "reason": "Explicit benchmark tool; target database is guarded as the dedicated diagnostic database."
+    },
+    {
+      "file": "scripts/cancel_stale_news_claim.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "maintenance_control",
+      "reason": "Manual operational cancellation command with backend identity and age checks."
+    },
+    {
+      "file": "scripts/create_news_claim_order_index.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "maintenance_schema",
+      "reason": "Manual concurrent index DDL; requires its native autocommit and advisory-lock boundary."
+    },
+    {
+      "file": "scripts/diagnose_active_news_queries.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "diagnostic_tool",
+      "reason": "Classification requires review."
+    },
+    {
+      "file": "scripts/diagnose_long_news_query.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "diagnostic_tool",
+      "reason": "Classification requires review."
+    },
+    {
+      "file": "scripts/diagnose_news_claim_query.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "diagnostic_tool",
+      "reason": "Classification requires review."
+    },
+    {
+      "file": "scripts/diagnose_prepared_news_db_waits.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "diagnostic_tool",
+      "reason": "Classification requires review."
+    },
+    {
+      "file": "scripts/export_historical_news_seed.py",
+      "owner": "export_seed",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "maintenance_read_export",
+      "reason": "Read-only repeatable-read export from PostgreSQL into a local prepared archive."
+    },
+    {
+      "file": "scripts/import_prepared_historical_news_to_nas.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "maintenance_prepared_news",
+      "reason": "Legacy prepared-news importer; caller-owned connection and batch completion boundary."
+    },
+    {
+      "file": "scripts/measure_news_claim_order_index.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "diagnostic_tool",
+      "reason": "Classification requires review."
+    },
+    {
+      "file": "scripts/nas_workload_diagnostic.py",
+      "owner": "_measure",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "diagnostic_tool",
+      "reason": "Classification requires review."
+    },
+    {
+      "file": "scripts/probe_postgres_access_commit_waits.py",
+      "owner": "_sample_waits",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "diagnostic_tool",
+      "reason": "Classification requires review."
+    },
+    {
+      "file": "scripts/purge_unprocessed_legacy_news.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "maintenance_cleanup",
+      "reason": "Legacy cleanup command; dry-run default and explicitly bounded destructive execution."
+    },
+    {
+      "file": "scripts/run_postgres_access_integration.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_preflight",
+      "reason": "Read-only database identity preflight before tests target the dedicated diagnostic database."
+    },
+    {
+      "file": "scripts/verify_prepared_news_import_postgres.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_preflight",
+      "reason": "Read-only database identity preflight before tests target the dedicated diagnostic database."
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/database.py",
+      "owner": "PostgresQueryStore._connect",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "runtime_connection_factory",
+      "reason": "Existing per-call store connection factory; production callers instrument ownership at the observed access boundary."
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/database.py",
+      "owner": "_sample_postgres_backend_waits",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "diagnostic_probe",
+      "reason": "Diagnostic-only probe or bounded diagnostic measurement connection; not a domain writer."
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/database.py",
+      "owner": "_sample_postgres_commit_waits",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "diagnostic_probe",
+      "reason": "Diagnostic-only probe or bounded diagnostic measurement connection; not a domain writer."
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/diagnostic_sampling.py",
+      "owner": "read_postgres_snapshot",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "diagnostic_probe",
+      "reason": "Fixed read-only PostgreSQL diagnostic snapshot with bounded connection and statement timeouts; no domain writer transaction."
+    },
+    {
+      "file": "tests/integration/test_historical_news_seed_postgres.py",
+      "owner": "HistoricalNewsSeedPostgresTests.setUp",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "PostgreSQL integration test connection scoped to a dedicated test database."
+    },
+    {
+      "file": "tests/integration/test_historical_news_seed_postgres.py",
+      "owner": "HistoricalNewsSeedPostgresTests.test_read_only_snapshot_exports_original_ids",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "PostgreSQL integration test connection scoped to a dedicated test database."
+    },
+    {
+      "file": "tests/integration/test_storage_boundary_postgres.py",
+      "owner": "PostgresStorageBoundaryTests.test_pg17_io_views_are_readable_and_optional_failure_is_isolated",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "PostgreSQL integration test connection scoped to a dedicated test database."
+    }
+  ]
+}

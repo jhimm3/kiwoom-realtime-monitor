@@ -72,6 +72,7 @@ from kiwoom_monitor.presentation.news_workers import (
     NewsSearchWorker,
 )
 from kiwoom_monitor.presentation.news_settings_dialog import NaverNewsSettingsDialog
+from kiwoom_monitor.presentation.historical_news_archive_dialog import HistoricalNewsArchiveDialog
 from kiwoom_monitor.presentation.news_execution import (
     ai_progress_text,
     ai_start_block_reason,
@@ -151,6 +152,7 @@ class StockNewsWindow(QDialog):
         self._central_evidence_client: CentralNewsClient | None = None
         self._central_ai_client: CentralAIClient | None = None
         self._central_operational_client: CentralOperationalSettingsClient | None = None
+        self._historical_archive_dialog: HistoricalNewsArchiveDialog | None = None
         try:
             source = DataSourceConfig(config_path.with_name("data_source.json")).load()
             if source.mode in {"local_server", "personal_server"}:
@@ -235,6 +237,10 @@ class StockNewsWindow(QDialog):
         self._show_low_relevance.toggled.connect(self._schedule_prepare)
         refresh = QPushButton("새로고침")
         refresh.clicked.connect(lambda: self.refresh(force=True))
+        archive = QPushButton("과거 수집 자료")
+        archive.setToolTip("PC에서 완성해 NAS에 게시한 과거 뉴스 archive를 별도로 조회합니다.")
+        archive.setVisible(self._central_news_client is not None)
+        archive.clicked.connect(self._open_historical_archive)
         settings = QPushButton("⚙")
         settings.setToolTip("뉴스 설정")
         settings.setAccessibleName("뉴스 설정")
@@ -270,6 +276,7 @@ class StockNewsWindow(QDialog):
         top.addStretch()
         top.addWidget(self._auto_ai_toggle)
         top.addWidget(self._show_low_relevance)
+        top.addWidget(archive)
         top.addWidget(refresh)
         top.addWidget(self._window_mode)
         top.addWidget(settings)
@@ -350,6 +357,8 @@ class StockNewsWindow(QDialog):
             or account_scope != self._journal_account_scope
         )
         if changed:
+            if self._historical_archive_dialog is not None:
+                self._historical_archive_dialog.set_stock(code, name.strip())
             self._news_next_offset = None
             self._news_loaded_limit = 200
             self._news_page_initialized = False
@@ -1276,6 +1285,8 @@ class StockNewsWindow(QDialog):
         self._save_window_geometry()
         self._allow_close = True
         self._auto_refresh.stop()
+        if self._historical_archive_dialog is not None:
+            self._historical_archive_dialog.shutdown()
         self._prepare_request_id += 1
         self._pending_prepare = None
         self._evidence_request_id += 1
@@ -1289,6 +1300,19 @@ class StockNewsWindow(QDialog):
                 active_worker.requestInterruption()
                 active_worker.wait(10_000)
         self.close()
+
+    def _open_historical_archive(self) -> None:
+        if self._central_news_client is None or not self._stock_code:
+            return
+        if self._historical_archive_dialog is None:
+            self._historical_archive_dialog = HistoricalNewsArchiveDialog(
+                self._central_news_client, self,
+            )
+            self._historical_archive_dialog.set_stock(self._stock_code, self._stock_name)
+        self._historical_archive_dialog.show()
+        self._historical_archive_dialog.raise_()
+        self._historical_archive_dialog.activateWindow()
+        self._historical_archive_dialog.load_if_needed()
 
     def _save_window_geometry(self) -> None:
         """앱 종료 직전에도 마지막 뉴스창 위치와 크기를 확실히 기록한다."""

@@ -1,0 +1,192 @@
+{
+  "captured_at_utc": "2026-09-25T21:28:32.516603+00:00",
+  "pgdata_host": "/volume1/docker/kiwoom-monitor/deploy/synology/postgres-data",
+  "paths": {
+    "PGDATA": {
+      "resolved_path": "/volume1/docker/kiwoom-monitor/deploy/synology/postgres-data",
+      "mount": {
+        "major_minor": "0:35",
+        "mountpoint": "/volume1",
+        "filesystem": "btrfs",
+        "source": "/dev/mapper/cachedev_0",
+        "source_major_minor": "249:4"
+      },
+      "block_graph": {
+        "name": "dm-4",
+        "slaves": [
+          {
+            "name": "dm-1",
+            "slaves": [
+              {
+                "name": "md4",
+                "slaves": [
+                  {
+                    "name": "nvme0n1p1",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:14.0/0000:04:00.0/nvme/nvme0/nvme0n1/nvme0n1p1"
+                  },
+                  {
+                    "name": "nvme1n1p1",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:14.1/0000:05:00.0/nvme/nvme1/nvme1n1/nvme1n1p1"
+                  }
+                ],
+                "sysfs": "/sys/devices/virtual/block/md4"
+              }
+            ],
+            "sysfs": "/sys/devices/virtual/block/dm-1"
+          },
+          {
+            "name": "dm-3",
+            "slaves": [
+              {
+                "name": "md2",
+                "slaves": [
+                  {
+                    "name": "sata1p5",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:12.0/ata1/host0/target0:0:0/0:0:0:0/block/sata1/sata1p5"
+                  },
+                  {
+                    "name": "sata2p5",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:12.0/ata2/host1/target1:0:0/1:0:0:0/block/sata2/sata2p5"
+                  },
+                  {
+                    "name": "sata3p5",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:13.0/0000:01:00.0/ata4/host3/target3:0:0/3:0:0:0/block/sata3/sata3p5"
+                  },
+                  {
+                    "name": "sata4p5",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:13.0/0000:01:00.0/ata5/host4/target4:0:0/4:0:0:0/block/sata4/sata4p5"
+                  }
+                ],
+                "sysfs": "/sys/devices/virtual/block/md2"
+              },
+              {
+                "name": "md3",
+                "slaves": [
+                  {
+                    "name": "sata1p6",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:12.0/ata1/host0/target0:0:0/0:0:0:0/block/sata1/sata1p6"
+                  },
+                  {
+                    "name": "sata2p6",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:12.0/ata2/host1/target1:0:0/1:0:0:0/block/sata2/sata2p6"
+                  },
+                  {
+                    "name": "sata4p6",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:13.0/0000:01:00.0/ata5/host4/target4:0:0/4:0:0:0/block/sata4/sata4p6"
+                  }
+                ],
+                "sysfs": "/sys/devices/virtual/block/md3"
+              }
+            ],
+            "sysfs": "/sys/devices/virtual/block/dm-3"
+          }
+        ],
+        "sysfs": "/sys/devices/virtual/block/dm-4"
+      }
+    },
+    "pg_wal": {
+      "resolved_path": "/volume1/docker/kiwoom-monitor/deploy/synology/postgres-data/pg_wal",
+      "mount": {
+        "major_minor": "0:35",
+        "mountpoint": "/volume1",
+        "filesystem": "btrfs",
+        "source": "/dev/mapper/cachedev_0",
+        "source_major_minor": "249:4"
+      },
+      "block_graph": {
+        "name": "dm-4",
+        "slaves": [
+          {
+            "name": "dm-1",
+            "slaves": [
+              {
+                "name": "md4",
+                "slaves": [
+                  {
+                    "name": "nvme0n1p1",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:14.0/0000:04:00.0/nvme/nvme0/nvme0n1/nvme0n1p1"
+                  },
+                  {
+                    "name": "nvme1n1p1",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:14.1/0000:05:00.0/nvme/nvme1/nvme1n1/nvme1n1p1"
+                  }
+                ],
+                "sysfs": "/sys/devices/virtual/block/md4"
+              }
+            ],
+            "sysfs": "/sys/devices/virtual/block/dm-1"
+          },
+          {
+            "name": "dm-3",
+            "slaves": [
+              {
+                "name": "md2",
+                "slaves": [
+                  {
+                    "name": "sata1p5",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:12.0/ata1/host0/target0:0:0/0:0:0:0/block/sata1/sata1p5"
+                  },
+                  {
+                    "name": "sata2p5",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:12.0/ata2/host1/target1:0:0/1:0:0:0/block/sata2/sata2p5"
+                  },
+                  {
+                    "name": "sata3p5",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:13.0/0000:01:00.0/ata4/host3/target3:0:0/3:0:0:0/block/sata3/sata3p5"
+                  },
+                  {
+                    "name": "sata4p5",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:13.0/0000:01:00.0/ata5/host4/target4:0:0/4:0:0:0/block/sata4/sata4p5"
+                  }
+                ],
+                "sysfs": "/sys/devices/virtual/block/md2"
+              },
+              {
+                "name": "md3",
+                "slaves": [
+                  {
+                    "name": "sata1p6",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:12.0/ata1/host0/target0:0:0/0:0:0:0/block/sata1/sata1p6"
+                  },
+                  {
+                    "name": "sata2p6",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:12.0/ata2/host1/target1:0:0/1:0:0:0/block/sata2/sata2p6"
+                  },
+                  {
+                    "name": "sata4p6",
+                    "slaves": [],
+                    "sysfs": "/sys/devices/pci0000:00/0000:00:13.0/0000:01:00.0/ata5/host4/target4:0:0/4:0:0:0/block/sata4/sata4p6"
+                  }
+                ],
+                "sysfs": "/sys/devices/virtual/block/md3"
+              }
+            ],
+            "sysfs": "/sys/devices/virtual/block/dm-3"
+          }
+        ],
+        "sysfs": "/sys/devices/virtual/block/dm-4"
+      }
+    }
+  },
+  "limits": [
+    "Docker bind source must be independently verified with docker inspect",
+    "device graph shows block slaves, not Synology cache policy or observed latency"
+  ]
+}

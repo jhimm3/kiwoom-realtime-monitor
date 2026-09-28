@@ -25,6 +25,9 @@ if str(SOURCE_ROOT) not in sys.path:
 from kiwoom_monitor.central_server.database import (
     PostgresQueryStore, _complete_external_news_job, _news_article_content_hash,
 )
+from kiwoom_monitor.central_server.postgres_access import (
+    DBWriterContext, observe_existing_transaction,
+)
 from kiwoom_monitor.application.news_rules import SUPPLY_CONTRACT_RULE_VERSION
 from kiwoom_monitor.domain.news_observation import (
     ARTICLE_BODY_EXTRACTOR_VERSION, stable_document_hash,
@@ -130,6 +133,68 @@ def _prepare_article(store: PostgresQueryStore, connection: psycopg.Connection,
     return article_id
 
 
+def _prepare_articles(store: PostgresQueryStore, connection: psycopg.Connection,
+                      records: list[dict]) -> tuple[list[dict], list[tuple[dict, str]]]:
+    """Amortize search-article writes without changing the normal revision writer.
+
+    A failed multi-article write is rolled back by ``upsert_documents``. Retry
+    each member through the original path so one bad article cannot strand the
+    rest of an immutable snapshot. Market source observations retain their
+    per-item run IDs and are deliberately kept on the original path.
+    """
+    prepared: list[dict] = []
+    failed: list[tuple[dict, str]] = []
+    search = [record for record in records if record["scope"] == "historical_backfill"]
+    for offset in range(0, len(search), 25):
+        group = search[offset:offset + 25]
+        values = [{
+            "owner": record["article"]["stock_code"],
+            "key": record["article"]["identity"],
+            "document": record["article"]["document"],
+            "collector_id": "naver_historical_web",
+            "collection_scope": "historical_news_pc_backfill",
+        } for record in group]
+        try:
+            store.upsert_documents("news_article", values)
+        except ValueError:
+            # The store owns a separate transaction, so its context manager
+            # rolls the entire attempted batch back before individual retry.
+            for record in group:
+                try:
+                    record["article_id"] = _prepare_article(
+                        store, connection, record["scope"], record["article"])
+                except Exception as error:
+                    connection.rollback()
+                    failed.append((record, f"{type(error).__name__}: {error}"[:500]))
+                else:
+                    prepared.append(record)
+        else:
+            for record in group:
+                try:
+                    record["article_id"] = _article_revision(
+                        connection, record["article"], record["scope"])
+                except Exception as error:
+                    connection.rollback()
+                    failed.append((record, f"{type(error).__name__}: {error}"[:500]))
+                else:
+                    prepared.append(record)
+            connection.commit()
+    for record in records:
+        if record["scope"] == "historical_backfill":
+            continue
+        try:
+            record["article_id"] = _prepare_article(
+                store, connection, record["scope"], record["article"])
+        except Exception as error:
+            connection.rollback()
+            failed.append((record, f"{type(error).__name__}: {error}"[:500]))
+        else:
+            prepared.append(record)
+    # Completion must preserve the snapshot order, including mixed-scope files.
+    prepared_ids = {id(record) for record in prepared}
+    return [record for record in records if id(record) in prepared_ids], failed
+
+
 def _complete_prepared(connection: psycopg.Connection, article_id: str,
                        article: dict, body: dict, rules: list[dict]) -> None:
     body_state = _complete_prepared_job(
@@ -161,12 +226,17 @@ def _complete_batch(connection: psycopg.Connection, records: list[dict]
     completed: list[dict] = []
     deferred: list[tuple[dict, str]] = []
     failed: list[tuple[dict, str]] = []
-    with connection.transaction():
+    with observe_existing_transaction(connection, DBWriterContext(
+        writer_family="maintenance.prepared_news",
+        writer_kind="prepared_news_completion_batch",
+        operation="complete_batch",
+        rows_attempted=len(records),
+    )) as observed_connection:
         for record in records:
             try:
                 # A savepoint keeps one unavailable job from rolling back peers.
-                with connection.transaction():
-                    _complete_prepared(connection, record["article_id"], record["article"],
+                with observed_connection.transaction():
+                    _complete_prepared(observed_connection, record["article_id"], record["article"],
                                        record["body"], record["rules"])
                 completed.append(record)
             except PreparedImportDeferred as error:
@@ -203,6 +273,7 @@ def main() -> int:
 
     store = PostgresQueryStore(database_url)
     imported = skipped = failed = deferred = batches_committed = 0
+    article_stage_ms = completion_stage_ms = 0
     with closing(sqlite3.connect(f"file:{prepared.as_posix()}?mode=ro",
                                  uri=True)) as source, closing(_open_ledger(args.ledger)) as ledger, \
          psycopg.connect(database_url) as connection:
@@ -229,22 +300,24 @@ def main() -> int:
                     break
                 record = {"scope": scope, "code": code, "identity": identity,
                           "article": article, "body": body, "rules": rules, "digest": digest}
-                try:
-                    record["article_id"] = _prepare_article(store, connection, scope, article)
-                except Exception as error:
-                    failed += 1
-                    print(json.dumps({"state": "failed", "scope": scope, "stock_code": code,
-                                      "identity": identity,
-                                      "error": f"{type(error).__name__}: {error}"[:500]},
-                                     ensure_ascii=False), flush=True)
-                    connection.rollback()
-                    continue
                 ready.append(record)
 
             if ready:
+                article_started = time.perf_counter()
+                ready, article_failures = _prepare_articles(store, connection, ready)
+                article_stage_ms += round((time.perf_counter() - article_started) * 1000)
+                failed += len(article_failures)
+                for record, error in article_failures:
+                    print(json.dumps({"state": "failed", "scope": record["scope"],
+                                      "stock_code": record["code"],
+                                      "identity": record["identity"], "error": error},
+                                     ensure_ascii=False), flush=True)
+            if ready:
                 # Per-article savepoints isolate worker ownership races and bad rows,
                 # while one outer commit amortizes WAL flushes across the batch.
+                completion_started = time.perf_counter()
                 completed, deferred_rows, failed_rows = _complete_batch(connection, ready)
+                completion_stage_ms += round((time.perf_counter() - completion_started) * 1000)
                 deferred += len(deferred_rows)
                 failed += len(failed_rows)
                 for record, reason in deferred_rows:
@@ -269,10 +342,14 @@ def main() -> int:
                     print(json.dumps({"imported": imported, "skipped": skipped,
                                       "failed": failed, "deferred": deferred,
                                       "batches_committed": batches_committed,
-                                      "batch_size": args.batch_size}), flush=True)
+                                      "batch_size": args.batch_size,
+                                      "article_stage_ms": article_stage_ms,
+                                      "completion_stage_ms": completion_stage_ms}), flush=True)
     print(json.dumps({"imported": imported, "skipped": skipped, "failed": failed,
                       "deferred": deferred, "batches_committed": batches_committed,
-                      "batch_size": args.batch_size}), flush=True)
+                      "batch_size": args.batch_size,
+                      "article_stage_ms": article_stage_ms,
+                      "completion_stage_ms": completion_stage_ms}), flush=True)
     return 1 if failed else 2 if deferred else 0
 
 

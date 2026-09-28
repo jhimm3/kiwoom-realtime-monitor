@@ -2,6 +2,8 @@
 
 AI와 사람이 이 저장소를 수정할 때 아래 규칙을 기본 계약으로 적용한다.
 
+모델 선택·추론 수준·상향/하향 강제 handoff는 [모델 단계 전환 정책](docs/MODEL_HANDOFF_POLICY.md)을 따른다. 주요 작업 단계와 설계·원인 해결 시점마다 Luna부터 다음 단계를 재평가하며, handoff가 필요하면 안내 후 멈춘다. 런타임에서 모델을 바꾸지 못했다면 변경했다고 주장하지 않는다.
+
 ## 데이터와 API
 
 1. NAS 모드의 모든 Kiwoom REST 조회는 `CentralRestBroker`를 통과한다. 새 직접 HTTP 호출로 중앙 큐를 우회하지 않는다.
@@ -31,6 +33,7 @@ NAS 재시작·단절 뒤 로컬 실시간 대체 수신에서 중앙 실시간�
 8-5-3. `_AL` 0B·0w는 KRX가 아닌 SOR 통합시세 원본으로 저장한다. 화면용 통합 분봉은 같은 분의 SOR 한 벌을 우선하고 없을 때만 KRX+NXT 한 벌을 사용하며 세 흐름을 함께 더하지 않는다. 실제 승인 REG item이 SOR↔상세로 전환되면 재활성 source의 첫 누적값을 기준점으로 사용하고 이전 source의 늦은 틱을 집계하지 않는다. strict KRX 연구는 SOR 원본을 허용하지 않는다. 분봉 보완 때 SOR 실시간 거래대금과 KRX/NXT 조회 추정값의 차이·차이율을 별도 기록한다.
 8-5-4. 상한가 표시는 `ka10001.upl_pric` 단독 캐시를 현재 기준으로 단정하지 않는다. 추적 종목의 `0g` 상한가·하한가·기준가를 한 묶음으로 중앙 저장·전달하고, 현재가가 제한가격에 닿아도 0B 등락률이 가격제한폭과 모순되면 서로 다른 기준 구간으로 보고 화면 강조와 새 상한가 사실 생성을 막는다.
 8-5-5. NAS 연결 메인 표의 시가총액은 현재 실행에서 받은 `0B` FID 311을 최우선으로 쓴다. 앱 재시작 뒤 아직 새 체결이 없는 종목은 중앙 `central_realtime_latest`의 마지막 0B에서 시가총액과 관측시각만 복원한다. 이 경로로 과거 현재가·등락률을 되살리지 않는다. PC 직접 연결도 마지막 0B 시가총액을 기존 로컬 `stocks.market_cap`에 백그라운드 저장해 재시작 뒤 복원하되 `fundamentals_updated_at`은 갱신하지 않아 다음 거래일 `ka10001` 확인을 막지 않는다. 저장된 0B 시가총액도 없는 신규 종목만 당일 `ka10001` 기본정보를 사용한다. 복원 요청 중 새 0B가 도착하면 새 값이 우선한다.
+8-5-6. PC 직접 연결의 `MinuteBarRepository`도 NAS `PostgresQueryStore`와 같은 분봉 출처 우선권을 지킨다. 열린 분의 0B 저장은 aggregator가 만든 최신 누적 snapshot을 임시 canonical 값으로 교체하고, SQLite에 이미 저장된 0B 봉에 다시 더하지 않는다. `ka10080`이 `QUERY + COMPLETE + kiwoom-ka10080` 메타데이터와 OHLCV·계산 거래대금을 저장하면 이후 0B는 그 분의 봉과 출처 메타데이터를 바꾸지 않는다. 출처 판정과 봉·metadata 갱신은 한 `BEGIN IMMEDIATE` transaction에서 직렬화한다. PC 화면의 메모리 집계에서도 `ka10080`으로 받은 종료 분은 늦은 0B가 수정하지 못하게 하고, NAS에서 복원한 종료 분은 이 직접 조회 확정 표식으로 오인하지 않는다. KRX+NXT 조회 추정값을 override로 전달해도 출처 메타데이터의 거래대금은 `ESTIMATED`다. 분봉 batch/revision 최적화와 별개의 정합성 계약이다.
 8-6. 뉴스 언론사 식별은 원문 URL의 정규화된 `publisher_domain`과 매핑 가능한 `publisher_name`을 함께 사용한다. 화면 제공처 제외는 목록 숨김이고 NAS 처리 제외는 별도 운영 정책이다. NAS 처리 제외 기사도 제목·링크와 source observation은 보존하되 새 BODY/RULE/자동 AI 작업을 만들지 않는다. 기존 완료·대기 작업을 소급 삭제하지 않으며, 파생 언론사 필드 보정만으로 새 기사 revision을 만들지 않는다.
 8-7. 중앙 종목 뉴스의 관련성 판정은 저장된 `fulltext` 원문이 있으면 이를 함께 사용한다. 원문 evidence는 그대로 보존하고, 화면·규칙·AI 입력에서는 저작권 문구 뒤의 포털 추천·랭킹·댓글 영역을 제거한 정제본을 사용한다. 정제 뒤 본문이 비면 검색 요약으로 보완한다. 장중 가격·지수·거래량을 중계하는 제목은 원문 뒤쪽에 과거 계약이나 일반 기대가 있어도 새 기업 사건으로 승격하지 않는다. 제목 또는 원문 도입부에서 당일 공시·계약·실적처럼 확인 가능한 새 사건을 제시할 때만 관련 뉴스로 보존한다. 공급계약 금액은 공급·수주 표현과 같은 문장 안에서만 추출하며 주가와 시가총액을 계약금액으로 사용하지 않는다.
 8-8. 뉴스 상세의 비AI 요약은 정제된 `fulltext`에서 최대 3개 원문 문장만 선택한다. 새 문장을 생성하거나 원문을 대체하지 않으며, 포털 푸터·저작권 꼬리와 900자를 넘는 비정상 단일 문장은 선택하지 않는다. 안전한 핵심 문장이 없으면 요약을 생략하고 저장 본문만 표시한다. `summary_only` 자료에는 추출 요약을 표시하지 않는다.
@@ -127,6 +130,8 @@ Kiwoom TR·주문 transport를 호출하지 않는다.
 29-2. NAS 서버의 요청별 Uvicorn access log는 Container Manager stdout에 쌓지 않고 `server-data/logs`의 자정 회전 파일에 기록한다. 회전 파일은 제한된 일수만 보존하며, 콘솔에는 요청마다 반복되지 않는 서버 상태·경고·오류를 남긴다.
 29-3. NAS→키움 실제 REST 전송 감사 로그는 `kiwoom_monitor.kiwoom_api`에 본문 없이 namespace·TR 코드·연속조회 여부·소요시간만 기록한다. 중앙 DB/API 조회와 broker cache hit를 키움 호출로 기록하지 않는다.
 29-4. TOP20 순위가 키움 응답 뒤 늦게 보이면 `조회후_ms`와 `저장_ms`를 먼저 분리한다. PostgreSQL dataset 저장이나 조회가 1초 이상 걸릴 때는 연결, snapshot upsert, metadata, observation revision, commit/close 단계별 시간 또는 조회 연결·query 시간을 경고 로그에 남겨 TR 지연과 DB 지연을 혼동하지 않는다.
+29-5. PostgreSQL transaction 경계나 실시간 수신·flush·저장 순서를 변경할 때는 속도 측정만으로 완료하지 않는다. 동일 이벤트의 중복·순서 역전·동시 도착, DB 실패와 재시도, commit 전후 프로세스 종료·재시작을 재현해 중복 반영·조용한 누락·부분 저장이 없는지 검증한다. 변경 전후 원천 이벤트, 최신값, 분봉/초봉, observation 이력, 완료 상태의 건수와 식별자·값을 대조하고, 허용된 공백은 명시적으로 기록한다. 실제 NAS 적용 전에는 독립된 테스트 DB에서 이 검증과 관련 회귀를 통과시키고, 적용 뒤에도 같은 보존 지표를 확인한다. 자세한 확인 항목은 `docs/KIWOOM_STORAGE_WRITE_AUDIT.md`를 따른다.
+29-6. 새 DB·스키마·테이블·저장 경로·writer 또는 독립 백그라운드 작업을 추가하거나 저장 책임을 옮길 때는 같은 변경에서 진단도구에 항목별 자식 스위치와 측정 등록을 추가한다. 진단도구에는 최상단 master ON/OFF가 있고 모든 capture·작업·writer 자식 스위치는 그 아래에 둔다. master OFF·TTL 만료·재시작은 모든 자식 효과를 해제하며, 자식 TTL은 master 만료를 넘지 않는다. 저장 경로 원장, writer registry, 호출·실제 반영 행수·단계시간·오류/재시도 계측, 관련 DB의 WAL/대기/저장장치 표본을 갱신한다. 측정 불가 값은 입력 시도 수로 가장하지 말고 미계측으로 표시한다. 각 자식 스위치에는 제어 범위·기본 상태·중단 중 자료 처리·재개/복구 동작을 적는다. 실시간 수신, 계좌·주문·체결 원장처럼 중단이 데이터 공백이나 실행 위험을 만드는 경로도 목록에서 빠뜨리지 말고, 안전한 drain/재개·공백 기록을 구현한 뒤 보호 경로용 명시 강제 옵션으로 개별 제어한다. 진단 목록·운영 안내·관련 데이터 보존/동시성 검증도 함께 갱신한 뒤 완료로 보고한다. 기준 문서는 `docs/KIWOOM_STORAGE_WRITE_AUDIT.md`와 `docs/NAS_RUNTIME_DIAGNOSTICS.md`다.
 30. 초기 ENV에서 이관된 구형 계좌 profile은 vault activation receipt가 없거나 `account_ref`만 있는 부분 activation이어도 검증된 최신 account binding이 남아 있으면 연결 해제에 그 binding을 사용한다. `operation_id`, `request_id`, keyed digest, account/run/environment/committed 시각이 모두 있는 완성 activation만 기존 receipt로 finalize한다. run ID가 없거나 UUID가 아닌 구형 임의 문자열이면 profile/account에서 결정적인 migration run ID를 만들며 새 계좌 신원이나 주문 runtime을 생성하지 않는다.
 
 Qt GUI 테스트에서 `close()`는 객체 파괴 완료를 뜻하지 않는다. 창·대화상자를 반복 생성하는 테스트는 `deleteLater()` 후 `DeferredDelete` 이벤트 처리까지 수행해 C++ 객체가 Python 종료 시점에 몰려 파괴되지 않게 한다. 테스트 본문이 `OK`여도 네이티브 종료 코드가 0이 아니면 통과로 보고하지 않는다.

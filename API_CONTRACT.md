@@ -1,8 +1,26 @@
 # NAS API 계약
 
+2026-09-29 NAS 진단 API v4(`2026.09.29-diagnostic-api-v4`)가 NAS에 배포됐다. 기존 Bearer 인증 아래 `GET /api/v1/diagnostics/capabilities`, `PUT /api/v1/diagnostics/control`, `GET /api/v1/diagnostics/snapshot`, `POST /api/v1/diagnostics/runs`, `GET /api/v1/diagnostics/runs/{run_id}`, `POST /api/v1/diagnostics/runs/{run_id}/cancel`, `GET /api/v1/diagnostics/reports`, `GET /api/v1/diagnostics/reports/{report_id}`, `GET /api/v1/diagnostics/history`를 제공한다. control은 `target=master|capture|workload`, `expected_revision` 필수, 기존 session/TTL/owner 규칙을 따른다. PostgreSQL snapshot은 고정 read-only query만 실행하며 `sections=postgres,activity,news_jobs,host,storage`에서 선택한다. query text·parameter·DSN은 반환하지 않는다. run은 `kind=measure|compare`, `seconds`와 선택 label/workload/request_id를 받아 202와 run ID를 반환하고, 동일 session/request_id의 같은 요청은 기존 run을 반환한다. 한 번에 한 run만 허용하며 409 충돌은 큐잉하지 않는다. 보고서는 기존 diagnostic-results JSON도 조회한다. 실제 검증은 [설계·검증 문서](docs/NAS_DIAGNOSTIC_API_DESIGN.md)에 기록하며, 관측 범위는 `opt_in_observed_calls_only`와 각 section의 scope에 한정된다.
+
+2026-09-27 공통 DB 관측 pilot: 인증된 `GET /api/v1/diagnostics/db-calls?start=<epoch>&end=<epoch>&mode=summary|verbose|raw&limit=200&slow_ms=500`는 capture 중 공통 경계를 통과한 호출만 반환한다. 구간은 0초 초과·1,800초 이내, `limit`은 1~500, `slow_ms`는 1~30,000이다. 응답은 `coverage=opt_in_observed_calls_only`, capture 상태, 보존 범위와 drop 수, `(writer_family,writer_kind)`별 `writers`와 `readers` 집계 및 무등록 수를 포함한다. 기존 call record에 `access_mode`가 없으면 `write`로 취급한다. `raw`는 최대 `limit`개 호출별 ID·PID·접근 분류·단계 시간·outcome·오류 타입만 노출하며 SQL/parameter/DSN은 담지 않는다. 현재 이관 writer는 REST query cache 한 종류이며 cache reader는 별도 `read.query_cache/query_cache` 집계다. capture OFF/만료나 미이관 경로는 0건 활동으로 해석하지 않는다. 기존 `/diagnostics/market-bar-saves`와 `/diagnostics/writers`는 유지한다.
+
+2026-09-28 READ 확장: summary 응답은 writer와 reader를 분리한다. 현재 관측한 reader kinds에는 `read.query_cache/query_cache`, `read.document_collection/document:<collection>`, `read.market_bars/minute_bar|daily_bar`, `read.observation_revisions/observation_revision|observation_revisions_after`, `read.shadow_monitor/monitor_state|candidate_events`, `read.dataset_snapshots/dataset:<kind>`, `read.market_data_metadata/metadata_range`, `read.news_history/history:<kind>`, `read.news_revision/article_revision|body_revision`, `read.news_source/source_cursor|source_diagnostics`, `read.news_publications/market_feed|stock_articles|confirmed_articles`가 포함된다. 이 목록은 접근 전수 인벤토리가 아니며 capture OFF·미이관 경로가 0건임을 의미하지 않는다.
+
+2026-09-26 진단 상태 응답 추가: 인증된 `GET /api/v1/diagnostics/workloads`는
+최상단 `diagnostic_tool`에 `enabled`, `expires_at`, `owner`, `session_id`를,
+응답 최상위에 `control_revision`을 포함한다. `workloads`의 자식 상태와
+`metrics_capture`는 같은 제어 파일 세대를 한 번 읽어 평가한다.
+`workloads[*].effective`는 운영 설정과 진단 pause를 결합한 요청 상태이며,
+실제 작업 drain 완료를 뜻하지 않는다. master OFF·만료·재시작 시 진단
+override는 무효화된다. CLI 측정 보고서의 `state=aborted`는 중간 종료를 뜻하고,
+`report <id>` 읽기는 master OFF에서도 허용된다. 보호 수신·주문·writer 제어는
+현재 API 구현 범위에 포함되지 않는다.
+
 상태 정리 기준: 2026-09-22. 아래 API·필드·실패 처리 계약은 유지한다. R0~R6 로컬 구현과 R7 기본 배포·HTTPS/WSS 연결은 완료 기록이 있으며, 최신 누적 빌드의 실행 반영과 장중·장시간 검증은 별도다. 단계 이름이 붙은 설명은 그 단계의 구현 범위를 나타낸다. 현재 구현·배포 상태는 [현재 상태](docs/CURRENT_STATUS.md), 미완료 구현과 운영 검증은 [남은 작업](docs/OPEN_ITEMS.md)을 따른다.
 
 현재 계약 버전은 `api_version=v1`, `schema_version=1`이다. 모든 `/api/v1/*` HTTP 요청은 `Authorization: Bearer <NAS 접속 토큰>`이 필요하다. `/health`만 공개다. WebSocket은 같은 헤더 또는 `?token=`을 사용한다.
+
+2026-09-26 진단 상태 응답은 `external_market`의 `runtime` 객체에 `operational_enabled`, `running`, `poll_seconds`, 누적 수집 시도·완료·성공 행 수와 마지막 실행 시각·행 수·오류를 추가한다. 이 항목의 `effective`는 운영 활성화, 살아 있는 수집 task, 진단 pause를 모두 반영한다. 계측값은 프로세스 수명 내 메모리 상태이며 수집 task의 실제 DB 반영 성공을 행 수만으로 보증하지 않는다.
 
 자동 시장자료 조회에서 `GET /api/v1/market/snapshots/{kind}`의 `kind`는 `investor_flow`, `program_flow`, `new_high`, `market_index_chart`를 포함한다. `GET /api/v1/content/stock_fundamentals`, `stock_nxt_eligibility`, `historical_highs`는 NAS가 만든 종목 문서를 반환한다. `historical_highs.document.target`은 `price`, `first_year`, `last_year`, `occurred_on`, `evidence`를 가진다. 중앙 연결이 정상인데 자료가 비어 있으면 앱은 빈 저장 결과로 처리하고 Kiwoom TR을 대신 만들지 않는다.
 
@@ -439,6 +457,8 @@ RECOVERY_REQUIRED이며 이전 키로 자동 rollback하지 않는다. DB 최종
 현재 revision을 읽고 빈 부분 PUT으로 재적용하거나 재시작 시 영속 설정을 다시 조립한다.
 성공 시 `apply_status=ACTIVE`, `applied_revision=revision`이다.
 | `GET /api/v1/diagnostics/resources` | 없음 | 프로세스/호스트 메모리, 디스크·DB 전체 크기, 뉴스/시장/연구/계좌/기타별 추정 용량·건수와 현재 보존 상태 | NAS 자원 진단 |
+| `GET /api/v1/diagnostics/writers` | 없음 | 현재 계측 writer의 ID·source·table·durability·pause 지원 여부와 미계측 범위 | writer registry. 전수 인벤토리 아님 |
+| `GET /api/v1/diagnostics/db-calls` | `start`, `end`, 선택 `mode`, `limit`, `slow_ms` | 공통 관측 pilot의 family/kind별 호출·성공/오류·단계시간, verbose 느린 호출, raw 제한 표본 | 인증·시간/출력 상한; 기존 writer 전체가 아님 |
 
 운영 설정 `ai_provider`는 `none/openai/gemini/claude`, 뉴스 간격은 60~86,400초다. 이 API는 공급자 비밀키를 반환하거나 변경하지 않는다.
 
@@ -516,6 +536,8 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 | `POST /api/v1/news/search` | `stock_code`, `stock_name`, 선택 `since`, 자동분석 옵션 | `stock_code`, 최신순 `items[]`(최대 1000) |
 | `POST /api/v1/news/analyze` | 종목, provider/model, `events[1..20]`, `article_count` | 중앙 AI 서비스 분석 문서. 공급자 429/5xx는 상태 코드를 보존한다. |
 | `GET /api/v1/news/history/{kind}` | `kind=article/body/ai/event/membership`, 선택 `target`, `identity`, Unix 초 `as_of`, `limit` | `known`, `kind`, `revisions[]`. 서버 가용시각 역순의 불변 이력 |
+| `GET /api/v1/news/historical-archive/search` | Bearer 인증, 6자리 `stock_code`, `limit=1..200`, 선택 서명된 `cursor` | 봉인된 PC archive의 `dataset_id`, `items[]`, `next_cursor`. 현재 뉴스 목록과 분리. 미설정·미봉인·진단 일시정지 시 503, 잘못된 cursor는 400 |
+| `GET /api/v1/news/historical-archive/articles/{article_revision_id}` | Bearer 인증, 필수 `dataset_id`, 선택 정확한 `body_revision_id` | archive의 기사·본문·assessment 상태·정확한 사건 membership 이력. dataset 변경 409, ID 없음 404, 다른 기사의 BODY ID 400. 누락 판정 재계산 없음 |
 | `POST /api/v1/news/historical-jobs/claim?stage=BODY\|RULE` | Bearer 인증. 과거 기사 대기 작업 한 건 원자 선점. `scope=pc_market`은 신규 PC 시황, `pc_search`는 신규 PC 네이버 검색만 선점한다. `scope=pc`와 기본 `all`은 기존 NAS 적재분을 포함한 네 과거 범위를 선점한다. NAS 일반 작업기는 이 네 범위의 BODY/RULE을 선점하지 않는다. `excluded_codes`는 쉼표로 구분한 6자리 코드(최대 500개) | `job`·`article`, RULE이면 기존 저장 `body`; 없으면 `job=null`. 완료된 작업은 다시 선점하지 않고 시도 번호로 결과 소유권 검증 |
 | `POST /api/v1/news/historical-jobs/complete` | Bearer 인증. `job_key`, `attempts`, `stage`와 BODY 본문·원문시각 또는 RULE 평가·핵심문장·공급계약 결과; 실패 시 `error` | revision·작업 완료를 한 트랜잭션에 기록. 동일 시도 재전송은 `already_completed`; 만료·다른 시도는 409 |
 | `POST /api/v1/news/historical-market-articles` | Bearer 인증. `source=flash\|world`, `target_date`, 결정적 `batch_id`, `processing_owner=nas\|pc`(기본 nas), 해당 날짜 기사 `items` 1~100건. 각 기사는 identity·document·targets를 포함 | 기존 `central_news_source_observations`와 BODY/RULE 원장에 저장. `pc` 범위의 BODY/RULE은 NAS 일반 작업기가 선점하지 않음. 같은 batch_id 재전송은 `already_imported`; 종목 연결 여부와 무관하게 시황 탭 소속 유지 |
@@ -528,6 +550,8 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 `news/search`는 기존 종목 owner 기사에 해당 종목 코드로 `confirmed` 연결된 N3 GLOBAL 기사를 합친다. unresolved·ambiguous·다른 종목은 제외하고, 같은 identity가 겹치면 기존 종목 owner 기사를 우선한다. GLOBAL의 같은 identity 판본은 중앙 수락 순서가 가장 최신인 confirmed 판본 하나만 사용한다. 합친 결과는 게시시각 내림차순, 같은 시각은 identity 오름차순이며 게시시각 결측·오류는 `since`가 없을 때 마지막에 둔다. `since`가 있으면 시각을 확인할 수 없거나 cutoff 이하인 행은 제외한다. 목록 병합은 NAVER 요청이나 BODY/RULE/AI 예약을 추가하지 않고, 자동 AI 후보는 기존 종목 owner 기사만 유지한다.
 
 기사 이력의 `target`은 종목코드, `identity`는 기존 기사 identity다. 본문 이력의 `target`은 `article_revision_id`, AI 이력의 `target`은 분석 대상 종목코드다. `as_of`는 `available_at <= as_of`인 행만 반환하며 최초 원장 기록 전에는 `known=false`다. 이 API는 현재 화면용 `news_article/news_ai` projection을 변경하지 않는다.
+
+단발성 과거뉴스 archive API는 **로컬 구현·운영 미게시** 상태다. `HISTORICAL_NEWS_ARCHIVE_PATH`가 비어 있으면 비활성이고, 절대경로의 `sealed` 파일과 완료된 검색 projection이 있어야 켜진다. 기존 `capabilities.news_archive`는 기존 PG 뉴스 기능으로 유지하고, 새 `capabilities.historical_news_archive_v1` 및 `historical_news_archive_dataset_id`로만 별도 지원을 알린다. cursor는 dataset·종목 필터에 묶이고, 해당 reader의 진단 pause는 진단 master 세션과 TTL 아래에서만 유효하다. 현재 API에는 시황 목록·`as_of`·클라이언트 UI 연결이 없다.
 
 사건 이력의 `target`은 종목코드, `identity`는 영속 `event_id`다. 소속 이력은 `target=event_id`, 선택 `identity=article_revision_id`로 조회한다. `event` 행은 정확한 article/body revision과 규칙·점수 산식 버전, 역할·범위·확실성·신규성, 근거 span, 금액/상대방, 대상별 방향·직접성, `ai_required` 이유를 가진다. URL은 event ID가 아니며 `possible_related_event_ids`는 후보 관계일 뿐 과거 행을 병합하지 않는다.
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
@@ -82,7 +82,7 @@ class MarketDataIngestorTests(unittest.TestCase):
         self.assertEqual(DataValueKind.ESTIMATED, metadata.value_kind)
         self.assertIn("trade_value=ohlcv_estimate", metadata.source)
 
-    def test_query_estimate_does_not_replace_existing_realtime_minute(self) -> None:
+    def test_closed_query_replaces_realtime_minute_and_late_delta_cannot_change_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
@@ -108,14 +108,67 @@ class MarketDataIngestorTests(unittest.TestCase):
                     "low_pric": "69900", "cur_prc": "70050", "trde_qty": "1000",
                 }],
             })
+            late = {**actual, "volume": 10, "trade_value_million_won": 8,
+                    "updated_at": 2.0, "operation_id": "late-0b"}
+            late_observation = minute_bar_observation(
+                late, origin=ObservationOrigin.REALTIME,
+                completeness=DataCompleteness.IN_PROGRESS,
+                source="kiwoom-websocket-0B", value_kind=DataValueKind.ACTUAL,
+            )
+            store.save_minute_bars(
+                [late], observations=[(bar_observation_key(late_observation), late_observation)],
+            )
+            store.finalize_minute_bars([{
+                "trading_date": "2026-09-08", "minute": "10:01", "code": "005930", "market": "KRX",
+                "available_at": datetime(2026, 9, 8, 10, 2, tzinfo=timezone(timedelta(hours=9))).timestamp(),
+                "capture_quality": "complete", "finalization_source": "timer",
+                "operation_id": "late-0b-close",
+            }])
             bars = store.load_minute_bars("005930", "2026-09-08", "KRX")
             metadata = store.load_market_data_metadata(
                 MarketDatasetKind.MINUTE_BAR, "005930:KRX", "2026-09-08T10:01",
             )
             store.close()
 
-        self.assertEqual(777, bars[0]["trade_value_million_won"])
-        self.assertEqual(DataValueKind.ACTUAL, metadata.value_kind)
+        self.assertEqual(70, bars[0]["trade_value_million_won"])
+        self.assertEqual(1000, bars[0]["volume"])
+        self.assertEqual(DataValueKind.ESTIMATED, metadata.value_kind)
+        self.assertEqual(ObservationOrigin.QUERY, metadata.origin)
+        self.assertEqual(DataCompleteness.COMPLETE, metadata.completeness)
+
+    def test_realtime_replaces_provisional_query_minute_without_adding_its_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            MarketDataIngestor(
+                store, now_provider=lambda: datetime(2026, 9, 8, 10, 1, 30)
+            ).ingest("ka10080", {"stk_cd": "005930", "base_dt": "20260908"}, {
+                "stk_min_pole_chart_qry": [{
+                    "cntr_tm": "20260908100100", "open_pric": "70000", "high_pric": "70100",
+                    "low_pric": "69900", "cur_prc": "70050", "trde_qty": "1000",
+                }],
+            })
+            realtime = {
+                "trading_date": "2026-09-08", "minute": "10:01", "code": "005930", "market": "KRX",
+                "open": 70000, "high": 70150, "low": 69900, "close": 70100, "volume": 15,
+                "trade_value_million_won": 1, "updated_at": 2.0, "operation_id": "in-progress-0b",
+            }
+            observation = minute_bar_observation(
+                realtime, origin=ObservationOrigin.REALTIME,
+                completeness=DataCompleteness.IN_PROGRESS,
+                source="kiwoom-websocket-0B", value_kind=DataValueKind.ACTUAL,
+            )
+            store.save_minute_bars(
+                [realtime], observations=[(bar_observation_key(observation), observation)],
+            )
+            bars = store.load_minute_bars("005930", "2026-09-08", "KRX")
+            metadata = store.load_market_data_metadata(
+                MarketDatasetKind.MINUTE_BAR, "005930:KRX", "2026-09-08T10:01",
+            )
+            store.close()
+        self.assertEqual(15, bars[0]["volume"])
+        self.assertEqual(1, bars[0]["trade_value_million_won"])
+        self.assertEqual(ObservationOrigin.REALTIME, metadata.origin)
 
     def test_ingests_daily_query(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

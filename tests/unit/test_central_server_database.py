@@ -7,7 +7,8 @@ import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.central_server.central_schema import (
     CENTRAL_SCHEMA_BASELINE_NAME,
@@ -33,11 +34,22 @@ from kiwoom_monitor.central_server.central_schema import (
     central_schema_migrations,
 )
 from kiwoom_monitor.central_server.database import (
+    POSTGRES_MULTIROW_UPSERT_ROWS,
+    SQLITE_MULTIROW_UPSERT_ROWS,
     PostgresQueryStore,
     SQLiteQueryStore,
     StoredQuery,
+    _append_postgres_observation_revision,
+    _insert_postgres_observation_revision,
+    _insert_postgres_observation_revisions_batch,
+    _insert_sqlite_observation_revisions_batch,
+    _load_postgres_latest_revisions,
+    _execute_multirow_upsert,
     _uses_async_dataset_commit,
     create_query_store,
+)
+from kiwoom_monitor.central_server.market_observations import (
+    bar_observation_key, daily_bar_observation, minute_bar_observation,
 )
 from kiwoom_monitor.central_server.schema_migrations import CentralSchemaMigrationError, CentralSchemaMigrationRunner
 from kiwoom_monitor.domain.market_data_contract import (
@@ -51,9 +63,228 @@ from kiwoom_monitor.domain.market_data_contract import (
     ObservationOrigin,
     TradingVenue,
 )
+from kiwoom_monitor.domain.research_contract import ObservationRevisionSource
 
 
 class CentralServerDatabaseTests(unittest.TestCase):
+    def test_multirow_upsert_uses_one_postgres_statement_and_bounded_sqlite_batches(self) -> None:
+        class Executor:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+            def execute(self, sql, parameters) -> None:
+                self.calls.append((sql, tuple(parameters)))
+
+        rows = [(index, index + 1, index + 2) for index in range(900)]
+        postgres = Executor()
+        sqlite = Executor()
+
+        postgres_statements = _execute_multirow_upsert(
+            postgres, "INSERT INTO sample VALUES", rows,
+            "ON CONFLICT(id) DO NOTHING", placeholder="%s",
+            batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
+        )
+        sqlite_statements = _execute_multirow_upsert(
+            sqlite, "INSERT INTO sample VALUES", rows,
+            "ON CONFLICT(id) DO NOTHING", placeholder="?",
+            batch_size=SQLITE_MULTIROW_UPSERT_ROWS,
+        )
+
+        self.assertEqual(1, postgres_statements)
+        self.assertEqual(12, sqlite_statements)
+        self.assertEqual(2_700, len(postgres.calls[0][1]))
+        self.assertEqual(240, len(sqlite.calls[0][1]))
+
+    def test_multirow_upsert_batch_boundaries_fit_driver_bind_limits(self) -> None:
+        class Executor:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def execute(self, sql, parameters) -> None:
+                self.calls.append((sql, parameters))
+
+        for count in (1, 80, 81, 900, 1001):
+            rows = [tuple([index] * 12) for index in range(count)]
+            for placeholder, batch_size, bind_limit in (
+                ("?", SQLITE_MULTIROW_UPSERT_ROWS, 999),
+                ("%s", POSTGRES_MULTIROW_UPSERT_ROWS, 65535),
+            ):
+                with self.subTest(count=count, placeholder=placeholder):
+                    executor = Executor()
+                    statements = _execute_multirow_upsert(
+                        executor, "INSERT INTO sample VALUES", rows,
+                        "ON CONFLICT(id) DO NOTHING", placeholder=placeholder,
+                        batch_size=batch_size,
+                    )
+                    self.assertEqual((count + batch_size - 1) // batch_size, statements)
+                    self.assertEqual(count * 12, sum(len(params) for _, params in executor.calls))
+                    self.assertTrue(all(len(params) <= bind_limit for _, params in executor.calls))
+
+    def test_sqlite_multirow_sql_executes_at_batch_boundaries(self) -> None:
+        for count in (1, 80, 81, 900, 1001):
+            with self.subTest(count=count), closing(sqlite3.connect(":memory:")) as connection:
+                connection.execute(
+                    "CREATE TABLE sample (id INTEGER PRIMARY KEY," +
+                    ",".join(f"field_{index} INTEGER" for index in range(11)) + ")"
+                )
+                rows = [(index, *([index + 1] * 11)) for index in range(count)]
+                statements = _execute_multirow_upsert(
+                    connection, "INSERT INTO sample VALUES", rows,
+                    "ON CONFLICT(id) DO UPDATE SET field_0=excluded.field_0",
+                    placeholder="?", batch_size=SQLITE_MULTIROW_UPSERT_ROWS,
+                )
+                self.assertEqual((count + 79) // 80, statements)
+                self.assertEqual(count, connection.execute("SELECT count(*) FROM sample").fetchone()[0])
+                self.assertEqual(count, connection.execute(
+                    "SELECT field_0 FROM sample WHERE id=?", (count - 1,),
+                ).fetchone()[0])
+
+    def test_sqlite_duplicate_minute_transition_preserves_final_update_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            original = {
+                "trading_date": "2099-01-06", "minute": "10:00",
+                "code": "005930", "market": "KRX", "open": 100,
+                "high": 110, "low": 90, "close": 100, "volume": 10,
+                "trade_value_million_won": 1, "updated_at": 1000.0,
+            }
+            store.replace_minute_bars([original])
+            changed = {**original, "close": 101, "updated_at": 1001.0}
+            restored = {**original, "updated_at": 1002.0}
+            store.replace_minute_bars([changed, restored])
+            [saved] = store.load_minute_bars("005930", "2099-01-06", "KRX")
+            store.close()
+        self.assertEqual(100, saved["close"])
+        self.assertEqual(1002.0, saved["updated_at"])
+
+    def test_postgres_revision_helper_reports_insert_without_changing_deduplication(self) -> None:
+        value = {
+            "trading_date": "2026-09-25", "minute": "09:30", "code": "005930",
+            "market": "KRX", "open": 100, "high": 101, "low": 99,
+            "close": 100, "volume": 10, "trade_value_million_won": 1,
+            "updated_at": 1790300000.0,
+        }
+        observation = minute_bar_observation(
+            value, origin=ObservationOrigin.QUERY,
+            completeness=DataCompleteness.COMPLETE,
+            source="kiwoom-ka10080", value_kind=DataValueKind.ACTUAL,
+        )
+        payload = {"close": value["close"]}
+        source = ObservationRevisionSource.from_observation(
+            "minute_bar", observation.subject, "2026-09-25T09:30", payload, observation,
+        )
+
+        class Cursor:
+            def __init__(self, latest):
+                self.latest = latest
+                self.insert_count = 0
+
+            def execute(self, sql, parameters):
+                if sql.startswith("SELECT revision_id,payload_hash"):
+                    return None
+                if sql.startswith("INSERT INTO central_observation_revisions"):
+                    self.insert_count += 1
+                    return None
+                raise AssertionError(f"unexpected query: {sql}")
+
+            def fetchone(self):
+                return self.latest
+
+        unchanged = Cursor(("existing", source.payload_hash))
+        self.assertFalse(_append_postgres_observation_revision(
+            unchanged, "minute_bar", observation.subject, "2026-09-25T09:30",
+            payload, observation,
+        ))
+        self.assertEqual(0, unchanged.insert_count)
+
+        changed = Cursor(("existing", "different-hash"))
+        self.assertTrue(_append_postgres_observation_revision(
+            changed, "minute_bar", observation.subject, "2026-09-25T09:30",
+            payload, observation,
+        ))
+        self.assertEqual(1, changed.insert_count)
+
+    def test_postgres_revision_batch_preserves_duplicate_key_chain(self) -> None:
+        def source(close: int, minute: str = "09:30") -> ObservationRevisionSource:
+            value = {
+                "trading_date": "2026-09-25", "minute": minute, "code": "005930",
+                "market": "KRX", "open": 100, "high": max(110, close), "low": 90,
+                "close": close, "volume": 10, "trade_value_million_won": 1,
+                "updated_at": 1790300000.0,
+            }
+            observation = minute_bar_observation(
+                value, origin=ObservationOrigin.QUERY,
+                completeness=DataCompleteness.COMPLETE,
+                source="kiwoom-ka10080", value_kind=DataValueKind.ACTUAL,
+            )
+            return ObservationRevisionSource.from_observation(
+                "minute_bar", observation.subject, f"2026-09-25T{minute}",
+                {"close": close}, observation,
+            )
+
+        class Cursor:
+            def __init__(self) -> None:
+                self.statements = []
+                self.inserted = []
+                self.inserted_sequences = []
+                self.result = []
+                self.next_sequence = 1000
+
+            def execute(self, sql, params):
+                self.statements.append((sql, params))
+                if "LEFT JOIN LATERAL" in sql:
+                    self.result = [(*key, None, None) for key in zip(*params)]
+                if "FROM generate_series" in sql:
+                    self.result = [(number,) for number in range(
+                        self.next_sequence, self.next_sequence + params[0]
+                    )]
+                    self.next_sequence += params[0]
+                if sql.startswith("INSERT INTO central_observation_revisions"):
+                    self.inserted_sequences.extend(
+                        params[offset]
+                        for offset in range(0, len(params), 24)
+                    )
+                    self.inserted.extend(
+                        params[offset + 1:offset + 24]
+                        for offset in range(0, len(params), 24)
+                    )
+
+            def fetchall(self):
+                return self.result
+
+        cursor = Cursor()
+        sources = [source(100), source(101), source(101), source(102, "09:31")]
+        timings = {}
+        latest = _load_postgres_latest_revisions(cursor, sources, timings=timings)
+        self.assertEqual(2, len(latest))
+        self.assertGreaterEqual(timings["lock_seconds"], 0)
+        self.assertGreaterEqual(timings["lookup_seconds"], 0)
+        self.assertEqual(1, sum("LEFT JOIN LATERAL" in sql for sql, _ in cursor.statements))
+        self.assertEqual(1, sum("pg_advisory_xact_lock" in sql for sql, _ in cursor.statements))
+        insert_execute_seconds = [0.0]
+        statement_count, inserted_rows = _insert_postgres_observation_revisions_batch(
+            cursor, sources, latest, execute_seconds=insert_execute_seconds,
+        )
+        self.assertEqual(1, statement_count)
+        self.assertEqual(3, inserted_rows)
+        self.assertEqual(3, len(cursor.inserted))
+        self.assertEqual([1000, 1001, 1002], cursor.inserted_sequences)
+        self.assertGreaterEqual(insert_execute_seconds[0], 0)
+        self.assertIsNone(cursor.inserted[0][12])
+        self.assertEqual(cursor.inserted[0][0], cursor.inserted[1][12])
+        self.assertIsNone(cursor.inserted[2][12])
+
+        # A repeated key must keep one chain even when the batch size is crossed.
+        earlier_rows = len(cursor.inserted)
+        statements, rows = _insert_postgres_observation_revisions_batch(
+            cursor, [source(102 + index) for index in range(1001)], latest,
+        )
+        self.assertEqual((2, 1001), (statements, rows))
+        self.assertEqual(cursor.inserted[earlier_rows + 999][0],
+                         cursor.inserted[earlier_rows + 1000][12])
+        self.assertEqual(list(range(1000, 2004)), cursor.inserted_sequences)
+
     def test_only_reconstructable_live_snapshots_use_async_commit(self) -> None:
         self.assertTrue(_uses_async_dataset_commit([
             ("top20_membership", "2026-09-22", "key", {}, None),
@@ -525,6 +756,273 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual(20, krx[0]["volume"])
         self.assertEqual(2, len(both))
 
+    def test_sqlite_open_minute_0b_values_accumulate_as_provisional(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            values = [
+                {
+                    "trading_date": "2026-09-08", "minute": "09:31", "code": "005930",
+                    "market": "KRX", "open": 100, "high": 105, "low": 99, "close": 104,
+                    "volume": 10, "trade_value_million_won": 100, "updated_at": 1_790_000_000.0,
+                    "operation_id": "sqlite-open-0b-1",
+                },
+                {
+                    "trading_date": "2026-09-08", "minute": "09:31", "code": "005930",
+                    "market": "KRX", "open": 100, "high": 110, "low": 98, "close": 108,
+                    "volume": 7, "trade_value_million_won": 70, "updated_at": 1_790_000_001.0,
+                    "operation_id": "sqlite-open-0b-2",
+                },
+            ]
+            observations = []
+            for value in values:
+                observation = minute_bar_observation(
+                    value, origin=ObservationOrigin.REALTIME,
+                    completeness=DataCompleteness.IN_PROGRESS,
+                    source="kiwoom-websocket-0B", value_kind=DataValueKind.ACTUAL,
+                )
+                observations.append((bar_observation_key(observation), observation))
+
+            for value, observation in zip(values, observations, strict=True):
+                store.save_minute_bars([value], observations=[observation])
+
+            bar = store.load_minute_bars("005930", "2026-09-08", "KRX")[0]
+            with store._lock, store._connection() as connection:
+                metadata = connection.execute(
+                    "SELECT completeness,origin,source FROM central_market_data_observation_meta "
+                    "WHERE dataset_kind='minute_bar' AND subject=? AND observation_key=?",
+                    ("005930:KRX", "2026-09-08T09:31"),
+                ).fetchone()
+            store.close()
+
+        self.assertEqual((100, 110, 98, 108, 17, 170), tuple(
+            bar[name] for name in ("open", "high", "low", "close", "volume", "trade_value_million_won")
+        ))
+        self.assertEqual(("in_progress", "realtime", "kiwoom-websocket-0B"), metadata)
+
+    def test_sqlite_completed_ka10080_bar_rejects_late_0b_and_finalization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            base = {
+                "trading_date": "2026-09-08", "minute": "09:31", "code": "005930",
+                "market": "KRX", "open": 100, "high": 110, "low": 90, "close": 105,
+                "volume": 10, "trade_value_million_won": 1, "updated_at": 1_790_000_000.0,
+            }
+            provisional = {**base, "volume": 5, "trade_value_million_won": 50,
+                           "operation_id": "sqlite-provisional-0b"}
+            provisional_observation = minute_bar_observation(
+                provisional, origin=ObservationOrigin.REALTIME,
+                completeness=DataCompleteness.IN_PROGRESS,
+                source="kiwoom-websocket-0B", value_kind=DataValueKind.ACTUAL,
+            )
+            store.save_minute_bars(
+                [provisional], observations=[(bar_observation_key(provisional_observation), provisional_observation)],
+            )
+
+            query_value = {
+                **base, "open": 101, "high": 120, "low": 95, "close": 118,
+                "volume": 80, "trade_value_million_won": 9_876,
+                "updated_at": 1_790_000_010.0,
+            }
+            query_observation = minute_bar_observation(
+                query_value, origin=ObservationOrigin.QUERY,
+                completeness=DataCompleteness.COMPLETE,
+                source="kiwoom-ka10080;trade_value=ohlcv_estimate",
+                value_kind=DataValueKind.ESTIMATED,
+            )
+            key = bar_observation_key(query_observation)
+            store.replace_minute_bars([query_value], observations=[(key, query_observation)])
+
+            with store._lock, store._connection() as connection:
+                revisions_before_late_events = connection.execute(
+                    "SELECT count(*) FROM central_observation_revisions "
+                    "WHERE kind='minute_bar' AND subject=? AND observation_key=?",
+                    ("005930:KRX", key),
+                ).fetchone()[0]
+
+            late_realtime = {
+                **base, "open": 100, "high": 999, "low": 1, "close": 2,
+                "volume": 50_000, "trade_value_million_won": 900_000,
+                "updated_at": 1_790_000_020.0, "operation_id": "sqlite-late-0b",
+            }
+            late_observation = minute_bar_observation(
+                late_realtime, origin=ObservationOrigin.REALTIME,
+                completeness=DataCompleteness.IN_PROGRESS,
+                source="kiwoom-websocket-0B", value_kind=DataValueKind.ACTUAL,
+            )
+            store.save_minute_bars(
+                [late_realtime], observations=[(key, late_observation)],
+            )
+            store.finalize_minute_bars([{
+                "trading_date": "2026-09-08", "minute": "09:31", "code": "005930",
+                "market": "KRX",
+                "available_at": datetime(2026, 9, 8, 9, 32, tzinfo=ZoneInfo("Asia/Seoul")).timestamp(),
+                "capture_quality": "complete", "finalization_source": "timer",
+                "operation_id": "sqlite-late-finalize",
+            }])
+
+            final_bar = store.load_minute_bars("005930", "2026-09-08", "KRX")[0]
+            with store._lock, store._connection() as connection:
+                metadata = connection.execute(
+                    "SELECT completeness,origin,source,value_kind FROM central_market_data_observation_meta "
+                    "WHERE dataset_kind='minute_bar' AND subject=? AND observation_key=?",
+                    ("005930:KRX", key),
+                ).fetchone()
+                revisions_after_late_events = connection.execute(
+                    "SELECT count(*) FROM central_observation_revisions "
+                    "WHERE kind='minute_bar' AND subject=? AND observation_key=?",
+                    ("005930:KRX", key),
+                ).fetchone()[0]
+            store.close()
+
+        self.assertEqual((101, 120, 95, 118, 80, 9_876), tuple(
+            final_bar[name] for name in ("open", "high", "low", "close", "volume", "trade_value_million_won")
+        ))
+        self.assertEqual(
+            ("complete", "query", "kiwoom-ka10080;trade_value=ohlcv_estimate", "estimated"),
+            metadata,
+        )
+        self.assertEqual(revisions_before_late_events, revisions_after_late_events)
+
+    def test_sqlite_minute_revision_batch_preserves_chain_replay_and_batch_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            traced_sql: list[str] = []
+            original_connect = store._connect
+
+            def traced_connect():
+                connection = original_connect()
+                connection.set_trace_callback(traced_sql.append)
+                return connection
+
+            store._connect = traced_connect  # type: ignore[method-assign]
+            values = []
+            observations = []
+            for index in range(100):
+                value = {
+                    "trading_date": "2026-09-08", "minute": f"{9 + index // 60:02d}:{index % 60:02d}",
+                    "code": "005930", "market": "KRX", "open": 100,
+                    "high": 110 + index, "low": 90, "close": 100 + index,
+                    "volume": index, "trade_value_million_won": index,
+                    "updated_at": 1_790_000_000.0 + index,
+                }
+                observation = minute_bar_observation(
+                    value, origin=ObservationOrigin.QUERY,
+                    completeness=DataCompleteness.COMPLETE,
+                    source="kiwoom-ka10080;trade_value=ohlcv_estimate",
+                    value_kind=DataValueKind.ESTIMATED,
+                )
+                values.append(value)
+                observations.append((bar_observation_key(observation), observation))
+
+            store.replace_minute_bars(values, observations=observations)
+            first_minute_observation = observations[0][1]
+            first_minute_value = values[0]
+            initial_lookup_queries = [
+                sql for sql in traced_sql
+                if sql.startswith("WITH requested(kind,subject,observation_key,source_id)")
+            ]
+            initial_insert_queries = [
+                sql for sql in traced_sql
+                if sql.startswith("INSERT INTO central_observation_revisions(accepted_sequence")
+            ]
+            traced_sql.clear()
+
+            chain_values = [
+                {**first_minute_value, "close": 101, "updated_at": first_minute_value["updated_at"] + 1},
+                {**first_minute_value, "close": 102, "updated_at": first_minute_value["updated_at"] + 2},
+                {**first_minute_value, "close": 102, "updated_at": first_minute_value["updated_at"] + 3},
+            ]
+            chain_observations = []
+            for value in chain_values:
+                observation = minute_bar_observation(
+                    value, origin=ObservationOrigin.QUERY,
+                    completeness=DataCompleteness.COMPLETE,
+                    source="kiwoom-ka10080;trade_value=ohlcv_estimate",
+                    value_kind=DataValueKind.ESTIMATED,
+                )
+                chain_observations.append((bar_observation_key(observation), observation))
+            store.replace_minute_bars(chain_values, observations=chain_observations)
+            store.replace_minute_bars([chain_values[-1]], observations=[chain_observations[-1]])
+
+            with store._lock, store._connection() as connection:
+                revisions = connection.execute(
+                    "SELECT accepted_sequence,revision_id,revision_of,payload_hash "
+                    "FROM central_observation_revisions WHERE kind='minute_bar' "
+                    "AND subject='005930:KRX' AND observation_key=? AND source_id=? "
+                    "ORDER BY accepted_sequence",
+                    (chain_observations[0][0], "kiwoom-ka10080;trade_value=ohlcv_estimate"),
+                ).fetchall()
+            store.close()
+
+        revision_lookup_queries = [
+            sql for sql in traced_sql if sql.startswith("WITH requested(kind,subject,observation_key,source_id)")
+        ]
+        revision_insert_queries = [
+            sql for sql in traced_sql if sql.startswith("INSERT INTO central_observation_revisions(accepted_sequence")
+        ]
+        self.assertEqual(
+            3, len(revisions),
+        )  # 100 initial rows plus two changed payloads; exact replay adds none.
+        self.assertIsNone(revisions[0][2])
+        self.assertEqual(revisions[0][1], revisions[1][2])
+        self.assertEqual(revisions[1][1], revisions[2][2])
+        self.assertLess(revisions[0][0], revisions[1][0])
+        self.assertLess(revisions[1][0], revisions[2][0])
+        self.assertEqual(2, len(initial_lookup_queries))
+        self.assertEqual(3, len(initial_insert_queries))
+        self.assertEqual(2, len(revision_lookup_queries))  # one for changed input, one replay
+        self.assertEqual(1, len(revision_insert_queries))  # two revisions in a single SQL statement
+
+    def test_sqlite_minute_revision_batch_rolls_back_bar_and_metadata_together(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            value = {
+                "trading_date": "2026-09-08", "minute": "09:31", "code": "005930",
+                "market": "KRX", "open": 100, "high": 110, "low": 90,
+                "close": 105, "volume": 10, "trade_value_million_won": 1,
+                "updated_at": 1_790_000_000.0,
+            }
+            observation = minute_bar_observation(
+                value, origin=ObservationOrigin.QUERY,
+                completeness=DataCompleteness.COMPLETE,
+                source="kiwoom-ka10080;trade_value=ohlcv_estimate",
+                value_kind=DataValueKind.ESTIMATED,
+            )
+            original_batch = _insert_sqlite_observation_revisions_batch
+
+            def fail_after_revision_insert(connection, sources, latest_by_key):
+                original_batch(connection, sources, latest_by_key)
+                raise RuntimeError("revision batch failed")
+
+            with patch(
+                "kiwoom_monitor.central_server.database._insert_sqlite_observation_revisions_batch",
+                side_effect=fail_after_revision_insert,
+            ), self.assertRaisesRegex(RuntimeError, "revision batch failed"):
+                store.replace_minute_bars(
+                    [value], observations=[(bar_observation_key(observation), observation)],
+                )
+
+            self.assertEqual([], store.load_minute_bars("005930", "2026-09-08", "KRX"))
+            with store._lock, store._connection() as connection:
+                metadata_count = connection.execute(
+                    "SELECT count(*) FROM central_market_data_observation_meta "
+                    "WHERE dataset_kind='minute_bar' AND subject=?",
+                    (observation.subject,),
+                ).fetchone()[0]
+                revision_count = connection.execute(
+                    "SELECT count(*) FROM central_observation_revisions "
+                    "WHERE kind='minute_bar' AND subject=?",
+                    (observation.subject,),
+                ).fetchone()[0]
+            store.close()
+
+        self.assertEqual(0, metadata_count)
+        self.assertEqual(0, revision_count)
+
     def test_bar_and_metadata_are_rolled_back_together(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
@@ -563,6 +1061,346 @@ class CentralServerDatabaseTests(unittest.TestCase):
             latest = store.load_daily_bars("005930", "KRX", 1)
         self.assertEqual(1, len(latest))
         self.assertEqual("2026-09-08", latest[0]["trading_date"])
+
+    def test_daily_bar_replay_skips_canonical_update_but_refreshes_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            original = {
+                "trading_date": "2026-09-08", "code": "005930", "market": "KRX",
+                "open": 70000, "high": 70100, "low": 69900, "close": 70050,
+                "volume": 100, "trade_value_million_won": 7000,
+                "updated_at": 1_790_000_000.0,
+            }
+
+            def save(value: dict[str, object]) -> None:
+                observation = daily_bar_observation(
+                    value, completeness=DataCompleteness.COMPLETE,
+                )
+                store.replace_daily_bars(
+                    [value], observations=[(bar_observation_key(observation), observation)],
+                )
+
+            save(original)
+            replay = {**original, "updated_at": original["updated_at"] + 60}
+            save(replay)
+            [unchanged] = store.load_daily_bars("005930", "KRX", 1)
+            with store._lock, store._connection() as connection:
+                metadata = connection.execute(
+                    "SELECT available_at FROM central_market_data_observation_meta "
+                    "WHERE dataset_kind='daily_bar' AND subject='005930:KRX' "
+                    "AND observation_key='2026-09-08'"
+                ).fetchone()
+
+            corrected = {**replay, "close": 70060, "updated_at": replay["updated_at"] + 60}
+            save(corrected)
+            [changed] = store.load_daily_bars("005930", "KRX", 1)
+            store.close()
+
+        self.assertEqual(original["updated_at"], unchanged["updated_at"])
+        replay_observation = daily_bar_observation(
+            replay, completeness=DataCompleteness.COMPLETE,
+        )
+        self.assertEqual(replay_observation.metadata.available_at.isoformat(), metadata[0])
+        self.assertEqual(70060, changed["close"])
+        self.assertEqual(corrected["updated_at"], changed["updated_at"])
+
+    def test_daily_bar_batch_keeps_last_duplicate_and_rolls_back_with_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            base = {
+                "trading_date": "2026-09-08", "code": "005930", "market": "KRX",
+                "open": 70000, "high": 70100, "low": 69900, "close": 70050,
+                "volume": 100, "trade_value_million_won": 7000,
+                "updated_at": 1_790_000_000.0,
+            }
+            last = {**base, "close": 70100, "updated_at": base["updated_at"] + 60}
+            first_observation = daily_bar_observation(base, completeness=DataCompleteness.COMPLETE)
+            last_observation = daily_bar_observation(last, completeness=DataCompleteness.COMPLETE)
+            key = bar_observation_key(first_observation)
+            store.replace_daily_bars(
+                [base, last], observations=[
+                    (key, first_observation), (key, last_observation),
+                ],
+            )
+            [saved] = store.load_daily_bars("005930", "KRX", 1)
+            with store._lock, store._connection() as connection:
+                metadata = connection.execute(
+                    "SELECT available_at FROM central_market_data_observation_meta "
+                    "WHERE dataset_kind='daily_bar' AND subject=? AND observation_key=?",
+                    (last_observation.subject, key),
+                ).fetchone()
+
+            invalid = {**base, "trading_date": "2026-09-09"}
+            invalid_observation = daily_bar_observation(
+                invalid, completeness=DataCompleteness.COMPLETE,
+            )
+            with self.assertRaisesRegex(ValueError, "observation_key"):
+                store.replace_daily_bars(
+                    [invalid], observations=[(" ", invalid_observation)],
+                )
+            rolled_back = store.load_daily_bars("005930", "KRX", 10)
+            store.close()
+
+        self.assertEqual(last["close"], saved["close"])
+        self.assertEqual(last["updated_at"], saved["updated_at"])
+        self.assertEqual(last_observation.metadata.available_at.isoformat(), metadata[0])
+        self.assertEqual(["2026-09-08"], [row["trading_date"] for row in rolled_back])
+
+    def test_postgres_daily_bar_and_metadata_use_one_statement_each_for_900_rows(self) -> None:
+        class Cursor:
+            def __init__(self) -> None:
+                self.statements: list[tuple[str, tuple[object, ...]]] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, parameters) -> None:
+                self.statements.append((sql, tuple(parameters)))
+
+        class Connection:
+            def __init__(self, cursor) -> None:
+                self._cursor = cursor
+                self.commits = 0
+                self.rollbacks = 0
+                self.closed = False
+
+            def cursor(self):
+                return self._cursor
+
+            def commit(self) -> None:
+                self.commits += 1
+
+            def rollback(self) -> None:
+                self.rollbacks += 1
+
+            def close(self) -> None:
+                self.closed = True
+
+        values = []
+        observations = []
+        for index in range(900):
+            value = {
+                "trading_date": "2026-09-08", "code": f"{index:06d}", "market": "KRX",
+                "open": 100, "high": 110, "low": 90, "close": 105,
+                "volume": index, "trade_value_million_won": index,
+                "updated_at": 1_790_000_000.0,
+            }
+            observation = daily_bar_observation(value, completeness=DataCompleteness.COMPLETE)
+            values.append(value)
+            observations.append((bar_observation_key(observation), observation))
+        cursor = Cursor()
+        connection = Connection(cursor)
+        store = PostgresQueryStore("postgresql://unused")
+        store._connect = lambda: connection  # type: ignore[method-assign]
+
+        store.replace_daily_bars(values, observations=observations)
+
+        self.assertEqual(2, len(cursor.statements))
+        self.assertIn("INSERT INTO central_daily_bars", cursor.statements[0][0])
+        self.assertEqual(9_000, len(cursor.statements[0][1]))
+        self.assertIn("INSERT INTO central_market_data_observation_meta", cursor.statements[1][0])
+        self.assertEqual(10_800, len(cursor.statements[1][1]))
+        self.assertEqual(1, connection.commits)
+        self.assertEqual(0, connection.rollbacks)
+        self.assertTrue(connection.closed)
+
+    def test_sqlite_daily_bar_and_metadata_use_bounded_batches_for_900_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            traced_sql: list[str] = []
+            original_connect = store._connect
+
+            def traced_connect():
+                connection = original_connect()
+                connection.set_trace_callback(traced_sql.append)
+                return connection
+
+            store._connect = traced_connect  # type: ignore[method-assign]
+            values = []
+            observations = []
+            for index in range(900):
+                value = {
+                    "trading_date": "2026-09-08", "code": f"{index:06d}", "market": "KRX",
+                    "open": 100, "high": 110, "low": 90, "close": 105,
+                    "volume": index, "trade_value_million_won": index,
+                    "updated_at": 1_790_000_000.0,
+                }
+                observation = daily_bar_observation(
+                    value, completeness=DataCompleteness.COMPLETE,
+                )
+                values.append(value)
+                observations.append((bar_observation_key(observation), observation))
+
+            store.replace_daily_bars(values, observations=observations)
+            store.close()
+
+        canonical = [sql for sql in traced_sql if sql.startswith("INSERT INTO central_daily_bars")]
+        metadata = [
+            sql for sql in traced_sql
+            if sql.startswith("INSERT INTO central_market_data_observation_meta")
+        ]
+        self.assertEqual(12, len(canonical))
+        self.assertEqual(12, len(metadata))
+
+    def test_sqlite_minute_bar_and_metadata_use_bounded_batches_and_keep_last_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            traced_sql: list[str] = []
+            original_connect = store._connect
+
+            def traced_connect():
+                connection = original_connect()
+                connection.set_trace_callback(traced_sql.append)
+                return connection
+
+            store._connect = traced_connect  # type: ignore[method-assign]
+            values = []
+            observations = []
+            for index in range(900):
+                minute = f"{index // 60:02d}:{index % 60:02d}"
+                value = {
+                    "trading_date": "2026-09-08", "minute": minute,
+                    "code": "005930", "market": "KRX", "open": 100,
+                    "high": 110, "low": 90, "close": 105,
+                    "volume": index, "trade_value_million_won": index,
+                    "updated_at": 1_790_000_000.0 + index,
+                }
+                observation = minute_bar_observation(
+                    value, origin=ObservationOrigin.QUERY,
+                    completeness=DataCompleteness.COMPLETE,
+                    source="kiwoom-ka10080;trade_value=ohlcv_estimate",
+                    value_kind=DataValueKind.ESTIMATED,
+                )
+                values.append(value)
+                observations.append((bar_observation_key(observation), observation))
+
+            duplicate = {**values[0], "close": 106, "updated_at": values[0]["updated_at"] + 900}
+            duplicate_observation = minute_bar_observation(
+                duplicate, origin=ObservationOrigin.QUERY,
+                completeness=DataCompleteness.COMPLETE,
+                source="kiwoom-ka10080;trade_value=ohlcv_estimate",
+                value_kind=DataValueKind.ESTIMATED,
+            )
+            values.append(duplicate)
+            observations.append((bar_observation_key(duplicate_observation), duplicate_observation))
+
+            store.replace_minute_bars(values, observations=observations)
+            [saved] = store.load_minute_bars("005930", "2026-09-08", "KRX")[:1]
+            with store._lock, store._connection() as connection:
+                metadata = connection.execute(
+                    "SELECT available_at FROM central_market_data_observation_meta "
+                    "WHERE dataset_kind='minute_bar' AND subject=? AND observation_key=?",
+                    (duplicate_observation.subject, bar_observation_key(duplicate_observation)),
+                ).fetchone()
+            invalid = {**values[1], "minute": "15:00"}
+            invalid_observation = minute_bar_observation(
+                invalid, origin=ObservationOrigin.QUERY,
+                completeness=DataCompleteness.COMPLETE,
+                source="kiwoom-ka10080;trade_value=ohlcv_estimate",
+                value_kind=DataValueKind.ESTIMATED,
+            )
+            canonical_statement_count = sum(
+                sql.startswith("INSERT INTO central_minute_bars") for sql in traced_sql
+            )
+            metadata_statement_count = sum(
+                sql.startswith("INSERT INTO central_market_data_observation_meta")
+                for sql in traced_sql
+            )
+            traced_sql.clear()
+            with self.assertRaisesRegex(ValueError, "observation_key"):
+                store.replace_minute_bars(
+                    [invalid], observations=[(" ", invalid_observation)],
+                )
+            after_rollback = store.load_minute_bars("005930", "2026-09-08", "KRX")
+            store.close()
+
+        self.assertEqual(13, canonical_statement_count)
+        self.assertEqual(12, metadata_statement_count)
+        self.assertEqual(106, saved["close"])
+        self.assertEqual(duplicate_observation.metadata.available_at.isoformat(), metadata[0])
+        self.assertFalse(any(row["minute"] == "15:00" for row in after_rollback))
+
+    def test_postgres_minute_bar_and_metadata_use_one_multirow_statement_each_for_900_rows(self) -> None:
+        class Cursor:
+            def __init__(self) -> None:
+                self.statements: list[tuple[str, tuple[object, ...]]] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, parameters=()) -> None:
+                self.statements.append((sql, tuple(parameters or ())))
+
+        class Connection:
+            def __init__(self, cursor) -> None:
+                self._cursor = cursor
+                self.commits = 0
+                self.rollbacks = 0
+                self.closed = False
+
+            def cursor(self):
+                return self._cursor
+
+            def commit(self) -> None:
+                self.commits += 1
+
+            def rollback(self) -> None:
+                self.rollbacks += 1
+
+            def close(self) -> None:
+                self.closed = True
+
+        values = []
+        observations = []
+        for index in range(900):
+            minute = f"{index // 60:02d}:{index % 60:02d}"
+            value = {
+                "trading_date": "2026-09-08", "minute": minute,
+                "code": "005930", "market": "KRX", "open": 100,
+                "high": 110, "low": 90, "close": 105,
+                "volume": index, "trade_value_million_won": index,
+                "updated_at": 1_790_000_000.0 + index,
+            }
+            observation = minute_bar_observation(
+                value, origin=ObservationOrigin.QUERY,
+                completeness=DataCompleteness.COMPLETE,
+                source="kiwoom-ka10080;trade_value=ohlcv_estimate",
+                value_kind=DataValueKind.ESTIMATED,
+            )
+            values.append(value)
+            observations.append((bar_observation_key(observation), observation))
+        values.append({**values[0], "close": 106, "updated_at": values[0]["updated_at"] + 900})
+        observations.append((observations[0][0], observations[0][1]))
+
+        cursor = Cursor()
+        connection = Connection(cursor)
+        store = PostgresQueryStore("postgresql://unused", observation_history_enabled=False)
+        store._connect = lambda: connection  # type: ignore[method-assign]
+        store.replace_minute_bars(values, observations=observations)
+
+        canonical = [(sql, params) for sql, params in cursor.statements if sql.startswith("INSERT INTO central_minute_bars")]
+        metadata = [(sql, params) for sql, params in cursor.statements
+                    if sql.startswith("INSERT INTO central_market_data_observation_meta")]
+        self.assertEqual(2, len(canonical))
+        self.assertEqual(1, len(metadata))
+        self.assertEqual(11, len(canonical[0][1]))
+        self.assertEqual(900 * 11, len(canonical[1][1]))
+        self.assertEqual(900 * 12, len(metadata[0][1]))
+        self.assertEqual(900, canonical[1][0].count("),(" ) + 1)
+        self.assertEqual(900, metadata[0][0].count("),(" ) + 1)
+        self.assertEqual(1, connection.commits)
+        self.assertEqual(0, connection.rollbacks)
+        self.assertTrue(connection.closed)
 
     def test_dataset_snapshot_upsert_and_filter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -817,14 +1655,17 @@ class CentralServerDatabaseTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.sql = ""
 
+            def execute(self, sql, _parameters=()) -> None:
+                if sql.startswith("INSERT INTO central_minute_bars"):
+                    self.sql = sql
+                else:
+                    self.assertion_lock_sql = sql
+
             def __enter__(self):
                 return self
 
             def __exit__(self, *_args):
                 return False
-
-            def executemany(self, sql, _rows) -> None:
-                self.sql = sql
 
         class Connection:
             def __init__(self, cursor) -> None:
@@ -854,22 +1695,41 @@ class CentralServerDatabaseTests(unittest.TestCase):
             side_effect=[index * 0.1 for index in range(14)],
         ), patch(
             "kiwoom_monitor.central_server.database.bar_value_rows",
-            return_value=[("2026-09-25", "09:30", "005930")],
+            return_value=[(
+                "2026-09-25", "09:30", "005930", "KRX", 100, 100, 100,
+                100, 1, 1, 1_790_000_000.0,
+            )],
         ), patch("kiwoom_monitor.central_server.database.logger.warning") as warning:
             store.replace_minute_bars([{"trading_date": "2026-09-25", "minute": "09:30", "code": "005930"}])
 
         self.assertIn("INSERT INTO central_minute_bars", cursor.sql)
+        self.assertIn("IS DISTINCT FROM", cursor.sql)
+        self.assertIn("central_minute_bars.trade_value_million_won", cursor.sql)
+        self.assertNotIn("central_minute_bars.updated_at", cursor.sql)
         self.assertTrue(connection.committed)
         self.assertFalse(connection.rolled_back)
         self.assertTrue(connection.closed)
         warning.assert_called_once()
         self.assertEqual(
-            ("minute", 1, 0, 100, 100, 100, 100, 100, 100, 1300),
+            ("minute", 1, 0, 100, 100, 100, 100,
+             0, 0, 0, 0, 0, 0, 0, 0, 0,
+             100, 100, 1300),
             warning.call_args.args[1:],
         )
 
-    def test_postgres_minute_bar_save_rolls_back_and_closes_on_error(self) -> None:
+    def test_commit_diagnostics_are_capture_gated_and_wal_permission_failure_is_nonfatal(self) -> None:
         class Cursor:
+            def __init__(self) -> None:
+                self.statements: list[str] = []
+
+            def execute(self, sql, _parameters=None) -> None:
+                self.statements.append(sql)
+                if sql == "SET LOCAL track_wal_io_timing TO on":
+                    raise RuntimeError("permission denied")
+
+            def fetchone(self):
+                return ("off",)
+
             def __enter__(self):
                 return self
 
@@ -877,7 +1737,96 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 return False
 
             def executemany(self, *_args) -> None:
-                raise RuntimeError("write failed")
+                return None
+
+        class Connection:
+            def __init__(self, cursor) -> None:
+                from types import SimpleNamespace
+                self._cursor = cursor
+                self.info = SimpleNamespace(backend_pid=4321)
+                self.committed = False
+                self.rolled_back = False
+                self.closed = False
+
+            def cursor(self):
+                return self._cursor
+
+            def commit(self) -> None:
+                self.committed = True
+
+            def rollback(self) -> None:
+                self.rolled_back = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        cursor = Cursor()
+        connection = Connection(cursor)
+        store = PostgresQueryStore("postgresql://unused")
+        store._connect = lambda: connection  # type: ignore[method-assign]
+        probe_thread = Mock()
+        value = {
+            "trading_date": "2026-09-25", "minute": "09:30", "code": "005930",
+            "market": "KRX", "open": 1, "high": 2, "low": 1, "close": 2,
+            "volume": 10, "trade_value_million_won": 2, "updated_at": time.time(),
+        }
+        with patch("kiwoom_monitor.central_server.diagnostic_metrics.refresh_capture_state",
+                   return_value={"enabled": True}), \
+                patch("kiwoom_monitor.central_server.database.Thread", return_value=probe_thread), \
+                patch("kiwoom_monitor.central_server.diagnostic_metrics.record_market_bar_save") as record:
+            store.replace_minute_bars([value])
+
+        self.assertIn("SAVEPOINT diagnostic_wal_timing", cursor.statements)
+        self.assertIn("ROLLBACK TO SAVEPOINT diagnostic_wal_timing", cursor.statements)
+        self.assertIn("RELEASE SAVEPOINT diagnostic_wal_timing", cursor.statements)
+        self.assertTrue(connection.committed)
+        self.assertFalse(connection.rolled_back)
+        self.assertTrue(connection.closed)
+        self.assertEqual(2, probe_thread.start.call_count)  # bar UPSERT and COMMIT windows
+        probe_thread.join.assert_not_called()
+        self.assertFalse(record.call_args.kwargs["wal_timing_for_commit"])
+        self.assertEqual("RuntimeError", record.call_args.kwargs["wal_timing_error"])
+
+        inactive_cursor = Cursor()
+        inactive_connection = Connection(inactive_cursor)
+        store._connect = lambda: inactive_connection  # type: ignore[method-assign]
+        with patch("kiwoom_monitor.central_server.diagnostic_metrics.refresh_capture_state",
+                   return_value={"enabled": False}), \
+                patch("kiwoom_monitor.central_server.database.Thread") as inactive_thread, \
+                patch("kiwoom_monitor.central_server.database.Event") as inactive_event:
+            store.replace_minute_bars([value])
+        self.assertTrue(inactive_connection.committed)
+        self.assertNotIn("SAVEPOINT diagnostic_wal_timing", inactive_cursor.statements)
+        inactive_thread.assert_not_called()
+        inactive_event.assert_not_called()
+
+        broken_probe_cursor = Cursor()
+        broken_probe_connection = Connection(broken_probe_cursor)
+        store._connect = lambda: broken_probe_connection  # type: ignore[method-assign]
+        with patch("kiwoom_monitor.central_server.diagnostic_metrics.refresh_capture_state",
+                   return_value={"enabled": True}), \
+                patch("kiwoom_monitor.central_server.database.Thread") as broken_thread, \
+                patch("kiwoom_monitor.central_server.diagnostic_metrics.record_market_bar_save") as record:
+            broken_thread.return_value.start.side_effect = RuntimeError("probe unavailable")
+            store.replace_minute_bars([value])
+        self.assertTrue(broken_probe_connection.committed)
+        self.assertFalse(broken_probe_connection.rolled_back)
+        self.assertEqual(["RuntimeError"], record.call_args.kwargs["commit_probe_errors"])
+
+    def test_postgres_minute_bar_save_rolls_back_and_closes_on_error(self) -> None:
+        class Cursor:
+            def execute(self, *_args) -> None:
+                return None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, _parameters=()) -> None:
+                if sql.startswith("INSERT INTO central_minute_bars"):
+                    raise RuntimeError("write failed")
 
         class Connection:
             def __init__(self) -> None:
@@ -900,7 +1849,10 @@ class CentralServerDatabaseTests(unittest.TestCase):
         connection = Connection()
         store = PostgresQueryStore("postgresql://unused")
         store._connect = lambda: connection  # type: ignore[method-assign]
-        with patch("kiwoom_monitor.central_server.database.bar_value_rows", return_value=[("row",)]):
+        with patch(
+            "kiwoom_monitor.central_server.database.bar_value_rows",
+            return_value=[("2026-09-25", "09:30", "005930", "KRX", 1, 1, 1, 1, 1, 1, 1)],
+        ):
             with self.assertRaisesRegex(RuntimeError, "write failed"):
                 store.replace_minute_bars([{"trading_date": "2026-09-25", "minute": "09:30", "code": "005930"}])
 

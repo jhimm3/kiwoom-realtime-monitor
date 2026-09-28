@@ -1,5 +1,6 @@
 .git
 .codex-backups
+.codex-backup
 .codex
 .agents
 **/.env

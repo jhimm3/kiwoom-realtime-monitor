@@ -7,7 +7,6 @@ already committed. This script never fetches article pages.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import subprocess
@@ -39,7 +38,22 @@ def write_status(**fields: object) -> None:
     temporary.replace(STATUS)
 
 
+def _import_progress(line: str) -> dict[str, int] | None:
+    try:
+        value = json.loads(line)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, dict) or not all(
+        isinstance(value.get(key), int) and value[key] >= 0
+        for key in ("imported", "skipped", "failed", "deferred")
+    ):
+        return None
+    return {key: value[key] for key in ("imported", "skipped", "failed", "deferred")}
+
+
 def main() -> int:
+    import fcntl  # NAS-only process lock; keep status parsing testable on Windows.
+
     if not IMPORTER.is_file():
         raise SystemExit("prepared-news importer is missing")
     with (ROOT / "prepared-news-import.lock").open("a+") as lock:
@@ -67,13 +81,22 @@ def main() -> int:
                                       stderr=subprocess.STDOUT, text=True,
                                       encoding="utf-8", errors="replace", bufsize=1) as process:
                     assert process.stdout is not None
+                    last_status_at = time.monotonic()
+                    progress: dict[str, int] = {}
                     for line in process.stdout:
                         log.write(line)
+                        parsed = _import_progress(line)
+                        if parsed is not None:
+                            progress = parsed
+                            if time.monotonic() - last_status_at >= 60:
+                                write_status(state="running", stage=name, snapshot=snapshot.name,
+                                             started_at=started, log=str(LOG), progress=progress)
+                                last_status_at = time.monotonic()
                     result = process.wait()
                 print(f"{datetime.now(UTC).isoformat()} stage={name} exit={result}", file=log)
                 if result:
                     write_status(state="failed", stage=name, snapshot=snapshot.name,
-                                 exit_code=result, log=str(LOG))
+                                 exit_code=result, log=str(LOG), progress=progress)
                     return result
         write_status(state="complete", stages=[name for name, _, _ in SNAPSHOTS],
                      started_at=started, elapsed_seconds=round(time.time() - started, 1),
