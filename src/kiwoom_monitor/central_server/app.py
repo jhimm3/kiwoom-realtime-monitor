@@ -42,7 +42,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.09.29-diagnostic-api-v5"
+SERVER_BUILD = "2026.09.29-diagnostic-api-v6"
 logger = logging.getLogger(__name__)
 
 

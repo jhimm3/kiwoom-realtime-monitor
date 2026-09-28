@@ -20,6 +20,45 @@ from kiwoom_monitor.central_server.diagnostic_workloads import (
 
 
 class DiagnosticRunTests(unittest.TestCase):
+    def test_terminal_status_does_not_publish_report_url_before_report_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "diagnostic-workloads.json"
+            with patch.dict(os.environ, {"KIWOOM_DIAGNOSTIC_WORKLOAD_PATH": str(path)}):
+                _set_tool(path, True, 120)
+                runs = DiagnosticRuns(path, lambda *_: {})
+                writing = threading.Event()
+                release = threading.Event()
+                write_report = runs._write_report
+
+                def delayed_report(run: dict) -> None:
+                    writing.set()
+                    self.assertTrue(release.wait(3))
+                    write_report(run)
+
+                result = {"kind": "measure", "state": "complete",
+                          "phase": {"state": "complete",
+                                    "db_calls": {"state": "complete"}}}
+                try:
+                    with patch("scripts.nas_workload_diagnostic._run_measurement",
+                               return_value=result), patch.object(
+                                   runs, "_write_report", side_effect=delayed_report,
+                               ):
+                        first = runs.start(kind="measure", seconds=5, label="test")
+                        self.assertTrue(writing.wait(3))
+                        status = runs.status(first["run_id"])
+                        self.assertEqual("completed", status["state"])
+                        self.assertNotIn("report_url", status)
+                        release.set()
+                        runs._worker.join(3)
+                        status = runs.status(first["run_id"])
+                        self.assertEqual(
+                            f"/api/v1/diagnostics/reports/{first['run_id']}",
+                            status["report_url"],
+                        )
+                finally:
+                    release.set()
+                    runs.close()
+
     def test_run_has_one_owner_replay_cancel_and_persisted_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "diagnostic-workloads.json"

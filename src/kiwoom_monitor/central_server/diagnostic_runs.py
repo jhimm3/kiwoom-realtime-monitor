@@ -208,7 +208,17 @@ class DiagnosticRuns:
                             if not key.startswith("_") and key != "result"}
                 response["status_url"] = f"/api/v1/diagnostics/runs/{run_id}"
                 if response["state"] not in {"starting", "running", "finalizing"}:
-                    response["report_url"] = f"/api/v1/diagnostics/reports/{run_id}"
+                    report_path = self._results_dir() / f"{run_id}.json"
+                    try:
+                        report_available = (
+                            not report_path.is_symlink()
+                            and report_path.is_file()
+                            and report_path.stat().st_size <= _MAX_REPORT_BYTES
+                        )
+                    except OSError:
+                        report_available = False
+                    if report_available:
+                        response["report_url"] = f"/api/v1/diagnostics/reports/{run_id}"
                 return response
         report = self.report(run_id)
         response = {key: value for key, value in report.items() if key != "result"}

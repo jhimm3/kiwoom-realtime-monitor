@@ -196,6 +196,10 @@ report는 기존 `diagnostic-results` 안에 versioned JSON으로 저장한다. 
 device tick 16,000을 상한으로 두며 drop 수·raw_truncated를 기록한다. 큰 결과는
 download로 회수하고 console 기본은 summary다. 압축 전 크기도 제한한다.
 
+Terminal run status는 report 파일이 실제로 저장되고 symlink가 아니며 크기 상한 안에
+있는 경우에만 `report_url`을 제공한다. run 상태 완료와 파일 저장 사이의 짧은 구간에는
+status 재조회로 링크가 나타날 때까지 기다린다.
+
 기존 보고서를 자동 삭제하지 않는다. 새 진단 산출물은 디렉터리 전체 1 GiB/1,000개
 admission quota를 두고 여유가 부족하면 새 run을 거절한다. 기존 control history의
 과거 파일은 보존하고 새 이벤트는 제한된 크기의 segment로 쓴다. 임의 경로·symlink

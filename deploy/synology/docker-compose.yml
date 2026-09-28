@@ -15,7 +15,7 @@ services:
       retries: 10
 
   server:
-    image: kiwoom-monitor-server:2026.09.29-diagnostic-api-v5
+    image: kiwoom-monitor-server:2026.09.29-diagnostic-api-v6
     build:
       context: ../..
       dockerfile: deploy/synology/server.Dockerfile
