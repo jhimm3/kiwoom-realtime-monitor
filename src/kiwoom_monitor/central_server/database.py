@@ -2928,25 +2928,37 @@ class PostgresQueryStore:
 
         started_at = monotonic()
         observation_by_key = dict(observations or ())
+        domain_phase_ms: dict[str, float] = {}
+        domain_counts = {"replayed": 0, "query_complete": 0,
+                         "bar_upserts": 0, "metadata_upserts": 0,
+                         "revision_inserts": 0, "operation_inserts": 0}
         writer = DBWriterContext(
             writer_family="realtime.minute", writer_kind="realtime_minute",
             operation="save_minute_bars", rows_attempted=len(values),
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+            phase_started = monotonic()
             _lock_postgres_minute_day_scopes(cursor, values)
+            domain_phase_ms["day_locks"] = round((monotonic() - phase_started) * 1000, 3)
             for value in values:
+                phase_started = monotonic()
                 operation_id, operation_hash = _minute_operation(value)
                 cursor.execute(
                     "SELECT operation_hash FROM central_minute_bar_operations WHERE operation_id=%s",
                     (operation_id,),
                 )
                 processed = cursor.fetchone()
+                domain_phase_ms["operation_lookup"] = domain_phase_ms.get("operation_lookup", 0) + (monotonic() - phase_started) * 1000
                 if processed is not None:
                     if str(processed[0]) != operation_hash:
                         raise ValueError("minute bar operation_id payload changed")
+                    domain_counts["replayed"] += 1
                     continue
+                phase_started = monotonic()
                 query_authority = _minute_query_authority(cursor, value, postgres=True)
+                domain_phase_ms["query_authority"] = domain_phase_ms.get("query_authority", 0) + (monotonic() - phase_started) * 1000
                 if query_authority != DataCompleteness.COMPLETE.value:
+                    phase_started = monotonic()
                     if query_authority == DataCompleteness.IN_PROGRESS.value:
                         updates = ",".join(
                             f"{column}=EXCLUDED.{column}" for column in bar_columns(minute=True)
@@ -2965,9 +2977,14 @@ class PostgresQueryStore:
                         "ON CONFLICT(trading_date,minute,code,market) DO UPDATE SET " + updates,
                         bar_value_rows((value,), minute=True)[0],
                     )
+                    domain_phase_ms["bar_upsert"] = domain_phase_ms.get("bar_upsert", 0) + (monotonic() - phase_started) * 1000
+                    domain_counts["bar_upserts"] += 1
+                else:
+                    domain_counts["query_complete"] += 1
                 key = _minute_key(value)
                 observation = observation_by_key.get(key)
                 if observation is not None and query_authority != DataCompleteness.COMPLETE.value:
+                    phase_started = monotonic()
                     merged = _load_postgres_minute_bar(cursor, value)
                     merged_observation = MarketDataObservation(
                         observation.kind, observation.subject, merged, observation.metadata,
@@ -2976,23 +2993,32 @@ class PostgresQueryStore:
                         _market_metadata_upsert_sql("%s", "EXCLUDED"),
                         market_metadata_storage_values(key, merged_observation),
                     )
+                    domain_counts["metadata_upserts"] += 1
                     if self._observation_history_enabled:
-                        _append_postgres_observation_revision(
+                        if _append_postgres_observation_revision(
                             cursor, "minute_bar", observation.subject, key,
                             minute_bar_revision_payload(
                                 merged, window_closed=False, capture_quality="in_progress",
                                 finalization_source="realtime_flush", operation_id=operation_id,
                             ),
                             merged_observation,
-                        )
+                        ):
+                            domain_counts["revision_inserts"] += 1
+                    domain_phase_ms["metadata_revision"] = domain_phase_ms.get("metadata_revision", 0) + (monotonic() - phase_started) * 1000
+                phase_started = monotonic()
                 cursor.execute(
                     "INSERT INTO central_minute_bar_operations(operation_id,operation_hash,processed_at) "
                     "VALUES(%s,%s,%s)",
                     (operation_id, operation_hash, datetime.now(timezone.utc)),
                 )
+                domain_phase_ms["operation_insert"] = domain_phase_ms.get("operation_insert", 0) + (monotonic() - phase_started) * 1000
+                domain_counts["operation_inserts"] += 1
         from .diagnostic_metrics import record_writer_transaction
         record_writer_transaction("realtime_minute", len(values),
                                   round((monotonic() - started_at) * 1000),
+                                  domain_phase_ms={key: round(value, 3)
+                                                   for key, value in domain_phase_ms.items()},
+                                  domain_counts=domain_counts,
                                   db_call_id=writer.call_id)
 
     def finalize_minute_bars(self, values: list[dict[str, Any]]) -> None:
@@ -3704,18 +3730,30 @@ class PostgresQueryStore:
 
     def save_shadow_monitor_state(self, monitor_id: str, document: dict[str, Any]) -> None:
         from .postgres_access import DBWriterContext, open_observed_connection
+        from .diagnostic_metrics import record_writer_transaction
 
+        started_at = monotonic()
         writer = DBWriterContext(
             writer_family="candidate.shadow_checkpoint",
             writer_kind="shadow_monitor_state",
             operation="save_shadow_monitor_state", rows_attempted=1,
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+            updated_at = datetime.now(timezone.utc)
+            encode_started = monotonic()
+            encoded = json.dumps(document, ensure_ascii=False)
+            payload_bytes = len(encoded.encode("utf-8"))
+            encode_ms = round((monotonic() - encode_started) * 1000, 3)
             cursor.execute(
                 "INSERT INTO central_shadow_monitor_state VALUES(%s,%s,%s) "
                 "ON CONFLICT(monitor_id) DO UPDATE SET updated_at=EXCLUDED.updated_at,document_json=EXCLUDED.document_json",
-                (monitor_id, datetime.now(timezone.utc), json.dumps(document, ensure_ascii=False)),
+                (monitor_id, updated_at, encoded),
             )
+        record_writer_transaction(
+            "shadow_monitor_state", 1, round((monotonic() - started_at) * 1000),
+            encode_ms=encode_ms, bytes_payload_estimate=payload_bytes,
+            db_call_id=writer.call_id,
+        )
 
     def save_shadow_evaluation(
         self, monitor_id: str, decision: dict[str, Any],
@@ -3922,6 +3960,7 @@ class PostgresQueryStore:
             "historical_highs": "document:historical_highs",
             "market_index_chart_coverage": "document:market_index_chart_coverage",
             "market_data_coverage_daily": "document:market_data_coverage_daily",
+            "daily_bar_history_coverage": "document:daily_bar_history_coverage",
             "market_data_coverage": "document:market_data_coverage",
             "market_data_coverage_intraday": "document:market_data_coverage_intraday",
             "candidate_flow_capture": "document:candidate_flow_capture",
@@ -4016,6 +4055,7 @@ class PostgresQueryStore:
             db_connection = open_observed_connection(self._connect, writer)
         else:
             db_connection = self._connect()
+        document_affected_rows = None
         with db_connection as connection, connection.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
@@ -4024,6 +4064,10 @@ class PostgresQueryStore:
                 "WHERE central_documents.document_json IS DISTINCT FROM EXCLUDED.document_json",
                 document_value_rows(collection, values, now),
             )
+            if collection == "top20_daily_entrants":
+                affected = getattr(cursor, "rowcount", -1)
+                if affected is not None and affected >= 0:
+                    document_affected_rows = int(affected)
             if collection == "theme_metadata":
                 _append_postgres_theme_snapshot(cursor, values, received_at=now)
             elif collection == "news_article":
@@ -4033,6 +4077,8 @@ class PostgresQueryStore:
         from .diagnostic_metrics import record_writer_transaction
         record_writer_transaction(f"document:{collection}", len(values),
                                   round((monotonic() - started_at) * 1000),
+                                  domain_counts=({"affected_rows": document_affected_rows}
+                                                 if document_affected_rows is not None else None),
                                   db_call_id=writer.call_id if writer else None)
 
     def replace_documents(self, collection: str, values: list[dict[str, Any]]) -> None:
@@ -5602,6 +5648,7 @@ def _storage_category(name: str, *, collection: bool = False) -> str:
         "stock_fundamentals", "stock_nxt_eligibility", "historical_highs",
         "top20_daily_entrants", "candidate_flow_capture", "candidate_flow_finalization",
         "market_data_coverage", "market_data_coverage_daily", "market_data_coverage_intraday",
+        "daily_bar_history_coverage",
         "market_index_chart_coverage", "condition_search_status", "market_event_sessions",
     }:
         return "market"

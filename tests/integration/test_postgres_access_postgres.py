@@ -98,6 +98,61 @@ from kiwoom_monitor.domain.news_observation import (
 
 
 class PostgresAccessIntegrationTests(unittest.TestCase):
+    def test_daily_history_short_source_reuse_and_failed_storage_keep_separate_observed_commits(self):
+        from kiwoom_monitor.application.daily_bar_coverage import COLLECTION, assess_daily_coverage
+        from kiwoom_monitor.central_server.rest_broker import BrokerResult
+        from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+        code = f"DIAG{uuid.uuid4().hex[:16]}"
+        self.query_bar_codes.append(code)
+        self.document_keys.append((COLLECTION, f"{code}:KRX", "initial"))
+        now = datetime.now(KST)
+        day = now.date().isoformat()
+        store = self.store
+
+        class Broker:
+            calls = 0
+            fail_save = False
+
+            async def request(self, api_id, path, body, **kwargs):
+                self.calls += 1
+                rows = [{"dt": (now.date() - timedelta(days=i + 1)).strftime("%Y%m%d"),
+                         "open_pric": "100", "high_pric": str(110 + i), "low_pric": "90",
+                         "cur_prc": "105", "trde_qty": "10", "trde_prica": "200"} for i in range(3)]
+                payload = {"stk_dt_pole_chart_qry": rows}
+                if not self.fail_save:
+                    MarketDataIngestor(store).ingest(api_id, body, payload)
+                return BrokerResult(payload, False, "", recording_succeeded=True)
+
+        broker = Broker()
+        service = AutonomousTop20Service(broker, RealtimeHub(), store, now_provider=lambda: now)
+        started = time.time()
+
+        async def run():
+            first = await service._ensure_daily_history(code, day, "KRX", scope="initial")
+            second = await service._ensure_daily_history(code, day, "KRX", scope="initial")
+            self.assertEqual(first, second)
+            self.assertEqual("ready", first["periods"]["250"]["status"])
+            self.assertEqual(3, first["periods"]["250"]["available_count"])
+            self.assertEqual(1, broker.calls)
+            with store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute("DELETE FROM central_daily_bars WHERE code=%s AND trading_date=%s",
+                               (code, (now.date() - timedelta(days=1)).isoformat()))
+            broker.fail_save = True
+            with self.assertRaisesRegex(RuntimeError, "저장값"):
+                await service._ensure_daily_history(code, day, "KRX", scope="initial")
+
+        asyncio.run(run())
+        documents = store.load_documents(COLLECTION, f"{code}:KRX", 2)
+        self.assertEqual(1, len(documents))
+        self.assertFalse(assess_daily_coverage(store.load_daily_bars(code, "KRX", 250), documents[0]["document"],
+                         code=code, market="KRX", query_basis_date=day)["collection_verified"])
+        calls = summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+        writes = [call for call in calls if call["writer_kind"] in {"query_daily", f"document:{COLLECTION}"}
+                  and call.get("access_mode") == "write"]
+        self.assertEqual(2, len(writes))
+        self.assertEqual(2, len({call["call_id"] for call in writes}))
+        self.assertTrue(all(call["transactions"] == 1 and call["commits"] == 1 for call in writes))
+
     @classmethod
     def setUpClass(cls) -> None:
         url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "")

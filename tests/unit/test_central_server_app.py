@@ -1122,6 +1122,30 @@ class CentralServerAppTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual([], response.json()["bars"])
 
+    def test_daily_bars_coverage_is_read_only_and_validates_returned_prefixes(self):
+        from kiwoom_monitor.application.daily_bar_coverage import COLLECTION
+        from tests.unit.test_daily_bar_coverage import window_with
+        today = datetime.now(KST).date()
+        window = window_with(20, end=today)
+        evidence = window.evidence(code="005930", market="KRX", scope="initial", checked_at="now")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "central.sqlite3"
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            store.replace_daily_bars([{**row, "code": "005930", "market": "KRX", "updated_at": 1} for row in window.rows])
+            store.upsert_documents(COLLECTION, [{"owner": "005930:KRX", "key": "initial", "document": evidence}])
+            with TestClient(create_app(CentralServerSettings(f"sqlite:///{path}", "private-token",
+                                                           autonomous_top20_enabled=False))) as client:
+                headers = {"Authorization": "Bearer private-token"}
+                before = store.load_documents(COLLECTION, "005930:KRX", 2)
+                response = client.get("/api/v1/market/daily-bars?code=005930&market=KRX&limit=250", headers=headers).json()
+                self.assertTrue(response["coverage"]["collection_verified"])
+                self.assertEqual("source_exhausted_short_history", response["coverage"]["periods"]["250"]["reason"])
+                short = client.get("/api/v1/market/daily-bars?code=005930&market=KRX&limit=5", headers=headers).json()
+                self.assertEqual("unverified", short["coverage"]["periods"]["20"]["status"])
+                self.assertEqual(before, store.load_documents(COLLECTION, "005930:KRX", 2))
+            store.close()
+
     def test_market_coverage_requires_authentication_and_stays_conservative(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = CentralServerSettings(

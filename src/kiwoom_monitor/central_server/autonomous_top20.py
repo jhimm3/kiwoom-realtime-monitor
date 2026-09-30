@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from dataclasses import asdict
-from datetime import datetime, time as clock_time, timedelta, timezone
+from datetime import date, datetime, time as clock_time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,6 +16,9 @@ from kiwoom_monitor.application.market_session_schedule import (
     full_day_close_at,
 )
 from kiwoom_monitor.application.historical_high_service import HistoricalHighService
+from kiwoom_monitor.application.daily_bar_coverage import (
+    COLLECTION as DAILY_HISTORY_COLLECTION, DailySourceWindow, assess_daily_coverage, choose_daily_coverage,
+)
 from kiwoom_monitor.application.top20_trade_value_collector import Top20MinuteRecord, Top20TradeValueCollector
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
     MarketOperationTick, ProgramTradeTick, TradeTick,
@@ -71,6 +74,7 @@ class AutonomousTop20Service:
         self._fundamentals_ready: dict[str, str] = {}
         self._fundamentals_pending: set[str] = set()
         self._fundamentals_tasks: set[asyncio.Task[None]] = set()
+        self._daily_history_locks: dict[tuple[str, str], tuple[asyncio.Lock, int]] = {}
         self._market_catalog_task: asyncio.Task[None] | None = None
         self._subscription_task: asyncio.Task[None] | None = None
         self._subscription_revision = 0
@@ -890,30 +894,81 @@ class AutonomousTop20Service:
             self._fundamentals_pending.difference_update(codes)
 
     async def _ensure_entry_daily_history(self, code: str, day: str) -> None:
-        """신규 추적 종목의 신고가 계산용 일봉이 비었을 때 NAS가 한 번 채운다."""
+        """Verify the source window, even when old canonical rows already exist."""
         markets = ["KRX"]
         if await self._nxt_enabled(code):
             markets.append("NXT")
         for market in markets:
-            from .postgres_access import db_call_source
-            with db_call_source("top20.entry_daily_history"):
-                stored = await asyncio.to_thread(
-                    self._store.load_daily_bars, code, market, 1,
-                )
-            if stored:
+            await self._ensure_daily_history(code, day, market, scope="initial")
+
+    async def _ensure_daily_history(self, code: str, day: str, market: str, *, scope: str) -> dict[str, Any]:
+        # Refcounts include waiters: cancellation cannot remove a lock another caller owns.
+        key = (code, market)
+        lock, users = self._daily_history_locks.get(key, (asyncio.Lock(), 0))
+        self._daily_history_locks[key] = (lock, users + 1)
+        try:
+            async with lock:
+                return await self._collect_daily_history(code, day, market, scope=scope)
+        finally:
+            _, users = self._daily_history_locks[key]
+            if users == 1:
+                del self._daily_history_locks[key]
+            else:
+                self._daily_history_locks[key] = (lock, users - 1)
+
+    async def _collect_daily_history(self, code: str, day: str, market: str, *, scope: str) -> dict[str, Any]:
+        from .postgres_access import db_call_source
+        current = self._now()
+        current = current.astimezone(KST) if current.tzinfo else current.replace(tzinfo=KST)
+        basis = current.date().isoformat()
+        owner = f"{code}:{market}"
+        source = "top20.after_close_daily" if scope == "final" else "top20.entry_daily_history"
+        read_limit = 250 if day == basis else 5000
+        # A historical target may have newer canonical rows preceding it.
+        with db_call_source(source):
+            stored = await asyncio.to_thread(self._store.load_daily_bars, code, market, read_limit)
+            documents = await asyncio.to_thread(self._store.load_documents, DAILY_HISTORY_COLLECTION, owner, 2)
+        for item in documents:
+            evidence = item.get("document", {})
+            if evidence.get("window_end") != day or (scope == "final" and evidence.get("scope") != "final"):
                 continue
-            result = await self._broker.request(
-                "ka10081", "/api/dostk/chart", {
-                    "stk_cd": f"{code}_NX" if market == "NXT" else code,
-                    "base_dt": day.replace("-", ""), "upd_stkpc_tp": "1",
-                },
-            )
-            if isinstance(self._broker, CentralRestBroker) and result.recording_succeeded is not True:
-                raise RuntimeError(f"{market} 편입 종목 일봉 조회 후 저장이 확인되지 않았습니다.")
-            with db_call_source("top20.entry_daily_history"):
-                stored = await asyncio.to_thread(self._store.load_daily_bars, code, market, 1)
-            if not stored:
-                raise RuntimeError(f"{market} 편입 종목 일봉이 저장되지 않았습니다.")
+            coverage = assess_daily_coverage(stored, evidence, code=code, market=market, query_basis_date=basis)
+            if coverage["collection_verified"]:
+                return coverage
+        window = DailySourceWindow(basis, day)
+        body = {"stk_cd": f"{code}_NX" if market == "NXT" else code,
+                "base_dt": basis.replace("-", ""), "upd_stkpc_tp": "1"}
+        cont_yn, next_key = "N", ""
+        while not window.complete:
+            if scope == "final":
+                result = await self._request_with_retries("ka10081", "/api/dostk/chart", body, cont_yn, next_key)
+            else:
+                result = await self._broker.request("ka10081", "/api/dostk/chart", body,
+                                                    cont_yn=cont_yn, next_key=next_key)
+                if isinstance(self._broker, CentralRestBroker) and result.recording_succeeded is not True:
+                    raise RuntimeError(f"{market} 일봉 응답 저장이 확인되지 않았습니다.")
+            try:
+                window.add_page(result.payload, result.has_next, result.next_key)
+            except ValueError as error:
+                raise RuntimeError(f"{market} 일봉 확보 미완료: {error}") from error
+            cont_yn, next_key = "Y", result.next_key
+        if scope == "final":
+            close_at = full_day_close_at(date.fromisoformat(day), venue=market)
+            current = self._now()
+            current = current.astimezone(KST) if current.tzinfo else current.replace(tzinfo=KST)
+            if (close_at is None or current < close_at
+                    or not await self._is_observed_krx_trading_day(day)
+                    or not any(row["trading_date"] == day for row in window.rows)):
+                raise RuntimeError(f"{market} 일봉 장후 확정 근거가 없습니다.")
+        evidence = window.evidence(code=code, market=market, scope=scope, checked_at=self._now().isoformat())
+        with db_call_source(source):
+            stored = await asyncio.to_thread(self._store.load_daily_bars, code, market, read_limit)
+        coverage = assess_daily_coverage(stored, evidence, code=code, market=market, query_basis_date=basis)
+        if not coverage["collection_verified"]:
+            raise RuntimeError(f"{market} 일봉 응답과 저장값이 일치하지 않습니다.")
+        await asyncio.to_thread(self._store.upsert_documents, DAILY_HISTORY_COLLECTION,
+                                [{"owner": owner, "key": scope, "document": evidence}])
+        return coverage
 
     async def _backfill_entry_minutes(self, code: str, day: str) -> None:
         """새 편입 종목의 등장 전 당일 분봉을 NAS가 한 번 준비한다."""
@@ -1001,10 +1056,16 @@ class AutonomousTop20Service:
         from .postgres_access import db_call_source
         with db_call_source("top20.historical_high"):
             bars = await asyncio.to_thread(self._store.load_daily_bars, code, "KRX", 250)
-        high_250 = max(
-            (int(value.get("high", 0)) for value in bars if value.get("high") is not None),
+            coverage_docs = await asyncio.to_thread(self._store.load_documents, DAILY_HISTORY_COLLECTION, f"{code}:KRX", 2)
+        current = self._now()
+        basis = (current.astimezone(KST) if current.tzinfo else current).date().isoformat()
+        coverage = choose_daily_coverage(bars, coverage_docs, code=code, market="KRX", query_basis_date=basis)
+        verified_bars = [value for value in bars if str(value.get("trading_date", "")) <= coverage.get("window_end", "")]
+        verified_bars = verified_bars[:coverage.get("expected_count", 0)]
+        high_250 = (max(
+            (int(value.get("high", 0)) for value in verified_bars if value.get("high") is not None),
             default=0,
-        ) or None
+        ) or None) if coverage["periods"]["250"]["status"] in {"ready", "provisional"} else None
         include_nxt = await self._nxt_enabled(code)
         target = await asyncio.to_thread(
             HistoricalHighService(
@@ -1199,12 +1260,10 @@ class AutonomousTop20Service:
 
     async def _backfill_daily(self, code: str, day: str, market: str) -> None:
         owner = f"{code}:{market}"
-        coverage = await asyncio.to_thread(self._store.load_documents, "market_data_coverage_daily", owner, 1)
-        if coverage and str(coverage[0].get("document", {}).get("as_of", "")) >= day:
+        coverage = await self._ensure_daily_history(code, day, market, scope="final")
+        legacy = await asyncio.to_thread(self._store.load_documents, "market_data_coverage_daily", owner, 1)
+        if legacy and legacy[0].get("document", {}).get("as_of") == day:
             return
-        body = {"stk_cd": f"{code}_NX" if market == "NXT" else code,
-                "base_dt": day.replace("-", ""), "upd_stkpc_tp": "1"}
-        await self._request_with_retries("ka10081", "/api/dostk/chart", body, "N", "")
         from .postgres_access import db_call_source
         with db_call_source("top20.after_close_daily"):
             bars = await asyncio.to_thread(self._store.load_daily_bars, code, market, 250)
@@ -1217,7 +1276,7 @@ class AutonomousTop20Service:
             "owner": owner, "key": "complete", "document": {
                 "kind": "daily", "scope": "full_day", "as_of": day,
                 "window_closed": True, "session_finalized": True,
-                "rows": len(bars), "completed_at": self._now().isoformat(),
+                "rows": coverage["expected_count"], "completed_at": self._now().isoformat(),
             }
         }])
 

@@ -21,6 +21,22 @@ class Response:
 
 
 class RemoteKiwoomRestClientTests(unittest.TestCase):
+    def test_daily_bars_keeps_legacy_shape_and_carries_optional_coverage(self):
+        calls = []
+        coverage = {"collection_verified": True, "periods": {"250": {"status": "ready"}}}
+
+        def opener(request, **kwargs):
+            calls.append(request.full_url)
+            return Response({"bars": [{"trading_date": "2026-09-29", "high": 100}], "coverage": coverage})
+
+        client = RemoteKiwoomRestClient("http://nas:8787", "token", opener=opener)
+        bars, actual = client.load_stored_daily_bars_with_coverage("005930", "KRX", 250)
+        self.assertEqual(coverage, actual)
+        self.assertEqual(bars, client.load_stored_daily_bars("005930", "KRX", 250))
+        self.assertEqual(2, len(calls))  # Each public read performs exactly one GET.
+        old = RemoteKiwoomRestClient("http://nas:8787", "token", opener=lambda *a, **kw: Response({"bars": []}))
+        self.assertEqual(((), {}), old.load_stored_daily_bars_with_coverage("005930", "KRX"))
+
     def test_top20_ranking_query_uses_kst_trading_date(self) -> None:
         captured = {}
 

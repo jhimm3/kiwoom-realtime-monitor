@@ -68,6 +68,7 @@ def local_daily_bar_observation(
     available_at: datetime | None = None,
     source: str,
     origin: ObservationOrigin = ObservationOrigin.QUERY,
+    completeness: DataCompleteness | None = None,
 ) -> MarketDataObservation[object]:
     observed = _as_kst(available_at or datetime.now(KST))
     effective = datetime.combine(trading_day, time(), tzinfo=KST)
@@ -84,7 +85,7 @@ def local_daily_bar_observation(
             venue=TradingVenue.COMBINED,
             unit=DataUnit.UNKNOWN,
             value_kind=DataValueKind.ACTUAL,
-            completeness=(DataCompleteness.COMPLETE if complete else DataCompleteness.IN_PROGRESS),
+            completeness=completeness or (DataCompleteness.COMPLETE if complete else DataCompleteness.IN_PROGRESS),
             origin=origin,
             source=source,
             candidate_universe=CandidateUniverse.UNKNOWN,

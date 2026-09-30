@@ -53,7 +53,7 @@ class MarketCacheWriterTests(unittest.TestCase):
                 blocker.execute("BEGIN IMMEDIATE")
                 started = perf_counter()
                 writer.enqueue_daily_high(
-                    "005930", DailyHighTargets(None, None, 71000),
+                    "005930", DailyHighTargets(None, None, 71000, period_statuses=(("250", "ready"),)),
                     date(2026, 9, 15), datetime(2026, 9, 15, 10, 31),
                 )
                 self.assertLess(perf_counter() - started, 0.5)
@@ -90,7 +90,7 @@ class MarketCacheWriterTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as connection:
                 stock = connection.execute("SELECT high_250_price FROM stocks WHERE code='005930'").fetchone()
                 bar = connection.execute("SELECT high_price FROM daily_bars WHERE stock_code='005930'").fetchone()
-            self.assertEqual((71000,), stock)
+            self.assertEqual((None,), stock)  # Unverified one-row cache must not replace adjusted high
             self.assertEqual((71000,), bar)
             self.assertEqual([1], saved)
 

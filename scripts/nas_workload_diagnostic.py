@@ -66,6 +66,7 @@ def _api(path: str, query: dict[str, float] | None = None) -> dict:
 from kiwoom_monitor.central_server.diagnostic_sampling import (
     _db_calls_report, _device_stats, _device_delta,
     _correlate_commit_device_samples, _host_usage, _uncontrolled_importers,
+    _correlate_db_commit_activity,
     _snapshot, _pg_stat_io_snapshot, _checkpointer_snapshot,
     _counter_delta, _optional_io_snapshot, _wal_timing_status,
     _io_timing_status, _wal_timing_report, _storage_mapping,
@@ -108,6 +109,8 @@ def _measure(seconds: int, label: str, session_id: str, *, api=None,
     blocking_counts: collections.Counter[str] = collections.Counter()
     max_query_ms: dict[str, int] = {}
     activity_rows_truncated = False
+    commit_activity_samples: list[dict] = []
+    commit_activity_samples_dropped = 0
     started = time.time()
     started_mono = time.monotonic()
     started_iso = datetime.now(UTC).isoformat()
@@ -139,6 +142,7 @@ def _measure(seconds: int, label: str, session_id: str, *, api=None,
                         break
                     now_mono = time.monotonic()
                     if now_mono >= next_pg_sample and next_pg_sample < measure_deadline:
+                        activity_probe_started = time.time()
                         cursor.execute(
                             "SELECT pid,backend_start,state,COALESCE(wait_event_type,''),"
                             "COALESCE(wait_event,''),"
@@ -148,12 +152,26 @@ def _measure(seconds: int, label: str, session_id: str, *, api=None,
                             "ORDER BY query_start NULLS LAST LIMIT 201"
                         )
                         activity_rows = cursor.fetchall()
+                        activity_probe_finished = time.time()
                         activity_rows_truncated |= len(activity_rows) > 200
-                        for _, _, state, wait_type, wait_event, query_age, blockers, query in activity_rows[:200]:
+                        for pid, backend_start, state, wait_type, wait_event, query_age, blockers, query in activity_rows[:200]:
                             if state != "active":
                                 continue
                             wait_counts[f"{wait_type or 'CPU'}:{wait_event or '-'}"] += 1
                             statement = (query or "").lower()
+                            if hasattr(backend_start, "timestamp"):
+                                if len(commit_activity_samples) < 8192:
+                                    commit_activity_samples.append({
+                                        "pid": pid, "backend_started_at": backend_start.timestamp(),
+                                        "started_at": activity_probe_started,
+                                        "finished_at": activity_probe_finished,
+                                        "wait_type": wait_type, "wait_event": wait_event,
+                                        "blocking_pids": list(blockers or ()),
+                                        "statement_type": ("COMMIT" if statement.strip().rstrip(";")
+                                                           in {"commit", "end"} else "OTHER"),
+                                    })
+                                else:
+                                    commit_activity_samples_dropped += 1
                             category = "minute_bars" if "central_minute_bars" in statement else (
                                 "news" if "central_news_" in statement else "other"
                             )
@@ -229,6 +247,14 @@ def _measure(seconds: int, label: str, session_id: str, *, api=None,
                     if api is not _api else None)
     db_calls = _db_calls_report(db_calls_before, db_calls_after, session_id,
                                 control_before, control_snapshot(path))
+    db_commit_activity = _correlate_db_commit_activity(
+        db_calls_raw, commit_activity_samples,
+        dropped_samples=commit_activity_samples_dropped,
+        rows_truncated=activity_rows_truncated,
+    )
+    if db_calls.get("state") != "complete" and db_commit_activity["state"] != "unavailable":
+        db_commit_activity["state"] = "incomplete"
+        db_commit_activity["reason"] = db_calls.get("reason", "db_call_window_incomplete")
     market_bar_saves = _correlate_commit_device_samples(market_bar_saves, device_samples)
     wal_timing = (_wal_timing_report(wal_timing, delta, market_bar_saves)
                   if delta.get("wal_write_time_ms") is not None and
@@ -261,6 +287,7 @@ def _measure(seconds: int, label: str, session_id: str, *, api=None,
         "log_counts": _log_counts(log_path, offset),
         "market_bar_saves": market_bar_saves,
         "db_calls": db_calls,
+        "db_commit_activity": db_commit_activity,
         "db_calls_raw": db_calls_raw,
         "storage_devices": _device_delta(device_before, device_after, elapsed),
         "host_before": host_before, "host_after": _host_usage(),

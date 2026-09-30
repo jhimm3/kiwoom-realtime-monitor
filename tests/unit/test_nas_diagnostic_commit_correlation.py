@@ -10,6 +10,32 @@ from unittest.mock import patch
 
 
 class NasDiagnosticCommitCorrelationTests(unittest.TestCase):
+    def test_commit_activity_excludes_adjacent_statements_and_reused_backend_pids(self) -> None:
+        from kiwoom_monitor.central_server.diagnostic_sampling import _correlate_db_commit_activity
+
+        call = {"call_id": "slow", "writer_family": "realtime.minute",
+                "writer_kind": "realtime_minute", "access_mode": "write",
+                "started_at": 9.0, "commit_started_at": 10.0,
+                "commit_finished_at": 12.0, "commit_ms": 2000, "backend_pid": 42}
+        sample = {"pid": 42, "backend_started_at": 8.0, "started_at": 11.0,
+                  "finished_at": 11.1, "statement_type": "COMMIT",
+                  "wait_type": "IO", "wait_event": "WalSync", "blocking_pids": []}
+        raw = {"calls": [call, dict(call, call_id="missed", started_at=19.0,
+                                    commit_started_at=20.0, commit_finished_at=22.0)]}
+        summary = _correlate_db_commit_activity(raw, [
+            sample, dict(sample, pid=43), dict(sample, backend_started_at=10.5),
+            dict(sample, started_at=9.9), dict(sample, finished_at=12.1),
+            dict(sample, statement_type="OTHER", wait_event="DataFileRead"),
+        ])
+        group = summary["groups"]["realtime.minute/realtime_minute"]
+        self.assertEqual((2, 1, 1), (group["slow_commit_attempts"],
+                                    group["sampled_attempts"], group["unsampled_attempts"]))
+        self.assertEqual({"IO:WalSync": 1}, group["wait_samples"])
+        self.assertEqual("no_sample", raw["commit_activity"][1]["sampling_status"])
+        self.assertIn("does not exclude", summary["scope_note"])
+        self.assertEqual("incomplete", _correlate_db_commit_activity(
+            raw, [sample], dropped_samples=1)["state"])
+
     @staticmethod
     def _diagnostic_module():
         if "fcntl" not in sys.modules:

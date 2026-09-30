@@ -119,6 +119,7 @@ WRITERS: tuple[dict[str, object], ...] = (
                                   "document:historical_highs",
                                   "document:market_index_chart_coverage",
                                   "document:market_data_coverage_daily",
+                                  "document:daily_bar_history_coverage",
                                   "document:market_data_coverage",
                                   "document:market_data_coverage_intraday",
                                   "document:candidate_flow_capture",

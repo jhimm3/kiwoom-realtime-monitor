@@ -15,7 +15,7 @@ services:
       retries: 10
 
   server:
-    image: kiwoom-monitor-server:2026.09.30-daily-bar-lookup-v1
+    image: kiwoom-monitor-server:2026.09.30-db-writer-detail-v1
     build:
       context: ../..
       dockerfile: deploy/synology/server.Dockerfile

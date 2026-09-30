@@ -119,7 +119,7 @@ class CandidateMonitor:
                     "last_error_at": datetime.now(timezone.utc).isoformat(),
                 }
                 try:
-                    await asyncio.to_thread(self._save_checkpoint)
+                    await asyncio.to_thread(self._save_checkpoint, reason="error")
                 except Exception:
                     logger.exception("shadow candidate monitor checkpoint failed")
             await asyncio.sleep(self._poll_seconds)
@@ -132,7 +132,7 @@ class CandidateMonitor:
             self._consume(observation)
             self._cursor = max(self._cursor, int(observation.get("accepted_sequence", 0)))
         if observations:
-            self._save_checkpoint()
+            self._save_checkpoint(reason="processed")
         return len(observations)
 
     def _consume(self, observation: Mapping[str, Any]) -> None:
@@ -245,7 +245,7 @@ class CandidateMonitor:
             "status": "WARMUP", "reason": "bootstrapped_without_historical_alerts",
             "last_processed_sequence": self._cursor,
         }
-        self._save_checkpoint()
+        self._save_checkpoint(reason="bootstrap")
 
     def _trim_bars(self, code: str) -> None:
         rows = sorted(
@@ -274,8 +274,10 @@ class CandidateMonitor:
             <= horizon
         ][-5000:]
 
-    def _save_checkpoint(self) -> None:
-        self._store.save_shadow_monitor_state(self.monitor_id, {
+    def _save_checkpoint(self, *, reason: str = "manual") -> None:
+        from .postgres_access import db_call_source
+
+        document = {
             "schema_version": 1,
             "session_profile": self._session_profile,
             "cursor": self._cursor,
@@ -284,4 +286,6 @@ class CandidateMonitor:
             "universes": [asdict(value) for value in self._universes],
             "bars": [asdict(value) for value in self._bars.values()],
             "quality": self._quality,
-        })
+        }
+        with db_call_source(f"candidate_monitor.{reason}"):
+            self._store.save_shadow_monitor_state(self.monitor_id, document)

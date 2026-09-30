@@ -10,6 +10,24 @@ from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import Daily
 
 
 class DailyBarRepositoryTests(unittest.TestCase):
+    def test_unverified_cache_preserves_rows_without_today_sync_and_short_verified_source_syncs(self) -> None:
+        from dataclasses import replace
+        from kiwoom_monitor.application.daily_high_service import DailyBar, DailyHighTargets
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = DailyBarRepository(path)
+            targets = DailyHighTargets.from_daily_bars((DailyBar("20260929", 100, None, 95, 90, 85, 10),),
+                                                      as_of=date(2026, 9, 30))
+            repository.upsert_targets("005930", targets, date(2026, 9, 30))
+            self.assertEqual(set(), repository.refreshed_today(("005930",), date(2026, 9, 30)))
+            self.assertEqual(1, len(repository.load_targets(("005930",))["005930"].daily_bars))
+            verified = replace(targets, collection_verified=True, query_basis_date="2026-09-30", source_exhausted=True)
+            repository.upsert_targets("005930", verified, date(2026, 9, 30))
+            self.assertEqual({"005930"}, repository.refreshed_today(("005930",), date(2026, 9, 30)))
+            self.assertFalse(repository.load_targets(("005930",))["005930"].collection_verified)
+
     def test_cached_rows_do_not_replace_saved_250_day_high_with_partial_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
@@ -23,7 +41,8 @@ class DailyBarRepositoryTests(unittest.TestCase):
 
             targets = DailyBarRepository(path).load_targets(("005930",))["005930"]
             self.assertIsNone(targets.high_250_price)
-            self.assertEqual(100, targets.high_5_price)
+            self.assertIsNone(targets.high_5_price)
+            self.assertEqual("unverified", targets.period_status("5"))
 
     def test_retain_latest_keeps_250_rows_per_stock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

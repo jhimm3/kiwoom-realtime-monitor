@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import json
 import time
+from collections import Counter, defaultdict
 from hashlib import sha256
 from pathlib import Path
 
@@ -74,6 +75,63 @@ def _device_stats() -> dict[str, list[int]]:
         except (OSError, ValueError):
             pass
     return result
+
+
+def _correlate_db_commit_activity(raw: dict | None, samples: list[dict], *,
+                                  dropped_samples: int = 0,
+                                  rows_truncated: bool = False) -> dict:
+    """Match existing activity point samples to the same backend's slow COMMIT.
+
+    Require the entire probe interval inside the COMMIT window. A reused PID,
+    another statement, or an adjacent wait must not be attributed to this call.
+    """
+    if (not isinstance(raw, dict) or raw.get("unavailable")
+            or not isinstance(raw.get("calls"), list)):
+        return {"state": "unavailable", "reason": "raw_db_calls_unavailable"}
+    by_pid: dict[int, list[dict]] = defaultdict(list)
+    for sample in samples:
+        by_pid[int(sample["pid"])].append(sample)
+    groups: dict[str, dict] = {}
+    details = []
+    detail_limit = 2048
+    for call in raw.get("calls", []):
+        start = call.get("commit_started_at")
+        end = call.get("commit_finished_at")
+        pid = call.get("backend_pid")
+        if (start is None or end is None or pid is None
+                or float(call.get("commit_ms") or 0) < 500):
+            continue
+        matched = [sample for sample in by_pid.get(int(pid), [])
+                   if sample["started_at"] >= float(start)
+                   and sample["finished_at"] <= float(end)
+                   and sample["backend_started_at"] <= float(call["started_at"])
+                   and sample["statement_type"] == "COMMIT"]
+        waits = Counter(f"{sample['wait_type'] or 'CPU'}:{sample['wait_event'] or '-'}"
+                        for sample in matched)
+        key = f"{call['writer_family']}/{call['writer_kind']}"
+        group = groups.setdefault(key, {"access_mode": call.get("access_mode"),
+                                       "slow_commit_attempts": 0, "sampled_attempts": 0,
+                                       "unsampled_attempts": 0, "wait_samples": {}})
+        group["slow_commit_attempts"] += 1
+        group["sampled_attempts" if matched else "unsampled_attempts"] += 1
+        group["wait_samples"] = dict(Counter(group["wait_samples"]) + waits)
+        if len(details) < detail_limit:
+            details.append({"call_id": call["call_id"], "writer": key,
+                            "backend_pid": pid, "commit_ms": call["commit_ms"],
+                            "sampling_status": "sampled" if matched else "no_sample",
+                            "wait_samples": dict(waits),
+                            "blocking_pids": sorted({pid for sample in matched
+                                                     for pid in sample["blocking_pids"]})})
+    summary = {"state": "incomplete" if dropped_samples or rows_truncated or raw.get("truncated")
+               or raw.get("dropped") else "complete",
+               "slow_commit_threshold_ms": 500, "target_sample_interval_ms": 1000,
+               "activity_samples_dropped": dropped_samples,
+               "activity_rows_truncated": rows_truncated,
+               "groups": groups,
+               "details_truncated": sum(g["slow_commit_attempts"] for g in groups.values()) > detail_limit,
+               "scope_note": "same-backend COMMIT point samples only; no_sample does not exclude waits; sample counts are not wait duration or WAL attribution"}
+    raw["commit_activity"] = details
+    return summary
 
 
 def _device_delta(before: dict[str, list[int]], after: dict[str, list[int]],

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
+from kiwoom_monitor.domain.market_data_contract import DataCompleteness
 
 from kiwoom_monitor.application.daily_high_service import DailyBar, DailyHighTargets
 from kiwoom_monitor.infrastructure.persistence.local_bar_observations import (
@@ -42,9 +43,7 @@ class DailyBarRepository:
         grouped: dict[str, list[DailyBar]] = {}
         for code, trade_date, high_price, trade_value, close_price, open_price, low_price, volume in rows:
             grouped.setdefault(str(code), []).append(DailyBar(str(trade_date).replace("-", ""), int(high_price), float(trade_value) if trade_value is not None else None, int(close_price) if close_price else None, int(open_price) if open_price else None, int(low_price) if low_price else None, int(volume) if volume is not None else None))
-        # 5·20일 값은 저장된 원본으로 복원한다. 250일 값은 이전 버전 DB에
-        # 아직 30개만 남아 있을 수 있으므로 여기서 불완전하게 계산하지 않고,
-        # stocks에 저장해 둔 마지막 정상 ka10081 계산값을 계속 사용한다.
+        # Raw cache rows retain prior-day values, but cannot restore NAS coverage proof.
         return {
             code: DailyHighTargets.from_daily_bars(
                 tuple(bars[:250]), as_of=date.today(), include_high_250=False,
@@ -191,7 +190,8 @@ class DailyBarRepository:
             connection.executemany(
                 "INSERT INTO daily_bars(stock_code, trade_date, high_price, trade_value_eok, close_price, open_price, low_price, volume) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(stock_code, trade_date) DO UPDATE SET high_price=excluded.high_price, trade_value_eok=excluded.trade_value_eok, close_price=excluded.close_price, open_price=excluded.open_price, low_price=excluded.low_price, volume=excluded.volume "
-                "WHERE daily_bars.high_price != excluded.high_price OR COALESCE(daily_bars.trade_value_eok, -1) != COALESCE(excluded.trade_value_eok, -1) OR COALESCE(daily_bars.close_price, -1) != COALESCE(excluded.close_price, -1)",
+                "WHERE daily_bars.high_price != excluded.high_price OR COALESCE(daily_bars.trade_value_eok, -1) != COALESCE(excluded.trade_value_eok, -1) OR COALESCE(daily_bars.close_price, -1) != COALESCE(excluded.close_price, -1) "
+                "OR COALESCE(daily_bars.open_price, -1) != COALESCE(excluded.open_price, -1) OR COALESCE(daily_bars.low_price, -1) != COALESCE(excluded.low_price, -1) OR COALESCE(daily_bars.volume, -1) != COALESCE(excluded.volume, -1)",
                 rows,
             )
             available_at = observed_at or datetime.now()
@@ -204,13 +204,17 @@ class DailyBarRepository:
                     trading_day,
                     bar,
                     available_at=available_at,
-                    source="kiwoom-ka10081",
+                    source="kiwoom-ka10081" if targets.collection_verified else "daily-cache-unverified",
+                    completeness=(DataCompleteness.UNCONFIRMED if not targets.collection_verified else
+                                  DataCompleteness.IN_PROGRESS if targets.scope != "final"
+                                  and trading_day.isoformat() == targets.query_basis_date else None),
                 )
                 upsert_market_data_metadata(connection, trading_day.isoformat(), observation)
-            connection.execute(
-                "INSERT INTO daily_bar_sync_log(stock_code, synced_on) VALUES (?, ?) ON CONFLICT(stock_code) DO UPDATE SET synced_on=excluded.synced_on",
-                (code, synced_on.isoformat()),
-            )
+            if targets.collection_verified and targets.query_basis_date == synced_on.isoformat():
+                connection.execute(
+                    "INSERT INTO daily_bar_sync_log(stock_code, synced_on) VALUES (?, ?) ON CONFLICT(stock_code) DO UPDATE SET synced_on=excluded.synced_on",
+                    (code, synced_on.isoformat()),
+                )
             connection.commit()
         finally:
             connection.close()

@@ -7,6 +7,7 @@ from pathlib import Path
 from kiwoom_monitor.application.breakout_strategy import BreakoutStrategyConfig
 from kiwoom_monitor.central_server.candidate_monitor import CandidateMonitor
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
+from kiwoom_monitor.central_server.postgres_access import DBWriterContext
 
 
 def _config() -> BreakoutStrategyConfig:
@@ -75,6 +76,24 @@ class FakeStore:
 
 
 class CandidateMonitorTests(unittest.TestCase):
+    def test_checkpoint_sources_distinguish_bootstrap_and_processed_batches(self) -> None:
+        class SourceStore(FakeStore):
+            def __init__(self, observations=()):
+                super().__init__(observations)
+                self.sources = []
+
+            def save_shadow_monitor_state(self, monitor_id, document):
+                self.sources.append(DBWriterContext("test", "test", "test").source)
+                super().save_shadow_monitor_state(monitor_id, document)
+
+        store = SourceStore((_rank(1),))
+        monitor = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)
+        self.assertEqual(["candidate_monitor.bootstrap"], store.sources)
+        self.assertEqual(1, monitor.run_once())
+        self.assertEqual(["candidate_monitor.bootstrap", "candidate_monitor.processed"], store.sources)
+        self.assertEqual(0, monitor.run_once())
+        self.assertEqual(2, len(store.sources))
+
     def test_default_session_preserves_existing_monitor_identity_format(self) -> None:
         monitor = CandidateMonitor(
             FakeStore(), _config(), poll_seconds=1, universe_max_age_seconds=300,

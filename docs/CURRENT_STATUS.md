@@ -1,5 +1,9 @@
 # 현재 앱과 검증 상태
 
+2026-09-30 O12 DB writer 후보 상세 계측 로컬 구현(빌드 `2026.09.30-db-writer-detail-v1`, NAS 미반영): 기존 90초 표본에서 shadow checkpoint 38회, 분봉 61회/798행/7,173 SQL, TOP20 편입 문서 3회/60행, 최신 실시간 snapshot 61회/789행, 초봉 62회/1,063행, runtime lease 3회였다. 서로 다른 writer에서 COMMIT tail이 관측됐고 SQL execute가 짧은 경로에서도 발생했다. shadow payload/encode, 분봉 내부 단계, TOP20 실제 반영 행 수와 같은 backend의 느린 COMMIT wait-event 상관을 추가했다. 관련 검사 81건·진단/상관 검사 92건 통과(중복 포함). 운영 부하 원인 제거는 아직 하지 않았고, NAS 재빌드 뒤 장중 재측정과 원인별 개선 검증이 남아 있다.
+
+2026-09-30 O12 일봉 기간 검증 로컬 구현(운영 미반영): NAS 수집은 일봉 한 행이 있어도 최신 원천 구간을 확인하고, 연속조회 종료 뒤 저장된 값까지 대조해 `daily_bar_history_coverage`에 확인 상태를 남긴다. 5·20·250일은 각각 계산한다. 신규주처럼 원천 전체가 정상 종료해 확보 이력이 N일보다 짧으면 확보한 봉 수를 표시해 그 구간의 최고가를 사용한다. coverage는 기존 일봉 API의 `bars`와 파라미터를 유지하며 읽기만 한다. PC 계산·캐시도 검증 상태 없이 구형 fundamental/cache 값을 기간 고가로 인증하지 않는다. 로컬 관련 회귀 묶음은 통과했으나 전용 PostgreSQL URL이 없어 해당 통합검사 1건은 건너뛰었다. NAS 빌드 및 실제 응답/화면 확인 전이므로 운영 배포·실제 동작 완료 상태는 아니다. 세부사항과 남은 검증은 OPEN_ITEMS O12 및 HISTORICAL_DATA_CONTRACT의 일봉 기간 검증 계약을 따른다.
+
 2026-09-30 일봉 reader v12 배포·재계측: `/health`가 `status=ok`, `server_build=2026.09.30-daily-bar-lookup-v1`을 반환했다. 60초 run `20260929T210701Z-a0f9fc8f`에서 일봉 reader 50회, 모두 `top20.entry_daily_history`; execute p50/p95 3.098/3.546ms, total p50/p95 15.353/16.697ms, DB·observer 오류 0, dropped/truncated 0이었다. master/capture OFF·workload pause 0 복귀를 확인했다. 직전 v11 60초 구간은 69회·unattributed라 호출 수/출처 mix가 달라 v12 변경의 직접 전후 비교로 해석하지 않는다. 자세한 조건은 OPEN_ITEMS O12.
 
 2026-09-30 NAS 일봉 조회 인덱스 적용 당시 기록: 운영 `central_daily_bars`에 `(code, market, trading_date DESC)` 인덱스를 concurrent 방식으로 생성했고 유효·ready 상태를 확인했다. v11 적용 후 60초 계측은 일봉 reader 69회·unattributed, execute p95 6.19ms였다. 이후 v12에는 qualified `ORDER BY`와 caller 출처 태그가 배포됐다. 자세한 비교 조건과 미확인 사항은 OPEN_ITEMS O12를 따른다.

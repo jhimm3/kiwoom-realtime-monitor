@@ -244,6 +244,7 @@ class MarketDataIngestor:
                 )
 
     def _ingest_daily(self, body: dict[str, Any], payload: dict[str, Any]) -> None:
+        from kiwoom_monitor.application.daily_bar_coverage import normalize_source_daily_bar
         raw_code = str(body.get("stk_cd", "")).strip()
         code, market = _code_and_market(raw_code)
         records = payload.get("stk_dt_pole_chart_qry", payload.get("stk_ddwkmm", []))
@@ -254,19 +255,11 @@ class MarketDataIngestor:
         for record in records:
             if not isinstance(record, dict):
                 continue
-            raw_date = str(record.get("date", record.get("dt", ""))).strip()
-            if len(raw_date) != 8 or not raw_date.isdigit():
+            normalized = normalize_source_daily_bar(record)
+            if normalized is None:
                 continue
-            prices = [_integer(record.get(key), positive=True) for key in ("open_pric", "high_pric", "low_pric", "cur_prc")]
-            volume = _integer(record.get("trde_qty"), positive=True)
-            if any(value is None for value in prices):
-                continue
-            trade_value = _integer(record.get("trde_prica"), positive=True)
             values.append({
-                "trading_date": f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}",
-                "code": code, "market": market, "open": prices[0], "high": prices[1],
-                "low": prices[2], "close": prices[3], "volume": volume or 0,
-                "trade_value_million_won": trade_value,
+                **normalized, "code": code, "market": market,
                 "updated_at": now.timestamp(),
             })
         observations = []

@@ -5,12 +5,22 @@ import unittest
 from kiwoom_monitor.application.daily_high_service import DailyHighService
 
 
-class FakeClient:
+class FullChartClient:
+    def request_with_continuation(self, api_id, path, body, **kwargs):
+        response = self.request(api_id, path, body)
+        for row in response.get("stk_dt_pole_chart_qry", []):
+            for key in ("open_pric", "low_pric", "cur_prc"):
+                row.setdefault(key, row["high_pric"])
+            row.setdefault("trde_qty", "0")
+        return response, False, ""
+
+
+class FakeClient(FullChartClient):
     def request(self, api_id: str, path: str, body: dict[str, object]) -> dict[str, object]:
         self.api_id = api_id
         self.path = path
         self.body = body
-        rows = [{"dt": f"202608{day:02d}", "high_pric": str(100 + day)} for day in range(1, 26)]
+        rows = [{"dt": f"202608{day:02d}", "high_pric": str(100 + day)} for day in range(25, 0, -1)]
         return {"stk_dt_pole_chart_qry": rows}
 
 
@@ -18,7 +28,7 @@ class DailyHighServiceTests(unittest.TestCase):
     def test_keeps_latest_250_daily_bars_for_persistence(self) -> None:
         from datetime import date, timedelta
 
-        class ManyBarsClient:
+        class ManyBarsClient(FullChartClient):
             def request(self, api_id: str, path: str, body: dict[str, object]) -> dict[str, object]:
                 base = date(2026, 8, 28)
                 return {"stk_dt_pole_chart_qry": [
@@ -35,11 +45,12 @@ class DailyHighServiceTests(unittest.TestCase):
         self.assertEqual(125, targets.high_5_price)
         self.assertEqual(125, targets.high_20_price)
         self.assertEqual(125, targets.high_250_price)
+        self.assertEqual("ready", targets.period_status("250"))
         self.assertEqual("ka10081", client.api_id)
         self.assertEqual("/api/dostk/chart", client.path)
 
     def test_prefers_direct_daily_trade_value_from_ka10081(self) -> None:
-        class DirectValueClient:
+        class DirectValueClient(FullChartClient):
             def request(self, api_id: str, path: str, body: dict[str, object]) -> dict[str, object]:
                 return {
                     "stk_dt_pole_chart_qry": [
@@ -67,7 +78,7 @@ class DailyHighServiceTests(unittest.TestCase):
         self.assertEqual(80, targets.previous_day_close_price)
 
     def test_sums_krx_and_nxt_only_for_previous_day_trade_value(self) -> None:
-        class CombinedMarketClient:
+        class CombinedMarketClient(FullChartClient):
             def request(self, api_id: str, path: str, body: dict[str, object]) -> dict[str, object]:
                 code = str(body["stk_cd"])
                 value = "2000" if code.endswith("_NX") else "3000"
@@ -79,11 +90,11 @@ class DailyHighServiceTests(unittest.TestCase):
                 }
 
         targets = DailyHighService(CombinedMarketClient(), include_nxt=True).load("005930")
-        self.assertEqual(200, targets.high_5_price)  # 신고가도 KRX+NXT 최고가 기준
+        self.assertEqual(200, targets.high_5_price)  # Verified source end covers its entire short history
         self.assertEqual(50.0, targets.previous_day_trade_value_eok)  # 30억 + 20억
 
     def test_keeps_last_combined_250_high_when_nxt_temporarily_fails(self) -> None:
-        class NxtFailureClient:
+        class NxtFailureClient(FullChartClient):
             def request(self, api_id: str, path: str, body: dict[str, object]) -> dict[str, object]:
                 if str(body["stk_cd"]).endswith("_NX"):
                     raise RuntimeError("temporary NXT error")
@@ -95,10 +106,11 @@ class DailyHighServiceTests(unittest.TestCase):
             cached_high_250_loader=lambda code: 3_002_000,
         ).load("000660")
 
-        self.assertEqual(3_002_000, targets.high_250_price)
+        self.assertIsNone(targets.high_250_price)
+        self.assertEqual(3_002_000, targets.cached_high_250_price)
 
     def test_keeps_last_combined_250_high_when_nxt_response_is_temporarily_empty(self) -> None:
-        class EmptyNxtClient:
+        class EmptyNxtClient(FullChartClient):
             def request(self, api_id: str, path: str, body: dict[str, object]) -> dict[str, object]:
                 if str(body["stk_cd"]).endswith("_NX"):
                     return {"stk_dt_pole_chart_qry": []}
@@ -110,13 +122,15 @@ class DailyHighServiceTests(unittest.TestCase):
             cached_high_250_loader=lambda code: 3_007_000,
         ).load("000660")
 
-        self.assertEqual(3_007_000, targets.high_250_price)
+        self.assertIsNone(targets.high_250_price)
+        self.assertEqual(3_007_000, targets.cached_high_250_price)
 
     def test_successful_nxt_response_replaces_stale_cached_250_high(self) -> None:
-        class CombinedClient:
+        class CombinedClient(FullChartClient):
             def request(self, api_id: str, path: str, body: dict[str, object]) -> dict[str, object]:
                 high = "3002000" if str(body["stk_cd"]).endswith("_NX") else "2987000"
-                return {"stk_dt_pole_chart_qry": [{"dt": "20260825", "high_pric": high}]}
+                from datetime import date, timedelta
+                return {"stk_dt_pole_chart_qry": [{"dt": (date(2026, 8, 25) - timedelta(days=i)).strftime("%Y%m%d"), "high_pric": high} for i in range(250)]}
 
         targets = DailyHighService(
             CombinedClient(),

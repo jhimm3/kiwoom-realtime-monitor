@@ -37,6 +37,30 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_daily_high_completion_requires_verified_scope_and_target_day(self) -> None:
+        from dataclasses import replace
+        from datetime import date
+        from kiwoom_monitor.application.daily_high_service import DailyBar
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings)
+            window._market_cache_writer = None
+            window._daily_bar_repository = None
+            window._stock_lookup = None
+            window._after_close_finalization_date = date(2026, 9, 29)
+            window._after_close_finalization_codes = ("005930",)
+            raw = DailyHighTargets(None, None, None, daily_bars=(DailyBar("20260929", 100, None),))
+            window._on_daily_high_received("005930", raw)
+            self.assertNotIn("005930", window._after_close_daily_received)
+            self.assertNotIn("005930", window._daily_high_basis_refresh_received)
+            initial = replace(raw, collection_verified=True, scope="initial", window_end="2026-09-29")
+            window._on_daily_high_received("005930", initial)
+            self.assertNotIn("005930", window._after_close_daily_received)
+            window._on_daily_high_received("005930", replace(initial, scope="final"))
+            self.assertIn("005930", window._after_close_daily_received)
+            window.close()
+
     def test_settings_backup_import_confirmation_uses_main_window_as_parent(self) -> None:
         owner = SimpleNamespace()
         with patch("kiwoom_monitor.presentation.main_window.QFileDialog.getOpenFileName", return_value=("backup.json", "")), \
@@ -632,7 +656,7 @@ class MainWindowTest(unittest.TestCase):
             database.initialize()
             window = MainWindow(database.settings)
             window._fundamentals["000660"] = StockFundamentals(1_000, 50, 3_100_000)
-            window._daily_highs["000660"] = DailyHighTargets(None, None, 3_002_000)
+            window._daily_highs["000660"] = DailyHighTargets(None, None, 3_002_000, period_statuses=(("250", "ready"),))
 
             window._on_fundamentals_received(
                 "000660", StockFundamentals(1_100, 45, 2_987_000)

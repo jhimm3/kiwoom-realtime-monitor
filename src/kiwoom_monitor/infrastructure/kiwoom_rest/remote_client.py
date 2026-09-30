@@ -352,6 +352,11 @@ class RemoteKiwoomRestClient:
     def load_stored_daily_bars(
         self, code: str, market: str = "", limit: int = 250,
     ) -> tuple[dict[str, Any], ...] | None:
+        return self.load_stored_daily_bars_with_coverage(code, market, limit)[0]
+
+    def load_stored_daily_bars_with_coverage(
+        self, code: str, market: str = "", limit: int = 250,
+    ) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
         query = urlencode({"code": code, "market": market.upper(), "limit": limit})
         request = Request(
             f"{self._server_url}/api/v1/market/daily-bars?{query}",
@@ -361,7 +366,8 @@ class RemoteKiwoomRestClient:
         bars = document.get("bars")
         if not isinstance(bars, list) or any(not isinstance(value, dict) for value in bars):
             raise KiwoomApiError("개인 중앙 서버 일봉 응답 형식이 올바르지 않습니다.")
-        return tuple(bars)
+        coverage = document.get("coverage")
+        return tuple(bars), coverage if isinstance(coverage, dict) else {}
 
     def load_stored_investor_flow(
         self, code: str, trading_date: str,

@@ -304,6 +304,9 @@ def record_writer_transaction(kind: str, rows: int, elapsed_ms: int, *,
                               commit_ms: int | None = None,
                               connect_ms: int | None = None,
                               execute_ms: int | None = None,
+                              encode_ms: float | None = None,
+                              domain_phase_ms: dict[str, float] | None = None,
+                              domain_counts: dict[str, int] | None = None,
                               bytes_payload_estimate: int | None = None,
                               db_call_id: str | None = None) -> None:
     """Record one successful writer transaction; unavailable phases stay null.
@@ -326,7 +329,9 @@ def record_writer_transaction(kind: str, rows: int, elapsed_ms: int, *,
                          "transactions": 1, "commits": 1,
                          "elapsed_ms": elapsed_ms,
                          "connect_ms": connect_ms, "execute_ms": execute_ms,
-                         "commit_ms": commit_ms,
+                         "commit_ms": commit_ms, "encode_ms": encode_ms,
+                         "domain_phase_ms": dict(domain_phase_ms or {}),
+                         "domain_counts": dict(domain_counts or {}),
                          "bytes_payload_estimate": bytes_payload_estimate})
 
 
@@ -502,6 +507,19 @@ def summarize_market_bar_saves(start: float, end: float) -> dict[str, object]:
                                          if row["connect_ms"] is not None]),
                 "execute_ms": describe([int(row["execute_ms"]) for row in rows
                                          if row["execute_ms"] is not None]),
+                "encode_ms": describe([float(row["encode_ms"]) for row in rows
+                                       if row.get("encode_ms") is not None]),
+                "domain_phase_ms": {
+                    phase: describe([float(row.get("domain_phase_ms", {}).get(phase, 0))
+                                     for row in rows])
+                    for phase in sorted({phase for row in rows
+                                         for phase in row.get("domain_phase_ms", {})})
+                },
+                "domain_counts": {
+                    name: sum(int(row.get("domain_counts", {}).get(name, 0)) for row in rows)
+                    for name in sorted({name for row in rows
+                                        for name in row.get("domain_counts", {})})
+                },
                 "commit_ms": describe([int(row["commit_ms"]) for row in rows
                                         if row["commit_ms"] is not None]),
                 "commit_latency_samples": sum(row["commit_ms"] is not None for row in rows),
@@ -515,7 +533,11 @@ def summarize_market_bar_saves(start: float, end: float) -> dict[str, object]:
                 "call_samples": [
                     {"at": row["at"], "db_call_id": row["db_call_id"],
                      "elapsed_ms": row["elapsed_ms"], "connect_ms": row["connect_ms"],
-                     "execute_ms": row["execute_ms"], "commit_ms": row["commit_ms"]}
+                     "execute_ms": row["execute_ms"], "commit_ms": row["commit_ms"],
+                     "encode_ms": row.get("encode_ms"),
+                     "domain_phase_ms": row.get("domain_phase_ms", {}),
+                     "domain_counts": row.get("domain_counts", {}),
+                     "payload_bytes_estimated": row["bytes_payload_estimate"]}
                     for row in rows if row.get("db_call_id")
                 ],
             }

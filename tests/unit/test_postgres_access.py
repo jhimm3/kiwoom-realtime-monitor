@@ -82,6 +82,31 @@ class FakeConnection:
 
 
 class PostgresAccessTests(unittest.TestCase):
+    def test_realtime_minute_phases_keep_one_native_transaction(self) -> None:
+        raw = self._native_context_connection()
+        store = PostgresQueryStore("unused")
+        value = {
+            "trading_date": "2099-01-09", "minute": "10:00", "code": "DIAG",
+            "market": "KRX", "open": 100, "high": 100, "low": 100,
+            "close": 100, "volume": 3, "trade_value_million_won": 3,
+            "updated_at": 1790000000.0, "operation_id": "minute-phase-test",
+        }
+        with patch.object(store, "_connect", return_value=raw):
+            store.save_minute_bars([value])
+
+        call = self._calls()[0]
+        self.assertEqual((1, 0, 1, 5),
+                         (raw.commits, raw.rollbacks, raw.closes, call["sql_calls"]))
+        sample = summarize_market_bar_saves(time.time() - 30, time.time() + 1)[
+            "writer_transactions"]["realtime_minute"]["call_samples"][0]
+        self.assertEqual(call["call_id"], sample["db_call_id"])
+        self.assertEqual({"replayed": 0, "query_complete": 0, "bar_upserts": 1,
+                          "metadata_upserts": 0, "revision_inserts": 0,
+                          "operation_inserts": 1}, sample["domain_counts"])
+        self.assertEqual({"day_locks", "operation_lookup", "query_authority",
+                          "bar_upsert", "operation_insert"},
+                         set(sample["domain_phase_ms"]))
+
     def test_read_source_survives_thread_boundary_and_is_summarized(self) -> None:
         async def read() -> None:
             with db_call_source("top20.entry_minutes"):
@@ -537,6 +562,7 @@ class PostgresAccessTests(unittest.TestCase):
         store = PostgresQueryStore("unused")
         decision = {"decision_id": "decision-1", "decided_at": "2099-01-09T00:00:00+00:00"}
         candidate = {"event_id": "event-1", "available_at": "2099-01-09T00:00:00+00:00"}
+        started = time.time() - 1
         with patch.object(store, "_connect", side_effect=[evaluation_connection, checkpoint_connection]):
             store.save_shadow_evaluation("monitor", decision, candidate, "2099-01-09T00:01:00+00:00")
             store.save_shadow_monitor_state("monitor", {"cursor": 1})
@@ -554,6 +580,13 @@ class PostgresAccessTests(unittest.TestCase):
             (call["writer_family"], call["writer_kind"], call["rows_attempted"], call["sql_calls"])
             for call in calls
         ])
+        writer = summarize_market_bar_saves(
+            started, time.time() + 1,
+        )["writer_transactions"]["shadow_monitor_state"]
+        self.assertEqual(len(json.dumps({"cursor": 1}).encode("utf-8")),
+                         writer["payload_bytes_estimated"])
+        self.assertGreaterEqual(writer["encode_ms"]["median"], 0)
+        self.assertEqual(calls[1]["call_id"], writer["call_samples"][0]["db_call_id"])
 
     def test_news_ai_job_enqueue_keeps_revision_reads_and_insert_in_one_commit(self) -> None:
         raw = self._native_context_connection()

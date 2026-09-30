@@ -4370,7 +4370,8 @@ class MainWindow(QMainWindow):
         # 모든 현재 종목을 ka10081 수정주가 기준으로 다시 계산해 교체한다.
         refresh_adjusted_basis = self._settings.get("daily_high_adjusted_basis_version") != "1"
         missing = daily_high_candidates(
-            codes, self._daily_highs, refreshed,
+            codes, {code for code, target in self._daily_highs.items()
+                    if target.collection_verified and target.query_basis_date == today.isoformat()}, refreshed,
             force=force, adjusted_basis_refresh=refresh_adjusted_basis,
         )
         if not missing:
@@ -4385,17 +4386,20 @@ class MainWindow(QMainWindow):
     def _on_daily_high_received(self, code: str, targets: object) -> None:
         if isinstance(targets, DailyHighTargets):
             target_day = self._after_close_finalization_date
-            if code in self._after_close_finalization_codes and target_day is not None and any(
+            if (targets.collection_verified and targets.scope == "final" and target_day is not None
+                    and targets.window_end == target_day.isoformat()
+                    and code in self._after_close_finalization_codes) and any(
                 bar.trade_date == target_day.strftime("%Y%m%d") for bar in targets.daily_bars
             ):
                 self._after_close_daily_received.add(code)
             self._daily_highs[code] = targets
-            self._daily_high_basis_refresh_received.add(code)
+            if targets.collection_verified:
+                self._daily_high_basis_refresh_received.add(code)
             if self._market_cache_writer is not None and self._daily_bar_repository is not None:
                 now = self._ranking_now()
                 self._market_cache_writer.enqueue_daily_high(code, targets, now.date(), now)
             else:
-                if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_adjusted_high_250_price"):
+                if targets.period_verified("250") and self._stock_lookup is not None and hasattr(self._stock_lookup, "update_adjusted_high_250_price"):
                     self._stock_lookup.update_adjusted_high_250_price(code, targets.high_250_price)
             if self._daily_bar_repository is not None and self._market_cache_writer is None:
                 try:

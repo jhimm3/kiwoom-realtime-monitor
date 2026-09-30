@@ -118,7 +118,8 @@ class MarketCacheWriter(QThread):
                          targets: DailyHighTargets, trade_date: date,
                          observed_at: datetime) -> None:
         try:
-            stock_repository.update_adjusted_high_250_price(code, targets.high_250_price)
+            if targets.period_verified("250"):
+                stock_repository.update_adjusted_high_250_price(code, targets.high_250_price)
             daily_repository.upsert_targets(code, targets, trade_date, observed_at=observed_at)
         except Exception as error:
             self.daily_high_failed.emit(code, str(error))
