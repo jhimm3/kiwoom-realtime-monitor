@@ -22,6 +22,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
 )
 from kiwoom_monitor.infrastructure.krx.stock_catalog import fetch_krx_stock_catalog
 from kiwoom_monitor.domain.ranking import normalize_stock_code
+from kiwoom_monitor.application.ranking_schedule import ranking_snapshot_archive_due
 
 from .database import QueryStore
 from .diagnostic_workloads import is_paused
@@ -83,6 +84,8 @@ class AutonomousTop20Service:
         self._backfill_retry_day = ""
         self._backfill_retry_at = 0.0
         self._backfill_attempts = 0
+        self._backfill_progress_day = ""
+        self._backfill_completed_steps: dict[str, set[str]] = {}
         self._entrants_day = ""
         self._entrant_first_seen: dict[str, str] = {}
         self._account_entry_codes: tuple[str, ...] = ()
@@ -334,6 +337,8 @@ class AutonomousTop20Service:
                 return
 
     def _schedule_aux_rankings(self, now: datetime) -> None:
+        if not ranking_snapshot_archive_due(now):
+            return
         due = []
         schedules = {
             "4": now.strftime("%Y-%m-%dT%H:%M:%S") if now.second in {0, 30} else "",
@@ -427,6 +432,9 @@ class AutonomousTop20Service:
         ):
             logger.info("KRX 전체일 차트 보완 대기: %s (20:00 종료 전)", day)
             return False
+        if self._backfill_progress_day != day:
+            self._backfill_progress_day = day
+            self._backfill_completed_steps.clear()
         succeeded = True
         try:
             await self._backfill_market_indexes(day)
@@ -448,22 +456,37 @@ class AutonomousTop20Service:
             if self._now().time().replace(tzinfo=None) >= clock_time(7, 40) and self._now().date().isoformat() != day:
                 succeeded = False
                 break
-            try:
-                eligible = await self._nxt_enabled(code)
-                await self._backfill_daily(code, day, "KRX")
-                await self._backfill_minutes(code, day, "KRX")
-                if eligible:
-                    await self._backfill_daily(code, day, "NXT")
-                    await self._backfill_minutes(code, day, "NXT")
-            except Exception as error:
-                succeeded = False
-                logger.warning("TOP20 편입종목 장후 보완 실패: %s %s", code, error)
-            try:
-                await self._backfill_candidate_flows(code, day)
-            except Exception as error:
-                succeeded = False
-                logger.warning("TOP20 편입종목 장후 수급 보완 실패: %s %s", code, error)
-        return succeeded and not is_paused("minute_backfill")
+            completed = self._backfill_completed_steps.setdefault(code, set())
+            if "bars" not in completed:
+                try:
+                    eligible = await self._nxt_enabled(code)
+                    await self._backfill_daily(code, day, "KRX")
+                    from .postgres_access import db_call_source
+                    with db_call_source("top20.after_close_minutes"):
+                        await self._backfill_minutes(code, day, "KRX")
+                    if eligible:
+                        await self._backfill_daily(code, day, "NXT")
+                        with db_call_source("top20.after_close_minutes"):
+                            await self._backfill_minutes(code, day, "NXT")
+                    if self._minute_backfill_enabled and not is_paused("minute_backfill"):
+                        completed.add("bars")
+                    else:
+                        succeeded = False
+                except Exception as error:
+                    succeeded = False
+                    logger.warning("TOP20 편입종목 장후 보완 실패: %s %s", code, error)
+            if "flows" not in completed:
+                try:
+                    await self._backfill_candidate_flows(code, day)
+                    completed.add("flows")
+                except Exception as error:
+                    succeeded = False
+                    logger.warning("TOP20 편입종목 장후 수급 보완 실패: %s %s", code, error)
+        completed_day = succeeded and not is_paused("minute_backfill")
+        if completed_day:
+            self._backfill_progress_day = ""
+            self._backfill_completed_steps.clear()
+        return completed_day
 
     async def _schedule_loop(self) -> None:
         first_iteration = True
@@ -848,12 +871,16 @@ class AutonomousTop20Service:
                         await self._broker.request(
                             "ka10001", "/api/dostk/stkinfo", {"stk_cd": code},
                         )
+                    entry_minutes_deferred = bool(day and not _entry_minute_query_due(day, self._now()))
                     if day:
-                        await self._backfill_entry_minutes(code, day)
+                        if not entry_minutes_deferred:
+                            from .postgres_access import db_call_source
+                            with db_call_source("top20.entry_minutes"):
+                                await self._backfill_entry_minutes(code, day)
                         await self._ensure_entry_daily_history(code, day)
                         await self._capture_candidate_investor_flow(code, day)
                         await self._ensure_historical_high(code, day)
-                    if not (day and is_paused("minute_backfill")):
+                    if not (day and (is_paused("minute_backfill") or entry_minutes_deferred)):
                         self._fundamentals_ready[code] = target_day
                 except asyncio.CancelledError:
                     raise
@@ -868,9 +895,11 @@ class AutonomousTop20Service:
         if await self._nxt_enabled(code):
             markets.append("NXT")
         for market in markets:
-            stored = await asyncio.to_thread(
-                self._store.load_daily_bars, code, market, 1,
-            )
+            from .postgres_access import db_call_source
+            with db_call_source("top20.entry_daily_history"):
+                stored = await asyncio.to_thread(
+                    self._store.load_daily_bars, code, market, 1,
+                )
             if stored:
                 continue
             result = await self._broker.request(
@@ -881,13 +910,15 @@ class AutonomousTop20Service:
             )
             if isinstance(self._broker, CentralRestBroker) and result.recording_succeeded is not True:
                 raise RuntimeError(f"{market} 편입 종목 일봉 조회 후 저장이 확인되지 않았습니다.")
-            stored = await asyncio.to_thread(self._store.load_daily_bars, code, market, 1)
+            with db_call_source("top20.entry_daily_history"):
+                stored = await asyncio.to_thread(self._store.load_daily_bars, code, market, 1)
             if not stored:
                 raise RuntimeError(f"{market} 편입 종목 일봉이 저장되지 않았습니다.")
 
     async def _backfill_entry_minutes(self, code: str, day: str) -> None:
         """새 편입 종목의 등장 전 당일 분봉을 NAS가 한 번 준비한다."""
-        if not self._minute_backfill_enabled or is_paused("minute_backfill"):
+        if (not self._minute_backfill_enabled or is_paused("minute_backfill")
+                or not _entry_minute_query_due(day, self._now())):
             return
         markets = ["KRX"]
         if await self._nxt_enabled(code):
@@ -967,7 +998,9 @@ class AutonomousTop20Service:
             return
         loop = asyncio.get_running_loop()
         adapter = _AsyncBrokerChartAdapter(self._broker, loop)
-        bars = await asyncio.to_thread(self._store.load_daily_bars, code, "KRX", 250)
+        from .postgres_access import db_call_source
+        with db_call_source("top20.historical_high"):
+            bars = await asyncio.to_thread(self._store.load_daily_bars, code, "KRX", 250)
         high_250 = max(
             (int(value.get("high", 0)) for value in bars if value.get("high") is not None),
             default=0,
@@ -1011,11 +1044,19 @@ class AutonomousTop20Service:
         except Exception:
             program_body["stk_cd"] = code
             program = await self._broker.request("ka90008", "/api/dostk/mrkcond", program_body)
-        self._verify_flow_result(program, "ka90008", "stk_tm_prm_trde_trnsn", raw_day)
+        # ka90008 may legitimately return no program trades. Its date argument is
+        # ignored by Kiwoom, so only attribute an empty observation to this day
+        # while the requested calendar day is still current.
+        program_rows = program.payload.get("stk_tm_prm_trde_trnsn")
+        self._verify_flow_result(
+            program, "ka90008", "stk_tm_prm_trde_trnsn", raw_day,
+            allow_empty=self._now().date().isoformat() == day,
+        )
         await asyncio.to_thread(self._store.upsert_documents, "candidate_flow_finalization", [{
             "owner": owner, "key": "complete", "document": {
                 "as_of": day, "completed_at": self._now().isoformat(),
                 "scope": "candidate_after_close",
+                "program_flow_rows": len(program_rows),
             },
         }])
 
@@ -1128,13 +1169,16 @@ class AutonomousTop20Service:
         }])
         return True
 
-    def _verify_flow_result(self, result: Any, api_id: str, rows_key: str, raw_day: str) -> None:
+    def _verify_flow_result(
+        self, result: Any, api_id: str, rows_key: str, raw_day: str,
+        *, allow_empty: bool = False,
+    ) -> None:
         if result.recording_succeeded is False or (
             isinstance(self._broker, CentralRestBroker) and result.recording_succeeded is not True
         ):
             raise RuntimeError(f"{api_id} 수급 원본 저장이 확인되지 않았습니다.")
         rows = result.payload.get(rows_key)
-        if not isinstance(rows, list) or not rows:
+        if not isinstance(rows, list) or (not rows and not allow_empty):
             raise RuntimeError(f"{api_id} 대상일 수급 응답이 비었습니다.")
         for row in rows:
             if not isinstance(row, dict):
@@ -1161,7 +1205,9 @@ class AutonomousTop20Service:
         body = {"stk_cd": f"{code}_NX" if market == "NXT" else code,
                 "base_dt": day.replace("-", ""), "upd_stkpc_tp": "1"}
         await self._request_with_retries("ka10081", "/api/dostk/chart", body, "N", "")
-        bars = await asyncio.to_thread(self._store.load_daily_bars, code, market, 250)
+        from .postgres_access import db_call_source
+        with db_call_source("top20.after_close_daily"):
+            bars = await asyncio.to_thread(self._store.load_daily_bars, code, market, 250)
         if not any(str(bar.get("trading_date", "")) == day for bar in bars):
             # NXT 가능 종목도 빈 응답을 완료로 기록하면 이후 모든 조회가
             # rows=0 캐시를 재사용해 KRX 단독 신고가로 내려간다. 어느
@@ -1195,6 +1241,12 @@ class AutonomousTop20Service:
 def _collection_open(value: datetime) -> bool:
     current = value.time().replace(tzinfo=None)
     return value.weekday() < 5 and clock_time(8) <= current < clock_time(20)
+
+
+def _entry_minute_query_due(day: str, value: datetime) -> bool:
+    """Current-day entry bars cannot exist before the 08:00 market session."""
+    current = value.astimezone(KST) if value.tzinfo else value
+    return day != current.date().isoformat() or current.time() >= clock_time(8)
 
 
 def _ranking_collection_due(value: datetime) -> bool:

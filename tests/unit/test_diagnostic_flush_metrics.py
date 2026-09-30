@@ -60,6 +60,12 @@ class DiagnosticFlushMetricsTests(unittest.TestCase):
                         "probe_pending_at_capture": True, "probe_errors": [],
                         "samples": [{"wait_type": "IO", "wait_event": "DataFileRead"}],
                     }],
+                    metadata_statement_diagnostics=[{
+                        "method": "execute", "sql_operations": 1,
+                        "affected_rows": 3, "probe_pending_at_capture": False,
+                        "probe_errors": [],
+                        "samples": [{"wait_type": "LWLock", "wait_event": "WALWrite"}],
+                    }],
                 )
                 metrics.record_market_bar_save(
                     kind="minute", rows=1, observations=0,
@@ -79,6 +85,10 @@ class DiagnosticFlushMetricsTests(unittest.TestCase):
             self.assertEqual(1, group["windows_with_incomplete_probe"])
             self.assertEqual(1, group["windows_below_initial_delay"])
             self.assertEqual({"IO:DataFileRead": 1}, group["wait_event_samples"])
+            metadata = summary["kinds"]["minute"]["metadata_statement_diagnostics"]
+            self.assertEqual(1, metadata["execution_windows"])
+            self.assertEqual(3, metadata["affected_rows"])
+            self.assertEqual({"LWLock:WALWrite": 1}, metadata["wait_event_samples"])
         finally:
             metrics.clear_metrics()
 

@@ -89,8 +89,8 @@ def _device_delta(before: dict[str, list[int]], after: dict[str, list[int]],
         busy_ms = current[9] - previous[9]
         value = {"writes": writes, "write_sectors": current[6] - previous[6],
                  "write_await_ms": round(write_ms / writes, 2) if writes > 0 else None,
-                 "average_queue": round(weighted_ms / (elapsed * 1000), 2),
-                 "busy_percent": round(100 * busy_ms / (elapsed * 1000), 2)}
+                 "average_queue": round(weighted_ms / (elapsed * 1000), 2) if elapsed > 0 else None,
+                 "busy_percent": round(100 * busy_ms / (elapsed * 1000), 2) if elapsed > 0 else None}
         if len(current) >= 17 and len(previous) >= 17:
             flushes = current[15] - previous[15]
             value["flushes"] = flushes
@@ -510,25 +510,25 @@ def read_postgres_snapshot(database_url: str, *, sections: frozenset[str],
                 }
             if "news_jobs" in sections:
                 cursor.execute(
-                    "SELECT n_live_tup,n_dead_tup,seq_scan,idx_scan,last_analyze,last_autoanalyze "
-                    "FROM pg_stat_user_tables WHERE relname='central_news_jobs'"
+                    "SELECT schemaname,n_live_tup,n_dead_tup,seq_scan,idx_scan,last_analyze,last_autoanalyze "
+                    "FROM pg_stat_user_tables WHERE relid=to_regclass('central_news_jobs')"
                 )
                 table = cursor.fetchone()
                 cursor.execute(
                     "SELECT indexrelname,idx_scan,idx_tup_read,idx_tup_fetch "
-                    "FROM pg_stat_user_indexes WHERE relname='central_news_jobs' "
+                    "FROM pg_stat_user_indexes WHERE relid=to_regclass('central_news_jobs') "
                     "ORDER BY indexrelname"
                 )
                 indexes = cursor.fetchall()
                 result["sections"]["news_jobs"] = {
-                    "table": ({"live_estimate": table[0], "dead_estimate": table[1],
-                               "seq_scans": table[2], "index_scans": table[3],
-                               "last_analyze": table[4].isoformat() if table[4] else None,
-                               "last_autoanalyze": table[5].isoformat() if table[5] else None}
+                    "table": ({"schema": table[0], "live_estimate": table[1], "dead_estimate": table[2],
+                               "seq_scans": table[3], "index_scans": table[4],
+                               "last_analyze": table[5].isoformat() if table[5] else None,
+                               "last_autoanalyze": table[6].isoformat() if table[6] else None}
                               if table else None),
                     "indexes": [dict(zip(("name", "scans", "tuples_read", "tuples_fetched"),
                                          row, strict=True)) for row in indexes],
-                    "scope_note": "cumulative index counters and estimated table rows",
+                    "scope_note": "statistics resolved for the same search_path relation as the application query",
                 }
     return result
 

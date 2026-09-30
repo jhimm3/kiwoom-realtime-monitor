@@ -48,6 +48,18 @@ class DiagnosticWorkloadTests(unittest.TestCase):
             with patch("kiwoom_monitor.central_server.diagnostic_workloads.instance_id", return_value="new-container"):
                 self.assertEqual(frozenset(), paused_workloads(path=path, now=now))
 
+    def test_minute_metadata_gate_expires_with_diagnostic_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "controls.json"
+            now = time.time()
+            path.write_text(json.dumps({
+                "schema": 1, "instance_id": instance_id(),
+                "diagnostic_tool": {"expires_at": now + 10},
+                "leases": {"minute_query_metadata": now + 60},
+            }), encoding="utf-8")
+            self.assertIn("minute_query_metadata", paused_workloads(path=path, now=now))
+            self.assertNotIn("minute_query_metadata", paused_workloads(path=path, now=now + 11))
+
     def test_all_saves_including_fast_ones_are_summarized(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
                 "os.environ", {"KIWOOM_DIAGNOSTIC_WORKLOAD_PATH":

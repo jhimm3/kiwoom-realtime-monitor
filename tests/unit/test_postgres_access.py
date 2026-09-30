@@ -1,21 +1,27 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import sqlite3
 import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
 
-from kiwoom_monitor.central_server.database import PostgresQueryStore, StoredQuery
+from kiwoom_monitor.central_server.database import (
+    PostgresQueryStore, StoredQuery, _NEWS_JOB_CLAIM_SELECT_SQL,
+    _NEWS_JOB_CLAIM_DIAGNOSTIC_CANDIDATE_SQL,
+)
 from kiwoom_monitor.central_server.diagnostic_metrics import (
     refresh_capture_state, summarize_db_calls, summarize_market_bar_saves,
 )
 from kiwoom_monitor.central_server.diagnostic_workloads import instance_id
 from kiwoom_monitor.central_server.postgres_access import (
-    DBWriterContext, observe_existing_transaction, open_observed_connection,
+    DBWriterContext, db_call_source, observe_existing_transaction, open_observed_connection,
 )
 
 
@@ -76,6 +82,31 @@ class FakeConnection:
 
 
 class PostgresAccessTests(unittest.TestCase):
+    def test_read_source_survives_thread_boundary_and_is_summarized(self) -> None:
+        async def read() -> None:
+            with db_call_source("top20.entry_minutes"):
+                await asyncio.to_thread(run_read)
+
+        def run_read() -> None:
+            connection = open_observed_connection(
+                FakeConnection,
+                DBWriterContext("read.document_collection", "document:market_data_coverage_intraday",
+                                "load_documents", access_mode="read"),
+            )
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+            connection.commit()
+            connection.close()
+
+        asyncio.run(read())
+        self.assertEqual("", DBWriterContext("read.test", "plain", "read").source)
+        self.assertEqual("top20.entry_minutes", self._calls()[0]["source"])
+        summary = summarize_db_calls(time.time() - 30, time.time() + 1)
+        self.assertEqual(
+            {"top20.entry_minutes": 1},
+            summary["readers"]["read.document_collection/document:market_data_coverage_intraday"]["sources"],
+        )
+
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -529,9 +560,12 @@ class PostgresAccessTests(unittest.TestCase):
         raw.rows = [("revision-1", "content-hash")]
         store = PostgresQueryStore("unused")
         value = {"stock_code": "005930", "identity": "article-1",
-                 "processing_version": "ai-v1", "payload": {"event": {}}}
+                  "processing_version": "ai-v1", "payload": {"event": {}}}
+        wakes_after_commits = []
+        store.set_news_job_wakeup(lambda: wakes_after_commits.append(raw.commits))
         with patch.object(store, "_connect", return_value=raw):
             self.assertEqual(1, store.enqueue_news_ai_jobs([value]))
+        self.assertEqual([1], wakes_after_commits)
         self.assertEqual(["SELECT", "SELECT", "INSERT"],
                          [item[0] for item in raw.statements])
         self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
@@ -547,10 +581,13 @@ class PostgresAccessTests(unittest.TestCase):
         raw.fail_execute = 4
         store = PostgresQueryStore("unused")
         value = {"stock_code": "005930", "identity": "article-1",
-                 "processing_version": "ai-v1", "payload": {"event": {}}}
+                  "processing_version": "ai-v1", "payload": {"event": {}}}
+        wakes = []
+        store.set_news_job_wakeup(lambda: wakes.append(True))
         with patch.object(store, "_connect", return_value=raw):
             with self.assertRaisesRegex(ValueError, "statement failed"):
                 store.enqueue_news_ai_jobs([value, value])
+        self.assertEqual([], wakes)
         self.assertEqual(["SELECT", "SELECT", "INSERT", "SELECT"],
                          [item[0] for item in raw.statements])
         self.assertEqual((0, 1, 1), (raw.commits, raw.rollbacks, raw.closes))
@@ -720,6 +757,7 @@ class PostgresAccessTests(unittest.TestCase):
         self.assertEqual("read_only_explain_without_analyze", result["mode"])
         self.assertEqual("diagnostic_test", result["database"])
         self.assertEqual(3, len(result["plans"]))
+        self.assertEqual(2, len(result["candidate_plans"]))
         self.assertEqual("Index Scan", result["plans"][0]["nodes"][0]["Node Type"])
         self.assertEqual("fixed safe diagnostic predicate",
                          result["plans"][0]["nodes"][0]["Filter"])
@@ -730,10 +768,98 @@ class PostgresAccessTests(unittest.TestCase):
         self.assertEqual("SET", diagnostic_connection.sql_statements[0].split()[0])
         explain_sql = [sql for sql in diagnostic_connection.sql_statements
                        if sql.startswith("EXPLAIN")]
-        self.assertEqual(3, len(explain_sql))
+        self.assertEqual(5, len(explain_sql))
         self.assertTrue(all("ANALYZE" not in sql.upper() for sql in explain_sql))
         self.assertTrue(any(sql.startswith("EXPLAIN (FORMAT JSON) "
                                     "SELECT job_key,article_revision_id") for sql in explain_sql))
+        self.assertEqual("BODY", result["candidate_plans"][0]["preferred_stage"])
+        self.assertEqual("RULE", result["candidate_plans"][1]["preferred_stage"])
+        self.assertIn("AND central_news_jobs.stage IN ('BODY','RULE')", explain_sql[2])
+        self.assertIn("AND (stage NOT IN ('BODY','RULE')", explain_sql[1])
+
+    def test_news_job_claim_read_only_analyze_reports_actual_work_without_locking(self) -> None:
+        raw = self._native_context_connection()
+        statements: list[str] = []
+
+        class DiagnosticCursor(FakeCursor):
+            def execute(self, sql: str, parameters: object = ()) -> DiagnosticCursor:
+                statements.append(sql)
+                super().execute(sql, parameters)
+                if sql.startswith("EXPLAIN"):
+                    self.connection.rows = [([{
+                        "Execution Time": 12.5, "Planning Time": 0.4,
+                        "Plan": {
+                            "Node Type": "Limit", "Actual Rows": 1,
+                            "Shared Hit Blocks": 20,
+                            "Plans": [{"Node Type": "Seq Scan",
+                                       "Relation Name": "central_news_article_revisions",
+                                       "Actual Rows": 42, "Actual Loops": 1,
+                                       "Shared Read Blocks": 5}],
+                    }}],)]
+                return self
+
+        class DiagnosticConnection(type(raw)):
+            def cursor(self) -> DiagnosticCursor:
+                return DiagnosticCursor(self)
+
+        store = PostgresQueryStore("unused")
+        with patch.object(store, "_connect", return_value=DiagnosticConnection()):
+            result = store.analyze_news_job_claim_read_only("BODY")
+        self.assertEqual("read_only_analyze_without_row_lock", result["mode"])
+        self.assertEqual(12.5, result["execution_ms"])
+        self.assertEqual(42, result["nodes"][1]["Actual Rows"])
+        self.assertEqual(5, result["nodes"][1]["Shared Read Blocks"])
+        self.assertEqual("SET TRANSACTION READ ONLY", statements[0])
+        self.assertEqual("SET LOCAL statement_timeout TO '2000ms'", statements[1])
+        self.assertIn("EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON)", statements[2])
+        self.assertNotIn("FOR UPDATE", statements[2])
+        self.assertIn("LIMIT %s", statements[2])
+        with self.assertRaises(ValueError):
+            store.analyze_news_job_claim_read_only("AI")
+
+    def test_news_job_claim_diagnostic_candidate_preserves_exclusion_and_priority(self) -> None:
+        jobs = (
+            ("current-body", "current", "BODY", 90.0),
+            ("current-rule", "current", "RULE", 80.0),
+            ("historical-body", "historical", "BODY", 100.0),
+            ("historical-rule", "historical", "RULE", 100.0),
+            ("historical-ai", "historical", "AI", 60.0),
+            ("missing-article-body", "missing", "BODY", 70.0),
+        )
+        with closing(sqlite3.connect(":memory:")) as connection:
+            connection.execute(
+                "CREATE TABLE central_news_jobs (job_key TEXT,article_revision_id TEXT,"
+                "stock_code TEXT,target_id TEXT,stage TEXT NOT NULL,input_hash TEXT,"
+                "processing_version TEXT,attempts INTEGER,payload_json TEXT,updated_at REAL,"
+                "state TEXT,next_retry_at REAL)"
+            )
+            connection.execute(
+                "CREATE TABLE central_news_article_revisions "
+                "(article_revision_id TEXT UNIQUE,collection_scope TEXT NOT NULL)"
+            )
+            connection.executemany(
+                "INSERT INTO central_news_article_revisions VALUES(?,?)",
+                (("current", "query_set"), ("historical", "historical_backfill")),
+            )
+            connection.executemany(
+                "INSERT INTO central_news_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                ((key, article, "005930", "005930", stage, "hash", "version", 0,
+                  "{}", updated, "PENDING", 0.0)
+                 for key, article, stage, updated in jobs),
+            )
+            for preferred_stage in ("BODY", "RULE"):
+                parameters = (200.0, preferred_stage, preferred_stage, "", "", "", "", "", "", 10)
+                results = []
+                for statement in (_NEWS_JOB_CLAIM_SELECT_SQL,
+                                  _NEWS_JOB_CLAIM_DIAGNOSTIC_CANDIDATE_SQL):
+                    read_only_sql = statement.replace(
+                        "FOR UPDATE SKIP LOCKED LIMIT %s", "LIMIT %s"
+                    ).replace("%s", "?")
+                    results.append([row[0] for row in connection.execute(read_only_sql, parameters)])
+                self.assertEqual(results[0], results[1])
+                self.assertEqual({"current-body", "current-rule", "historical-ai",
+                                  "missing-article-body"}, set(results[0]))
+                self.assertEqual(f"current-{preferred_stage.lower()}", results[0][0])
 
     def test_external_news_claim_empty_result_commits_read_transaction(self) -> None:
         raw = self._native_context_connection()

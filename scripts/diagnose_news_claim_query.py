@@ -38,18 +38,19 @@ def main() -> None:
                         "query_sha256": hashlib.sha256(sql.encode()).hexdigest()[:12]}
                        for pid, state, kind, event, age, blocked, sql in cur.fetchall()]
             cur.execute(
-                "SELECT n_live_tup,n_dead_tup,seq_scan,idx_scan,last_analyze,last_autoanalyze "
-                "FROM pg_stat_user_tables WHERE relname='central_news_jobs'"
+                "SELECT schemaname,n_live_tup,n_dead_tup,seq_scan,idx_scan,last_analyze,last_autoanalyze "
+                "FROM pg_stat_user_tables WHERE relid=to_regclass('central_news_jobs')"
             )
             row = cur.fetchone()
-            table = dict(zip(("live_estimate", "dead_estimate", "seq_scans", "index_scans",
+            table = dict(zip(("schema", "live_estimate", "dead_estimate", "seq_scans", "index_scans",
                               "last_analyze", "last_autoanalyze"), row, strict=True)) if row else {}
             for key in ("last_analyze", "last_autoanalyze"):
                 if table.get(key) is not None:
                     table[key] = table[key].isoformat()
             cur.execute(
                 "SELECT indexrelname,idx_scan,idx_tup_read,idx_tup_fetch "
-                "FROM pg_stat_user_indexes WHERE relname='central_news_jobs' ORDER BY indexrelname"
+                "FROM pg_stat_user_indexes WHERE relid=to_regclass('central_news_jobs') "
+                "ORDER BY indexrelname"
             )
             indexes = [dict(zip(("name", "scans", "tuples_read", "tuples_fetched"), item,
                                 strict=True)) for item in cur.fetchall()]

@@ -28,7 +28,7 @@ catch [IO.IOException] {
 }
 
 function Write-State([string]$Status, [int]$Completed, [string]$ErrorText = '') {
-    [ordered]@{
+    $document = [ordered]@{
         schema = 'historical-news-article-collector-state/v1'
         pid = $PID
         status = $Status
@@ -37,7 +37,36 @@ function Write-State([string]$Status, [int]$Completed, [string]$ErrorText = '') 
         diagnostic_log = $diagnosticLog
         error = $ErrorText
         updated_at = [DateTimeOffset]::UtcNow.ToString('o')
-    } | ConvertTo-Json | Set-Content -LiteralPath $stateFile -Encoding utf8
+    } | ConvertTo-Json
+    $temporary = "$stateFile.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+    $backup = "$temporary.bak"
+    $lastError = $null
+    try {
+        [IO.File]::WriteAllText($temporary, $document, [System.Text.UTF8Encoding]::new($false))
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            try {
+                if ([IO.File]::Exists($stateFile)) {
+                    [IO.File]::Replace($temporary, $stateFile, $backup)
+                }
+                else {
+                    [IO.File]::Move($temporary, $stateFile)
+                }
+                return
+            }
+            catch {
+                $lastError = $_.Exception.Message
+                if ($attempt -lt 19) { Start-Sleep -Milliseconds 100 }
+            }
+        }
+    }
+    catch {
+        $lastError = $_.Exception.Message
+    }
+    finally {
+        try { [IO.File]::Delete($temporary) } catch { }
+        try { [IO.File]::Delete($backup) } catch { }
+    }
+    try { Write-Log "state update failed after retry: $lastError" } catch { }
 }
 
 function Write-Log([string]$Message) {

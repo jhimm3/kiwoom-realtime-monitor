@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from kiwoom_monitor.application.ranking_schedule import (
+    ranking_snapshot_archive_due,
     RankingResponseAction,
     decide_ranking_response,
     next_ranking_schedule,
@@ -13,6 +14,15 @@ from kiwoom_monitor.application.ranking_schedule import (
 
 
 class RankingScheduleTests(unittest.TestCase):
+    def test_standalone_ranking_archive_window_uses_kst(self) -> None:
+        self.assertFalse(ranking_snapshot_archive_due(datetime(2026, 9, 10, 7, 54, 59)))
+        self.assertTrue(ranking_snapshot_archive_due(datetime(2026, 9, 10, 7, 55)))
+        self.assertTrue(ranking_snapshot_archive_due(datetime(2026, 9, 10, 8, 5, 59)))
+        self.assertFalse(ranking_snapshot_archive_due(datetime(2026, 9, 10, 8, 6)))
+        self.assertTrue(ranking_snapshot_archive_due(
+            datetime(2026, 9, 9, 22, 55, tzinfo=timezone.utc),
+        ))
+
     def test_thirty_second_schedule_uses_next_half_minute_and_quarter_second_offset(self) -> None:
         schedule = next_ranking_schedule(datetime(2026, 9, 9, 10, 12, 10, 123000), "5")
         self.assertEqual(datetime(2026, 9, 9, 10, 12, 30), schedule.next_time)

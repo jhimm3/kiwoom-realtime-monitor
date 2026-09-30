@@ -15,7 +15,7 @@ from pathlib import Path
 WORKLOADS = frozenset({
     "minute_backfill", "top20_after_close", "news_jobs", "news_stock_refresh",
     "news_query_set", "news_market_feed", "external_market", "candidate_monitor",
-    "historical_news_archive",
+    "historical_news_archive", "minute_query_metadata",
 })
 
 

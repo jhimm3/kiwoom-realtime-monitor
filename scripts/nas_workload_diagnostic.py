@@ -253,7 +253,8 @@ def _measure(seconds: int, label: str, session_id: str, *, api=None,
         "io_timing": io_timing,
         "storage_mapping": _storage_mapping(),
         "wal_bytes_per_second": (round(delta["wal_bytes"] / elapsed, 2)
-                                 if delta.get("wal_bytes") is not None else None),
+                                 if elapsed > 0 and delta.get("wal_bytes") is not None
+                                 else None),
         "wait_samples": dict(wait_counts), "active_query_samples": dict(active_counts),
         "blocking_samples": dict(blocking_counts), "max_query_ms": max_query_ms,
         "activity_rows_truncated": activity_rows_truncated,

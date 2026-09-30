@@ -6,6 +6,7 @@ from time import monotonic
 from typing import Any, Callable
 
 from kiwoom_monitor.application.market_session_schedule import KRX_AFTER_MARKET_EFFECTIVE_DATE
+from kiwoom_monitor.application.ranking_schedule import ranking_snapshot_archive_due
 from kiwoom_monitor.domain.market_data_contract import (
     DataCompleteness,
     DataValueKind,
@@ -63,7 +64,9 @@ class MarketDataIngestor:
 
     def ingest(self, api_id: str, body: dict[str, Any], payload: dict[str, Any]) -> None:
         if api_id == "ka10080":
-            self._ingest_minutes(body, payload)
+            from .postgres_access import db_call_source
+            with db_call_source("market_ingest.ka10080"):
+                self._ingest_minutes(body, payload)
         elif api_id == "ka10081":
             self._ingest_daily(body, payload)
         elif api_id == "ka00198":
@@ -276,13 +279,15 @@ class MarketDataIngestor:
         self._store.replace_daily_bars(values, observations=observations)
 
     def _ingest_ranking(self, body: dict[str, Any], payload: dict[str, Any]) -> None:
+        now = self._now()
+        if not ranking_snapshot_archive_due(now):
+            return
         records = payload.get("item_inq_rank", payload.get("result_list", []))
         if not isinstance(records, list):
             return
         first = next((row for row in records if isinstance(row, dict)), {})
         raw_date = str(first.get("dt", payload.get("base_date", ""))).strip()
         raw_time = str(first.get("tm", payload.get("base_time", ""))).strip().zfill(6)
-        now = self._now()
         snapshot_key = (
             f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}T{raw_time[:2]}:{raw_time[2:4]}:{raw_time[4:]}"
             if len(raw_date) == 8 and len(raw_time) == 6 else now.isoformat(timespec="seconds")

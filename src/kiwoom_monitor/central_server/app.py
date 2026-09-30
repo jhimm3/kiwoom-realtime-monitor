@@ -42,7 +42,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.09.29-diagnostic-api-v6"
+SERVER_BUILD = "2026.09.30-daily-bar-lookup-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -1121,6 +1121,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         paused = control["paused"]
         configured = {
             "minute_backfill": bool(top20_service and top20_service._minute_backfill_enabled),
+            "minute_query_metadata": bool(active.database_url.startswith("postgres")),
             "top20_after_close": top20_service is not None,
             "news_jobs": bool(news_service and news_service._job_runner),
             "news_stock_refresh": bool(news_service and (
@@ -1204,6 +1205,16 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         if len(json.dumps(result).encode("utf-8")) > 1_048_576:
             raise HTTPException(503, detail="DIAGNOSTIC_PLAN_TOO_LARGE")
         return result
+
+    @app.get("/api/v1/diagnostics/news-job-claim-readonly-analyze",
+             dependencies=[Depends(authorize)])
+    async def diagnostic_news_job_claim_readonly_analyze(stage: str = "BODY") -> dict[str, object]:
+        analyze = getattr(store, "analyze_news_job_claim_read_only", None)
+        if not callable(analyze):
+            raise HTTPException(501, detail="POSTGRES_DIAGNOSTIC_UNAVAILABLE")
+        if stage not in {"BODY", "RULE"}:
+            raise HTTPException(400, detail="NEWS_JOB_STAGE_INVALID")
+        return await asyncio.to_thread(analyze, stage)
 
     from .diagnostic_workloads import (
         WORKLOADS, _history as record_diagnostic_history,
@@ -1898,7 +1909,9 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         market: str = Query(default="", max_length=8),
         limit: int = Query(default=250, ge=1, le=5000),
     ) -> dict[str, object]:
-        values = await asyncio.to_thread(store.load_daily_bars, code, market.upper(), limit)
+        from .postgres_access import db_call_source
+        with db_call_source("api.market.daily_bars"):
+            values = await asyncio.to_thread(store.load_daily_bars, code, market.upper(), limit)
         return {"code": code, "market": market.upper(), "bars": values}
 
     @app.get("/api/v1/market/coverage", dependencies=[Depends(authorize)])
@@ -2640,8 +2653,11 @@ def _archived_chart_response(store: Any, api_id: str, body: dict[str, Any]) -> d
         coverage = store.load_documents("market_data_coverage_daily", f"{code}:{market}", 1)
         if not _archive_coverage_ready(coverage, day, "daily"):
             return None
+        from .postgres_access import db_call_source
+        with db_call_source("api.kiwoom.archive_daily_bars"):
+            stored_bars = store.load_daily_bars(code, market, 5000)
         bars = [
-            bar for bar in store.load_daily_bars(code, market, 5000)
+            bar for bar in stored_bars
             if str(bar.get("trading_date", "")) <= day
         ][:250]
         # 과거 버전이 NXT 빈 응답도 완료(rows=0)로 남긴 경우가 있다.

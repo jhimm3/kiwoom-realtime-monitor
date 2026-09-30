@@ -1062,7 +1062,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual(1, len(latest))
         self.assertEqual("2026-09-08", latest[0]["trading_date"])
 
-    def test_daily_bar_replay_skips_canonical_update_but_refreshes_metadata(self) -> None:
+    def test_daily_bar_replay_preserves_available_at_until_value_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
@@ -1095,15 +1095,59 @@ class CentralServerDatabaseTests(unittest.TestCase):
             corrected = {**replay, "close": 70060, "updated_at": replay["updated_at"] + 60}
             save(corrected)
             [changed] = store.load_daily_bars("005930", "KRX", 1)
+            with store._lock, store._connection() as connection:
+                corrected_metadata = connection.execute(
+                    "SELECT available_at FROM central_market_data_observation_meta "
+                    "WHERE dataset_kind='daily_bar' AND subject='005930:KRX' "
+                    "AND observation_key='2026-09-08'"
+                ).fetchone()
             store.close()
 
         self.assertEqual(original["updated_at"], unchanged["updated_at"])
-        replay_observation = daily_bar_observation(
-            replay, completeness=DataCompleteness.COMPLETE,
-        )
-        self.assertEqual(replay_observation.metadata.available_at.isoformat(), metadata[0])
+        original_observation = daily_bar_observation(original, completeness=DataCompleteness.COMPLETE)
+        corrected_observation = daily_bar_observation(corrected, completeness=DataCompleteness.COMPLETE)
+        self.assertEqual(original_observation.metadata.available_at.isoformat(), metadata[0])
+        self.assertEqual(corrected_observation.metadata.available_at.isoformat(), corrected_metadata[0])
         self.assertEqual(70060, changed["close"])
         self.assertEqual(corrected["updated_at"], changed["updated_at"])
+
+    def test_minute_bar_metadata_replay_preserves_time_until_state_or_source_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            original = {
+                "trading_date": "2026-09-08", "minute": "09:30", "code": "005930",
+                "market": "KRX", "open": 100, "high": 110, "low": 90, "close": 105,
+                "volume": 10, "trade_value_million_won": 1,
+                "updated_at": 1_790_000_000.0,
+            }
+
+            def save(value, completeness, source):
+                observation = minute_bar_observation(
+                    value, origin=ObservationOrigin.QUERY,
+                    completeness=completeness, source=source,
+                    value_kind=DataValueKind.ESTIMATED,
+                )
+                store.replace_minute_bars(
+                    [value], observations=[(bar_observation_key(observation), observation)],
+                )
+                return store.load_market_data_metadata(
+                    MarketDatasetKind.MINUTE_BAR, "005930:KRX", "2026-09-08T09:30",
+                )
+
+            initial = save(original, DataCompleteness.IN_PROGRESS, "source-a")
+            replay = {**original, "updated_at": original["updated_at"] + 60}
+            unchanged = save(replay, DataCompleteness.IN_PROGRESS, "source-a")
+            completed = save(replay, DataCompleteness.COMPLETE, "source-a")
+            sourced = save({**replay, "updated_at": replay["updated_at"] + 60},
+                           DataCompleteness.COMPLETE, "source-b")
+            store.close()
+
+        self.assertEqual(initial.available_at, unchanged.available_at)
+        self.assertEqual(replay["updated_at"], completed.available_at.timestamp())
+        self.assertEqual(DataCompleteness.COMPLETE, completed.completeness)
+        self.assertEqual("source-b", sourced.source)
+        self.assertEqual(replay["updated_at"] + 60, sourced.available_at.timestamp())
 
     def test_daily_bar_batch_keeps_last_duplicate_and_rolls_back_with_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1159,8 +1203,14 @@ class CentralServerDatabaseTests(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def execute(self, sql, parameters) -> None:
+            def execute(self, sql, parameters):
                 self.statements.append((sql, tuple(parameters)))
+                self.last_parameters = tuple(parameters)
+                return self
+
+            def fetchall(self):
+                return [tuple(self.last_parameters[index:index + 3])
+                        for index in range(0, len(self.last_parameters), 10)]
 
         class Connection:
             def __init__(self, cursor) -> None:
@@ -1338,8 +1388,14 @@ class CentralServerDatabaseTests(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def execute(self, sql, parameters=()) -> None:
+            def execute(self, sql, parameters=()):
                 self.statements.append((sql, tuple(parameters or ())))
+                self.last_parameters = tuple(parameters or ())
+                return self
+
+            def fetchall(self):
+                return [tuple(self.last_parameters[index:index + 4])
+                        for index in range(0, len(self.last_parameters), 11)]
 
         class Connection:
             def __init__(self, cursor) -> None:
@@ -1722,10 +1778,15 @@ class CentralServerDatabaseTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.statements: list[str] = []
 
-            def execute(self, sql, _parameters=None) -> None:
+            def execute(self, sql, _parameters=None):
                 self.statements.append(sql)
                 if sql == "SET LOCAL track_wal_io_timing TO on":
                     raise RuntimeError("permission denied")
+                self.last_parameters = tuple(_parameters or ())
+                return self
+
+            def fetchall(self):
+                return [tuple(self.last_parameters[:4])]
 
             def fetchone(self):
                 return ("off",)
@@ -1765,16 +1826,24 @@ class CentralServerDatabaseTests(unittest.TestCase):
         store = PostgresQueryStore("postgresql://unused")
         store._connect = lambda: connection  # type: ignore[method-assign]
         probe_thread = Mock()
+        store._observation_history_enabled = False
         value = {
             "trading_date": "2026-09-25", "minute": "09:30", "code": "005930",
             "market": "KRX", "open": 1, "high": 2, "low": 1, "close": 2,
             "volume": 10, "trade_value_million_won": 2, "updated_at": time.time(),
         }
+        observation = minute_bar_observation(
+            value, origin=ObservationOrigin.QUERY,
+            completeness=DataCompleteness.COMPLETE, source="kiwoom-ka10080",
+            value_kind=DataValueKind.ESTIMATED,
+        )
         with patch("kiwoom_monitor.central_server.diagnostic_metrics.refresh_capture_state",
                    return_value={"enabled": True}), \
                 patch("kiwoom_monitor.central_server.database.Thread", return_value=probe_thread), \
                 patch("kiwoom_monitor.central_server.diagnostic_metrics.record_market_bar_save") as record:
-            store.replace_minute_bars([value])
+            store.replace_minute_bars(
+                [value], observations=[(bar_observation_key(observation), observation)],
+            )
 
         self.assertIn("SAVEPOINT diagnostic_wal_timing", cursor.statements)
         self.assertIn("ROLLBACK TO SAVEPOINT diagnostic_wal_timing", cursor.statements)
@@ -1782,7 +1851,8 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertTrue(connection.committed)
         self.assertFalse(connection.rolled_back)
         self.assertTrue(connection.closed)
-        self.assertEqual(2, probe_thread.start.call_count)  # bar UPSERT and COMMIT windows
+        self.assertEqual(3, probe_thread.start.call_count)  # bar, metadata, COMMIT windows
+        self.assertEqual(1, len(record.call_args.kwargs["metadata_statement_diagnostics"]))
         probe_thread.join.assert_not_called()
         self.assertFalse(record.call_args.kwargs["wal_timing_for_commit"])
         self.assertEqual("RuntimeError", record.call_args.kwargs["wal_timing_error"])
@@ -1812,6 +1882,78 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertTrue(broken_probe_connection.committed)
         self.assertFalse(broken_probe_connection.rolled_back)
         self.assertEqual(["RuntimeError"], record.call_args.kwargs["commit_probe_errors"])
+
+    def test_minute_metadata_diagnostic_gate_only_skips_metadata(self) -> None:
+        class Cursor:
+            def __init__(self) -> None:
+                self.statements: list[str] = []
+
+            def execute(self, sql, _parameters=()):
+                self.statements.append(sql)
+                self.last_parameters = tuple(_parameters or ())
+                return self
+
+            def fetchall(self):
+                return [tuple(self.last_parameters[:4])]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Connection:
+            def __init__(self) -> None:
+                self.query = Cursor()
+                self.commits = 0
+
+            def cursor(self):
+                return self.query
+
+            def commit(self) -> None:
+                self.commits += 1
+
+            def rollback(self) -> None:
+                raise AssertionError("unexpected rollback")
+
+            def close(self) -> None:
+                pass
+
+        store = PostgresQueryStore("postgresql://unused")
+        connections: list[Connection] = []
+
+        def connect():
+            connection = Connection()
+            connections.append(connection)
+            return connection
+
+        store._connect = connect  # type: ignore[method-assign]
+        store._observation_history_enabled = False
+        value = {
+            "trading_date": "2026-09-25", "minute": "09:30", "code": "005930",
+            "market": "KRX", "open": 1, "high": 2, "low": 1, "close": 2,
+            "volume": 10, "trade_value_million_won": 2, "updated_at": time.time(),
+        }
+        observation = minute_bar_observation(
+            value, origin=ObservationOrigin.QUERY,
+            completeness=DataCompleteness.COMPLETE, source="kiwoom-ka10080",
+            value_kind=DataValueKind.ESTIMATED,
+        )
+        rows = [(bar_observation_key(observation), observation)]
+        with patch("kiwoom_monitor.central_server.diagnostic_workloads.is_paused",
+                   side_effect=[False, True, False]), \
+                patch("kiwoom_monitor.central_server.database._save_postgres_metadata") as save_metadata, \
+                patch("kiwoom_monitor.central_server.diagnostic_metrics.record_market_bar_save") as record:
+            for _ in range(3):
+                store.replace_minute_bars([value], observations=rows)
+
+        self.assertEqual(2, save_metadata.call_count)
+        self.assertEqual([0, 1, 0], [call.kwargs["metadata_suppressed_rows"]
+                                    for call in record.call_args_list])
+        self.assertEqual([1, 1, 1], [connection.commits for connection in connections])
+        self.assertTrue(all(any("INSERT INTO central_minute_bars" in sql
+                                for sql in connection.query.statements)
+                            for connection in connections))
 
     def test_postgres_minute_bar_save_rolls_back_and_closes_on_error(self) -> None:
         class Cursor:

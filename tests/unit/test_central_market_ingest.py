@@ -263,10 +263,10 @@ class MarketDataIngestorTests(unittest.TestCase):
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
             ingestor = MarketDataIngestor(
-                store, now_provider=lambda: datetime(2026, 9, 8, 10, 15, 31),
+                store, now_provider=lambda: datetime(2026, 9, 8, 8, 5, 31),
             )
             ingestor.ingest("ka00198", {"qry_tp": "5"}, {
-                "item_inq_rank": [{"dt": "20260908", "tm": "101530", "stk_cd": "005930", "bigd_rank": "1"}],
+                "item_inq_rank": [{"dt": "20260908", "tm": "080530", "stk_cd": "005930", "bigd_rank": "1"}],
             })
             ingestor.ingest("ka10045", {"stk_cd": "005930_AL", "end_dt": "20260908"}, {
                 "stk_orgn_trde_trnsn": [{"dt": "20260908", "for_daly_nettrde_qty": "100"}],
@@ -276,7 +276,7 @@ class MarketDataIngestorTests(unittest.TestCase):
             })
             ranking = store.load_dataset_snapshots("ranking", "5")
             ranking_metadata = store.load_market_data_metadata(
-                MarketDatasetKind.CANDIDATE_SET, "5", "2026-09-08T10:15:30"
+                MarketDatasetKind.CANDIDATE_SET, "5", "2026-09-08T08:05:30"
             )
             ranking_revisions = store.load_observation_revisions("ranking", "5")
             investor = store.load_dataset_snapshots("investor_flow", "005930")
@@ -288,9 +288,24 @@ class MarketDataIngestorTests(unittest.TestCase):
         self.assertEqual(DataCompleteness.COMPLETE, ranking_metadata.completeness)
         self.assertEqual(ObservationOrigin.QUERY, ranking_metadata.origin)
         self.assertEqual(CandidateUniverse.RANKING_TOP20, ranking_metadata.candidate_universe)
-        self.assertEqual("2026-09-08T01:15:31+00:00", ranking_revisions[0]["available_at"])
+        self.assertEqual("2026-09-07T23:05:31+00:00", ranking_revisions[0]["available_at"])
         self.assertEqual("SOR", investor[0]["payload"]["market"])
         self.assertEqual("SOR", program[0]["payload"]["market"])
+
+    def test_ranking_ingest_outside_morning_window_does_not_persist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            payload = {"item_inq_rank": [{
+                "dt": "20260908", "tm": "090000", "stk_cd": "005930", "bigd_rank": "1",
+            }]}
+            for query_type in ("1", "5"):
+                for hour, minute in ((7, 54), (8, 6), (9, 0)):
+                    MarketDataIngestor(
+                        store, now_provider=lambda h=hour, m=minute: datetime(2026, 9, 8, h, m),
+                    ).ingest("ka00198", {"qry_tp": query_type}, payload)
+                self.assertEqual([], store.load_dataset_snapshots("ranking", query_type))
+            store.close()
 
     def test_archives_new_high_fundamentals_and_nxt_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

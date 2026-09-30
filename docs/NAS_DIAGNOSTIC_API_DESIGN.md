@@ -1,7 +1,8 @@
 # NAS 진단도구 API 연결 설계
 
-2026-09-29 · O12 · **v4 배포 및 observe-only API smoke 완료; 비교 run/전체 동등성은 미확인**
+2026-09-29 · O12 · **v6 배포 확인; observe-only run과 report GET 확인, CLI 동등성·진단 acceptance는 미확인**
 
+아래 단락은 v4 당시의 배포 이력이다. 현재 실행 상태는 위 v6 확인을 따른다.
 NAS 현행 v2 소스와 다른 `app.py`/`database.py`는 진단 블록만 선별 반영했다.
 기존 NAS 대상 7개 파일은 `X:\kiwoom-monitor-backups\20260929-diagnostic-api-v4`에
 백업했고, 후속 API/history 수정 전 2개 파일은 `...-refresh-1`에 추가 백업했다.

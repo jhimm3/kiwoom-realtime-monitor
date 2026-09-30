@@ -21,7 +21,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from kiwoom_monitor.central_server.database import PostgresQueryStore, StoredQuery
+from kiwoom_monitor.central_server.database import (
+    PostgresQueryStore, StoredQuery, _NEWS_JOB_CLAIM_SELECT_SQL,
+    _NEWS_JOB_CLAIM_DIAGNOSTIC_CANDIDATE_SQL,
+)
 from kiwoom_monitor.central_server.schema_migrations import CentralSchemaMigration
 from kiwoom_monitor.central_server.central_schema import central_schema_migrations
 from kiwoom_monitor.central_server.credential_store import CredentialStore, CredentialStoreError
@@ -1093,6 +1096,54 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                 self.assertEqual(call["backend_pid"], sample["commit_diagnostics"]["backend_pid"])
                 self.assertLessEqual(abs(call["commit_ms"] - sample["commit_ms"]), 10)
 
+    def test_query_bar_metadata_available_at_changes_only_with_content_or_state(self) -> None:
+        code = f"DIAG{uuid.uuid4().hex[:16]}"
+        self.query_bar_codes.append(code)
+        minute = {
+            "trading_date": "2099-01-09", "minute": "10:00", "code": code,
+            "market": "KRX", "open": 100, "high": 110, "low": 90, "close": 105,
+            "volume": 10, "trade_value_million_won": 1,
+            "updated_at": 1_790_000_000.0,
+        }
+        daily = {key: value for key, value in minute.items() if key != "minute"}
+
+        def save_minute(value, completeness, source):
+            observation = minute_bar_observation(
+                value, origin=ObservationOrigin.QUERY,
+                completeness=completeness, source=source,
+                value_kind=DataValueKind.ESTIMATED,
+            )
+            self.store.replace_minute_bars(
+                [value], observations=[(bar_observation_key(observation), observation)],
+            )
+            return self.store.load_market_data_metadata(
+                MarketDatasetKind.MINUTE_BAR, f"{code}:KRX", "2099-01-09T10:00",
+            )
+
+        def save_daily(value):
+            observation = daily_bar_observation(value, completeness=DataCompleteness.COMPLETE)
+            self.store.replace_daily_bars(
+                [value], observations=[(bar_observation_key(observation), observation)],
+            )
+            return self.store.load_market_data_metadata(
+                MarketDatasetKind.DAILY_BAR, f"{code}:KRX", "2099-01-09",
+            )
+
+        first_minute = save_minute(minute, DataCompleteness.IN_PROGRESS, "source-a")
+        first_daily = save_daily(daily)
+        replay_minute = {**minute, "updated_at": minute["updated_at"] + 60}
+        replay_daily = {**daily, "updated_at": daily["updated_at"] + 60}
+        self.assertEqual(first_minute.available_at,
+                         save_minute(replay_minute, DataCompleteness.IN_PROGRESS, "source-a").available_at)
+        self.assertEqual(first_daily.available_at, save_daily(replay_daily).available_at)
+        completed = save_minute(replay_minute, DataCompleteness.COMPLETE, "source-a")
+        self.assertEqual(replay_minute["updated_at"], completed.available_at.timestamp())
+        sourced = save_minute({**replay_minute, "updated_at": replay_minute["updated_at"] + 60},
+                              DataCompleteness.COMPLETE, "source-b")
+        self.assertEqual(replay_minute["updated_at"] + 60, sourced.available_at.timestamp())
+        corrected = save_daily({**replay_daily, "close": 106})
+        self.assertEqual(replay_daily["updated_at"], corrected.available_at.timestamp())
+
     def test_shadow_evaluation_and_checkpoint_keep_replay_and_independent_commits(self) -> None:
         monitor_id = f"diagnostic-shadow-{uuid.uuid4().hex}"
         self.shadow_monitor_ids.append(monitor_id)
@@ -1313,6 +1364,68 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertTrue({call["call_id"] for call in calls}.issubset(
             {sample["db_call_id"] for sample in samples}
         ))
+
+    def test_news_job_claim_candidate_preserves_postgres_selection_and_skip_locked(self) -> None:
+        token = uuid.uuid4().hex
+        code = f"DIAG{token[:16]}"
+        jobs = []
+        for index, (stage, scope) in enumerate((
+            ("BODY", "news_article"), ("RULE", "news_article"),
+            ("BODY", "historical_news_pc_backfill"),
+            ("RULE", "historical_market_pc_backfill"),
+            ("AI", "historical_news_pc_backfill"),
+        )):
+            article_id = f"diagnostic-claim-article-{token}-{index}"
+            job_key = f"diagnostic-claim-candidate-{token}-{index}"
+            self.article_revision_ids.append(article_id)
+            self.news_keys.append(job_key)
+            jobs.append((job_key, article_id, stage, scope))
+        with self.store._connect() as connection, connection.cursor() as cursor:
+            for job_key, article_id, stage, scope in jobs:
+                cursor.execute(
+                    "INSERT INTO central_news_article_revisions("
+                    "article_revision_id,stock_code,identity,content_hash,collector_id,"
+                    "published_at,received_at,available_at,collection_scope,revision_of,document_json) "
+                    "VALUES(%s,%s,%s,%s,'diagnostic',NULL,0,0,%s,NULL,'{}'::jsonb)",
+                    (article_id, code, article_id, article_id, scope),
+                )
+                cursor.execute(
+                    "INSERT INTO central_news_jobs("
+                    "job_key,article_revision_id,stock_code,target_id,stage,input_hash,"
+                    "processing_version,attempts,next_retry_at,state,output_ref,error,"
+                    "payload_json,updated_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,'diagnostic',0,0,'PENDING','','',"
+                    "'{}'::jsonb,0)",
+                    (job_key, article_id, code, code, stage, article_id),
+                )
+
+        parameters = (1.0, "DIAG", "DIAG", code, code, code, code, code, code, 3)
+        expected = {jobs[index][0] for index in (0, 1, 4)}
+        with self.store._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(_NEWS_JOB_CLAIM_SELECT_SQL, parameters)
+            original = [row[0] for row in cursor.fetchall()]
+            cursor.execute(_NEWS_JOB_CLAIM_DIAGNOSTIC_CANDIDATE_SQL, parameters)
+            candidate = [row[0] for row in cursor.fetchall()]
+            self.assertEqual(original, candidate)
+            self.assertEqual(expected, set(candidate))
+
+        first = self.store._connect()
+        second = self.store._connect()
+        try:
+            with first.cursor() as first_cursor, second.cursor() as second_cursor:
+                one_row = (*parameters[:-1], 1)
+                first_cursor.execute(_NEWS_JOB_CLAIM_DIAGNOSTIC_CANDIDATE_SQL, one_row)
+                first_key = first_cursor.fetchone()[0]
+                second_cursor.execute(_NEWS_JOB_CLAIM_DIAGNOSTIC_CANDIDATE_SQL, one_row)
+                second_key = second_cursor.fetchone()[0]
+                self.assertNotEqual(first_key, second_key)
+                self.assertIn(first_key, expected)
+                self.assertIn(second_key, expected)
+        finally:
+            first.rollback()
+            second.rollback()
+            first.close()
+            second.close()
 
     def test_news_request_budget_serializes_parallel_claims_and_observes_limits(self) -> None:
         budget_date = "2099-12-31"

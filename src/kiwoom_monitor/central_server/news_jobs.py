@@ -27,9 +27,10 @@ class NewsJobRunner:
                  fetcher: Callable[..., str | tuple[str, str]] = fetch_article_text_with_metadata,
                  poll_seconds: float = 1.0, body_timeout: float = 15.0,
                  ai_timeout: float = 90.0, busy_pause_seconds: float = 1.0,
-                 parallelism: int = 1) -> None:
+                 parallelism: int = 1, max_idle_poll_seconds: float = 5.0) -> None:
         self._store, self._ai_service, self._fetcher = store, ai_service, fetcher
         self._poll_seconds = max(0.05, float(poll_seconds))
+        self._max_idle_poll_seconds = max(self._poll_seconds, float(max_idle_poll_seconds))
         self._busy_pause_seconds = max(0.01, float(busy_pause_seconds))
         self._body_timeout, self._ai_timeout = body_timeout, ai_timeout
         self._priority_stock_code = ""
@@ -37,6 +38,8 @@ class NewsJobRunner:
         self._tasks: tuple[asyncio.Task[None], ...] = ()
         self._parallelism = max(1, min(3, int(parallelism)))
         self._closing = asyncio.Event()
+        self._wake_events: tuple[asyncio.Event, ...] = ()
+        self._loop_owner: asyncio.AbstractEventLoop | None = None
         self._stage_metrics: dict[str, dict[str, float]] = {}
         self._metrics_started_at = time()
 
@@ -49,21 +52,46 @@ class NewsJobRunner:
     async def start(self) -> None:
         if self._task is None:
             self._closing.clear()
+            self._loop_owner = asyncio.get_running_loop()
             stages = {
                 1: (None,), 2: ("BODY", "RULE"), 3: ("BODY", "BODY", "RULE"),
             }[self._parallelism]
+            self._wake_events = tuple(asyncio.Event() for _ in stages)
+            register = getattr(self._store, "set_news_job_wakeup", None)
+            if register is not None:
+                register(self.wake)
             self._tasks = tuple(
-                asyncio.create_task(self._loop(stage), name=f"central-news-jobs-{index + 1}")
-                for index, stage in enumerate(stages)
+                asyncio.create_task(self._loop(stage, wake), name=f"central-news-jobs-{index + 1}")
+                for index, (stage, wake) in enumerate(zip(stages, self._wake_events, strict=True))
             )
             self._task = self._tasks[0]
 
     async def close(self) -> None:
         self._closing.set()
+        register = getattr(self._store, "set_news_job_wakeup", None)
+        if register is not None:
+            register(None)
+        for wake in self._wake_events:
+            wake.set()
         tasks, self._tasks = self._tasks, ()
         self._task = None
         for task in tasks:
             await task
+        self._wake_events = ()
+        self._loop_owner = None
+
+    def wake(self) -> None:
+        """A committed enqueue may arrive from an asyncio.to_thread producer."""
+        loop = self._loop_owner
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(self._wake_all)
+            except RuntimeError:  # The event loop can close during server shutdown.
+                pass
+
+    def _wake_all(self) -> None:
+        for wake in self._wake_events:
+            wake.set()
 
     async def run_once(self, *, preferred_stage: str = "") -> int:
         jobs = await asyncio.to_thread(
@@ -265,10 +293,16 @@ class NewsJobRunner:
             "result": result.as_document(),
         })
 
-    async def _loop(self, preferred_stage: str | None = None) -> None:
+    async def _loop(self, preferred_stage: str | None = None,
+                    wake: asyncio.Event | None = None) -> None:
+        empty_polls = 0
         while not self._closing.is_set():
+            if wake is not None:
+                wake.clear()  # Signals arriving during the claim remain set for the next wait.
+            claim_failed = False
             try:
-                processed = 0 if is_paused("news_jobs") else await (
+                paused = is_paused("news_jobs")
+                processed = 0 if paused else await (
                     self.run_once(preferred_stage=preferred_stage)
                     if preferred_stage else self.run_once()
                 )
@@ -277,10 +311,27 @@ class NewsJobRunner:
             except Exception:
                 LOGGER.exception("뉴스 후속 작업 조회에 실패했습니다.")
                 processed = 0
+                paused = False
+                claim_failed = True
+            if processed or paused or claim_failed:
+                empty_polls = 0
+            else:
+                empty_polls += 1
+            if processed:
+                delay = self._busy_pause_seconds
+            elif paused or claim_failed:
+                delay = self._poll_seconds
+            else:
+                delay = min(
+                    self._max_idle_poll_seconds,
+                    self._poll_seconds * 2 ** min(empty_polls - 1, 16),
+                )
             try:
                 await asyncio.wait_for(
-                    self._closing.wait(),
-                    timeout=self._busy_pause_seconds if processed else self._poll_seconds,
+                    wake.wait() if wake is not None else self._closing.wait(),
+                    timeout=delay,
                 )
+                if wake is not None and wake.is_set():
+                    empty_polls = 0
             except TimeoutError:
                 pass

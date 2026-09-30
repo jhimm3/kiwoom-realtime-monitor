@@ -92,6 +92,9 @@ class DiagnosticCliControlTests(unittest.TestCase):
                 return response
             return {}
 
+        device_before = {"dm-4": [0, 0, 0, 0, 3, 0, 10, 20, 0, 30, 40]}
+        device_after = {"dm-4": [0, 0, 0, 0, 5, 0, 14, 26, 0, 34, 48]}
+
         with (patch.dict("os.environ", {
                 "KIWOOM_DIAGNOSTIC_WORKLOAD_PATH": str(self.path),
                 "KIWOOM_SERVER_DATABASE_URL": "unused-test-connection"}),
@@ -99,7 +102,9 @@ class DiagnosticCliControlTests(unittest.TestCase):
                   connect=lambda *a, **k: FakeConnection(), Error=Exception)}),
               patch.object(self.cli, "_api", side_effect=api),
               patch.object(self.cli, "_log_position", return_value=(self.path, 0)),
-              patch.object(self.cli, "_device_stats", return_value={}),
+              patch.object(self.cli, "_device_stats",
+                           side_effect=[device_before, device_before, device_after]),
+              patch.object(self.cli.time, "time", return_value=100.0),
               patch.object(self.cli, "_host_usage", return_value={}),
               patch.object(self.cli, "_uncontrolled_importers", return_value=[]),
               patch.object(self.cli, "_wal_timing_status", return_value={}),
@@ -111,6 +116,10 @@ class DiagnosticCliControlTests(unittest.TestCase):
               patch.object(self.cli, "_log_counts", return_value={})):
             phase = self.cli._measure(0, "test", session_id)
         self.assertEqual("complete", phase["state"])
+        self.assertEqual(0, phase["elapsed_seconds"])
+        self.assertIsNone(phase["wal_bytes_per_second"])
+        self.assertIsNone(phase["storage_devices"]["dm-4"]["average_queue"])
+        self.assertIsNone(phase["storage_devices"]["dm-4"]["busy_percent"])
         self.assertEqual("complete", phase["db_calls"]["state"])
         self.assertEqual(2, len(queries))
         self.assertGreaterEqual(queries[1]["end"], queries[1]["start"])

@@ -6,11 +6,12 @@ import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from kiwoom_monitor.central_server.autonomous_top20 import (
     AutonomousTop20Service,
     _collection_open,
+    _entry_minute_query_due,
     _ranking_collection_due,
     _ranking_expected_at,
 )
@@ -66,6 +67,38 @@ class _FlakyIndexStore:
 
 
 class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_current_day_entry_minutes_wait_until_0800_without_marking_ready(self) -> None:
+        now = [datetime.fromisoformat("2026-09-30T07:59:59+09:00")]
+        broker = _Broker()
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(
+            broker, RealtimeHub(), store, now_provider=lambda: now[0],
+        )
+        with patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock), \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock), \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock):
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            minutes.assert_not_awaited()
+            self.assertNotIn("005930", service._fundamentals_ready)
+            now[0] = datetime.fromisoformat("2026-09-30T08:00:00+09:00")
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            minutes.assert_awaited_once_with("005930", "2026-09-30")
+            self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
+
+        self.assertFalse(_entry_minute_query_due("2026-09-30", datetime.fromisoformat("2026-09-30T07:59:59+09:00")))
+        self.assertTrue(_entry_minute_query_due("2026-09-29", datetime.fromisoformat("2026-09-30T07:59:59+09:00")))
+
+    async def test_direct_entry_minute_backfill_does_not_request_before_0800(self) -> None:
+        broker = _Broker()
+        service = AutonomousTop20Service(
+            broker, RealtimeHub(), object(),
+            now_provider=lambda: datetime.fromisoformat("2026-09-30T07:59:59+09:00"),
+        )
+        await service._backfill_entry_minutes("005930", "2026-09-30")
+        self.assertEqual([], broker.calls)
+
     async def test_minute_backfill_can_be_disabled_without_store_or_broker_work(self) -> None:
         broker = _Broker()
         service = AutonomousTop20Service(
@@ -173,6 +206,52 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual("2026-09-24", service._last_backfill_day)
         self.assertEqual(2, calls)
+
+    async def test_failed_flow_retry_skips_successful_bar_steps_and_checks_new_codes(self) -> None:
+        class CohortStore:
+            codes = ["A", "B"]
+
+            def load_documents(self, collection, _owner, _limit):
+                if collection == "top20_daily_entrants":
+                    return [{"key": code} for code in self.codes]
+                return []
+
+            def load_hot_cohort(self, *, active_only):
+                return []
+
+        store = CohortStore()
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), store,  # type: ignore[arg-type]
+            now_provider=lambda: datetime.fromisoformat("2026-09-14T20:05:00+09:00"),
+        )
+        service._backfill_market_indexes = AsyncMock()  # type: ignore[method-assign]
+        service._nxt_enabled = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        service._backfill_daily = AsyncMock()  # type: ignore[method-assign]
+        service._backfill_minutes = AsyncMock()  # type: ignore[method-assign]
+        flow_calls: list[str] = []
+        fail_b = True
+
+        async def flow(code: str, _day: str) -> None:
+            flow_calls.append(code)
+            if code == "B" and fail_b:
+                raise RuntimeError("empty program flow")
+
+        service._backfill_candidate_flows = flow  # type: ignore[method-assign]
+        self.assertFalse(await service.backfill_day("2026-09-14"))
+        self.assertFalse(await service.backfill_day("2026-09-14"))
+        self.assertEqual(["A", "B"], [call.args[0] for call in service._backfill_daily.await_args_list])
+        self.assertEqual(["A", "B", "B"], flow_calls)
+
+        store.codes.append("C")
+        fail_b = False
+        self.assertTrue(await service.backfill_day("2026-09-14"))
+        self.assertEqual(["A", "B", "C"], [call.args[0] for call in service._backfill_daily.await_args_list])
+        self.assertEqual(["A", "B", "B", "B", "C"], flow_calls)
+
+        # A later explicit rerun revalidates persisted completion after the retry finishes.
+        self.assertTrue(await service.backfill_day("2026-09-14"))
+        self.assertEqual(["A", "B", "C", "A", "B", "C"],
+                         [call.args[0] for call in service._backfill_daily.await_args_list])
 
     async def test_weekday_without_0s_trading_evidence_does_not_start_after_close_backfill(self) -> None:
         class EmptyStore:
@@ -540,6 +619,18 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["4", "1", "2", "3"], [call[1]["qry_tp"] for call in broker.calls])
 
+    async def test_aux_rankings_are_only_scheduled_during_morning_archive_window(self) -> None:
+        service = AutonomousTop20Service(_Broker(), RealtimeHub(), object())  # type: ignore[arg-type]
+        with patch.object(service, "_refresh_aux_rankings", new_callable=AsyncMock) as refresh:
+            for hour, minute in ((7, 54), (8, 6), (9, 0)):
+                service._schedule_aux_rankings(datetime(2026, 9, 10, hour, minute, 0))
+            refresh.assert_not_awaited()
+            service._schedule_aux_rankings(datetime(2026, 9, 10, 7, 55, 0))
+            await asyncio.gather(*service._fundamentals_tasks)
+            service._schedule_aux_rankings(datetime(2026, 9, 10, 8, 5, 0))
+            await asyncio.gather(*service._fundamentals_tasks)
+            self.assertEqual(2, refresh.await_count)
+
     async def test_nas_calculates_and_reuses_historical_high(self) -> None:
         class HistoricalBroker(_Broker):
             async def request(self, api_id, path, body, **kwargs):
@@ -638,6 +729,74 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["ka10045", "ka10045", "ka90008"], [call[0] for call in broker.calls])
         self.assertEqual("candidate_first_seen", initial[0]["document"]["scope"])
         self.assertEqual("candidate_after_close", final[0]["document"]["scope"])
+
+    async def test_empty_program_flow_is_recorded_once_only_on_requested_day(self) -> None:
+        class EmptyProgramBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                self.calls.append((api_id, dict(body), kwargs))
+                if api_id == "ka10045":
+                    return BrokerResult({"stk_orgn_trde_trnsn": [{"dt": "20260914"}]}, False, "",
+                                        recording_succeeded=True)
+                return BrokerResult({"stk_tm_prm_trde_trnsn": []}, False, "",
+                                    recording_succeeded=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            broker = EmptyProgramBroker()
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store,
+                now_provider=lambda: datetime.fromisoformat("2026-09-14T20:05:00+09:00"),
+            )
+            await service._backfill_candidate_flows("005935", "2026-09-14")
+            await service._backfill_candidate_flows("005935", "2026-09-14")
+            marker = store.load_documents("candidate_flow_finalization", "2026-09-14:005935", 1)
+            store.close()
+
+        self.assertEqual(2, len(broker.calls))
+        self.assertEqual(0, marker[0]["document"]["program_flow_rows"])
+
+    async def test_empty_program_flow_does_not_finalize_unverified_prior_day(self) -> None:
+        class EmptyProgramBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                if api_id == "ka10045":
+                    return BrokerResult({"stk_orgn_trde_trnsn": [{"dt": "20260914"}]}, False, "",
+                                        recording_succeeded=True)
+                return BrokerResult({"stk_tm_prm_trde_trnsn": []}, False, "",
+                                    recording_succeeded=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            service = AutonomousTop20Service(
+                EmptyProgramBroker(), RealtimeHub(), store,
+                now_provider=lambda: datetime.fromisoformat("2026-09-15T05:20:00+09:00"),
+            )
+            with self.assertRaisesRegex(RuntimeError, "응답이 비었습니다"):
+                await service._backfill_candidate_flows("005935", "2026-09-14")
+            self.assertEqual([], store.load_documents("candidate_flow_finalization", "2026-09-14:005935", 1))
+            store.close()
+
+    async def test_empty_program_flow_with_failed_recording_is_not_finalized(self) -> None:
+        class UnrecordedProgramBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                if api_id == "ka10045":
+                    return BrokerResult({"stk_orgn_trde_trnsn": [{"dt": "20260914"}]}, False, "",
+                                        recording_succeeded=True)
+                return BrokerResult({"stk_tm_prm_trde_trnsn": []}, False, "",
+                                    recording_succeeded=False)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            service = AutonomousTop20Service(
+                UnrecordedProgramBroker(), RealtimeHub(), store,
+                now_provider=lambda: datetime.fromisoformat("2026-09-14T20:05:00+09:00"),
+            )
+            with self.assertRaisesRegex(RuntimeError, "원본 저장이 확인되지 않았습니다"):
+                await service._backfill_candidate_flows("005935", "2026-09-14")
+            self.assertEqual([], store.load_documents("candidate_flow_finalization", "2026-09-14:005935", 1))
+            store.close()
 
     async def test_realtime_program_snapshot_is_archived_without_tr(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

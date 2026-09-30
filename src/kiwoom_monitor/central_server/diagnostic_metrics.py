@@ -145,6 +145,8 @@ def summarize_db_calls(start: float, end: float, *, mode: str = "summary",
                 "writer_family": family, "writer_kind": kind,
                 "access_mode": access_mode,
                 "calls": len(selected),
+                "sources": dict(Counter(str(row.get("source") or "unattributed")
+                                        for row in selected)) if access_mode == "read" else {},
                 "transactions": sum(int(row["transactions"]) for row in selected
                                     if row["transactions"] is not None),
                 "transactions_unavailable_calls": sum(row["transactions"] is None
@@ -261,12 +263,15 @@ def record_market_bar_save(*, kind: str, rows: int, observations: int,
                            wal_timing_for_commit: bool | None = None,
                            wal_timing_error: str = "",
                            bar_statement_diagnostics: list[dict[str, object]] | None = None,
+                           metadata_statement_diagnostics: list[dict[str, object]] | None = None,
+                           metadata_suppressed_rows: int = 0,
                            db_call_id: str | None = None) -> None:
     if not _capture_is_enabled():
         return
     value = {"at": time(), "kind": kind, "api_id": CURRENT_API_ID.get(),
              "db_call_id": db_call_id,
              "rows": rows, "observations": observations,
+             "metadata_suppressed_rows": metadata_suppressed_rows,
              "connect_ms": connect_ms, "bars_ms": bars_ms,
              "metadata_ms": metadata_ms, "revisions_ms": revisions_ms,
              "commit_ms": commit_ms, "close_ms": close_ms, "total_ms": total_ms,
@@ -280,6 +285,7 @@ def record_market_bar_save(*, kind: str, rows: int, observations: int,
              "revision_rows_ms": revision_rows_ms,
              "revision_insert_execute_ms": revision_insert_execute_ms,
              "bar_statement_diagnostics": list(bar_statement_diagnostics or []),
+             "metadata_statement_diagnostics": list(metadata_statement_diagnostics or []),
              "commit_diagnostics": _commit_diagnostic_record(
                  commit_wait_samples, commit_probe_errors, commit_backend_pid,
                  commit_started_at, commit_ms, wal_timing_for_commit, wal_timing_error,
@@ -351,6 +357,9 @@ def summarize_market_bar_saves(start: float, end: float) -> dict[str, object]:
             kind: {
                 "count": len(rows), "bar_rows": sum(int(row["rows"]) for row in rows),
                 "observation_rows": sum(int(row["observations"]) for row in rows),
+                "metadata_suppressed_rows": sum(
+                    int(row.get("metadata_suppressed_rows", 0)) for row in rows
+                ),
                 "revision_lookup_statements": sum(
                     int(row["revision_lookup_statements"]) for row in rows
                 ),
@@ -371,6 +380,7 @@ def summarize_market_bar_saves(start: float, end: float) -> dict[str, object]:
                 "call_samples": [
                     {key: row[key] for key in (
                         "at", "api_id", "db_call_id", "rows", "observations",
+                        "metadata_suppressed_rows",
                         "revision_lookup_statements", "revision_lookup_keys",
                         "revision_insert_statements", "revision_insert_rows",
                         "connect_ms", "bars_ms",
@@ -378,6 +388,7 @@ def summarize_market_bar_saves(start: float, end: float) -> dict[str, object]:
                         "revision_lookup_ms", "revision_rows_ms",
                         "revision_insert_execute_ms", "revisions_ms", "commit_ms",
                         "close_ms", "total_ms", "bar_statement_diagnostics",
+                        "metadata_statement_diagnostics",
                     )} | {"commit_diagnostics": row["commit_diagnostics"]}
                     for row in rows
                 ],
@@ -417,6 +428,10 @@ def summarize_market_bar_saves(start: float, end: float) -> dict[str, object]:
                     "execution_windows": sum(
                         len(row["bar_statement_diagnostics"]) for row in rows
                     ),
+                    "affected_rows": sum(
+                        int(item.get("affected_rows") or 0)
+                        for row in rows for item in row["bar_statement_diagnostics"]
+                    ),
                     "sql_operations": sum(
                         int(item.get("sql_operations") or 0)
                         for row in rows for item in row["bar_statement_diagnostics"]
@@ -449,6 +464,27 @@ def summarize_market_bar_saves(start: float, end: float) -> dict[str, object]:
                         "execute windows are individual SQL batches; executemany covers all "
                         "row operations in that call, not each row separately; sampling waits "
                         "100ms before probing and may miss shorter calls"
+                    ),
+                },
+                "metadata_statement_diagnostics": {
+                    "execution_windows": sum(
+                        len(row["metadata_statement_diagnostics"]) for row in rows
+                    ),
+                    "affected_rows": sum(
+                        int(item.get("affected_rows") or 0)
+                        for row in rows for item in row["metadata_statement_diagnostics"]
+                    ),
+                    "wait_event_samples": {
+                        key: count for key, count in sorted(Counter(
+                            f"{sample.get('wait_type') or 'NONE'}:{sample.get('wait_event') or 'NONE'}"
+                            for row in rows
+                            for item in row["metadata_statement_diagnostics"]
+                            for sample in item["samples"]
+                        ).items())
+                    },
+                    "scope_note": (
+                        "diagnostic-only metadata UPSERT windows on the same backend; "
+                        "affected_rows counts inserted or updated rows, not changed bar values"
                     ),
                 },
             }

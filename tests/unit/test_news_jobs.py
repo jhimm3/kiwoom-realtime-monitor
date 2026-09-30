@@ -30,6 +30,84 @@ class _AI:
 
 
 class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_claim_backoff_is_bounded(self) -> None:
+        runner = NewsJobRunner(object(), poll_seconds=1, max_idle_poll_seconds=5)
+        runner.run_once = AsyncMock(return_value=0)
+        delays = []
+
+        async def capture_wait(awaitable, *, timeout):
+            awaitable.close()
+            delays.append(timeout)
+            if len(delays) == 4:
+                runner._closing.set()
+            raise TimeoutError
+
+        with patch("kiwoom_monitor.central_server.news_jobs.asyncio.wait_for",
+                   side_effect=capture_wait):
+            await runner._loop(wake=asyncio.Event())
+
+        self.assertEqual([1, 2, 4, 5], delays)
+        self.assertEqual(4, runner.run_once.await_count)
+
+    async def test_wakeup_arriving_during_claim_is_not_lost(self) -> None:
+        import threading
+
+        class Store:
+            callback = None
+
+            def set_news_job_wakeup(self, callback):
+                self.callback = callback
+
+        store = Store()
+        runner = NewsJobRunner(store, poll_seconds=1, max_idle_poll_seconds=5)
+        claim_started = asyncio.Event()
+        release_claim = threading.Event()
+        claimed_again = asyncio.Event()
+        calls = 0
+
+        async def run_once():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                claim_started.set()
+                await asyncio.to_thread(release_claim.wait, 2)
+                return 0
+            claimed_again.set()
+            return 0
+
+        runner.run_once = run_once
+        await runner.start()
+        try:
+            await asyncio.wait_for(claim_started.wait(), 1)
+            await asyncio.to_thread(store.callback)
+            release_claim.set()
+            await asyncio.wait_for(claimed_again.wait(), 0.5)
+        finally:
+            release_claim.set()
+            await runner.close()
+        self.assertIsNone(store.callback)
+        self.assertGreaterEqual(calls, 2)
+
+    async def test_article_enqueue_wakeup_runs_after_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
+            store.initialize()
+            visible_pending = []
+
+            def on_wake():
+                with store._connection() as connection:
+                    visible_pending.append(connection.execute(
+                        "SELECT COUNT(*) FROM central_news_jobs WHERE state='PENDING'"
+                    ).fetchone()[0])
+
+            store.set_news_job_wakeup(on_wake)
+            store.upsert_documents("news_article", _article())
+            self.assertEqual([1], visible_pending)
+            with self.assertRaises(Exception):
+                store.upsert_documents("news_article", [{"owner": "bad"}])
+            self.assertEqual([1], visible_pending)
+            store.close()
+
     async def test_diagnostic_pause_resumes_claiming_without_restarting_worker(self) -> None:
         runner = NewsJobRunner(object(), poll_seconds=0.05)
         runner.run_once = AsyncMock(return_value=0)

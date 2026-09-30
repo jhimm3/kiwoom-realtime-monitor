@@ -13,8 +13,10 @@ RUN grep -q '/api/v1/settings/operations' /app/src/kiwoom_monitor/central_server
     && grep -q '/api/v1/diagnostics/resources' /app/src/kiwoom_monitor/central_server/app.py \
     && grep -q '/api/v1/market/latest-market-caps' /app/src/kiwoom_monitor/central_server/app.py \
     && grep -q '/api/v1/diagnostics/news-job-claim-plan' /app/src/kiwoom_monitor/central_server/app.py \
+    && grep -q '/api/v1/diagnostics/capabilities' /app/src/kiwoom_monitor/central_server/app.py \
+    && grep -q '/api/v1/diagnostics/db-calls' /app/src/kiwoom_monitor/central_server/app.py \
     && grep -q 'def update_operational_settings' /app/src/kiwoom_monitor/central_server/news_service.py \
-    && grep -q '2026.09.29-diagnostic-api-v6' /app/src/kiwoom_monitor/central_server/app.py \
+    && grep -q '2026.09.30-daily-bar-lookup-v1' /app/src/kiwoom_monitor/central_server/app.py \
     && test -f /app/src/kiwoom_monitor/central_server/credential_store.py \
     && test -f /app/src/kiwoom_monitor/central_server/credential_runtime.py \
     && test -f /app/src/kiwoom_monitor/central_server/schema_migrations.py \

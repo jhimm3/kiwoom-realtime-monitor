@@ -7,10 +7,25 @@ without taking ownership of its connection or nested savepoints.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from time import monotonic, time
 from typing import Any, Callable, Protocol
 from uuid import uuid4
+
+
+_DB_CALL_SOURCE: ContextVar[str] = ContextVar("db_call_source", default="")
+
+
+@contextmanager
+def db_call_source(source: str):
+    """Identify the owning operation across asyncio.to_thread DB reads."""
+    token = _DB_CALL_SOURCE.set(source)
+    try:
+        yield
+    finally:
+        _DB_CALL_SOURCE.reset(token)
 
 
 @dataclass(frozen=True)
@@ -20,7 +35,7 @@ class DBWriterContext:
     operation: str
     rows_attempted: int | None = None
     api_id: str = ""
-    source: str = ""
+    source: str = field(default_factory=_DB_CALL_SOURCE.get)
     parent_call_id: str = ""
     request_id: str = ""
     call_id: str = field(default_factory=lambda: uuid4().hex)

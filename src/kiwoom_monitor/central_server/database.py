@@ -80,15 +80,16 @@ class StoredQuery:
     next_key: str
 
 
-_NEWS_JOB_CLAIM_SELECT_SQL = (
+_NEWS_JOB_CLAIM_READY_SQL = (
     "SELECT job_key,article_revision_id,stock_code,target_id,stage,input_hash,"
     "processing_version,attempts,payload_json,updated_at FROM central_news_jobs "
     "WHERE state='PENDING' AND next_retry_at<=%s "
-    "AND (stage NOT IN ('BODY','RULE') OR NOT EXISTS ("
-    "SELECT 1 FROM central_news_article_revisions a "
-    "WHERE a.article_revision_id=central_news_jobs.article_revision_id "
-    "AND a.collection_scope IN ('historical_backfill','historical_market_backfill',"
-    "'historical_market_pc_backfill','historical_news_pc_backfill'))) "
+)
+_NEWS_JOB_CLAIM_HISTORICAL_SCOPES_SQL = (
+    "'historical_backfill','historical_market_backfill',"
+    "'historical_market_pc_backfill','historical_news_pc_backfill'"
+)
+_NEWS_JOB_CLAIM_ORDER_AND_LOCK_SQL = (
     "ORDER BY CASE WHEN %s<>'' AND stage=%s THEN -1 "
     "WHEN %s<>'' AND (stock_code=%s OR target_id=%s) AND stage='BODY' THEN 0 "
     "WHEN %s<>'' AND (stock_code=%s OR target_id=%s) THEN 1 "
@@ -96,6 +97,25 @@ _NEWS_JOB_CLAIM_SELECT_SQL = (
     "WHEN stage='BODY' THEN 3 WHEN stage='AI' THEN 4 ELSE 5 END,"
     "CASE WHEN stage='BODY' THEN -updated_at ELSE updated_at END "
     "FOR UPDATE SKIP LOCKED LIMIT %s"
+)
+_NEWS_JOB_CLAIM_SELECT_SQL = (
+    _NEWS_JOB_CLAIM_READY_SQL
+    + "AND (stage NOT IN ('BODY','RULE') OR NOT EXISTS ("
+    "SELECT 1 FROM central_news_article_revisions a "
+    "WHERE a.article_revision_id=central_news_jobs.article_revision_id "
+    + f"AND a.collection_scope IN ({_NEWS_JOB_CLAIM_HISTORICAL_SCOPES_SQL}))) "
+    + _NEWS_JOB_CLAIM_ORDER_AND_LOCK_SQL
+)
+_NEWS_JOB_CLAIM_DIAGNOSTIC_CANDIDATE_SQL = (
+    _NEWS_JOB_CLAIM_READY_SQL
+    + "AND NOT EXISTS (SELECT 1 FROM central_news_article_revisions a "
+    "WHERE a.article_revision_id=central_news_jobs.article_revision_id "
+    "AND central_news_jobs.stage IN ('BODY','RULE') "
+    + f"AND a.collection_scope IN ({_NEWS_JOB_CLAIM_HISTORICAL_SCOPES_SQL})) "
+    + _NEWS_JOB_CLAIM_ORDER_AND_LOCK_SQL
+)
+_NEWS_JOB_CLAIM_READ_ONLY_SQL = _NEWS_JOB_CLAIM_SELECT_SQL.replace(
+    "FOR UPDATE SKIP LOCKED LIMIT %s", "LIMIT %s",
 )
 
 
@@ -273,7 +293,7 @@ def _execute_with_postgres_wait_probe(
 
 
 class _PostgresObservedCursor:
-    """Narrow cursor proxy that records the waits for bar UPSERT statements."""
+    """Narrow cursor proxy that records waits for selected UPSERT statements."""
 
     def __init__(self, cursor, database_url: str, backend_pid: int,
                  enabled: bool, records: list[dict[str, object]]) -> None:
@@ -291,6 +311,7 @@ class _PostgresObservedCursor:
         if record is not None:
             record["method"] = "execute"
             record["sql_operations"] = 1
+            record["affected_rows"] = getattr(self._cursor, "rowcount", None)
             self._records.append(record)
         return result
 
@@ -302,6 +323,7 @@ class _PostgresObservedCursor:
         if record is not None:
             record["method"] = "executemany"
             record["sql_operations"] = len(args[1]) if len(args) > 1 else None
+            record["affected_rows"] = getattr(self._cursor, "rowcount", None)
             self._records.append(record)
         return result
 
@@ -449,6 +471,16 @@ _CREDENTIAL_ACTIVATION_COLUMNS = (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _notify_news_job_wakeup(store: Any) -> None:
+    callback = getattr(store, "_news_job_wakeup", None)
+    if callback is not None:
+        try:
+            callback()
+        except Exception:
+            # The enqueue has committed; a local wake failure must not change its result.
+            logger.exception("뉴스 작업 wake-up 알림에 실패했습니다.")
 
 
 def _credential_activation_row(row: tuple[object, ...]) -> dict[str, Any]:
@@ -1106,6 +1138,9 @@ class QueryStore(Protocol):
 
 
 class SQLiteQueryStore:
+    def set_news_job_wakeup(self, callback: Callable[[], None] | None) -> None:
+        self._news_job_wakeup = callback
+
     def release_execution_runtime(self, owner_key: str, owner_token: str) -> bool:
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1476,8 +1511,7 @@ class SQLiteQueryStore:
             column for column in columns
             if column not in BAR_KEY_COLUMNS and column != "updated_at"
         )
-        # Identical OHLCV payloads do not rewrite the canonical row, while
-        # metadata still records the latest observation time below.
+        # Identical OHLCV payloads do not rewrite the canonical row.
         changed_guard = (
             " WHERE " + " OR ".join(
                 f"{table}.{column} IS NOT excluded.{column}"
@@ -1487,6 +1521,10 @@ class SQLiteQueryStore:
         )
         with self._lock, self._connection() as connection:
             bar_rows = bar_value_rows(values, minute=minute)
+            changed_bar_rows: list[tuple[Any, ...]] = []
+            returning = (
+                "trading_date,minute,code,market" if minute else "trading_date,code,market"
+            ) if observations else ""
             if minute:
                 changed_guard = (
                     " WHERE " + " OR ".join(
@@ -1503,6 +1541,8 @@ class SQLiteQueryStore:
                     f"INSERT INTO {table}({','.join(columns)}) VALUES",
                     [row], f"ON CONFLICT({conflict}) DO UPDATE SET {updates}{changed_guard}",
                     placeholder="?", batch_size=1,
+                    returning_columns=returning,
+                    returned_rows=changed_bar_rows if returning else None,
                 )
             _execute_multirow_upsert(
                 connection,
@@ -1510,8 +1550,13 @@ class SQLiteQueryStore:
                 latest_rows,
                 f"ON CONFLICT({conflict}) DO UPDATE SET {updates}{changed_guard}",
                 placeholder="?", batch_size=SQLITE_MULTIROW_UPSERT_ROWS,
+                returning_columns=returning,
+                returned_rows=changed_bar_rows if returning else None,
             )
-            _save_sqlite_metadata(connection, observations, multirow=True)
+            _save_sqlite_metadata(
+                connection, observations, multirow=True,
+                changed_bar_keys={_bar_metadata_key(row, minute=minute) for row in changed_bar_rows},
+            )
             if minute and observations and self._observation_history_enabled:
                 revision_sources = [
                     ObservationRevisionSource.from_observation(
@@ -1805,6 +1850,8 @@ class SQLiteQueryStore:
                 _append_sqlite_theme_snapshot(connection, values, received_at=now)
             elif collection == "news_article":
                 _append_sqlite_news_articles(connection, values, received_at=now)
+        if collection == "news_article":
+            _notify_news_job_wakeup(self)
 
     def replace_documents(self, collection: str, values: list[dict[str, Any]]) -> None:
         """컬렉션 전체를 한 트랜잭션에서 현재 스냅샷으로 교체한다."""
@@ -1861,7 +1908,10 @@ class SQLiteQueryStore:
 
     def enqueue_news_ai_jobs(self, values: list[dict[str, Any]]) -> int:
         with self._lock, self._connection() as connection:
-            return _enqueue_sqlite_news_ai_jobs(connection, values)
+            count = _enqueue_sqlite_news_ai_jobs(connection, values)
+        if count:
+            _notify_news_job_wakeup(self)
+        return count
 
     def claim_news_jobs(self, *, limit: int = 1, now: float | None = None,
                         priority_stock_code: str = "", preferred_stage: str = "") -> list[dict[str, Any]]:
@@ -1939,7 +1989,10 @@ class SQLiteQueryStore:
 
     def complete_external_historical_news_job(self, value: dict[str, Any]) -> dict[str, str]:
         with self._lock, self._connection() as connection:
-            return _complete_external_news_job(connection, value, postgres=False)
+            result = _complete_external_news_job(connection, value, postgres=False)
+        if value.get("stage") == "BODY":
+            _notify_news_job_wakeup(self)
+        return result
 
     def save_historical_market_news_batch(self, source: str, target_date: str,
                                           batch_id: str, items: list[dict[str, Any]],
@@ -1951,7 +2004,9 @@ class SQLiteQueryStore:
                 return {"state": "already_imported", "raw_count": len(items)}
             result = _save_sqlite_news_source_page(connection,
                 _historical_market_source_page(source, target_date, batch_id, items, processing_owner))
-            return {"state": "imported", **result}
+        if items:
+            _notify_news_job_wakeup(self)
+        return {"state": "imported", **result}
 
     def finish_news_job(self, job_key: str, output_ref: str) -> None:
         with self._lock, self._connection() as connection:
@@ -1972,10 +2027,14 @@ class SQLiteQueryStore:
                 "WHERE job_key=?",
                 (state, error[:1000], float(next_retry_at), output_ref, time(), job_key),
             )
+        if state == "PENDING":
+            _notify_news_job_wakeup(self)
 
     def save_news_body_revision(self, value: dict[str, Any]) -> str:
         with self._lock, self._connection() as connection:
-            return _save_sqlite_news_body(connection, value)
+            revision_id = _save_sqlite_news_body(connection, value)
+        _notify_news_job_wakeup(self)
+        return revision_id
 
     def save_news_ai_results(self, documents: list[dict[str, Any]],
                              revisions: list[dict[str, Any]],
@@ -2081,7 +2140,10 @@ class SQLiteQueryStore:
 
     def save_news_source_page(self, value: dict[str, Any]) -> dict[str, Any]:
         with self._lock, self._connection() as connection:
-            return _save_sqlite_news_source_page(connection, value)
+            result = _save_sqlite_news_source_page(connection, value)
+        if value.get("items"):
+            _notify_news_job_wakeup(self)
+        return result
 
     def load_news_source_diagnostics(self, *, source_id: str = "", days: int = 7,
                                      limit: int = 100) -> dict[str, Any]:
@@ -2502,6 +2564,9 @@ class SQLiteQueryStore:
 
 
 class PostgresQueryStore:
+    def set_news_job_wakeup(self, callback: Callable[[], None] | None) -> None:
+        self._news_job_wakeup = callback
+
     def release_execution_runtime(self, owner_key: str, owner_token: str) -> bool:
         from .postgres_access import DBWriterContext, open_observed_connection
 
@@ -3102,7 +3167,14 @@ class PostgresQueryStore:
         commit_ended_at: float | None = None
         commit_probe_incomplete = False
         bar_statement_diagnostics: list[dict[str, object]] = []
+        metadata_statement_diagnostics: list[dict[str, object]] = []
         capture_enabled = bool(refresh_capture_state().get("enabled"))
+        # The diagnostic lease is sampled once per call. Expiry/restart restores
+        # the normal write for the next call without changing this transaction.
+        from .diagnostic_workloads import is_paused
+        metadata_suppressed_rows = (
+            len(observations or ()) if minute and is_paused("minute_query_metadata") else 0
+        )
         if capture_enabled:
             commit_probe_stop = Event()
         bar_backend_pid = int(getattr(getattr(connection, "info", None), "backend_pid", 0) or 0)
@@ -3137,6 +3209,10 @@ class PostgresQueryStore:
                     _lock_postgres_minute_day_scopes(cursor, values)
                 phase_started = monotonic()
                 bar_rows = bar_value_rows(values, minute=minute)
+                changed_bar_rows: list[tuple[Any, ...]] = []
+                returning = (
+                    "trading_date,minute,code,market" if minute else "trading_date,code,market"
+                ) if observations and not metadata_suppressed_rows else ""
                 earlier_rows, latest_rows = _partition_rows_by_last_key(
                     bar_rows, (0, 1, 2, 3) if minute else (0, 1, 2),
                 )
@@ -3146,6 +3222,8 @@ class PostgresQueryStore:
                         f"INSERT INTO {table}({','.join(columns)}) VALUES",
                         [row], f"ON CONFLICT({conflict}) DO UPDATE SET {updates}{changed_guard}",
                         placeholder="%s", batch_size=1,
+                        returning_columns=returning,
+                        returned_rows=changed_bar_rows if returning else None,
                     )
                 _execute_multirow_upsert(
                     observed_cursor,
@@ -3153,11 +3231,23 @@ class PostgresQueryStore:
                     latest_rows,
                     f"ON CONFLICT({conflict}) DO UPDATE SET {updates}{changed_guard}",
                     placeholder="%s", batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
+                    returning_columns=returning,
+                    returned_rows=changed_bar_rows if returning else None,
                 )
                 bar_write_ms = round((monotonic() - phase_started) * 1000)
 
                 phase_started = monotonic()
-                _save_postgres_metadata(cursor, observations, multirow=True)
+                metadata_cursor = (
+                    _PostgresObservedCursor(
+                        cursor, self._database_url, bar_backend_pid,
+                        True, metadata_statement_diagnostics,
+                    ) if capture_enabled else cursor
+                )
+                if not metadata_suppressed_rows:
+                    _save_postgres_metadata(
+                        metadata_cursor, observations, multirow=True,
+                        changed_bar_keys={_bar_metadata_key(row, minute=minute) for row in changed_bar_rows},
+                    )
                 metadata_ms = round((monotonic() - phase_started) * 1000)
 
                 phase_started = monotonic()
@@ -3253,6 +3343,7 @@ class PostgresQueryStore:
             kind="minute" if minute else "daily", rows=len(values),
             db_call_id=writer.call_id,
             observations=len(observations or ()), connect_ms=connect_ms,
+            metadata_suppressed_rows=metadata_suppressed_rows,
             bars_ms=bar_write_ms, metadata_ms=metadata_ms,
             revisions_ms=revision_ms, commit_ms=commit_ms,
             close_ms=close_ms, total_ms=total_ms,
@@ -3274,6 +3365,7 @@ class PostgresQueryStore:
             wal_timing_for_commit=wal_timing_for_commit,
             wal_timing_error=wal_timing_error,
             bar_statement_diagnostics=bar_statement_diagnostics,
+            metadata_statement_diagnostics=metadata_statement_diagnostics,
         )
         from .diagnostic_metrics import record_writer_transaction
         record_writer_transaction(writer_kind,
@@ -3308,7 +3400,9 @@ class PostgresQueryStore:
         if market:
             sql += " AND market=%s"
             parameters.append(market)
-        sql += " ORDER BY trading_date DESC LIMIT %s"
+        # Avoid resolving the SELECT alias for trading_date::text here;
+        # PostgreSQL would sort the cast expression and skip the date index.
+        sql += " ORDER BY central_daily_bars.trading_date DESC LIMIT %s"
         parameters.append(bounded_limit(limit, 5000))
         reader = DBWriterContext(
             writer_family="read.market_bars", writer_kind="daily_bar",
@@ -3934,6 +4028,8 @@ class PostgresQueryStore:
                 _append_postgres_theme_snapshot(cursor, values, received_at=now)
             elif collection == "news_article":
                 _append_postgres_news_articles(cursor, values, received_at=now)
+        if collection == "news_article":
+            _notify_news_job_wakeup(self)
         from .diagnostic_metrics import record_writer_transaction
         record_writer_transaction(f"document:{collection}", len(values),
                                   round((monotonic() - started_at) * 1000),
@@ -4035,7 +4131,10 @@ class PostgresQueryStore:
             operation="enqueue_news_ai_jobs", rows_attempted=len(values),
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            return _enqueue_postgres_news_ai_jobs(cursor, values)
+            count = _enqueue_postgres_news_ai_jobs(cursor, values)
+        if count:
+            _notify_news_job_wakeup(self)
+        return count
 
     def claim_news_jobs(self, *, limit: int = 1, now: float | None = None,
                         priority_stock_code: str = "", preferred_stage: str = "") -> list[dict[str, Any]]:
@@ -4108,6 +4207,7 @@ class PostgresQueryStore:
             operation="explain_news_job_claim_plan", access_mode="read",
         )
         plans: list[dict[str, Any]] = []
+        candidate_plans: list[dict[str, Any]] = []
         with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute("SET TRANSACTION READ ONLY")
             cursor.execute("SELECT current_database(),current_setting('server_version')")
@@ -4121,15 +4221,72 @@ class PostgresQueryStore:
             plans.append({"operation": "recover_stale_running", "nodes": plan_summary(cursor.fetchone()[0])})
             for stage in ("BODY", "RULE"):
                 priority = ""
+                parameters = (now_epoch, stage, stage, priority, priority, priority,
+                              priority, priority, priority, 1)
                 cursor.execute(
                     "EXPLAIN (FORMAT JSON) " + _NEWS_JOB_CLAIM_SELECT_SQL,
-                    (now_epoch, stage, stage, priority, priority, priority, priority,
-                     priority, priority, 1),
+                    parameters,
                 )
                 plans.append({"operation": "claim_candidate_select", "preferred_stage": stage,
                               "nodes": plan_summary(cursor.fetchone()[0])})
+                cursor.execute(
+                    "EXPLAIN (FORMAT JSON) " + _NEWS_JOB_CLAIM_DIAGNOSTIC_CANDIDATE_SQL,
+                    parameters,
+                )
+                candidate_plans.append({"operation": "claim_candidate_select", "preferred_stage": stage,
+                                        "nodes": plan_summary(cursor.fetchone()[0])})
         return {"mode": "read_only_explain_without_analyze", "database": database_name,
-                "postgresql": server_version, "plans": plans}
+                "postgresql": server_version, "plans": plans,
+                "candidate_plans": candidate_plans}
+
+    def analyze_news_job_claim_read_only(self, stage: str) -> dict[str, Any]:
+        """Measure the claim filter/order without executing its row lock or updates."""
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        if stage not in {"BODY", "RULE"}:
+            raise ValueError("BODY or RULE stage is required")
+        reader = DBWriterContext(
+            writer_family="diagnostic.query_plan", writer_kind="news_job_claim_read_only",
+            operation="analyze_news_job_claim_read_only", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute("SET LOCAL statement_timeout TO '2000ms'")
+            cursor.execute(
+                "EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON) "
+                + _NEWS_JOB_CLAIM_READ_ONLY_SQL,
+                (time(), stage, stage, "", "", "", "", "", "", 1),
+            )
+            report = cursor.fetchone()[0][0]
+        root = report.get("Plan", {})
+        nodes: list[dict[str, Any]] = []
+        pending = [(root, None, 0)] if isinstance(root, dict) else []
+        while pending and len(nodes) < 64:
+            node, parent, depth = pending.pop(0)
+            index = len(nodes)
+            summary = {key: node[key] for key in (
+                "Node Type", "Parent Relationship", "Subplan Name", "Relation Name",
+                "Index Name", "Plan Rows", "Actual Rows", "Actual Loops", "Sort Method",
+                "Shared Hit Blocks", "Shared Read Blocks", "Shared Dirtied Blocks",
+                "Shared Written Blocks", "Temp Read Blocks", "Temp Written Blocks",
+            ) if key in node}
+            summary.update(parent_node=parent, depth=depth)
+            nodes.append(summary)
+            children = node.get("Plans", ())
+            if isinstance(children, list):
+                pending.extend((child, index, depth + 1)
+                               for child in children if isinstance(child, dict))
+        return {
+            "mode": "read_only_analyze_without_row_lock",
+            "preferred_stage": stage,
+            "execution_ms": report.get("Execution Time"),
+            "planning_ms": report.get("Planning Time"),
+            "nodes": nodes,
+            "truncated": bool(pending),
+            "scope_note": "Runs one read-only SELECT with the claim filter/order and LIMIT 1; "
+                          "FOR UPDATE SKIP LOCKED and the stale-job UPDATE are excluded, "
+                          "so this is not a full claim transaction timing.",
+        }
 
     def claim_external_historical_news_job(self, stage: str,
                                            excluded_codes: tuple[str, ...] = (),
@@ -4241,7 +4398,10 @@ class PostgresQueryStore:
             operation="complete_external_historical_news_job", rows_attempted=1,
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            return _complete_external_news_job(cursor, value, postgres=True)
+            result = _complete_external_news_job(cursor, value, postgres=True)
+        if stage == "BODY":
+            _notify_news_job_wakeup(self)
+        return result
 
     def save_historical_market_news_batch(self, source: str, target_date: str,
                                           batch_id: str, items: list[dict[str, Any]],
@@ -4261,7 +4421,9 @@ class PostgresQueryStore:
                 return {"state": "already_imported", "raw_count": len(items)}
             result = _save_postgres_news_source_page(cursor,
                 _historical_market_source_page(source, target_date, batch_id, items, processing_owner))
-            return {"state": "imported", **result}
+        if items:
+            _notify_news_job_wakeup(self)
+        return {"state": "imported", **result}
 
     def finish_news_job(self, job_key: str, output_ref: str) -> None:
         from .postgres_access import DBWriterContext, open_observed_connection
@@ -4282,7 +4444,7 @@ class PostgresQueryStore:
                                   db_call_id=writer.call_id)
 
     def retry_news_job(self, job_key: str, error: str, next_retry_at: float,
-                       output_ref: str = "") -> None:
+                        output_ref: str = "") -> None:
         from .postgres_access import DBWriterContext, open_observed_connection
 
         writer = DBWriterContext(
@@ -4298,6 +4460,8 @@ class PostgresQueryStore:
                 "updated_at=%s WHERE job_key=%s",
                 (state, error[:1000], float(next_retry_at), output_ref, time(), job_key),
             )
+        if state == "PENDING":
+            _notify_news_job_wakeup(self)
 
     def save_news_body_revision(self, value: dict[str, Any]) -> str:
         from .postgres_access import DBWriterContext, open_observed_connection
@@ -4309,6 +4473,7 @@ class PostgresQueryStore:
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             revision_id = _save_postgres_news_body(cursor, value)
+        _notify_news_job_wakeup(self)
         from .diagnostic_metrics import record_writer_transaction
         record_writer_transaction("news_body", 1,
                                   round((monotonic() - started_at) * 1000),
@@ -4507,7 +4672,10 @@ class PostgresQueryStore:
             rows_attempted=len(items) if isinstance(items, (list, tuple)) else None,
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            return _save_postgres_news_source_page(cursor, value)
+            result = _save_postgres_news_source_page(cursor, value)
+        if items:
+            _notify_news_job_wakeup(self)
+        return result
 
     def load_news_source_diagnostics(self, *, source_id: str = "", days: int = 7,
                                      limit: int = 100) -> dict[str, Any]:
@@ -7026,14 +7194,26 @@ def _market_metadata_upsert_sql(placeholder: str, excluded: str) -> str:
     )
 
 
-def _market_metadata_upsert_suffix(excluded: str) -> str:
-    return (
+def _market_metadata_upsert_suffix(
+    excluded: str, *, distinct_operator: str = "",
+) -> str:
+    sql = (
         "ON CONFLICT(dataset_kind,subject,observation_key) DO UPDATE SET "
         f"effective_at={excluded}.effective_at,available_at={excluded}.available_at,"
         f"venue={excluded}.venue,unit={excluded}.unit,value_kind={excluded}.value_kind,"
         f"completeness={excluded}.completeness,origin={excluded}.origin,source={excluded}.source,"
         f"candidate_universe={excluded}.candidate_universe"
     )
+    if distinct_operator:
+        semantic_columns = (
+            "effective_at", "venue", "unit", "value_kind", "completeness",
+            "origin", "source", "candidate_universe",
+        )
+        sql += " WHERE " + " OR ".join(
+            f"central_market_data_observation_meta.{column} {distinct_operator} {excluded}.{column}"
+            for column in semantic_columns
+        )
+    return sql
 
 
 def _observation_revision_select(placeholder: str, *, postgres: bool = False) -> str:
@@ -7754,6 +7934,8 @@ def _execute_multirow_upsert(
     *,
     placeholder: str,
     batch_size: int,
+    returning_columns: str = "",
+    returned_rows: list[tuple[Any, ...]] | None = None,
 ) -> int:
     """Execute a bounded multi-row UPSERT and return its statement count."""
     if not rows:
@@ -7768,39 +7950,87 @@ def _execute_multirow_upsert(
     for offset in range(0, len(rows), batch_size):
         batch = rows[offset:offset + batch_size]
         sql = f"{insert_prefix}{','.join(value_group for _ in batch)} {upsert_suffix}"
+        if returning_columns:
+            sql += f" RETURNING {returning_columns}"
         parameters = tuple(value for row in batch for value in row)
-        executor.execute(sql, parameters)
+        result = executor.execute(sql, parameters)
+        if returned_rows is not None:
+            returned_rows.extend(result.fetchall())
         statements += 1
     return statements
 
 
-def _save_sqlite_metadata(connection, observations, *, multirow: bool = False) -> None:
+def _bar_metadata_key(row: tuple[Any, ...], *, minute: bool) -> tuple[str, str, str]:
+    if minute:
+        day, clock, code, market = row
+        observation_key = f"{day}T{clock}"
+        kind = "minute_bar"
+    else:
+        day, code, market = row
+        observation_key = str(day)
+        kind = "daily_bar"
+    return kind, f"{code}:{market or 'UNKNOWN'}", observation_key
+
+
+def _save_sqlite_metadata(
+    connection, observations, *, multirow: bool = False,
+    changed_bar_keys: set[tuple[str, str, str]] | None = None,
+) -> None:
     if not observations:
         return
     rows = [market_metadata_storage_values(key, observation) for key, observation in observations]
     if multirow:
-        _execute_multirow_upsert(
-            connection,
-            "INSERT INTO central_market_data_observation_meta VALUES",
-            _last_rows_by_key(rows, (0, 1, 2)),
-            _market_metadata_upsert_suffix("excluded"),
-            placeholder="?", batch_size=SQLITE_MULTIROW_UPSERT_ROWS,
+        final_rows = _last_rows_by_key(rows, (0, 1, 2))
+        groups = (
+            [(final_rows, "")]
+            if changed_bar_keys is None else [
+                ([row for row in final_rows if (row[0], row[1], row[2]) in changed_bar_keys], ""),
+                ([row for row in final_rows if (row[0], row[1], row[2]) not in changed_bar_keys], "IS NOT"),
+            ]
         )
+        for selected, distinct_operator in groups:
+            if not selected:
+                continue
+            _execute_multirow_upsert(
+                connection,
+                "INSERT INTO central_market_data_observation_meta VALUES",
+                selected,
+                _market_metadata_upsert_suffix(
+                    "excluded", distinct_operator=distinct_operator,
+                ),
+                placeholder="?", batch_size=SQLITE_MULTIROW_UPSERT_ROWS,
+            )
     else:
         connection.executemany(_market_metadata_upsert_sql("?", "excluded"), rows)
 
 
-def _save_postgres_metadata(cursor, observations, *, multirow: bool = False) -> None:
+def _save_postgres_metadata(
+    cursor, observations, *, multirow: bool = False,
+    changed_bar_keys: set[tuple[str, str, str]] | None = None,
+) -> None:
     if not observations:
         return
     rows = [market_metadata_storage_values(key, observation) for key, observation in observations]
     if multirow:
-        _execute_multirow_upsert(
-            cursor,
-            "INSERT INTO central_market_data_observation_meta VALUES",
-            _last_rows_by_key(rows, (0, 1, 2)),
-            _market_metadata_upsert_suffix("EXCLUDED"),
-            placeholder="%s", batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
+        final_rows = _last_rows_by_key(rows, (0, 1, 2))
+        groups = (
+            [(final_rows, "")]
+            if changed_bar_keys is None else [
+                ([row for row in final_rows if (row[0], row[1], row[2]) in changed_bar_keys], ""),
+                ([row for row in final_rows if (row[0], row[1], row[2]) not in changed_bar_keys], "IS DISTINCT FROM"),
+            ]
         )
+        for selected, distinct_operator in groups:
+            if not selected:
+                continue
+            _execute_multirow_upsert(
+                cursor,
+                "INSERT INTO central_market_data_observation_meta VALUES",
+                selected,
+                _market_metadata_upsert_suffix(
+                    "EXCLUDED", distinct_operator=distinct_operator,
+                ),
+                placeholder="%s", batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
+            )
     else:
         cursor.executemany(_market_metadata_upsert_sql("%s", "EXCLUDED"), rows)

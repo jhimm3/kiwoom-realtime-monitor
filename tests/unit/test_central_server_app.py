@@ -77,6 +77,31 @@ class CentralServerAppTests(unittest.TestCase):
         self.assertEqual(501, response.status_code)
         self.assertEqual("POSTGRES_DIAGNOSTIC_UNAVAILABLE", response.json()["detail"])
 
+    def test_news_job_claim_readonly_analyze_api_requires_auth_and_postgres(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = CentralServerSettings(
+                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
+            )
+            with TestClient(create_app(settings)) as client:
+                endpoint = "/api/v1/diagnostics/news-job-claim-readonly-analyze"
+                self.assertEqual(401, client.get(endpoint).status_code)
+                response = client.get(endpoint, headers={"Authorization": "Bearer private-token"})
+        self.assertEqual(501, response.status_code)
+        self.assertEqual("POSTGRES_DIAGNOSTIC_UNAVAILABLE", response.json()["detail"])
+        with tempfile.TemporaryDirectory() as directory:
+            settings = CentralServerSettings(
+                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
+            )
+            result = {"mode": "read_only_analyze_without_row_lock", "nodes": []}
+            with patch.object(SQLiteQueryStore, "analyze_news_job_claim_read_only",
+                              create=True, return_value=result) as analyze:
+                with TestClient(create_app(settings)) as client:
+                    headers = {"Authorization": "Bearer private-token"}
+                    self.assertEqual(result, client.get(endpoint, headers=headers).json())
+                    self.assertEqual(400, client.get(endpoint, params={"stage": "AI"},
+                                                     headers=headers).status_code)
+            analyze.assert_called_once_with("BODY")
+
     def test_diagnostic_status_reads_master_and_children_together(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "monitor.sqlite3"
@@ -724,6 +749,7 @@ class CentralServerAppTests(unittest.TestCase):
             ("GET", "/api/v1/diagnostics/writers"),
             ("GET", "/api/v1/diagnostics/db-calls"),
             ("GET", "/api/v1/diagnostics/news-job-claim-plan"),
+            ("GET", "/api/v1/diagnostics/news-job-claim-readonly-analyze"),
             ("GET", "/api/v1/diagnostics/capabilities"),
             ("PUT", "/api/v1/diagnostics/control"),
             ("GET", "/api/v1/diagnostics/snapshot"),
