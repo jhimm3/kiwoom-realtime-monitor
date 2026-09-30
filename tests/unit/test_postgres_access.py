@@ -83,7 +83,25 @@ class FakeConnection:
 
 class PostgresAccessTests(unittest.TestCase):
     def test_realtime_minute_phases_keep_one_native_transaction(self) -> None:
+        class ReturningCursor(FakeCursor):
+            def __init__(self, connection: FakeConnection) -> None:
+                super().__init__(connection)
+                self.last_sql = ""
+
+            def execute(self, sql: str, parameters: object = ()) -> FakeCursor:
+                self.last_sql = sql
+                return super().execute(sql, parameters)
+
+            def fetchone(self) -> tuple[object, ...] | None:
+                if "RETURNING trading_date::text" in self.last_sql:
+                    return (
+                        "2099-01-09", "10:00", "DIAG", "KRX",
+                        100, 100, 100, 100, 3, 3, 1790000000.0,
+                    )
+                return super().fetchone()
+
         raw = self._native_context_connection()
+        raw.cursor = lambda: ReturningCursor(raw)
         store = PostgresQueryStore("unused")
         value = {
             "trading_date": "2099-01-09", "minute": "10:00", "code": "DIAG",
@@ -102,7 +120,11 @@ class PostgresAccessTests(unittest.TestCase):
         self.assertEqual(call["call_id"], sample["db_call_id"])
         self.assertEqual({"replayed": 0, "query_complete": 0, "bar_upserts": 1,
                           "metadata_upserts": 0, "revision_inserts": 0,
-                          "operation_inserts": 1}, sample["domain_counts"])
+                          "operation_inserts": 1,
+                          "operation_lookup_statements": 1,
+                          "operation_lookup_keys": 1,
+                          "authority_lookup_statements": 1,
+                          "authority_lookup_keys": 1}, sample["domain_counts"])
         self.assertEqual({"day_locks", "operation_lookup", "query_authority",
                           "bar_upsert", "operation_insert"},
                          set(sample["domain_phase_ms"]))
@@ -562,10 +584,16 @@ class PostgresAccessTests(unittest.TestCase):
         store = PostgresQueryStore("unused")
         decision = {"decision_id": "decision-1", "decided_at": "2099-01-09T00:00:00+00:00"}
         candidate = {"event_id": "event-1", "available_at": "2099-01-09T00:00:00+00:00"}
+        checkpoint = {
+            "cursor": 1,
+            "strategy_state": {"emitted_candidate_keys": ("candidate-1",)},
+            "bars": [{"code": "005930"}, {"code": "000660"}],
+            "universes": [{"codes": ("005930", "000660")}],
+        }
         started = time.time() - 1
         with patch.object(store, "_connect", side_effect=[evaluation_connection, checkpoint_connection]):
             store.save_shadow_evaluation("monitor", decision, candidate, "2099-01-09T00:01:00+00:00")
-            store.save_shadow_monitor_state("monitor", {"cursor": 1})
+            store.save_shadow_monitor_state("monitor", checkpoint)
 
         self.assertEqual(["SELECT", "INSERT", "SELECT", "INSERT"],
                          [statement[0] for statement in evaluation_connection.statements])
@@ -583,9 +611,14 @@ class PostgresAccessTests(unittest.TestCase):
         writer = summarize_market_bar_saves(
             started, time.time() + 1,
         )["writer_transactions"]["shadow_monitor_state"]
-        self.assertEqual(len(json.dumps({"cursor": 1}).encode("utf-8")),
+        self.assertEqual(len(json.dumps(checkpoint, ensure_ascii=False).encode("utf-8")),
                          writer["payload_bytes_estimated"])
         self.assertGreaterEqual(writer["encode_ms"]["median"], 0)
+        self.assertEqual({
+            "checkpoint_bar_frames": 2,
+            "checkpoint_universe_frames": 1,
+            "checkpoint_emitted_candidate_keys": 1,
+        }, writer["domain_counts"])
         self.assertEqual(calls[1]["call_id"], writer["call_samples"][0]["db_call_id"])
 
     def test_news_ai_job_enqueue_keeps_revision_reads_and_insert_in_one_commit(self) -> None:

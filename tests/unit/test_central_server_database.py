@@ -2126,21 +2126,30 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertIn("ON CONFLICT DO NOTHING", cursor.sql)
         self.assertNotIn("ON CONFLICT(event_key)", cursor.sql)
 
-    def test_external_market_bars_accumulate_and_upsert_same_observation(self) -> None:
+    def test_external_market_bars_skip_unchanged_values_and_keep_null_safe_corrections(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
             base = {"provider": "yahoo_delayed", "instrument": "NASDAQ_FUTURES",
                     "contract": "MNQU26.CME", "timeframe": "5m", "open": 25000.0,
                     "high": 25010.0, "low": 24990.0, "close": 25005.0, "volume": 10.0,
-                    "updated_at": time.time()}
+                    "updated_at": 100.0}
             store.save_external_bars([{**base, "bar_time": "2026-09-10T00:00:00Z"}])
-            store.save_external_bars([{**base, "bar_time": "2026-09-10T00:05:00Z", "close": 25020.0}])
-            store.save_external_bars([{**base, "bar_time": "2026-09-10T00:05:00Z", "close": 25021.0}])
+            observed = {**base, "bar_time": "2026-09-10T00:05:00Z", "close": 25020.0}
+            store.save_external_bars([observed])
+            store.save_external_bars([{**observed, "updated_at": 200.0}])
+            correction = {**observed, "close": 25021.0, "updated_at": 300.0}
+            store.save_external_bars([correction])
+            store.save_external_bars([{**correction, "updated_at": 400.0}])
+            null_correction = {**correction, "volume": None, "updated_at": 500.0}
+            store.save_external_bars([null_correction])
+            store.save_external_bars([{**null_correction, "updated_at": 600.0}])
             rows = store.load_external_bars("NASDAQ_FUTURES", "5m")
             store.close()
         self.assertEqual(2, len(rows))
         self.assertEqual(25021.0, rows[-1]["close"])
+        self.assertIsNone(rows[-1]["volume"])
+        self.assertEqual(500.0, rows[-1]["updated_at"])
 
 
 if __name__ == "__main__":

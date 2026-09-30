@@ -211,6 +211,12 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
         class CohortStore:
             codes = ["A", "B"]
 
+            def load_dataset_snapshots(self, *_args):
+                return []
+
+            def load_observation_revisions(self, *_args):
+                return []
+
             def load_documents(self, collection, _owner, _limit):
                 if collection == "top20_daily_entrants":
                     return [{"key": code} for code in self.codes]
@@ -954,6 +960,145 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
         calls = [call for call in broker.calls if call[0] == "ka10081"]
         self.assertEqual(1, len(calls))
         self.assertEqual("005930", calls[0][1]["stk_cd"])
+
+    def _entrant_service(self, store, broker, now=None):
+        service = AutonomousTop20Service(
+            broker, RealtimeHub(), store,
+            now_provider=lambda: now or datetime.fromisoformat("2026-09-11T07:00:00+09:00"),
+        )
+        service._schedule_market_catalog = lambda _day: None
+        service._schedule_subscription_update = lambda _day: None
+        service._backfill_market_indexes = AsyncMock()
+        service._nxt_enabled = AsyncMock(return_value=False)
+        service._backfill_daily = AsyncMock()
+        service._backfill_minutes = AsyncMock()
+        service._backfill_candidate_flows = AsyncMock()
+        return service
+
+    async def test_daily_entrants_retry_departed_code_skip_replay_and_reset_next_day(self) -> None:
+        class Broker(_Broker):
+            clock = "090000"
+            day = "20260910"
+            first = "005930"
+
+            async def request(self, *args, **kwargs):
+                rows = _ranking_rows(self.clock)
+                for row in rows:
+                    row["dt"] = self.day
+                rows[0]["stk_cd"] = self.first
+                return BrokerResult({"item_inq_rank": rows}, False, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            self.addCleanup(store.close)
+            broker = Broker()
+            service = self._entrant_service(store, broker)
+            original_save = store.upsert_documents
+            with patch.object(store, "upsert_documents", side_effect=RuntimeError("save failed")):
+                with self.assertRaisesRegex(RuntimeError, "save failed"):
+                    await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0))
+            self.assertEqual(set(), service._entrant_persisted_codes)
+            broker.clock, broker.first = "090030", "099999"
+            with patch.object(store, "upsert_documents", wraps=original_save) as save:
+                await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0, 30))
+                self.assertEqual(21, len(save.call_args.args[1]))
+                broker.clock = "090100"
+                await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 1))
+                self.assertEqual(1, save.call_count)
+                restarted = self._entrant_service(store, broker)
+                await restarted.refresh_ranking_once(datetime(2026, 9, 10, 9, 1))
+                self.assertEqual(1, save.call_count)
+                broker.day = "20260911"
+                await service.refresh_ranking_once(datetime(2026, 9, 11, 9, 1))
+                self.assertEqual(2, save.call_count)
+                self.assertEqual({"2026-09-11"}, {row["owner"] for row in save.call_args.args[1]})
+            documents = store.load_documents("top20_daily_entrants", "2026-09-10")
+            samsung = next(row for row in documents if row["key"] == "005930")
+            self.assertEqual("2026-09-10T09:00:00", samsung["document"]["first_seen_at"])
+            self.assertNotIn("last_seen_at", samsung["document"])
+            self.assertEqual(3, len(store.load_dataset_snapshots("top20_membership", "2026-09-10")))
+            store.close()
+
+    async def test_backfill_recovers_failed_entrant_from_corrected_membership_history(self) -> None:
+        class Broker(_Broker):
+            first = "005930"
+
+            async def request(self, *args, **kwargs):
+                rows = _ranking_rows("090000")
+                rows[0]["stk_cd"] = self.first
+                return BrokerResult({"item_inq_rank": rows}, False, "")
+
+        for history_enabled in (True, False):
+            with self.subTest(history_enabled=history_enabled), tempfile.TemporaryDirectory() as directory:
+                store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3",
+                                         observation_history_enabled=history_enabled)
+                store.initialize()
+                broker = Broker()
+                service = self._entrant_service(store, broker)
+                with patch.object(store, "upsert_documents", side_effect=RuntimeError("save failed")):
+                    for first in ("005930", "099999"):
+                        broker.first = first
+                        with self.assertRaisesRegex(RuntimeError, "save failed"):
+                            await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0))
+                restarted = self._entrant_service(store, broker)
+                self.assertTrue(await restarted.backfill_day("2026-09-10"))
+                codes = {row["key"] for row in store.load_documents("top20_daily_entrants", "2026-09-10")}
+                self.assertIn("099999", codes)
+                self.assertEqual(history_enabled, "005930" in codes)
+                self.assertEqual(codes, {call.args[0] for call in restarted._backfill_daily.await_args_list})
+                self.assertEqual("", restarted._entrants_day)
+                store.close()
+
+    async def test_previous_day_backfill_and_current_ranking_keep_separate_entrant_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            old_day = "2026-09-09"
+            store.save_dataset_snapshot("top20_membership", old_day, old_day + "T09:00:00", {
+                "observed_at": old_day + "T09:00:00", "codes": ["OLD"],
+            })
+            service = self._entrant_service(store, _Broker(), datetime(2026, 9, 10, 7, 0))
+            entered, release = threading.Event(), threading.Event()
+            original_save = store.upsert_documents
+
+            def blocked_save(collection, documents):
+                if documents[0]["owner"] == old_day:
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError("backfill save not released")
+                return original_save(collection, documents)
+
+            with patch.object(store, "upsert_documents", side_effect=blocked_save):
+                task = asyncio.create_task(service.backfill_day(old_day))
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                    codes = await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0))
+                    self.assertEqual(set(codes), service._entrant_persisted_codes)
+                    self.assertEqual("2026-09-10", service._entrants_day)
+                finally:
+                    release.set()
+                    completed = await task
+                self.assertTrue(completed)
+            previous = store.load_documents("top20_daily_entrants", old_day)
+            current = store.load_documents("top20_daily_entrants", "2026-09-10")
+            self.assertEqual(["OLD"], [row["key"] for row in previous])
+            self.assertEqual(old_day + "T09:00:00", previous[0]["document"]["first_seen_at"])
+            self.assertEqual(set(codes), {row["key"] for row in current})
+            self.assertTrue(all(row["document"]["first_seen_at"].startswith("2026-09-10") for row in current))
+            self.assertEqual(["OLD"], [call.args[0] for call in service._backfill_daily.await_args_list])
+            store.close()
+
+    async def test_daily_entrant_recovery_does_not_silently_accept_truncated_history(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = []
+        store.load_dataset_snapshots.return_value = [{}] * 5000
+        store.load_observation_revisions.return_value = []
+        service = self._entrant_service(store, _Broker())
+        with self.assertRaisesRegex(RuntimeError, "recovery limit reached"):
+            await service.backfill_day("2026-09-10")
+        store.upsert_documents.assert_not_called()
+        service._backfill_daily.assert_not_awaited()
 
     async def test_ranking_is_archived_and_keeps_an_internal_subscription(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

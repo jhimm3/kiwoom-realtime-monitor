@@ -2254,7 +2254,12 @@ class SQLiteQueryStore:
                 "INSERT INTO central_external_bars VALUES(?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(provider,instrument,contract,timeframe,bar_time) DO UPDATE SET "
                 "open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,"
-                "volume=excluded.volume,updated_at=excluded.updated_at",
+                "volume=excluded.volume,updated_at=excluded.updated_at "
+                "WHERE central_external_bars.open IS NOT excluded.open "
+                "OR central_external_bars.high IS NOT excluded.high "
+                "OR central_external_bars.low IS NOT excluded.low "
+                "OR central_external_bars.close IS NOT excluded.close "
+                "OR central_external_bars.volume IS NOT excluded.volume",
                 [_external_bar_values(value) for value in values],
             )
 
@@ -2931,7 +2936,11 @@ class PostgresQueryStore:
         domain_phase_ms: dict[str, float] = {}
         domain_counts = {"replayed": 0, "query_complete": 0,
                          "bar_upserts": 0, "metadata_upserts": 0,
-                         "revision_inserts": 0, "operation_inserts": 0}
+                         "revision_inserts": 0, "operation_inserts": 0,
+                         "operation_lookup_statements": 0,
+                         "operation_lookup_keys": 0,
+                         "authority_lookup_statements": 0,
+                         "authority_lookup_keys": 0}
         writer = DBWriterContext(
             writer_family="realtime.minute", writer_kind="realtime_minute",
             operation="save_minute_bars", rows_attempted=len(values),
@@ -2940,23 +2949,60 @@ class PostgresQueryStore:
             phase_started = monotonic()
             _lock_postgres_minute_day_scopes(cursor, values)
             domain_phase_ms["day_locks"] = round((monotonic() - phase_started) * 1000, 3)
-            for value in values:
-                phase_started = monotonic()
-                operation_id, operation_hash = _minute_operation(value)
-                cursor.execute(
-                    "SELECT operation_hash FROM central_minute_bar_operations WHERE operation_id=%s",
-                    (operation_id,),
-                )
-                processed = cursor.fetchone()
-                domain_phase_ms["operation_lookup"] = domain_phase_ms.get("operation_lookup", 0) + (monotonic() - phase_started) * 1000
-                if processed is not None:
-                    if str(processed[0]) != operation_hash:
+            operations = [(value, *_minute_operation(value)) for value in values]
+            operation_ids = list(dict.fromkeys(
+                operation_id for _, operation_id, _ in operations
+            ))
+            phase_started = monotonic()
+            operation_hashes = _load_postgres_minute_operation_hashes(
+                cursor, operation_ids,
+            )
+            domain_phase_ms["operation_lookup"] = round((monotonic() - phase_started) * 1000, 3)
+            domain_counts["operation_lookup_statements"] = 1
+            domain_counts["operation_lookup_keys"] = len(operation_ids)
+
+            # The realtime accumulator emits one operation per minute key. Keep
+            # sequential authority reads for duplicate keys so unusual callers
+            # retain the previous read-after-write behavior within this batch.
+            key_counts: dict[tuple[str, str], int] = {}
+            pending_operation_ids: set[str] = set()
+            for value, operation_id, _ in operations:
+                if operation_id in operation_hashes or operation_id in pending_operation_ids:
+                    continue
+                pending_operation_ids.add(operation_id)
+                key = (f"{value['code']}:{value['market']}", _minute_key(value))
+                key_counts[key] = key_counts.get(key, 0) + 1
+            authority_keys = [key for key, count in key_counts.items() if count == 1]
+            phase_started = monotonic()
+            authorities = _load_postgres_minute_query_authorities(cursor, authority_keys)
+            domain_phase_ms["query_authority"] = round((monotonic() - phase_started) * 1000, 3)
+            domain_counts["authority_lookup_statements"] = int(bool(authority_keys))
+            domain_counts["authority_lookup_keys"] = len(authority_keys)
+            seen_operations: dict[str, str] = {}
+            for value, operation_id, operation_hash in operations:
+                processed_hash = operation_hashes.get(operation_id)
+                if processed_hash is not None:
+                    if str(processed_hash) != operation_hash:
                         raise ValueError("minute bar operation_id payload changed")
                     domain_counts["replayed"] += 1
                     continue
-                phase_started = monotonic()
-                query_authority = _minute_query_authority(cursor, value, postgres=True)
-                domain_phase_ms["query_authority"] = domain_phase_ms.get("query_authority", 0) + (monotonic() - phase_started) * 1000
+                earlier_hash = seen_operations.get(operation_id)
+                if earlier_hash is not None:
+                    if earlier_hash != operation_hash:
+                        raise ValueError("minute bar operation_id payload changed")
+                    domain_counts["replayed"] += 1
+                    continue
+                seen_operations[operation_id] = operation_hash
+                key = (f"{value['code']}:{value['market']}", _minute_key(value))
+                if key_counts.get(key, 0) > 1:
+                    phase_started = monotonic()
+                    query_authority = _minute_query_authority(cursor, value, postgres=True)
+                    domain_phase_ms["query_authority"] += (monotonic() - phase_started) * 1000
+                    domain_counts["authority_lookup_statements"] += 1
+                    domain_counts["authority_lookup_keys"] += 1
+                else:
+                    query_authority = authorities.get(key, "")
+                merged_bar: dict[str, Any] | None = None
                 if query_authority != DataCompleteness.COMPLETE.value:
                     phase_started = monotonic()
                     if query_authority == DataCompleteness.IN_PROGRESS.value:
@@ -2974,9 +3020,12 @@ class PostgresQueryStore:
                         )
                     cursor.execute(
                         "INSERT INTO central_minute_bars VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-                        "ON CONFLICT(trading_date,minute,code,market) DO UPDATE SET " + updates,
+                        "ON CONFLICT(trading_date,minute,code,market) DO UPDATE SET " + updates + " "
+                        "RETURNING trading_date::text,to_char(minute,'HH24:MI'),code,market,open,high,low,close,"
+                        "volume,trade_value_million_won,updated_at",
                         bar_value_rows((value,), minute=True)[0],
                     )
+                    merged_bar = bar_result_rows((cursor.fetchone(),), minute=True)[0]
                     domain_phase_ms["bar_upsert"] = domain_phase_ms.get("bar_upsert", 0) + (monotonic() - phase_started) * 1000
                     domain_counts["bar_upserts"] += 1
                 else:
@@ -2984,10 +3033,11 @@ class PostgresQueryStore:
                 key = _minute_key(value)
                 observation = observation_by_key.get(key)
                 if observation is not None and query_authority != DataCompleteness.COMPLETE.value:
+                    if merged_bar is None:
+                        raise RuntimeError("minute bar upsert did not return its saved row")
                     phase_started = monotonic()
-                    merged = _load_postgres_minute_bar(cursor, value)
                     merged_observation = MarketDataObservation(
-                        observation.kind, observation.subject, merged, observation.metadata,
+                        observation.kind, observation.subject, merged_bar, observation.metadata,
                     )
                     cursor.execute(
                         _market_metadata_upsert_sql("%s", "EXCLUDED"),
@@ -2998,7 +3048,7 @@ class PostgresQueryStore:
                         if _append_postgres_observation_revision(
                             cursor, "minute_bar", observation.subject, key,
                             minute_bar_revision_payload(
-                                merged, window_closed=False, capture_quality="in_progress",
+                                merged_bar, window_closed=False, capture_quality="in_progress",
                                 finalization_source="realtime_flush", operation_id=operation_id,
                             ),
                             merged_observation,
@@ -3752,6 +3802,13 @@ class PostgresQueryStore:
         record_writer_transaction(
             "shadow_monitor_state", 1, round((monotonic() - started_at) * 1000),
             encode_ms=encode_ms, bytes_payload_estimate=payload_bytes,
+            domain_counts={
+                "checkpoint_bar_frames": len(document.get("bars", ())),
+                "checkpoint_universe_frames": len(document.get("universes", ())),
+                "checkpoint_emitted_candidate_keys": len(
+                    document.get("strategy_state", {}).get("emitted_candidate_keys", ()),
+                ),
+            },
             db_call_id=writer.call_id,
         )
 
@@ -4896,7 +4953,11 @@ class PostgresQueryStore:
                 "INSERT INTO central_external_bars VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT(provider,instrument,contract,timeframe,bar_time) DO UPDATE SET "
                 "open=EXCLUDED.open,high=EXCLUDED.high,low=EXCLUDED.low,close=EXCLUDED.close,"
-                "volume=EXCLUDED.volume,updated_at=EXCLUDED.updated_at",
+                "volume=EXCLUDED.volume,updated_at=EXCLUDED.updated_at "
+                "WHERE (central_external_bars.open,central_external_bars.high,"
+                "central_external_bars.low,central_external_bars.close,"
+                "central_external_bars.volume) IS DISTINCT FROM "
+                "(EXCLUDED.open,EXCLUDED.high,EXCLUDED.low,EXCLUDED.close,EXCLUDED.volume)",
                 [_external_bar_values(value) for value in values],
             )
 
@@ -7748,6 +7809,44 @@ def _minute_query_authority(cursor: Any, value: dict[str, Any], *, postgres: boo
     if row and str(row[0]) == ObservationOrigin.QUERY.value and str(row[1]).startswith("kiwoom-ka10080"):
         return str(row[2])
     return ""
+
+
+def _load_postgres_minute_operation_hashes(
+    cursor: Any, operation_ids: list[str],
+) -> dict[str, str]:
+    """Read the existing idempotency records for a realtime flush in one query."""
+    if not operation_ids:
+        return {}
+    cursor.execute(
+        "SELECT operation_id,operation_hash FROM central_minute_bar_operations "
+        "WHERE operation_id=ANY(%s)",
+        (operation_ids,),
+    )
+    return {str(operation_id): str(operation_hash)
+            for operation_id, operation_hash in cursor.fetchall()}
+
+
+def _load_postgres_minute_query_authorities(
+    cursor: Any, keys: list[tuple[str, str]],
+) -> dict[tuple[str, str], str]:
+    """Read finalized/query-owned minute keys for a realtime flush in one query."""
+    if not keys:
+        return {}
+    subjects, observation_keys = zip(*keys)
+    cursor.execute(
+        "SELECT meta.subject,meta.observation_key,meta.origin,meta.source,meta.completeness "
+        "FROM central_market_data_observation_meta AS meta "
+        "JOIN unnest(%s::text[],%s::text[]) AS requested(subject,observation_key) "
+        "ON requested.subject=meta.subject AND requested.observation_key=meta.observation_key "
+        "WHERE meta.dataset_kind='minute_bar'",
+        (list(subjects), list(observation_keys)),
+    )
+    authorities: dict[tuple[str, str], str] = {}
+    for subject, observation_key, origin, source, completeness in cursor.fetchall():
+        if (str(origin) == ObservationOrigin.QUERY.value
+                and str(source).startswith("kiwoom-ka10080")):
+            authorities[(str(subject), str(observation_key))] = str(completeness)
+    return authorities
 
 
 def _lock_postgres_minute_day_scopes(cursor: Any, values: list[dict[str, Any]]) -> None:

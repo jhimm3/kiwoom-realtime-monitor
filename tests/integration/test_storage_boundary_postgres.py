@@ -6,10 +6,15 @@ kiwoom_monitor_diagnostic_test. This file refuses any operational DB name.
 
 from __future__ import annotations
 
+import json
 import os
+import tempfile
+import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
@@ -17,6 +22,8 @@ from kiwoom_monitor.central_server.database import (
     PostgresQueryStore, _insert_postgres_observation_revisions_batch,
     _execute_multirow_upsert,
 )
+from kiwoom_monitor.central_server.diagnostic_metrics import refresh_capture_state
+from kiwoom_monitor.central_server.diagnostic_workloads import instance_id
 from kiwoom_monitor.central_server.market_observations import (
     bar_observation_key, daily_bar_observation, minute_bar_observation,
 )
@@ -27,6 +34,39 @@ from kiwoom_monitor.domain.research_contract import ObservationRevisionSource
 
 
 TEST_DATABASE_NAME = "kiwoom_monitor_diagnostic_test"
+
+
+@contextmanager
+def _writer_metrics_capture():
+    """Enable a private, short-lived capture so writer assertions are observable."""
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "controls.json"
+        expires_at = time.time() + 120
+        session_id = uuid.uuid4().hex
+        path.write_text(json.dumps({
+            "schema": 1,
+            "instance_id": instance_id(),
+            "diagnostic_tool": {"expires_at": expires_at, "owner": "test",
+                                 "session_id": session_id},
+            "capture": {"expires_at": expires_at, "owner": "test"},
+        }), encoding="utf-8")
+        environment = patch.dict(os.environ, {
+            "KIWOOM_DIAGNOSTIC_WORKLOAD_PATH": str(path),
+        })
+        environment.start()
+        refresh_capture_state(force=True)
+        try:
+            yield
+        finally:
+            try:
+                path.write_text(json.dumps({
+                    "schema": 1, "instance_id": instance_id(),
+                    "diagnostic_tool": {"expires_at": time.time() + 120,
+                                         "session_id": session_id},
+                }), encoding="utf-8")
+                refresh_capture_state(force=True)
+            finally:
+                environment.stop()
 
 
 class PostgresStorageBoundaryTests(unittest.TestCase):
@@ -43,6 +83,130 @@ class PostgresStorageBoundaryTests(unittest.TestCase):
             if cursor.fetchone()[0] != TEST_DATABASE_NAME:
                 raise RuntimeError("connected PostgreSQL database is not the dedicated diagnostic test database")
         cls.store.initialize()
+
+    def test_realtime_minute_batch_prefetches_guards_and_preserves_replay(self) -> None:
+        from kiwoom_monitor.central_server.diagnostic_metrics import summarize_market_bar_saves
+
+        token = uuid.uuid4().hex
+        code = f"D{token[:9]}"
+        operation_ids = [f"diagnostic-{token}-{index}" for index in range(2)]
+        values = [{
+            "trading_date": "2099-01-09", "minute": f"10:0{index}", "code": code,
+            "market": "KRX", "open": 10000, "high": 10100, "low": 9900,
+            "close": 10050 + index, "volume": 7 + index,
+            "trade_value_million_won": 1, "updated_at": 1_790_000_000.0 + index,
+            "operation_id": operation_ids[index],
+        } for index in range(2)]
+        observations = []
+        for value in values:
+            observation = minute_bar_observation(
+                value, origin=ObservationOrigin.REALTIME,
+                completeness=DataCompleteness.IN_PROGRESS,
+                source="kiwoom-websocket-0B", value_kind=DataValueKind.ACTUAL,
+            )
+            observations.append((bar_observation_key(observation), observation))
+
+        def save_and_counts():
+            started = time.time() - 0.01
+            self.store.save_minute_bars(values, observations=observations)
+            summary = summarize_market_bar_saves(started, time.time() + 1)
+            samples = summary["writer_transactions"]["realtime_minute"]["call_samples"]
+            return samples[-1]["domain_counts"]
+
+        with _writer_metrics_capture():
+            try:
+                first_counts = save_and_counts()
+                self.assertEqual(1, first_counts["operation_lookup_statements"])
+                self.assertEqual(2, first_counts["operation_lookup_keys"])
+                self.assertEqual(1, first_counts["authority_lookup_statements"])
+                self.assertEqual(2, first_counts["authority_lookup_keys"])
+                self.assertEqual(2, first_counts["operation_inserts"])
+
+                replay_counts = save_and_counts()
+                self.assertEqual(1, replay_counts["operation_lookup_statements"])
+                self.assertEqual(2, replay_counts["operation_lookup_keys"])
+                self.assertEqual(0, replay_counts["authority_lookup_statements"])
+                self.assertEqual(2, replay_counts["replayed"])
+                rows = self.store.load_minute_bars(code, "2099-01-09", "KRX")
+                self.assertEqual([7, 8], [row["volume"] for row in rows])
+                with self.store._connect() as connection, connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT count(*) FROM central_minute_bar_operations WHERE operation_id=ANY(%s)",
+                        (operation_ids,),
+                    )
+                    self.assertEqual(2, cursor.fetchone()[0])
+            finally:
+                with self.store._connect() as connection, connection.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM central_observation_revisions WHERE kind='minute_bar' AND subject=%s",
+                        (f"{code}:KRX",),
+                    )
+                    cursor.execute(
+                        "DELETE FROM central_market_data_observation_meta WHERE dataset_kind='minute_bar' AND subject=%s",
+                        (f"{code}:KRX",),
+                    )
+                    cursor.execute(
+                        "DELETE FROM central_minute_bar_operations WHERE operation_id=ANY(%s)",
+                        (operation_ids,),
+                    )
+                    cursor.execute(
+                        "DELETE FROM central_minute_bars WHERE code=%s AND trading_date=%s",
+                        (code, "2099-01-09"),
+                    )
+
+    def test_realtime_minute_duplicate_keys_keep_sequential_delta_updates(self) -> None:
+        from kiwoom_monitor.central_server.diagnostic_metrics import summarize_market_bar_saves
+
+        token = uuid.uuid4().hex
+        code = f"D{token[:9]}"
+        operation_ids = [f"diagnostic-{token}-{index}" for index in range(2)]
+        values = [{
+            "trading_date": "2099-01-10", "minute": "10:00", "code": code,
+            "market": "KRX", "open": 10000, "high": 10100 + index,
+            "low": 9900 - index, "close": 10050 + index,
+            "volume": 7 + index, "trade_value_million_won": 1,
+            "updated_at": 1_790_000_000.0 + index,
+            "operation_id": operation_ids[index],
+        } for index in range(2)]
+        observations = []
+        for value in values:
+            observation = minute_bar_observation(
+                value, origin=ObservationOrigin.REALTIME,
+                completeness=DataCompleteness.IN_PROGRESS,
+                source="kiwoom-websocket-0B", value_kind=DataValueKind.ACTUAL,
+            )
+            observations.append((bar_observation_key(observation), observation))
+
+        with _writer_metrics_capture():
+            try:
+                started = time.time() - 0.01
+                self.store.save_minute_bars(values, observations=observations)
+                summary = summarize_market_bar_saves(started, time.time() + 1)
+                counts = summary["writer_transactions"]["realtime_minute"]["call_samples"][-1]["domain_counts"]
+                self.assertEqual(2, counts["authority_lookup_statements"])
+                self.assertEqual(2, counts["authority_lookup_keys"])
+                [saved] = self.store.load_minute_bars(code, "2099-01-10", "KRX")
+                self.assertEqual((15, 2, 10051), (
+                    saved["volume"], saved["trade_value_million_won"], saved["close"],
+                ))
+            finally:
+                with self.store._connect() as connection, connection.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM central_observation_revisions WHERE kind='minute_bar' AND subject=%s",
+                        (f"{code}:KRX",),
+                    )
+                    cursor.execute(
+                        "DELETE FROM central_market_data_observation_meta WHERE dataset_kind='minute_bar' AND subject=%s",
+                        (f"{code}:KRX",),
+                    )
+                    cursor.execute(
+                        "DELETE FROM central_minute_bar_operations WHERE operation_id=ANY(%s)",
+                        (operation_ids,),
+                    )
+                    cursor.execute(
+                        "DELETE FROM central_minute_bars WHERE code=%s AND trading_date=%s",
+                        (code, "2099-01-10"),
+                    )
 
     def test_parallel_distinct_operations_and_commit_ack_retry(self) -> None:
         code = str(900000 + uuid.uuid4().int % 99999)

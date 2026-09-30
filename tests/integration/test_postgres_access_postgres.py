@@ -4344,9 +4344,9 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         daily = {**base, "timeframe": "1d", "bar_time": "2026-09-28T00:00:00Z"}
         started = time.time() - 1
         self.store.save_external_bars([five_minute])
-        self.store.save_external_bars([five_minute])
+        self.store.save_external_bars([{**five_minute, "updated_at": base["updated_at"] + 60}])
         self.store.save_external_bars([daily])
-        self.store.save_external_bars([daily])
+        self.store.save_external_bars([{**daily, "updated_at": base["updated_at"] + 60}])
 
         five_minute_rows = self.store.load_external_bars(instrument, "5m")
         daily_rows = self.store.load_external_bars(instrument, "1d")
@@ -4354,11 +4354,19 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual(1, len(daily_rows))
         self.assertEqual(104.0, five_minute_rows[0]["close"])
         self.assertEqual(104.0, daily_rows[0]["close"])
+        self.assertEqual(base["updated_at"], five_minute_rows[0]["updated_at"])
+        self.assertEqual(base["updated_at"], daily_rows[0]["updated_at"])
+
+        corrected = {**five_minute, "close": 106.0, "updated_at": base["updated_at"] + 120}
+        self.store.save_external_bars([corrected])
+        corrected_rows = self.store.load_external_bars(instrument, "5m")
+        self.assertEqual(106.0, corrected_rows[0]["close"])
+        self.assertEqual(corrected["updated_at"], corrected_rows[0]["updated_at"])
 
         calls = [call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
                  if call["writer_kind"] == "external_market:bars"]
-        self.assertEqual(4, len(calls))
-        self.assertEqual(4, len({call["call_id"] for call in calls}))
+        self.assertEqual(5, len(calls))
+        self.assertEqual(5, len({call["call_id"] for call in calls}))
         self.assertEqual({"external_market.bars"}, {call["writer_family"] for call in calls})
         self.assertTrue(all(
             call["operation"] == "save_external_bars"
@@ -4372,7 +4380,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         reader_calls = [call for call in summarize_db_calls(
             started, time.time() + 1, mode="raw",
         )["calls"] if call["writer_family"] == "read.external_market_bars"]
-        self.assertEqual({"bars:5m": 1, "bars:1d": 1}, {
+        self.assertEqual({"bars:5m": 2, "bars:1d": 1}, {
             kind: sum(call["writer_kind"] == kind for call in reader_calls)
             for kind in {call["writer_kind"] for call in reader_calls}
         })

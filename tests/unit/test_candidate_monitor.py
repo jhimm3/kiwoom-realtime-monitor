@@ -143,6 +143,52 @@ class CandidateMonitorTests(unittest.TestCase):
         self.assertEqual(1, len(store.candidates))
         self.assertEqual(4, store.checkpoints[monitor.monitor_id]["cursor"])
 
+    def test_failed_final_checkpoint_retries_while_queue_is_empty_then_stops_writing(self) -> None:
+        class RetryStore(FakeStore):
+            fail_checkpoint = False
+            attempts = 0
+            sources = []
+
+            def save_shadow_monitor_state(self, monitor_id, document):
+                self.attempts += 1
+                self.sources.append(DBWriterContext("test", "test", "test").source)
+                if self.fail_checkpoint:
+                    raise RuntimeError("checkpoint unavailable")
+                super().save_shadow_monitor_state(monitor_id, document)
+
+        store = RetryStore((
+            _rank(1), _bar(2, 0, 1000, 1010),
+            _bar(3, 1, 1010, 1020), _bar(4, 2, 1030, 1040),
+        ))
+        monitor = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)
+        store.fail_checkpoint = True
+        with self.assertRaisesRegex(RuntimeError, "checkpoint unavailable"):
+            monitor.run_once()
+        # A second failure with no new input must also remain retryable.
+        with self.assertRaisesRegex(RuntimeError, "checkpoint unavailable"):
+            monitor.run_once()
+        self.assertEqual(0, store.checkpoints[monitor.monitor_id]["cursor"])
+        self.assertEqual(3, len(store.decisions))
+        self.assertEqual(1, len(store.candidates))
+
+        store.fail_checkpoint = False
+        self.assertEqual(0, monitor.run_once())
+        saved = store.checkpoints[monitor.monitor_id]
+        self.assertEqual(4, saved["cursor"])
+        self.assertEqual(monitor._state.to_dict(), saved["strategy_state"])
+        self.assertEqual(3, len(saved["bars"]))
+        attempts = store.attempts
+        self.assertEqual(0, monitor.run_once())
+        restarted = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)
+        self.assertEqual(0, restarted.run_once())
+        self.assertEqual(attempts, store.attempts)
+        self.assertEqual(3, len(store.decisions))
+        self.assertEqual(1, len(store.candidates))
+        self.assertEqual([
+            "candidate_monitor.bootstrap", "candidate_monitor.processed",
+            "candidate_monitor.retry", "candidate_monitor.retry",
+        ], store.sources)
+
     def test_stale_universe_blocks_candidate_and_reports_quality(self) -> None:
         store = FakeStore((_rank(1), _bar(2, 10, 1000, 1010), _bar(3, 11, 1010, 1020), _bar(4, 12, 1030, 1040)))
         monitor = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=30)

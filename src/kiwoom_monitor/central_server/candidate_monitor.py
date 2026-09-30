@@ -68,6 +68,7 @@ class CandidateMonitor:
             "status": "WARMUP", "reason": "not_started", "last_processed_sequence": 0,
         }
         self._task: asyncio.Task[None] | None = None
+        self._checkpoint_pending = False
         self._restore_or_bootstrap()
 
     @classmethod
@@ -131,8 +132,8 @@ class CandidateMonitor:
         for observation in observations:
             self._consume(observation)
             self._cursor = max(self._cursor, int(observation.get("accepted_sequence", 0)))
-        if observations:
-            self._save_checkpoint(reason="processed")
+        if observations or self._checkpoint_pending:
+            self._save_checkpoint(reason="processed" if observations else "retry")
         return len(observations)
 
     def _consume(self, observation: Mapping[str, Any]) -> None:
@@ -277,15 +278,20 @@ class CandidateMonitor:
     def _save_checkpoint(self, *, reason: str = "manual") -> None:
         from .postgres_access import db_call_source
 
+        # A failed final batch must retry even when no later observation arrives.
+        self._checkpoint_pending = True
+        # Replay frames are frozen and contain scalars or immutable tuples;
+        # copying their field dictionaries avoids dataclasses.asdict deep copies.
         document = {
             "schema_version": 1,
             "session_profile": self._session_profile,
             "cursor": self._cursor,
             "strategy_config": self._config.to_dict(),
             "strategy_state": self._state.to_dict(),
-            "universes": [asdict(value) for value in self._universes],
-            "bars": [asdict(value) for value in self._bars.values()],
+            "universes": [vars(value).copy() for value in self._universes],
+            "bars": [vars(value).copy() for value in self._bars.values()],
             "quality": self._quality,
         }
         with db_call_source(f"candidate_monitor.{reason}"):
             self._store.save_shadow_monitor_state(self.monitor_id, document)
+        self._checkpoint_pending = False

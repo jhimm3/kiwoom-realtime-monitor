@@ -1,5 +1,7 @@
 # 현재 앱과 검증 상태
 
+2026-10-01 O12 `realtime.minute` SQL 반복 축소 후보: 전용 `kiwoom_monitor_diagnostic_test`에서 replay/idempotency, 중복 분 키 순차 누적, 두 connection 독립성, late realtime 저장 후 닫힌 query 보호, realtime writer lineage 검사를 묶어 5/5 통과했다. 기존 transaction 경계와 revision/authority 동작이 보존됐다. 해당 서버 코드의 운영 빌드·동일 조건 부하 재측정은 아직 남아 있어 SQL 감소량과 WAL/COMMIT 영향은 확정하지 않았다. 상세 범위는 [OPEN_ITEMS O12](OPEN_ITEMS.md)를 따른다.
+
 2026-09-30 O12 DB writer 후보 상세 계측 NAS 배포(빌드 `2026.09.30-db-writer-detail-v1`, `/health`에서 `status=ok` 확인): 기존 90초 표본에서 shadow checkpoint 38회, 분봉 61회/798행/7,173 SQL, TOP20 편입 문서 3회/60행, 최신 실시간 snapshot 61회/789행, 초봉 62회/1,063행, runtime lease 3회였다. 서로 다른 writer에서 COMMIT tail이 관측됐고 SQL execute가 짧은 경로에서도 발생했다. shadow payload/encode, 분봉 내부 단계, TOP20 실제 반영 행 수와 같은 backend의 느린 COMMIT wait-event 상관을 추가했다. 관련 검사 81건·진단/상관 검사 92건 통과(중복 포함). 운영 부하 원인 제거는 아직 하지 않았고, 배포된 계측으로 장중 재측정 후 원인별 개선을 검증해야 한다.
 
 2026-09-30 O12 일봉 기간 검증 로컬 구현(운영 미반영): NAS 수집은 일봉 한 행이 있어도 최신 원천 구간을 확인하고, 연속조회 종료 뒤 저장된 값까지 대조해 `daily_bar_history_coverage`에 확인 상태를 남긴다. 5·20·250일은 각각 계산한다. 신규주처럼 원천 전체가 정상 종료해 확보 이력이 N일보다 짧으면 확보한 봉 수를 표시해 그 구간의 최고가를 사용한다. coverage는 기존 일봉 API의 `bars`와 파라미터를 유지하며 읽기만 한다. PC 계산·캐시도 검증 상태 없이 구형 fundamental/cache 값을 기간 고가로 인증하지 않는다. 로컬 관련 회귀 묶음은 통과했으나 전용 PostgreSQL URL이 없어 해당 통합검사 1건은 건너뛰었다. NAS 빌드 및 실제 응답/화면 확인 전이므로 운영 배포·실제 동작 완료 상태는 아니다. 세부사항과 남은 검증은 OPEN_ITEMS O12 및 HISTORICAL_DATA_CONTRACT의 일봉 기간 검증 계약을 따른다.

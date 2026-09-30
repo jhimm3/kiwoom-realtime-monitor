@@ -92,6 +92,10 @@ class AutonomousTop20Service:
         self._backfill_completed_steps: dict[str, set[str]] = {}
         self._entrants_day = ""
         self._entrant_first_seen: dict[str, str] = {}
+        self._entrant_persisted_codes: set[str] = set()
+        # The previous-day backfill task must never replace the ranking day's state.
+        self._backfill_entrant_first_seen: dict[str, str] | None = None
+        self._backfill_entrant_persisted_codes: set[str] = set()
         self._account_entry_codes: tuple[str, ...] = ()
         self._pending_index_records: dict[str, dict[str, Any]] = {}
         self._index_outbox_lock = asyncio.Lock()
@@ -260,19 +264,15 @@ class AutonomousTop20Service:
         )
         if codes:
             if self._entrants_day != day:
-                previous = await asyncio.to_thread(self._store.load_documents, "top20_daily_entrants", day, 5000)
-                self._entrant_first_seen = {
-                    str(value.get("key", "")): str(value.get("document", {}).get("first_seen_at", snapshot_key))
-                    for value in previous if value.get("key")
-                }
+                first_seen, persisted = await self._load_daily_entrant_state(day)
+                self._entrant_first_seen = first_seen
+                self._entrant_persisted_codes = persisted
                 self._entrants_day = day
-            await asyncio.to_thread(self._store.upsert_documents, "top20_daily_entrants", [
-                {"owner": day, "key": code, "document": {
-                    "code": code, "first_seen_at": self._entrant_first_seen.setdefault(code, snapshot_key),
-                    "last_seen_at": snapshot_key,
-                }}
-                for code in codes
-            ])
+            for code in codes:
+                self._entrant_first_seen.setdefault(code, snapshot_key)
+            await self._persist_missing_daily_entrants(
+                day, self._entrant_first_seen, self._entrant_persisted_codes,
+            )
         if update.completed is not None:
             try:
                 await self._flush_pending_indexes()
@@ -282,6 +282,62 @@ class AutonomousTop20Service:
             self._schedule_fundamentals(codes, day)
             self._schedule_aux_rankings(now)
         return codes
+
+    async def _load_daily_entrant_state(
+        self, day: str, documents: list[dict[str, Any]] | None = None,
+    ) -> tuple[dict[str, str], set[str]]:
+        """Recover a day locally, including membership commits whose document save failed."""
+        if documents is None:
+            documents = await asyncio.to_thread(
+                self._store.load_documents, "top20_daily_entrants", day, 5000,
+            )
+        snapshots = await asyncio.to_thread(
+            self._store.load_dataset_snapshots, "top20_membership", day, 5000,
+        )
+        revisions = await asyncio.to_thread(
+            self._store.load_observation_revisions, "top20_membership", day, 5000,
+        )
+        if any(len(rows) >= 5000 for rows in (documents, snapshots, revisions)):
+            raise RuntimeError(f"TOP20 daily entrant recovery limit reached: {day}")
+        persisted = {str(row["key"]).strip() for row in documents if row.get("key")}
+        first_seen = {
+            str(row["key"]).strip(): str(row.get("document", {}).get("first_seen_at", ""))
+            for row in documents if row.get("key")
+        }
+        for row in [*snapshots, *revisions]:
+            payload = row.get("payload", {})
+            observed_at = str(payload.get("observed_at") or row.get("snapshot_key")
+                              or row.get("effective_at") or "")
+            if not observed_at:
+                continue
+            observed = datetime.fromisoformat(observed_at)
+            observed = observed.replace(tzinfo=KST) if observed.tzinfo is None else observed
+            for value in payload.get("codes", []):
+                # Stored membership codes are already normalized; preserve their identities.
+                code = str(value).strip()
+                if not code or code in persisted:
+                    continue
+                previous = first_seen.get(code)
+                if previous:
+                    previous_at = datetime.fromisoformat(previous)
+                    previous_at = previous_at.replace(tzinfo=KST) if previous_at.tzinfo is None else previous_at
+                    if previous_at <= observed:
+                        continue
+                first_seen[code] = observed_at
+        return first_seen, persisted
+
+    async def _persist_missing_daily_entrants(
+        self, day: str, first_seen: dict[str, str], persisted: set[str],
+    ) -> None:
+        documents = [
+            {"owner": day, "key": code, "document": {"code": code, "first_seen_at": seen}}
+            for code, seen in first_seen.items() if code not in persisted
+        ]
+        if not documents:
+            return
+        await asyncio.to_thread(self._store.upsert_documents, "top20_daily_entrants", documents)
+        # Failed or cancelled saves remain pending, even if the code leaves the next ranking.
+        persisted.update(row["key"] for row in documents)
 
     def _schedule_market_catalog(self, day: str) -> None:
         task = self._market_catalog_task
@@ -439,6 +495,8 @@ class AutonomousTop20Service:
         if self._backfill_progress_day != day:
             self._backfill_progress_day = day
             self._backfill_completed_steps.clear()
+            self._backfill_entrant_first_seen = None
+            self._backfill_entrant_persisted_codes = set()
         succeeded = True
         try:
             await self._backfill_market_indexes(day)
@@ -446,11 +504,23 @@ class AutonomousTop20Service:
             succeeded = False
             logger.warning("시장지수 장후 보완 실패: %s %s", day, error)
         documents = await asyncio.to_thread(self._store.load_documents, "top20_daily_entrants", day, 5000)
+        if len(documents) >= 5000:
+            raise RuntimeError(f"TOP20 daily entrant recovery limit reached: {day}")
+        if self._backfill_entrant_first_seen is None:
+            first_seen, persisted = await self._load_daily_entrant_state(day, documents)
+            self._backfill_entrant_first_seen = first_seen
+            self._backfill_entrant_persisted_codes = persisted
+        first_seen = self._backfill_entrant_first_seen
+        persisted = self._backfill_entrant_persisted_codes
+        # Re-read documents on every retry so newly admitted symbols join the backfill.
+        persisted.update(str(row["key"]).strip() for row in documents if row.get("key"))
+        await self._persist_missing_daily_entrants(day, first_seen, persisted)
         account_entries = await asyncio.to_thread(
             self._store.load_documents, "account_entry_symbols_daily", day, 5000,
         )
         cohort = await asyncio.to_thread(self._store.load_hot_cohort, active_only=False)
         codes = tuple(dict.fromkeys([
+            *first_seen,
             *(str(value.get("key", "")) for value in documents if value.get("key")),
             *(str(value.get("key", "")) for value in account_entries if value.get("key")),
             *(str(value.get("stock_code", "")) for value in cohort
