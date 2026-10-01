@@ -6,7 +6,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
-from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
+from kiwoom_monitor.central_server.market_ingest import (
+    MarketDataIngestor, fundamentals_document_is_current, nxt_eligibility_document_is_current,
+)
 from kiwoom_monitor.central_server.market_observations import (
     bar_observation_key,
     minute_bar_observation,
@@ -22,6 +24,22 @@ from kiwoom_monitor.domain.market_data_contract import (
 
 
 class MarketDataIngestorTests(unittest.TestCase):
+    def test_basic_refresh_cutoff_uses_kst_and_does_not_expire_nxt_eligibility(self) -> None:
+        before = datetime.fromisoformat("2026-10-01T06:59:59+09:00")
+        after = datetime.fromisoformat("2026-10-01T07:00:00+09:00")
+        # Both timestamps represent the same pre-07:00 KST observation.
+        for observed_at in (before.isoformat(), before.astimezone(timezone.utc).isoformat(),
+                            "2026-10-01T06:59:59"):
+            document = {"observed_at": observed_at}
+            self.assertTrue(fundamentals_document_is_current(document, before.date(), checked_at=before))
+            self.assertFalse(fundamentals_document_is_current(document, after.date(), checked_at=after))
+            self.assertTrue(nxt_eligibility_document_is_current(document, after.date()))
+        self.assertTrue(fundamentals_document_is_current(
+            {"observed_at": after.isoformat()}, after.date(), checked_at=after,
+        ))
+        for document in ({}, {"observed_at": "invalid"}, {"observed_at": "2026-09-30T07:00:00+09:00"}):
+            self.assertFalse(fundamentals_document_is_current(document, after.date(), checked_at=after))
+
     def test_records_sor_vs_query_trade_value_trend_after_minute_backfill(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")

@@ -18,6 +18,7 @@ from kiwoom_monitor.central_server.central_schema import (
     CENTRAL_RESEARCH_EXPORT_MIGRATION_NAME,
     CENTRAL_MINUTE_BAR_REVISION_MIGRATION_NAME,
     CENTRAL_SCHEMA_VERSION,
+    CENTRAL_SQLITE_SCHEMA_VERSION,
     CENTRAL_SHADOW_CANDIDATE_MIGRATION_NAME,
     CENTRAL_MOCK_EXECUTION_MIGRATION_NAME,
     CENTRAL_ACCOUNT_IDENTITY_MIGRATION_NAME,
@@ -33,6 +34,16 @@ from kiwoom_monitor.central_server.central_schema import (
 
 
 class CentralSchemaTests(unittest.TestCase):
+    def test_postgres_only_suffix_does_not_advance_sqlite_supported_plan(self) -> None:
+        postgres = central_schema_migrations("postgres")
+        sqlite = central_schema_migrations("sqlite")
+        self.assertEqual(CENTRAL_SCHEMA_VERSION, postgres[-1].version)
+        self.assertEqual(CENTRAL_SQLITE_SCHEMA_VERSION, sqlite[-1].version)
+        self.assertEqual(postgres[:20], sqlite)
+        self.assertTrue(all(not migration.sqlite_statements for migration in postgres[len(sqlite):]))
+        with self.assertRaisesRegex(ValueError, "dialect"):
+            central_schema_migrations("unsupported")
+
     def test_both_dialects_define_every_contract_object_once(self) -> None:
         migrations = central_schema_migrations()
         for statements in (
@@ -134,7 +145,10 @@ class CentralSchemaTests(unittest.TestCase):
         self.assertEqual(CENTRAL_CREDENTIAL_ACTIVATION_MIGRATION_NAME, migrations[18].name)
         self.assertEqual(20, migrations[19].version)
         self.assertEqual(CENTRAL_FIVE_MINUTE_BARS_MIGRATION_NAME, migrations[19].name)
-        self.assertEqual(CENTRAL_SCHEMA_VERSION, migrations[19].version)
+        self.assertEqual(CENTRAL_SCHEMA_VERSION, migrations[20].version)
+        self.assertEqual("shadow_checkpoint_frames", migrations[20].name)
+        self.assertEqual((), migrations[20].sqlite_statements)
+        self.assertIn("ON DELETE CASCADE", "\n".join(migrations[20].postgres_statements))
 
 
 if __name__ == "__main__":

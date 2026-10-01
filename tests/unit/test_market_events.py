@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.market_events import MarketEventService, select_condition
@@ -219,3 +221,130 @@ class MarketEventServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service._backfill_vi()
         await self.service._backfill_vi()
         self.assertEqual(1, len(self.store.load_market_event_history("vi", code="000660")))
+
+    @staticmethod
+    def _vi_message(*codes: str) -> dict:
+        return {"trnm": "REAL", "data": [{"type": "1h", "values": {
+            "9001": "A" + code, "9068": "1", "1225": "1", "1221": "+75000",
+            "1223": "091501", "1490": "1", "9069": "+", "9081": "KRX",
+        }} for code in codes]}
+
+    async def test_vi_inflight_duplicates_share_commit_and_later_replay_reaches_store(self) -> None:
+        entered, release = threading.Event(), threading.Event()
+        append = self.store.append_vi_events
+        batches = []
+
+        def save(values):
+            batches.append([value["stock_code"] for value in values])
+            if len(batches) == 1:
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError("test did not release VI commit")
+            return append(values)
+
+        with patch.object(self.store, "append_vi_events", side_effect=save):
+            try:
+                # 같은 프레임의 중복과 COMMIT 대기 중 재수신을 함께 검증한다.
+                await self.service.handle_ws_message(self._vi_message("005930", "000660", "005930"), _Socket())
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                await self.service.handle_ws_message(self._vi_message("005930", "000660"), _Socket())
+                await asyncio.sleep(0)
+            finally:
+                release.set()
+                await asyncio.gather(*tuple(self.service._background))
+            self.assertEqual([["005930", "000660"]], batches)
+            self.assertFalse(self.service._vi_inflight)
+            before = self.store.load_market_event_history("vi")
+            await self.service.handle_ws_message(self._vi_message("005930"), _Socket())
+            await asyncio.gather(*tuple(self.service._background))
+            self.assertEqual([["005930", "000660"], ["005930"]], batches)
+            self.assertEqual(before, self.store.load_market_event_history("vi"))
+
+    async def test_vi_distinct_event_can_commit_while_other_event_is_pending(self) -> None:
+        entered, release, other_committed = threading.Event(), threading.Event(), threading.Event()
+        append = self.store.append_vi_events
+
+        def save(values):
+            if values[0]["stock_code"] == "005930":
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError("test did not release VI commit")
+            result = append(values)
+            if values[0]["stock_code"] == "000660":
+                other_committed.set()
+            return result
+
+        with patch.object(self.store, "append_vi_events", side_effect=save):
+            try:
+                await self.service.handle_ws_message(self._vi_message("005930"), _Socket())
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                await self.service.handle_ws_message(self._vi_message("000660"), _Socket())
+                self.assertTrue(await asyncio.to_thread(other_committed.wait, 2))
+                self.assertFalse(release.is_set())
+            finally:
+                release.set()
+                await asyncio.gather(*tuple(self.service._background))
+        self.assertEqual(2, len(self.store.load_market_event_history("vi")))
+
+    async def test_vi_failed_owner_allows_waiting_duplicate_to_save(self) -> None:
+        entered, release = threading.Event(), threading.Event()
+        append = self.store.append_vi_events
+        attempts = []
+
+        def save(values):
+            attempts.append(values)
+            if len(attempts) == 1:
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError("test did not release VI commit")
+                raise RuntimeError("failed VI transaction")
+            return append(values)
+
+        with patch.object(self.store, "append_vi_events", side_effect=save):
+            try:
+                await self.service.handle_ws_message(self._vi_message("005930"), _Socket())
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                await self.service.handle_ws_message(self._vi_message("005930"), _Socket())
+                await asyncio.sleep(0)
+            finally:
+                release.set()
+                outcomes = await asyncio.gather(*tuple(self.service._background), return_exceptions=True)
+        self.assertEqual(2, len(attempts))
+        self.assertEqual(1, sum(isinstance(outcome, RuntimeError) for outcome in outcomes))
+        self.assertEqual(1, len(self.store.load_market_event_history("vi")))
+        self.assertFalse(self.service._vi_inflight)
+
+    async def test_vi_cancelled_owner_keeps_guard_until_thread_commit_and_close_drains(self) -> None:
+        entered, release = threading.Event(), threading.Event()
+        append = self.store.append_vi_events
+        attempts = []
+
+        def save(values):
+            attempts.append(values)
+            entered.set()
+            if not release.wait(3):
+                raise TimeoutError("test did not release VI commit")
+            return append(values)
+
+        with patch.object(self.store, "append_vi_events", side_effect=save):
+            try:
+                await self.service.handle_ws_message(self._vi_message("005930"), _Socket())
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                owner = next(task for task in self.service._background if task.get_name() == "vi-live-store")
+                owner.cancel()
+                await asyncio.sleep(0)
+                self.assertTrue(self.service._vi_inflight)
+                await self.service.handle_ws_message(self._vi_message("005930"), _Socket())
+                closing = asyncio.create_task(self.service.close())
+                await asyncio.sleep(0)
+                self.assertFalse(closing.done())
+            finally:
+                release.set()
+                if "closing" in locals():
+                    await closing
+                else:
+                    await self.service.close()
+        self.assertTrue(owner.cancelled())
+        self.assertEqual(1, len(attempts))
+        self.assertEqual(1, len(self.store.load_market_event_history("vi")))
+        self.assertFalse(self.service._vi_inflight)

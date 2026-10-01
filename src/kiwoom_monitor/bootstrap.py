@@ -39,6 +39,7 @@ from kiwoom_monitor.application.minute_trade_value import MinuteTradeValueAggreg
 from kiwoom_monitor.application.minute_chart_service import MinuteChartService
 from kiwoom_monitor.application.stock_fundamentals_service import StockFundamentalsService
 from kiwoom_monitor.application.daily_high_service import DailyHighService
+from kiwoom_monitor.application.daily_bar_coverage import daily_query_date
 from kiwoom_monitor.application.historical_high_service import HistoricalHighService
 from kiwoom_monitor.application.nxt_eligibility_service import NxtEligibilityService
 from kiwoom_monitor.application.investor_flow_service import InvestorFlowService
@@ -278,10 +279,11 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
                 realtime_factory = lambda codes: CentralRealtimeWorker(source, codes)
         else:
             realtime_factory = lambda codes: CentralRealtimeWorker(source, codes)
+        stock_repository = StockRepository(paths.database_path)
         return {
             "source_mode": source.mode,
             "market_data_client": client,
-            "ranking_loader": RankingService(client, stocks=StockRepository(paths.database_path), query_type=database.settings.get("rank_query_type")),
+            "ranking_loader": RankingService(client, stocks=stock_repository, query_type=database.settings.get("rank_query_type")),
             "realtime_worker_factory": realtime_factory,
             "minute_history_worker_factory": lambda codes: MinuteHistoryWorker(
                 MinuteChartService(client, include_nxt=True), codes, client.server_now
@@ -291,7 +293,10 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
                 DailyHighService(
                     client,
                     include_nxt=True,
-                    cached_high_250_loader=StockRepository(paths.database_path).load_high_250_price,
+                    cached_high_250_loader=stock_repository.load_high_250_price,
+                    nxt_enabled_loader=lambda code: stock_repository.load_nxt_enabled(
+                        (code,), daily_query_date().isoformat(),
+                    ).get(code),
                 ),
                 codes,
             ),
@@ -301,11 +306,11 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
                     # 계산 기준이 바뀐 릴리즈에서는 기존 근거를 사용하지 않고
                     # 전 종목을 오늘 기준 수정주가로 한 번 다시 계산한다.
                     cache_loader=lambda code: (
-                        StockRepository(paths.database_path).load_historical_high_cache(code)
+                        stock_repository.load_historical_high_cache(code)
                         if database.settings.get("historical_high_adjusted_basis_version") == "5"
                         else None
                     ),
-                    high_250_loader=StockRepository(paths.database_path).load_high_250_price,
+                    high_250_loader=stock_repository.load_high_250_price,
                 ), codes
             ),
             "nxt_eligibility_worker_factory": lambda codes: NxtEligibilityWorker(NxtEligibilityService(client), codes),

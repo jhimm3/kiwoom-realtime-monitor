@@ -4086,6 +4086,16 @@ class MainWindow(QMainWindow):
             self._after_close_minute_received.clear()
             self._after_close_daily_received.clear()
         after_hours_pause = self._is_after_hours_data_pause()
+        # Local rows cannot restore NAS collection evidence after a process restart.
+        # This path only reads stored NAS bars; direct Kiwoom clients stay paused.
+        stored_daily_high_codes = ()
+        if after_hours_pause and self._uses_nas_market_data_source():
+            basis = now.date().isoformat()
+            stored_daily_high_codes = tuple(
+                code for code in codes
+                if code not in self._daily_highs
+                or self._daily_highs[code].query_basis_date != basis
+            )
         weekend_missing: tuple[str, ...] = ()
         if after_hours_pause:
             now = self._ranking_now()
@@ -4101,6 +4111,7 @@ class MainWindow(QMainWindow):
             finalization_codes=finalization,
             after_hours_pause=after_hours_pause,
             weekend_daily_high_codes=weekend_missing,
+            stored_daily_high_codes=stored_daily_high_codes,
         )
         if started_phase is SecondaryStartPhase.FINALIZATION and finalization_date is not None:
             for code in finalization:

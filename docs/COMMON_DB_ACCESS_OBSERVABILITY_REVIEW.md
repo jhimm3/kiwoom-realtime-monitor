@@ -700,3 +700,141 @@ raw 기준선 / observed+capture OFF / observed+capture ON(hook 비활성)을 �
 - [Python asyncio.to_thread](https://docs.python.org/3/library/asyncio-task.html#asyncio.to_thread):
   contextvars 전파 계약. 별도 queue envelope 전파는 애플리케이션 책임이다.
 `account_entry_symbols_daily`와 `stock_price_references`는 `CentralRealtimeCollector`의 동일 flush에서 각각 실제 매수 체결 편입 종목과 0G 기준가격 문서를 `upsert_documents`로 기록한다. 첫 writer는 `AutonomousTop20Service._load_account_entry_codes` 및 장후 보완 대상 선정에, 둘째는 `MarketEventService._load_metadata`의 상한가 기준 조회에 쓰인다. 둘 다 단순 `central_documents` UPSERT라 reader 결과와 replay를 유지한 채 allowlist 관측을 추가했다. `theme_metadata`/`news_article`의 revision helper 및 `market_state` dataset 저장 정책은 다른 transaction 흐름이므로 제외했다. 전용 PostgreSQL `test_realtime_document_batch_preserves_readers_and_correlates_metrics`가 통과해 두 kind의 reader/replay 및 call ID correlation을 확인했다. v1 ZIP은 package initializer 누락으로 app의 구버전 모듈을 불렀으나, initializer를 포함한 v2 ZIP을 NAS에 보내 재검사해 통과했다.
+
+## 15. 2026-10-01 shadow checkpoint 쓰기 최적화 설계
+
+상태: **전용 PostgreSQL 계약 검사 5/5 및 현실 dataclass fixture 비교 3/3 통과. 단일 frame 변경 DML의 WAL은 약 99% 줄었지만, 전체 writer 성능 우위는 입증되지 않았고 총 column payload는 약 9.9배다. 성능 후보는 채택하지 않으며 writer 기본값 OFF와 NAS 활성 release를 유지한다. 세부 판정은 아래 2026-10-01 측정 결과를 따른다.**
+공통 관측 layer의 최초 migration과 별개인 O12 성능 후속 작업이다.
+
+### 근거와 범위
+
+- 장중 보고서 `20261001T014152Z-b2f12614`의 60초 구간에서 checkpoint 14회,
+  회당 약 1.16MB의 직렬화 입력, 매번 봉 frame 1,803개가 관측됐다.
+  같은 구간 shadow evaluation 저장은 29회였다. 관측 창 경계·실패를 고려하면
+  이것을 정확한 변경 frame 수로 등치할 수 없지만 작은 변경에 전체 상태를
+  전송하는 구조의 개선 후보를 뒷받침한다. 입력 JSON 바이트는 물리 저장량이나 WAL 바이트가 아니다.
+- `CandidateMonitor.run_once -> _consume -> _save_checkpoint ->
+  PostgresQueryStore.save_shadow_monitor_state`가 writer다.
+  `_restore_or_bootstrap -> load_shadow_monitor_state`가 복구 reader다.
+- 새 관측을 소비하면 cursor가 바뀌므로 전체 문서 동일성 조건만으로 저장을 줄일 수 없다.
+  `_trim_bars`는 해당 종목의 `lookback_bars + 2`개만 제한하고 다른 종목을 보존한다.
+  늦은 수정분도 평가하므로 날짜나 현재 TOP20 밖이라는 이유로 추가 삭제하지 않는다.
+- 평가/후보 ledger 저장과 checkpoint는 현재 서로 다른 transaction이다. 합치지 않는다.
+  frame 보관 규칙, 전략 상태, emitted candidate keys, 원본 observation/research 이력은 변경하지 않는다.
+
+### 선택한 저장 방식
+
+PostgreSQL에 한정해 **복구 header와 봉 frame 행을 분리하고 DB에서 변경 행을 선별**한다.
+현재 `save_shadow_monitor_state(monitor_id, document)` 및
+`load_shadow_monitor_state(monitor_id)`의 논리 문서 계약은 그대로 유지한다.
+SQLite 저장은 현재 형식을 유지한다. 앱에 별도 delta cache나 전역 connection을 만들지 않는다.
+
+PostgreSQL migration 21에서 새 header/frame 테이블을 추가한다. SQLite의 지원 버전은 20으로 유지하고 inline 저장을 사용한다.
+
+- header: monitor_id PK, storage_version, updated_at, bars를 제외한 document_json,
+  원래 bars 배열의 순서를 나타내는 bar_order(JSONB).
+- frames: (monitor_id, code, observation_key) PK, 원래 frame 전체의 frame_json(JSONB).
+  header 삭제 시 해당 복구 frame만 정리하는 FK를 둔다. 원본 봉/observation ledger와 관계없다.
+- 기존 `central_shadow_monitor_state`는 v1 복구 및 명시적 downgrade를 위해 남긴다.
+  v2 존재 시 v2가 권위본이며, 남아 있는 v1을 최신 상태라고 읽지 않는다.
+- v2 정규화 대상은 현재 CandidateMonitor의 schema_version=1 문서이며 bars의
+  (code, observation_key)가 유효하고 유일해야 한다. 지원하지 않는 일반 문서는
+  기존 inline 저장을 유지한다. v2에서 inline으로 전환할 때도 한 transaction 안에서 처리한다.
+  논리 schema_version과 물리 storage_version은 별개다.
+
+저장 순서:
+
+1. 입력을 검증/직렬화하고 기존 관측 connection context를 연다.
+2. monitor_id별 안정된 부모 행을 확보하고 잠근다. 최초 생성 경합도 같은 키로 직렬화한다.
+   기존 v1 행을 잠금 기준으로 사용할 수 있으며 기존/새 writer가 서로 다른 잠금을 쓰면 안 된다.
+3. 새 header와 bar_order를 저장한다. 동일한 bar_order는 기존 값을 유지한다.
+4. 입력 frame을 집합으로 전달해 DB의 실제 frame_json과 `IS DISTINCT FROM`으로 비교한다.
+   없거나 변경된 frame만 bulk UPSERT한다. 동일 frame은 UPDATE 대상에서 제외한다.
+5. 이번 완전한 입력 문서에서 사라진 복구 frame만 집합 DELETE한다.
+6. 한 번 COMMIT한다. 어느 단계든 실패하면 header/frame 변경 전체를 rollback한다.
+
+항상 완전한 논리 문서를 입력받아 DB 상태와 대조하므로 오래된 앱 측 delta 기준이나
+COMMIT 응답 유실 뒤 재시도에 의존하지 않는다. 같은 monitor_id의 저장은 섞이지 않고,
+다른 monitor_id/writer의 transaction은 독립적이다. 행별 execute/commit은 금지한다.
+초기 버전은 전송 JSON의 크기를 줄였다고 주장하지 않는다. 먼저 실제 변경 행과 WAL을 줄이는 범위다.
+
+읽기는 **하나의 SQL snapshot**으로 header와 bar_order 순서의 frame을 조립한다.
+여러 READ COMMITTED SELECT로 서로 다른 시점의 header/frame을 섞지 않는다.
+빈 bars와 bars 필드 없음, 원래 배열 순서, 모든 frame 필드를 보존한다.
+없는 v2는 v1으로 읽되, 존재하지만 frame이 누락됐거나 알 수 없는 버전인 v2는
+명시적 저장소 오류로 중단한다. CandidateMonitor의 ValueError bootstrap fallback으로
+이 오류를 숨기지 않는다.
+
+### 대안과 선택 이유
+
+- 저장 간격 확대: 장애 뒤 재생 구간/복구 보장이 달라지므로 이번 범위에서 제외.
+- 오래된 종목/frame 삭제: 지연 도착 수정분과 평가 결과의 동등성을 입증하지 못했으므로 제외.
+- revision ID만 저장 후 원본에서 재구성: 복구가 별도 원본 보존/조회 계약에 의존하므로 제외.
+- JSONB 내부 일부만 수정: SQL 표현만 바꿔 큰 값의 물리 쓰기가 줄었다고 볼 수 없으므로 제외.
+- 봉별 저장: 실제 유지 중인 frame 자체를 보존하면서 작은 변경만 쓰고,
+  기존 복구 문서를 정확히 다시 만들 수 있어 선택. 추가 SQL/인덱스 비용은 전용 DB에서 검증한다.
+
+PostgreSQL은 변경되지 않은 큰 컬럼 값을 보존할 수 있지만, 내부 JSON 필드 변경을
+컬럼 불변과 동일시하면 안 된다. 근거: [PostgreSQL 17 TOAST](https://www.postgresql.org/docs/17/storage-toast.html).
+
+### 호환·배포 조건
+
+- PostgreSQL 지원 migration은 21, SQLite는 20으로 유지한다. `central_schema_migrations(dialect)`가
+  해당 backend의 연속된 지원 계획을 선택하고 기존 runner는 그대로 사용한다.
+  SQL이 없는 migration도 기록하는 runner 특성 때문에 PostgreSQL 전용 21번을 SQLite에
+  전달하지 않는다. SQLite inline checkpoint와 기존 20번 소스의 복귀 호환성을 보존한다.
+- 먼저 v1 fixture -> v2 저장 -> 동일 문서 복원 검증을 전용 DB에서 수행한다.
+  운영 startup에서 기존 모든 checkpoint를 한꺼번에 변환하지 않는다.
+- v2 reader, writer, migration, 테스트, downgrade 변환과 source-runtime 보호가
+  완성되기 전에는 운영에서 v2 쓰기를 켜지 않는다. 현재 `shadow_checkpoint_frames_enabled`
+  기본값은 꺼져 있다.
+- 현행 source-runtime은 health 실패 시 이전 release를 다시 선택한다. 구버전은
+  v2 reader가 없으므로 수동 rollback과 자동 복귀 양쪽 모두 호환 검사를 추가해야 한다.
+  v2가 있는 상태에서 이를 읽지 못하는 release로 그대로 재시작하면 안 된다.
+- downgrade는 checkpoint writer가 완전히 종료된 상태에서 최신 v2를 정확한 v1 문서로
+  원자적으로 복원하고 v2 권위본을 해제한 뒤 이전 release를 실행한다.
+  live writer와 동시 변환하지 않는다. source 변경 전 호환 검사/변환 실패는 안전하게 중단한다.
+  남겨 둔 오래된 v1에서 재생하면 되리라는 가정으로 rollback을 허용하지 않는다.
+- 별도 제품 정책/공개 API/시장 자료 포맷 변경, durability 완화, global queue 도입은 없다.
+
+### 구현·검증 완료 조건
+
+1. 단위/전용 PG: v1 읽기, v2 첫 저장, cursor-only 변경, 한 봉 변경, eviction,
+   지연 수정분, 빈 배열, 배열 순서, 일반 inline 문서, 재시작 결과 동등성.
+2. frame 저장 중 고장으로 header까지 rollback되는지, COMMIT 응답 유실 재시도,
+   동일 monitor 동시 저장에서 혼합 snapshot이 없는지, 다른 monitor 독립 commit.
+3. 기존 checkpoint 실패 뒤 candidate/decision 중복 방지 회귀와 source-runtime
+   수동/자동 복귀의 v2 보호 및 v1 복원 검사.
+4. 기존/new 경로 모두 같은 1,803개 fixture에 cursor-only/1개 변경/여러 개 변경을 적용.
+   초기 적재와 정상 갱신을 분리하고 실행 순서를 교대한다. SQL 수, 실제 변경 frame 수,
+   입력 bytes, execute/commit, 물리 크기와 WAL을 기록한다.
+5. WAL은 전용 DB의 해당 DML에 `EXPLAIN (ANALYZE, WAL, BUFFERS, FORMAT JSON)`을
+   적용해 statement 발생량을 비교할 수 있다. 실제 DML 실행이므로 운영에서는 하지 않는다.
+   COMMIT record/지연과는 구분하고 공유 NAS 전체 WAL delta를 writer 전용 수치로 쓰지 않는다.
+   근거: [PostgreSQL 17 EXPLAIN](https://www.postgresql.org/docs/17/sql-explain.html).
+6. 이 저장 방식의 성능 후보는 전용 DB에서 전체 writer 이점이 확인되지 않아 운영 적용 단계로
+   진행하지 않는다. 추후 별도 저장 용량/복구 목적 때문에 다시 채택을 검토한다면 source-runtime
+   후보 호환성 검사와 별도 운영 승인을 거친 뒤에만 장중 동일 지표를 비교한다. 전용 DB에서
+   WAL이 줄어도 운영 COMMIT spike의 원인이 제거됐다고 미리 결론내리지 않는다.
+
+현재 성능 평가 단계는 운영 성능 gate 미충족으로 종료한다. 전용 PostgreSQL 회귀 및 1,803개
+frame fixture 비교는 완료했으며, 운영 배포·장중 재측정은 이 후보를 채택하지 않으므로 진행하지 않는다.
+
+### 2026-10-01 비교 결과와 현재 판정
+
+전용 `kiwoom_monitor_diagnostic_test`에서 실제 dataclass 1,803-frame fixture로 계약/회귀 및
+비교 검사 3/3이 통과했다. 단일 변경 DML의 WAL은 inline 151,643 bytes/213 records에서
+frame 1,499 bytes/8 records로 줄었고 DML 실행 합은 28.321ms에서 23.059ms였다. 이는 해당
+전용 DB의 DML 측정에 한정되며 COMMIT 지연을 설명하지 않는다.
+
+public writer 비교는 각 모드·변경량당 3회였다. inline 2 SQL에 비해 frame writer는 5 SQL을
+실행했고 execute median은 inline 약 68ms, frame 약 73~77ms였다. cursor-only/1-frame/50-frame의
+median total은 각각 inline 184/264/269ms, frame 2,644/269/275ms였다. 양쪽 모두 수 초 COMMIT
+outlier가 있어 작은 표본으로 차이를 원인에 귀속할 수 없다. legacy downgrade fallback까지
+포함한 column payload는 inline 약 138.5KB, frame v2 전체 약 1.368MB(약 9.9배)이며 index와
+relation overhead는 포함하지 않았다.
+
+현재 판정은 성능 개선 미입증이다. `shadow_checkpoint_frames_enabled`는 기본 OFF로 유지하며
+운영 활성화/배포를 진행하지 않는다. WAL 감소는 측정된 장점이지만 추가 SQL·execute 비용 및
+column payload 증가를 고려하면 현재 결과만으로 채택할 근거가 부족하다. 다른 저장 형식 목적을
+검토하지 않는 한 이 성능 후보의 구현·검증 단계는 닫고, 운영 장중 효과는 미확인으로 남긴다.

@@ -120,12 +120,12 @@ Kiwoom TR·주문 transport를 호출하지 않는다.
 24. 수정 후 최소 관련 테스트와 핵심 회귀 묶음을 실행한다. 실행 불가능하면 이유와 미검증 범위를 숨기지 않는다.
 25. API 변경은 `API_CONTRACT.md`, DB 변경은 `DB_SCHEMA.md`, 모듈 이동은 `MODULE_MAP.md`, 사용자 영향은 `CHANGELOG.md`를 함께 갱신한다.
 26. 기능개발서의 미래 계획을 현재 구현으로 단정하지 않는다. 현재 사실은 `ARCHITECTURE_CURRENT.md`, 불일치는 `AUDIT_REPORT.md`에 기록한다.
-27. NAS 서버 소스·의존성·Dockerfile·Compose가 바뀌면 **같은 변경에서 반드시 NAS 빌드 식별자도 올린다.** 아래 세 곳은 한 묶음이며 값이 정확히 같아야 한다.
+27. 기본 이미지 배포에서 NAS 서버 소스·의존성·Dockerfile·Compose가 바뀌면 **같은 변경에서 반드시 NAS 빌드 식별자도 올린다.** 아래 세 곳은 한 묶음이며 값이 정확히 같아야 한다.
     - `src/kiwoom_monitor/central_server/app.py`의 `SERVER_BUILD`
     - `deploy/synology/docker-compose.yml`의 `server.image`
     - `deploy/synology/server.Dockerfile`의 빌드 식별자 검증 문자열
-28. NAS 빌드 식별자는 `YYYY.MM.DD-변경명-vN` 형식을 사용하고, 서버 동작이 달라지는 매 변경마다 새 값으로 바꾼다. 같은 이미지 태그로 서버 코드를 다시 배포하지 않는다.
-29. NAS에 저장소 전체를 동기화한 뒤 Container Manager에서 서버 이미지를 다시 빌드한다. 컨테이너 재시작만으로 새 소스가 반영됐다고 판단하지 않으며 `/health`의 `server_build`가 이번 변경값과 같은지 확인한다. 다르면 작업을 완료로 보고하지 않는다. `.env`, `postgres-data`, `server-data`는 코드 배포 과정에서 삭제하거나 덮어쓰지 않는다.
+28. NAS 빌드 식별자는 `YYYY.MM.DD-변경명-vN` 형식을 사용하고, 서버 동작이 달라지는 매 변경마다 새 값으로 바꾼다. 같은 이미지 태그로 서버 코드를 다시 배포하지 않는다. 사용자가 요청한 운영 소스 마운트 모드에서는 의존성 이미지와 소스 release를 따로 식별한다. `SERVER_BUILD`는 소스 변경마다 올리고, 이미지 태그는 검증된 의존성 runtime을 유지한다. 이 모드의 변경을 기본 이미지 배포로 설명하지 않는다.
+29. 기본 이미지 모드에서는 NAS에 소스를 동기화한 뒤 서버 이미지를 다시 빌드한다. 운영 소스 모드는 `docker-compose.source.yml`과 `source-runtime.sh`로 한 번 설정하며, `scripts/nas_source_runtime.py`가 코드만 담은 전체 불변 release를 게시한다. 실행 중인 프로세스는 한 release의 실제 경로에 고정하고, 새 release는 검사·원자 선택 후 수동 재시작으로 반영한다. 활성 폴더의 파일 덮어쓰기와 자동 reload는 사용하지 않는다. 의존성·Dockerfile·스키마 계약이 바뀌면 소스 배포를 거부하고 별도 runtime/마이그레이션 검증을 진행한다. 두 모드 모두 실제 source 경로·release ID 및 `/health.server_build`를 확인해야 완료다. `.env`, `postgres-data`, `server-data`, `server-secrets`는 코드 배포 과정에서 삭제하거나 덮어쓰지 않는다. HTTP 준비 시간은 실시간 수신 복구나 무손실 증거와 구분한다.
 29-1. Synology Compose의 기본 Docker subnet과 gateway는 `KIWOOM_DOCKER_SUBNET`·`KIWOOM_DOCKER_GATEWAY`로 고정한다. HTTPS 쓰기 신뢰 프록시는 같은 gateway 값 하나만 사용한다. 재생성 때 달라질 수 있는 자동 할당 주소를 별도 `CREDENTIAL_TRUSTED_PROXIES` 값으로 복제하지 않고, 대역 충돌 시 Docker 네트워크를 먼저 확인한 뒤 subnet과 gateway를 함께 변경한다.
 29-2. NAS 서버의 요청별 Uvicorn access log는 Container Manager stdout에 쌓지 않고 `server-data/logs`의 자정 회전 파일에 기록한다. 회전 파일은 제한된 일수만 보존하며, 콘솔에는 요청마다 반복되지 않는 서버 상태·경고·오류를 남긴다.
 29-3. NAS→키움 실제 REST 전송 감사 로그는 `kiwoom_monitor.kiwoom_api`에 본문 없이 namespace·TR 코드·연속조회 여부·소요시간만 기록한다. 중앙 DB/API 조회와 broker cache hit를 키움 호출로 기록하지 않는다.

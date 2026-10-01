@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.error import HTTPError
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -1166,6 +1166,42 @@ class CentralServerAppTests(unittest.TestCase):
         self.assertEqual("missing", response.json()["state"])
         self.assertEqual("no_trade_or_no_observation", response.json()["absence_meaning"])
 
+    def test_market_coverage_tags_metadata_read_source_across_thread_boundary(self) -> None:
+        from kiwoom_monitor.central_server.postgres_access import DBWriterContext
+
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            store = SQLiteQueryStore(database_path)
+            original_load = store.load_market_data_metadata_range
+            observed_sources: list[str] = []
+
+            def capture_source(*args: object, **kwargs: object):
+                observed_sources.append(DBWriterContext(
+                    "read.market_data_metadata", "metadata_range",
+                    "load_market_data_metadata_range", access_mode="read",
+                ).source)
+                return original_load(*args, **kwargs)
+
+            settings = CentralServerSettings(
+                f"sqlite:///{database_path}", "private-token",
+                autonomous_top20_enabled=False,
+            )
+            with patch(
+                "kiwoom_monitor.central_server.app.create_query_store",
+                return_value=store,
+            ), patch.object(
+                store, "load_market_data_metadata_range", side_effect=capture_source,
+            ), TestClient(create_app(settings)) as client:
+                response = client.get(
+                    "/api/v1/market/coverage?kind=minute_bar&subject=005930%3AKRX"
+                    "&start=2026-09-10T00%3A00%3A00%2B09%3A00"
+                    "&end=2026-09-11T00%3A00%3A00%2B09%3A00",
+                    headers={"Authorization": "Bearer private-token"},
+                )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(["api.market.coverage"], observed_sources)
+
     def test_market_coverage_uses_explicit_completed_archive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "monitor.sqlite3"
@@ -1446,6 +1482,16 @@ class CentralServerAppTests(unittest.TestCase):
             store.close()
 
         self.assertIsNone(result)
+
+    def test_basic_archive_refresh_at_0700_does_not_invalidate_nxt_archive(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = [{"document": {
+            "observed_at": "2026-10-01T06:59:59+09:00", "payload": {"mac": "1000"},
+        }}]
+        with patch("kiwoom_monitor.central_server.app.datetime") as clock:
+            clock.now.return_value = datetime.fromisoformat("2026-10-01T07:00:00+09:00")
+            self.assertIsNone(_stored_market_response(store, "ka10001", {"stk_cd": "005930"}))
+            self.assertIsNotNone(_stored_market_response(store, "ka10100", {"stk_cd": "005930"}))
 
     def test_content_api_upserts_and_loads_news(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

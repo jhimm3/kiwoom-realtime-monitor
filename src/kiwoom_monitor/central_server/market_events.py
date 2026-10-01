@@ -77,6 +77,7 @@ class MarketEventService:
         self._subscriber: RealtimeSubscriber | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._background: set[asyncio.Task[None]] = set()
+        self._vi_inflight: dict[str, asyncio.Future[bool]] = {}
         self._state_lock = asyncio.Lock()
         self._metadata_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=2000)
         self._signal_queue: asyncio.Queue[tuple[str, str, str, str, tuple[str, str] | None]] = asyncio.Queue(maxsize=5000)
@@ -230,7 +231,7 @@ class MarketEventService:
                 self._upper_limits[reference.code] = reference.upper_limit_price
         if vi_events:
             self._spawn(
-                asyncio.to_thread(self._store.append_vi_events, [self._vi_value(value) for value in vi_events]),
+                self._save_live_vi_events([self._vi_value(value) for value in vi_events]),
                 "vi-live-store",
             )
         handled = bool(vi_events or references)
@@ -626,6 +627,47 @@ class MarketEventService:
                 cont_yn, next_key = "Y", result.next_key
         except Exception as error:
             logger.warning("VI 누락 보완 실패(실시간 수집 계속): %s", error)
+
+    async def _save_live_vi_events(self, values: list[dict[str, Any]]) -> None:
+        # DB와 같은 불변 event_key만 합친다. 완료된 키는 캐시하지 않는다.
+        remaining = {}
+        for value in values:
+            remaining.setdefault(value["event_key"], value)
+        while remaining:
+            waiting = {key: self._vi_inflight[key] for key in remaining if key in self._vi_inflight}
+            if not waiting:
+                break
+            outcomes = await asyncio.gather(*(asyncio.shield(future) for future in waiting.values()))
+            for key, committed in zip(waiting, outcomes):
+                if committed:
+                    remaining.pop(key)
+            # 실패한 선행 저장의 중복은 버리지 않고 기존처럼 다시 저장한다.
+        if not remaining:
+            return
+        completion = asyncio.get_running_loop().create_future()
+        for key in remaining:
+            self._vi_inflight[key] = completion
+        save = asyncio.create_task(asyncio.to_thread(self._store.append_vi_events, list(remaining.values())))
+        cancelled = False
+        try:
+            while True:
+                try:
+                    await asyncio.shield(save)
+                    break
+                except asyncio.CancelledError:
+                    if save.cancelled():
+                        raise
+                    # to_thread의 취소는 실제 COMMIT을 멈추지 않는다.
+                    # thread가 끝날 때까지 소유권과 종료 대기를 유지한다.
+                    cancelled = True
+        finally:
+            committed = save.done() and not save.cancelled() and save.exception() is None
+            for key in remaining:
+                if self._vi_inflight.get(key) is completion:
+                    self._vi_inflight.pop(key)
+            completion.set_result(committed)
+        if cancelled:
+            raise asyncio.CancelledError
 
     def _spawn(self, coroutine: Any, name: str) -> None:
         task = asyncio.create_task(coroutine, name=name)

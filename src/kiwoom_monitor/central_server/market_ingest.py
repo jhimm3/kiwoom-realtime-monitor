@@ -28,26 +28,44 @@ logger = logging.getLogger(__name__)
 
 
 def fundamentals_document_is_current(
-    document: object, trading_day: date,
+    document: object, trading_day: date, *, checked_at: datetime | None = None,
 ) -> bool:
-    """Return whether a stored ka10001 document was observed on the KST day."""
-    if not isinstance(document, dict):
+    """Reuse today's basics, but refresh pre-07:00 observations after 07:00."""
+    observed_at = _document_observed_at(document)
+    if observed_at is None or observed_at.date() != trading_day:
         return False
+    current = checked_at or datetime.now(KST)
+    return (fundamentals_refresh_key(trading_day, current).endswith(":0000")
+            or observed_at.time() >= clock_time(7))
+
+
+def fundamentals_refresh_key(trading_day: date, checked_at: datetime) -> str:
+    """The basic-info refresh period shared by preparation and broker caches."""
+    current = (checked_at.astimezone(KST) if checked_at.tzinfo
+               else checked_at.replace(tzinfo=KST))
+    after_refresh = current.date() == trading_day and current.time() >= clock_time(7)
+    return f"{trading_day.isoformat()}:{'0700' if after_refresh else '0000'}"
+
+
+def _document_observed_at(document: object) -> datetime | None:
+    if not isinstance(document, dict):
+        return None
     raw = str(document.get("observed_at") or "").strip()
     if not raw:
-        return False
+        return None
     try:
         observed_at = datetime.fromisoformat(raw)
     except ValueError:
-        return False
+        return None
     if observed_at.tzinfo is None:
         observed_at = observed_at.replace(tzinfo=KST)
-    return observed_at.astimezone(KST).date() == trading_day
+    return observed_at.astimezone(KST)
 
 
 def nxt_eligibility_document_is_current(document: object, trading_day: date) -> bool:
     """NXT eligibility is a dated observation, not a permanent stock attribute."""
-    return fundamentals_document_is_current(document, trading_day)
+    observed_at = _document_observed_at(document)
+    return observed_at is not None and observed_at.date() == trading_day
 
 
 class MarketDataIngestor:

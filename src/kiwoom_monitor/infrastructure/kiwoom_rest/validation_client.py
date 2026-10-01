@@ -177,6 +177,16 @@ class ParallelValidationClient:
                 raise
             return None
 
+    def load_stored_daily_bars_with_coverage(
+        self, code: str, market: str = "", limit: int = 250,
+    ) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
+        try:
+            return self._primary.load_stored_daily_bars_with_coverage(code, market, limit)
+        except CentralServerUnavailable:
+            if not self._fallback_on_unavailable:
+                raise
+            return (), {}
+
     def load_stored_investor_flow(self, code: str, trading_date: str):
         try:
             return self._primary.load_stored_investor_flow(code, trading_date)

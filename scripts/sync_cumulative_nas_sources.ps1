@@ -16,6 +16,7 @@ if (-not (Test-Path -LiteralPath $backupBase)) {
 $excluded = @(
     '^(\.git|\.codex-backup|\.venv|__pycache__|node_modules|build|dist|release|outputs|runs|tmp|logs|htmlcov|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.local-news-audit)(/|$)',
     '^data(/|$)',
+    '^source-runtime(/|$)',
     '^deploy/synology/(\.env$|postgres-data/|server-data/|server-secrets/|release/)',
     '(^|/)([^/]+\.egg-info|\.idea|\.vscode)(/|$)',
     '(^|/)([^/]+\.db|[^/]+\.sqlite3?|[^/]+\.py[cod]|\.coverage|Thumbs\.db|\.DS_Store)$',

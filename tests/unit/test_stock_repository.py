@@ -196,3 +196,23 @@ class StockRepositoryTests(unittest.TestCase):
 
             stocks.update_fundamentals("005930", 2_000_000, 55.5, 72_000, None, 91_900)
             self.assertEqual((), stocks.fundamentals_to_refresh(("005930",), today))
+
+    def test_fundamentals_refresh_date_uses_kst_for_utc_sqlite_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            Database(database_path).initialize()
+            stocks = StockRepository(database_path)
+            stocks.upsert("005930", "삼성전자")
+            stocks.update_fundamentals(
+                "005930", 2_000_000, 55.5, 72_000, 4_000_000, 91_900,
+            )
+            with closing(sqlite3.connect(database_path)) as connection:
+                # 22:30 UTC on Sep 30 is 07:30 KST on Oct 1.
+                connection.execute(
+                    "UPDATE stocks SET fundamentals_updated_at=? WHERE code=?",
+                    ("2026-09-30 22:30:00", "005930"),
+                )
+                connection.commit()
+
+            self.assertEqual((), stocks.fundamentals_to_refresh(("005930",), "2026-10-01"))
+            self.assertEqual(("005930",), stocks.fundamentals_to_refresh(("005930",), "2026-09-30"))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import unittest
@@ -642,7 +643,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 (17, CENTRAL_ACCOUNT_IDENTITY_MIGRATION_NAME),
                 (18, CENTRAL_ACCOUNT_SCOPE_ALIAS_MIGRATION_NAME),
                 (19, "encrypted_credential_activation_ledger"),
-                (CENTRAL_SCHEMA_VERSION, CENTRAL_FIVE_MINUTE_BARS_MIGRATION_NAME),
+                (20, CENTRAL_FIVE_MINUTE_BARS_MIGRATION_NAME),
             ],
             versions,
         )
@@ -683,12 +684,48 @@ class CentralServerDatabaseTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as connection:
                 connection.execute(
                     "INSERT INTO central_schema_migrations(version,name,applied_at) "
-                    "VALUES(21,'future','2026-09-10T00:00:00+00:00')"
+                    "VALUES(?,'future','2026-09-10T00:00:00+00:00')",
+                    (CENTRAL_SCHEMA_VERSION + 1,),
                 )
                 connection.commit()
 
             with self.assertRaisesRegex(CentralSchemaMigrationError, "newer"):
                 store.initialize()
+
+    def test_sqlite_checkpoint_keeps_version_20_and_old_runner_compatibility(self) -> None:
+        old_plan = central_schema_migrations("postgres")[:20]
+        document = {"schema_version": 1, "cursor": 42, "bars": [
+            {"code": "005930", "observation_key": "old-frame", "close": 100},
+        ], "strategy_state": {"emitted_candidate_keys": ["preserve"]}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "central.sqlite3"
+            with closing(sqlite3.connect(path)) as connection:
+                with connection:
+                    CentralSchemaMigrationRunner(connection.cursor(), "sqlite").apply(old_plan)
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            store.save_shadow_monitor_state("old-monitor", document)
+            store.initialize()
+            with closing(sqlite3.connect(path)) as connection:
+                with connection:
+                    # Simulate the exact migration plan supported by the prior
+                    # source: a PostgreSQL-only addition must not reject it.
+                    self.assertEqual((), CentralSchemaMigrationRunner(
+                        connection.cursor(), "sqlite",
+                    ).apply(old_plan))
+                self.assertEqual(20, connection.execute(
+                    "SELECT MAX(version) FROM central_schema_migrations",
+                ).fetchone()[0])
+                encoded = connection.execute(
+                    "SELECT document_json FROM central_shadow_monitor_state WHERE monitor_id=?",
+                    ("old-monitor",),
+                ).fetchone()[0]
+                self.assertEqual(document, json.loads(encoded))
+                self.assertEqual(0, connection.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'central_shadow_checkpoint_%'",
+                ).fetchone()[0])
+            self.assertEqual(document, store.load_shadow_monitor_state("old-monitor"))
+            store.close()
 
     def test_sqlite_query_cache_round_trip_and_expiry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -18,7 +18,7 @@ from contextlib import closing, nullcontext
 from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import urlsplit
 
 from kiwoom_monitor.central_server.database import (
@@ -3765,7 +3765,11 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual(document["document"], replay[0]["document"])
         service = object.__new__(AutonomousTop20Service)
         service._store = self.store
+        service._ensure_daily_history = AsyncMock(return_value={"expected_count": 1})
         asyncio.run(service._backfill_daily(owner.split(":", 1)[0], day, "KRX"))
+        service._ensure_daily_history.assert_awaited_once_with(
+            owner.split(":", 1)[0], day, "KRX", scope="final",
+        )
 
         calls = [
             call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]

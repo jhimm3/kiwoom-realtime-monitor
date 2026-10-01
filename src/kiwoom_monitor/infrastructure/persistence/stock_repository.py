@@ -502,7 +502,10 @@ class StockRepository:
         try:
             rows = con.execute(
                 f"SELECT code, market_cap, float_ratio, high_250_price, upper_limit_price, "
-                f"fundamentals_updated_at FROM stocks WHERE code IN ({placeholders})",
+                # SQLite CURRENT_TIMESTAMP is UTC. Compare its KST calendar day
+                # with the trading day supplied by the ranking workflow.
+                f"date(fundamentals_updated_at, '+9 hours') "
+                f"FROM stocks WHERE code IN ({placeholders})",
                 codes,
             ).fetchall()
         finally:

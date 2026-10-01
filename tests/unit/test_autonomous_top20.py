@@ -67,6 +67,44 @@ class _FlakyIndexStore:
 
 
 class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_restart_rechecks_durable_entry_markers_without_new_tr_requests(self) -> None:
+        now = datetime.fromisoformat("2026-09-30T09:00:00+09:00")
+        class DailyBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                self.calls.append((api_id, body, kwargs))
+                if api_id != "ka10081":
+                    raise AssertionError(f"unexpected repeated TR {api_id}")
+                payload = {"stk_dt_pole_chart_qry": [{
+                    "dt": "20260930", "open_pric": "100", "high_pric": "110",
+                    "low_pric": "90", "cur_prc": "105", "trde_qty": "10",
+                }]}
+                MarketDataIngestor(store, now_provider=lambda: now).ingest(api_id, body, payload)
+                return BrokerResult(payload, False, "", recording_succeeded=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            self.addCleanup(store.close)
+            broker = DailyBroker()
+            for collection, owner, document in (
+                ("stock_fundamentals", "005930", {"observed_at": now.isoformat(), "payload": {"mac": "1000"}}),
+                ("stock_nxt_eligibility", "005930", {"observed_at": now.isoformat(), "payload": {"nxtEnable": "N"}}),
+                ("candidate_flow_capture", "2026-09-30:005930", {"scope": "initial"}),
+                ("historical_highs", "005930", {"checked_on": "2026-09-30", "target": 110}),
+            ):
+                store.upsert_documents(collection, [{"owner": owner, "key": "latest", "document": document}])
+            # Create an actual verified source-window marker and canonical bars.
+            first = AutonomousTop20Service(broker, RealtimeHub(), store, now_provider=lambda: now)
+            await first._ensure_entry_daily_history("005930", "2026-09-30")
+            for _ in range(2):
+                restarted = AutonomousTop20Service(
+                    broker, RealtimeHub(), store, minute_backfill_enabled=False, now_provider=lambda: now,
+                )
+                await restarted._ensure_fundamentals(("005930",), "2026-09-30")
+                await restarted._ensure_fundamentals(("005930",), "2026-09-30")
+                self.assertEqual("2026-09-30", restarted._fundamentals_ready["005930"])
+            self.assertEqual(1, len(broker.calls))
+
     async def test_current_day_entry_minutes_wait_until_0800_without_marking_ready(self) -> None:
         now = [datetime.fromisoformat("2026-09-30T07:59:59+09:00")]
         broker = _Broker()
@@ -75,20 +113,294 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
         service = AutonomousTop20Service(
             broker, RealtimeHub(), store, now_provider=lambda: now[0],
         )
-        with patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock) as minutes, \
-                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock), \
-                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock), \
-                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock):
+        with patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock, return_value=True) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as highs:
             await service._ensure_fundamentals(("005930",), "2026-09-30")
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            self.assertFalse(service._fundamentals_tasks)
             minutes.assert_not_awaited()
             self.assertNotIn("005930", service._fundamentals_ready)
             now[0] = datetime.fromisoformat("2026-09-30T08:00:00+09:00")
-            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await asyncio.gather(*service._fundamentals_tasks)
             minutes.assert_awaited_once_with("005930", "2026-09-30")
+            daily.assert_awaited_once_with("005930", "2026-09-30")
+            flow.assert_awaited_once_with("005930", "2026-09-30")
+            highs.assert_awaited_once_with("005930", "2026-09-30")
+            store.load_documents.assert_called_once_with("stock_fundamentals", "005930", 1)
+            self.assertEqual(1, len(broker.calls))
             self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
 
         self.assertFalse(_entry_minute_query_due("2026-09-30", datetime.fromisoformat("2026-09-30T07:59:59+09:00")))
         self.assertTrue(_entry_minute_query_due("2026-09-29", datetime.fromisoformat("2026-09-30T07:59:59+09:00")))
+
+    async def test_entry_data_is_reused_while_minutes_are_paused_and_resumed(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), store,
+            now_provider=lambda: datetime.fromisoformat("2026-09-30T09:00:00+09:00"),
+        )
+        paused = [True]
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def minutes_ready(*args):
+            started.set()
+            await release.wait()
+            return True
+
+        with patch("kiwoom_monitor.central_server.autonomous_top20.is_paused", side_effect=lambda _: paused[0]), \
+                patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock, side_effect=minutes_ready) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as highs:
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await asyncio.gather(*service._fundamentals_tasks)
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            self.assertFalse(service._fundamentals_pending)
+            minutes.assert_not_awaited()
+            self.assertNotIn("005930", service._fundamentals_ready)
+            paused[0] = False
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await started.wait()
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            self.assertEqual(1, minutes.await_count)
+            release.set()
+            await asyncio.gather(*service._fundamentals_tasks)
+            daily.assert_awaited_once()
+            flow.assert_awaited_once()
+            highs.assert_awaited_once()
+            store.load_documents.assert_called_once()
+            self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
+
+    async def test_deferred_minute_result_is_retried_without_repeating_entry_data(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), store,
+            now_provider=lambda: datetime.fromisoformat("2026-09-30T09:00:00+09:00"),
+        )
+        with patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock, side_effect=[False, True]) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as highs:
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertNotIn("005930", service._fundamentals_ready)
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertEqual(2, minutes.await_count)
+            daily.assert_awaited_once()
+            flow.assert_awaited_once()
+            highs.assert_awaited_once()
+            store.load_documents.assert_called_once()
+            self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
+
+    async def test_failed_entry_data_is_not_cached_before_minutes_are_due(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), store,
+            now_provider=lambda: datetime.fromisoformat("2026-09-30T07:00:00+09:00"),
+        )
+        with patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock,
+                             side_effect=[RuntimeError("incomplete daily history"), None]) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as highs:
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertNotIn("005930", service._entry_data_ready)
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertEqual(2, daily.await_count)
+            self.assertEqual(1, store.load_documents.call_count)
+            flow.assert_awaited_once()
+            highs.assert_awaited_once()
+            minutes.assert_not_awaited()
+            self.assertEqual("2026-09-30", service._entry_data_ready["005930"])
+
+    async def test_each_failed_stage_retries_without_repeating_other_successes(self) -> None:
+        for failed_stage in ("basic", "minutes", "daily", "flow", "high"):
+            with self.subTest(stage=failed_stage):
+                store = MagicMock()
+                service = AutonomousTop20Service(
+                    _Broker(), RealtimeHub(), store,
+                    now_provider=lambda: datetime.fromisoformat("2026-09-30T09:00:00+09:00"),
+                )
+                names = {"basic": "_ensure_entry_basic", "minutes": "_backfill_entry_minutes",
+                         "daily": "_ensure_entry_daily_history", "flow": "_capture_candidate_investor_flow",
+                         "high": "_ensure_historical_high"}
+                preparations = {}
+                for stage, name in names.items():
+                    prepare = AsyncMock(return_value=True)
+                    if stage == failed_stage:
+                        prepare.side_effect = [RuntimeError(f"failed {stage}"), True]
+                    setattr(service, name, prepare)
+                    preparations[stage] = prepare
+                service._schedule_fundamentals(("005930",), "2026-09-30")
+                await asyncio.gather(*service._fundamentals_tasks)
+                self.assertNotIn("005930", service._fundamentals_ready)
+                self.assertEqual(0 if failed_stage == "daily" else 1,
+                                 preparations["high"].await_count)
+                service._schedule_fundamentals(("005930",), "2026-09-30")
+                service._schedule_fundamentals(("005930",), "2026-09-30")
+                await asyncio.gather(*service._fundamentals_tasks)
+                for stage, prepare in preparations.items():
+                    self.assertEqual(2 if stage == failed_stage else 1, prepare.await_count, stage)
+                self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
+                service._schedule_fundamentals(("005930",), "2026-09-30")
+                self.assertFalse(service._fundamentals_pending)
+
+    async def test_daily_markets_retry_independently_and_defer_high_until_verified(self) -> None:
+        for failed_market in ("KRX", "NXT"):
+            with self.subTest(market=failed_market):
+                service = AutonomousTop20Service(
+                    _Broker(), RealtimeHub(), MagicMock(), minute_backfill_enabled=False,
+                    now_provider=lambda: datetime.fromisoformat("2026-09-30T09:00:00+09:00"),
+                )
+                markets = []
+                async def daily(code, day, market, **kwargs):
+                    markets.append(market)
+                    if market == failed_market and markets.count(market) == 1:
+                        raise RuntimeError(f"{market} unavailable")
+                    return {}
+                with patch.object(service, "_ensure_entry_basic", new_callable=AsyncMock) as basics, \
+                        patch.object(service, "_ensure_daily_history", side_effect=daily), \
+                        patch.object(service, "_nxt_enabled", new_callable=AsyncMock, return_value=True), \
+                        patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                        patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as high:
+                    await service._ensure_fundamentals(("005930",), "2026-09-30")
+                    self.assertEqual(["KRX", "NXT"], markets)
+                    high.assert_not_awaited()
+                    await service._ensure_fundamentals(("005930",), "2026-09-30")
+                    self.assertEqual(["KRX", "NXT", failed_market], markets)
+                    basics.assert_awaited_once()
+                    flow.assert_awaited_once()
+                    high.assert_awaited_once()
+
+    async def test_pre0700_basics_refresh_on_reappearance_without_repeating_other_stages(self) -> None:
+        now = [datetime.fromisoformat("2026-09-30T06:59:59+09:00")]
+        store = MagicMock()
+        store.load_documents.return_value = [{"document": {"observed_at": now[0].isoformat()}}]
+        broker = _Broker()
+        service = AutonomousTop20Service(
+            broker, RealtimeHub(), store, minute_backfill_enabled=False, now_provider=lambda: now[0],
+        )
+        with patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as high:
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await asyncio.gather(*service._fundamentals_tasks)
+            self.assertEqual([], broker.calls)
+            now[0] = datetime.fromisoformat("2026-09-30T07:00:00+09:00")
+            service._schedule_fundamentals((), "2026-09-30")
+            self.assertFalse(service._fundamentals_pending)
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await asyncio.gather(*service._fundamentals_tasks)
+            self.assertEqual([("ka10001", {"stk_cd": "005930"}, {})], broker.calls)
+            self.assertEqual(2, store.load_documents.call_count)
+            daily.assert_awaited_once()
+            flow.assert_awaited_once()
+            high.assert_awaited_once()
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertEqual(1, len(broker.calls))
+
+    async def test_failed_basic_persistence_is_retried_without_repeating_other_stages(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = []
+        broker = MagicMock()
+        broker.request = AsyncMock(side_effect=[
+            BrokerResult({"mac": "1000"}, False, "", recording_succeeded=False),
+            BrokerResult({"mac": "1000"}, False, "", recording_succeeded=True),
+        ])
+        service = AutonomousTop20Service(
+            broker, RealtimeHub(), store, minute_backfill_enabled=False,
+            now_provider=lambda: datetime.fromisoformat("2026-09-30T09:00:00+09:00"),
+        )
+        with patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as high:
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertNotIn(("005930", "basic"), service._entry_stage_ready)
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertEqual(2, broker.request.await_count)
+            daily.assert_awaited_once()
+            flow.assert_awaited_once()
+            high.assert_awaited_once()
+
+    async def test_entry_data_is_checked_again_after_date_change_or_restart(self) -> None:
+        now = [datetime.fromisoformat("2026-09-30T07:00:00+09:00")]
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(_Broker(), RealtimeHub(), store, now_provider=lambda: now[0])
+        for selected in (service, AutonomousTop20Service(_Broker(), RealtimeHub(), store, now_provider=lambda: now[0])):
+            with patch.object(selected, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                    patch.object(selected, "_capture_candidate_investor_flow", new_callable=AsyncMock), \
+                    patch.object(selected, "_ensure_historical_high", new_callable=AsyncMock):
+                day = now[0].date().isoformat()
+                await selected._ensure_fundamentals(("005930",), day)
+                await selected._ensure_fundamentals(("005930",), day)
+                daily.assert_awaited_once_with("005930", day)
+                if selected is service:
+                    now[0] = datetime.fromisoformat("2026-10-01T07:00:00+09:00")
+                    await selected._ensure_fundamentals(("005930",), "2026-10-01")
+                    self.assertEqual(2, daily.await_count)
+        self.assertEqual(3, store.load_documents.call_count)
+
+    async def test_entry_data_completes_when_minute_backfill_is_disabled(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), store, minute_backfill_enabled=False,
+            now_provider=lambda: datetime.fromisoformat("2026-09-30T07:00:00+09:00"),
+        )
+        with patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock), \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock), \
+                patch("kiwoom_monitor.central_server.autonomous_top20.is_paused", return_value=True):
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            daily.assert_awaited_once()
+            minutes.assert_not_awaited()
+            self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
+
+    async def test_cancelled_minute_preparation_retries_without_repeating_entry_data(self) -> None:
+        now = [datetime.fromisoformat("2026-09-30T07:00:00+09:00")]
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(_Broker(), RealtimeHub(), store, now_provider=lambda: now[0])
+        started = asyncio.Event()
+
+        async def interrupted_minutes(*args):
+            started.set()
+            await asyncio.Event().wait()
+
+        with patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock,
+                          side_effect=interrupted_minutes) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock), \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock):
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            now[0] = datetime.fromisoformat("2026-09-30T08:00:00+09:00")
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await started.wait()
+            task = next(iter(service._fundamentals_tasks))
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertFalse(service._fundamentals_pending)
+            self.assertNotIn("005930", service._fundamentals_ready)
+            minutes.side_effect = None
+            minutes.return_value = True
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await asyncio.gather(*service._fundamentals_tasks)
+            self.assertEqual(2, minutes.await_count)
+            daily.assert_awaited_once()
+            store.load_documents.assert_called_once()
+            self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
 
     async def test_direct_entry_minute_backfill_does_not_request_before_0800(self) -> None:
         broker = _Broker()
@@ -96,7 +408,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             broker, RealtimeHub(), object(),
             now_provider=lambda: datetime.fromisoformat("2026-09-30T07:59:59+09:00"),
         )
-        await service._backfill_entry_minutes("005930", "2026-09-30")
+        self.assertFalse(await service._backfill_entry_minutes("005930", "2026-09-30"))
         self.assertEqual([], broker.calls)
 
     async def test_minute_backfill_can_be_disabled_without_store_or_broker_work(self) -> None:
@@ -850,8 +1162,8 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                 now_provider=lambda: datetime.fromisoformat("2026-09-14T10:02:00+09:00"),
             )
 
-            await service._backfill_entry_minutes("005930", "2026-09-14")
-            await service._backfill_entry_minutes("005930", "2026-09-14")
+            self.assertTrue(await service._backfill_entry_minutes("005930", "2026-09-14"))
+            self.assertTrue(await service._backfill_entry_minutes("005930", "2026-09-14"))
             coverage = store.load_documents(
                 "market_data_coverage_intraday", "2026-09-14:005930:KRX", 1,
             )

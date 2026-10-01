@@ -42,7 +42,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.10.01-db-writer-candidate-fixes-v1"
+SERVER_BUILD = "2026.10.01-shadow-checkpoint-frames-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -1948,13 +1948,15 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         if normalized_end <= normalized_start:
             raise HTTPException(status_code=400, detail="end는 start보다 뒤여야 합니다.")
         cutoff = as_kst(available_by or datetime.now().astimezone())
-        observations = await asyncio.to_thread(
-            store.load_market_data_metadata_range,
-            dataset_kind,
-            subject,
-            normalized_start,
-            normalized_end,
-        )
+        from .postgres_access import db_call_source
+        with db_call_source("api.market.coverage"):
+            observations = await asyncio.to_thread(
+                store.load_market_data_metadata_range,
+                dataset_kind,
+                subject,
+                normalized_start,
+                normalized_end,
+            )
         explicit_complete = await asyncio.to_thread(
             _explicit_coverage_complete,
             store,
@@ -2612,12 +2614,13 @@ def _stored_market_response(
         values = store.load_documents(collection, code, 1) if code else []
         if values:
             document = values[0].get("document", {})
+            checked_at = datetime.now(KST)
             if api_id == "ka10001" and not fundamentals_document_is_current(
-                document, datetime.now(KST).date(),
+                document, checked_at.date(), checked_at=checked_at,
             ):
                 return None
             if api_id == "ka10100" and not nxt_eligibility_document_is_current(
-                document, datetime.now(KST).date(),
+                document, checked_at.date(),
             ):
                 return None
             payload = document.get("payload") if isinstance(document, dict) else None

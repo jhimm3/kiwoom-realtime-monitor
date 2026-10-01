@@ -111,17 +111,19 @@ class DailyHighService:
         *,
         include_nxt: bool = False,
         cached_high_250_loader: Callable[[str], int | None] | None = None,
+        nxt_enabled_loader: Callable[[str], bool | None] | None = None,
     ) -> None:
         self._client = client
         self._include_nxt = include_nxt
         self._cached_high_250_loader = cached_high_250_loader
+        self._nxt_enabled_loader = nxt_enabled_loader
 
     def load(self, code: str) -> DailyHighTargets:
         # 영웅문의 KRXNXT 표기와 맞추기 위해 신고가·최고가와 직전 거래대금에
         # NXT 일봉을 함께 반영한다.
         krx_bars, krx_coverage = self._load_bars_with_coverage(code)
         bars, coverages = krx_bars, [krx_coverage]
-        if not self._include_nxt:
+        if not self._include_nxt or self._nxt_enabled(code) is False:
             return self._targets(bars, coverages)
         try:
             nxt_bars, nxt_coverage = self._load_bars_with_coverage(f"{code}_NX")
@@ -130,6 +132,23 @@ class DailyHighService:
         except Exception:
             coverages.append({})
         return self._targets(bars, coverages, code=code)
+
+    def _nxt_enabled(self, code: str) -> bool | None:
+        if self._nxt_enabled_loader is not None:
+            cached = self._nxt_enabled_loader(code)
+            if isinstance(cached, bool):
+                return cached
+        loader = getattr(self._client, "load_stored_nxt_eligibility", None)
+        if not callable(loader):
+            return None
+        try:
+            document = loader(code)
+        except Exception:
+            return None
+        if not isinstance(document, dict):
+            return None
+        value = str(document.get("nxtEnable", "")).strip().upper()
+        return True if value == "Y" else False if value == "N" else None
 
     def _targets(self, bars: tuple[DailyBar, ...], coverages: list[dict[str, Any]], *, code: str = "") -> DailyHighTargets:
         same_window = len({(coverage.get("query_basis_date"), coverage.get("window_end")) for coverage in coverages}) == 1

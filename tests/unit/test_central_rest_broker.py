@@ -4,6 +4,7 @@ import asyncio
 import threading
 import time
 import unittest
+from datetime import datetime
 from typing import Any
 from unittest.mock import patch
 
@@ -28,6 +29,110 @@ class FakeClient:
 
 
 class CentralRestBrokerTests(unittest.TestCase):
+    def test_basic_cache_lookup_crossing_0700_does_not_restamp_an_old_response(self) -> None:
+        class Store:
+            def __init__(self):
+                self.values = {}
+                self.entered, self.release = threading.Event(), threading.Event()
+                self.block = False
+
+            def load_query(self, key):
+                if self.block:
+                    self.entered.set()
+                    self.release.wait(timeout=3)
+                return self.values.get(key)
+
+            def save_query(self, key, api_id, expires_at, value):
+                self.values[key] = value
+
+        async def scenario():
+            now = [datetime.fromisoformat("2026-10-01T06:59:59+09:00")]
+            store, client = Store(), FakeClient()
+            with patch("kiwoom_monitor.central_server.rest_broker.datetime") as clock:
+                clock.now.side_effect = lambda *_: now[0]
+                broker = CentralRestBroker(client, store=store)
+                await broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
+                broker._cache.clear()
+                store.block = True
+                lookup = asyncio.create_task(broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"}))
+                try:
+                    self.assertTrue(await asyncio.to_thread(store.entered.wait, 2))
+                    now[0] = datetime.fromisoformat("2026-10-01T07:00:00+09:00")
+                finally:
+                    store.release.set()
+                result = await lookup
+                self.assertFalse(result.cache_hit)
+                self.assertEqual(2, len(client.calls))
+                await broker.close()
+        asyncio.run(scenario())
+
+    def test_basic_cache_period_changes_at_0700_and_midnight_in_memory_and_storage(self) -> None:
+        class Store:
+            def __init__(self):
+                self.values = {}
+
+            def load_query(self, key):
+                return self.values.get(key)
+
+            def save_query(self, key, api_id, expires_at, value):
+                self.values[key] = value
+
+        async def scenario():
+            store = Store()
+            client = FakeClient()
+            now = [datetime.fromisoformat("2026-10-01T06:59:59+09:00")]
+            with patch("kiwoom_monitor.central_server.rest_broker.datetime") as clock:
+                clock.now.side_effect = lambda *_: now[0]
+                broker = CentralRestBroker(client, store=store)
+                await broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
+                repeated = await broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
+                self.assertTrue(repeated.cache_hit)
+                await broker.close()
+                # Restart clears RAM, but retains the same pre-07 persistent response.
+                broker = CentralRestBroker(client, store=store)
+                repeated = await broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
+                self.assertTrue(repeated.cache_hit)
+                nxt_key = broker._fingerprint("ka10100", "/api/dostk/stkinfo", {"stk_cd": "005930"}, "N", "")
+                now[0] = datetime.fromisoformat("2026-10-01T07:00:00+09:00")
+                refreshed = await broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
+                self.assertFalse(refreshed.cache_hit)
+                self.assertEqual(nxt_key, broker._fingerprint("ka10100", "/api/dostk/stkinfo", {"stk_cd": "005930"}, "N", ""))
+                broker._cache.clear()
+                repeated = await broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
+                self.assertTrue(repeated.cache_hit)
+                now[0] = datetime.fromisoformat("2026-10-02T00:00:00+09:00")
+                refreshed = await broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
+                self.assertFalse(refreshed.cache_hit)
+                self.assertEqual(3, len(client.calls))
+                await broker.close()
+        asyncio.run(scenario())
+
+    def test_parallel_basic_requests_wait_for_recording_result_before_reporting_success(self) -> None:
+        async def scenario():
+            entered, release = threading.Event(), threading.Event()
+
+            def record(*_):
+                entered.set()
+                release.wait(timeout=3)
+                raise OSError("document write failed")
+
+            client = FakeClient()
+            broker = CentralRestBroker(client, response_handler=record)
+            first = asyncio.create_task(broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"}))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            second = asyncio.create_task(broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"}))
+            try:
+                await asyncio.sleep(0.02)
+                self.assertFalse(second.done())
+                self.assertEqual(1, len(client.calls))
+            finally:
+                release.set()
+            results = await asyncio.gather(first, second)
+            self.assertTrue(all(result.recording_succeeded is False for result in results))
+            self.assertEqual({}, broker._cache)
+            await broker.close()
+        asyncio.run(scenario())
+
     def test_slow_persistent_lookup_does_not_hold_ranking_or_duplicate_request(self) -> None:
         class BlockingStore:
             def __init__(self) -> None:

@@ -1235,7 +1235,7 @@ class SQLiteQueryStore:
             with connection as transaction:
                 cursor = transaction.cursor()
                 CentralSchemaMigrationRunner(cursor, "sqlite").apply(
-                    central_schema_migrations()
+                    central_schema_migrations("sqlite")
                 )
 
     def storage_size_bytes(self) -> int | None:
@@ -2737,9 +2737,12 @@ class PostgresQueryStore:
 
     """시놀로지 PostgreSQL에서 사용하는 동일 규격의 조회 캐시."""
 
-    def __init__(self, database_url: str, *, observation_history_enabled: bool = True) -> None:
+    def __init__(self, database_url: str, *, observation_history_enabled: bool = True,
+                 shadow_checkpoint_frames_enabled: bool = False) -> None:
         self._database_url = database_url
         self._observation_history_enabled = observation_history_enabled
+        # Opt in only after storage/rollback and dedicated-PG gates pass.
+        self._shadow_checkpoint_frames_enabled = shadow_checkpoint_frames_enabled
 
     def initialize(self) -> None:
         from .postgres_access import DBWriterContext, open_observed_connection
@@ -3763,6 +3766,7 @@ class PostgresQueryStore:
 
     def load_shadow_monitor_state(self, monitor_id: str) -> dict[str, Any] | None:
         from .postgres_access import DBWriterContext, open_observed_connection
+        from .shadow_checkpoint import LOAD_SQL, restore_checkpoint
 
         context = DBWriterContext(
             writer_family="read.shadow_monitor",
@@ -3771,16 +3775,14 @@ class PostgresQueryStore:
             access_mode="read",
         )
         with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT document_json FROM central_shadow_monitor_state WHERE monitor_id=%s",
-                (monitor_id,),
-            )
+            cursor.execute(LOAD_SQL, (monitor_id,))
             row = cursor.fetchone()
-        return json_mapping(row[0]) if row else None
+        return restore_checkpoint(row)
 
     def save_shadow_monitor_state(self, monitor_id: str, document: dict[str, Any]) -> None:
         from .postgres_access import DBWriterContext, open_observed_connection
         from .diagnostic_metrics import record_writer_transaction
+        from .shadow_checkpoint import clear_frames, save_frames, split_checkpoint
 
         started_at = monotonic()
         writer = DBWriterContext(
@@ -3793,16 +3795,25 @@ class PostgresQueryStore:
             encode_started = monotonic()
             encoded = json.dumps(document, ensure_ascii=False)
             payload_bytes = len(encoded.encode("utf-8"))
+            parts = split_checkpoint(document) if self._shadow_checkpoint_frames_enabled else None
             encode_ms = round((monotonic() - encode_started) * 1000, 3)
-            cursor.execute(
-                "INSERT INTO central_shadow_monitor_state VALUES(%s,%s,%s) "
-                "ON CONFLICT(monitor_id) DO UPDATE SET updated_at=EXCLUDED.updated_at,document_json=EXCLUDED.document_json",
-                (monitor_id, updated_at, encoded),
-            )
+            counts = {"checkpoint_storage_version": 1}
+            if parts is not None:
+                counts = save_frames(cursor, monitor_id, encoded, parts, updated_at)
+            else:
+                # The UPSERT locks the same stable parent used by normalized
+                # writers. Retire any v2 authority in this same transaction.
+                cursor.execute(
+                    "INSERT INTO central_shadow_monitor_state VALUES(%s,%s,%s) "
+                    "ON CONFLICT(monitor_id) DO UPDATE SET updated_at=EXCLUDED.updated_at,document_json=EXCLUDED.document_json",
+                    (monitor_id, updated_at, encoded),
+                )
+                clear_frames(cursor, monitor_id)
         record_writer_transaction(
             "shadow_monitor_state", 1, round((monotonic() - started_at) * 1000),
             encode_ms=encode_ms, bytes_payload_estimate=payload_bytes,
             domain_counts={
+                **counts,
                 "checkpoint_bar_frames": len(document.get("bars", ())),
                 "checkpoint_universe_frames": len(document.get("universes", ())),
                 "checkpoint_emitted_candidate_keys": len(

@@ -78,7 +78,9 @@ CENTRAL_INDEXES = (
     "idx_central_account_scope_alias_target",
 )
 
-CENTRAL_SCHEMA_VERSION = 20
+CENTRAL_SCHEMA_VERSION = 21
+# PostgreSQL-only trailing migrations must not advance unchanged SQLite DBs.
+CENTRAL_SQLITE_SCHEMA_VERSION = 20
 CENTRAL_SCHEMA_BASELINE_NAME = "current_central_storage_baseline"
 CENTRAL_MARKET_METADATA_MIGRATION_NAME = "market_data_observation_metadata"
 CENTRAL_MARKET_STATE_TIME_REPAIR_MIGRATION_NAME = "repair_market_state_special_trade_time"
@@ -99,6 +101,7 @@ CENTRAL_ACCOUNT_IDENTITY_MIGRATION_NAME = "verified_account_identity_registry"
 CENTRAL_ACCOUNT_SCOPE_ALIAS_MIGRATION_NAME = "verified_account_scope_aliases"
 CENTRAL_CREDENTIAL_ACTIVATION_MIGRATION_NAME = "encrypted_credential_activation_ledger"
 CENTRAL_FIVE_MINUTE_BARS_MIGRATION_NAME = "historical_five_minute_bars"
+CENTRAL_SHADOW_CHECKPOINT_FRAMES_MIGRATION_NAME = "shadow_checkpoint_frames"
 
 
 def sqlite_schema_statements() -> tuple[str, ...]:
@@ -190,11 +193,13 @@ def postgres_schema_statements() -> tuple[str, ...]:
     )
 
 
-def central_schema_migrations():
+def central_schema_migrations(dialect: str = "postgres"):
     # 순환 import를 피하면서 실행 명세를 이 파일의 단일 원본에서 구성한다.
     from kiwoom_monitor.central_server.schema_migrations import CentralSchemaMigration
 
-    return (
+    if dialect not in ("sqlite", "postgres"):
+        raise ValueError(f"unsupported central schema dialect: {dialect}")
+    migrations = (
         CentralSchemaMigration(
             1,
             CENTRAL_SCHEMA_BASELINE_NAME,
@@ -820,7 +825,20 @@ def central_schema_migrations():
             _five_minute_bar_schema_statements("sqlite"),
             _five_minute_bar_schema_statements("postgres"),
         ),
+        CentralSchemaMigration(
+            21,
+            CENTRAL_SHADOW_CHECKPOINT_FRAMES_MIGRATION_NAME,
+            (),  # PostgreSQL-only; SQLite's supported plan still ends at 20.
+            _shadow_checkpoint_schema_statements(),
+        ),
     )
+    return migrations[:CENTRAL_SQLITE_SCHEMA_VERSION] if dialect == "sqlite" else migrations
+
+
+def _shadow_checkpoint_schema_statements() -> tuple[str, ...]:
+    from .shadow_checkpoint import postgres_schema_statements
+
+    return postgres_schema_statements()
 
 
 def _five_minute_bar_schema_statements(dialect: str) -> tuple[str, ...]:

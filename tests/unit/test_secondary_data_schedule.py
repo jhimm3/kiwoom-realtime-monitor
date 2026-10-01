@@ -14,6 +14,14 @@ from kiwoom_monitor.application.secondary_data_schedule import (
 
 
 class SecondaryDataScheduleTests(unittest.TestCase):
+    def test_after_hours_restores_stored_daily_proof_before_other_followups(self) -> None:
+        calls = []
+        coordinator = self.coordinator(calls, starts={"daily": True})
+        phase = coordinator.start(("A", "B"), after_hours_pause=True,
+                                  stored_daily_high_codes=("B",))
+        self.assertIs(SecondaryStartPhase.STORED_DAILY_HIGH, phase)
+        self.assertEqual([("daily", ("B",), False)], calls)
+
     def coordinator(self, calls: list[tuple[object, ...]], *, starts: dict[str, bool] | None = None):
         starts = starts or {}
         def worker(name: str):

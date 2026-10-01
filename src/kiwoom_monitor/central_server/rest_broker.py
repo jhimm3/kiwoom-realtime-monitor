@@ -6,11 +6,14 @@ import hashlib
 import json
 import logging
 import time
+from datetime import datetime
 from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import Any, Callable, Protocol
 
 from .database import QueryStore, StoredQuery
+from .market_ingest import fundamentals_refresh_key
+from .market_observations import KST
 
 
 logger = logging.getLogger(__name__)
@@ -363,7 +366,11 @@ class CentralRestBroker:
                 raise BrokerCredentialBusyError("CREDENTIAL_CHANGE_IN_PROGRESS")
             self._prune_memory_cache()
             cached = self._cache.get(key)
-            if cached and cached[0] > time.monotonic():
+            basic_recording_pending = (
+                api_id == "ka10001" and record_response and self._response_handler is not None
+                and cached is not None and cached[1].recording_succeeded is None
+            )
+            if cached and cached[0] > time.monotonic() and not basic_recording_pending:
                 value = cached[1]
                 return BrokerResult(
                     copy.deepcopy(value.payload), value.has_next, value.next_key,
@@ -396,6 +403,10 @@ class CentralRestBroker:
             stored = None
             if record_response and _persistent_cache_ttl(api_id, cont_yn) and self._store is not None:
                 stored = await asyncio.to_thread(self._store.load_query, key)
+            if api_id == "ka10001" and key != self._fingerprint(api_id, path, body, cont_yn, next_key):
+                # A slow DB lookup can cross 07:00/midnight. Do not stamp the
+                # previous period's cached payload as a fresh observation.
+                stored = None
             recording_succeeded: bool | None = None
             if stored is not None and self._response_handler is not None:
                 from .diagnostic_metrics import CURRENT_API_ID
@@ -592,10 +603,15 @@ class CentralRestBroker:
             raise ValueError("연속조회에는 next_key가 필요합니다.")
 
     def _fingerprint(self, api_id: str, path: str, body: dict[str, Any], cont_yn: str, next_key: str) -> str:
+        parts = [self._namespace if self._credential_generation == 0 else
+                 f"{self._namespace}:credential-generation:{self._credential_generation}",
+                 api_id, path, body, cont_yn, next_key]
+        if api_id == "ka10001":
+            current = datetime.now(KST)
+            # Both RAM and persistent caches must exclude pre-refresh responses.
+            parts.append(fundamentals_refresh_key(current.date(), current))
         raw = json.dumps(
-            [self._namespace if self._credential_generation == 0 else
-             f"{self._namespace}:credential-generation:{self._credential_generation}",
-             api_id, path, body, cont_yn, next_key],
+            parts,
             ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()

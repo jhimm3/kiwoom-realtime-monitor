@@ -146,6 +146,17 @@ class FailoverKiwoomRestClient:
             self._primary_retry_at = time.monotonic() + self._retry_primary_seconds
             return None
 
+    def load_stored_daily_bars_with_coverage(
+        self, code: str, market: str = "", limit: int = 250,
+    ) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
+        if time.monotonic() < self._primary_retry_at:
+            return (), {}
+        try:
+            return self._primary.load_stored_daily_bars_with_coverage(code, market, limit)
+        except CentralServerUnavailable:
+            self._primary_retry_at = time.monotonic() + self._retry_primary_seconds
+            return (), {}
+
     def load_stored_investor_flow(self, code: str, trading_date: str):
         if time.monotonic() < self._primary_retry_at:
             return None

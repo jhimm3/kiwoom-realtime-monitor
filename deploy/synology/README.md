@@ -13,8 +13,64 @@
 배포됐다는 뜻은 아니다. 이후 배포할 때는 작업본의 `SERVER_BUILD`, Compose 이미지
 태그, Dockerfile 검증 문자열을 함께 확인한다.
 프로젝트 소스를 먼저 동기화하고 Container Manager에서 서버 이미지를 다시 빌드한다.
-컨테이너 재시작만으로 소스 변경이 반영되지 않는다. 빌드 후 `/health` 응답의
+기본 이미지 모드에서는 컨테이너 재시작만으로 소스 변경이 반영되지 않는다. 빌드 후 `/health` 응답의
 `server_build`가 해당 배포 대상과 같은지 확인하기 전에는 배포 완료로 판단하지 않는다.
+
+### 운영 코드와 반복 검사를 이미지 재빌드 없이 반영
+
+선택형 운영 소스 모드는 현재 이미지의 Python/라이브러리를 사용하고 NAS의
+`source-runtime` 폴더를 컨테이너 `/app/source-runtime`에 읽기 전용으로 한 번 연결한다.
+PC의 C: 작업본은 NAS에 자동으로 연결되지 않는다. 아래 게시 명령이 변경한 코드를
+`X:\kiwoom-monitor\source-runtime`의 새 release에 복사하고 SHA-256으로 검사한다.
+소스·검사·스크립트만 포함하며 `.env`, DB, 사용자 자료, 비밀 폴더는 포함하지 않는다.
+NAS의 각 release는 수정하지 않는다. 실행 중인 서버는 기존 release에 고정되고,
+새 release를 선택한 뒤 수동 재시작할 때 적용된다. 자동 reload는 사용하지 않는다.
+
+PC PowerShell에서 준비한다. 이 단계는 운영 서버를 멈추거나 활성 release를 바꾸지 않는다.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\nas_source_runtime.py --root X:\kiwoom-monitor\source-runtime stage
+```
+
+출력의 `release_id`를 NAS에서 사용한다. 먼저 `docker-compose.source.yml`과
+`source-runtime.sh` 두 파일을 NAS의 같은 `deploy/synology` 폴더에 동기화한다.
+한 번 설정할 때만 서버 컨테이너를 새 마운트/시작 명령으로 재생성한다. 이미 빌드한
+`2026.10.01-db-writer-candidate-fixes-v1` 이미지를 사용하므로 새 빌드는 없다.
+
+```sh
+sudo sh /volume1/docker/kiwoom-monitor/deploy/synology/source-runtime.sh install RELEASE_ID
+```
+
+이후 Python 코드 변경은 `SERVER_BUILD`를 새 값으로 올리고 PC에서 `stage`를 다시
+실행한다. 이미지 태그와 Dockerfile의 기준은 의존성 runtime에 고정한다. 후보 release의
+검사를 여러 개 묶어서 실행하고 통과하면 서버만 재시작한다.
+
+```sh
+sudo sh /volume1/docker/kiwoom-monitor/deploy/synology/source-runtime.sh test RELEASE_ID \
+  --test tests.integration.test_storage_boundary_postgres.PostgresStorageBoundaryTests.test_realtime_minute_batch_prefetches_guards_and_preserves_replay \
+  --test tests.integration.test_storage_boundary_postgres.PostgresStorageBoundaryTests.test_realtime_minute_duplicate_keys_keep_sequential_delta_updates
+```
+
+```sh
+sudo sh /volume1/docker/kiwoom-monitor/deploy/synology/source-runtime.sh deploy RELEASE_ID
+```
+
+검사는 기존 `run_postgres_access_integration.py`가 전용
+`kiwoom_monitor_diagnostic_test`를 확인한 뒤 실행한다. ZIP 업로드나 테스트마다 새
+마운트를 만드는 절차는 없다. release 선택·동일 이미지 import 검사를 먼저 수행하며,
+서버 준비 실패 시 첫 설정은 이미지 모드로, 이후 배포는 이전 source release로 복귀한다.
+수동으로 이전 source release에 복귀하려면 다음 명령을 사용한다.
+
+```sh
+sudo sh /volume1/docker/kiwoom-monitor/deploy/synology/source-runtime.sh rollback
+```
+
+`http_ready_seconds`는 종료 요청부터 새 `/health.server_build` 확인까지 측정한 시간이다.
+실시간 REG·수신 복구와 공백은 별도로 확인한다. 60초 종료 유예는 정상 종료가 빨리 끝나면
+즉시 진행하며, 대기 중 저장이 있으면 기존 종료 경로가 마무리할 시간을 준다.
+의존성, Python/OS 환경, Dockerfile, 스키마 계약 변경은 이 source 배포에서 거부한다.
+그때는 기본 이미지/마이그레이션 검증 절차로 새 runtime을 준비한다.
+source release는 자동 삭제하지 않으며, 일반 소스 동기화와 Docker build context에서 제외한다.
 
 기존 R7 누적 배포 안내는 과거 빌드
 `2026.09.16-runtime-credentials-r7-deploy-v1`을 기준으로 작성됐다.
@@ -152,9 +208,13 @@ DB 백업과 비밀 복구 백업을 구분한다. `.env`와 `server-secrets`의
 - `deploy/synology/docker-compose.yml`
 - 서버 Python 패키지나 실행 명령
 
-### 서버 코드 변경 시 빌드 번호 갱신 — 필수
+### 서버 버전 표식 갱신 — 필수
 
-NAS 서버 동작이 바뀌는 코드 수정은 재빌드 안내만 남기고 끝내면 안 된다. **코드 변경과 같은 작업에서 새 빌드 번호를 만들고 아래 세 파일을 함께 수정해야 한다.**
+NAS 서버 동작이 바뀌면 재빌드 안내만 남기지 않는다. 배포 방식에 따라 버전 표식을 갱신한다.
+
+현재 `source-runtime` 모드에서 Python 소스만 바꿀 때는 `app.py`의 `SERVER_BUILD`를 새 값으로 바꾸고, 아래 PC staging과 NAS release 검사·선택을 수행한다. 이 모드에서 `docker-compose.source.yml`의 image와 Dockerfile은 Python 코드가 아니라 Python/OS 의존성을 제공하는 런타임 이미지다. 매 소스 수정마다 그 이미지를 다시 만들 필요는 없다.
+
+기존 이미지 빌드·배포 모드를 사용하거나 Python 런타임/의존성/OS 패키지를 변경할 때만 아래 세 파일을 한 빌드로 함께 갱신한다.
 
 1. `src/kiwoom_monitor/central_server/app.py`의 `SERVER_BUILD`
 2. `deploy/synology/docker-compose.yml`의 `server.image`
@@ -162,7 +222,7 @@ NAS 서버 동작이 바뀌는 코드 수정은 재빌드 안내만 남기고 �
 
 세 값은 완전히 같아야 한다. `2026.09.10-schema-ledger-v1`은 형식을 보여 주는 과거 예시다. 형식은 `YYYY.MM.DD-변경명-vN`을 사용한다. 서버 코드가 바뀌었는데 기존 이미지 태그를 그대로 재사용하지 않는다. 그래야 Container Manager의 이미지 목록과 `/health` 응답만 보고도 새 코드가 실제로 배포됐는지 구분할 수 있다.
 
-AI 또는 개발자는 NAS 서버 코드 변경을 완료했다고 보고하기 전에 다음 체크를 모두 통과해야 한다.
+이미지 빌드 모드의 서버 코드 변경은 다음 체크를 통과해야 한다.
 
 - [ ] 새 `SERVER_BUILD`를 정했다.
 - [ ] Compose 이미지 태그를 같은 값으로 바꿨다.

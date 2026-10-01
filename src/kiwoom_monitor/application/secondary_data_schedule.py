@@ -10,6 +10,7 @@ class SecondaryStartPhase(str, Enum):
     FINALIZATION = "finalization"
     WEEKEND_DAILY_HIGH = "weekend_daily_high"
     AFTER_HOURS = "after_hours"
+    STORED_DAILY_HIGH = "stored_daily_high"
     MINUTE_HISTORY = "minute_history"
 
 
@@ -40,10 +41,13 @@ class SecondaryDataFollowupCoordinator:
         finalization_codes: tuple[str, ...] = (),
         after_hours_pause: bool = False,
         weekend_daily_high_codes: tuple[str, ...] = (),
+        stored_daily_high_codes: tuple[str, ...] = (),
     ) -> SecondaryStartPhase:
         if finalization_codes and self._start_minute_history(finalization_codes, True):
             return SecondaryStartPhase.FINALIZATION
         if after_hours_pause:
+            if stored_daily_high_codes and self._start_daily_high(stored_daily_high_codes, False):
+                return SecondaryStartPhase.STORED_DAILY_HIGH
             if weekend_daily_high_codes and self._start_daily_high(weekend_daily_high_codes, False):
                 return SecondaryStartPhase.WEEKEND_DAILY_HIGH
             if not self._start_fundamentals(codes):

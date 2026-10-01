@@ -29,7 +29,9 @@ from kiwoom_monitor.application.ranking_schedule import ranking_snapshot_archive
 
 from .database import QueryStore
 from .diagnostic_workloads import is_paused
-from .market_ingest import fundamentals_document_is_current, nxt_eligibility_document_is_current
+from .market_ingest import (
+    fundamentals_document_is_current, fundamentals_refresh_key, nxt_eligibility_document_is_current,
+)
 from .market_observations import ranking_observation, top20_index_observation
 from .persistent_outbox import JsonRecordOutbox
 from .realtime_hub import RealtimeHub, RealtimeSubscriber
@@ -72,6 +74,9 @@ class AutonomousTop20Service:
         self._nxt_eligible: dict[str, bool] = {}
         self._nxt_checked_on: dict[str, str] = {}
         self._fundamentals_ready: dict[str, str] = {}
+        # Success belongs to each stock/day/stage; aggregate flags are summaries only.
+        self._entry_stage_ready: dict[tuple[str, str], str] = {}
+        self._entry_data_ready: dict[str, str] = {}
         self._fundamentals_pending: set[str] = set()
         self._fundamentals_tasks: set[asyncio.Task[None]] = set()
         self._daily_history_locks: dict[tuple[str, str], tuple[asyncio.Lock, int]] = {}
@@ -908,9 +913,13 @@ class AutonomousTop20Service:
         return enabled
 
     def _schedule_fundamentals(self, codes: tuple[str, ...], day: str) -> None:
+        minutes_due = (self._minute_backfill_enabled and not is_paused("minute_backfill")
+                       and _entry_minute_query_due(day, self._now()))
         missing = tuple(
             code for code in codes
-            if self._fundamentals_ready.get(code) != day and code not in self._fundamentals_pending
+            if code not in self._fundamentals_pending
+            and (not self._entry_data_complete(code, day)
+                 or (minutes_due and self._entry_stage_ready.get((code, "minutes")) != day))
         )
         if not missing:
             return
@@ -923,7 +932,7 @@ class AutonomousTop20Service:
         task.add_done_callback(self._fundamentals_tasks.discard)
 
     async def _ensure_fundamentals(self, codes: tuple[str, ...], day: str = "") -> None:
-        """추적 종목의 기본정보와 신고가용 일봉을 거래일마다 준비한다."""
+        """Retry failed stages without repeating successful stock/day preparation."""
         current = self._now()
         current_day = (
             current.date() if current.tzinfo is None
@@ -932,44 +941,85 @@ class AutonomousTop20Service:
         target_day = day or current_day.isoformat()
         try:
             for code in codes:
-                if self._fundamentals_ready.get(code) == target_day:
-                    continue
-                try:
-                    stored = await asyncio.to_thread(
-                        self._store.load_documents, "stock_fundamentals", code, 1,
-                    )
-                    document = stored[0].get("document", {}) if stored else {}
-                    if not fundamentals_document_is_current(
-                        document, datetime.fromisoformat(target_day).date(),
+                self._entry_data_ready.pop(code, None)
+                self._fundamentals_ready.pop(code, None)
+                for stage, prepare in (
+                    ("basic", self._ensure_entry_basic),
+                    ("minutes", self._backfill_entry_minutes),
+                    ("daily", self._ensure_entry_daily_history),
+                    ("flow", self._capture_candidate_investor_flow),
+                    ("high", self._ensure_historical_high),
+                ):
+                    if stage != "basic" and not day:
+                        continue
+                    token = self._entry_stage_token(stage, target_day)
+                    if self._entry_stage_ready.get((code, stage)) == token:
+                        continue
+                    if stage == "minutes" and (
+                        not self._minute_backfill_enabled or is_paused("minute_backfill")
+                        or not _entry_minute_query_due(target_day, self._now())
                     ):
-                        await self._broker.request(
-                            "ka10001", "/api/dostk/stkinfo", {"stk_cd": code},
-                        )
-                    entry_minutes_deferred = bool(day and not _entry_minute_query_due(day, self._now()))
-                    if day:
-                        if not entry_minutes_deferred:
+                        continue
+                    if stage == "high" and self._entry_stage_ready.get((code, "daily")) != target_day:
+                        # Historical-high calculation depends on verified daily history.
+                        continue
+                    try:
+                        if stage == "minutes":
                             from .postgres_access import db_call_source
                             with db_call_source("top20.entry_minutes"):
-                                await self._backfill_entry_minutes(code, day)
-                        await self._ensure_entry_daily_history(code, day)
-                        await self._capture_candidate_investor_flow(code, day)
-                        await self._ensure_historical_high(code, day)
-                    if not (day and (is_paused("minute_backfill") or entry_minutes_deferred)):
+                                if not await prepare(code, target_day):
+                                    continue
+                        else:
+                            await prepare(code, target_day)
+                        self._entry_stage_ready[(code, stage)] = token
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
+                        logger.warning("TOP20 편입종목 자료 준비 실패: %s stage=%s %s", code, stage, error)
+                if self._entry_data_complete(code, target_day, basics_only=not day):
+                    self._entry_data_ready[code] = target_day
+                    if (not day or not self._minute_backfill_enabled
+                            or self._entry_stage_ready.get((code, "minutes")) == target_day):
                         self._fundamentals_ready[code] = target_day
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    logger.warning("TOP20 편입종목 자료 준비 실패: %s %s", code, error)
         finally:
             self._fundamentals_pending.difference_update(codes)
 
+    def _entry_stage_token(self, stage: str, day: str) -> str:
+        return (fundamentals_refresh_key(date.fromisoformat(day), self._now())
+                if stage == "basic" else day)
+
+    def _entry_data_complete(self, code: str, day: str, *, basics_only: bool = False) -> bool:
+        stages = ("basic",) if basics_only else ("basic", "daily", "flow", "high")
+        return all(self._entry_stage_ready.get((code, stage)) == self._entry_stage_token(stage, day)
+                   for stage in stages)
+
+    async def _ensure_entry_basic(self, code: str, day: str) -> None:
+        stored = await asyncio.to_thread(self._store.load_documents, "stock_fundamentals", code, 1)
+        document = stored[0].get("document", {}) if stored else {}
+        if not fundamentals_document_is_current(document, date.fromisoformat(day), checked_at=self._now()):
+            result = await self._broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": code})
+            if result.recording_succeeded is False or not result.payload:
+                raise RuntimeError(f"{code} 기본정보 응답 또는 중앙 저장이 완료되지 않았습니다.")
+
     async def _ensure_entry_daily_history(self, code: str, day: str) -> None:
         """Verify the source window, even when old canonical rows already exist."""
-        markets = ["KRX"]
-        if await self._nxt_enabled(code):
-            markets.append("NXT")
-        for market in markets:
-            await self._ensure_daily_history(code, day, market, scope="initial")
+        # Each market retains success even when the other market fails.
+        failure: Exception | None = None
+        try:
+            if self._entry_stage_ready.get((code, "daily:KRX")) != day:
+                await self._ensure_daily_history(code, day, "KRX", scope="initial")
+                self._entry_stage_ready[(code, "daily:KRX")] = day
+        except Exception as error:
+            failure = error
+        try:
+            if await self._nxt_enabled(code) and self._entry_stage_ready.get((code, "daily:NXT")) != day:
+                await self._ensure_daily_history(code, day, "NXT", scope="initial")
+                self._entry_stage_ready[(code, "daily:NXT")] = day
+        except Exception as error:
+            if failure is None:
+                failure = error
+        if failure is not None:
+            raise failure
 
     async def _ensure_daily_history(self, code: str, day: str, market: str, *, scope: str) -> dict[str, Any]:
         # Refcounts include waiters: cancellation cannot remove a lock another caller owns.
@@ -1040,11 +1090,11 @@ class AutonomousTop20Service:
                                 [{"owner": owner, "key": scope, "document": evidence}])
         return coverage
 
-    async def _backfill_entry_minutes(self, code: str, day: str) -> None:
+    async def _backfill_entry_minutes(self, code: str, day: str) -> bool:
         """새 편입 종목의 등장 전 당일 분봉을 NAS가 한 번 준비한다."""
         if (not self._minute_backfill_enabled or is_paused("minute_backfill")
                 or not _entry_minute_query_due(day, self._now())):
-            return
+            return False
         markets = ["KRX"]
         if await self._nxt_enabled(code):
             markets.append("NXT")
@@ -1088,6 +1138,7 @@ class AutonomousTop20Service:
                     "as_of": day, "completed_at": self._now().isoformat(),
                 },
             }])
+        return True
 
     async def _capture_candidate_investor_flow(self, code: str, day: str) -> None:
         """후보 최초 편입 때 수급 원본을 NAS에서 한 번 확보한다."""

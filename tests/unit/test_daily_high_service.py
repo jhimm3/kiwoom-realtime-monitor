@@ -25,6 +25,54 @@ class FakeClient(FullChartClient):
 
 
 class DailyHighServiceTests(unittest.TestCase):
+    def test_nas_wrappers_preserve_verified_highs_without_local_tr(self) -> None:
+        import tempfile
+        from datetime import date, timedelta
+        from pathlib import Path
+        from kiwoom_monitor.infrastructure.kiwoom_rest.failover_client import FailoverKiwoomRestClient
+        from kiwoom_monitor.infrastructure.kiwoom_rest.validation_client import ParallelValidationClient
+        from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import CentralServerUnavailable
+
+        basis = date.today().isoformat()
+        rows = tuple({"trading_date": (date.today() - timedelta(days=i)).isoformat(),
+                      "high": 2000 + i, "open": 1000, "low": 900, "close": 1500,
+                      "volume": 10, "trade_value_million_won": 1} for i in range(250))
+        coverage = {"query_basis_date": basis, "window_end": basis, "expected_count": 250,
+                    "collection_verified": True, "scope": "initial", "source_exhausted": False,
+                    "periods": {str(n): {"status": "ready"} for n in (5, 20, 250)}}
+
+        class Primary:
+            error = None
+            def load_stored_daily_bars_with_coverage(self, *args):
+                if self.error:
+                    raise self.error
+                return rows, coverage
+
+        class NoTR:
+            def request_with_continuation(self, *args, **kwargs):
+                raise AssertionError("stored daily restoration must not request Kiwoom TR")
+
+        with tempfile.TemporaryDirectory() as directory:
+            for mode in ("failover", "validation", "validation_fallback"):
+                with self.subTest(mode=mode):
+                    primary = Primary()
+                    client = (FailoverKiwoomRestClient(primary, NoTR()) if mode == "failover" else
+                              ParallelValidationClient(primary, NoTR(), Path(directory) / "report.jsonl",
+                                                       fallback_on_unavailable=mode == "validation_fallback"))
+                    target = DailyHighService(client, include_nxt=True).load("005930")
+                    self.assertEqual(2249, target.high_250_price)
+                    self.assertTrue(target.collection_verified)
+                    self.assertEqual("ready", target.period_status("250"))
+                    primary.error = CentralServerUnavailable("offline")
+                    if mode == "validation":
+                        with self.assertRaises(CentralServerUnavailable):
+                            client.load_stored_daily_bars_with_coverage("005930", "KRX", 250)
+                    else:
+                        self.assertEqual(((), {}), client.load_stored_daily_bars_with_coverage("005930", "KRX", 250))
+                    if mode == "failover":
+                        primary.error = None
+                        self.assertEqual(((), {}), client.load_stored_daily_bars_with_coverage("005930", "KRX", 250))
+
     def test_keeps_latest_250_daily_bars_for_persistence(self) -> None:
         from datetime import date, timedelta
 

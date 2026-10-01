@@ -37,6 +37,30 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_after_hours_daily_restore_only_reads_missing_nas_proof(self) -> None:
+        from kiwoom_monitor.application.secondary_data_schedule import SecondaryStartPhase
+        now = datetime(2026, 10, 1, 21, 0)
+        for nas in (True, False):
+            calls = []
+            def start(codes, **kwargs):
+                calls.append(kwargs)
+                return SecondaryStartPhase.AFTER_HOURS
+            window = SimpleNamespace(
+                _ranking_execution=SimpleNamespace(priority_preparing=False),
+                _ranking_now=lambda: now, _journal_background_sync_day=now.date(),
+                _load_cached_daily_highs=lambda codes: None,
+                _load_cached_historical_highs=lambda codes: None,
+                _finalization_candidates=lambda codes: (None, ()),
+                _is_after_hours_data_pause=lambda: True,
+                _uses_nas_market_data_source=lambda: nas,
+                _daily_highs={"cached": DailyHighTargets(None, None, None),
+                              "ready": DailyHighTargets(None, None, 100,
+                                  query_basis_date=now.date().isoformat(), collection_verified=True)},
+                _secondary_data_coordinator=SimpleNamespace(start=start),
+            )
+            MainWindow._start_secondary_loading(window, ("cached", "ready", "new"))
+            self.assertEqual(("cached", "new") if nas else (), calls[0]["stored_daily_high_codes"])
+
     def test_daily_high_completion_requires_verified_scope_and_target_day(self) -> None:
         from dataclasses import replace
         from datetime import date

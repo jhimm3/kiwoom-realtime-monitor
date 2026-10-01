@@ -16,6 +16,7 @@
 | 키움 PostgreSQL writer 계측과 미완료 전수 감사 | [저장 경로 감사](KIWOOM_STORAGE_WRITE_AUDIT.md) |
 | PostgreSQL 공통 접근·관측 계층 검토와 이관 기준 | [공통 DB 경계 검토](COMMON_DB_ACCESS_OBSERVABILITY_REVIEW.md) |
 | 시스템 책임과 데이터 흐름 | [현재 아키텍처](../ARCHITECTURE_CURRENT.md) · [모듈 지도](../MODULE_MAP.md) |
+| 키움 시장 데이터 요청·저장·사용 흐름 | [시장 데이터 관계도](MARKET_DATA_FLOW.md) |
 
 ## 개발할 때 적용하는 계약
 

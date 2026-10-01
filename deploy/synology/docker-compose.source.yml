@@ -1,0 +1,14 @@
+# Optional operating source mode. The main file remains the image fallback.
+# Use with -p kiwoom-monitor and docker-compose.yml; no automatic reload.
+services:
+  server:
+    image: ${KIWOOM_SOURCE_RUNTIME_IMAGE:-kiwoom-monitor-server:2026.10.01-db-writer-candidate-fixes-v1}
+    command: ["python", "/app/source-runtime/runner.py", "launch"]
+    stop_grace_period: 60s
+    volumes:
+      - type: bind
+        source: ../../source-runtime
+        target: /app/source-runtime
+        read_only: true
+        bind:
+          create_host_path: false

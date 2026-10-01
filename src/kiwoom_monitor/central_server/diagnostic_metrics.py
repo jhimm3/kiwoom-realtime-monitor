@@ -141,12 +141,31 @@ def summarize_db_calls(start: float, end: float, *, mode: str = "summary",
             selected = [row for row in selected_rows if row["writer_family"] == family
                         and row["writer_kind"] == kind]
             key = f"{family}/{kind}"
+            source_rows = {
+                source: [row for row in selected
+                         if str(row.get("source") or "unattributed") == source]
+                for source in sorted({str(row.get("source") or "unattributed")
+                                      for row in selected})
+            } if access_mode == "read" else {}
             groups[key] = {
                 "writer_family": family, "writer_kind": kind,
                 "access_mode": access_mode,
                 "calls": len(selected),
                 "sources": dict(Counter(str(row.get("source") or "unattributed")
                                         for row in selected)) if access_mode == "read" else {},
+                "source_metrics": {
+                    source: {
+                        "calls": len(source_selected),
+                        **{field: describe([
+                            float(row[field]) for row in source_selected
+                            if row[field] is not None
+                        ]) for field in (
+                            "connection_acquire_ms", "execute_ms", "commit_ms",
+                            "rollback_ms", "close_ms", "total_ms",
+                        )},
+                    }
+                    for source, source_selected in source_rows.items()
+                },
                 "transactions": sum(int(row["transactions"]) for row in selected
                                     if row["transactions"] is not None),
                 "transactions_unavailable_calls": sum(row["transactions"] is None

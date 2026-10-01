@@ -130,8 +130,8 @@ class PostgresAccessTests(unittest.TestCase):
                          set(sample["domain_phase_ms"]))
 
     def test_read_source_survives_thread_boundary_and_is_summarized(self) -> None:
-        async def read() -> None:
-            with db_call_source("top20.entry_minutes"):
+        async def read(source: str) -> None:
+            with db_call_source(source):
                 await asyncio.to_thread(run_read)
 
         def run_read() -> None:
@@ -145,14 +145,25 @@ class PostgresAccessTests(unittest.TestCase):
             connection.commit()
             connection.close()
 
-        asyncio.run(read())
+        asyncio.run(read("top20.entry_minutes"))
+        asyncio.run(read("api.market.coverage"))
         self.assertEqual("", DBWriterContext("read.test", "plain", "read").source)
-        self.assertEqual("top20.entry_minutes", self._calls()[0]["source"])
-        summary = summarize_db_calls(time.time() - 30, time.time() + 1)
         self.assertEqual(
-            {"top20.entry_minutes": 1},
-            summary["readers"]["read.document_collection/document:market_data_coverage_intraday"]["sources"],
+            {"top20.entry_minutes", "api.market.coverage"},
+            {call["source"] for call in self._calls()},
         )
+        summary = summarize_db_calls(time.time() - 30, time.time() + 1)
+        reader = summary["readers"][
+            "read.document_collection/document:market_data_coverage_intraday"
+        ]
+        self.assertEqual(
+            {"top20.entry_minutes": 1, "api.market.coverage": 1}, reader["sources"],
+        )
+        for source in ("top20.entry_minutes", "api.market.coverage"):
+            source_metrics = reader["source_metrics"][source]
+            self.assertEqual(1, source_metrics["calls"])
+            self.assertEqual(1, source_metrics["execute_ms"]["n"])
+            self.assertEqual(1, source_metrics["total_ms"]["n"])
 
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -597,14 +608,15 @@ class PostgresAccessTests(unittest.TestCase):
 
         self.assertEqual(["SELECT", "INSERT", "SELECT", "INSERT"],
                          [statement[0] for statement in evaluation_connection.statements])
-        self.assertEqual(["INSERT"], [statement[0] for statement in checkpoint_connection.statements])
+        self.assertEqual(["INSERT", "DELETE"],
+                         [statement[0] for statement in checkpoint_connection.statements])
         for connection in (evaluation_connection, checkpoint_connection):
             self.assertEqual((1, 0, 1), (connection.commits, connection.rollbacks, connection.closes))
         calls = self._calls()
         self.assertEqual(2, len(calls))
         self.assertEqual(2, len({call["call_id"] for call in calls}))
         self.assertEqual([("candidate.shadow_evaluation", "shadow_evaluation", 2, 4),
-                          ("candidate.shadow_checkpoint", "shadow_monitor_state", 1, 1)], [
+                          ("candidate.shadow_checkpoint", "shadow_monitor_state", 1, 2)], [
             (call["writer_family"], call["writer_kind"], call["rows_attempted"], call["sql_calls"])
             for call in calls
         ])
@@ -615,6 +627,7 @@ class PostgresAccessTests(unittest.TestCase):
                          writer["payload_bytes_estimated"])
         self.assertGreaterEqual(writer["encode_ms"]["median"], 0)
         self.assertEqual({
+            "checkpoint_storage_version": 1,
             "checkpoint_bar_frames": 2,
             "checkpoint_universe_frames": 1,
             "checkpoint_emitted_candidate_keys": 1,
