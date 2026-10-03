@@ -15,6 +15,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QToolBar
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
+from kiwoom_monitor.presentation.app_controller import AppController
 from kiwoom_monitor.presentation.main_window import MainWindow, NxtMarkerDelegate, selected_high_cycle_periods
 from kiwoom_monitor.presentation.theme_dialogs import ThemeEditDialog
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
@@ -58,8 +59,8 @@ class MainWindowTest(unittest.TestCase):
                                   query_basis_date=now.date().isoformat(), collection_verified=True)},
                 _secondary_data_coordinator=SimpleNamespace(start=start),
             )
-            MainWindow._start_secondary_loading(window, ("cached", "ready", "new"))
-            self.assertEqual(("cached", "new") if nas else (), calls[0]["stored_daily_high_codes"])
+            request = MainWindow._prepare_secondary_loading(window, ("cached", "ready", "new"))
+            self.assertEqual(("cached", "new") if nas else (), request.stored_daily_high_codes)
 
     def test_daily_high_completion_requires_verified_scope_and_target_day(self) -> None:
         from dataclasses import replace
@@ -69,7 +70,6 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings)
-            window._market_cache_writer = None
             window._daily_bar_repository = None
             window._stock_lookup = None
             window._after_close_finalization_date = date(2026, 9, 29)
@@ -113,7 +113,7 @@ class MainWindowTest(unittest.TestCase):
                 self.callback = callback
 
         class Worker:
-            def __init__(self, task):
+            def __init__(self, task, parent=None):
                 self.task = task
                 self.succeeded = Signal()
                 self.failed = Signal()
@@ -127,7 +127,7 @@ class MainWindowTest(unittest.TestCase):
         store = SimpleNamespace(all_by_name=lambda: {"005930": "반도체"})
         owner = SimpleNamespace(
             _theme_store=store, _theme_save_request=None,
-            _theme_save_completion=None, _closing=False,
+            _theme_save_completion=None, _closing=False, _app_controller=object(),
             statusBar=lambda: SimpleNamespace(showMessage=lambda message, *_: messages.append(message)),
             _refresh_theme_badges=lambda: None,
             _refresh_rankings=lambda: None,
@@ -153,22 +153,22 @@ class MainWindowTest(unittest.TestCase):
         started: list[tuple[str, ...]] = []
         execution = SimpleNamespace(priority_preparing=True)
         owner = SimpleNamespace(
-            _closing=False, _ranking_execution=execution,
-            _row_by_code={"005930": 0, "000660": 1},
+            closing=False, api_reloading=False, ranking_execution=execution,
+            ranked_codes=("005930", "000660"),
             _ranking_followup_revision=1, _started_followup_revision=-1,
-            _start_secondary_loading=lambda codes: started.append(codes),
+            start_secondary_loading=lambda codes: started.append(codes),
         )
         codes = ("005930", "000660")
-        MainWindow._start_realtime_followups(owner, codes)
+        AppController.start_realtime_followups(owner, codes)
         self.assertEqual([], started)
         execution.priority_preparing = False
-        MainWindow._start_realtime_followups(owner, ("005930",))
+        AppController.start_realtime_followups(owner, ("005930",))
         self.assertEqual([], started)
-        MainWindow._start_realtime_followups(owner, codes)
-        MainWindow._start_realtime_followups(owner, codes)
+        AppController.start_realtime_followups(owner, codes)
+        AppController.start_realtime_followups(owner, codes)
         self.assertEqual([codes], started)
         owner._ranking_followup_revision = 2
-        MainWindow._start_realtime_followups(owner, codes)
+        AppController.start_realtime_followups(owner, codes)
         self.assertEqual([codes, codes], started)
 
     def test_theme_confirmation_modal_does_not_defer_live_table_updates(self) -> None:
@@ -192,14 +192,14 @@ class MainWindowTest(unittest.TestCase):
         )
         now = datetime(2026, 9, 21, 10, 15)
         owner = SimpleNamespace(
-            _pending_price_cache={"005930": 71_000},
-            _pending_today_high_cache={"005930": 72_000},
-            _pending_market_cap_cache={"005930": 4_200_000.0},
-            _market_cache_writer=writer,
-            _ranking_now=lambda: now,
+            pending_prices={"005930": 71_000},
+            pending_highs={"005930": 72_000},
+            pending_market_caps={"005930": 4_200_000.0},
+            market_cache_writer=writer,
+            ranking_now=lambda: now,
         )
 
-        MainWindow._save_current_price_cache(owner)
+        AppController.flush_price_cache(owner)
 
         self.assertEqual(
             [(
@@ -208,9 +208,9 @@ class MainWindowTest(unittest.TestCase):
             )],
             queued,
         )
-        self.assertEqual({}, owner._pending_price_cache)
-        self.assertEqual({}, owner._pending_today_high_cache)
-        self.assertEqual({}, owner._pending_market_cap_cache)
+        self.assertEqual({}, owner.pending_prices)
+        self.assertEqual({}, owner.pending_highs)
+        self.assertEqual({}, owner.pending_market_caps)
 
     def test_api_label_prioritizes_actual_ranking_local_fallback(self) -> None:
         shown = []
@@ -273,11 +273,11 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual({}, owner._realtime_market_caps)
 
     def test_api_reload_discards_late_ranking_response(self) -> None:
-        owner = SimpleNamespace(_api_reloading=True)
+        owner = SimpleNamespace(api_reloading=True)
 
-        MainWindow._on_ranking_loaded(owner, (object(),))
+        AppController.handle_ranking_response(owner, (object(),))
 
-        self.assertTrue(owner._api_reloading)
+        self.assertTrue(owner.api_reloading)
 
     def test_ranking_timer_does_not_fire_before_the_scheduled_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -384,6 +384,7 @@ class MainWindowTest(unittest.TestCase):
             start=lambda *args: started.append(args) or True,
         )
         owner = SimpleNamespace(
+            _closing=False,
             _google_drive_sync=SimpleNamespace(configured=True, connected=True),
             _google_drive_worker_controller=controller,
             _google_drive_pending_target="",
@@ -566,16 +567,16 @@ class MainWindowTest(unittest.TestCase):
             window = MainWindow(database.settings)
             minute = datetime(2026, 9, 10, 10, 15)
             bar = MinuteOhlcv(minute, 100, 102, 99, 101, 10, 0.5)
-            window._minute_bar_repository = FailingRepository()
-            window._pending_minute_bars = {("005930", minute): bar}
-            window._pending_market_index_bars = {
+            window._app_controller.minute_bar_repository = FailingRepository()
+            window._app_controller.pending_minutes = {("005930", minute): bar}
+            window._app_controller.pending_market_minutes = {
                 ("kospi", minute): (2800.0, 2801.0, 2799.0, 2800.5, 100.0)
             }
 
-            window._flush_pending_minute_bars()
+            window._app_controller.flush_minute_cache()
 
-            self.assertEqual(bar, window._pending_minute_bars[("005930", minute)])
-            self.assertIn(("kospi", minute), window._pending_market_index_bars)
+            self.assertEqual(bar, window._app_controller.pending_minutes[("005930", minute)])
+            self.assertIn(("kospi", minute), window._app_controller.pending_market_minutes)
             window.close()
 
     def test_background_cache_failures_restore_work_without_overwriting_newer_values(self) -> None:
@@ -595,17 +596,17 @@ class MainWindowTest(unittest.TestCase):
         newer_bar = MinuteOhlcv(old_minute, 100, 103, 99, 102, 20, 1.0)
         minute_timer = Timer()
         owner = SimpleNamespace(
-            _pending_minute_bars={("005930", old_minute): newer_bar},
-            _pending_market_index_bars={},
-            _pending_price_cache={"005930": 102},
-            _pending_market_cap_cache={"005930": 2_100_000.0},
-            _pending_today_high_cache={"005930": 103},
-            _minute_bar_save_timer=minute_timer,
-            _price_cache_timer=Timer(),
-            _closing=False,
+            pending_minutes={("005930", old_minute): newer_bar},
+            pending_market_minutes={},
+            pending_prices={"005930": 102},
+            pending_market_caps={"005930": 2_100_000.0},
+            pending_highs={"005930": 103},
+            minute_cache_timer=minute_timer,
+            price_cache_timer=Timer(),
+            closing=False,
         )
 
-        MainWindow._on_minute_cache_write_failed(
+        AppController.on_minute_cache_failed(
             owner,
             {
                 ("005930", old_minute): old_bar,
@@ -616,7 +617,7 @@ class MainWindowTest(unittest.TestCase):
             {("kospi", old_minute): (2800.0, 2801.0, 2799.0, 2800.5, 100.0)},
             "temporary failure",
         )
-        MainWindow._on_price_cache_write_failed(
+        AppController.on_price_cache_failed(
             owner,
             {"005930": 101, "000660": 203},
             {"005930": 102, "000660": 204},
@@ -625,17 +626,17 @@ class MainWindowTest(unittest.TestCase):
             "temporary failure",
         )
 
-        self.assertEqual(newer_bar, owner._pending_minute_bars[("005930", old_minute)])
-        self.assertIn(("000660", new_minute), owner._pending_minute_bars)
-        self.assertIn(("kospi", old_minute), owner._pending_market_index_bars)
-        self.assertEqual({"005930": 102, "000660": 203}, owner._pending_price_cache)
-        self.assertEqual({"005930": 103, "000660": 204}, owner._pending_today_high_cache)
+        self.assertEqual(newer_bar, owner.pending_minutes[("005930", old_minute)])
+        self.assertIn(("000660", new_minute), owner.pending_minutes)
+        self.assertIn(("kospi", old_minute), owner.pending_market_minutes)
+        self.assertEqual({"005930": 102, "000660": 203}, owner.pending_prices)
+        self.assertEqual({"005930": 103, "000660": 204}, owner.pending_highs)
         self.assertEqual(
             {"005930": 2_100_000.0, "000660": 900_000.0},
-            owner._pending_market_cap_cache,
+            owner.pending_market_caps,
         )
         self.assertEqual(1, minute_timer.started)
-        self.assertEqual(1, owner._price_cache_timer.started)
+        self.assertEqual(1, owner.price_cache_timer.started)
 
     def test_failed_history_save_does_not_mark_code_as_loaded(self) -> None:
         class FailingRepository:
@@ -702,7 +703,7 @@ class MainWindowTest(unittest.TestCase):
                 def __init__(self, rank: int, code: str, name: str, change: str) -> None:
                     self.rank, self.code, self.name, self.change_rate = rank, code, name, change
 
-            window._on_ranking_loaded((
+            window._app_controller.ranking.completed.emit((
                 Stock(1, "000001", "가", "+1.00"),
                 Stock(2, "000002", "나", "+3.00"),
                 Stock(3, "000003", "다", "+5.00"),
@@ -729,7 +730,7 @@ class MainWindowTest(unittest.TestCase):
 
             trade_values = {"000001": 3.0, "000002": 2.0, "000003": 12.0, "000004": 8.0}
             window._minute_aggregator.today_trade_value_eok = lambda code, _now=None: trade_values[code]
-            window._on_ranking_loaded((
+            window._app_controller.ranking.completed.emit((
                 Stock(1, "000001", "가", "+4.00"),
                 Stock(2, "000002", "나", "+2.00"),
                 Stock(3, "000003", "다", "+3.00"),
@@ -876,7 +877,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
-            window._on_ranking_loaded(FakeRankingLoader().load_top_stocks())
+            window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
             item = window._table.item(0, 6)
             item.setData(window.TRADE_VALUE_ALERT_ROLE, True)
             window._near_high_codes.add("005930")

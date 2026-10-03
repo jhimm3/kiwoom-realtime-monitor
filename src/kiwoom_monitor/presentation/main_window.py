@@ -66,7 +66,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-
 from PySide6.QtCore import Qt
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -97,10 +96,9 @@ from kiwoom_monitor.application.high_price_policy import (
     merge_fundamentals_with_adjusted_high,
     selected_high_price,
 )
-from kiwoom_monitor.application.ranking_schedule import RankingResponseAction
+from kiwoom_monitor.application.ranking_schedule import RankingChangeSummary
 from kiwoom_monitor.application.ranking_execution import RankingExecutionCoordinator
 from kiwoom_monitor.application.realtime_subscription import (
-    RealtimeSubscriptionAction,
     RealtimeSubscriptionCoordinator,
 )
 from kiwoom_monitor.application.market_data_finalization import (
@@ -142,6 +140,10 @@ from kiwoom_monitor.domain.theme_parser import parse_themes
 from kiwoom_monitor.domain.theme_text_import import parse_theme_text
 from kiwoom_monitor.presentation.theme_colors import text_color
 from kiwoom_monitor.presentation.api_settings_dialog import ApiSettingsDialog
+from kiwoom_monitor.presentation.app_controller import (
+    AppController, AppRuntimeActions, AppShutdownActions, AppRankingActions,
+    AppSecondaryActions, SecondaryLoadingRequest,
+)
 from kiwoom_monitor.presentation.app_metadata import (
     APP_COPYRIGHT,
     APP_DISPLAY_NAME,
@@ -249,8 +251,6 @@ from kiwoom_monitor.domain.strength_level import strength_badge
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv, MinuteTradeValueAggregator
 from kiwoom_monitor.application.market_session_schedule import (
     after_hours_data_pause,
-    is_nxt_only_session,
-    next_realtime_session_boundary,
     top20_collection_available,
     top20_collection_open,
 )
@@ -270,13 +270,10 @@ from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import ImageThemeOcrWork
 from kiwoom_monitor.infrastructure.krx.stock_catalog_worker import KrxStockCatalogWorker
 from kiwoom_monitor.infrastructure.update_planner import UpdatePlan, UpdateStep, build_update_plan
 
-
 class RankingLoader(Protocol):
     def load_top_stocks(self) -> tuple[object, ...]: ...
 
-
 logger = logging.getLogger(__name__)
-
 
 def _journal_news_scope_pair(
     document: Mapping[str, object],
@@ -310,13 +307,130 @@ def _journal_news_scope_pair(
         return None
     return origin, canonical
 
-
 class MainWindow(QMainWindow):
     TRADE_VALUE_ALERT_ROLE = Qt.ItemDataRole.UserRole + 3
     TRADE_VALUE_ALERT_COLOR = QColor("#F4CCCC")
     UPPER_LIMIT_BADGE_COLOR = "#FFD6D6"
     COLUMNS = (("rank","순위"),("stock","종목"),("themes","테마"),("change_rate","등락률"),("strength_1m","1분강도"),("current_price","현재가"),("trade_value_1m","1분"),("trade_value_5m","5분"),("trade_value_60m","60분"),("trade_value_day","1일"),("strength_5m","5분강도"),("strength_60m","60분강도"),("strength_day","1일강도"),("new_high_price","신고가"),("high_distance","신고가%"),("market_cap","시가총액"))
     HEADERS = tuple(label for _, label in COLUMNS)
+
+    @property
+    def _ranking_execution(self) -> RankingExecutionCoordinator:
+        return self._app_controller.ranking_execution
+
+    @property
+    def _realtime_subscription(self) -> RealtimeSubscriptionCoordinator:
+        return self._app_controller.realtime_subscription
+
+    @property
+    def _ranking_timer(self) -> QTimer:
+        return self._app_controller.ranking_timer
+
+    @property
+    def _ranking_preparation_timer(self) -> QTimer:
+        return self._app_controller.ranking_preparation_timer
+
+    @property
+    def _realtime_session_timer(self) -> QTimer:
+        return self._app_controller.realtime_session_timer
+
+    @property
+    def _nxt_checked_codes(self) -> set[str]:
+        return self._app_controller.nxt_checked_codes
+
+    @property
+    def _nxt_enabled_codes(self) -> set[str]:
+        return self._app_controller.nxt_enabled_codes
+
+    @property
+    def _ranking_uses_local_fallback(self) -> bool:
+        return self._app_controller.ranking_uses_local_fallback
+
+    @property
+    def _secondary_data_coordinator(self) -> SecondaryDataFollowupCoordinator:
+        coordinator = self._app_controller.secondary_data
+        assert coordinator is not None
+        return coordinator
+
+    @property
+    def _google_drive_worker_controller(self) -> GoogleDriveWorkerController:
+        return self._app_controller.google_drive
+
+    @property
+    def _update_worker_controller(self) -> UpdateWorkerController:
+        return self._app_controller.updates
+
+    @property
+    def _ranking_worker_controller(self) -> RankingWorkerController:
+        return self._app_controller.ranking
+
+    @property
+    def _minute_history_worker_controller(self) -> MinuteHistoryWorkerController:
+        return self._app_controller.minute_history
+
+    @property
+    def _daily_high_worker_controller(self) -> DailyHighWorkerController:
+        return self._app_controller.daily_high
+
+    @property
+    def _fundamentals_worker_controller(self) -> FundamentalsWorkerController:
+        return self._app_controller.fundamentals
+
+    @property
+    def _historical_high_worker_controller(self) -> HistoricalHighWorkerController:
+        return self._app_controller.historical_high
+
+    @property
+    def _nxt_eligibility_worker_controller(self) -> NxtEligibilityWorkerController:
+        return self._app_controller.nxt_eligibility
+
+    @property
+    def _krx_stock_catalog_worker_controller(self) -> KrxStockCatalogWorkerController:
+        return self._app_controller.krx_catalog
+
+    @property
+    def _image_theme_ocr_worker_controller(self) -> ImageThemeOcrWorkerController:
+        return self._app_controller.image_ocr
+
+    @property
+    def _realtime_worker_controller(self) -> RealtimeWorkerController:
+        return self._app_controller.realtime
+
+    @property
+    def _top20_repair_worker_controller(self) -> Top20MarketRepairWorkerController:
+        return self._app_controller.top20_repair
+
+    @property
+    def _market_cache_writer(self) -> MarketCacheWriter | None:
+        return self._app_controller.market_cache_writer
+
+    @property
+    def _entry_snapshot_writer(self) -> EntrySnapshotWriter | None:
+        return self._app_controller.entry_snapshot_writer
+
+    @property
+    def _top20_nas_workers(self) -> set[QThread]:
+        return self._app_controller.top20_nas_workers
+
+    @property
+    def _closing(self) -> bool:
+        return self._app_controller.closing
+
+    @property
+    def _api_reloading(self) -> bool:
+        return self._app_controller.api_reloading
+
+    @property
+    def _ranking_loader(self) -> RankingLoader | None:
+        return self._app_controller.ranking_loader
+
+    @property
+    def _market_data_client(self) -> object | None:
+        return self._app_controller.market_data_client
+
+    @property
+    def _initial_ranking_waits_for_google_drive(self) -> bool:
+        return self._app_controller.initial_ranking_waits_for_google_drive
 
     @property
     def _ranking_worker(self) -> RankingWorker | None:
@@ -417,11 +531,22 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self._settings = settings
-        self._ranking_loader = ranking_loader
-        self._realtime_worker_factory = realtime_worker_factory
-        self._minute_history_worker_factory = minute_history_worker_factory
-        self._fundamentals_worker_factory = fundamentals_worker_factory
-        self._daily_high_worker_factory = daily_high_worker_factory
+        self._app_controller = AppController(
+            self, realtime_worker_factory=realtime_worker_factory,
+            minute_history_worker_factory=minute_history_worker_factory,
+            fundamentals_worker_factory=fundamentals_worker_factory,
+            daily_high_worker_factory=daily_high_worker_factory,
+            historical_high_worker_factory=historical_high_worker_factory,
+            nxt_eligibility_worker_factory=nxt_eligibility_worker_factory,
+            monitor_database_path=monitor_database_path,
+            minute_bar_repository=minute_bar_repository, stock_lookup=stock_lookup,
+            journal_database_path=journal_database_path,
+            news_database_path=news_database_path,
+            entry_investor_loader=entry_investor_loader,
+            program_trade_loader=program_trade_loader,
+            ranking_loader=ranking_loader, api_runtime_factory=api_runtime_factory,
+            market_data_client=market_data_client,
+        )
         self._fundamentals: dict[str, StockFundamentals] = {}
         self._realtime_upper_limits: dict[str, int] = {}
         self._daily_highs: dict[str, DailyHighTargets] = {}
@@ -434,9 +559,6 @@ class MainWindow(QMainWindow):
         self._historical_high_refresh_expected: set[str] = set()
         self._historical_high_refresh_received: set[str] = set()
         self._themes = themes or {}
-        self._pending_price_cache: dict[str, int] = {}
-        self._pending_market_cap_cache: dict[str, float] = {}
-        self._pending_today_high_cache: dict[str, int] = {}
         self._columns = columns
         self._stock_lookup = stock_lookup
         self._theme_store = theme_store
@@ -444,9 +566,6 @@ class MainWindow(QMainWindow):
         self._theme_save_completion: tuple[str, str] | None = None
         self._theme_confirmation_active = False
         self._google_drive_sync = google_drive_sync
-        self._api_runtime_factory = api_runtime_factory
-        self._market_data_client = market_data_client
-        self._top20_nas_workers: set[Top20NasDataWorker] = set()
         self._top20_nas_callbacks: dict[Top20NasDataWorker, tuple[Callable[[object], None], Callable[[str], None] | None]] = {}
         self._market_cap_reference_codes: set[str] = set()
         self._market_cap_reference_pending: set[str] = set()
@@ -459,12 +578,7 @@ class MainWindow(QMainWindow):
         self._news_api_settings_dialog: QDialog | None = None
         self._journal_database_path = journal_database_path
         self._monitor_database_path = monitor_database_path
-        self._market_cache_writer: MarketCacheWriter | None = None
         if monitor_database_path is not None:
-            self._market_cache_writer = MarketCacheWriter(monitor_database_path)
-            self._market_cache_writer.minute_saved.connect(self._start_top20_market_repair)
-            self._market_cache_writer.minute_failed.connect(self._on_minute_cache_write_failed)
-            self._market_cache_writer.price_failed.connect(self._on_price_cache_write_failed)
             self._market_cache_writer.fundamentals_failed.connect(
                 lambda code, message: logger.warning("%s 기초정보 캐시 저장 실패: %s", code, message)
             )
@@ -479,7 +593,7 @@ class MainWindow(QMainWindow):
             self._market_cache_writer.comparison_failed.connect(
                 lambda message: logger.warning("분봉·일봉 거래대금 비교 CSV 저장 실패: %s", message)
             )
-            self._market_cache_writer.start()
+            self._app_controller.start_market_cache_writer()
         self._candidate_dialog = (
             CandidateMonitorDialog(candidate_client, candidate_settings_client, self)
             if candidate_client is not None else None
@@ -501,14 +615,10 @@ class MainWindow(QMainWindow):
         self._journal_news_request_path = journal_database_path.with_name("journal_news_request.json") if journal_database_path else None
         self._journal_news_inbox = JsonRequestInbox(self._journal_news_request_path)
         self._journal_background_sync_day: date | None = None
-        self._entry_snapshot_writer: EntrySnapshotWriter | None = None
         self._investor_backfill_days: set[date] = set()
         if journal_database_path is not None:
-            self._entry_snapshot_writer = EntrySnapshotWriter(
-                journal_database_path, news_database_path, entry_investor_loader, program_trade_loader,
-            )
             self._entry_snapshot_writer.failed.connect(lambda message: logger.warning("%s", message))
-            self._entry_snapshot_writer.start()
+            self._app_controller.start_entry_snapshot_writer()
         # 이전 메인 세션이 남긴 매매일지를 재사용하면 새 코드가 반영되지 않고
         # 메인 종료 연동도 끊긴다. 시작할 때 정확한 PID만 정리해 이번 세션에서 새로 띄운다.
         self._stop_stale_journal_process()
@@ -516,8 +626,6 @@ class MainWindow(QMainWindow):
         self._journal_news_timer.setInterval(150)
         self._journal_news_timer.timeout.connect(self._poll_journal_news_request)
         self._journal_news_timer.start()
-        self._api_reloading = False
-        self._google_drive_worker_controller = GoogleDriveWorkerController(self)
         self._google_drive_worker_controller.completed.connect(
             self._on_google_drive_sync_completed
         )
@@ -527,7 +635,6 @@ class MainWindow(QMainWindow):
         self._google_drive_worker_controller.failed.connect(
             self._on_google_drive_sync_failed
         )
-        self._update_worker_controller = UpdateWorkerController(self)
         self._update_worker_controller.check_completed.connect(
             self._on_update_check_completed
         )
@@ -556,7 +663,6 @@ class MainWindow(QMainWindow):
         self._google_drive_first_backup_pending = False
         # Drive 수정 시각 확인/다운로드는 순위 표 표시를 막지 않는다. 시작 시에는
         # 항상 로컬 데이터로 즉시 순위를 조회하고, Drive 결과는 완료되는 즉시 반영한다.
-        self._initial_ranking_waits_for_google_drive = False
         self._google_drive_debounce = QTimer(self)
         self._google_drive_debounce.setSingleShot(True)
         self._google_drive_debounce.setInterval(1_500)
@@ -565,7 +671,6 @@ class MainWindow(QMainWindow):
         # 있다. 시놀로지 장애 시에는 설정을 바꾸지 않고 현재 경로만 로컬로
         # 표시하며, 복구되면 다시 시놀로지로 표시한다.
         self._active_api_route = ""
-        self._ranking_uses_local_fallback = False
         self._latest_market_state: dict[str, object] = {}
         self._realtime_diagnostics: dict[str, object] = {
             "abnormal_disconnects": 0, "reconnects": 0, "last_disconnect_reason": "",
@@ -576,39 +681,18 @@ class MainWindow(QMainWindow):
         self._after_close_daily_received: set[str] = set()
         self._finalization_attempts: dict[tuple[date, str], int] = {}
         self._finalization_retry_after: dict[tuple[date, str], datetime] = {}
-        self._ranking_worker_controller = RankingWorkerController(self)
-        self._ranking_worker_controller.completed.connect(self._on_ranking_loaded)
-        self._ranking_worker_controller.failed.connect(self._on_ranking_failed)
-        self._ranking_worker_controller.finished.connect(self._on_ranking_worker_finished)
         self._settings_dialog: SettingsDialog | None = None
         self._theme_manager_dialog: ThemeManagerDialog | None = None
-        self._deferred_ranking_flush_scheduled = False
         self._table_update_deferred = False
         self._table_update_flush_scheduled = False
         self._initial_ranking_size_adjusted = False
-        self._ranking_execution = RankingExecutionCoordinator(self._ranking_now)
-        self._realtime_subscription = RealtimeSubscriptionCoordinator(
-            self._ranking_now,
-            lambda: str(self._environment_selector.currentData()),
-        )
         self._rank_changed_codes: set[str] = set()
-        self._ranking_followup_revision = 0
-        self._started_followup_revision = -1
         self._selected_table_cell: tuple[int, int] | None = None
         self._selected_table_code: str | None = None
         self._syncing_row_heights = False
         self._row_height_dragging = False
         self._row_height_drag_start_y = 0
         self._row_height_drag_start_height = 0
-        self._secondary_data_coordinator = SecondaryDataFollowupCoordinator(
-            start_minute_history=lambda codes, force: self._start_minute_history_loading(codes, force=force),
-            start_daily_high=lambda codes, force: self._start_daily_high_loading(codes, force=force),
-            start_daily_high_phase=self._start_daily_high_phase,
-            start_fundamentals=self._start_fundamentals_loading,
-            start_fundamentals_phase=self._start_fundamentals_phase,
-            start_nxt_phase=self._start_nxt_phase,
-        )
-        self._closing = False
         self._row_by_code: dict[str, int] = {}
         self._ranked_stock_names: dict[str, str] = {}
         self._stock_markets: dict[str, str] = {}
@@ -624,14 +708,9 @@ class MainWindow(QMainWindow):
         self._near_high_codes: set[str] = set()
         self._near_high_levels: dict[str, str] = {}
         self._near_high_sound_last_played: dict[tuple[str, str], float] = {}
-        self._nxt_checked_codes: set[str] = set()
-        self._nxt_enabled_codes: set[str] = set()
         self._near_high_sound_players: dict[str, tuple[QMediaPlayer, QAudioOutput]] = {}
         self._minute_history_codes: set[str] = set()
         self._minute_aggregator = minute_aggregator or MinuteTradeValueAggregator()
-        self._minute_history_worker_controller = MinuteHistoryWorkerController(
-            self, minute_history_worker_factory
-        )
         self._minute_history_worker_controller.history_received.connect(
             self._on_history_received
         )
@@ -640,14 +719,6 @@ class MainWindow(QMainWindow):
         )
         self._minute_history_worker_controller.failed.connect(
             self._on_background_failure
-        )
-        self._minute_history_worker_controller.finished.connect(
-            lambda codes, forced: self._secondary_data_coordinator.minute_history_finished(
-                codes, forced=forced
-            )
-        )
-        self._daily_high_worker_controller = DailyHighWorkerController(
-            self, daily_high_worker_factory
         )
         self._daily_high_worker_controller.received.connect(
             self._on_daily_high_received
@@ -658,9 +729,6 @@ class MainWindow(QMainWindow):
         self._daily_high_worker_controller.finished.connect(
             self._on_daily_high_worker_finished
         )
-        self._fundamentals_worker_controller = FundamentalsWorkerController(
-            self, fundamentals_worker_factory
-        )
         self._fundamentals_worker_controller.received.connect(
             self._on_fundamentals_received
         )
@@ -669,9 +737,6 @@ class MainWindow(QMainWindow):
         )
         self._fundamentals_worker_controller.completed.connect(
             self._on_fundamentals_completed
-        )
-        self._historical_high_worker_controller = HistoricalHighWorkerController(
-            self, historical_high_worker_factory
         )
         self._historical_high_worker_controller.received.connect(
             self._on_historical_high_received
@@ -682,26 +747,12 @@ class MainWindow(QMainWindow):
         self._historical_high_worker_controller.finished.connect(
             self._on_historical_high_worker_finished
         )
-        self._nxt_eligibility_worker_controller = NxtEligibilityWorkerController(
-            self, nxt_eligibility_worker_factory
-        )
         self._nxt_eligibility_worker_controller.received.connect(
             self._on_nxt_eligibility_received
         )
         self._nxt_eligibility_worker_controller.failed.connect(
             self._on_background_failure
         )
-        self._nxt_eligibility_worker_controller.finished.connect(
-            self._start_daily_krx_catalog_sync
-        )
-        self._nxt_eligibility_worker_controller.finished.connect(
-            lambda: self._start_realtime_subscription(tuple(self._row_by_code))
-        )
-        self._nxt_eligibility_worker_controller.finished.connect(
-            lambda: self._start_realtime_followups(tuple(self._row_by_code))
-        )
-        self._krx_stock_catalog_worker_controller = KrxStockCatalogWorkerController(self)
-        self._image_theme_ocr_worker_controller = ImageThemeOcrWorkerController(self)
         self._image_theme_ocr_worker_controller.progress.connect(
             self._on_image_theme_ocr_progress
         )
@@ -723,9 +774,6 @@ class MainWindow(QMainWindow):
         self._image_theme_ocr_worker_controller.finished.connect(
             lambda: self.statusBar().showMessage("이미지 OCR 작업 종료")
         )
-        self._realtime_worker_controller = RealtimeWorkerController(
-            self, realtime_worker_factory
-        )
         self._realtime_worker_controller.trade_received.connect(self._on_trade_tick)
         self._realtime_worker_controller.order_executed.connect(self._on_order_execution)
         self._realtime_worker_controller.market_state_received.connect(self._on_market_index_tick)
@@ -743,14 +791,10 @@ class MainWindow(QMainWindow):
         self._realtime_worker_controller.codes_added.connect(
             lambda codes: self._minute_aggregator.reset_cumulative_baselines(codes)
         )
-        self._realtime_worker_controller.subscription_ready.connect(
-            self._start_realtime_followups
-        )
         # 코호트·기준값·분 마감은 화면과 독립된 수집 객체가 소유한다.
         self._top20_collector = Top20TradeValueCollector()
         self._top20_view_date = date.today()
         self._top20_view_mode = "minute"
-        self._top20_repair_worker_controller = Top20MarketRepairWorkerController(self)
         self._top20_repair_worker_controller.completed.connect(
             self._on_top20_market_repaired
         )
@@ -772,35 +816,9 @@ class MainWindow(QMainWindow):
                 logger.warning("TOP20 거래대금 지수 저장값 로드 실패: %s", error)
         self._daily_bar_repository = daily_bar_repository
         self._minute_bar_storage_date: date | None = None
-        self._pending_minute_bars: dict[tuple[str, datetime], MinuteOhlcv] = {}
-        self._pending_market_index_bars: dict[
-            tuple[str, datetime], tuple[float, float, float, float, float | None]
-        ] = {}
-        self._minute_bar_save_timer = QTimer(self)
-        self._minute_bar_save_timer.setSingleShot(True)
-        self._minute_bar_save_timer.setInterval(1_000)
-        self._minute_bar_save_timer.timeout.connect(self._flush_pending_minute_bars)
-        self._pending_daily_trade_comparisons: dict[str, tuple[tuple[str, float], ...]] = {}
-        self._daily_trade_comparison_timer = QTimer(self)
-        self._daily_trade_comparison_timer.setSingleShot(True)
-        self._daily_trade_comparison_timer.setInterval(500)
-        self._daily_trade_comparison_timer.timeout.connect(self._flush_daily_trade_comparisons)
-        self._ranking_timer = QTimer(self)
-        self._ranking_timer.setSingleShot(True)
-        # 기본 CoarseTimer는 긴 대기에서 목표 시각보다 일찍 깨어날 수 있다.
-        # 30초 경계 직전에 실행되면 같은 경계를 다시 예약해 동일 순위를
-        # 연속 조회하고, 두 번째 "변동 없음"이 첫 변경 안내를 덮어쓴다.
-        self._ranking_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._ranking_timer.timeout.connect(self._on_ranking_timer)
         self._rank_changed_highlight_timer = QTimer(self)
         self._rank_changed_highlight_timer.setSingleShot(True)
         self._rank_changed_highlight_timer.timeout.connect(self._clear_rank_changed_highlights)
-        self._realtime_session_timer = QTimer(self)
-        self._realtime_session_timer.setSingleShot(True)
-        self._realtime_session_timer.timeout.connect(self._on_realtime_session_boundary)
-        self._ranking_preparation_timer = QTimer(self)
-        self._ranking_preparation_timer.setSingleShot(True)
-        self._ranking_preparation_timer.timeout.connect(self._prepare_ranking_refresh)
         self._clock_label = QLabel()
         self.statusBar().addPermanentWidget(self._clock_label)
         self._clock_timer = QTimer(self)
@@ -995,20 +1013,70 @@ class MainWindow(QMainWindow):
         self._theme_trade_summary_timer.setSingleShot(True)
         self._theme_trade_summary_timer.setInterval(200)
         self._theme_trade_summary_timer.timeout.connect(self._refresh_theme_trade_summary)
-        self._price_cache_timer = QTimer(self)
-        self._price_cache_timer.setSingleShot(True)
-        self._price_cache_timer.setInterval(1_000)
-        self._price_cache_timer.timeout.connect(self._save_current_price_cache)
         self.setCentralWidget(content)
         self._apply_table_visuals()
         message = "키움 REST 순위를 자동으로 조회합니다." if ranking_loader else "상단 API 설정에서 키를 입력해 연결할 수 있습니다."
         self.statusBar().showMessage(message)
+        self._app_controller.minute_cache_saved.connect(self._start_top20_market_repair)
+        self._app_controller.shutdown_progress.connect(self.statusBar().showMessage)
+        self._app_controller.shutdown_ready.connect(self.close)
+        self._app_controller.configure_shutdown(AppShutdownActions(
+            timers=(
+                self._top20_trade_value_window._geometry_save_timer,
+                self._window_geometry_save_timer, self._ranking_timer,
+                self._rank_changed_highlight_timer, self._realtime_session_timer,
+                self._ranking_preparation_timer, self._clock_timer,
+                self._theme_trade_summary_timer, self._top20_index_timer,
+                self._google_drive_debounce,
+                self._journal_news_timer, self._investment_notice_timer,
+                self._investment_notice_restore_timer,
+            ),
+            tick_timer=lambda: getattr(self, "_trade_tick_flush_timer", None),
+            save_view_state=self._save_shutdown_view_state,
+            stop_visual_work=self._stop_shutdown_visual_work,
+            start_exit_backup_if_needed=self._start_shutdown_backup,
+            flush_partial_top20=self._flush_partial_top20,
+            stop_auxiliaries=self._stop_shutdown_auxiliaries,
+        ))
+        self._app_controller.configure_ranking(AppRankingActions(
+            query_type=lambda: self._settings.get("rank_query_type"),
+            environment=lambda: str(self._environment_selector.currentData()),
+            has_blocking_modal=self._has_blocking_modal,
+            apply_ranking=self._apply_ranking_view,
+            realtime_codes=self._top20_realtime_codes,
+            uses_nas_source=self._uses_nas_market_data_source,
+            start_nxt_eligibility=self._start_nxt_eligibility_loading,
+            start_minute_history=self._start_minute_history_loading,
+        ), AppSecondaryActions(
+            prepare=self._prepare_secondary_loading,
+            phase_started=self._on_secondary_phase_started,
+            start_minute_history=lambda codes, force: self._start_minute_history_loading(codes, force=force),
+            start_daily_high=lambda codes, force: self._start_daily_high_loading(codes, force=force),
+            start_fundamentals=self._start_fundamentals_loading,
+            start_nxt_eligibility=self._start_nxt_eligibility_loading,
+            start_catalog=self._start_daily_krx_catalog_sync,
+        ))
+        self._app_controller.configure_runtime(AppRuntimeActions(apply_runtime=self._apply_api_runtime_view))
+        self._app_controller.ranking_started.connect(self._on_ranking_started)
+        self._app_controller.ranking_finished.connect(self._on_ranking_worker_finished)
+        self._app_controller.ranking_failed.connect(self._on_ranking_failed)
+        self._app_controller.ranking_waiting.connect(self._on_ranking_waiting)
+        self._app_controller.ranking_deferred.connect(self._set_connected_api_status)
+        self._app_controller.nxt_preparing.connect(self._on_nxt_preparing)
+        self._app_controller.realtime_status.connect(self.statusBar().showMessage)
+        self._app_controller.background_failed.connect(self._on_background_failure)
+        self._app_controller.realtime_starting.connect(self._on_realtime_starting)
+        self._app_controller.ranking_requested.connect(self._refresh_rankings)
+        self._app_controller.api_reload_started.connect(self._on_api_reload_started)
+        self._app_controller.api_reload_status.connect(self.statusBar().showMessage)
+        self._app_controller.api_reload_failed.connect(self._on_api_reload_failed)
+        self._app_controller.api_reload_completed.connect(self._on_api_reload_completed)
         if ranking_loader is not None:
             if initial_google_drive_download:
-                self._start_initial_ranking()
+                self._app_controller.start_initial_ranking()
                 QTimer.singleShot(0, lambda: self._start_google_drive_sync("metadata"))
             else:
-                self._start_initial_ranking()
+                self._app_controller.start_initial_ranking()
                 QTimer.singleShot(0, self._resume_pending_google_drive_upload)
         else:
             QTimer.singleShot(0, self._open_api_settings)
@@ -1142,6 +1210,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("뉴스·DART·AI 설정을 저장했습니다.")
 
     def _check_for_updates(self, silent: bool = False) -> None:
+        if self._closing:
+            return
         if self._update_worker_controller.is_check_running:
             self.statusBar().showMessage("업데이트 정보를 확인하고 있습니다…")
             return
@@ -1198,6 +1268,8 @@ class MainWindow(QMainWindow):
             self._download_updates(plan.steps)
 
     def _download_updates(self, steps: tuple[UpdateStep, ...]) -> None:
+        if self._closing:
+            return
         if self._update_worker_controller.is_download_running:
             self.statusBar().showMessage("업데이트 파일을 이미 다운로드하고 있습니다…")
             return
@@ -1277,7 +1349,7 @@ class MainWindow(QMainWindow):
             self._ranking_loader.set_query_type(self._settings.get("rank_query_type"))
         saved_rank_query = self._settings.get("rank_query_type")
         self._rank_query_selector.setCurrentIndex(("5", "1", "2", "3", "4").index(saved_rank_query) if saved_rank_query in {"1", "2", "3", "4", "5"} else 0)
-        self._schedule_next_ranking_refresh()
+        self._app_controller.schedule_next_ranking_refresh()
         self._apply_table_visuals()
         self._update_clock_label()
         self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1")
@@ -1299,7 +1371,7 @@ class MainWindow(QMainWindow):
         if dialog.api_changed:
             if self._news_window.is_running:
                 self._news_window.send_command(action="reload_settings", activate=False)
-            self._restart_for_api_settings()
+            self._app_controller.restart_for_api_settings()
 
     def _on_themes_changed(self) -> None:
         if self._theme_store is not None:
@@ -1310,14 +1382,6 @@ class MainWindow(QMainWindow):
         self._refresh_theme_badges()
         self._refresh_rankings()
         self._schedule_google_drive_upload("both")
-
-    def _start_initial_ranking(self) -> None:
-        if self._ranking_loader is None:
-            return
-        self._initial_ranking_waits_for_google_drive = False
-        QTimer.singleShot(0, self._refresh_rankings)
-        self._schedule_next_ranking_refresh()
-        self._schedule_realtime_session_refresh()
 
     def _google_drive_status(self) -> str:
         if self._google_drive_sync is None:
@@ -1406,6 +1470,8 @@ class MainWindow(QMainWindow):
             self._start_google_drive_sync("upload")
 
     def _start_google_drive_sync(self, operation: str, interactive: bool = False, close_after: bool = False, allow_connect: bool = False, notify_on_success: bool = False) -> None:
+        if self._closing and not close_after:
+            return
         service = self._google_drive_sync
         if service is None or not service.configured:
             return
@@ -1504,7 +1570,7 @@ class MainWindow(QMainWindow):
 
     def _finish_initial_drive_check(self) -> None:
         if self._initial_ranking_waits_for_google_drive:
-            self._start_initial_ranking()
+            self._app_controller.start_initial_ranking()
 
     def _on_google_drive_sync_completed(self, result: GoogleDriveSyncResult) -> None:
         message = result.message
@@ -1534,7 +1600,7 @@ class MainWindow(QMainWindow):
             target = {"settings": "설정", "themes": "테마", "both": "설정과 테마"}.get(self._settings.get("google_drive_sync_target"), "설정과 테마")
             QMessageBox.information(self, "첫 Google Drive 백업", f"현재 컴퓨터의 {target}를 Google Drive에 업로드했습니다.")
             if self._initial_ranking_waits_for_google_drive:
-                self._start_initial_ranking()
+                self._app_controller.start_initial_ranking()
         elif show_completion:
             QMessageBox.information(self, "Google Drive 동기화 완료", message)
         if operation == "download" and result.status == "empty":
@@ -1554,7 +1620,7 @@ class MainWindow(QMainWindow):
                 self._google_drive_first_backup_pending = True
                 self._start_google_drive_sync("upload")
             elif self._initial_ranking_waits_for_google_drive:
-                self._start_initial_ranking()
+                self._app_controller.start_initial_ranking()
             return
         if self._google_drive_close_pending and operation != "upload":
             self._start_google_drive_sync("upload", close_after=True)
@@ -1581,9 +1647,9 @@ class MainWindow(QMainWindow):
         self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1")
         self._update_clock_label()
         if self._initial_ranking_waits_for_google_drive:
-            self._start_initial_ranking()
+            self._app_controller.start_initial_ranking()
         else:
-            self._schedule_next_ranking_refresh()
+            self._app_controller.schedule_next_ranking_refresh()
             self._refresh_rankings()
 
     def _on_google_drive_sync_failed(self, result: GoogleDriveSyncResult) -> None:
@@ -1606,7 +1672,7 @@ class MainWindow(QMainWindow):
             # 실패는 표시하되 메모리와 화면을 commit된 로컬 상태에 맞춘다.
             self._apply_downloaded_google_drive_data()
         if operation in {"download", "metadata"} and self._initial_ranking_waits_for_google_drive:
-            self._start_initial_ranking()
+            self._app_controller.start_initial_ranking()
 
     def _refresh_google_drive_status(self) -> None:
         if self._settings_dialog is not None:
@@ -1617,7 +1683,7 @@ class MainWindow(QMainWindow):
         self._settings.set("rank_query_type", query_type)
         if self._ranking_loader is not None and hasattr(self._ranking_loader, "set_query_type"):
             self._ranking_loader.set_query_type(query_type)
-        self._schedule_next_ranking_refresh()
+        self._app_controller.schedule_next_ranking_refresh()
 
     def _toggle_table_cell_selection(self, row: int, column: int) -> None:
         """클릭한 종목의 행 전체를 강조하고 같은 행을 다시 누르면 해제한다."""
@@ -2076,7 +2142,7 @@ class MainWindow(QMainWindow):
             task()
             return store.all_by_name()
 
-        worker = SettingsRequestWorker(persist)
+        worker = SettingsRequestWorker(persist, self._app_controller)
         self._theme_save_request = worker
         self._theme_save_completion = completion
         worker.succeeded.connect(self._main_theme_change_saved)
@@ -2139,7 +2205,7 @@ class MainWindow(QMainWindow):
             self._environment_selector.blockSignals(False)
             return
         LocalApiConfig(path).save_profiles(replace(profiles, active_environment=environment))
-        self._restart_for_api_settings()
+        self._app_controller.restart_for_api_settings()
 
     def _open_api_settings(self) -> None:
         if self._closing:
@@ -2148,99 +2214,27 @@ class MainWindow(QMainWindow):
         dialog = ApiSettingsDialog(path, self, active_route=self._active_api_route)
         if dialog.exec():
             LocalApiConfig(path).save_profiles(dialog.values)
-            self._restart_for_api_settings()
+            self._app_controller.restart_for_api_settings()
 
-    def _restart_for_api_settings(self) -> None:
-        """앱을 끄지 않고 새 API 설정으로 연결 작업을 다시 구성한다."""
-        if self._api_runtime_factory is None:
-            self.statusBar().showMessage("API 설정이 저장되었습니다. 앱을 다시 열면 적용됩니다.")
-            return
-        if self._api_reloading:
-            return
-        self._api_reloading = True
-        self._ranking_timer.stop()
-        self._ranking_preparation_timer.stop()
-        self._realtime_session_timer.stop()
-        self._ranking_execution.cancel_pending_request()
-        # 기존 API 응답이 새 설정의 화면을 다시 덮어쓰지 않도록, 작업 정리
-        # 중에는 후속 보완 조회 연결도 잠시 보류한다.
-        self._ranking_execution.begin_priority_preparation()
-        for worker in self._api_runtime_workers():
-            worker.requestInterruption()
+    def _on_api_reload_started(self) -> None:
         self._set_api_status("API: 설정 적용 중…", "#B36B00")
-        self.statusBar().showMessage("새 API 설정을 적용하는 중입니다…")
-        QTimer.singleShot(50, self._finish_api_runtime_reload)
 
-    def _api_runtime_workers(self) -> tuple[QThread, ...]:
-        return tuple(
-            worker
-            for worker in (
-                self._realtime_worker,
-                self._minute_history_worker,
-                self._fundamentals_worker,
-                self._daily_high_worker,
-                self._historical_high_worker,
-                self._nxt_eligibility_worker,
-                self._ranking_worker,
-            )
-            if worker is not None and worker.isRunning()
-        )
-
-    def _finish_api_runtime_reload(self) -> None:
-        if self._closing or not self._api_reloading:
-            return
-        if self._api_runtime_workers():
-            self.statusBar().showMessage("이전 API 작업을 정리하는 중입니다…")
-            QTimer.singleShot(100, self._finish_api_runtime_reload)
-            return
-        try:
-            runtime = self._api_runtime_factory() if self._api_runtime_factory is not None else {}
-            source_mode = str(runtime.get("source_mode", ""))
-            self._ranking_loader = runtime.get("ranking_loader")  # type: ignore[assignment]
-            self._realtime_worker_factory = runtime.get("realtime_worker_factory")  # type: ignore[assignment]
-            self._realtime_worker_controller.set_factory(self._realtime_worker_factory)
-            self._minute_history_worker_factory = runtime.get("minute_history_worker_factory")  # type: ignore[assignment]
-            self._minute_history_worker_controller.set_factory(
-                self._minute_history_worker_factory
-            )
-            self._fundamentals_worker_factory = runtime.get("fundamentals_worker_factory")  # type: ignore[assignment]
-            self._fundamentals_worker_controller.set_factory(
-                self._fundamentals_worker_factory
-            )
-            self._daily_high_worker_factory = runtime.get("daily_high_worker_factory")  # type: ignore[assignment]
-            self._daily_high_worker_controller.set_factory(
-                self._daily_high_worker_factory
-            )
-            self._historical_high_worker_controller.set_factory(
-                runtime.get("historical_high_worker_factory")  # type: ignore[arg-type]
-            )
-            self._nxt_eligibility_worker_controller.set_factory(
-                runtime.get("nxt_eligibility_worker_factory")  # type: ignore[arg-type]
-            )
-            if self._entry_snapshot_writer is not None:
-                self._entry_snapshot_writer.set_investor_loader(runtime.get("entry_investor_loader"))  # type: ignore[arg-type]
-                self._entry_snapshot_writer.set_program_loader(runtime.get("program_trade_loader"))  # type: ignore[arg-type]
-            self._active_api_route = "local" if source_mode == "local" else "central_waiting"
-            self._ranking_uses_local_fallback = False
-            self._market_data_client = runtime.get("market_data_client")
-            self._market_cap_reference_codes.clear()
-            self._market_cap_reference_pending.clear()
-            self._realtime_market_caps.clear()
-        except Exception as error:
-            self._api_reloading = False
-            self._ranking_execution.end_priority_preparation()
-            self._set_api_status("API: 오류", "#C00000")
-            QMessageBox.warning(self, "API 설정", f"새 API 설정을 적용하지 못했습니다.\n{error}")
-            return
-
-        self._realtime_subscription.reset()
+    def _apply_api_runtime_view(self, runtime: dict[str, object]) -> None:
+        source_mode = str(runtime.get("source_mode", ""))
+        self._active_api_route = "local" if source_mode == "local" else "central_waiting"
+        self._market_cap_reference_codes.clear()
+        self._market_cap_reference_pending.clear()
+        self._realtime_market_caps.clear()
         self._minute_history_codes.clear()
         self._minute_aggregator = MinuteTradeValueAggregator()
-        self._api_reloading = False
-        self._ranking_execution.end_priority_preparation()
+
+    def _on_api_reload_failed(self, message: str) -> None:
+        self._set_api_status("API: 오류", "#C00000")
+        QMessageBox.warning(self, "API 설정", f"새 API 설정을 적용하지 못했습니다.\n{message}")
+
+    def _on_api_reload_completed(self) -> None:
         self._restore_environment_selector()
         self.statusBar().showMessage("새 API 설정 적용 완료 · 순위를 다시 조회합니다.")
-        self._start_initial_ranking()
 
     def _select_theme_image(self, mode: str = "theme_column") -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "테마 이미지 선택", self._settings.get("theme_image_import_dir"), "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)")
@@ -2252,6 +2246,8 @@ class MainWindow(QMainWindow):
         self._start_image_theme_ocr(image_paths, mode, theme_header)
 
     def _start_image_theme_ocr(self, image_paths: tuple[Path, ...], mode: str = "theme_column", theme_header: str = "테마") -> None:
+        if self._closing:
+            return
         if self._image_theme_ocr_worker_controller.is_running:
             QMessageBox.information(self, "이미지 OCR", "이미지 분석이 이미 진행 중입니다.")
             return
@@ -2507,53 +2503,8 @@ class MainWindow(QMainWindow):
         self._column_controller.reset()
         self.statusBar().showMessage("컬럼 표시, 순서, 폭을 기본값으로 초기화했습니다.")
 
-    def _on_ranking_timer(self) -> None:
-        # 순위 기준 시각에는 반드시 이 요청을 먼저 시작한다. 직전 준비 단계에서
-        # 보완 조회를 멈춰 두었기 때문에 REST 연결 대기 가능성을 최소화한다.
-        now = self._ranking_now()
-        worker_running = self._ranking_worker_controller.is_running
-        if not self._ranking_execution.ranking_timer_fired(worker_running=worker_running):
-            # 기준 시각에 겹친 요청을 없애지 않는다. 기존 요청이 끝나는 즉시
-            # 한 번 더 조회해 순위 갱신 회차가 빠지는 일을 막는다.
-            logger.warning("순위 기준 시각 %s: 이전 순위 조회가 진행 중이라 완료 직후 재조회합니다.", now.strftime("%H:%M:%S"))
-            return
-        logger.info("순위 기준 시각 %s: 순위 조회를 시작합니다.", now.strftime("%H:%M:%S"))
-        self._refresh_rankings()
-
-    def _prepare_ranking_refresh(self) -> None:
-        """순위 기준 시각 직전에 저우선순위 REST 보완 요청을 양보시킨다."""
-        if self._closing:
-            return
-        self._ranking_execution.begin_priority_preparation()
-        for worker in (
-            self._minute_history_worker,
-            self._daily_high_worker,
-            self._fundamentals_worker,
-            self._nxt_eligibility_worker,
-            self._krx_stock_catalog_worker,
-        ):
-            if worker is not None and worker.isRunning():
-                worker.requestInterruption()
-
-    def _schedule_next_ranking_refresh(self) -> None:
-        if self._closing or self._ranking_loader is None:
-            return
-        query_type = self._settings.get("rank_query_type")
-        schedule = self._ranking_execution.next_schedule(query_type)
-        self._ranking_timer.start(schedule.delay_ms)
-        # 현재 진행 중인 HTTP 요청은 강제로 끊지 않는다. 다음 보완 요청만
-        # 막을 수 있도록 기준 시각 2.5초 전에 준비를 시작한다.
-        self._ranking_preparation_timer.start(schedule.preparation_delay_ms)
-        logger.info(
-            "다음 순위 조회 예약: %s + 0.25초 (기준 %s)",
-            schedule.next_time.strftime("%H:%M:%S"),
-            query_type,
-        )
-
     def _ranking_now(self) -> datetime:
-        provider = getattr(self._ranking_loader, "server_now", None)
-        value = provider() if callable(provider) else None
-        return value if isinstance(value, datetime) else datetime.now()
+        return self._app_controller.ranking_now()
 
     def _update_clock_label(self) -> None:
         self._schedule_investor_backfill_if_due()
@@ -2584,100 +2535,39 @@ class MainWindow(QMainWindow):
             writer.enqueue_investor_backfill(target, ())
 
     def _refresh_rankings(self) -> None:
-        if self._closing or self._api_reloading or self._ranking_loader is None:
-            return
-        if self._ranking_worker_controller.is_running:
-            return
+        self._app_controller.request_ranking()
+
+    def _on_ranking_started(self) -> None:
         self._refresh_button.setEnabled(False)
         self._set_api_status("API: 연결 중…", "#B36B00")
         self.statusBar().showMessage("순위와 신고가를 조회하는 중입니다…")
-        logger.info("순위 조회 작업 시작: %s", self._ranking_now().strftime("%H:%M:%S"))
-        self._ranking_worker_controller.start(self._ranking_loader)
 
     def _on_ranking_worker_finished(self) -> None:
         self._refresh_button.setEnabled(True)
-        if self._api_reloading:
-            return
-        if self._closing or not self._ranking_execution.worker_finished():
-            return
-        logger.info("밀린 순위 조회를 즉시 시작합니다.")
-        QTimer.singleShot(0, self._refresh_rankings)
 
     def _on_ranking_failed(self, message: str) -> None:
-        if self._api_reloading:
-            logger.info("API 설정 교체 중 이전 순위 오류를 폐기합니다: %s", message)
-            return
-        self._ranking_execution.end_priority_preparation()
-        logger.warning("순위 조회에 실패했습니다: %s", message)
         self._set_api_status("API: 오류", "#C00000")
         self.statusBar().showMessage("조회에 실패했습니다. 네트워크와 API 설정을 확인하세요.")
-        self._schedule_next_ranking_refresh()
 
-    def _on_ranking_loaded(self, stocks: object) -> None:
-        if self._api_reloading:
-            # 이전 연결의 늦은 응답이 중지한 순위 타이머를 다시 켜거나 새
-            # 연결의 표를 덮어쓰지 못하게 한다.
-            logger.info("API 설정 교체 중 이전 순위 응답을 폐기합니다.")
-            return
-        if not isinstance(stocks, tuple):
-            self._on_ranking_failed("순위 응답 형식이 올바르지 않습니다.")
-            return
-        previous_query_route = self._ranking_uses_local_fallback
-        self._ranking_uses_local_fallback = bool(
-            getattr(self._ranking_loader, "last_response_from_local_fallback", False)
-        )
-        if previous_query_route != self._ranking_uses_local_fallback:
-            logger.info(
-                "순위 조회 경로 변경: %s",
-                "이 PC 키움 API" if self._ranking_uses_local_fallback else "NAS",
-            )
-        expected_count = int(getattr(self._ranking_loader, "EXPECTED_STOCKS", 0))
-        outcome = self._ranking_execution.handle_response(
-            stocks,
-            expected_count=expected_count,
-            has_blocking_modal=self._has_blocking_modal(),
-            # NAS의 직전·부분 snapshot 재확인은 RankingService가 중앙 DB만
-            # 적응형 간격으로 확인한다. 여기서는 worker 완료 뒤 같은 재시도
-            # 흐름을 하나 더 만들지 않고 직접 API 응답만 UI 재시도한다.
-            allow_partial_retry=not bool(
-                getattr(self._ranking_loader, "last_response_from_storage", False)
-            ),
-        )
-        decision = outcome.decision
-        if decision.action in {RankingResponseAction.RETRY_SOON, RankingResponseAction.WAIT_NEXT}:
-            stored_response = bool(
-                getattr(self._ranking_loader, "last_response_from_storage", False)
-            )
-            if stored_response and decision.action == RankingResponseAction.WAIT_NEXT:
-                self._set_connected_api_status()
-                self.statusBar().showMessage(
-                    f"NAS 최신 순위 일부 수신 ({len(stocks)}/{expected_count}) · "
-                    "기존 목록 유지 · 다음 회차 확인"
-                )
-            else:
-                self._set_api_status("API: 재조회", "#B36B00")
-                self.statusBar().showMessage(
-                    "NAS 최신 순위 대기 중 · 기존 목록 유지"
-                    if stored_response
-                    else f"순위 응답이 {len(stocks)}/{expected_count}개입니다. 기존 목록을 유지하고 다시 조회합니다…"
-                )
-            if decision.action == RankingResponseAction.RETRY_SOON:
-                QTimer.singleShot(1_500, self._refresh_rankings)
-            else:
-                self._schedule_next_ranking_refresh()
-            return
-        # 설정·테마·입력 창을 조작하는 중에는 표 전체를 다시 만들지 않는다.
-        # 최신 결과 하나만 보관하고 창이 닫힌 뒤 반영해 입력 끊김을 막는다.
-        if decision.action == RankingResponseAction.DEFER_WHILE_MODAL:
+    def _on_ranking_waiting(self, count: int, expected: int, stored: bool, retry: bool) -> None:
+        if stored and not retry:
             self._set_connected_api_status()
-            self._schedule_next_ranking_refresh()
-            self._schedule_deferred_ranking_flush()
-            return
-        change_summary = outcome.change_summary
-        if change_summary is None:
-            self._on_ranking_failed("순위 변경 계산 결과가 없습니다.")
-            return
-        table_apply_started_at = time.monotonic()
+            self.statusBar().showMessage(f"NAS 최신 순위 일부 수신 ({count}/{expected}) · 기존 목록 유지 · 다음 회차 확인")
+        else:
+            self._set_api_status("API: 재조회", "#B36B00")
+            self.statusBar().showMessage(
+                "NAS 최신 순위 대기 중 · 기존 목록 유지" if stored
+                else f"순위 응답이 {count}/{expected}개입니다. 기존 목록을 유지하고 다시 조회합니다…"
+            )
+
+    def _on_nxt_preparing(self, count: int) -> None:
+        self.statusBar().showMessage(f"조회 완료 · {count}개 종목 · NXT 가능 종목을 확인하는 중입니다…")
+
+    def _on_realtime_starting(self) -> None:
+        self._realtime_diagnostics["worker_abnormal_disconnects"] = 0
+        self._realtime_diagnostics["worker_reconnects"] = 0
+
+    def _apply_ranking_view(self, stocks: tuple[object, ...], change_summary: RankingChangeSummary, codes: tuple[str, ...]) -> None:
         self._rank_changed_codes = set(change_summary.changed_codes)
         if self._rank_changed_codes:
             changed_names = ", ".join(
@@ -2704,8 +2594,6 @@ class MainWindow(QMainWindow):
         self._row_by_code.clear()
         self._ranked_stock_names.clear()
         self._visible_theme_frequency = visible_theme_frequency(stocks, self._themes)
-        codes = tuple(stock.code for stock in stocks)
-        self._ranking_followup_revision += 1
         self._prepare_top20_trade_value_index(codes, self._ranking_now())
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_markets"):
             self._stock_markets.update(self._stock_lookup.load_markets(self._top20_realtime_codes(codes)))
@@ -2732,7 +2620,7 @@ class MainWindow(QMainWindow):
             ranking_price = getattr(stock, "current_price", None)
             if use_ranking_price and isinstance(ranking_price, int) and ranking_price > 0:
                 self._current_prices[stock.code] = ranking_price
-                self._pending_price_cache[stock.code] = ranking_price
+                self._app_controller.queue_price_cache(stock.code, price=ranking_price)
             values = (
                 str(stock.rank),
                 stock.name,
@@ -2760,8 +2648,6 @@ class MainWindow(QMainWindow):
             if stock.code in self._nxt_enabled_codes:
                 self._table.item(row, 1).setToolTip("NXT 거래 가능")
             self._table.setCellWidget(row, 2, self._theme_badges(stock.code, stock.name))
-        if self._pending_price_cache and not self._price_cache_timer.isActive():
-            self._price_cache_timer.start()
         for stock in stocks:
             current_price = self._current_prices.get(stock.code)
             row = self._row_by_code[stock.code]
@@ -2780,44 +2666,9 @@ class MainWindow(QMainWindow):
         self._start_rank_changed_highlights()
         self.statusBar().showMessage(f"조회 완료 · {len(stocks)}개 종목 · {'순위 변동 없음' if unchanged else '순위 변동 반영'} · 실시간 체결 데이터 연결 중")
         self._schedule_theme_trade_summary()
-        # NXT 시간에는 NXT 불가 종목을 함께 ``_NX``로 등록하면 키움이
-        # WebSocket 연결 전체를 종료할 수 있다. 캐시된 가능 여부는 즉시
-        # 사용하고, 아직 확인되지 않은 종목만 먼저 ka10100으로 확인한 뒤
-        # NXT 가능 종목만 구독한다.
-        if self._is_nxt_only_session() and self._start_nxt_eligibility_loading(codes):
-            self.statusBar().showMessage(f"조회 완료 · {len(stocks)}개 종목 · NXT 가능 종목을 확인하는 중입니다…")
-        else:
-            # NAS는 앱이 켜지기 전부터 분봉을 저장한다. 실시간 구독 승인
-            # 뒤까지 기다리지 말고 중앙 저장분을 먼저 읽어 1·5·60분과
-            # 당일 거래대금이 0에서 시작하지 않게 한다.
-            if self._uses_nas_market_data_source():
-                self._start_minute_history_loading(codes)
-            self._start_realtime_subscription(self._top20_realtime_codes(codes))
-            # 정상 구독 직후에는 subscription_ready가 후속 보완을 시작한다.
-            # 연결이 아직 준비되지 않은 경우만을 위한 안전장치다.
-            QTimer.singleShot(5_000, lambda: self._start_realtime_followups(codes))
-        self._schedule_next_ranking_refresh()
-        table_apply_ms = round((time.monotonic() - table_apply_started_at) * 1000)
-        logger.info("순위 표 적용 완료: %dms · %d개", table_apply_ms, len(stocks))
+
         # 분봉·기본정보 40건 동시 보완은 모의 API 제한을 쉽게 초과하므로,
         # 안정적인 순위 조회가 확인된 뒤 사용자가 따로 실행하는 방식으로 제공한다.
-
-    def _schedule_deferred_ranking_flush(self) -> None:
-        if self._deferred_ranking_flush_scheduled:
-            return
-        self._deferred_ranking_flush_scheduled = True
-        QTimer.singleShot(150, self._flush_deferred_ranking)
-
-    def _flush_deferred_ranking(self) -> None:
-        self._deferred_ranking_flush_scheduled = False
-        if self._closing or not self._ranking_execution.has_deferred_response:
-            return
-        if self._has_blocking_modal():
-            self._schedule_deferred_ranking_flush()
-            return
-        stocks = self._ranking_execution.take_deferred_response()
-        if stocks is not None:
-            self._on_ranking_loaded(stocks)
 
     def _defer_table_update_while_modal(self) -> bool:
         """설정/입력 창을 조작하는 동안에는 메인 표 렌더링을 미룬다."""
@@ -3084,87 +2935,12 @@ class MainWindow(QMainWindow):
             self._render_trade_values(code)
         self.statusBar().showMessage(f"{label} 거래대금·{label}강도: " + (f"직전 완료 {label}" if completed else f"실시간 진행 중 {label}"))
 
-    def _start_realtime_subscription(self, codes: tuple[str, ...]) -> None:
-        worker_exists = self._realtime_worker is not None
-        worker_running = worker_exists and self._realtime_worker.isRunning()
-        decision = self._realtime_subscription.plan(
-            codes,
-            self._nxt_enabled_codes,
-            closing=self._closing,
-            worker_available=self._realtime_worker_controller.available,
-            worker_exists=worker_exists,
-            worker_running=worker_running,
-        )
-        if decision.action == RealtimeSubscriptionAction.NONE:
-            return
-        if decision.action == RealtimeSubscriptionAction.STOP:
-            self._realtime_worker_controller.stop()
-            self._realtime_subscription.commit(decision)
-            self.statusBar().showMessage("현재 시간에는 수신 가능한 실시간 체결 종목이 없습니다.")
-            return
-        if decision.action == RealtimeSubscriptionAction.UPDATE:
-            self._realtime_worker_controller.update_codes(
-                decision.active_codes,
-                decision.nxt_codes,
-            )
-            self._realtime_subscription.commit(decision)
-            self.statusBar().showMessage(f"실시간 연결 유지 · 구독 종목 변경 중 · {len(decision.active_codes)}종목")
-            return
-        if decision.stop_existing_first:
-            if not self._realtime_worker_controller.stop():
-                self._on_background_failure("이전 실시간 연결을 아직 종료하는 중입니다. 잠시 후 다시 시도합니다.")
-                return
-        self._realtime_diagnostics["worker_abnormal_disconnects"] = 0
-        self._realtime_diagnostics["worker_reconnects"] = 0
-        if not self._realtime_worker_controller.start(
-            decision.active_codes,
-            decision.nxt_codes,
-            followup_codes=codes,
-        ):
-            self._on_background_failure("실시간 연결 작업을 시작하지 못했습니다.")
-            return
-        self._realtime_subscription.commit(decision)
-
-    def _is_nxt_only_session(self) -> bool:
-        """실전 NXT 시간대인지 판단한다.
-
-        모의투자에는 NXT WebSocket이 없으므로, 그 환경에서는 기존 KRX
-        연결 흐름을 유지한다.
-        """
-        return is_nxt_only_session(str(self._environment_selector.currentData()), self._ranking_now())
-
-    def _schedule_realtime_session_refresh(self) -> None:
-        if self._closing:
-            return
-        now = self._ranking_now()
-        next_boundary = next_realtime_session_boundary(now)
-        self._realtime_session_timer.start(max(100, round((next_boundary - now).total_seconds() * 1000)))
-
-    def _on_realtime_session_boundary(self) -> None:
-        if self._closing:
-            return
-        self._start_realtime_subscription(tuple(self._row_by_code))
-        self._schedule_realtime_session_refresh()
-
-    def _start_realtime_followups(self, codes: tuple[str, ...]) -> None:
-        """실시간 순위 뒤의 저우선순위 보완 조회를 시작한다."""
-        if self._closing or self._ranking_execution.priority_preparing:
-            return
-        # 이전 구독의 늦은 승인이나 이전 회차의 fallback은 새 순위를 시작하지 않는다.
-        if not self._row_by_code or not set(self._row_by_code).issubset(codes):
-            return
-        revision = self._ranking_followup_revision
-        if self._started_followup_revision == revision:
-            return
-        self._start_secondary_loading(codes)
-        self._started_followup_revision = revision
-
     def _ensure_today_minute_bar_storage(self, now: datetime) -> None:
         """날짜가 바뀌면 메모리를 비우고, DB에서는 30일보다 오래된 분봉만 정리한다."""
         today = now.date()
         if self._minute_bar_storage_date == today:
             return
-        self._flush_pending_minute_bars()
+        self._app_controller.flush_minute_cache()
         self._minute_aggregator.discard_before(today)
         self._minute_history_codes.clear()
         if self._minute_bar_repository is not None:
@@ -3174,62 +2950,8 @@ class MainWindow(QMainWindow):
                 logger.warning("오래된 분봉 DB 정리 실패: %s", error)
         self._minute_bar_storage_date = today
 
-    def _flush_pending_minute_bars(self) -> None:
-        """실시간 체결을 1초 단위로 묶어 SQLite에 저장한다."""
-        if not self._pending_minute_bars and not self._pending_market_index_bars:
-            return
-        if self._minute_bar_repository is None:
-            return
-        pending, self._pending_minute_bars = self._pending_minute_bars, {}
-        market_pending, self._pending_market_index_bars = self._pending_market_index_bars, {}
-        if self._market_cache_writer is not None:
-            self._market_cache_writer.enqueue_minute_bars(pending, market_pending)
-            return
-        grouped: dict[str, list[MinuteOhlcv]] = {}
-        for (code, _), bar in pending.items():
-            grouped.setdefault(code, []).append(bar)
-        try:
-            self._minute_bar_repository.upsert_many(
-                {code: tuple(bars) for code, bars in grouped.items()}
-            )
-            self._minute_bar_repository.upsert_market_index_minutes(market_pending)
-            self._start_top20_market_repair()
-        except Exception as error:
-            # 저장 호출 중에는 GUI 이벤트가 처리되지 않지만, 향후 구현이
-            # 비동기로 바뀌어도 새 값이 우선하도록 현재 대기분 뒤에 병합한다.
-            self._pending_minute_bars = {**pending, **self._pending_minute_bars}
-            self._pending_market_index_bars = {
-                **market_pending, **self._pending_market_index_bars,
-            }
-            logger.warning("실시간 분봉 DB 저장 실패: %s", error)
 
-    def _on_minute_cache_write_failed(
-        self, pending: object, market_pending: object, message: str,
-    ) -> None:
-        if isinstance(pending, dict):
-            self._pending_minute_bars = {**pending, **self._pending_minute_bars}
-        if isinstance(market_pending, dict):
-            self._pending_market_index_bars = {
-                **market_pending, **self._pending_market_index_bars,
-            }
-        if not self._closing and not self._minute_bar_save_timer.isActive():
-            self._minute_bar_save_timer.start()
-        logger.warning("실시간 분봉 DB 저장 실패: %s", message)
 
-    def _flush_daily_trade_comparisons(self) -> None:
-        """이미 받은 ka10081 일봉값을 재사용해 개발 확인용 CSV를 갱신한다."""
-        pending, self._pending_daily_trade_comparisons = self._pending_daily_trade_comparisons, {}
-        if not pending or self._minute_bar_repository is None:
-            return
-        if self._market_cache_writer is not None:
-            self._market_cache_writer.enqueue_trade_comparisons(pending, self._ranking_now().date())
-            return
-        try:
-            count = self._minute_bar_repository.update_comparison_reports(pending, self._ranking_now().date())
-            if count:
-                logger.info("분봉·일봉 거래대금 비교 CSV 갱신: %s건", count)
-        except Exception as error:
-            logger.warning("분봉·일봉 거래대금 비교 CSV 저장 실패: %s", error)
 
     def _on_trade_tick(self, tick: TradeTick) -> None:
         # 서버의 별도 '구독 완료' 통지가 누락되더라도 실제 체결이 한 건
@@ -3244,9 +2966,7 @@ class MainWindow(QMainWindow):
             return
         if tick.market_cap_eok is not None and tick.market_cap_eok > 0:
             self._realtime_market_caps[tick.code] = float(tick.market_cap_eok)
-            self._pending_market_cap_cache[tick.code] = float(tick.market_cap_eok)
-            if not self._price_cache_timer.isActive():
-                self._price_cache_timer.start()
+            self._app_controller.queue_price_cache(tick.code, market_cap=float(tick.market_cap_eok))
         observed_at = self._ranking_now()
         if tick.change_rate is not None:
             self._last_change_rates[tick.code] = tick.change_rate
@@ -3262,20 +2982,16 @@ class MainWindow(QMainWindow):
                 pressure.popleft()
         if tick.current_price is not None:
             self._current_prices[tick.code] = tick.current_price
-            self._pending_price_cache[tick.code] = tick.current_price
-            if not self._price_cache_timer.isActive():
-                self._price_cache_timer.start()
+            self._app_controller.queue_price_cache(tick.code, price=tick.current_price)
             if tick.high_price and tick.high_price > 0:
                 previous_high = self._today_high_prices.get(tick.code, 0)
                 if tick.high_price > previous_high:
                     self._today_high_prices[tick.code] = tick.high_price
-                    self._pending_today_high_cache[tick.code] = tick.high_price
+                    self._app_controller.queue_price_cache(tick.code, high=tick.high_price)
             self._ensure_today_minute_bar_storage(observed_at)
             bar = self._minute_aggregator.ingest(tick, observed_at)
             if bar is not None:
-                self._pending_minute_bars[(tick.code, bar.minute)] = bar
-                if not self._minute_bar_save_timer.isActive():
-                    self._minute_bar_save_timer.start()
+                self._app_controller.queue_minute_bar(tick.code, bar)
         if not hasattr(self, "_pending_trade_ticks"):
             self._pending_trade_ticks: dict[str, TradeTick] = {}
             self._trade_tick_flush_timer = QTimer(self)
@@ -3331,7 +3047,7 @@ class MainWindow(QMainWindow):
         if update.completed is not None:
             self._save_top20_record(update.completed)
         if update.cohort_changed and self._row_by_code:
-            self._start_realtime_subscription(self._top20_realtime_codes(tuple(self._row_by_code)))
+            self._app_controller.start_realtime_subscription(self._top20_realtime_codes(tuple(self._row_by_code)))
         completed_rows = list(self._top20_collector.completed)
         if not update.collection_open:
             if self._top20_view_date == now.date() and self._top20_view_mode == "minute":
@@ -3420,11 +3136,14 @@ class MainWindow(QMainWindow):
         self, request: tuple[str, object], on_completed: Callable[[object], None],
         on_failed: Callable[[str], None] | None = None,
     ) -> None:
+        if self._closing:
+            return
         if self._market_data_client is None:
             if on_failed is not None:
                 on_failed("NAS 시장자료 연결이 없습니다.")
             return
         worker = Top20NasDataWorker(self._market_data_client, request)
+        worker.setParent(self._app_controller)
         self._top20_nas_workers.add(worker)
         self._top20_nas_callbacks[worker] = (on_completed, on_failed)
         worker.completed.connect(
@@ -3959,17 +3678,8 @@ class MainWindow(QMainWindow):
                 if 0 <= hour <= 23 and 0 <= minute <= 59:
                     now = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             minute = now.replace(second=0, microsecond=0)
-            key = (tick.market, minute); value = float(tick.index_value)
             trade_value = float(tick.cumulative_trade_value_million_won) / 100 if tick.cumulative_trade_value_million_won is not None else None
-            previous = self._pending_market_index_bars.get(key)
-            self._pending_market_index_bars[key] = (
-                previous[0] if previous else value,
-                max(previous[1], value) if previous else value,
-                min(previous[2], value) if previous else value,
-                value, trade_value,
-            )
-            if not self._minute_bar_save_timer.isActive():
-                self._minute_bar_save_timer.start()
+            self._app_controller.queue_market_index(tick.market, minute, float(tick.index_value), trade_value)
 
     def _on_realtime_diagnostics_changed(self, diagnostics: object) -> None:
         if not isinstance(diagnostics, dict):
@@ -4026,52 +3736,10 @@ class MainWindow(QMainWindow):
             self._render_high_distance(tick.code)
             self._render_trade_values(tick.code, live_only=tick.code not in self._minute_history_codes)
 
-    def _save_current_price_cache(self) -> None:
-        """체결마다 저장하지 않고 짧게 묶어 마지막 현재가만 보존한다."""
-        if (
-            not self._pending_price_cache
-            and not self._pending_today_high_cache
-            and not self._pending_market_cap_cache
-        ):
-            return
-        prices = self._pending_price_cache
-        highs = self._pending_today_high_cache
-        market_caps = self._pending_market_cap_cache
-        self._pending_price_cache = {}
-        self._pending_today_high_cache = {}
-        self._pending_market_cap_cache = {}
-        if self._market_cache_writer is not None:
-            self._market_cache_writer.enqueue_price_cache(
-                prices, highs, market_caps, self._ranking_now().date(),
-            )
-            return
-        if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_last_prices"):
-            self._stock_lookup.update_last_prices(prices)
-        if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_last_market_caps"):
-            self._stock_lookup.update_last_market_caps(market_caps)
-        if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_intraday_highs"):
-            self._stock_lookup.update_intraday_highs(highs, self._ranking_now().date())
 
-    def _on_price_cache_write_failed(
-        self, prices: object, highs: object, market_caps: object,
-        _trade_date: object, message: str,
-    ) -> None:
-        if isinstance(prices, dict):
-            self._pending_price_cache = {**prices, **self._pending_price_cache}
-        if isinstance(highs, dict):
-            self._pending_today_high_cache = {**highs, **self._pending_today_high_cache}
-        if isinstance(market_caps, dict):
-            self._pending_market_cap_cache = {
-                **market_caps, **self._pending_market_cap_cache,
-            }
-        if not self._closing and not self._price_cache_timer.isActive():
-            self._price_cache_timer.start()
-        logger.warning("현재가 캐시 저장 실패: %s", message)
 
-    def _start_secondary_loading(self, codes: tuple[str, ...]) -> None:
-        """Start non-realtime API work in the defined priority order."""
-        if self._ranking_execution.priority_preparing:
-            return
+    def _prepare_secondary_loading(self, codes: tuple[str, ...]) -> SecondaryLoadingRequest:
+        """Prepare data and storage evidence for the controller-owned followup."""
         now = self._ranking_now()
         if now.weekday() < 5 and now.time() >= clock_time(20, 5) and self._journal_background_sync_day != now.date():
             self._journal_background_sync_day = now.date()
@@ -4106,16 +3774,16 @@ class MainWindow(QMainWindow):
                 weekend_started = (now - timedelta(days=now.weekday() - 5)).date()
                 finalized = self._daily_bar_repository.refreshed_since(codes, weekend_started)
                 weekend_missing = tuple(code for code in codes if code not in finalized)
-        started_phase = self._secondary_data_coordinator.start(
-            codes,
-            finalization_codes=finalization,
-            after_hours_pause=after_hours_pause,
-            weekend_daily_high_codes=weekend_missing,
+        return SecondaryLoadingRequest(
+            codes=codes, finalization_codes=finalization, finalization_date=finalization_date,
+            after_hours_pause=after_hours_pause, weekend_daily_high_codes=weekend_missing,
             stored_daily_high_codes=stored_daily_high_codes,
         )
-        if started_phase is SecondaryStartPhase.FINALIZATION and finalization_date is not None:
-            for code in finalization:
-                key = (finalization_date, code)
+
+    def _on_secondary_phase_started(self, request: SecondaryLoadingRequest, phase: SecondaryStartPhase) -> None:
+        if phase is SecondaryStartPhase.FINALIZATION and request.finalization_date is not None:
+            for code in request.finalization_codes:
+                key = (request.finalization_date, code)
                 self._finalization_attempts[key] = self._finalization_attempts.get(key, 0) + 1
 
     def _finalization_candidates(self, codes: tuple[str, ...]) -> tuple[date | None, tuple[str, ...]]:
@@ -4144,24 +3812,6 @@ class MainWindow(QMainWindow):
 
     def _is_after_hours_data_pause(self) -> bool:
         return after_hours_data_pause(self._ranking_now())
-
-    def _start_daily_high_phase(self, codes: tuple[str, ...]) -> None:
-        if self._ranking_execution.priority_preparing:
-            return
-        if not self._start_daily_high_loading(codes):
-            self._start_fundamentals_phase(codes)
-
-    def _start_fundamentals_phase(self, codes: tuple[str, ...]) -> None:
-        if self._ranking_execution.priority_preparing:
-            return
-        if not self._start_fundamentals_loading(codes):
-            self._start_nxt_phase(codes)
-
-    def _start_nxt_phase(self, codes: tuple[str, ...]) -> None:
-        if self._ranking_execution.priority_preparing:
-            return
-        if not self._start_nxt_eligibility_loading(codes):
-            self._start_daily_krx_catalog_sync()
 
     def _start_minute_history_loading(self, codes: tuple[str, ...], *, force: bool = False) -> bool:
         if self._closing or self._ranking_execution.priority_preparing or (self._is_after_hours_data_pause() and not force) or not self._minute_history_worker_controller.available:
@@ -4200,9 +3850,7 @@ class MainWindow(QMainWindow):
             previous_high = self._today_high_prices.get(code, 0)
             if restored_high > previous_high:
                 self._today_high_prices[code] = restored_high
-                self._pending_today_high_cache[code] = restored_high
-                if not self._price_cache_timer.isActive():
-                    self._price_cache_timer.start()
+                self._app_controller.queue_price_cache(code, high=restored_high)
         stored = self._minute_bar_repository is None
         if self._minute_bar_repository is not None and self._market_cache_writer is not None:
             self._market_cache_writer.enqueue_history_bars(code, bars, now.date(), now)
@@ -4425,9 +4073,7 @@ class MainWindow(QMainWindow):
             if targets.previous_day_close_price is not None:
                 self._previous_day_close_prices[code] = targets.previous_day_close_price
             if targets.daily_trade_values_eok:
-                self._pending_daily_trade_comparisons[code] = targets.daily_trade_values_eok
-                if not self._daily_trade_comparison_timer.isActive():
-                    self._daily_trade_comparison_timer.start()
+                self._app_controller.queue_comparison(code, targets.daily_trade_values_eok)
             if self._defer_table_update_while_modal():
                 return
             self._render_new_high_price(code)
@@ -4999,117 +4645,42 @@ class MainWindow(QMainWindow):
             self._news_window.on_activation()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if not self._closing:
-            self._closing = True
-            self._top20_trade_value_window._geometry_save_timer.stop()
-            self._top20_trade_value_window._save_window_geometry()
-            partial = self._top20_collector.partial_record(
-                self._top20_trade_value, self._top20_market,
-            )
-            if partial is not None:
-                self._save_top20_record(partial)
-            self._window_geometry_save_timer.stop()
-            self._save_window_geometry()
-            self._save_columns()
-            self._ranking_timer.stop()
-            self._rank_changed_highlight_timer.stop()
-            self._realtime_session_timer.stop()
-            self._ranking_preparation_timer.stop()
-            self._clock_timer.stop()
-            self._theme_trade_summary_timer.stop()
-            self._top20_index_timer.stop()
-            self._price_cache_timer.stop()
-            self._google_drive_debounce.stop()
-            self._save_current_price_cache()
-            self._minute_bar_save_timer.stop()
-            self._flush_pending_minute_bars()
-            if self._market_cache_writer is not None:
-                if not self._market_cache_writer.stop_and_drain():
-                    logger.warning("실시간 캐시 저장 스레드가 종료 제한시간 안에 끝나지 않았습니다.")
-            self._daily_trade_comparison_timer.stop()
-            self._flush_daily_trade_comparisons()
-            if hasattr(self, "_trade_tick_flush_timer"):
-                self._trade_tick_flush_timer.stop()
-            for player, _ in self._near_high_sound_players.values():
-                player.stop()
-            if self._candidate_dialog is not None:
-                self._candidate_dialog.stop()
-            if self._research_dialog is not None:
-                self._research_dialog.stop()
-            if self._mock_automation_dialog is not None:
-                self._mock_automation_dialog.stop()
-            self._refresh_button.setEnabled(False)
-            self.statusBar().showMessage("종료 중: 실행 중인 작업을 일시 중지하고 있습니다…")
-            if self._google_drive_sync is not None and self._google_drive_sync.connected and not self._google_drive_strict_restore_staged and self._settings.get("google_drive_auto_upload_on_exit") == "1" and (self._google_drive_dirty or self._google_drive_debounce.isActive()):
-                self._start_google_drive_sync("upload", close_after=True)
-            self._request_worker_stop()
-            if not self._image_theme_ocr_worker_controller.stop_for_shutdown():
-                logger.warning("OCR 보조 스레드가 강제 종료 제한시간 안에 끝나지 않았습니다.")
-            if not self._running_workers():
-                self._news_window.stop()
-                if self._journal_command_path is not None:
-                    self._stop_current_journal_process()
-                event.accept()
-                return
-            QTimer.singleShot(100, self._finish_shutdown)
+        if self._app_controller.request_close():
+            event.accept()
+        else:
             event.ignore()
-            return
-        if self._running_workers():
-            event.ignore()
-            return
+
+    def _save_shutdown_view_state(self) -> None:
+        self._top20_trade_value_window._save_window_geometry()
+        self._save_window_geometry()
+        self._save_columns()
+
+    def _flush_partial_top20(self) -> None:
+        partial = self._top20_collector.partial_record(
+            self._top20_trade_value, self._top20_market,
+        )
+        if partial is not None:
+            self._save_top20_record(partial)
+
+    def _stop_shutdown_visual_work(self) -> None:
+        for player, _ in self._near_high_sound_players.values():
+            player.stop()
+        for dialog in (self._candidate_dialog, self._research_dialog, self._mock_automation_dialog):
+            if dialog is not None:
+                dialog.stop()
+        self._refresh_button.setEnabled(False)
+
+    def _start_shutdown_backup(self) -> None:
+        if (self._google_drive_sync is not None and self._google_drive_sync.connected
+                and not self._google_drive_strict_restore_staged
+                and self._settings.get("google_drive_auto_upload_on_exit") == "1"
+                and self._google_drive_dirty):
+            self._start_google_drive_sync("upload", close_after=True)
+
+    def _stop_shutdown_auxiliaries(self) -> None:
         self._news_window.stop()
         if self._journal_command_path is not None:
             self._stop_current_journal_process()
-        event.accept()
-
-    def _workers(self) -> tuple[QThread | None, ...]:
-        return (
-            self._entry_snapshot_writer,
-            self._realtime_worker,
-            self._minute_history_worker,
-            self._fundamentals_worker,
-            self._daily_high_worker,
-            self._historical_high_worker,
-            self._nxt_eligibility_worker,
-            self._ranking_worker,
-            self._image_theme_ocr_worker,
-            self._krx_stock_catalog_worker,
-            self._top20_repair_worker,
-            self._google_drive_worker,
-            self._update_check_worker,
-            self._update_download_worker,
-            *tuple(self._top20_nas_workers),
-        )
-
-    def _running_workers(self) -> tuple[QThread, ...]:
-        return tuple(worker for worker in self._workers() if worker is not None and worker.isRunning())
-
-    def _request_worker_stop(self) -> None:
-        for worker in self._running_workers():
-            worker.requestInterruption()
-
-    def _finish_shutdown(self) -> None:
-        running = self._running_workers()
-        if running:
-            self._request_worker_stop()
-            names = {
-                self._realtime_worker: "실시간 체결",
-                self._minute_history_worker: "분봉 보완",
-                self._fundamentals_worker: "기본정보",
-                self._daily_high_worker: "신고가",
-                self._historical_high_worker: "역사적 신고가",
-                self._nxt_eligibility_worker: "NXT 확인",
-                self._ranking_worker: "실시간 순위",
-                self._image_theme_ocr_worker: "이미지 OCR",
-                self._google_drive_worker: "Google Drive",
-                self._update_check_worker: "업데이트 확인",
-                self._update_download_worker: "업데이트 다운로드",
-            }
-            labels = [names.get(worker, "백그라운드 작업") for worker in running]
-            self.statusBar().showMessage(f"종료 중: {', '.join(labels)} 작업을 중단하는 중입니다…")
-            QTimer.singleShot(250, self._finish_shutdown)
-            return
-        self.close()
 
     def _apply_table_visuals(self, *, refresh_theme_badges: bool = True) -> None:
         if not hasattr(self, "_table"):

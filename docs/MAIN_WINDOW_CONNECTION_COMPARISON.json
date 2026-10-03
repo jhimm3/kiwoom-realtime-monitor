@@ -1,0 +1,208 @@
+{
+  "schema_version": 2,
+  "source_path": "src/kiwoom_monitor/presentation/main_window.py",
+  "compared_to": "e465371c74613928533806c39f5c1f6bf207aabe",
+  "static_baseline_main_window_connections": 116,
+  "static_current_main_window_connections": 116,
+  "baseline_connections_retained_in_main_window": 99,
+  "baseline_connections_relocated_to_app_controller": 17,
+  "relocated_connections": [
+    {
+      "baseline": "self._ranking_worker_controller.completed.connect(self._on_ranking_loaded)",
+      "current": "self.ranking.completed.connect(self.handle_ranking_response)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._ranking_worker_controller.failed.connect(self._on_ranking_failed)",
+      "current": "self.ranking.failed.connect(self.on_ranking_failed)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._ranking_worker_controller.finished.connect(self._on_ranking_worker_finished)",
+      "current": "self.ranking.finished.connect(self.on_ranking_worker_finished)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._minute_history_worker_controller.finished.connect(lambda codes, forced: self._secondary_data_coordinator.minute_history_finished(codes, forced=forced))",
+      "current": "self.minute_history.finished.connect(self._on_minute_history_finished)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._nxt_eligibility_worker_controller.finished.connect(self._start_daily_krx_catalog_sync)",
+      "current": "self.nxt_eligibility.finished.connect(self._start_catalog_after_nxt)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._nxt_eligibility_worker_controller.finished.connect(lambda: self._start_realtime_subscription(tuple(self._row_by_code)))",
+      "current": "self.nxt_eligibility.finished.connect(lambda: self.start_realtime_subscription(self.ranked_codes))",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._nxt_eligibility_worker_controller.finished.connect(lambda: self._start_realtime_followups(tuple(self._row_by_code)))",
+      "current": "self.nxt_eligibility.finished.connect(lambda: self.start_realtime_followups(self.ranked_codes))",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._realtime_worker_controller.subscription_ready.connect(self._start_realtime_followups)",
+      "current": "self.realtime.subscription_ready.connect(self.start_realtime_followups)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._ranking_timer.timeout.connect(self._on_ranking_timer)",
+      "current": "self.ranking_timer.timeout.connect(self.on_ranking_timer)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._realtime_session_timer.timeout.connect(self._on_realtime_session_boundary)",
+      "current": "self.realtime_session_timer.timeout.connect(self.on_realtime_session_boundary)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._ranking_preparation_timer.timeout.connect(self._prepare_ranking_refresh)",
+      "current": "self.ranking_preparation_timer.timeout.connect(self.prepare_ranking_refresh)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._market_cache_writer.minute_saved.connect(self._start_top20_market_repair)",
+      "current": "self._app_controller.minute_cache_saved.connect(self._start_top20_market_repair)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._market_cache_writer.minute_failed.connect(self._on_minute_cache_write_failed)",
+      "current": "self._app_controller.market_cache_writer.minute_failed.connect(self._app_controller.on_minute_cache_failed)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._market_cache_writer.price_failed.connect(self._on_price_cache_write_failed)",
+      "current": "self._app_controller.market_cache_writer.price_failed.connect(self._app_controller.on_price_cache_failed)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._minute_bar_save_timer.timeout.connect(self._flush_pending_minute_bars)",
+      "current": "self._app_controller.minute_cache_timer.timeout.connect(self._app_controller.flush_minute_cache)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._daily_trade_comparison_timer.timeout.connect(self._flush_daily_trade_comparisons)",
+      "current": "self._app_controller.comparison_timer.timeout.connect(self._app_controller.flush_comparisons)",
+      "owner": "AppController"
+    },
+    {
+      "baseline": "self._price_cache_timer.timeout.connect(self._save_current_price_cache)",
+      "current": "self._app_controller.price_cache_timer.timeout.connect(self._app_controller.flush_price_cache)",
+      "owner": "AppController"
+    }
+  ],
+  "unmatched_baseline_connections": [],
+  "new_main_window_connections_stage_a_b": [
+    [
+      "self._app_controller.shutdown_progress",
+      [
+        "self.statusBar().showMessage"
+      ]
+    ],
+    [
+      "self._app_controller.shutdown_ready",
+      [
+        "self.close"
+      ]
+    ],
+    [
+      "self._app_controller.ranking_requested",
+      [
+        "self._refresh_rankings"
+      ]
+    ],
+    [
+      "self._app_controller.api_reload_started",
+      [
+        "self._on_api_reload_started"
+      ]
+    ],
+    [
+      "self._app_controller.api_reload_status",
+      [
+        "self.statusBar().showMessage"
+      ]
+    ],
+    [
+      "self._app_controller.api_reload_failed",
+      [
+        "self._on_api_reload_failed"
+      ]
+    ],
+    [
+      "self._app_controller.api_reload_completed",
+      [
+        "self._on_api_reload_completed"
+      ]
+    ]
+  ],
+  "new_main_window_connections_stage_c": [
+    [
+      "self._app_controller.ranking_started",
+      [
+        "self._on_ranking_started"
+      ]
+    ],
+    [
+      "self._app_controller.ranking_finished",
+      [
+        "self._on_ranking_worker_finished"
+      ]
+    ],
+    [
+      "self._app_controller.ranking_failed",
+      [
+        "self._on_ranking_failed"
+      ]
+    ],
+    [
+      "self._app_controller.ranking_waiting",
+      [
+        "self._on_ranking_waiting"
+      ]
+    ],
+    [
+      "self._app_controller.ranking_deferred",
+      [
+        "self._set_connected_api_status"
+      ]
+    ],
+    [
+      "self._app_controller.nxt_preparing",
+      [
+        "self._on_nxt_preparing"
+      ]
+    ],
+    [
+      "self._app_controller.realtime_status",
+      [
+        "self.statusBar().showMessage"
+      ]
+    ],
+    [
+      "self._app_controller.background_failed",
+      [
+        "self._on_background_failure"
+      ]
+    ],
+    [
+      "self._app_controller.realtime_starting",
+      [
+        "self._on_realtime_starting"
+      ]
+    ]
+  ],
+  "new_main_window_connections_total": 17,
+  "runtime_verified": false,
+  "scope_note": "Static AST inventory. All 116 baseline MainWindow connection occurrences are accounted for: 99 remain in MainWindow and 17 are explicitly relocated to AppController. Stages A-D add 17 MainWindow result/control connections, including the existing TOP20 repair effect via AppController.minute_cache_saved. This does not verify runtime delivery or installed application flows; Qt signal delivery, buffer failure recovery, shutdown persistence, ranking, NXT, and API replacement are covered separately in the offscreen test logs.",
+  "new_main_window_connections_stage_d": [
+    [
+      "self._app_controller.minute_cache_saved",
+      [
+        "self._start_top20_market_repair"
+      ]
+    ]
+  ]
+}

@@ -5,7 +5,7 @@ from __future__ import annotations
 import atexit
 from typing import Callable
 
-from PySide6.QtCore import QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 
 _running_requests: set["SettingsRequestWorker"] = set()
@@ -15,8 +15,8 @@ class SettingsRequestWorker(QThread):
     succeeded = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, task: Callable[[], object]) -> None:
-        super().__init__()
+    def __init__(self, task: Callable[[], object], parent: QObject | None = None) -> None:
+        super().__init__(parent)
         self._task = task
         self.finished.connect(self._release)
 

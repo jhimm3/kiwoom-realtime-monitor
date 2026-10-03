@@ -1,0 +1,1774 @@
+{
+  "schema_version": 1,
+  "scope": "Static AST call sites lexically inside MainWindow only. Includes UI and conditional/dynamic connections; excludes inherited/imported controller internals. Not runtime execution or delivery proof.",
+  "baseline_commit": "e465371c74613928533806c39f5c1f6bf207aabe",
+  "source_path": "src/kiwoom_monitor/presentation/main_window.py",
+  "sha256_file_bytes": "0907eea269c63dd0739d79a40500d1552e4f0793493b2853e286e4a4bc18bde5",
+  "sha256_utf8_lf": "ef53b1337ce0b7fb8b4da1869cd049579117f26b45deb11975162cce3859121d",
+  "runtime_verified": false,
+  "method_definitions": 267,
+  "connections": [
+    {
+      "line": 465,
+      "owner_method": "__init__",
+      "expression": "self._market_cache_writer.minute_saved.connect(self._start_top20_market_repair)",
+      "signal": "self._market_cache_writer.minute_saved",
+      "targets": [
+        "self._start_top20_market_repair"
+      ]
+    },
+    {
+      "line": 466,
+      "owner_method": "__init__",
+      "expression": "self._market_cache_writer.minute_failed.connect(self._on_minute_cache_write_failed)",
+      "signal": "self._market_cache_writer.minute_failed",
+      "targets": [
+        "self._on_minute_cache_write_failed"
+      ]
+    },
+    {
+      "line": 467,
+      "owner_method": "__init__",
+      "expression": "self._market_cache_writer.price_failed.connect(self._on_price_cache_write_failed)",
+      "signal": "self._market_cache_writer.price_failed",
+      "targets": [
+        "self._on_price_cache_write_failed"
+      ]
+    },
+    {
+      "line": 468,
+      "owner_method": "__init__",
+      "expression": "self._market_cache_writer.fundamentals_failed.connect(lambda code, message: logger.warning('%s 기초정보 캐시 저장 실패: %s', code, message))",
+      "signal": "self._market_cache_writer.fundamentals_failed",
+      "targets": [
+        "lambda code, message: logger.warning('%s 기초정보 캐시 저장 실패: %s', code, message)"
+      ]
+    },
+    {
+      "line": 471,
+      "owner_method": "__init__",
+      "expression": "self._market_cache_writer.history_saved.connect(self._on_history_cache_saved)",
+      "signal": "self._market_cache_writer.history_saved",
+      "targets": [
+        "self._on_history_cache_saved"
+      ]
+    },
+    {
+      "line": 472,
+      "owner_method": "__init__",
+      "expression": "self._market_cache_writer.history_failed.connect(self._on_history_cache_failed)",
+      "signal": "self._market_cache_writer.history_failed",
+      "targets": [
+        "self._on_history_cache_failed"
+      ]
+    },
+    {
+      "line": 473,
+      "owner_method": "__init__",
+      "expression": "self._market_cache_writer.daily_high_failed.connect(lambda code, message: logger.warning('일봉 캐시 저장 실패 (%s): %s', code, message))",
+      "signal": "self._market_cache_writer.daily_high_failed",
+      "targets": [
+        "lambda code, message: logger.warning('일봉 캐시 저장 실패 (%s): %s', code, message)"
+      ]
+    },
+    {
+      "line": 476,
+      "owner_method": "__init__",
+      "expression": "self._market_cache_writer.comparison_saved.connect(lambda count: logger.info('분봉·일봉 거래대금 비교 CSV 갱신: %s건', count))",
+      "signal": "self._market_cache_writer.comparison_saved",
+      "targets": [
+        "lambda count: logger.info('분봉·일봉 거래대금 비교 CSV 갱신: %s건', count)"
+      ]
+    },
+    {
+      "line": 479,
+      "owner_method": "__init__",
+      "expression": "self._market_cache_writer.comparison_failed.connect(lambda message: logger.warning('분봉·일봉 거래대금 비교 CSV 저장 실패: %s', message))",
+      "signal": "self._market_cache_writer.comparison_failed",
+      "targets": [
+        "lambda message: logger.warning('분봉·일봉 거래대금 비교 CSV 저장 실패: %s', message)"
+      ]
+    },
+    {
+      "line": 510,
+      "owner_method": "__init__",
+      "expression": "self._entry_snapshot_writer.failed.connect(lambda message: logger.warning('%s', message))",
+      "signal": "self._entry_snapshot_writer.failed",
+      "targets": [
+        "lambda message: logger.warning('%s', message)"
+      ]
+    },
+    {
+      "line": 517,
+      "owner_method": "__init__",
+      "expression": "self._journal_news_timer.timeout.connect(self._poll_journal_news_request)",
+      "signal": "self._journal_news_timer.timeout",
+      "targets": [
+        "self._poll_journal_news_request"
+      ]
+    },
+    {
+      "line": 521,
+      "owner_method": "__init__",
+      "expression": "self._google_drive_worker_controller.completed.connect(self._on_google_drive_sync_completed)",
+      "signal": "self._google_drive_worker_controller.completed",
+      "targets": [
+        "self._on_google_drive_sync_completed"
+      ]
+    },
+    {
+      "line": 524,
+      "owner_method": "__init__",
+      "expression": "self._google_drive_worker_controller.metadata_received.connect(self._on_google_drive_metadata_received)",
+      "signal": "self._google_drive_worker_controller.metadata_received",
+      "targets": [
+        "self._on_google_drive_metadata_received"
+      ]
+    },
+    {
+      "line": 527,
+      "owner_method": "__init__",
+      "expression": "self._google_drive_worker_controller.failed.connect(self._on_google_drive_sync_failed)",
+      "signal": "self._google_drive_worker_controller.failed",
+      "targets": [
+        "self._on_google_drive_sync_failed"
+      ]
+    },
+    {
+      "line": 531,
+      "owner_method": "__init__",
+      "expression": "self._update_worker_controller.check_completed.connect(self._on_update_check_completed)",
+      "signal": "self._update_worker_controller.check_completed",
+      "targets": [
+        "self._on_update_check_completed"
+      ]
+    },
+    {
+      "line": 534,
+      "owner_method": "__init__",
+      "expression": "self._update_worker_controller.check_failed.connect(self._on_update_check_failed)",
+      "signal": "self._update_worker_controller.check_failed",
+      "targets": [
+        "self._on_update_check_failed"
+      ]
+    },
+    {
+      "line": 537,
+      "owner_method": "__init__",
+      "expression": "self._update_worker_controller.download_progress.connect(self._on_update_download_progress)",
+      "signal": "self._update_worker_controller.download_progress",
+      "targets": [
+        "self._on_update_download_progress"
+      ]
+    },
+    {
+      "line": 540,
+      "owner_method": "__init__",
+      "expression": "self._update_worker_controller.download_completed.connect(self._apply_downloaded_updates)",
+      "signal": "self._update_worker_controller.download_completed",
+      "targets": [
+        "self._apply_downloaded_updates"
+      ]
+    },
+    {
+      "line": 543,
+      "owner_method": "__init__",
+      "expression": "self._update_worker_controller.download_failed.connect(self._on_update_download_failed)",
+      "signal": "self._update_worker_controller.download_failed",
+      "targets": [
+        "self._on_update_download_failed"
+      ]
+    },
+    {
+      "line": 546,
+      "owner_method": "__init__",
+      "expression": "self._update_worker_controller.download_finished.connect(self._close_update_progress)",
+      "signal": "self._update_worker_controller.download_finished",
+      "targets": [
+        "self._close_update_progress"
+      ]
+    },
+    {
+      "line": 563,
+      "owner_method": "__init__",
+      "expression": "self._google_drive_debounce.timeout.connect(lambda: self._start_google_drive_sync('upload'))",
+      "signal": "self._google_drive_debounce.timeout",
+      "targets": [
+        "lambda: self._start_google_drive_sync('upload')"
+      ]
+    },
+    {
+      "line": 580,
+      "owner_method": "__init__",
+      "expression": "self._ranking_worker_controller.completed.connect(self._on_ranking_loaded)",
+      "signal": "self._ranking_worker_controller.completed",
+      "targets": [
+        "self._on_ranking_loaded"
+      ]
+    },
+    {
+      "line": 581,
+      "owner_method": "__init__",
+      "expression": "self._ranking_worker_controller.failed.connect(self._on_ranking_failed)",
+      "signal": "self._ranking_worker_controller.failed",
+      "targets": [
+        "self._on_ranking_failed"
+      ]
+    },
+    {
+      "line": 582,
+      "owner_method": "__init__",
+      "expression": "self._ranking_worker_controller.finished.connect(self._on_ranking_worker_finished)",
+      "signal": "self._ranking_worker_controller.finished",
+      "targets": [
+        "self._on_ranking_worker_finished"
+      ]
+    },
+    {
+      "line": 635,
+      "owner_method": "__init__",
+      "expression": "self._minute_history_worker_controller.history_received.connect(self._on_history_received)",
+      "signal": "self._minute_history_worker_controller.history_received",
+      "targets": [
+        "self._on_history_received"
+      ]
+    },
+    {
+      "line": 638,
+      "owner_method": "__init__",
+      "expression": "self._minute_history_worker_controller.status_changed.connect(self.statusBar().showMessage)",
+      "signal": "self._minute_history_worker_controller.status_changed",
+      "targets": [
+        "self.statusBar().showMessage"
+      ]
+    },
+    {
+      "line": 641,
+      "owner_method": "__init__",
+      "expression": "self._minute_history_worker_controller.failed.connect(self._on_background_failure)",
+      "signal": "self._minute_history_worker_controller.failed",
+      "targets": [
+        "self._on_background_failure"
+      ]
+    },
+    {
+      "line": 644,
+      "owner_method": "__init__",
+      "expression": "self._minute_history_worker_controller.finished.connect(lambda codes, forced: self._secondary_data_coordinator.minute_history_finished(codes, forced=forced))",
+      "signal": "self._minute_history_worker_controller.finished",
+      "targets": [
+        "lambda codes, forced: self._secondary_data_coordinator.minute_history_finished(codes, forced=forced)"
+      ]
+    },
+    {
+      "line": 652,
+      "owner_method": "__init__",
+      "expression": "self._daily_high_worker_controller.received.connect(self._on_daily_high_received)",
+      "signal": "self._daily_high_worker_controller.received",
+      "targets": [
+        "self._on_daily_high_received"
+      ]
+    },
+    {
+      "line": 655,
+      "owner_method": "__init__",
+      "expression": "self._daily_high_worker_controller.failed.connect(self._on_background_failure)",
+      "signal": "self._daily_high_worker_controller.failed",
+      "targets": [
+        "self._on_background_failure"
+      ]
+    },
+    {
+      "line": 658,
+      "owner_method": "__init__",
+      "expression": "self._daily_high_worker_controller.finished.connect(self._on_daily_high_worker_finished)",
+      "signal": "self._daily_high_worker_controller.finished",
+      "targets": [
+        "self._on_daily_high_worker_finished"
+      ]
+    },
+    {
+      "line": 664,
+      "owner_method": "__init__",
+      "expression": "self._fundamentals_worker_controller.received.connect(self._on_fundamentals_received)",
+      "signal": "self._fundamentals_worker_controller.received",
+      "targets": [
+        "self._on_fundamentals_received"
+      ]
+    },
+    {
+      "line": 667,
+      "owner_method": "__init__",
+      "expression": "self._fundamentals_worker_controller.failed.connect(self._on_background_failure)",
+      "signal": "self._fundamentals_worker_controller.failed",
+      "targets": [
+        "self._on_background_failure"
+      ]
+    },
+    {
+      "line": 670,
+      "owner_method": "__init__",
+      "expression": "self._fundamentals_worker_controller.completed.connect(self._on_fundamentals_completed)",
+      "signal": "self._fundamentals_worker_controller.completed",
+      "targets": [
+        "self._on_fundamentals_completed"
+      ]
+    },
+    {
+      "line": 676,
+      "owner_method": "__init__",
+      "expression": "self._historical_high_worker_controller.received.connect(self._on_historical_high_received)",
+      "signal": "self._historical_high_worker_controller.received",
+      "targets": [
+        "self._on_historical_high_received"
+      ]
+    },
+    {
+      "line": 679,
+      "owner_method": "__init__",
+      "expression": "self._historical_high_worker_controller.failed.connect(self._on_background_failure)",
+      "signal": "self._historical_high_worker_controller.failed",
+      "targets": [
+        "self._on_background_failure"
+      ]
+    },
+    {
+      "line": 682,
+      "owner_method": "__init__",
+      "expression": "self._historical_high_worker_controller.finished.connect(self._on_historical_high_worker_finished)",
+      "signal": "self._historical_high_worker_controller.finished",
+      "targets": [
+        "self._on_historical_high_worker_finished"
+      ]
+    },
+    {
+      "line": 688,
+      "owner_method": "__init__",
+      "expression": "self._nxt_eligibility_worker_controller.received.connect(self._on_nxt_eligibility_received)",
+      "signal": "self._nxt_eligibility_worker_controller.received",
+      "targets": [
+        "self._on_nxt_eligibility_received"
+      ]
+    },
+    {
+      "line": 691,
+      "owner_method": "__init__",
+      "expression": "self._nxt_eligibility_worker_controller.failed.connect(self._on_background_failure)",
+      "signal": "self._nxt_eligibility_worker_controller.failed",
+      "targets": [
+        "self._on_background_failure"
+      ]
+    },
+    {
+      "line": 694,
+      "owner_method": "__init__",
+      "expression": "self._nxt_eligibility_worker_controller.finished.connect(self._start_daily_krx_catalog_sync)",
+      "signal": "self._nxt_eligibility_worker_controller.finished",
+      "targets": [
+        "self._start_daily_krx_catalog_sync"
+      ]
+    },
+    {
+      "line": 697,
+      "owner_method": "__init__",
+      "expression": "self._nxt_eligibility_worker_controller.finished.connect(lambda: self._start_realtime_subscription(tuple(self._row_by_code)))",
+      "signal": "self._nxt_eligibility_worker_controller.finished",
+      "targets": [
+        "lambda: self._start_realtime_subscription(tuple(self._row_by_code))"
+      ]
+    },
+    {
+      "line": 700,
+      "owner_method": "__init__",
+      "expression": "self._nxt_eligibility_worker_controller.finished.connect(lambda: self._start_realtime_followups(tuple(self._row_by_code)))",
+      "signal": "self._nxt_eligibility_worker_controller.finished",
+      "targets": [
+        "lambda: self._start_realtime_followups(tuple(self._row_by_code))"
+      ]
+    },
+    {
+      "line": 705,
+      "owner_method": "__init__",
+      "expression": "self._image_theme_ocr_worker_controller.progress.connect(self._on_image_theme_ocr_progress)",
+      "signal": "self._image_theme_ocr_worker_controller.progress",
+      "targets": [
+        "self._on_image_theme_ocr_progress"
+      ]
+    },
+    {
+      "line": 708,
+      "owner_method": "__init__",
+      "expression": "self._image_theme_ocr_worker_controller.completed.connect(lambda _rows: self._close_image_theme_ocr_progress())",
+      "signal": "self._image_theme_ocr_worker_controller.completed",
+      "targets": [
+        "lambda _rows: self._close_image_theme_ocr_progress()"
+      ]
+    },
+    {
+      "line": 711,
+      "owner_method": "__init__",
+      "expression": "self._image_theme_ocr_worker_controller.completed.connect(self._show_image_theme_rows)",
+      "signal": "self._image_theme_ocr_worker_controller.completed",
+      "targets": [
+        "self._show_image_theme_rows"
+      ]
+    },
+    {
+      "line": 714,
+      "owner_method": "__init__",
+      "expression": "self._image_theme_ocr_worker_controller.failed.connect(self._on_image_theme_ocr_failed)",
+      "signal": "self._image_theme_ocr_worker_controller.failed",
+      "targets": [
+        "self._on_image_theme_ocr_failed"
+      ]
+    },
+    {
+      "line": 717,
+      "owner_method": "__init__",
+      "expression": "self._image_theme_ocr_worker_controller.finished.connect(self._close_image_theme_ocr_progress)",
+      "signal": "self._image_theme_ocr_worker_controller.finished",
+      "targets": [
+        "self._close_image_theme_ocr_progress"
+      ]
+    },
+    {
+      "line": 720,
+      "owner_method": "__init__",
+      "expression": "self._image_theme_ocr_worker_controller.finished.connect(self._on_image_theme_ocr_finished)",
+      "signal": "self._image_theme_ocr_worker_controller.finished",
+      "targets": [
+        "self._on_image_theme_ocr_finished"
+      ]
+    },
+    {
+      "line": 723,
+      "owner_method": "__init__",
+      "expression": "self._image_theme_ocr_worker_controller.finished.connect(lambda: self.statusBar().showMessage('이미지 OCR 작업 종료'))",
+      "signal": "self._image_theme_ocr_worker_controller.finished",
+      "targets": [
+        "lambda: self.statusBar().showMessage('이미지 OCR 작업 종료')"
+      ]
+    },
+    {
+      "line": 729,
+      "owner_method": "__init__",
+      "expression": "self._realtime_worker_controller.trade_received.connect(self._on_trade_tick)",
+      "signal": "self._realtime_worker_controller.trade_received",
+      "targets": [
+        "self._on_trade_tick"
+      ]
+    },
+    {
+      "line": 730,
+      "owner_method": "__init__",
+      "expression": "self._realtime_worker_controller.order_executed.connect(self._on_order_execution)",
+      "signal": "self._realtime_worker_controller.order_executed",
+      "targets": [
+        "self._on_order_execution"
+      ]
+    },
+    {
+      "line": 731,
+      "owner_method": "__init__",
+      "expression": "self._realtime_worker_controller.market_state_received.connect(self._on_market_index_tick)",
+      "signal": "self._realtime_worker_controller.market_state_received",
+      "targets": [
+        "self._on_market_index_tick"
+      ]
+    },
+    {
+      "line": 732,
+      "owner_method": "__init__",
+      "expression": "self._realtime_worker_controller.program_trade_received.connect(self._on_program_trade_tick)",
+      "signal": "self._realtime_worker_controller.program_trade_received",
+      "targets": [
+        "self._on_program_trade_tick"
+      ]
+    },
+    {
+      "line": 733,
+      "owner_method": "__init__",
+      "expression": "self._realtime_worker_controller.stock_reference_received.connect(self._on_stock_price_reference)",
+      "signal": "self._realtime_worker_controller.stock_reference_received",
+      "targets": [
+        "self._on_stock_price_reference"
+      ]
+    },
+    {
+      "line": 736,
+      "owner_method": "__init__",
+      "expression": "self._realtime_worker_controller.diagnostics_changed.connect(self._on_realtime_diagnostics_changed)",
+      "signal": "self._realtime_worker_controller.diagnostics_changed",
+      "targets": [
+        "self._on_realtime_diagnostics_changed"
+      ]
+    },
+    {
+      "line": 737,
+      "owner_method": "__init__",
+      "expression": "self._realtime_worker_controller.realtime_gap.connect(self._on_realtime_gap)",
+      "signal": "self._realtime_worker_controller.realtime_gap",
+      "targets": [
+        "self._on_realtime_gap"
+      ]
+    },
+    {
+      "line": 738,
+      "owner_method": "__init__",
+      "expression": "self._realtime_worker_controller.status_changed.connect(self._on_realtime_status_changed)",
+      "signal": "self._realtime_worker_controller.status_changed",
+      "targets": [
+        "self._on_realtime_status_changed"
+      ]
+    },
+    {
+      "line": 739,
+      "owner_method": "__init__",
+      "expression": "self._realtime_worker_controller.connection_failed.connect(self._on_realtime_failure)",
+      "signal": "self._realtime_worker_controller.connection_failed",
+      "targets": [
+        "self._on_realtime_failure"
+      ]
+    },
+    {
+      "line": 740,
+      "owner_method": "__init__",
+      "expression": "self._realtime_worker_controller.connection_opened.connect(lambda codes: self._minute_aggregator.reset_cumulative_baselines(codes))",
+      "signal": "self._realtime_worker_controller.connection_opened",
+      "targets": [
+        "lambda codes: self._minute_aggregator.reset_cumulative_baselines(codes)"
+      ]
+    },
+    {
+      "line": 743,
+      "owner_method": "__init__",
+      "expression": "self._realtime_worker_controller.codes_added.connect(lambda codes: self._minute_aggregator.reset_cumulative_baselines(codes))",
+      "signal": "self._realtime_worker_controller.codes_added",
+      "targets": [
+        "lambda codes: self._minute_aggregator.reset_cumulative_baselines(codes)"
+      ]
+    },
+    {
+      "line": 746,
+      "owner_method": "__init__",
+      "expression": "self._realtime_worker_controller.subscription_ready.connect(self._start_realtime_followups)",
+      "signal": "self._realtime_worker_controller.subscription_ready",
+      "targets": [
+        "self._start_realtime_followups"
+      ]
+    },
+    {
+      "line": 754,
+      "owner_method": "__init__",
+      "expression": "self._top20_repair_worker_controller.completed.connect(self._on_top20_market_repaired)",
+      "signal": "self._top20_repair_worker_controller.completed",
+      "targets": [
+        "self._on_top20_market_repaired"
+      ]
+    },
+    {
+      "line": 757,
+      "owner_method": "__init__",
+      "expression": "self._top20_repair_worker_controller.failed.connect(lambda message: logger.warning('TOP20 시장 구분 재확인 실패: %s', message))",
+      "signal": "self._top20_repair_worker_controller.failed",
+      "targets": [
+        "lambda message: logger.warning('TOP20 시장 구분 재확인 실패: %s', message)"
+      ]
+    },
+    {
+      "line": 782,
+      "owner_method": "__init__",
+      "expression": "self._minute_bar_save_timer.timeout.connect(self._flush_pending_minute_bars)",
+      "signal": "self._minute_bar_save_timer.timeout",
+      "targets": [
+        "self._flush_pending_minute_bars"
+      ]
+    },
+    {
+      "line": 787,
+      "owner_method": "__init__",
+      "expression": "self._daily_trade_comparison_timer.timeout.connect(self._flush_daily_trade_comparisons)",
+      "signal": "self._daily_trade_comparison_timer.timeout",
+      "targets": [
+        "self._flush_daily_trade_comparisons"
+      ]
+    },
+    {
+      "line": 794,
+      "owner_method": "__init__",
+      "expression": "self._ranking_timer.timeout.connect(self._on_ranking_timer)",
+      "signal": "self._ranking_timer.timeout",
+      "targets": [
+        "self._on_ranking_timer"
+      ]
+    },
+    {
+      "line": 797,
+      "owner_method": "__init__",
+      "expression": "self._rank_changed_highlight_timer.timeout.connect(self._clear_rank_changed_highlights)",
+      "signal": "self._rank_changed_highlight_timer.timeout",
+      "targets": [
+        "self._clear_rank_changed_highlights"
+      ]
+    },
+    {
+      "line": 800,
+      "owner_method": "__init__",
+      "expression": "self._realtime_session_timer.timeout.connect(self._on_realtime_session_boundary)",
+      "signal": "self._realtime_session_timer.timeout",
+      "targets": [
+        "self._on_realtime_session_boundary"
+      ]
+    },
+    {
+      "line": 803,
+      "owner_method": "__init__",
+      "expression": "self._ranking_preparation_timer.timeout.connect(self._prepare_ranking_refresh)",
+      "signal": "self._ranking_preparation_timer.timeout",
+      "targets": [
+        "self._prepare_ranking_refresh"
+      ]
+    },
+    {
+      "line": 807,
+      "owner_method": "__init__",
+      "expression": "self._clock_timer.timeout.connect(self._update_clock_label)",
+      "signal": "self._clock_timer.timeout",
+      "targets": [
+        "self._update_clock_label"
+      ]
+    },
+    {
+      "line": 815,
+      "owner_method": "__init__",
+      "expression": "self._investment_notice_timer.timeout.connect(self._show_investment_notice)",
+      "signal": "self._investment_notice_timer.timeout",
+      "targets": [
+        "self._show_investment_notice"
+      ]
+    },
+    {
+      "line": 820,
+      "owner_method": "__init__",
+      "expression": "self._investment_notice_restore_timer.timeout.connect(self._restore_status_after_investment_notice)",
+      "signal": "self._investment_notice_restore_timer.timeout",
+      "targets": [
+        "self._restore_status_after_investment_notice"
+      ]
+    },
+    {
+      "line": 824,
+      "owner_method": "__init__",
+      "expression": "self._window_geometry_save_timer.timeout.connect(self._save_window_geometry)",
+      "signal": "self._window_geometry_save_timer.timeout",
+      "targets": [
+        "self._save_window_geometry"
+      ]
+    },
+    {
+      "line": 837,
+      "owner_method": "__init__",
+      "expression": "self._refresh_button.clicked.connect(self._refresh_rankings)",
+      "signal": "self._refresh_button.clicked",
+      "targets": [
+        "self._refresh_rankings"
+      ]
+    },
+    {
+      "line": 844,
+      "owner_method": "__init__",
+      "expression": "settings_button.clicked.connect(self._open_settings)",
+      "signal": "settings_button.clicked",
+      "targets": [
+        "self._open_settings"
+      ]
+    },
+    {
+      "line": 848,
+      "owner_method": "__init__",
+      "expression": "top20_index_button.clicked.connect(self._show_top20_trade_value_window)",
+      "signal": "top20_index_button.clicked",
+      "targets": [
+        "self._show_top20_trade_value_window"
+      ]
+    },
+    {
+      "line": 852,
+      "owner_method": "__init__",
+      "expression": "market_news_button.clicked.connect(self._show_market_news)",
+      "signal": "market_news_button.clicked",
+      "targets": [
+        "self._show_market_news"
+      ]
+    },
+    {
+      "line": 857,
+      "owner_method": "__init__",
+      "expression": "journal_button.clicked.connect(self._show_trading_journal)",
+      "signal": "journal_button.clicked",
+      "targets": [
+        "self._show_trading_journal"
+      ]
+    },
+    {
+      "line": 872,
+      "owner_method": "__init__",
+      "expression": "candidate_button.clicked.connect(self._show_candidate_monitor)",
+      "signal": "candidate_button.clicked",
+      "targets": [
+        "self._show_candidate_monitor"
+      ]
+    },
+    {
+      "line": 884,
+      "owner_method": "__init__",
+      "expression": "research_button.clicked.connect(self._show_research_dialog)",
+      "signal": "research_button.clicked",
+      "targets": [
+        "self._show_research_dialog"
+      ]
+    },
+    {
+      "line": 896,
+      "owner_method": "__init__",
+      "expression": "automation_button.clicked.connect(self._show_mock_automation)",
+      "signal": "automation_button.clicked",
+      "targets": [
+        "self._show_mock_automation"
+      ]
+    },
+    {
+      "line": 903,
+      "owner_method": "__init__",
+      "expression": "self._rank_query_selector.currentIndexChanged.connect(self._change_rank_query_type)",
+      "signal": "self._rank_query_selector.currentIndexChanged",
+      "targets": [
+        "self._change_rank_query_type"
+      ]
+    },
+    {
+      "line": 918,
+      "owner_method": "__init__",
+      "expression": "self._environment_selector.currentIndexChanged.connect(self._change_environment)",
+      "signal": "self._environment_selector.currentIndexChanged",
+      "targets": [
+        "self._change_environment"
+      ]
+    },
+    {
+      "line": 939,
+      "owner_method": "__init__",
+      "expression": "self._table.cellClicked.connect(self._handle_main_table_click)",
+      "signal": "self._table.cellClicked",
+      "targets": [
+        "self._handle_main_table_click"
+      ]
+    },
+    {
+      "line": 940,
+      "owner_method": "__init__",
+      "expression": "self._table.cellDoubleClicked.connect(self._handle_main_table_double_click)",
+      "signal": "self._table.cellDoubleClicked",
+      "targets": [
+        "self._handle_main_table_double_click"
+      ]
+    },
+    {
+      "line": 952,
+      "owner_method": "__init__",
+      "expression": "self._table.horizontalHeader().customContextMenuRequested.connect(self._show_column_menu)",
+      "signal": "self._table.horizontalHeader().customContextMenuRequested",
+      "targets": [
+        "self._show_column_menu"
+      ]
+    },
+    {
+      "line": 953,
+      "owner_method": "__init__",
+      "expression": "self._table.horizontalHeader().sectionMoved.connect(lambda *_: self._save_columns())",
+      "signal": "self._table.horizontalHeader().sectionMoved",
+      "targets": [
+        "lambda *_: self._save_columns()"
+      ]
+    },
+    {
+      "line": 954,
+      "owner_method": "__init__",
+      "expression": "self._table.horizontalHeader().sectionResized.connect(self._on_column_resized)",
+      "signal": "self._table.horizontalHeader().sectionResized",
+      "targets": [
+        "self._on_column_resized"
+      ]
+    },
+    {
+      "line": 955,
+      "owner_method": "__init__",
+      "expression": "self._table.horizontalHeader().sectionClicked.connect(self._toggle_table_header_mode)",
+      "signal": "self._table.horizontalHeader().sectionClicked",
+      "targets": [
+        "self._toggle_table_header_mode"
+      ]
+    },
+    {
+      "line": 976,
+      "owner_method": "__init__",
+      "expression": "self._top20_trade_value_window.dateRequested.connect(self._show_top20_trade_value_date)",
+      "signal": "self._top20_trade_value_window.dateRequested",
+      "targets": [
+        "self._show_top20_trade_value_date"
+      ]
+    },
+    {
+      "line": 977,
+      "owner_method": "__init__",
+      "expression": "self._top20_trade_value_window.modeRequested.connect(self._show_top20_trade_value_mode)",
+      "signal": "self._top20_trade_value_window.modeRequested",
+      "targets": [
+        "self._show_top20_trade_value_mode"
+      ]
+    },
+    {
+      "line": 978,
+      "owner_method": "__init__",
+      "expression": "self._top20_trade_value_window.statisticsRequested.connect(self._show_top20_trade_value_statistics)",
+      "signal": "self._top20_trade_value_window.statisticsRequested",
+      "targets": [
+        "self._show_top20_trade_value_statistics"
+      ]
+    },
+    {
+      "line": 981,
+      "owner_method": "__init__",
+      "expression": "self._top20_index_timer.timeout.connect(self._update_top20_trade_value_index)",
+      "signal": "self._top20_index_timer.timeout",
+      "targets": [
+        "self._update_top20_trade_value_index"
+      ]
+    },
+    {
+      "line": 997,
+      "owner_method": "__init__",
+      "expression": "self._theme_trade_summary_timer.timeout.connect(self._refresh_theme_trade_summary)",
+      "signal": "self._theme_trade_summary_timer.timeout",
+      "targets": [
+        "self._refresh_theme_trade_summary"
+      ]
+    },
+    {
+      "line": 1001,
+      "owner_method": "__init__",
+      "expression": "self._price_cache_timer.timeout.connect(self._save_current_price_cache)",
+      "signal": "self._price_cache_timer.timeout",
+      "targets": [
+        "self._save_current_price_cache"
+      ]
+    },
+    {
+      "line": 1093,
+      "owner_method": "_open_settings",
+      "expression": "dialog.finished.connect(lambda result, source=dialog: self._on_settings_closed(source, result))",
+      "signal": "dialog.finished",
+      "targets": [
+        "lambda result, source=dialog: self._on_settings_closed(source, result)"
+      ]
+    },
+    {
+      "line": 1129,
+      "owner_method": "_open_news_api_settings",
+      "expression": "dialog.accepted.connect(self._on_news_api_settings_saved)",
+      "signal": "dialog.accepted",
+      "targets": [
+        "self._on_news_api_settings_saved"
+      ]
+    },
+    {
+      "line": 1130,
+      "owner_method": "_open_news_api_settings",
+      "expression": "dialog.finished.connect(lambda _result, source=dialog: self._clear_news_api_settings_dialog(source))",
+      "signal": "dialog.finished",
+      "targets": [
+        "lambda _result, source=dialog: self._clear_news_api_settings_dialog(source)"
+      ]
+    },
+    {
+      "line": 1210,
+      "owner_method": "_download_updates",
+      "expression": "progress.canceled.connect(self._update_worker_controller.request_download_interruption)",
+      "signal": "progress.canceled",
+      "targets": [
+        "self._update_worker_controller.request_download_interruption"
+      ]
+    },
+    {
+      "line": 1829,
+      "owner_method": "_open_theme_manager",
+      "expression": "dialog.finished.connect(lambda _result, source=dialog: self._clear_theme_manager_dialog(source))",
+      "signal": "dialog.finished",
+      "targets": [
+        "lambda _result, source=dialog: self._clear_theme_manager_dialog(source)"
+      ]
+    },
+    {
+      "line": 2082,
+      "owner_method": "_submit_main_theme_change",
+      "expression": "worker.succeeded.connect(self._main_theme_change_saved)",
+      "signal": "worker.succeeded",
+      "targets": [
+        "self._main_theme_change_saved"
+      ]
+    },
+    {
+      "line": 2083,
+      "owner_method": "_submit_main_theme_change",
+      "expression": "worker.failed.connect(self._main_theme_change_failed)",
+      "signal": "worker.failed",
+      "targets": [
+        "self._main_theme_change_failed"
+      ]
+    },
+    {
+      "line": 2266,
+      "owner_method": "_start_image_theme_ocr",
+      "expression": "progress.canceled.connect(self._image_theme_ocr_worker_controller.request_interruption)",
+      "signal": "progress.canceled",
+      "targets": [
+        "self._image_theme_ocr_worker_controller.request_interruption"
+      ]
+    },
+    {
+      "line": 2481,
+      "owner_method": "_show_column_menu",
+      "expression": "action.toggled.connect(lambda checked, index=logical: self._set_column_visible(index, checked))",
+      "signal": "action.toggled",
+      "targets": [
+        "lambda checked, index=logical: self._set_column_visible(index, checked)"
+      ]
+    },
+    {
+      "line": 2484,
+      "owner_method": "_show_column_menu",
+      "expression": "fit.triggered.connect(self._enable_column_auto_fit)",
+      "signal": "fit.triggered",
+      "targets": [
+        "self._enable_column_auto_fit"
+      ]
+    },
+    {
+      "line": 2487,
+      "owner_method": "_show_column_menu",
+      "expression": "fit_selected.triggered.connect(lambda: (self._table.resizeColumnToContents(selected_column), self._save_columns()))",
+      "signal": "fit_selected.triggered",
+      "targets": [
+        "lambda: (self._table.resizeColumnToContents(selected_column), self._save_columns())"
+      ]
+    },
+    {
+      "line": 2489,
+      "owner_method": "_show_column_menu",
+      "expression": "reset.triggered.connect(self._reset_columns)",
+      "signal": "reset.triggered",
+      "targets": [
+        "self._reset_columns"
+      ]
+    },
+    {
+      "line": 2898,
+      "owner_method": "_theme_badges",
+      "expression": "badge.clicked.connect(lambda _, value=theme, stock_code=code: self._edit_badge_color(stock_code, value))",
+      "signal": "badge.clicked",
+      "targets": [
+        "lambda _, value=theme, stock_code=code: self._edit_badge_color(stock_code, value)"
+      ]
+    },
+    {
+      "line": 3284,
+      "owner_method": "_on_trade_tick",
+      "expression": "self._trade_tick_flush_timer.timeout.connect(self._flush_trade_tick_updates)",
+      "signal": "self._trade_tick_flush_timer.timeout",
+      "targets": [
+        "self._flush_trade_tick_updates"
+      ]
+    },
+    {
+      "line": 3430,
+      "owner_method": "_start_top20_nas_request",
+      "expression": "worker.completed.connect(lambda _request, result, source=worker: self._finish_top20_nas_request(source, result, ''))",
+      "signal": "worker.completed",
+      "targets": [
+        "lambda _request, result, source=worker: self._finish_top20_nas_request(source, result, '')"
+      ]
+    },
+    {
+      "line": 3433,
+      "owner_method": "_start_top20_nas_request",
+      "expression": "worker.failed.connect(lambda _request, message, source=worker: self._finish_top20_nas_request(source, None, message))",
+      "signal": "worker.failed",
+      "targets": [
+        "lambda _request, message, source=worker: self._finish_top20_nas_request(source, None, message)"
+      ]
+    },
+    {
+      "line": 3436,
+      "owner_method": "_start_top20_nas_request",
+      "expression": "worker.finished.connect(lambda source=worker: self._release_top20_nas_worker(source))",
+      "signal": "worker.finished",
+      "targets": [
+        "lambda source=worker: self._release_top20_nas_worker(source)"
+      ]
+    },
+    {
+      "line": 3437,
+      "owner_method": "_start_top20_nas_request",
+      "expression": "worker.finished.connect(worker.deleteLater)",
+      "signal": "worker.finished",
+      "targets": [
+        "worker.deleteLater"
+      ]
+    },
+    {
+      "line": 3694,
+      "owner_method": "_show_top20_trade_value_statistics",
+      "expression": "period.currentIndexChanged.connect(refresh_statistics)",
+      "signal": "period.currentIndexChanged",
+      "targets": [
+        "refresh_statistics"
+      ]
+    },
+    {
+      "line": 3697,
+      "owner_method": "_show_top20_trade_value_statistics",
+      "expression": "close.rejected.connect(dialog.reject)",
+      "signal": "close.rejected",
+      "targets": [
+        "dialog.reject"
+      ]
+    },
+    {
+      "line": 3697,
+      "owner_method": "_show_top20_trade_value_statistics",
+      "expression": "close.accepted.connect(dialog.accept)",
+      "signal": "close.accepted",
+      "targets": [
+        "dialog.accept"
+      ]
+    }
+  ],
+  "single_shots": [
+    {
+      "line": 983,
+      "owner_method": "__init__",
+      "expression": "QTimer.singleShot(0, self._start_top20_market_repair)"
+    },
+    {
+      "line": 1009,
+      "owner_method": "__init__",
+      "expression": "QTimer.singleShot(0, lambda: self._start_google_drive_sync('metadata'))"
+    },
+    {
+      "line": 1012,
+      "owner_method": "__init__",
+      "expression": "QTimer.singleShot(0, self._resume_pending_google_drive_upload)"
+    },
+    {
+      "line": 1014,
+      "owner_method": "__init__",
+      "expression": "QTimer.singleShot(0, self._open_api_settings)"
+    },
+    {
+      "line": 1018,
+      "owner_method": "__init__",
+      "expression": "QTimer.singleShot(1200, lambda: self._check_for_updates(silent=True))"
+    },
+    {
+      "line": 1256,
+      "owner_method": "_apply_downloaded_updates",
+      "expression": "QTimer.singleShot(300, self.close)"
+    },
+    {
+      "line": 1318,
+      "owner_method": "_start_initial_ranking",
+      "expression": "QTimer.singleShot(0, self._refresh_rankings)"
+    },
+    {
+      "line": 1570,
+      "owner_method": "_apply_downloaded_google_drive_data",
+      "expression": "QTimer.singleShot(0, self._resize_columns_proportionally)"
+    },
+    {
+      "line": 1673,
+      "owner_method": "_handle_main_table_click",
+      "expression": "QTimer.singleShot(80, lambda: self._apply_pending_news_selection(request_id, code, name))"
+    },
+    {
+      "line": 1812,
+      "owner_method": "_apply_column_settings",
+      "expression": "QTimer.singleShot(0, self._resize_columns_proportionally)"
+    },
+    {
+      "line": 2172,
+      "owner_method": "_restart_for_api_settings",
+      "expression": "QTimer.singleShot(50, self._finish_api_runtime_reload)"
+    },
+    {
+      "line": 2194,
+      "owner_method": "_finish_api_runtime_reload",
+      "expression": "QTimer.singleShot(100, self._finish_api_runtime_reload)"
+    },
+    {
+      "line": 2271,
+      "owner_method": "_start_image_theme_ocr",
+      "expression": "QTimer.singleShot(60000, self._warn_slow_image_ocr)"
+    },
+    {
+      "line": 2497,
+      "owner_method": "_set_column_visible",
+      "expression": "QTimer.singleShot(0, self._resize_columns_proportionally)"
+    },
+    {
+      "line": 2604,
+      "owner_method": "_on_ranking_worker_finished",
+      "expression": "QTimer.singleShot(0, self._refresh_rankings)"
+    },
+    {
+      "line": 2665,
+      "owner_method": "_on_ranking_loaded",
+      "expression": "QTimer.singleShot(1500, self._refresh_rankings)"
+    },
+    {
+      "line": 2798,
+      "owner_method": "_on_ranking_loaded",
+      "expression": "QTimer.singleShot(5000, lambda: self._start_realtime_followups(codes))"
+    },
+    {
+      "line": 2809,
+      "owner_method": "_schedule_deferred_ranking_flush",
+      "expression": "QTimer.singleShot(150, self._flush_deferred_ranking)"
+    },
+    {
+      "line": 2829,
+      "owner_method": "_defer_table_update_while_modal",
+      "expression": "QTimer.singleShot(150, self._flush_deferred_table_updates)"
+    },
+    {
+      "line": 5054,
+      "owner_method": "closeEvent",
+      "expression": "QTimer.singleShot(100, self._finish_shutdown)"
+    },
+    {
+      "line": 5110,
+      "owner_method": "_finish_shutdown",
+      "expression": "QTimer.singleShot(250, self._finish_shutdown)"
+    },
+    {
+      "line": 5173,
+      "owner_method": "_ensure_initial_ranking_rows_visible",
+      "expression": "QTimer.singleShot(0, lambda: self.resize(current_width, self.height()))"
+    },
+    {
+      "line": 5243,
+      "owner_method": "resizeEvent",
+      "expression": "QTimer.singleShot(0, self._resize_columns_proportionally)"
+    },
+    {
+      "line": 5257,
+      "owner_method": "showEvent",
+      "expression": "QTimer.singleShot(0, self._enable_initial_column_auto_fit)"
+    }
+  ],
+  "resource_constructors": [
+    {
+      "line": 455,
+      "owner_method": "__init__",
+      "targets": [
+        "self._news_window"
+      ],
+      "expression": "NewsWindowCoordinator(news_config_path, news_database_path, self.frameGeometry, lambda message: self.statusBar().showMessage(message), self)"
+    },
+    {
+      "line": 464,
+      "owner_method": "__init__",
+      "targets": [
+        "self._market_cache_writer"
+      ],
+      "expression": "MarketCacheWriter(monitor_database_path)"
+    },
+    {
+      "line": 507,
+      "owner_method": "__init__",
+      "targets": [
+        "self._entry_snapshot_writer"
+      ],
+      "expression": "EntrySnapshotWriter(journal_database_path, news_database_path, entry_investor_loader, program_trade_loader)"
+    },
+    {
+      "line": 515,
+      "owner_method": "__init__",
+      "targets": [
+        "self._journal_news_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 520,
+      "owner_method": "__init__",
+      "targets": [
+        "self._google_drive_worker_controller"
+      ],
+      "expression": "GoogleDriveWorkerController(self)"
+    },
+    {
+      "line": 530,
+      "owner_method": "__init__",
+      "targets": [
+        "self._update_worker_controller"
+      ],
+      "expression": "UpdateWorkerController(self)"
+    },
+    {
+      "line": 560,
+      "owner_method": "__init__",
+      "targets": [
+        "self._google_drive_debounce"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 579,
+      "owner_method": "__init__",
+      "targets": [
+        "self._ranking_worker_controller"
+      ],
+      "expression": "RankingWorkerController(self)"
+    },
+    {
+      "line": 589,
+      "owner_method": "__init__",
+      "targets": [
+        "self._ranking_execution"
+      ],
+      "expression": "RankingExecutionCoordinator(self._ranking_now)"
+    },
+    {
+      "line": 590,
+      "owner_method": "__init__",
+      "targets": [
+        "self._realtime_subscription"
+      ],
+      "expression": "RealtimeSubscriptionCoordinator(self._ranking_now, lambda: str(self._environment_selector.currentData()))"
+    },
+    {
+      "line": 603,
+      "owner_method": "__init__",
+      "targets": [
+        "self._secondary_data_coordinator"
+      ],
+      "expression": "SecondaryDataFollowupCoordinator(start_minute_history=lambda codes, force: self._start_minute_history_loading(codes, force=force), start_daily_high=lambda codes, force: self._start_daily_high_loading(codes, force=force), start_daily_high_phase=self._start_daily_high_phase, start_fundamentals=self._start_fundamentals_loading, start_fundamentals_phase=self._start_fundamentals_phase, start_nxt_phase=self._start_nxt_phase)"
+    },
+    {
+      "line": 632,
+      "owner_method": "__init__",
+      "targets": [
+        "self._minute_history_worker_controller"
+      ],
+      "expression": "MinuteHistoryWorkerController(self, minute_history_worker_factory)"
+    },
+    {
+      "line": 649,
+      "owner_method": "__init__",
+      "targets": [
+        "self._daily_high_worker_controller"
+      ],
+      "expression": "DailyHighWorkerController(self, daily_high_worker_factory)"
+    },
+    {
+      "line": 661,
+      "owner_method": "__init__",
+      "targets": [
+        "self._fundamentals_worker_controller"
+      ],
+      "expression": "FundamentalsWorkerController(self, fundamentals_worker_factory)"
+    },
+    {
+      "line": 673,
+      "owner_method": "__init__",
+      "targets": [
+        "self._historical_high_worker_controller"
+      ],
+      "expression": "HistoricalHighWorkerController(self, historical_high_worker_factory)"
+    },
+    {
+      "line": 685,
+      "owner_method": "__init__",
+      "targets": [
+        "self._nxt_eligibility_worker_controller"
+      ],
+      "expression": "NxtEligibilityWorkerController(self, nxt_eligibility_worker_factory)"
+    },
+    {
+      "line": 703,
+      "owner_method": "__init__",
+      "targets": [
+        "self._krx_stock_catalog_worker_controller"
+      ],
+      "expression": "KrxStockCatalogWorkerController(self)"
+    },
+    {
+      "line": 704,
+      "owner_method": "__init__",
+      "targets": [
+        "self._image_theme_ocr_worker_controller"
+      ],
+      "expression": "ImageThemeOcrWorkerController(self)"
+    },
+    {
+      "line": 726,
+      "owner_method": "__init__",
+      "targets": [
+        "self._realtime_worker_controller"
+      ],
+      "expression": "RealtimeWorkerController(self, realtime_worker_factory)"
+    },
+    {
+      "line": 753,
+      "owner_method": "__init__",
+      "targets": [
+        "self._top20_repair_worker_controller"
+      ],
+      "expression": "Top20MarketRepairWorkerController(self)"
+    },
+    {
+      "line": 779,
+      "owner_method": "__init__",
+      "targets": [
+        "self._minute_bar_save_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 784,
+      "owner_method": "__init__",
+      "targets": [
+        "self._daily_trade_comparison_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 788,
+      "owner_method": "__init__",
+      "targets": [
+        "self._ranking_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 795,
+      "owner_method": "__init__",
+      "targets": [
+        "self._rank_changed_highlight_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 798,
+      "owner_method": "__init__",
+      "targets": [
+        "self._realtime_session_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 801,
+      "owner_method": "__init__",
+      "targets": [
+        "self._ranking_preparation_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 806,
+      "owner_method": "__init__",
+      "targets": [
+        "self._clock_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 813,
+      "owner_method": "__init__",
+      "targets": [
+        "self._investment_notice_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 817,
+      "owner_method": "__init__",
+      "targets": [
+        "self._investment_notice_restore_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 821,
+      "owner_method": "__init__",
+      "targets": [
+        "self._window_geometry_save_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 948,
+      "owner_method": "__init__",
+      "targets": [
+        "self._column_controller"
+      ],
+      "expression": "MainTableColumnController(self._table, self._columns, self.COLUMNS)"
+    },
+    {
+      "line": 979,
+      "owner_method": "__init__",
+      "targets": [
+        "self._top20_index_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 994,
+      "owner_method": "__init__",
+      "targets": [
+        "self._theme_trade_summary_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 998,
+      "owner_method": "__init__",
+      "targets": [
+        "self._price_cache_timer"
+      ],
+      "expression": "QTimer(self)"
+    },
+    {
+      "line": 3281,
+      "owner_method": "_on_trade_tick",
+      "targets": [
+        "self._trade_tick_flush_timer"
+      ],
+      "expression": "QTimer(self)"
+    }
+  ],
+  "timer_configuration_and_control": [
+    {
+      "line": 516,
+      "owner_method": "__init__",
+      "expression": "self._journal_news_timer.setInterval(150)"
+    },
+    {
+      "line": 518,
+      "owner_method": "__init__",
+      "expression": "self._journal_news_timer.start()"
+    },
+    {
+      "line": 780,
+      "owner_method": "__init__",
+      "expression": "self._minute_bar_save_timer.setSingleShot(True)"
+    },
+    {
+      "line": 781,
+      "owner_method": "__init__",
+      "expression": "self._minute_bar_save_timer.setInterval(1000)"
+    },
+    {
+      "line": 785,
+      "owner_method": "__init__",
+      "expression": "self._daily_trade_comparison_timer.setSingleShot(True)"
+    },
+    {
+      "line": 786,
+      "owner_method": "__init__",
+      "expression": "self._daily_trade_comparison_timer.setInterval(500)"
+    },
+    {
+      "line": 789,
+      "owner_method": "__init__",
+      "expression": "self._ranking_timer.setSingleShot(True)"
+    },
+    {
+      "line": 793,
+      "owner_method": "__init__",
+      "expression": "self._ranking_timer.setTimerType(Qt.TimerType.PreciseTimer)"
+    },
+    {
+      "line": 796,
+      "owner_method": "__init__",
+      "expression": "self._rank_changed_highlight_timer.setSingleShot(True)"
+    },
+    {
+      "line": 799,
+      "owner_method": "__init__",
+      "expression": "self._realtime_session_timer.setSingleShot(True)"
+    },
+    {
+      "line": 802,
+      "owner_method": "__init__",
+      "expression": "self._ranking_preparation_timer.setSingleShot(True)"
+    },
+    {
+      "line": 808,
+      "owner_method": "__init__",
+      "expression": "self._clock_timer.start(1000)"
+    },
+    {
+      "line": 814,
+      "owner_method": "__init__",
+      "expression": "self._investment_notice_timer.setInterval(15 * 60 * 1000)"
+    },
+    {
+      "line": 816,
+      "owner_method": "__init__",
+      "expression": "self._investment_notice_timer.start()"
+    },
+    {
+      "line": 818,
+      "owner_method": "__init__",
+      "expression": "self._investment_notice_restore_timer.setSingleShot(True)"
+    },
+    {
+      "line": 819,
+      "owner_method": "__init__",
+      "expression": "self._investment_notice_restore_timer.setInterval(8000)"
+    },
+    {
+      "line": 822,
+      "owner_method": "__init__",
+      "expression": "self._window_geometry_save_timer.setSingleShot(True)"
+    },
+    {
+      "line": 823,
+      "owner_method": "__init__",
+      "expression": "self._window_geometry_save_timer.setInterval(350)"
+    },
+    {
+      "line": 980,
+      "owner_method": "__init__",
+      "expression": "self._top20_index_timer.setInterval(250)"
+    },
+    {
+      "line": 982,
+      "owner_method": "__init__",
+      "expression": "self._top20_index_timer.start()"
+    },
+    {
+      "line": 995,
+      "owner_method": "__init__",
+      "expression": "self._theme_trade_summary_timer.setSingleShot(True)"
+    },
+    {
+      "line": 996,
+      "owner_method": "__init__",
+      "expression": "self._theme_trade_summary_timer.setInterval(200)"
+    },
+    {
+      "line": 999,
+      "owner_method": "__init__",
+      "expression": "self._price_cache_timer.setSingleShot(True)"
+    },
+    {
+      "line": 1000,
+      "owner_method": "__init__",
+      "expression": "self._price_cache_timer.setInterval(1000)"
+    },
+    {
+      "line": 1049,
+      "owner_method": "_show_investment_notice",
+      "expression": "self._investment_notice_restore_timer.start()"
+    },
+    {
+      "line": 2161,
+      "owner_method": "_restart_for_api_settings",
+      "expression": "self._ranking_timer.stop()"
+    },
+    {
+      "line": 2162,
+      "owner_method": "_restart_for_api_settings",
+      "expression": "self._ranking_preparation_timer.stop()"
+    },
+    {
+      "line": 2163,
+      "owner_method": "_restart_for_api_settings",
+      "expression": "self._realtime_session_timer.stop()"
+    },
+    {
+      "line": 2543,
+      "owner_method": "_schedule_next_ranking_refresh",
+      "expression": "self._ranking_timer.start(schedule.delay_ms)"
+    },
+    {
+      "line": 2546,
+      "owner_method": "_schedule_next_ranking_refresh",
+      "expression": "self._ranking_preparation_timer.start(schedule.preparation_delay_ms)"
+    },
+    {
+      "line": 2764,
+      "owner_method": "_on_ranking_loaded",
+      "expression": "self._price_cache_timer.start()"
+    },
+    {
+      "line": 3141,
+      "owner_method": "_schedule_realtime_session_refresh",
+      "expression": "self._realtime_session_timer.start(max(100, round((next_boundary - now).total_seconds() * 1000)))"
+    },
+    {
+      "line": 3216,
+      "owner_method": "_on_minute_cache_write_failed",
+      "expression": "self._minute_bar_save_timer.start()"
+    },
+    {
+      "line": 3249,
+      "owner_method": "_on_trade_tick",
+      "expression": "self._price_cache_timer.start()"
+    },
+    {
+      "line": 3267,
+      "owner_method": "_on_trade_tick",
+      "expression": "self._price_cache_timer.start()"
+    },
+    {
+      "line": 3278,
+      "owner_method": "_on_trade_tick",
+      "expression": "self._minute_bar_save_timer.start()"
+    },
+    {
+      "line": 3282,
+      "owner_method": "_on_trade_tick",
+      "expression": "self._trade_tick_flush_timer.setSingleShot(True)"
+    },
+    {
+      "line": 3283,
+      "owner_method": "_on_trade_tick",
+      "expression": "self._trade_tick_flush_timer.setInterval(120)"
+    },
+    {
+      "line": 3287,
+      "owner_method": "_on_trade_tick",
+      "expression": "self._trade_tick_flush_timer.start()"
+    },
+    {
+      "line": 3972,
+      "owner_method": "_on_market_index_tick",
+      "expression": "self._minute_bar_save_timer.start()"
+    },
+    {
+      "line": 4068,
+      "owner_method": "_on_price_cache_write_failed",
+      "expression": "self._price_cache_timer.start()"
+    },
+    {
+      "line": 4205,
+      "owner_method": "_on_history_received",
+      "expression": "self._price_cache_timer.start()"
+    },
+    {
+      "line": 4430,
+      "owner_method": "_on_daily_high_received",
+      "expression": "self._daily_trade_comparison_timer.start()"
+    },
+    {
+      "line": 4653,
+      "owner_method": "_schedule_theme_trade_summary",
+      "expression": "self._theme_trade_summary_timer.start()"
+    },
+    {
+      "line": 4777,
+      "owner_method": "_start_rank_changed_highlights",
+      "expression": "self._rank_changed_highlight_timer.stop()"
+    },
+    {
+      "line": 4790,
+      "owner_method": "_start_rank_changed_highlights",
+      "expression": "self._rank_changed_highlight_timer.start(duration_ms)"
+    },
+    {
+      "line": 5004,
+      "owner_method": "closeEvent",
+      "expression": "self._top20_trade_value_window._geometry_save_timer.stop()"
+    },
+    {
+      "line": 5011,
+      "owner_method": "closeEvent",
+      "expression": "self._window_geometry_save_timer.stop()"
+    },
+    {
+      "line": 5014,
+      "owner_method": "closeEvent",
+      "expression": "self._ranking_timer.stop()"
+    },
+    {
+      "line": 5015,
+      "owner_method": "closeEvent",
+      "expression": "self._rank_changed_highlight_timer.stop()"
+    },
+    {
+      "line": 5016,
+      "owner_method": "closeEvent",
+      "expression": "self._realtime_session_timer.stop()"
+    },
+    {
+      "line": 5017,
+      "owner_method": "closeEvent",
+      "expression": "self._ranking_preparation_timer.stop()"
+    },
+    {
+      "line": 5018,
+      "owner_method": "closeEvent",
+      "expression": "self._clock_timer.stop()"
+    },
+    {
+      "line": 5019,
+      "owner_method": "closeEvent",
+      "expression": "self._theme_trade_summary_timer.stop()"
+    },
+    {
+      "line": 5020,
+      "owner_method": "closeEvent",
+      "expression": "self._top20_index_timer.stop()"
+    },
+    {
+      "line": 5021,
+      "owner_method": "closeEvent",
+      "expression": "self._price_cache_timer.stop()"
+    },
+    {
+      "line": 5024,
+      "owner_method": "closeEvent",
+      "expression": "self._minute_bar_save_timer.stop()"
+    },
+    {
+      "line": 5029,
+      "owner_method": "closeEvent",
+      "expression": "self._daily_trade_comparison_timer.stop()"
+    },
+    {
+      "line": 5032,
+      "owner_method": "closeEvent",
+      "expression": "self._trade_tick_flush_timer.stop()"
+    },
+    {
+      "line": 5233,
+      "owner_method": "resizeEvent",
+      "expression": "self._window_geometry_save_timer.start()"
+    },
+    {
+      "line": 5248,
+      "owner_method": "moveEvent",
+      "expression": "self._window_geometry_save_timer.start()"
+    }
+  ],
+  "event_filters": [
+    {
+      "line": 957,
+      "owner_method": "__init__",
+      "expression": "self._table.viewport().installEventFilter(self)"
+    }
+  ]
+}

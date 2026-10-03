@@ -16,6 +16,7 @@
 | 키움 PostgreSQL writer 계측과 미완료 전수 감사 | [저장 경로 감사](KIWOOM_STORAGE_WRITE_AUDIT.md) |
 | PostgreSQL 공통 접근·관측 계층 검토와 이관 기준 | [공통 DB 경계 검토](COMMON_DB_ACCESS_OBSERVABILITY_REVIEW.md) |
 | 시스템 책임과 데이터 흐름 | [현재 아키텍처](../ARCHITECTURE_CURRENT.md) · [모듈 지도](../MODULE_MAP.md) |
+| MainWindow의 AppController 도입과 기능 연결 보존 | [책임 이전·검증 계약](MAIN_WINDOW_APP_CONTROLLER_PLAN.md) · [변경 전 정적 연결 목록](MAIN_WINDOW_CONNECTION_BASELINE.json) · [변경 후 대조](MAIN_WINDOW_CONNECTION_COMPARISON.json) |
 | 키움 시장 데이터 요청·저장·사용 흐름 | [시장 데이터 관계도](MARKET_DATA_FLOW.md) |
 | 실제 NAS 전체 테이블·컬럼·논리 연결 및 PC DB 목록 | [전체 DB 관계도와 사전](database/README.md) · [선택형 지도](database/atlas.html) |
 
