@@ -75,6 +75,7 @@ DEFAULT_CANDIDATE_DB = Path(
     r"C:\Users\pc-1\Desktop\kiwoom_history_backfill\data\kiwoom_history.sqlite3"
 )
 DEFAULT_OUTPUT_DB = Path("data/historical_intelligence.sqlite3")
+DEFAULT_SEARCH_THROTTLE_SECONDS = 60.0
 
 
 _NewsTimingLog = NewsTimingLog
@@ -374,7 +375,7 @@ class _SearchPagePool:
     def __init__(
         self, *, workers: int, request_delay: float,
         fetcher: object = fetch_naver_historical_search_page,
-        throttle_delay: float = 60.0,
+        throttle_delay: float = DEFAULT_SEARCH_THROTTLE_SECONDS,
         throttle_retries: int = 10,
         throttle_observer: object | None = None,
         timing_observer: Callable[..., None] | None = None,
@@ -705,6 +706,10 @@ def main() -> int:
     news_run.add_argument("--jobs", type=int, default=1)
     news_run.add_argument("--max-pages", type=int, default=100)
     news_run.add_argument("--request-delay", type=float, default=0.5)
+    news_run.add_argument(
+        "--throttle-delay", type=float, default=DEFAULT_SEARCH_THROTTLE_SECONDS,
+        help="403/429 응답 뒤 모든 검색 작업자에 적용할 대기 초",
+    )
     news_run.add_argument("--search-workers", type=int, default=1)
     news_run.add_argument("--article-delay", type=float, default=0.2)
     news_run.add_argument("--article-workers", type=int, default=1)
@@ -801,6 +806,8 @@ def main() -> int:
             parser.error("--max-pages must be between 1 and 100")
         if args.search_workers < 1 or args.search_workers > 8:
             parser.error("--search-workers must be between 1 and 8")
+        if args.throttle_delay < 0 or args.throttle_delay > 600:
+            parser.error("--throttle-delay must be between 0 and 600 seconds")
         if args.article_workers < 1 or args.article_workers > 16:
             parser.error("--article-workers must be between 1 and 16")
         if args.prepare_workers < 1 or args.prepare_workers > 8:
@@ -829,7 +836,8 @@ def main() -> int:
             job_fields = {"code": job.code, "target_date": job.target_date,
                           "target_end_date": job.target_end_date or job.target_date}
             timing_log.write("job_start", **job_fields, search_workers=args.search_workers,
-                             article_workers=args.article_workers, prepare_workers=args.prepare_workers)
+                             article_workers=args.article_workers, prepare_workers=args.prepare_workers,
+                             throttle_delay_seconds=args.throttle_delay)
             _write_news_heartbeat(args.heartbeat_file, job, "claimed")
             current_stage = "claimed"
             try:
@@ -916,6 +924,7 @@ def main() -> int:
                 )
                 with _SearchPagePool(
                     workers=args.search_workers, request_delay=args.request_delay,
+                    throttle_delay=args.throttle_delay,
                     throttle_observer=record_search_throttle,
                     timing_observer=record_search_timing,
                 ) as search_pool, article_context as article_pool, preparation_context as preparation:

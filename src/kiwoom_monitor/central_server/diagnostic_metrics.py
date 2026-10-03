@@ -186,6 +186,44 @@ def summarize_db_calls(start: float, end: float, *, mode: str = "summary",
                    for field in ("connection_acquire_ms", "execute_ms", "commit_ms",
                                  "rollback_ms", "close_ms", "total_ms")},
             }
+            phases = [phase for row in selected for phase in row.get("phase_diagnostics", [])]
+            if phases:
+                phase_summary: dict[str, dict[str, object]] = {}
+                for name in sorted({str(phase["phase"]) for phase in phases}):
+                    matching = [phase for phase in phases if phase["phase"] == name]
+                    wait_samples = [sample for phase in matching for sample in phase["samples"]]
+                    phase_summary[name] = {
+                        "executions": len(matching),
+                        "duration_ms": describe([float(phase["duration_ms"]) for phase in matching]),
+                        "affected_rows": sum(int(phase["rowcount"]) for phase in matching
+                                             if phase.get("rowcount") is not None
+                                             and int(phase["rowcount"]) >= 0),
+                        "rowcount_unavailable_executions": sum(
+                            phase.get("rowcount") is None or int(phase["rowcount"]) < 0
+                            for phase in matching),
+                        "sampling_status": dict(Counter(str(phase["sampling_status"])
+                                                        for phase in matching)),
+                        "wait_samples": dict(Counter(
+                            f"{sample.get('wait_type') or 'none'}:{sample.get('wait_event') or 'none'}"
+                            for sample in wait_samples)),
+                        "blocking_pids": dict(Counter(str(pid) for sample in wait_samples
+                                                      for pid in sample.get("blocking_pids", []))),
+                        "probe_errors": dict(Counter(error for phase in matching
+                                                     for error in phase["probe_errors"])),
+                        "exception_types": dict(Counter(str(phase["exception_type"])
+                                                        for phase in matching
+                                                        if phase.get("exception_type"))),
+                        "samples_truncated_executions": sum(bool(phase["samples_truncated"])
+                                                            for phase in matching),
+                        "probe_pending_executions": sum(bool(phase["probe_pending_at_capture"])
+                                                        for phase in matching),
+                    }
+                groups[key]["phase_diagnostics"] = phase_summary
+                groups[key]["phase_diagnostics_truncated_calls"] = sum(
+                    bool(row.get("phase_diagnostics_truncated")) for row in selected)
+                groups[key]["phase_scope_note"] = (
+                    "backend wait snapshots inside each phase; no sample does not exclude waits; "
+                    "sample counts are not wait durations; select duration includes fetch")
             if mode in {"verbose", "raw"}:
                 groups[key]["slow_calls"] = [
                     {"call_id": row["call_id"], "outcome": row["outcome"],
@@ -333,6 +371,19 @@ def record_writer_transaction(kind: str, rows: int, elapsed_ms: int, *,
     Current call sites invoke this only after their PostgreSQL connection context
     exits successfully. Do not infer commit latency from total elapsed time.
     """
+    try:
+        from .diagnostic_trace import emit, token
+        trace_token = token()
+        if trace_token is not None:
+            emit(trace_token, "domain", {
+                "call_id": db_call_id, "writer_kind": kind[:100],
+                "flush_id": CURRENT_FLUSH_ID.get()[:40], "rows": rows,
+                "bytes_payload_estimate": bytes_payload_estimate,
+                "domain_counts": {key[:50]: int(value)
+                                  for key, value in list((domain_counts or {}).items())[:24]},
+            })
+    except Exception:
+        pass
     if not _capture_is_enabled():
         return
     global _DROPPED_WRITERS

@@ -42,7 +42,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.10.01-shadow-checkpoint-frames-v1"
+SERVER_BUILD = "2026.10.03-db-minute-recorded-shape-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -65,7 +65,7 @@ def _verified_realtime_scope(
 def create_app(settings: CentralServerSettings | None = None) -> Any:
     """FastAPI 앱을 만든다. 서버 선택 의존성은 로컬 앱과 분리해 지연 로드한다."""
     try:
-        from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+        from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
         from pydantic import BaseModel, Field, ConfigDict
     except ImportError as error:
         raise RuntimeError("중앙 서버 의존성을 설치하세요: pip install -e .[server]") from error
@@ -404,6 +404,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     async def service_lifespan(_app: Any):
         nonlocal account_broker, main_binding, main_identity, mock_bundle
         nonlocal mock_account_monitor, mock_account_realtime, mock_order_gateway
+        from .diagnostic_trace import recover_interrupted
+        await asyncio.to_thread(recover_interrupted)
         if broker is not None:
             await broker.start()
         verified_bindings = []
@@ -478,6 +480,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         yield
         if diagnostic_runs is not None:
             await asyncio.to_thread(diagnostic_runs.close)
+        from .diagnostic_trace import stop as stop_diagnostic_trace
+        await asyncio.to_thread(stop_diagnostic_trace, "server_shutdown")
         if credential_runtime is not None:
             await credential_runtime.close()
         if mock_automation_supervisor is not None:
@@ -558,20 +562,32 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         enabled: bool | None = None
         paused: bool | None = None
         workload: str = ""
-        ttl_seconds: int = Field(default=600, ge=60, le=3600)
+        ttl_seconds: int = Field(default=600, ge=60, le=7200)
         expected_session: str | None = None
         expected_revision: int = Field(ge=0)
         expected_instance: str | None = None
 
     class DiagnosticRunRequest(BaseModel):
         model_config = ConfigDict(extra="forbid")
-        kind: str = Field(pattern=r"^(measure|compare)$")
+        kind: str = Field(pattern=r"^(measure|compare|replay)$")
         seconds: int = Field(ge=5, le=1100)
         label: str = Field(default="manual", max_length=80)
         workload: str = ""
+        profile_report_id: str = Field(default="", max_length=80)
+        profile_trace_id: str = Field(default="", max_length=80)
+        window_start_seconds: float = Field(default=0, ge=0, le=7200)
+        window_end_seconds: float | None = Field(default=None, gt=0, le=7200)
+        include_writer_kinds: list[str] = Field(default_factory=list, max_length=20)
+        exclude_writer_kinds: list[str] = Field(default_factory=list, max_length=20)
+        query_minute_scenario: str = Field(default="", pattern=r"^(|unchanged_page|one_changed_bar|fresh_page|recorded_counts)$")
         request_id: str = Field(default="", max_length=80)
         expected_session: str | None = None
         expected_revision: int | None = Field(default=None, ge=0)
+
+    class DiagnosticTraceRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        seconds: int = Field(ge=60, le=7200)
+        expected_session: str
 
     class QueryRequest(BaseModel):
         api_id: str = Field(min_length=7, max_length=7)
@@ -1161,7 +1177,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                 item["runtime"] = external_runtime
             workloads[name] = item
         return {"diagnostic_tool": diagnostic_tool, "workloads": workloads,
-            "metrics_capture": capture, "expires_at": control["expires_at"],
+            "metrics_capture": capture, "trace_capture": control["trace_capture"],
+            "expires_at": control["expires_at"],
             "control_revision": control["control_revision"]}
 
     @app.get("/api/v1/diagnostics/market-bar-saves", dependencies=[Depends(authorize)])
@@ -1244,7 +1261,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         raise ValueError("unsupported_diagnostic_section")
 
     diagnostic_path = diagnostic_control_path()
-    diagnostic_runs = DiagnosticRuns(diagnostic_path, diagnostic_internal_api) if diagnostic_path else None
+    diagnostic_runs = (DiagnosticRuns(diagnostic_path, diagnostic_internal_api,
+                                      active.database_url) if diagnostic_path else None)
     app.state.diagnostic_runs = diagnostic_runs
 
     def require_diagnostic_runs():
@@ -1254,18 +1272,26 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
 
     @app.get("/api/v1/diagnostics/capabilities", dependencies=[Depends(authorize)])
     async def diagnostic_capabilities() -> dict[str, object]:
+        from .diagnostic_replay import (MAX_QUERY_MINUTE_ROWS, MAX_QUERY_MINUTE_TOTAL_ROWS,
+                                        QUERY_MINUTE_SCENARIOS, TRACE_SYNTHETIC_KINDS)
         return {"server_build": SERVER_BUILD, "producer_instance": diagnostic_instance_id(),
                 "control_available": diagnostic_runs is not None,
                 "postgres_available": active.database_url.startswith("postgres"),
                 "sections": ["postgres", "activity", "news_jobs", "host", "storage"],
-                "run_kinds": ["measure", "compare"],
+                "run_kinds": ["measure", "compare", "replay"],
+                "trace_replay_writer_kinds": sorted(TRACE_SYNTHETIC_KINDS),
+                "query_minute_scenarios": sorted(QUERY_MINUTE_SCENARIOS),
                 "limits": {"measure_seconds": 300, "compare_phase_seconds": 1100,
-                           "ttl_seconds": 3600, "activity_rows": 200},
+                           "ttl_seconds": 7200, "activity_rows": 200,
+                           "query_minute_rows_per_call": MAX_QUERY_MINUTE_ROWS,
+                           "query_minute_total_input_rows": MAX_QUERY_MINUTE_TOTAL_ROWS},
                 "scope_note": "server-process metrics, database-wide counters and host samples; independent PC/importer memory unavailable"}
 
     @app.put("/api/v1/diagnostics/control", dependencies=[Depends(authorize)])
     async def diagnostic_control_update(body: DiagnosticControlRequest) -> dict[str, object]:
         require_diagnostic_runs()
+        if body.target != "master" and body.ttl_seconds > 3600:
+            raise HTTPException(422, detail="DIAGNOSTIC_CHILD_TTL_OUT_OF_BOUNDS")
         if (body.target in {"master", "capture"} and
                 (body.enabled is None or body.paused is not None or body.workload)
                 or body.target == "workload" and
@@ -1306,6 +1332,58 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             result["history_error_type"] = history_error
         return result
 
+    @app.post("/api/v1/diagnostics/trace", dependencies=[Depends(authorize)])
+    async def diagnostic_trace_start(body: DiagnosticTraceRequest) -> dict[str, object]:
+        from .diagnostic_workloads import _set_trace, control_snapshot
+        from .diagnostic_trace import start as start_trace, status as trace_state
+        path = diagnostic_control_path()
+        if path is None:
+            raise HTTPException(501, detail="DIAGNOSTIC_CONTROL_UNAVAILABLE")
+        control = control_snapshot(path)
+        if control["diagnostic_tool"]["session_id"] != body.expected_session:
+            raise HTTPException(409, detail="diagnostic_control_conflict")
+        if trace_state().get("state") in {"running", "stopping"}:
+            raise HTTPException(409, detail="trace_already_running")
+        try:
+            await asyncio.to_thread(_set_trace, path, True, body.seconds,
+                                    expected_session=body.expected_session)
+            return await asyncio.to_thread(start_trace, seconds=body.seconds)
+        except ValueError as error:
+            if trace_state().get("state") not in {"running", "stopping"}:
+                await asyncio.to_thread(_set_trace, path, False, body.seconds,
+                                        expected_session=body.expected_session)
+            raise HTTPException(409, detail=str(error)) from error
+
+    @app.get("/api/v1/diagnostics/trace", dependencies=[Depends(authorize)])
+    async def diagnostic_trace_status() -> dict[str, object]:
+        from .diagnostic_trace import status as trace_state
+        return await asyncio.to_thread(trace_state)
+
+    @app.post("/api/v1/diagnostics/trace/stop", dependencies=[Depends(authorize)])
+    async def diagnostic_trace_stop() -> dict[str, object]:
+        from .diagnostic_trace import stop as stop_trace
+        return await asyncio.to_thread(stop_trace)
+
+    @app.get("/api/v1/diagnostics/trace/{trace_id}", dependencies=[Depends(authorize)])
+    async def diagnostic_trace_manifest(trace_id: str) -> dict[str, object]:
+        from .diagnostic_trace import status as trace_state
+        try:
+            return await asyncio.to_thread(trace_state, trace_id)
+        except KeyError as error:
+            raise HTTPException(404, detail="TRACE_NOT_FOUND") from error
+
+    @app.get("/api/v1/diagnostics/trace/{trace_id}/chunks/{chunk_name}",
+             dependencies=[Depends(authorize)])
+    async def diagnostic_trace_chunk(trace_id: str, chunk_name: str) -> Response:
+        from .diagnostic_trace import chunk_bytes
+        try:
+            content = await asyncio.to_thread(chunk_bytes, trace_id, chunk_name)
+        except KeyError as error:
+            raise HTTPException(404, detail="TRACE_CHUNK_NOT_FOUND") from error
+        except ValueError as error:
+            raise HTTPException(409, detail=str(error)) from error
+        return Response(content=content, media_type="application/x-ndjson")
+
     @app.get("/api/v1/diagnostics/snapshot", dependencies=[Depends(authorize)])
     async def diagnostic_snapshot(sections: str = "postgres,activity,news_jobs,host,storage",
                                   pid: int | None = None) -> dict[str, object]:
@@ -1344,6 +1422,13 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             return await asyncio.to_thread(runs.start, kind=body.kind, seconds=body.seconds,
                                            label=body.label, workload=body.workload,
                                            request_id=body.request_id,
+                                           profile_report_id=body.profile_report_id,
+                                           profile_trace_id=body.profile_trace_id,
+                                           window_start_seconds=body.window_start_seconds,
+                                           window_end_seconds=body.window_end_seconds,
+                                           include_writer_kinds=tuple(body.include_writer_kinds),
+                                           exclude_writer_kinds=tuple(body.exclude_writer_kinds),
+                                           query_minute_scenario=body.query_minute_scenario,
                                            expected_session=body.expected_session,
                                            expected_revision=body.expected_revision)
         except ValueError as error:

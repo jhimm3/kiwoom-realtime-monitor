@@ -86,14 +86,15 @@ def _aborted_phase(label: str, reason: str, *, samples: int = 0) -> dict:
 
 
 def _measure(seconds: int, label: str, session_id: str, *, api=None,
-             stop=None, checkpoint=None) -> dict:
+             stop=None, checkpoint=None, database_url=None,
+             on_started=None) -> dict:
     api = api or _api
     path = _path()
     if (stop is not None and stop.is_set()) or not _session_active(path, session_id):
         return _aborted_phase(label, "diagnostic_session_ended")
     import psycopg
 
-    database_url = os.environ["KIWOOM_SERVER_DATABASE_URL"]
+    database_url = database_url or os.environ["KIWOOM_SERVER_DATABASE_URL"]
     log_path, offset = _log_position()
     device_before = _device_stats()
     host_before = _host_usage()
@@ -133,6 +134,17 @@ def _measure(seconds: int, label: str, session_id: str, *, api=None,
                 before = _snapshot(cursor)
                 before_pg_stat_io = _optional_io_snapshot(cursor, _pg_stat_io_snapshot)
                 before_checkpointer = _optional_io_snapshot(cursor, _checkpointer_snapshot)
+                if on_started is not None:
+                    # The replay clock begins only after its dedicated DB
+                    # baseline is captured, so its first call is measured.
+                    started = time.time()
+                    started_mono = time.monotonic()
+                    started_iso = datetime.now(UTC).isoformat()
+                    measure_deadline = started_mono + seconds
+                    next_pg_sample = started_mono
+                    next_device_sample = started_mono + 0.25
+                    device_samples = [{"at": started, "stats": _device_stats()}]
+                    on_started()
                 while time.monotonic() < measure_deadline:
                     if stop is not None and stop.is_set():
                         aborted_reason = "cancel_requested"
@@ -272,6 +284,21 @@ def _measure(seconds: int, label: str, session_id: str, *, api=None,
         "uncontrolled_importers_before": importers_before,
         "uncontrolled_importers_after": _uncontrolled_importers(),
         "database_delta": delta,
+        "database_delta_scope": {
+            "name": "whole_measurement_interval_delta",
+            "started_at_utc": started_iso,
+            "ended_at_utc": datetime.fromtimestamp(ended, UTC).isoformat(),
+            "wal_statistics": "cluster-wide pg_stat_wal counters",
+            "database_statistics": "pg_stat_database counters for current_database()",
+            "replay_exclusive": False,
+            "includes_sampler_activity": True,
+            "scope_note": (
+                "database_delta is the before/after delta for the entire measurement interval. "
+                "WAL is cluster-wide; database transaction counters include sampler probes and "
+                "other work in the measured database. Use replay.direct_call_totals for calls "
+                "correlated to replay; PostgreSQL does not expose per-transaction WAL bytes here."
+            ),
+        },
         "statistics_reset": resets,
         "pg_stat_io_delta": pg_stat_io_delta,
         "checkpointer_delta": checkpointer_delta,

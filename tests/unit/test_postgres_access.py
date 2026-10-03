@@ -21,7 +21,8 @@ from kiwoom_monitor.central_server.diagnostic_metrics import (
 )
 from kiwoom_monitor.central_server.diagnostic_workloads import instance_id
 from kiwoom_monitor.central_server.postgres_access import (
-    DBWriterContext, db_call_source, observe_existing_transaction, open_observed_connection,
+    DBWriterContext, db_call_request_id, db_call_source, observe_existing_transaction,
+    open_observed_connection,
 )
 
 
@@ -164,6 +165,25 @@ class PostgresAccessTests(unittest.TestCase):
             self.assertEqual(1, source_metrics["calls"])
             self.assertEqual(1, source_metrics["execute_ms"]["n"])
             self.assertEqual(1, source_metrics["total_ms"]["n"])
+
+    def test_request_id_survives_thread_boundary_and_is_reset(self) -> None:
+        async def write() -> None:
+            with db_call_request_id("replay-call-001"):
+                await asyncio.to_thread(run_write)
+
+        def run_write() -> None:
+            connection = open_observed_connection(
+                FakeConnection,
+                DBWriterContext("test.replay", "replay_writer", "write", rows_attempted=3),
+            )
+            with connection.cursor() as cursor:
+                cursor.execute("INSERT INTO example VALUES (1)")
+            connection.commit()
+            connection.close()
+
+        asyncio.run(write())
+        self.assertEqual("", DBWriterContext("test", "plain", "write").request_id)
+        self.assertEqual("replay-call-001", self._calls()[-1]["request_id"])
 
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -769,6 +789,15 @@ class PostgresAccessTests(unittest.TestCase):
         samples = legacy["writer_transactions"]["news_job_claim"]["call_samples"]
         self.assertTrue(any(sample["db_call_id"] == call["call_id"] for sample in samples))
 
+        phases = call["phase_diagnostics"]
+        self.assertEqual(["recover_stale", "select_candidates"],
+                         [phase["phase"] for phase in phases])
+        self.assertTrue(all(phase["backend_pid"] == 321 and not phase["exception_type"]
+                            for phase in phases))
+        sample = next(sample for sample in samples if sample["db_call_id"] == call["call_id"])
+        self.assertEqual({phase["phase"]: phase["duration_ms"] for phase in phases},
+                         sample["domain_phase_ms"])
+
     def test_news_job_claim_updates_selected_row_in_same_context(self) -> None:
         raw = self._native_context_connection()
         raw.rows = [("job-1", "revision-1", "005930", "005930", "BODY",
@@ -797,6 +826,77 @@ class PostgresAccessTests(unittest.TestCase):
         self.assertEqual(("rolled_back", 0, 1),
                          (self._calls()[0]["outcome"], self._calls()[0]["commits"],
                           self._calls()[0]["rollbacks"]))
+        self.assertEqual(["recover_stale", "select_candidates"],
+                         [phase["phase"] for phase in self._calls()[0]["phase_diagnostics"]])
+        self.assertEqual("ValueError",
+                         self._calls()[0]["phase_diagnostics"][-1]["exception_type"])
+
+    def test_news_job_claim_capture_off_does_not_start_probe_or_change_transaction(self) -> None:
+        self.control.unlink()
+        refresh_capture_state(force=True)
+        raw = self._native_context_connection()
+        store = PostgresQueryStore("unused")
+        with patch.object(store, "_connect", return_value=raw), \
+                patch("kiwoom_monitor.central_server.database.Thread") as thread:
+            self.assertEqual([], store.claim_news_jobs(now=300.0))
+        thread.assert_not_called()
+        self.assertEqual((1, 0, 1, 2),
+                         (raw.commits, raw.rollbacks, raw.closes, len(raw.statements)))
+        self.assertEqual([], self._calls())
+
+    def test_news_job_claim_probe_failure_does_not_change_selected_jobs(self) -> None:
+        raw = self._native_context_connection()
+        raw.rows = [("job-1", "revision-1", "005930", "005930", "BODY",
+                     "hash", "version", 0, {}, 100.0)]
+        store = PostgresQueryStore("unused")
+        with patch.object(store, "_connect", return_value=raw), \
+                patch("kiwoom_monitor.central_server.database.Thread") as thread:
+            thread.return_value.start.side_effect = RuntimeError("probe unavailable")
+            jobs = store.claim_news_jobs(now=300.0)
+        self.assertEqual(["job-1"], [job["job_key"] for job in jobs])
+        self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
+        phases = self._calls()[0]["phase_diagnostics"]
+        self.assertEqual(["recover_stale", "select_candidates", "mark_running"],
+                         [phase["phase"] for phase in phases])
+        self.assertTrue(all(phase["probe_errors"] == ["RuntimeError"] for phase in phases))
+
+    def test_phase_summary_bounds_raw_samples_and_distinguishes_waits_from_duration(self) -> None:
+        connection = open_observed_connection(FakeConnection, DBWriterContext(
+            "news.job_claim", "news_job_claim", "claim_news_jobs"))
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        for index in range(17):
+            connection.record_phase_diagnostic("select_candidates", {
+                "duration_ms": 200, "rowcount": 0, "sampling_status": "sampled",
+                "samples": [{"wait_type": "Lock", "wait_event": "transactionid",
+                             "blocking_pids": [123]}],
+                "probe_errors": [], "exception_type": "",
+                "samples_truncated": index == 0, "probe_pending_at_capture": False,
+            })
+        connection.commit()
+        connection.close()
+        call = self._calls()[0]
+        self.assertEqual(16, len(call["phase_diagnostics"]))
+        self.assertTrue(call["phase_diagnostics_truncated"])
+        summary = summarize_db_calls(time.time() - 30, time.time() + 1)
+        group = summary["writers"]["news.job_claim/news_job_claim"]
+        phase = group["phase_diagnostics"]["select_candidates"]
+        self.assertEqual(16, phase["executions"])
+        self.assertEqual(200, phase["duration_ms"]["p95"])
+        self.assertEqual({"Lock:transactionid": 16}, phase["wait_samples"])
+        self.assertEqual({"123": 16}, phase["blocking_pids"])
+        self.assertEqual(1, phase["samples_truncated_executions"])
+        self.assertEqual(1, group["phase_diagnostics_truncated_calls"])
+        self.assertNotIn("samples", phase)
+
+    def test_phase_probe_guard_stops_when_capture_changes_generation(self) -> None:
+        connection = open_observed_connection(FakeConnection, DBWriterContext(
+            "news.job_claim", "news_job_claim", "claim_news_jobs"))
+        self.assertTrue(connection.diagnostic_capture_active())
+        self._capture("second")
+        self.assertFalse(connection.diagnostic_capture_active())
+        connection.close()
+        self.assertEqual([], self._calls())
 
     def test_news_job_claim_plan_is_read_only_and_uses_claim_sql(self) -> None:
         raw = self._native_context_connection()

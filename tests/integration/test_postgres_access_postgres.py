@@ -1420,6 +1420,17 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             {sample["db_call_id"] for sample in samples}
         ))
 
+        for call in calls:
+            phases = call["phase_diagnostics"]
+            self.assertEqual(["recover_stale", "select_candidates", "mark_running"],
+                             [phase["phase"] for phase in phases])
+            self.assertTrue(all(phase["backend_pid"] == call["backend_pid"]
+                                and not phase["exception_type"] for phase in phases))
+            self.assertEqual([1, 1], [phase["rowcount"] for phase in phases[1:]])
+            sample = next(sample for sample in samples if sample["db_call_id"] == call["call_id"])
+            self.assertEqual({phase["phase"]: phase["duration_ms"] for phase in phases},
+                             sample["domain_phase_ms"])
+
     def test_news_job_claim_candidate_preserves_postgres_selection_and_skip_locked(self) -> None:
         token = uuid.uuid4().hex
         code = f"DIAG{token[:16]}"

@@ -39,6 +39,7 @@ def evaluate_diagnostic_control(payload: object, *, now: float | None = None) ->
     empty = {"enabled": False, "expires_at": None, "owner": None, "session_id": None}
     result: dict[str, object] = {
         "diagnostic_tool": empty, "metrics_capture": dict(empty),
+        "trace_capture": dict(empty),
         "paused": frozenset(), "workload_expiries": {}, "expires_at": None,
         "control_revision": 0,
     }
@@ -89,10 +90,20 @@ def evaluate_diagnostic_control(payload: object, *, now: float | None = None) ->
                     "owner": str(capture.get("owner", "manual")),
                     "session_id": parent_status["session_id"],
                 }
+        trace = payload.get("trace")
+        if isinstance(trace, dict):
+            trace_expiry = min(float(trace.get("expires_at", 0)), parent_expiry)
+            if trace_expiry > current_time:
+                result["trace_capture"] = {
+                    "enabled": True, "expires_at": trace_expiry,
+                    "owner": str(trace.get("owner", "manual")),
+                    "session_id": parent_status["session_id"],
+                }
         return result
     except (ValueError, TypeError, AttributeError):
         # Invalid diagnostic state cannot turn on a pause or a sampler.
         return {"diagnostic_tool": empty, "metrics_capture": dict(empty),
+                "trace_capture": dict(empty),
                 "paused": frozenset(), "workload_expiries": {}, "expires_at": None,
                 "control_revision": 0}
 
@@ -125,6 +136,10 @@ def workload_expiries(path: Path | None = None) -> dict[str, float]:
 
 def capture_status(path: Path | None = None, *, now: float | None = None) -> dict[str, object]:
     return control_snapshot(path, now=now)["metrics_capture"]
+
+
+def trace_status(path: Path | None = None, *, now: float | None = None) -> dict[str, object]:
+    return control_snapshot(path, now=now)["trace_capture"]
 
 
 def is_paused(workload: str) -> bool:
@@ -261,6 +276,7 @@ def _set(path: Path, workload: str, pause: bool, lease_seconds: int,
                   "diagnostic_tool": current.get("diagnostic_tool"),
                   "control_revision": int(current.get("control_revision", 0)) + 1,
                   "owners": owners, "paused": sorted(leases), "capture": capture,
+                  "trace": current.get("trace"),
                   "expires_at": max([*leases.values(),
                                      float(capture["expires_at"]) if capture else 0]),
                   "updated_at": now}
@@ -313,6 +329,25 @@ def _set_capture(path: Path, enabled: bool, lease_seconds: int,
         return result
 
 
+def _set_trace(path: Path, enabled: bool, lease_seconds: int, *,
+               expected_session: str) -> dict:
+    """Trace is a distinct master child; restart and master OFF revoke it."""
+    with _control_lock(path):
+        current = _payload(path)
+        tool = evaluate_diagnostic_control(current)["diagnostic_tool"]
+        if not tool["enabled"] or tool["session_id"] != expected_session:
+            raise ValueError("diagnostic_control_conflict")
+        now = time.time()
+        if enabled and float(tool["expires_at"]) < now + lease_seconds + 5:
+            raise ValueError("diagnostic_master_ttl_too_short")
+        current["trace"] = ({"expires_at": min(now + lease_seconds, float(tool["expires_at"])),
+                              "owner": "manual"} if enabled else None)
+        current["control_revision"] = int(current.get("control_revision", 0)) + 1
+        current["updated_at"] = now
+        _write(path, current)
+        return current
+
+
 def _set_tool(path: Path, enabled: bool, lease_seconds: int = 600,
               *, expected_session: str | None = None,
               expected_revision: int | None = None,
@@ -342,6 +377,7 @@ def _set_tool(path: Path, enabled: bool, lease_seconds: int = 600,
             "owners": {},
             "paused": [],
             "capture": None,
+            "trace": None,
             "expires_at": float(tool["expires_at"]) if tool else 0,
             "updated_at": now,
         }

@@ -282,3 +282,17 @@ task 생존, 실제 polling 주기, 누적 실행·완료 횟수, 누적 성공 
 전체 실행 시간보다 길게 설정한다. 이 코드는 로컬 검증 후이며 NAS 배포 확인 전이다.
 
 transaction 경계 또는 실시간 저장 흐름을 실제 수정하는 단계에서는 [키움 저장 경로 감사의 필수 검증](KIWOOM_STORAGE_WRITE_AUDIT.md#transaction실시간-저장-변경-시-필수-검증)을 추가한다. 특히 동시 도착·중복·순서 역전, commit 전후 장애·재시작, 재시도 멱등성, 원천과 파생 자료의 변경 전후 보존을 확인해야 한다. A/B/A 지연 측정은 이 검증의 대체물이 아니다.
+
+## 2026-10-02 뉴스 claim 단계 대기 진단
+
+로컬 `2026.10.02-news-claim-phase-waits-v1`은 기존 뉴스 claim SQL과 transaction을 바꾸지 않고 `recover_stale`, `select_candidates`, `mark_running` 시간을 `call_id`에 연결한다. `select_candidates`는 execute와 `fetchall()`을 합친 구간이므로 공통 `execute_ms`와 경계가 다르다. 단계가 100ms 이상 지속되면 별도 연결로 같은 writer backend의 state/wait event/blocking PID를 최대 25ms 간격으로 표본화한다. statement timeout은 500ms이며 뉴스 claim 진단 observer는 동시 3개로 제한된다. capture OFF 또는 generation이 바뀌면 추가 표본 연결을 열지 않고, probe 실패는 원래 SQL 결과를 바꾸지 않는다. 호출당 raw 단계 16개와 단계당 표본 256개까지 보존하며 초과는 truncated 표식으로 드러낸다.
+
+`/api/v1/diagnostics/db-calls`의 summary `writers["news.job_claim/news_job_claim"].phase_diagnostics`에서 단계별 `duration_ms` 분위수, sampling status, wait event 표본 수, blocking PID 표본 수, probe 오류를 본다. raw 모드의 각 `calls[]` 항목 `phase_diagnostics[]`에 개별 시작/종료 시각과 wait 표본이 있다. wait 표본 count는 실제 wait duration이 아니고, `no_sample`은 wait가 없었다는 뜻이 아니다. 새 서버 build는 `2026.10.02-news-claim-phase-waits-v1`이며 사용자가 NAS 전용 PostgreSQL 검사 2건 통과와 운영 적용 결과를 제공했다.
+
+## 2026-10-02 기록된 DB 호출의 장후 부분 재생 pilot (로컬 후보)
+
+인증된 `POST /api/v1/diagnostics/runs`에서 `kind=replay`, `workload=recorded_news_shadow`, 완료된 `measure`의 `profile_report_id`, `seconds`를 지정한다. `window_start_seconds`와 `window_end_seconds`는 원본 측정 시작 기준 초 단위이며, `include_writer_kinds` 또는 `exclude_writer_kinds`로 정확한 writer kind를 고른다. 선택 구간 길이보다 측정 시간을 최소 5초 길게 둔다. 동일 보고서와 구간으로 전체 지원 writer, 뉴스 제외, shadow 제외를 각각 별도 실행해 비교할 수 있다. 선택한 종류가 지원되지 않으면 실행을 거부한다.
+
+현재 재생 가능한 호출은 원본 raw의 `sql_calls=2`인 **빈** `news_job_claim`과 `sql_calls=2`인 **inline** `shadow_monitor_state`뿐이다. 다른 뉴스 상태, 0B, 분봉, TOP20, reader, frame 저장 및 원본 SQL parameter는 재생하지 않는다. 따라서 이 pilot으로 장중 전체 부하나 어떤 writer의 인과적 기여를 판정하지 않는다. 원본 호출 개수, 선택 구간 호출 개수, 실제 재생/누락/밀림 개수를 결과에 분리한다. 원본 시각 간격은 유지하고 뉴스 최대 3개·shadow 최대 1개로 병렬 실행한다. 속도 배율과 임의 동시성 옵션은 아직 없다.
+
+재생은 평일 KST 07:30~20:30에 거부하며, 기존 진단 master/capture/run lock을 요구한다. DB 이름은 전용 `kiwoom_monitor_diagnostic_test`로 연결 전후 확인하고, 해당 DB의 뉴스 작업 행이 비어 있어야 한다. shadow는 별도 진단 키만 쓰고 측정 종료 후 삭제·검증한다. 운영 DB에는 재생 쓰기를 하지 않는다. PostgreSQL 전체 WAL과 NAS 장치 통계에는 다른 호스트 작업도 포함되므로 결과의 차이가 재생 writer에 귀속된다고 단정하지 않는다. 이 후보는 로컬 단위검사까지만 통과했으며, NAS 전용 PostgreSQL 실행과 운영 배포는 아직 하지 않았다.

@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from threading import Event, RLock, Thread
+from threading import BoundedSemaphore, Event, RLock, Thread
 from time import monotonic, time
 from typing import Any, Callable, Protocol
 from urllib.parse import unquote, urlsplit
@@ -189,9 +189,14 @@ def _postgres_wait_summary(samples: list[tuple[str, str, tuple[int, ...]]]) -> s
     ) or "no-sample"
 
 
+_NEWS_CLAIM_WAIT_PROBE_SLOTS = BoundedSemaphore(3)
+
+
 def _sample_postgres_commit_waits(
     database_url: str, backend_pid: int, stop: Event,
     samples: list[dict[str, object]], errors: list[str],
+    *, capture_guard: Callable[[], bool] | None = None,
+    probe_slots: BoundedSemaphore | None = None,
 ) -> None:
     """Sample one writer backend while a measured SQL phase is running.
 
@@ -200,7 +205,12 @@ def _sample_postgres_commit_waits(
     """
     if stop.wait(0.1):
         return
+    if probe_slots is not None and not probe_slots.acquire(blocking=False):
+        errors.append("probe_capacity_reached")
+        return
     try:
+        if capture_guard is not None and not capture_guard():
+            return
         import psycopg
 
         with psycopg.connect(
@@ -211,6 +221,8 @@ def _sample_postgres_commit_waits(
                 return
             cursor.execute("SET statement_timeout TO '500ms'")
             while not stop.is_set():
+                if capture_guard is not None and not capture_guard():
+                    return
                 cursor.execute(
                     "SELECT clock_timestamp(),state,COALESCE(wait_event_type,''),"
                     "COALESCE(wait_event,''),pg_blocking_pids(pid) "
@@ -219,6 +231,9 @@ def _sample_postgres_commit_waits(
                 )
                 row = cursor.fetchone()
                 if row is None:
+                    return
+                if len(samples) >= 2048:
+                    errors.append("sample_limit_reached")
                     return
                 samples.append({
                     "at": row[0].timestamp(), "state": str(row[1]),
@@ -229,11 +244,18 @@ def _sample_postgres_commit_waits(
                     return
     except Exception as error:
         errors.append(type(error).__name__)
+    finally:
+        if probe_slots is not None:
+            probe_slots.release()
 
 
 def _execute_with_postgres_wait_probe(
     execute: Callable[[], object], database_url: str, backend_pid: int,
     enabled: bool,
+    *, record_callback: Callable[[dict[str, object]], None] | None = None,
+    max_retained_samples: int = 2048,
+    capture_guard: Callable[[], bool] | None = None,
+    probe_slots: BoundedSemaphore | None = None,
 ) -> tuple[object, dict[str, object] | None]:
     """Measure one cursor call without including probe cleanup in SQL duration."""
     if not enabled:
@@ -249,6 +271,8 @@ def _execute_with_postgres_wait_probe(
             probe = Thread(
                 target=_sample_postgres_commit_waits,
                 args=(database_url, backend_pid, stop, samples, errors),
+                kwargs={**({"capture_guard": capture_guard} if capture_guard is not None else {}),
+                        **({"probe_slots": probe_slots} if probe_slots is not None else {})},
                 name="market-sql-wait-probe", daemon=True,
             )
             probe.start()
@@ -260,36 +284,46 @@ def _execute_with_postgres_wait_probe(
         errors.append("backend_pid_unavailable")
     started_at = time()
     started_mono = monotonic()
+    exception_type = ""
+    record: dict[str, object] | None = None
     try:
         result = execute()
+    except BaseException as error:
+        exception_type = type(error).__name__
+        raise
     finally:
         ended_at = time()
         duration_seconds = monotonic() - started_mono
         duration_ms = round(duration_seconds * 1000)
         stop.set()
-    # The probe owns a separate connection and sees the stop event. Waiting for
-    # connection setup/teardown here would inflate the caller's bars_ms.
-    probe_pending = bool(probe is not None and probe.is_alive())
-    sample_snapshot = list(samples)
-    window_samples = [dict(sample) for sample in sample_snapshot
-                      if started_at <= float(sample["at"]) <= ended_at]
-    sampling_status = (
-        "sampled" if window_samples else
-        "probe_error" if errors else
-        "below_initial_delay" if duration_seconds < 0.1 else
-        "probe_pending" if probe_pending else
-        "no_sample"
-    )
-    return result, {
-        "started_at": started_at, "ended_at": ended_at,
-        "duration_ms": duration_ms, "backend_pid": backend_pid or None,
-        "probe_startup_ms": probe_startup_ms,
-        "probe_pending_at_capture": probe_pending,
-        "sampling_interval_ms": 25, "initial_delay_ms": 100,
-        "sampling_status": sampling_status,
-        "samples": window_samples,
-        "probe_errors": list(errors),
-    }
+        # Never wait for probe connection teardown or let diagnostic processing
+        # replace the domain exception. A failed statement still gets a window.
+        try:
+            probe_pending = bool(probe is not None and probe.is_alive())
+            window_samples = [dict(sample) for sample in list(samples)
+                              if started_at <= float(sample["at"]) <= ended_at]
+            sampling_status = (
+                "sampled" if window_samples else
+                "probe_error" if errors else
+                "below_initial_delay" if duration_seconds < 0.1 else
+                "probe_pending" if probe_pending else "no_sample"
+            )
+            record = {
+                "started_at": started_at, "ended_at": ended_at,
+                "duration_ms": duration_ms, "backend_pid": backend_pid or None,
+                "probe_startup_ms": probe_startup_ms,
+                "probe_pending_at_capture": probe_pending,
+                "sampling_interval_ms": 25, "initial_delay_ms": 100,
+                "sampling_status": sampling_status,
+                "samples": window_samples[:max_retained_samples],
+                "samples_truncated": len(window_samples) > max_retained_samples,
+                "probe_errors": list(errors), "exception_type": exception_type,
+            }
+            if record_callback is not None:
+                record_callback(record)
+        except Exception:
+            pass
+    return result, record
 
 
 class _PostgresObservedCursor:
@@ -3451,7 +3485,16 @@ class PostgresQueryStore:
                                   len(values), total_ms, commit_ms=commit_ms,
                                   connect_ms=connect_ms,
                                   execute_ms=bar_write_ms + metadata_ms + revision_ms,
-                                  db_call_id=writer.call_id)
+                                  db_call_id=writer.call_id,
+                                  domain_counts=({
+                                      "bar_shape_version": 1,
+                                      "bar_changed_rows": len(changed_bar_rows) if returning else -1,
+                                      "observations": len(observations or ()),
+                                      "metadata_suppressed_rows": metadata_suppressed_rows,
+                                      "revision_insert_rows": revision_insert_rows,
+                                      "revision_history_enabled": int(self._observation_history_enabled),
+                                      "duplicate_input_keys": len(earlier_rows),
+                                  } if minute else None))
         if total_ms >= 1000:
             logger.warning(
                 "slow PostgreSQL market bar save kind=%s rows=%d observations=%d "
@@ -4260,28 +4303,50 @@ class PostgresQueryStore:
             writer_family="news.job_claim", writer_kind="news_job_claim",
             operation="claim_news_jobs",
         )
+        phase_ms: dict[str, float] = {}
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            cursor.execute(
+            def run_phase(name: str, operation: Callable[[], object]) -> object:
+                if not connection.diagnostic_capture_active():
+                    return operation()
+
+                def record_phase(record: dict[str, object]) -> None:
+                    phase_ms[name] = phase_ms.get(name, 0.0) + float(record["duration_ms"])
+                    record["rowcount"] = getattr(cursor, "rowcount", None)
+                    connection.record_phase_diagnostic(name, record)
+
+                result, _ = _execute_with_postgres_wait_probe(
+                    operation, self._database_url, connection.backend_pid or 0, True,
+                    record_callback=record_phase, max_retained_samples=256,
+                    capture_guard=connection.diagnostic_capture_active,
+                    probe_slots=_NEWS_CLAIM_WAIT_PROBE_SLOTS,
+                )
+                return result
+
+            run_phase("recover_stale", lambda: cursor.execute(
                 "UPDATE central_news_jobs SET state='PENDING',updated_at=%s "
                 "WHERE state='RUNNING' AND updated_at<%s", (claimed_at, claimed_at - 120.0),
-            )
+            ))
             priority = str(priority_stock_code or "").strip()
-            cursor.execute(
-                _NEWS_JOB_CLAIM_SELECT_SQL,
-                (claimed_at, preferred_stage, preferred_stage,
-                 priority, priority, priority, priority, priority, priority,
-                 bounded_limit(limit, 4)),
-            )
-            rows = cursor.fetchall()
-            for row in rows:
+
+            def select_candidates():
                 cursor.execute(
+                    _NEWS_JOB_CLAIM_SELECT_SQL,
+                    (claimed_at, preferred_stage, preferred_stage,
+                     priority, priority, priority, priority, priority, priority,
+                     bounded_limit(limit, 4)),
+                )
+                return cursor.fetchall()
+
+            rows = run_phase("select_candidates", select_candidates)
+            for row in rows:
+                run_phase("mark_running", lambda: cursor.execute(
                     "UPDATE central_news_jobs SET state='RUNNING',attempts=attempts+1,updated_at=%s "
                     "WHERE job_key=%s", (claimed_at, row[0]),
-                )
+                ))
         from .diagnostic_metrics import record_writer_transaction
         record_writer_transaction("news_job_claim", len(rows),
                                   round((monotonic() - started_at) * 1000),
-                                  db_call_id=writer.call_id)
+                                  db_call_id=writer.call_id, domain_phase_ms=phase_ms)
         return _news_job_rows(rows)
 
     def explain_news_job_claim_plan(self) -> dict[str, Any]:

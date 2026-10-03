@@ -16,6 +16,7 @@ from uuid import uuid4
 
 
 _DB_CALL_SOURCE: ContextVar[str] = ContextVar("db_call_source", default="")
+_DB_CALL_REQUEST_ID: ContextVar[str] = ContextVar("db_call_request_id", default="")
 
 
 @contextmanager
@@ -28,6 +29,16 @@ def db_call_source(source: str):
         _DB_CALL_SOURCE.reset(token)
 
 
+@contextmanager
+def db_call_request_id(request_id: str):
+    """Attach a bounded external operation ID to calls made in this scope."""
+    token = _DB_CALL_REQUEST_ID.set(request_id[:100])
+    try:
+        yield
+    finally:
+        _DB_CALL_REQUEST_ID.reset(token)
+
+
 @dataclass(frozen=True)
 class DBWriterContext:
     writer_family: str
@@ -37,7 +48,7 @@ class DBWriterContext:
     api_id: str = ""
     source: str = field(default_factory=_DB_CALL_SOURCE.get)
     parent_call_id: str = ""
-    request_id: str = ""
+    request_id: str = field(default_factory=_DB_CALL_REQUEST_ID.get)
     call_id: str = field(default_factory=lambda: uuid4().hex)
     access_mode: str = "write"
 
@@ -117,13 +128,15 @@ class ObservedDBConnection:
     def __init__(self, raw: Any, context: DBWriterContext | None,
                  *, started_at: float, started_mono: float,
                  connect_ms: float | None, capture_token: tuple[bool, str | None],
-                 hook: DBSlowHook | None = None) -> None:
+                 hook: DBSlowHook | None = None, trace_token: str | None = None,
+                 call_id: str | None = None) -> None:
         self._raw = raw
         self._context = context
         self._started_at = started_at
         self._started_mono = started_mono
         self._connect_ms = connect_ms
         self._capture_token = capture_token
+        self._trace_token = trace_token
         self._hook = hook
         # None means the first statement failed before a transaction was confirmed.
         self._transaction_started: bool | None = False
@@ -131,6 +144,8 @@ class ObservedDBConnection:
         self._execute_ms = 0.0
         self._execute_windows: list[dict[str, object]] = []
         self._execute_windows_truncated = False
+        self._phase_diagnostics: list[dict[str, object]] = []
+        self._phase_diagnostics_truncated = False
         self._commit_ms: float | None = None
         self._commit_started_at: float | None = None
         self._commit_finished_at: float | None = None
@@ -144,9 +159,13 @@ class ObservedDBConnection:
         self._errors: list[dict[str, str]] = []
         self._body_exception_type: str | None = None
         self._finished = False
-        self.call_id = context.call_id if context else uuid4().hex
+        self.call_id = call_id or (context.call_id if context else uuid4().hex)
         pid = getattr(getattr(raw, "info", None), "backend_pid", None)
         self.backend_pid = int(pid) if pid else None
+        try:
+            self.database_name = raw.info.dbname
+        except Exception:
+            self.database_name = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._raw, name)
@@ -178,6 +197,26 @@ class ObservedDBConnection:
 
     def execute(self, *args: Any, **kwargs: Any) -> Any:
         return self.cursor().execute(*args, **kwargs)
+
+    def record_phase_diagnostic(self, phase: str, record: dict[str, object]) -> None:
+        """Attach bounded domain timing to this call, including failed statements."""
+        if not self._capture_token[0]:
+            return
+        if len(self._phase_diagnostics) < 16:
+            self._phase_diagnostics.append({**record, "phase": phase})
+        else:
+            self._phase_diagnostics_truncated = True
+
+    def diagnostic_capture_active(self) -> bool:
+        """Keep optional probes in the capture generation owning this call."""
+        if not self._capture_token[0]:
+            return False
+        try:
+            from .diagnostic_metrics import capture_session_token
+
+            return capture_session_token() == self._capture_token
+        except Exception:
+            return False
 
     def commit(self) -> None:
         self._notify_started("commit")
@@ -265,7 +304,7 @@ class ObservedDBConnection:
                 self._failure("observer", error)
 
     def _publish(self) -> None:
-        if not self._capture_token[0]:
+        if not self._capture_token[0] and self._trace_token is None:
             return
         if self._body_exception_type is not None and not self._errors:
             self._errors.append({"stage": "body", "exception_type": self._body_exception_type})
@@ -282,6 +321,7 @@ class ObservedDBConnection:
             "parent_call_id": context.parent_call_id if context else "",
             "request_id": context.request_id if context else "",
             "backend_pid": self.backend_pid,
+            "database_name": self.database_name,
             "rows_attempted": context.rows_attempted if context else None,
             "calls": 1, "transactions": (None if self._transaction_started is None
                                             else int(self._transaction_started)),
@@ -301,6 +341,28 @@ class ObservedDBConnection:
             "outcome": self._outcome, "errors": list(self._errors),
             "retries": None,
         }
+        if self._phase_diagnostics:
+            record["phase_diagnostics"] = list(self._phase_diagnostics)
+            record["phase_diagnostics_truncated"] = self._phase_diagnostics_truncated
+        if self._trace_token is not None:
+            try:
+                from .diagnostic_trace import emit
+                emit(self._trace_token, "call_end", {
+                    "call_id": self.call_id, "backend_pid": self.backend_pid,
+                    "database_name": record["database_name"],
+                    "commits": self._commits, "rollbacks": self._rollbacks,
+                    "sql_calls": self._sql_calls, "outcome": self._outcome,
+                    "connection_acquire_ms": self._connect_ms,
+                    "execute_ms": record["execute_ms"], "commit_ms": self._commit_ms,
+                    "rollback_ms": self._rollback_ms, "total_ms": record["total_ms"],
+                    "commit_started_at": self._commit_started_at,
+                    "commit_finished_at": self._commit_finished_at,
+                    "exception_types": [item["exception_type"] for item in self._errors[:3]],
+                })
+            except Exception:
+                pass
+        if not self._capture_token[0]:
+            return
         try:
             from .diagnostic_metrics import record_db_call
 
@@ -323,9 +385,17 @@ class ObservedExistingDBTransaction:
             capture_token = capture_session_token()
         except Exception:
             capture_token = (False, None)
+        trace_token = None
+        try:
+            from .diagnostic_trace import token, emit
+            trace_token = token()
+            emit(trace_token, "call_start", _trace_start(context))
+        except Exception:
+            pass
         self.connection = ObservedDBConnection(
             raw, context, started_at=time(), started_mono=monotonic(),
             connect_ms=None, capture_token=capture_token, hook=hook,
+            trace_token=trace_token,
         )
         self._native_transaction: Any = None
 
@@ -397,14 +467,22 @@ def open_observed_connection(connect: Callable[[], Any],
     except Exception:
         # A broken diagnostic control must not prevent the actual DB call.
         capture_token = (False, None)
+    trace_token = None
+    trace_call_id = context.call_id if context else uuid4().hex
+    try:
+        from .diagnostic_trace import token, emit
+        trace_token = token()
+        emit(trace_token, "call_start", _trace_start(context, trace_call_id))
+    except Exception:
+        pass
     started_at, started_mono = time(), monotonic()
     try:
         raw = connect()
     except BaseException as error:
-        if capture_token[0]:
+        if capture_token[0] or trace_token is not None:
             record: dict[str, object] = {
                 "at": time(), "started_at": started_at, "finished_at": time(),
-                "call_id": context.call_id if context else uuid4().hex,
+                "call_id": trace_call_id,
                 "writer_family": context.writer_family if context else "UNREGISTERED",
                 "writer_kind": context.writer_kind if context else "UNREGISTERED",
                 "access_mode": context.access_mode if context else "write",
@@ -427,12 +505,34 @@ def open_observed_connection(connect: Callable[[], Any],
                 "retries": None,
             }
             try:
-                record_db_call(record, capture_token=capture_token)
+                if trace_token is not None:
+                    from .diagnostic_trace import emit
+                    emit(trace_token, "call_end", {
+                        "call_id": trace_call_id, "outcome": "connect_error",
+                        "connection_acquire_ms": record["connection_acquire_ms"],
+                        "total_ms": record["total_ms"], "commits": 0,
+                        "rollbacks": 0, "sql_calls": 0,
+                        "exception_types": [type(error).__name__],
+                    })
+                if capture_token[0]:
+                    record_db_call(record, capture_token=capture_token)
             except Exception:
                 pass
         raise
     return ObservedDBConnection(
         raw, context, started_at=started_at, started_mono=started_mono,
         connect_ms=_milliseconds(started_mono), capture_token=capture_token,
-        hook=hook,
+        hook=hook, trace_token=trace_token, call_id=trace_call_id,
     )
+
+
+def _trace_start(context: DBWriterContext | None, call_id: str | None = None) -> dict[str, object]:
+    return {"call_id": call_id or (context.call_id if context else ""),
+            "writer_family": context.writer_family[:100] if context else "UNREGISTERED",
+            "writer_kind": context.writer_kind[:100] if context else "UNREGISTERED",
+            "operation": context.operation[:100] if context else "unregistered",
+            "access_mode": context.access_mode if context else "write",
+            "source": context.source[:100] if context else "",
+            "api_id": context.api_id[:40] if context else "",
+            "parent_call_id": context.parent_call_id[:40] if context else "",
+            "rows_attempted": context.rows_attempted if context else None}

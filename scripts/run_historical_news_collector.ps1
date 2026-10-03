@@ -11,6 +11,9 @@ param(
     [ValidateRange(1, 8)]
     [int]$SearchWorkers = 4,
 
+    [ValidateRange(0.0, 600.0)]
+    [double]$ThrottleDelaySeconds = 60.0,
+
     [ValidateRange(0.0, 60.0)]
     [double]$ArticleDelay = 0.2,
 
@@ -90,7 +93,7 @@ Set-Location $projectRoot
 $completed = 0
 $stopRequested = $false
 Write-State 'running' $completed
-Write-Log "search collector started jobs=$Jobs max_pages=$MaxPages search_workers=$SearchWorkers; original/BODY/RULE run in the separate article collector"
+Write-Log "search collector started jobs=$Jobs max_pages=$MaxPages search_workers=$SearchWorkers throttle_delay_seconds=$ThrottleDelaySeconds; original/BODY/RULE run in the separate article collector"
 Write-Log "request timing and errors: $diagnosticLog"
 try {
     $excludeOutput = & $python scripts\probe_historical_backfill.py news-exclude-nonstocks `
@@ -115,7 +118,7 @@ try {
         $ErrorActionPreference = 'Continue'
         $output = & $python scripts\probe_historical_backfill.py news-run `
             --jobs 1 --search-only --max-pages $MaxPages --request-delay $RequestDelay `
-            --search-workers $SearchWorkers `
+            --search-workers $SearchWorkers --throttle-delay $ThrottleDelaySeconds `
             --heartbeat-file $heartbeatFile `
             --diagnostic-log $diagnosticLog `
             --output $Database 2>&1
@@ -135,8 +138,8 @@ try {
         }
         elseif ($collectorExitCode -eq 3) {
             if ($detail -match 'HTTP Error (403|429)') {
-                Write-Log "Naver search throttled; job returned to pending, retrying after 60 seconds: $detail"
-                Start-Sleep -Seconds 60
+                Write-Log "Naver search throttled; job returned to pending, retrying after $ThrottleDelaySeconds seconds: $detail"
+                Start-Sleep -Milliseconds ([int][Math]::Round($ThrottleDelaySeconds * 1000))
                 continue
             }
             throw "news-run exited with code ${collectorExitCode}: $detail"

@@ -4,7 +4,7 @@ import importlib
 import sys
 import types
 import unittest
-from threading import Event
+from threading import BoundedSemaphore, Event
 from time import monotonic, time
 from unittest.mock import patch
 
@@ -117,6 +117,70 @@ class NasDiagnosticCommitCorrelationTests(unittest.TestCase):
         self.assertEqual(["RuntimeError"], diagnostic["probe_errors"])
         self.assertEqual([], diagnostic["samples"])
         self.assertEqual("probe_error", diagnostic["sampling_status"])
+
+    def test_failed_statement_keeps_window_and_original_error_despite_callback_failure(self) -> None:
+        from kiwoom_monitor.central_server.database import _execute_with_postgres_wait_probe
+
+        records = []
+        def execute():
+            raise ValueError("domain failure")
+        def record(value):
+            records.append(value)
+            raise RuntimeError("observer failure")
+        with patch("kiwoom_monitor.central_server.database.Thread") as thread:
+            thread.return_value.is_alive.return_value = False
+            with self.assertRaisesRegex(ValueError, "domain failure"):
+                _execute_with_postgres_wait_probe(execute, "unused", 456, True,
+                                                  record_callback=record)
+        self.assertEqual("ValueError", records[0]["exception_type"])
+        self.assertGreaterEqual(records[0]["duration_ms"], 0)
+        self.assertTrue(thread.call_args.kwargs["args"][2].is_set())
+
+    def test_phase_samples_are_bounded_and_exclude_neighboring_windows(self) -> None:
+        from kiwoom_monitor.central_server.database import _execute_with_postgres_wait_probe
+
+        sampled, started = Event(), Event()
+        def sample(_url, _pid, _stop, samples, _errors):
+            started.wait(1)
+            base = {"state": "active", "wait_type": "Lock",
+                    "wait_event": "transactionid", "blocking_pids": [42]}
+            samples.extend([dict(base, at=time() - 60),
+                            *[dict(base, at=time()) for _ in range(5)],
+                            dict(base, at=time() + 60)])
+            sampled.set()
+        with patch("kiwoom_monitor.central_server.database._sample_postgres_commit_waits", sample):
+            _, record = _execute_with_postgres_wait_probe(
+                lambda: (started.set(), sampled.wait(1)), "unused", 456, True,
+                max_retained_samples=2)
+        self.assertEqual(2, len(record["samples"]))
+        self.assertTrue(record["samples_truncated"])
+        self.assertTrue(all(record["started_at"] <= value["at"] <= record["ended_at"]
+                            for value in record["samples"]))
+
+    def test_expired_capture_does_not_open_diagnostic_connection(self) -> None:
+        from kiwoom_monitor.central_server.database import _sample_postgres_commit_waits
+
+        with patch("psycopg.connect") as connect:
+            _sample_postgres_commit_waits("unused", 456, Event(), [], [],
+                                          capture_guard=lambda: False)
+        connect.assert_not_called()
+
+    def test_probe_capacity_is_nonblocking_and_released_when_capture_expires(self) -> None:
+        from kiwoom_monitor.central_server.database import _sample_postgres_commit_waits
+
+        slots = BoundedSemaphore(1)
+        self.assertTrue(slots.acquire(blocking=False))
+        errors = []
+        with patch("psycopg.connect") as connect:
+            _sample_postgres_commit_waits("unused", 456, Event(), [], errors,
+                                          probe_slots=slots)
+        self.assertEqual(["probe_capacity_reached"], errors)
+        connect.assert_not_called()
+        slots.release()
+        _sample_postgres_commit_waits("unused", 456, Event(), [], [],
+                                      probe_slots=slots, capture_guard=lambda: False)
+        self.assertTrue(slots.acquire(blocking=False))
+        slots.release()
 
     def test_executemany_is_one_window_for_multiple_row_operations(self) -> None:
         from kiwoom_monitor.central_server.database import _PostgresObservedCursor
