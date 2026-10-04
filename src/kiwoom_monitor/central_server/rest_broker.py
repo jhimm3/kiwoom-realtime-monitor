@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import Any, Callable, Protocol
 
-from .database import QueryStore, StoredQuery
+from .database_query_cache import QueryCacheStore, StoredQuery
 from .market_ingest import fundamentals_refresh_key
 from .market_observations import KST
 
@@ -162,7 +162,7 @@ class CentralRestBroker:
     """한 KiwoomRestClient를 통해 모든 REST 요청을 직렬 처리한다."""
 
     def __init__(
-        self, client: RestClient, store: QueryStore | None = None,
+        self, client: RestClient, store: QueryCacheStore | None = None,
         response_handler: Callable[[str, dict[str, Any], dict[str, Any]], None] | None = None,
         *, allowed_endpoints: dict[str, str] | None = None, namespace: str = "market",
         ranking_reservation: bool = False,

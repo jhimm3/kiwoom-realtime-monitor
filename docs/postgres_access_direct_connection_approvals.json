@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "reviewed_on": "2026-09-29",
+  "reviewed_on": "2026-10-04",
   "approved_sites": [
     {
       "file": "scripts/benchmark_minute_revision_batch_postgres.py",
@@ -195,20 +195,20 @@
       "reason": "Existing per-call store connection factory; production callers instrument ownership at the observed access boundary."
     },
     {
-      "file": "src/kiwoom_monitor/central_server/database.py",
+      "file": "src/kiwoom_monitor/central_server/postgres_access.py",
       "owner": "_sample_postgres_backend_waits",
       "call": "psycopg.connect",
       "count": 1,
       "category": "diagnostic_probe",
-      "reason": "Diagnostic-only probe or bounded diagnostic measurement connection; not a domain writer."
+      "reason": "Dataset and news wait sampler diagnostic-only connection; bounded probe behavior is unchanged and shared by PostgreSQL access helpers."
     },
     {
-      "file": "src/kiwoom_monitor/central_server/database.py",
+      "file": "src/kiwoom_monitor/central_server/postgres_access.py",
       "owner": "_sample_postgres_commit_waits",
       "call": "psycopg.connect",
       "count": 1,
       "category": "diagnostic_probe",
-      "reason": "Diagnostic-only probe or bounded diagnostic measurement connection; not a domain writer."
+      "reason": "Shared bounded PostgreSQL wait probe relocated from the monolithic store into the common access module; diagnostic-only connection and bounded behavior are unchanged."
     },
     {
       "file": "src/kiwoom_monitor/central_server/diagnostic_sampling.py",
@@ -241,6 +241,86 @@
       "count": 1,
       "category": "test_integration",
       "reason": "PostgreSQL integration test connection scoped to a dedicated test database."
+    },
+    {
+      "file": "scripts/check_source_database.py",
+      "owner": "main",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "maintenance_schema",
+      "reason": "The default path runs read-only compatibility checks through the observed access wrapper. Explicit --offline permits only the known checkpoint downgrade and requires the deployment owner to stop server writers first."
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/diagnostic_replay.py",
+      "owner": "_ReplayStore._connect",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "diagnostic_tool",
+      "reason": "Replay store factory is reached after the run requires the dedicated diagnostic database and a separate read-only preflight checks database identity, required tables, and scope collisions."
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/diagnostic_replay.py",
+      "owner": "run_replay",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "diagnostic_tool",
+      "reason": "Separate autocommit read-only preflight with bounded connection and statement timeouts; verifies dedicated database identity and test scope before replay writes."
+    },
+    {
+      "file": "tests/integration/test_diagnostic_replay_postgres.py",
+      "owner": "DiagnosticReplayPostgresTests._assert_minute_scope_empty",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "Read-only post-cleanup assertion against the dedicated integration database; setup and replay runner enforce database identity."
+    },
+    {
+      "file": "tests/integration/test_diagnostic_replay_postgres.py",
+      "owner": "DiagnosticReplayPostgresTests.test_news_and_shadow_replay_commit_and_remove_only_their_rows",
+      "call": "psycopg.connect",
+      "count": 2,
+      "category": "test_preflight",
+      "reason": "Two direct connections: read-only preflight pins the integration database identity and scope, then peer-row verification checks isolation after bounded replay writes."
+    },
+    {
+      "file": "tests/integration/test_diagnostic_replay_postgres.py",
+      "owner": "DiagnosticReplayPostgresTests.test_query_minute_invalid_observation_rolls_back_and_cleans_only_its_scope",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_preflight",
+      "reason": "Read-only preflight pins the integration database identity and scope before the injected failure and rollback assertions."
+    },
+    {
+      "file": "tests/integration/test_diagnostic_replay_postgres.py",
+      "owner": "DiagnosticReplayPostgresTests.test_realtime_and_program_shapes_commit_verify_and_clean_scoped_rows",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_preflight",
+      "reason": "Read-only preflight pins the integration database identity before scoped realtime and program-shape integration checks."
+    },
+    {
+      "file": "tests/integration/test_diagnostic_replay_postgres.py",
+      "owner": "DiagnosticReplayPostgresTests.test_recorded_minute_failed_call_rolls_back_then_cleans_seeded_scope_and_keeps_peer",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_preflight",
+      "reason": "Read-only preflight pins the integration database identity and scope before failure, cleanup, and peer-preservation checks."
+    },
+    {
+      "file": "tests/integration/test_shadow_checkpoint_postgres.py",
+      "owner": "ShadowCheckpointPostgresTests.test_1803_frame_single_change_compares_real_dml_wal_and_buffers",
+      "call": "psycopg.connect",
+      "count": 2,
+      "category": "test_integration",
+      "reason": "Two scoped inspection connections in a class whose setup enforces the dedicated database identity; benchmark mutations run in rollback transactions."
+    },
+    {
+      "file": "tests/integration/test_shadow_checkpoint_postgres.py",
+      "owner": "ShadowCheckpointPostgresTests.test_offline_downgrade_commits_latest_document_and_restores_old_schema_contract",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "Dedicated-database-only schema contract test uses a generated isolated schema for the downgrade case."
     }
   ]
 }

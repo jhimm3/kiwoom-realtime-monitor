@@ -40,6 +40,92 @@ from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRe
 
 
 class CentralServerAppTests(unittest.TestCase):
+    def test_verified_account_alias_round_trips_journal_content_and_rejects_wrong_scope(self) -> None:
+        import uuid
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2]) as directory:
+            database_path = Path(directory) / "central.sqlite3"
+            account_ref, origin = str(uuid.uuid4()), str(uuid.uuid4())
+            now = datetime.now(timezone.utc).isoformat()
+            store = SQLiteQueryStore(database_path)
+            store.initialize()
+            store.register_account_identity({
+                "broker": "kiwoom", "environment": "mock", "account_ref": account_ref,
+                "identity_fingerprint": "a" * 64, "created_at": now,
+            })
+            binding = store.append_account_binding({
+                "credential_profile_id": "alias-test", "broker": "kiwoom", "environment": "mock",
+                "account_ref": account_ref, "verified_at": now, "verification_method": "ka00001",
+            })
+            store.register_account_scope_alias({
+                "origin_account_ref": origin, "canonical_account_ref": account_ref,
+                "broker": "kiwoom", "environment": "mock", "credential_profile_id": "alias-test",
+                "binding_revision": binding["binding_revision"], "verified_at": now,
+                "verification_method": "ka00001",
+            })
+            store.close()
+            settings = CentralServerSettings(
+                f"sqlite:///{database_path}", "private-token", autonomous_top20_enabled=False,
+                market_event_collection_enabled=False,
+            )
+            endpoint = "/api/v1/content/journal_v2_group_overrides"
+            headers = {"Authorization": "Bearer private-token"}
+            document = {
+                "fill_id": "fill-1", "group_id": "manual:alias",
+                "origin_broker": "kiwoom", "origin_environment": "mock",
+                "origin_account_ref": origin, "canonical_account_ref": account_ref,
+            }
+            with TestClient(create_app(settings)) as client:
+                body = {"documents": [{"owner": origin, "key": "fill-1", "document": document}]}
+                self.assertEqual(401, client.post(endpoint, json=body).status_code)
+                saved = client.post(endpoint, headers=headers, json=body)
+                self.assertEqual(200, saved.status_code, saved.text)
+                self.assertEqual(1, saved.json()["saved"])
+                for changes in ({"canonical_account_ref": str(uuid.uuid4())},
+                                {"origin_environment": "real"}):
+                    response = client.post(endpoint, headers=headers, json={"documents": [{
+                        "owner": origin, "key": "fill-1", "document": {**document, **changes},
+                    }]})
+                    self.assertEqual(422, response.status_code, response.text)
+                loaded = client.get(endpoint, params={"owner": origin}, headers=headers)
+                self.assertEqual(200, loaded.status_code)
+                self.assertEqual(document, loaded.json()["documents"][0]["document"])
+
+    def test_external_market_bars_round_trip_through_authenticated_route(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2]) as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
+            store = SQLiteQueryStore(database_path)
+            store.initialize()
+            base = {
+                "provider": "yahoo_delayed", "instrument": "NASDAQ_FUTURES",
+                "contract": "MNQU26.CME", "timeframe": "5m", "open": 100.0,
+                "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0,
+                "updated_at": 100.0,
+            }
+            store.save_external_bars([
+                {**base, "bar_time": "2026-10-04T00:00:00Z"},
+                {**base, "bar_time": "2026-10-04T00:05:00Z", "close": 101.0},
+            ])
+            settings = CentralServerSettings(f"sqlite:///{database_path}", "private-token")
+            endpoint = "/api/v1/market/external-bars"
+            with TestClient(create_app(settings)) as client:
+                params = {"instrument": "nasdaq_futures", "timeframe": "5m"}
+                self.assertEqual(401, client.get(endpoint, params=params).status_code)
+                response = client.get(endpoint, params=params,
+                                      headers={"Authorization": "Bearer private-token"})
+                self.assertEqual(200, response.status_code)
+                document = response.json()
+                self.assertEqual("NASDAQ_FUTURES", document["instrument"])
+                self.assertEqual("5m", document["timeframe"])
+                self.assertEqual(["2026-10-04T00:00:00Z", "2026-10-04T00:05:00Z"],
+                                 [row["bar_time"] for row in document["bars"]])
+                self.assertEqual(101.0, document["bars"][-1]["close"])
+                self.assertEqual(11, len(document["bars"][-1]))
+                limited = client.get(endpoint, params={**params, "limit": 1},
+                                     headers={"Authorization": "Bearer private-token"})
+                self.assertEqual(["2026-10-04T00:05:00Z"],
+                                 [row["bar_time"] for row in limited.json()["bars"]])
+
     def test_db_call_diagnostic_requires_auth_and_rejects_unbounded_requests(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = CentralServerSettings(
@@ -146,6 +232,37 @@ class CentralServerAppTests(unittest.TestCase):
         self.assertEqual(4_321_000, response.json()["market_caps"][0]["market_cap_eok"])
         self.assertNotIn("current_price", response.text)
         self.assertNotIn("change_rate", response.text)
+
+    def test_realtime_subscription_restores_only_fresh_requested_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            now = time.time()
+            fresh = {"type": "trade", "payload": {"code": "005930", "current_price": 70000}}
+            market_state = {"type": "market_state", "payload": {"market": "kospi"}}
+            store.save_realtime_snapshots([
+                {"event_type": "market_state", "item_key": "kospi", "received_at": now - 2,
+                 "event": market_state},
+                {"event_type": "trade", "item_key": "005930", "received_at": now - 1,
+                 "event": fresh},
+                {"event_type": "trade", "item_key": "000660", "received_at": now - 3600,
+                 "event": {"type": "trade", "payload": {"code": "000660"}}},
+                {"event_type": "trade", "item_key": "035420", "received_at": now,
+                 "event": {"type": "trade", "payload": {"code": "035420"}}},
+            ])
+            store.close()
+            settings = CentralServerSettings(f"sqlite:///{path}", "private-token")
+            with TestClient(create_app(settings)) as client:
+                with client.websocket_connect(
+                    "/api/v1/realtime", headers={"Authorization": "Bearer private-token"},
+                ) as socket:
+                    self.assertEqual("ready", socket.receive_json()["type"])
+                    socket.send_json({"type": "subscribe", "codes": ["005930", "000660"]})
+                    self.assertEqual("subscribed", socket.receive_json()["type"])
+                    self.assertEqual(market_state, socket.receive_json())
+                    self.assertEqual(fresh, socket.receive_json())
+                    self.assertEqual("central_ready", socket.receive_json()["type"])
 
     def test_combined_minute_bars_prefer_sor_and_never_add_all_three_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

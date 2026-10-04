@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import psycopg
 import sqlite3
 import tempfile
 import time
@@ -213,6 +214,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.execution_account_refs: list[str] = []
         self.execution_owner_keys: list[str] = []
         self.account_registry_refs: list[str] = []
+        self.account_scope_alias_refs: list[str] = []
         self.account_binding_profile_ids: list[str] = []
         self.credential_activation_profile_ids: list[str] = []
         self.credential_profile_ids: list[str] = []
@@ -472,6 +474,17 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                         cursor.execute(f"DELETE FROM {table} WHERE {column}=ANY(%s)", (keys,))
                         cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE {column}=ANY(%s)", (keys,))
                         self.assertEqual(0, cursor.fetchone()[0], table)
+            if self.account_scope_alias_refs:
+                with self.store._connect() as connection, connection.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM central_account_scope_aliases WHERE origin_account_ref=ANY(%s)",
+                        (self.account_scope_alias_refs,),
+                    )
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM central_account_scope_aliases WHERE origin_account_ref=ANY(%s)",
+                        (self.account_scope_alias_refs,),
+                    )
+                    self.assertEqual(0, cursor.fetchone()[0])
             if self.account_registry_refs:
                 with self.store._connect() as connection, connection.cursor() as cursor:
                     for table, column, keys in (
@@ -507,8 +520,6 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         return key
 
     def test_research_export_keeps_fixed_membership_and_rolls_back_partial_failure(self) -> None:
-        from kiwoom_monitor.central_server import database as database_module
-
         subject = f"DIAG-{uuid.uuid4().hex}"
         start = datetime(2026, 9, 28, tzinfo=timezone.utc)
         end = start + timedelta(days=1)
@@ -555,7 +566,9 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             self.store.load_observation_export_page(second["fixed_watermark"], 0, 10)["observations"]
         ])
 
-        original_manifest = database_module._observation_export_manifest
+        from kiwoom_monitor.central_server import database_research_export as export_module
+
+        original_manifest = export_module._observation_export_manifest
         failed_ids: list[str] = []
 
         def capture_manifest(*args):
@@ -568,7 +581,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             cursor._raw.execute(sql, values[0])
             raise RuntimeError("injected member write failure")
 
-        with patch.object(database_module, "_observation_export_manifest",
+        with patch.object(export_module, "_observation_export_manifest",
                           side_effect=capture_manifest), patch.object(
                               ObservedDBCursor, "executemany", autospec=True,
                               side_effect=fail_after_first_member,
@@ -720,6 +733,80 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                             and call["transactions"] == 1
                             and call["commits"] == 1
                             and call["backend_pid"] is not None for call in reader_calls))
+
+    def test_account_scope_alias_preserves_binding_validation_rollback_and_peer(self) -> None:
+        from kiwoom_monitor.central_server import database_account_identity as account_identity_module
+
+        account_ref, origin, failed_origin, profile_id = (str(uuid.uuid4()) for _ in range(4))
+        self.account_registry_refs.append(account_ref)
+        self.account_binding_profile_ids.append(profile_id)
+        self.account_scope_alias_refs.extend((origin, failed_origin))
+        observed_at = datetime.now(timezone.utc).isoformat()
+        self.store.register_account_identity({
+            "broker": "kiwoom", "environment": "mock", "account_ref": account_ref,
+            "identity_fingerprint": uuid.uuid4().hex * 2, "created_at": observed_at,
+        })
+        binding = self.store.append_account_binding({
+            "credential_profile_id": profile_id, "broker": "kiwoom", "environment": "mock",
+            "account_ref": account_ref, "verified_at": observed_at, "verification_method": "ka00001",
+        })
+        expected_bindings = [row for row in self.store.load_account_bindings()
+                             if row["credential_profile_id"] == profile_id]
+        alias = {
+            "origin_account_ref": origin, "canonical_account_ref": account_ref,
+            "broker": "kiwoom", "environment": "mock", "credential_profile_id": profile_id,
+            "binding_revision": binding["binding_revision"], "verified_at": observed_at,
+            "verification_method": "ka00001",
+        }
+        with self.assertRaisesRegex(ValueError, "recorded verified binding"):
+            self.store.register_account_scope_alias({**alias, "binding_revision": 999})
+        original_values = account_identity_module._account_scope_alias_values
+
+        def invalid_insert_values(document):
+            values = list(original_values(document))
+            values[5] = "not-a-binding-revision"
+            return tuple(values)
+
+        with patch.object(account_identity_module, "_account_scope_alias_values",
+                          side_effect=invalid_insert_values):
+            with self.assertRaises(psycopg.errors.InvalidTextRepresentation):
+                self.store.register_account_scope_alias({**alias, "origin_account_ref": failed_origin})
+        self.assertFalse(self.store.resolve_account_scope("kiwoom", "mock", failed_origin)["verified"])
+        with self.store._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM central_account_scope_aliases WHERE origin_account_ref=ANY(%s)",
+                (self.account_scope_alias_refs,),
+            )
+            self.assertEqual(0, cursor.fetchone()[0])
+
+        barrier = Barrier(2)
+
+        def register():
+            barrier.wait(timeout=30)
+            return self.store.register_account_scope_alias(alias)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(register) for _ in range(2)]
+            saved = [future.result(timeout=60) for future in futures]
+        self.assertEqual([alias, alias], saved)
+        with self.assertRaisesRegex(ValueError, "immutable"):
+            self.store.register_account_scope_alias({**alias, "binding_revision": 999})
+        with self.assertRaisesRegex(ValueError, "chains"):
+            self.store.register_account_scope_alias({
+                **alias, "origin_account_ref": failed_origin, "canonical_account_ref": origin,
+            })
+        with self.assertRaisesRegex(ValueError, "canonical account"):
+            self.store.register_account_scope_alias({
+                **alias, "origin_account_ref": account_ref, "canonical_account_ref": failed_origin,
+            })
+        resolved = self.store.resolve_account_scope("kiwoom", "mock", origin)
+        self.assertEqual((origin, origin, account_ref, True), (
+            resolved["account_ref"], resolved["origin_account_ref"],
+            resolved["canonical_account_ref"], resolved["verified"],
+        ))
+        self.assertFalse(self.store.resolve_account_scope("kiwoom", "real", origin)["verified"])
+        self.assertEqual(expected_bindings, [row for row in self.store.load_account_bindings()
+                                            if row["credential_profile_id"] == profile_id])
 
     def test_real_account_event_and_recovery_keep_replay_fence_and_separate_commits(self) -> None:
         account_ref, profile_id = str(uuid.uuid4()), str(uuid.uuid4())
@@ -1036,6 +1123,86 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                             and call["sql_calls"] == 1
                             and call["backend_pid"] is not None for call in reader_calls))
 
+    def test_execution_ownership_control_fences_rollback_and_keep_peer(self) -> None:
+        marker = uuid.uuid4().hex
+        account_ref, run_id = f"diag-{marker}", f"run-{marker}"
+        peer_account = f"peer-{marker}"
+        owner_key, owner_token = f"mock:{account_ref}", f"{run_id}:{marker}"
+        self.execution_owner_keys.append(owner_key)
+        self.execution_account_refs.extend((account_ref, peer_account))
+        ids = [f"{name}-{marker}" for name in ("owned", "peer", "blocked", "resumed")]
+        self.execution_intent_ids.extend(ids)
+        self.document_keys.append(("execution_mock_automation_control", account_ref, account_ref))
+        now = datetime.now(timezone.utc)
+        observed_at = now.isoformat()
+        expires_at = (now + timedelta(minutes=5)).isoformat()
+        intent = {
+            "intent_id": ids[0], "run_id": run_id, "environment": "mock",
+            "account_ref": account_ref, "state": "QUEUED", "broker_order_id": "",
+            "last_broker_as_of": None, "created_at": observed_at, "updated_at": observed_at,
+        }
+        peer_intent = {**intent, "intent_id": ids[1], "account_ref": peer_account}
+        peer = PostgresQueryStore(self.store._database_url)
+        self.assertTrue(peer.create_execution_intent(peer_intent))
+        self.assertTrue(self.store.acquire_execution_runtime(owner_key, owner_token, observed_at, expires_at))
+        control = {
+            "account_ref": account_ref, "control_revision": 1, "desired_state": "RUNNING",
+            "changed_at": observed_at, "active_spec_id": marker, "execution_run_id": run_id,
+        }
+        self.assertTrue(self.store.save_mock_automation_control(control, expected_revision=0))
+        ownership = {
+            "owner_key": owner_key, "owner_token": owner_token, "run_id": run_id,
+            "control_revision": 1, "active_spec_id": marker,
+        }
+        self.assertTrue(self.store.create_execution_intent(intent, ownership=ownership))
+        stopped = {**control, "control_revision": 2, "desired_state": "STOPPED"}
+        self.assertTrue(self.store.save_mock_automation_control(stopped, expected_revision=1))
+        started = time.time()
+        blocked = {**intent, "intent_id": ids[2]}
+        with self.assertRaisesRegex(RuntimeError, "MOCK_AUTOMATION_CONTROL_CHANGED"):
+            self.store.create_execution_intent(blocked, ownership=ownership)
+        event = {
+            "event_id": f"blocked-event-{marker}", "intent_id": ids[0], "state": "ACCEPTED",
+            "occurred_at": observed_at, "received_at": observed_at,
+        }
+        with self.assertRaisesRegex(RuntimeError, "MOCK_AUTOMATION_CONTROL_CHANGED"):
+            self.store.append_execution_event({**intent, "state": "ACCEPTED"}, event, ownership=ownership)
+        snapshot_id = f"blocked-snapshot-{marker}"
+        snapshot = {
+            "snapshot_id": snapshot_id, "environment": "mock", "account_ref": account_ref,
+            "as_of": observed_at, "received_at": observed_at,
+        }
+        with self.assertRaisesRegex(RuntimeError, "MOCK_AUTOMATION_CONTROL_CHANGED"):
+            self.store.save_execution_account_snapshot(snapshot, ownership=ownership)
+        resumed = {**control, "control_revision": 3}
+        self.assertTrue(self.store.save_mock_automation_control(resumed, expected_revision=2))
+        with self.assertRaisesRegex(RuntimeError, "MOCK_AUTOMATION_CONTROL_CHANGED"):
+            self.store.create_execution_intent(blocked, ownership=ownership)
+        current_ownership = {**ownership, "control_revision": 3}
+        current_intent = {**intent, "intent_id": ids[3]}
+        self.assertTrue(self.store.create_execution_intent(current_intent, ownership=current_ownership))
+        self.assertFalse(self.store.release_execution_runtime(owner_key, f"{run_id}:wrong"))
+        self.assertTrue(self.store.release_execution_runtime(owner_key, owner_token))
+        self.assertTrue(peer.acquire_execution_runtime(owner_key, f"{run_id}:new-owner", observed_at, expires_at))
+        with self.assertRaisesRegex(RuntimeError, "EXECUTION_OWNERSHIP_LOST"):
+            self.store.create_execution_intent(blocked, ownership=current_ownership)
+        self.assertIsNone(self.store.load_execution_intent(ids[2]))
+        self.assertEqual([], self.store.load_execution_events(ids[0]))
+        self.assertEqual(intent, self.store.load_execution_intent(ids[0]))
+        self.assertEqual(current_intent, self.store.load_execution_intent(ids[3]))
+        self.assertEqual(peer_intent, peer.load_execution_intent(ids[1]))
+        with self.store._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM central_execution_account_snapshots WHERE snapshot_id=%s", (snapshot_id,))
+            self.assertEqual(0, cursor.fetchone()[0])
+        calls = summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+        failed = [call for call in calls if call["writer_kind"] in {
+            "execution_intent", "execution_event", "execution_account_snapshot",
+        } and call["outcome"] == "rolled_back"]
+        self.assertEqual(5, len(failed))
+        self.assertEqual(5, len({call["call_id"] for call in failed}))
+        self.assertTrue(all(call["commits"] == 0 and call["rollbacks"] == 1
+                            and call["backend_pid"] is not None for call in failed))
+
     def test_query_market_bars_keep_native_history_and_correlate_both_metrics(self) -> None:
         code = f"DIAG{uuid.uuid4().hex[:16]}"
         self.query_bar_codes.append(code)
@@ -1198,6 +1365,74 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual(replay_minute["updated_at"] + 60, sourced.available_at.timestamp())
         corrected = save_daily({**replay_daily, "close": 106})
         self.assertEqual(replay_daily["updated_at"], corrected.available_at.timestamp())
+
+    def test_direct_market_metadata_writer_rolls_back_and_range_reader_keeps_native_context(self) -> None:
+        from kiwoom_monitor.central_server.database_observation_writes import (
+            _market_metadata_upsert_sql as market_metadata_upsert_sql,
+        )
+        from kiwoom_monitor.domain.market_data_contract import (
+            DataCompleteness, DataUnit, DataValueKind, MarketDataMetadata,
+            MarketDataObservation, MarketDatasetKind, ObservationOrigin, TradingVenue,
+        )
+
+        code = f"DIAG{uuid.uuid4().hex[:16]}"
+        self.query_bar_codes.append(code)
+        subject = f"{code}:KRX"
+        effective_at = datetime(2099, 1, 9, 10, 0, tzinfo=KST)
+        available_at = effective_at + timedelta(seconds=2)
+        observation = MarketDataObservation(
+            kind=MarketDatasetKind.CANDIDATE_SET,
+            subject=subject,
+            value={"items": []},
+            metadata=MarketDataMetadata(
+                effective_at=effective_at,
+                available_at=available_at,
+                venue=TradingVenue.COMBINED,
+                unit=DataUnit.COUNT,
+                value_kind=DataValueKind.ACTUAL,
+                completeness=DataCompleteness.COMPLETE,
+                origin=ObservationOrigin.QUERY,
+                source="diagnostic-market-metadata-writer",
+            ),
+        )
+        key = effective_at.isoformat()
+        self.store.save_market_data_metadata(key, observation)
+
+        with patch(
+            "kiwoom_monitor.central_server.database_market_metadata._market_metadata_upsert_sql",
+            side_effect=lambda placeholder, excluded: (
+                market_metadata_upsert_sql(placeholder, excluded) + " INVALID"
+            ),
+        ), self.assertRaises(psycopg.errors.SyntaxError):
+            self.store.save_market_data_metadata(key, replace(
+                observation,
+                metadata=replace(observation.metadata, source="failed-correction"),
+            ))
+
+        started = time.time()
+        loaded = self.store.load_market_data_metadata(
+            MarketDatasetKind.CANDIDATE_SET, subject, key,
+        )
+        rows = self.store.load_market_data_metadata_range(
+            MarketDatasetKind.CANDIDATE_SET, subject,
+            effective_at - timedelta(seconds=1), effective_at + timedelta(seconds=1),
+        )
+        self.assertEqual(observation.metadata, loaded)
+        self.assertEqual([(key, observation.metadata)], [
+            (row.observation_key, row.metadata) for row in rows
+        ])
+
+        calls = summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+        range_reads = [call for call in calls
+                       if call["operation"] == "load_market_data_metadata_range"]
+        self.assertEqual(1, len(range_reads))
+        self.assertEqual("read", range_reads[0]["access_mode"])
+        self.assertEqual("committed", range_reads[0]["outcome"])
+        self.assertEqual((1, 1, 1), (
+            range_reads[0]["transactions"], range_reads[0]["commits"],
+            range_reads[0]["sql_calls"],
+        ))
+        self.assertIsNotNone(range_reads[0]["backend_pid"])
 
     def test_shadow_evaluation_and_checkpoint_keep_replay_and_independent_commits(self) -> None:
         monitor_id = f"diagnostic-shadow-{uuid.uuid4().hex}"
@@ -1953,7 +2188,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                           memberships[0]["article_revision_id"],
                           memberships[0]["body_revision_id"]))
 
-        with patch("kiwoom_monitor.central_server.database.uuid") as event_uuid:
+        with patch("kiwoom_monitor.central_server.database_news_revisions.uuid") as event_uuid:
             event_uuid.uuid4.side_effect = [
                 uuid.uuid4(), uuid.UUID(hex=memberships[0]["membership_revision_id"]),
             ]
@@ -2248,7 +2483,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         ))
 
     def test_external_news_finish_preserves_body_rule_replay_and_atomic_rollback(self) -> None:
-        from kiwoom_monitor.central_server import database as database_module
+        from kiwoom_monitor.central_server import database_historical_news as historical_news_module
         from kiwoom_monitor.domain.news_observation import ARTICLE_BODY_EXTRACTOR_VERSION
         from kiwoom_monitor.application.news_rules import SUPPLY_CONTRACT_RULE_VERSION
 
@@ -2315,13 +2550,13 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         rule_result = {"job_key": rule_job_key, "attempts": 1, "stage": "RULE",
                        "assessment": {"status": "diagnostic"}, "core_sentences": [],
                        "rule_result": rule_document}
-        save_event = database_module._save_postgres_news_event
+        save_event = historical_news_module._save_postgres_news_event
 
         def fail_after_event(cursor: object, value: dict[str, object]) -> str:
             save_event(cursor, value)
             raise RuntimeError("diagnostic failure after event membership")
 
-        with patch.object(database_module, "_save_postgres_news_event",
+        with patch.object(historical_news_module, "_save_postgres_news_event",
                           side_effect=fail_after_event):
             with self.assertRaisesRegex(RuntimeError, "after event membership"):
                 self.store.complete_external_historical_news_job(rule_result)
@@ -4169,6 +4404,59 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                             and call["transactions"] == 1
                             and call["commits"] == 1 for call in reader_calls))
 
+    def test_realtime_snapshot_batch_failure_rolls_back_and_keeps_peer(self) -> None:
+        token = uuid.uuid4().hex
+        code, invalid_code, peer_code = [f"diagnostic-{token}-{suffix}"
+                                          for suffix in ("latest", "invalid", "peer")]
+        self.realtime_codes.extend((code, invalid_code, peer_code))
+        received_at = time.time()
+
+        def snapshot(item_key: str, market_cap: float) -> dict[str, object]:
+            return {
+                "event_type": "trade", "item_key": item_key, "received_at": received_at,
+                "event": {"type": "trade", "payload": {
+                    "code": item_key, "current_price": 100, "market_cap_eok": market_cap,
+                }},
+            }
+
+        original = snapshot(code, 1000)
+        peer = snapshot(peer_code, 2000)
+        self.store.save_realtime_snapshots([original])
+        self.store.save_realtime_snapshots([peer])
+        revised = snapshot(code, 1500)
+        # json.dumps emits NaN, which PostgreSQL JSONB rejects during batch DML.
+        invalid = snapshot(invalid_code, float("nan"))
+        started = time.time()
+        with self.assertRaises(psycopg.errors.InvalidTextRepresentation):
+            self.store.save_realtime_snapshots([revised, invalid])
+
+        persisted = [event for event in self.store.load_realtime_snapshots([code, peer_code])
+                     if event.get("payload", {}).get("code") in (code, peer_code)]
+        self.assertEqual({code: original["event"], peer_code: peer["event"]},
+                         {event["payload"]["code"]: event for event in persisted})
+        with self.store._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM central_realtime_latest WHERE item_key=%s",
+                           (invalid_code,))
+            self.assertEqual(0, cursor.fetchone()[0])
+        failed_calls = [call for call in summarize_db_calls(
+            started, time.time(), mode="raw",
+        )["calls"] if call["writer_family"] == "realtime.latest"
+                       and call["outcome"] == "rolled_back"]
+        self.assertEqual(1, len(failed_calls))
+        failed = failed_calls[0]
+        # The invalid JSON fails on the first SQL statement, so the observer
+        # deliberately reports transaction count as unavailable. The rollback
+        # count still confirms that the caller-owned transaction was rolled back.
+        self.assertEqual((2, None, 0, 1), (
+            failed["rows_attempted"], failed["transactions"],
+            failed["commits"], failed["rollbacks"],
+        ))
+
+        self.store.save_realtime_snapshots([revised, snapshot(invalid_code, 3000)])
+        caps = self.store.load_latest_market_caps([code, invalid_code, peer_code])
+        self.assertEqual({code: 1500, invalid_code: 3000, peer_code: 2000},
+                         {row["code"]: row["market_cap_eok"] for row in caps})
+
     def test_realtime_writer_batch_preserves_replay_lineage_and_independent_commits(self) -> None:
         token = uuid.uuid4().hex
         code = f"diagnostic-{token}"
@@ -4404,6 +4692,48 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                             and call["backend_pid"] is not None
                             and call["transactions"] == 1
                             and call["commits"] == 1 for call in reader_calls))
+
+    def test_external_market_bar_batch_failure_rolls_back_and_keeps_peer(self) -> None:
+        instrument = f"DIAG-{uuid.uuid4().hex}"
+        self.external_bar_instruments.append(instrument)
+        base = {
+            "provider": "yahoo_delayed", "instrument": instrument,
+            "contract": f"{instrument}.CME", "timeframe": "5m",
+            "bar_time": "2026-10-04T00:00:00Z", "open": 100.0,
+            "high": 101.0, "low": 99.0, "close": None, "volume": None,
+            "updated_at": time.time(),
+        }
+        self.store.save_external_bars([base])
+        original = self.store.load_external_bars(instrument, "5m")
+        self.assertEqual(1, len(original))
+        self.assertIsNone(original[0]["close"])
+        self.assertIsNone(original[0]["volume"])
+
+        corrected = {**base, "close": 100.5, "volume": 12.0,
+                     "updated_at": base["updated_at"] + 1}
+        second = {**base, "bar_time": "2026-10-04T00:05:00Z"}
+        self.store.save_external_bars([corrected, second])
+        committed = self.store.load_external_bars(instrument, "5m")
+        self.assertEqual([100.5, None], [row["close"] for row in committed])
+        self.assertEqual([12.0, None], [row["volume"] for row in committed])
+
+        peer = {**base, "timeframe": "1d"}
+        self.store.save_external_bars([peer])
+        peer_committed = self.store.load_external_bars(instrument, "1d")
+        failed_first = {**corrected, "close": 102.0,
+                        "updated_at": corrected["updated_at"] + 1}
+        failed_second = {**base, "bar_time": "invalid-timestamp"}
+        started = time.time() - 1
+        with self.assertRaises(Exception):
+            self.store.save_external_bars([failed_first, failed_second])
+        self.assertEqual(committed, self.store.load_external_bars(instrument, "5m"))
+        self.assertEqual(peer_committed, self.store.load_external_bars(instrument, "1d"))
+        calls = [call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+                 if call["writer_kind"] == "external_market:bars" and call["rollbacks"] == 1]
+        self.assertEqual(1, len(calls))
+        self.assertEqual(2, calls[0]["rows_attempted"])
+        self.assertEqual("rolled_back", calls[0]["outcome"])
+        self.assertEqual(0, calls[0]["commits"])
 
     def test_news_original_publication_replay_preserves_reader_and_correlates_metrics(self) -> None:
         article_revision_id = f"diagnostic-{uuid.uuid4().hex}"

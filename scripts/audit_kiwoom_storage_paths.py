@@ -12,6 +12,11 @@ import json
 import re
 from pathlib import Path
 
+if __package__:
+    from .query_store_source import method_sources
+else:
+    from query_store_source import method_sources
+
 
 API_ID = re.compile(r"^(?:ka|kt)\d{5}$")
 SQL_WRITE = re.compile(r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|REPLACE\s+INTO)\s+(central_[a-z_]+)", re.I)
@@ -91,18 +96,16 @@ def inventory(root: Path) -> dict[str, object]:
                         if _literal(key) == "type" and isinstance(value, (ast.List, ast.Tuple)):
                             ws_types.update(item for element in value.elts if (item := _literal(element)))
 
-    database_file = source / "central_server" / "database.py"
-    database_tree = ast.parse(database_file.read_text(encoding="utf-8"))
     postgres_methods: list[dict[str, object]] = []
-    for cls in (node for node in database_tree.body if isinstance(node, ast.ClassDef) and node.name == "PostgresQueryStore"):
-        for method in (node for node in cls.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
-            tables = sorted({table.lower() for child in ast.walk(method)
-                             if isinstance(child, ast.Constant) and isinstance(child.value, str)
-                             for table in SQL_WRITE.findall(child.value)})
-            if tables:
-                postgres_methods.append({"method": method.name, "line": method.lineno,
-                                         "tables_in_literal_sql": tables,
-                                         "note": "helper SQL and transaction count require manual review"})
+    for method, implementation in method_sources(root)["PostgresQueryStore"].items():
+        node = implementation.node
+        tables = sorted({table.lower() for child in ast.walk(node)
+                         if isinstance(child, ast.Constant) and isinstance(child.value, str)
+                         for table in SQL_WRITE.findall(child.value)})
+        if tables:
+            postgres_methods.append({"method": method, "file": implementation.file,
+                                     "line": node.lineno, "tables_in_literal_sql": tables,
+                                     "note": "helper SQL and transaction count require manual review"})
 
     sqlite_tables: set[str] = set()
     for path in (source / "infrastructure" / "persistence").rglob("*.py"):

@@ -1,6 +1,6 @@
 """Static DB access inventory for design review; never imports or connects to DBs.
 
-SQL literals and locally reachable helpers are evidence, not a SQL parser or a
+SQL literals and statically reachable local helpers are evidence, not a SQL parser or a
 runtime transaction count. Shared PostgreSQL/SQLite helpers require manual review.
 """
 from __future__ import annotations
@@ -12,6 +12,11 @@ import json
 import re
 from collections import Counter
 from pathlib import Path
+
+if __package__:
+    from .query_store_source import method_sources
+else:
+    from query_store_source import method_sources
 
 
 METHODS = {"connect", "_connect", "_connection", "cursor", "execute", "executemany",
@@ -96,6 +101,14 @@ def inventory(root: Path, approvals_path: Path | None = None) -> dict:
     calls = []
     hashes = {}
     parse_errors = []
+    sources = method_sources(root)
+    physical_scopes = {
+        (source.file, f"{source.class_name}.{source.node.name}"): (
+            "postgres_store" if owner == "PostgresQueryStore" else "sqlite_store"
+        )
+        for owner in ("PostgresQueryStore", "SQLiteQueryStore")
+        for source in sources[owner].values()
+    }
     for subtree in ("src", "scripts", "tests"):
         for path in sorted((root / subtree).rglob("*.py")):
             relative = path.relative_to(root).as_posix()
@@ -122,12 +135,11 @@ def inventory(root: Path, approvals_path: Path | None = None) -> dict:
                         owner.append(ancestor.name)
                     ancestor = parents.get(ancestor)
                 owner_text = ".".join(reversed(owner))
-                if relative == DB_FILE:
-                    scope = ("postgres_store" if owner_text.startswith("PostgresQueryStore.") else
-                             "sqlite_store" if owner_text.startswith("SQLiteQueryStore.") else
-                             "shared_or_diagnostic_helper")
-                else:
-                    scope = "unclassified_test" if subtree == "tests" else "unclassified_candidate"
+                scope = physical_scopes.get((relative, owner_text))
+                if scope is None:
+                    scope = ("shared_or_diagnostic_helper" if relative == DB_FILE else
+                             "unclassified_test" if subtree == "tests" else
+                             "unclassified_candidate")
                 literal = (node.args[0].value if node.args and isinstance(node.args[0], ast.Constant)
                            and isinstance(node.args[0].value, str) else "")
                 calls.append({"file": relative, "owner": owner_text, "line": node.lineno,
@@ -138,40 +150,86 @@ def inventory(root: Path, approvals_path: Path | None = None) -> dict:
             if found:
                 hashes[relative] = hashlib.sha256(data).hexdigest()
 
-    tree = ast.parse((root / DB_FILE).read_text(encoding="utf-8-sig"))
-    functions = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PostgresQueryStore")
-    methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
-    rows = []
-    for method, node in methods.items():
-        reachable = {}
-        pending = [node]
-        while pending:
-            current = pending.pop()
-            if current.name in reachable:
+    methods = sources["PostgresQueryStore"]
+    central_root = root / "src/kiwoom_monitor/central_server"
+    local_helper_paths = [*central_root.glob("database_*.py"), central_root / "postgres_access.py"]
+    trees_by_file = {source.file: source.tree for source in methods.values()}
+    for path in local_helper_paths:
+        relative = path.relative_to(root).as_posix()
+        trees_by_file.setdefault(
+            relative, ast.parse(path.read_text(encoding="utf-8-sig"), filename=relative)
+        )
+    functions_by_file = {
+        file: {n.name: n for n in tree.body
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for file, tree in trees_by_file.items()
+    }
+    imported_helpers_by_file: dict[str, dict[str, tuple[str, str]]] = {}
+    for file, tree in trees_by_file.items():
+        imports: dict[str, tuple[str, str]] = {}
+        for statement in tree.body:
+            if not isinstance(statement, ast.ImportFrom) or not statement.module:
                 continue
-            reachable[current.name] = current
+            module = statement.module
+            if statement.level == 1:
+                module_name = module
+            elif statement.level == 0 and module.startswith("kiwoom_monitor.central_server."):
+                module_name = module.rsplit(".", 1)[-1]
+            else:
+                continue
+            target_file = f"src/kiwoom_monitor/central_server/{module_name}.py"
+            if target_file not in functions_by_file:
+                continue
+            for alias in statement.names:
+                if alias.name not in functions_by_file[target_file]:
+                    continue
+                local_name = alias.asname or alias.name
+                if local_name in imports or local_name in functions_by_file[file]:
+                    raise ValueError(f"ambiguous local helper {local_name} in {file}")
+                imports[local_name] = (target_file, alias.name)
+        imported_helpers_by_file[file] = imports
+    rows = []
+    reachable_helper_files: set[str] = set()
+    for method, source in methods.items():
+        node = source.node
+        reachable: dict[tuple[str, str], ast.FunctionDef | ast.AsyncFunctionDef] = {}
+        pending = [(source.file, node)]
+        while pending:
+            file, current = pending.pop()
+            if (file, current.name) in reachable:
+                continue
+            reachable[(file, current.name)] = current
+            functions = functions_by_file[file]
             for item in ast.walk(current):
                 if not isinstance(item, ast.Call):
                     continue
                 if isinstance(item.func, ast.Name) and item.func.id in functions:
-                    pending.append(functions[item.func.id])
-                elif isinstance(item.func, ast.Attribute) and isinstance(item.func.value, ast.Name) and item.func.value.id == "self" and item.func.attr in methods and item.func.attr != "_connect":
-                    pending.append(methods[item.func.attr])
+                    pending.append((file, functions[item.func.id]))
+                elif isinstance(item.func, ast.Name) and item.func.id in imported_helpers_by_file[file]:
+                    target_file, target_name = imported_helpers_by_file[file][item.func.id]
+                    reachable_helper_files.add(target_file)
+                    pending.append((target_file, functions_by_file[target_file][target_name]))
+                elif (isinstance(item.func, ast.Attribute) and
+                      isinstance(item.func.value, ast.Name) and item.func.value.id == "self" and
+                      item.func.attr in methods and item.func.attr != "_connect"):
+                    target = methods[item.func.attr]
+                    pending.append((target.file, target.node))
         literals = [child.value for current in reachable.values() for child in ast.walk(current)
                     if isinstance(child, ast.Constant) and isinstance(child.value, str)]
-        direct = [c for c in calls if c["file"] == DB_FILE and c["owner"] == f"PostgresQueryStore.{method}"]
+        direct = [c for c in calls if c["file"] == source.file and
+                  c["owner"] == f"{source.class_name}.{method}"]
         family, kind = proposal(method)
         context_expressions = [name(item.context_expr) for child in ast.walk(node)
                                if isinstance(child, ast.With) for item in child.items
                                if "connect" in name(item.context_expr) or "transaction" in name(item.context_expr)]
-        rows.append({"file": DB_FILE, "function": f"PostgresQueryStore.{method}", "line": node.lineno,
+        rows.append({"file": source.file, "function": f"PostgresQueryStore.{method}",
+                     "implementation_owner": source.class_name, "line": node.lineno,
                      "purpose": method, "proposed_family": family, "proposed_kind": kind,
                      "proposal_status": "design_label_not_runtime_registration",
                      "direct_callsite_counts_not_transaction_counts": dict(Counter(c["call"] for c in direct)),
                      "connection_context_expressions": context_expressions,
                      "connection_ownership": "per-call new connection if _connect is used; delegated helpers borrow cursor; inspect explicit lifecycle separately",
-                     "reachable_local_helpers": sorted(set(reachable) - {method}),
+                     "reachable_local_helpers": sorted({name for (_, name) in reachable} - {method}),
                      "reachable_literal_sql_tokens": sorted({v for s in literals for v in SQL.findall(s.upper())}),
                      "reachable_literal_tables_candidates": sorted({v for s in literals for v in TABLE.findall(s)}),
                      "boundary_status": "static evidence; context exit, branches, helpers and SQL commands need manual interpretation"})
@@ -183,6 +241,8 @@ def inventory(root: Path, approvals_path: Path | None = None) -> dict:
         approvals = {"approved_sites": []}
     connection_guard = audit_direct_connections(direct_connects, approvals)
     pg_files = {c["file"] for c in direct_connects}
+    pg_files.update(source.file for source in methods.values())
+    pg_files.update(reachable_helper_files)
     pg_files.add("src/kiwoom_monitor/central_server/schema_migrations.py")
     if (root / ACCESS_FILE).exists():
         pg_files.add(ACCESS_FILE)
@@ -197,7 +257,7 @@ def inventory(root: Path, approvals_path: Path | None = None) -> dict:
             "selected_pg_and_shared_helper_calls": sorted(selected, key=lambda c: (c["file"], c["line"])),
             "other_candidate_file_counts_not_proven_postgres": dict(sorted(remainder.items())),
             "source_sha256": hashes, "parse_errors": parse_errors,
-            "limits": ["Does not resolve imported aliases, reflective calls, external libraries or dynamic SQL.",
+            "limits": ["Follows explicit named imports among store implementations and local database_*.py/postgres_access.py helpers; other imported aliases, reflective calls, external libraries and dynamic SQL are not resolved.",
                        "Generic connect/execute/close names include SQLite and non-DB APIs; unclassified is not PostgreSQL.",
                        "Reachable helper literals can include SQLite branches and SQL fragments; not an active table inventory.",
                        "Callsite count does not establish transaction, commit, network round trip or active writer counts.",

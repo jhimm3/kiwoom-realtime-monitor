@@ -49,7 +49,7 @@ class NasDiagnosticCommitCorrelationTests(unittest.TestCase):
     def test_bar_upsert_wait_probe_is_capture_gated(self) -> None:
         from kiwoom_monitor.central_server.database import _execute_with_postgres_wait_probe
 
-        with patch("kiwoom_monitor.central_server.database._sample_postgres_commit_waits") as probe:
+        with patch("kiwoom_monitor.central_server.postgres_access._sample_postgres_commit_waits") as probe:
             result, diagnostic = _execute_with_postgres_wait_probe(
                 lambda: "saved", "postgresql://unused", 123, False,
             )
@@ -69,7 +69,7 @@ class NasDiagnosticCommitCorrelationTests(unittest.TestCase):
                             "wait_event": "DataFileRead", "blocking_pids": []})
             sampled.set()
 
-        with patch("kiwoom_monitor.central_server.database._sample_postgres_commit_waits", sample):
+        with patch("kiwoom_monitor.central_server.postgres_access._sample_postgres_commit_waits", sample):
             result, diagnostic = _execute_with_postgres_wait_probe(
                 lambda: (sql_started.set(), sampled.wait(1), "upserted")[2],
                 "postgresql://unused", 456, True,
@@ -92,7 +92,7 @@ class NasDiagnosticCommitCorrelationTests(unittest.TestCase):
             release.wait(1)
 
         try:
-            with patch("kiwoom_monitor.central_server.database._sample_postgres_commit_waits", blocked_probe):
+            with patch("kiwoom_monitor.central_server.postgres_access._sample_postgres_commit_waits", blocked_probe):
                 started = monotonic()
                 result, diagnostic = _execute_with_postgres_wait_probe(
                     lambda: (entered.wait(1), "saved")[1], "postgresql://unused", 456, True,
@@ -108,7 +108,7 @@ class NasDiagnosticCommitCorrelationTests(unittest.TestCase):
     def test_probe_start_failure_cannot_cancel_bar_upsert(self) -> None:
         from kiwoom_monitor.central_server.database import _execute_with_postgres_wait_probe
 
-        with patch("kiwoom_monitor.central_server.database.Thread") as thread:
+        with patch("kiwoom_monitor.central_server.postgres_access.Thread") as thread:
             thread.return_value.start.side_effect = RuntimeError("thread unavailable")
             result, diagnostic = _execute_with_postgres_wait_probe(
                 lambda: "saved", "postgresql://unused", 456, True,
@@ -127,7 +127,7 @@ class NasDiagnosticCommitCorrelationTests(unittest.TestCase):
         def record(value):
             records.append(value)
             raise RuntimeError("observer failure")
-        with patch("kiwoom_monitor.central_server.database.Thread") as thread:
+        with patch("kiwoom_monitor.central_server.postgres_access.Thread") as thread:
             thread.return_value.is_alive.return_value = False
             with self.assertRaisesRegex(ValueError, "domain failure"):
                 _execute_with_postgres_wait_probe(execute, "unused", 456, True,
@@ -148,7 +148,7 @@ class NasDiagnosticCommitCorrelationTests(unittest.TestCase):
                             *[dict(base, at=time()) for _ in range(5)],
                             dict(base, at=time() + 60)])
             sampled.set()
-        with patch("kiwoom_monitor.central_server.database._sample_postgres_commit_waits", sample):
+        with patch("kiwoom_monitor.central_server.postgres_access._sample_postgres_commit_waits", sample):
             _, record = _execute_with_postgres_wait_probe(
                 lambda: (started.set(), sampled.wait(1)), "unused", 456, True,
                 max_retained_samples=2)
@@ -190,7 +190,7 @@ class NasDiagnosticCommitCorrelationTests(unittest.TestCase):
                 return None
 
         records: list[dict[str, object]] = []
-        with patch("kiwoom_monitor.central_server.database.Thread") as thread:
+        with patch("kiwoom_monitor.central_server.postgres_access.Thread") as thread:
             thread.return_value.is_alive.return_value = False
             observed = _PostgresObservedCursor(Cursor(), "postgresql://unused", 456, True, records)
             observed.executemany("INSERT", [(1,), (2,), (3,)])

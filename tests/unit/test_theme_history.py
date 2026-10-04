@@ -122,10 +122,10 @@ class ThemeHistoryRepositoryTests(unittest.TestCase):
             late = _document(
                 created_at="2026-09-12T08:00:00+09:00", assignments=("000660",),
             )
-            with patch("kiwoom_monitor.central_server.database.time", side_effect=[100.0, 101.0]):
+            with patch("kiwoom_monitor.central_server.database_documents.time", side_effect=[100.0, 101.0]):
                 store.replace_documents("theme_metadata", _snapshot(current, origin="pc-a"))
             before_late = store.load_theme_snapshots(available_at=150.0)
-            with patch("kiwoom_monitor.central_server.database.time", side_effect=[200.0, 201.0]):
+            with patch("kiwoom_monitor.central_server.database_documents.time", side_effect=[200.0, 201.0]):
                 store.replace_documents("theme_metadata", _snapshot(late, origin="pc-b"))
             after_late = store.load_theme_snapshots()
             replay = store.load_theme_snapshots(available_at=150.0)

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 
 from kiwoom_monitor.domain.market_data_contract import (
+    CoverageObservation,
     DataCompleteness,
     MarketDataMetadata,
 )
@@ -16,12 +17,6 @@ class CoverageState(StrEnum):
     COMPLETE = "complete"
     PARTIAL = "partial"
     MISSING = "missing"
-
-
-@dataclass(frozen=True)
-class CoverageObservation:
-    observation_key: str
-    metadata: MarketDataMetadata
 
 
 @dataclass(frozen=True)

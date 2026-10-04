@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "captured_on_kst": "2026-10-04",
+  "source_commit": "1ccaca1bdbf6a18d1b5bb51a3695e801b0a3c3a8",
+  "scope": "static_source_evidence_only_no_database_access",
+  "tools": [
+    "scripts/audit_postgres_access.py",
+    "scripts/audit_kiwoom_storage_paths.py",
+    "scripts/audit_query_store_consumers.py"
+  ],
+  "artifact_sha256": {
+    "baseline_postgres_access.json": "2e695bc33302e511dc41d9de3fe7292ba6287bbec30aa009e4eda7e7399949ee",
+    "baseline_storage_paths.json": "44ce11d51945591cdc91cdb6871de20c53e7870bd4b0173fee82f4b3f874ef5d",
+    "baseline_query_store_consumers.json": "cfbd9a3bed811f8bf1af4b7f870d80e24d3b763b046b8235a5185c4d336568c1"
+  },
+  "counts": {
+    "postgres_store_methods": 105,
+    "literal_driver_connect_sites": 42,
+    "candidate_db_api_calls_all_backends": 7004,
+    "parse_errors": 0
+  },
+  "direct_connection_guard_status": "review_required",
+  "unreviewed_direct_callsites": 12,
+  "unreviewed_functions": 10,
+  "sqlite_declared_table_names": 97,
+  "verification": "No runtime DB/API/UI preservation tests executed in this baseline stage; schema and deployment unchanged.",
+  "after_artifact_sha256": {
+    "after_postgres_access.json": "677fd4aef6d4dfeca5b1bf8cab7cab3a1e4fc7b2ac0b6728aa94997b4a4c9004",
+    "after_storage_paths.json": "44ce11d51945591cdc91cdb6871de20c53e7870bd4b0173fee82f4b3f874ef5d",
+    "baseline_comparison.json": "a436554ed5dad76f4c6f6d916bbe7f8c06e56753b12379ee7c808affe0ae582f"
+  },
+  "after_direct_connection_review_gate": "pass",
+  "after_unreviewed_direct_callsites": 0,
+  "query_store_consumer_baseline": {
+    "captured_on_kst": "2026-10-04",
+    "counts": {
+      "protocol_methods": 99,
+      "postgres_methods": 104,
+      "sqlite_methods": 103,
+      "reviewed_store_sites": 338,
+      "store_internal_delegate_sites": 4,
+      "unresolved_same_name_candidates": 23,
+      "forwarding_edges": 46,
+      "parse_errors": 0
+    },
+    "verification": "Static audit check passed; three synthetic/unit regression tests passed. No DB, schema, application behavior, or NAS deployment changed."
+  }
+}

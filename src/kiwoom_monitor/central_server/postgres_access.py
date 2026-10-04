@@ -14,6 +14,8 @@ from time import monotonic, time
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
+from collections import Counter
+from threading import BoundedSemaphore, Event, Thread
 
 _DB_CALL_SOURCE: ContextVar[str] = ContextVar("db_call_source", default="")
 _DB_CALL_REQUEST_ID: ContextVar[str] = ContextVar("db_call_request_id", default="")
@@ -536,3 +538,212 @@ def _trace_start(context: DBWriterContext | None, call_id: str | None = None) ->
             "api_id": context.api_id[:40] if context else "",
             "parent_call_id": context.parent_call_id[:40] if context else "",
             "rows_attempted": context.rows_attempted if context else None}
+
+
+# Dataset and news writer wait probes; preserve the existing bounded diagnostic behavior.
+def _sample_postgres_backend_waits(
+    database_url: str, backend_pid: int, stop: Event,
+    samples: list[tuple[str, str, tuple[int, ...]]],
+) -> None:
+    """Capture the real PostgreSQL wait event while a TOP20 commit is blocked."""
+    if stop.wait(1.0):
+        return
+    try:
+        import psycopg
+
+        with psycopg.connect(
+            database_url, autocommit=True,
+            application_name="kiwoom-top20-latency-probe",
+        ) as connection, connection.cursor() as cursor:
+            while not stop.is_set():
+                cursor.execute(
+                    "SELECT COALESCE(wait_event_type,''),COALESCE(wait_event,''),"
+                    "pg_blocking_pids(pid) FROM pg_stat_activity WHERE pid=%s",
+                    (backend_pid,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return
+                samples.append((str(row[0]), str(row[1]), tuple(int(value) for value in row[2])))
+                if stop.wait(0.1):
+                    return
+    except Exception as error:
+        samples.append(("DIAGNOSTIC_ERROR", type(error).__name__, ()))
+
+def _postgres_wait_summary(samples: list[tuple[str, str, tuple[int, ...]]]) -> str:
+    counts = Counter(samples)
+    return ";".join(
+        f"{wait_type or 'NONE'}:{wait_event or 'NONE'}"
+        f" blockers={','.join(map(str, blockers)) or '-'} samples={count}"
+        for (wait_type, wait_event, blockers), count in counts.most_common()
+    ) or "no-sample"
+
+
+_NEWS_CLAIM_WAIT_PROBE_SLOTS = BoundedSemaphore(3)
+
+def _sample_postgres_commit_waits(
+    database_url: str, backend_pid: int, stop: Event,
+    samples: list[dict[str, object]], errors: list[str],
+    *, capture_guard: Callable[[], bool] | None = None,
+    probe_slots: BoundedSemaphore | None = None,
+) -> None:
+    """Sample one writer backend while a measured SQL phase is running.
+
+    The first probe is delayed to avoid adding a second connection for ordinary
+    sub-100ms commits. This runs only while diagnostic metric capture is enabled.
+    """
+    if stop.wait(0.1):
+        return
+    if probe_slots is not None and not probe_slots.acquire(blocking=False):
+        errors.append("probe_capacity_reached")
+        return
+    try:
+        if capture_guard is not None and not capture_guard():
+            return
+        import psycopg
+
+        with psycopg.connect(
+            database_url, autocommit=True, connect_timeout=2,
+            application_name="kiwoom-market-wait-probe",
+        ) as connection, connection.cursor() as cursor:
+            if stop.is_set():
+                return
+            cursor.execute("SET statement_timeout TO '500ms'")
+            while not stop.is_set():
+                if capture_guard is not None and not capture_guard():
+                    return
+                cursor.execute(
+                    "SELECT clock_timestamp(),state,COALESCE(wait_event_type,''),"
+                    "COALESCE(wait_event,''),pg_blocking_pids(pid) "
+                    "FROM pg_stat_activity WHERE pid=%s",
+                    (backend_pid,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return
+                if len(samples) >= 2048:
+                    errors.append("sample_limit_reached")
+                    return
+                samples.append({
+                    "at": row[0].timestamp(), "state": str(row[1]),
+                    "wait_type": str(row[2]), "wait_event": str(row[3]),
+                    "blocking_pids": [int(value) for value in row[4]],
+                })
+                if stop.wait(0.025):
+                    return
+    except Exception as error:
+        errors.append(type(error).__name__)
+    finally:
+        if probe_slots is not None:
+            probe_slots.release()
+
+def _execute_with_postgres_wait_probe(
+    execute: Callable[[], object], database_url: str, backend_pid: int,
+    enabled: bool,
+    *, record_callback: Callable[[dict[str, object]], None] | None = None,
+    max_retained_samples: int = 2048,
+    capture_guard: Callable[[], bool] | None = None,
+    probe_slots: BoundedSemaphore | None = None,
+) -> tuple[object, dict[str, object] | None]:
+    """Measure one cursor call without including probe cleanup in SQL duration."""
+    if not enabled:
+        return execute(), None
+    samples: list[dict[str, object]] = []
+    errors: list[str] = []
+    stop = Event()
+    probe: Thread | None = None
+    probe_startup_ms = 0
+    if backend_pid > 0:
+        startup_started = monotonic()
+        try:
+            probe = Thread(
+                target=_sample_postgres_commit_waits,
+                args=(database_url, backend_pid, stop, samples, errors),
+                kwargs={**({"capture_guard": capture_guard} if capture_guard is not None else {}),
+                        **({"probe_slots": probe_slots} if probe_slots is not None else {})},
+                name="market-sql-wait-probe", daemon=True,
+            )
+            probe.start()
+        except Exception as error:
+            errors.append(type(error).__name__)
+            probe = None
+        probe_startup_ms = round((monotonic() - startup_started) * 1000)
+    else:
+        errors.append("backend_pid_unavailable")
+    started_at = time()
+    started_mono = monotonic()
+    exception_type = ""
+    record: dict[str, object] | None = None
+    try:
+        result = execute()
+    except BaseException as error:
+        exception_type = type(error).__name__
+        raise
+    finally:
+        ended_at = time()
+        duration_seconds = monotonic() - started_mono
+        duration_ms = round(duration_seconds * 1000)
+        stop.set()
+        # Never wait for probe connection teardown or let diagnostic processing
+        # replace the domain exception. A failed statement still gets a window.
+        try:
+            probe_pending = bool(probe is not None and probe.is_alive())
+            window_samples = [dict(sample) for sample in list(samples)
+                              if started_at <= float(sample["at"]) <= ended_at]
+            sampling_status = (
+                "sampled" if window_samples else
+                "probe_error" if errors else
+                "below_initial_delay" if duration_seconds < 0.1 else
+                "probe_pending" if probe_pending else "no_sample"
+            )
+            record = {
+                "started_at": started_at, "ended_at": ended_at,
+                "duration_ms": duration_ms, "backend_pid": backend_pid or None,
+                "probe_startup_ms": probe_startup_ms,
+                "probe_pending_at_capture": probe_pending,
+                "sampling_interval_ms": 25, "initial_delay_ms": 100,
+                "sampling_status": sampling_status,
+                "samples": window_samples[:max_retained_samples],
+                "samples_truncated": len(window_samples) > max_retained_samples,
+                "probe_errors": list(errors), "exception_type": exception_type,
+            }
+            if record_callback is not None:
+                record_callback(record)
+        except Exception:
+            pass
+    return result, record
+
+class _PostgresObservedCursor:
+    """Narrow cursor proxy that records waits for selected UPSERT statements."""
+
+    def __init__(self, cursor, database_url: str, backend_pid: int,
+                 enabled: bool, records: list[dict[str, object]]) -> None:
+        self._cursor = cursor
+        self._database_url = database_url
+        self._backend_pid = backend_pid
+        self._enabled = enabled
+        self._records = records
+
+    def execute(self, *args, **kwargs):
+        result, record = _execute_with_postgres_wait_probe(
+            lambda: self._cursor.execute(*args, **kwargs), self._database_url,
+            self._backend_pid, self._enabled,
+        )
+        if record is not None:
+            record["method"] = "execute"
+            record["sql_operations"] = 1
+            record["affected_rows"] = getattr(self._cursor, "rowcount", None)
+            self._records.append(record)
+        return result
+
+    def executemany(self, *args, **kwargs):
+        result, record = _execute_with_postgres_wait_probe(
+            lambda: self._cursor.executemany(*args, **kwargs), self._database_url,
+            self._backend_pid, self._enabled,
+        )
+        if record is not None:
+            record["method"] = "executemany"
+            record["sql_operations"] = len(args[1]) if len(args) > 1 else None
+            record["affected_rows"] = getattr(self._cursor, "rowcount", None)
+            self._records.append(record)
+        return result

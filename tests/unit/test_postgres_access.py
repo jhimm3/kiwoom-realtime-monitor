@@ -323,6 +323,44 @@ class PostgresAccessTests(unittest.TestCase):
         self.assertEqual(1, summarize_db_calls(time.time() - 30, time.time() + 1)
                          ["writers"]["rest.query_cache/query_cache"]["commits"])
 
+    def test_external_market_bar_methods_keep_native_connection_boundaries(self) -> None:
+        value = {
+            "provider": "yahoo_delayed", "instrument": "DIAG", "contract": "DIAG.CME",
+            "timeframe": "5m", "bar_time": "2026-10-04T00:00:00Z",
+            "open": 100.0, "high": 101.0, "low": 99.0, "close": None,
+            "volume": None, "updated_at": 123.0,
+        }
+        saved = self._native_context_connection()
+        reader = self._native_context_connection()
+        reader.rows = [tuple(value[key] for key in (
+            "provider", "instrument", "contract", "timeframe", "bar_time",
+            "open", "high", "low", "close", "volume", "updated_at",
+        ))]
+        failed = self._native_context_connection()
+        failed.fail_execute = 1
+        store = PostgresQueryStore("unused")
+        with patch.object(store, "_connect", side_effect=[saved, reader, failed]):
+            store.save_external_bars([])
+            store.save_external_bars([value])
+            self.assertEqual([value], store.load_external_bars("DIAG", "5m", 1))
+            with self.assertRaisesRegex(ValueError, "statement failed"):
+                store.save_external_bars([value])
+
+        self.assertEqual((1, 0, 1), (saved.commits, saved.rollbacks, saved.closes))
+        self.assertEqual((1, 0, 1), (reader.commits, reader.rollbacks, reader.closes))
+        self.assertEqual((0, 1, 1), (failed.commits, failed.rollbacks, failed.closes))
+        self.assertEqual(["INSERT"], [statement[0] for statement in saved.statements])
+        self.assertEqual(["SELECT"], [statement[0] for statement in reader.statements])
+        self.assertEqual(["INSERT"], [statement[0] for statement in failed.statements])
+        calls = [call for call in self._calls()
+                 if call["operation"] in {"save_external_bars", "load_external_bars"}]
+        self.assertEqual(["committed", "committed", "rolled_back"],
+                         [call["outcome"] for call in calls])
+        self.assertEqual(["write", "read", "write"],
+                         [call["access_mode"] for call in calls])
+        self.assertEqual([1, 1], [call["transactions"] for call in calls[:2]])
+        self.assertEqual((0, 1), (calls[2]["commits"], calls[2]["rollbacks"]))
+
     def test_query_cache_reader_keeps_native_context_and_separates_metrics(self) -> None:
         raw_hit = self._native_context_connection()
         raw_miss = self._native_context_connection()
@@ -414,6 +452,35 @@ class PostgresAccessTests(unittest.TestCase):
         readers = summary["readers"]
         self.assertEqual(2, readers["read.market_bars/minute_bar"]["calls"])
         self.assertEqual(2, readers["read.market_bars/daily_bar"]["calls"])
+
+    def test_daily_bar_reader_orders_by_physical_date_column(self) -> None:
+        class CapturingCursor(FakeCursor):
+            def __init__(self, connection: FakeConnection) -> None:
+                super().__init__(connection)
+                self.sql = ""
+                self.parameters: object = ()
+
+            def execute(self, sql: str, parameters: object = ()) -> FakeCursor:
+                self.sql = sql
+                self.parameters = parameters
+                return super().execute(sql, parameters)
+
+        raw = self._native_context_connection()
+        raw.rows = [("2099-01-09", "DIAG", "KRX", 100, 110, 90, 105,
+                     10, 1, 1790000000.0)]
+        cursor = CapturingCursor(raw)
+        raw.cursor = lambda: cursor
+        store = PostgresQueryStore("unused")
+
+        with patch.object(store, "_connect", return_value=raw):
+            rows = store.load_daily_bars("DIAG", "KRX", 10)
+
+        self.assertEqual("2099-01-09", rows[0]["trading_date"])
+        self.assertIn("trading_date::text", cursor.sql)
+        self.assertIn("ORDER BY central_daily_bars.trading_date DESC LIMIT %s", cursor.sql)
+        self.assertNotIn("ORDER BY trading_date DESC", cursor.sql)
+        self.assertEqual(["DIAG", "KRX", 10], cursor.parameters)
+        self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
 
     def test_execute_error_preserves_original_exception_and_implicit_discard(self) -> None:
         raw = FakeConnection(fail_execute=2)
@@ -837,7 +904,7 @@ class PostgresAccessTests(unittest.TestCase):
         raw = self._native_context_connection()
         store = PostgresQueryStore("unused")
         with patch.object(store, "_connect", return_value=raw), \
-                patch("kiwoom_monitor.central_server.database.Thread") as thread:
+                patch("kiwoom_monitor.central_server.postgres_access.Thread") as thread:
             self.assertEqual([], store.claim_news_jobs(now=300.0))
         thread.assert_not_called()
         self.assertEqual((1, 0, 1, 2),
@@ -850,7 +917,7 @@ class PostgresAccessTests(unittest.TestCase):
                      "hash", "version", 0, {}, 100.0)]
         store = PostgresQueryStore("unused")
         with patch.object(store, "_connect", return_value=raw), \
-                patch("kiwoom_monitor.central_server.database.Thread") as thread:
+                patch("kiwoom_monitor.central_server.postgres_access.Thread") as thread:
             thread.return_value.start.side_effect = RuntimeError("probe unavailable")
             jobs = store.claim_news_jobs(now=300.0)
         self.assertEqual(["job-1"], [job["job_key"] for job in jobs])
@@ -1089,8 +1156,10 @@ class PostgresAccessTests(unittest.TestCase):
     def test_external_news_finish_uses_one_native_transaction_per_stage(self) -> None:
         store = PostgresQueryStore("unused")
 
-        def complete(cursor: FakeCursor, value: dict[str, object], *, postgres: bool) -> dict[str, str]:
+        def complete(cursor: FakeCursor, value: dict[str, object], *, postgres: bool,
+                     candidate_grouper: object) -> dict[str, str]:
             self.assertTrue(postgres)
+            self.assertIs(store._candidate_grouper, candidate_grouper)
             cursor.execute("UPDATE central_news_jobs SET state='COMPLETED' WHERE job_key=%s",
                            (value["job_key"],))
             return {"state": "completed", "output_ref": "revision-1"}
@@ -1099,7 +1168,7 @@ class PostgresAccessTests(unittest.TestCase):
             with self.subTest(stage=stage):
                 raw = self._native_context_connection()
                 with patch.object(store, "_connect", return_value=raw), patch(
-                    "kiwoom_monitor.central_server.database._complete_external_news_job",
+                    "kiwoom_monitor.central_server.database_historical_news._complete_external_news_job",
                     side_effect=complete,
                 ):
                     result = store.complete_external_historical_news_job(
@@ -1117,7 +1186,7 @@ class PostgresAccessTests(unittest.TestCase):
         raw = self._native_context_connection()
         raw.fail_execute = 1
         with patch.object(store, "_connect", return_value=raw), patch(
-            "kiwoom_monitor.central_server.database._complete_external_news_job",
+            "kiwoom_monitor.central_server.database_historical_news._complete_external_news_job",
             side_effect=complete,
         ):
             with self.assertRaisesRegex(ValueError, "statement failed"):
@@ -1136,7 +1205,7 @@ class PostgresAccessTests(unittest.TestCase):
             with self.subTest(name=name):
                 raw = self._native_context_connection()
                 with patch.object(store, "_connect", return_value=raw), patch(
-                    f"kiwoom_monitor.central_server.database.{helper}", return_value={"stored": True},
+                    f"kiwoom_monitor.central_server.database_account_settings.{helper}", return_value={"stored": True},
                 ):
                     if name == "event":
                         result = store.save_real_account_event("binding", "order_execution", "event", "time",
@@ -1157,7 +1226,7 @@ class PostgresAccessTests(unittest.TestCase):
 
         raw = self._native_context_connection()
         with patch.object(store, "_connect", return_value=raw), patch(
-            "kiwoom_monitor.central_server.database._save_real_account_event",
+            "kiwoom_monitor.central_server.database_account_settings._save_real_account_event",
             side_effect=ValueError("stale binding"),
         ):
             with self.assertRaisesRegex(ValueError, "stale binding"):
@@ -1178,7 +1247,7 @@ class PostgresAccessTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 raw = self._native_context_connection()
                 with patch.object(store, "_connect", return_value=raw), patch(
-                    f"kiwoom_monitor.central_server.database.{helper}", return_value={"revision": 1},
+                    f"kiwoom_monitor.central_server.database_account_settings.{helper}", return_value={"revision": 1},
                 ) as saved:
                     self.assertEqual({"revision": 1}, getattr(store, method)(
                         {"some": "value"}, expected_revision=0))
@@ -1193,7 +1262,7 @@ class PostgresAccessTests(unittest.TestCase):
 
         raw = self._native_context_connection()
         with patch.object(store, "_connect", return_value=raw), patch(
-            "kiwoom_monitor.central_server.database._save_market_profile_settings",
+            "kiwoom_monitor.central_server.database_account_settings._save_market_profile_settings",
             side_effect=ValueError("MARKET_PROFILE_SETTINGS_REVISION_CONFLICT"),
         ):
             with self.assertRaisesRegex(ValueError, "MARKET_PROFILE_SETTINGS_REVISION_CONFLICT"):

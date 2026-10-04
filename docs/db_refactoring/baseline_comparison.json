@@ -1,0 +1,15 @@
+{
+  "scope": "static source inventory only; no database access",
+  "postgres_direct_callsite_identity_unchanged": true,
+  "postgres_direct_callsite_count_before": 42,
+  "postgres_direct_callsite_count_after": 42,
+  "postgres_store_method_count_before": 105,
+  "postgres_store_method_count_after": 105,
+  "postgres_parse_errors_after": 0,
+  "direct_connection_review_gate_after": "pass",
+  "new_unreviewed_callsites_after": [],
+  "stale_approvals_after": [],
+  "storage_inventory_unchanged": true,
+  "sqlite_declared_table_count_before": 97,
+  "sqlite_declared_table_count_after": 97
+}

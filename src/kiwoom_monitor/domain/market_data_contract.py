@@ -111,6 +111,12 @@ class MarketDataMetadata:
 
 
 @dataclass(frozen=True)
+class CoverageObservation:
+    observation_key: str
+    metadata: MarketDataMetadata
+
+
+@dataclass(frozen=True)
 class MarketDataObservation(Generic[ValueT]):
     """봉·시장 상태·후보군을 같은 시간 계약으로 전달하는 얇은 봉투."""
 

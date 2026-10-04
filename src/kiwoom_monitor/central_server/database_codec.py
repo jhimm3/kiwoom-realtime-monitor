@@ -163,3 +163,34 @@ def json_mapping(value: object) -> dict[str, Any]:
     if not isinstance(decoded, dict):
         raise ValueError("central JSON value must be an object")
     return decoded
+
+
+def _json_document(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    decoded = json.loads(str(value))
+    if not isinstance(decoded, dict):
+        raise ValueError("stored execution document must be an object")
+    return decoded
+
+
+def _event_document(value: dict[str, Any]) -> str:
+    document = dict(value.get("document", {})) if isinstance(value.get("document"), dict) else {}
+    document.update({key: item for key, item in value.items() if key != "document"})
+    return json.dumps(document, ensure_ascii=False, separators=(",", ":"))
+
+
+def _observation_revision_columns(*, prefix: str = "", postgres: bool = False) -> str:
+    column = lambda name: f"{prefix}{name}"
+    effective_at = f"{column('effective_at')}::text" if postgres else column("effective_at")
+    received_at = f"{column('received_at')}::text" if postgres else column("received_at")
+    available_at = f"{column('available_at')}::text" if postgres else column("available_at")
+    return ",".join((
+        column("accepted_sequence"), column("revision_id"), column("observation_key"),
+        column("schema_version"), column("source_id"), column("source_session_id"),
+        column("source_sequence"), column("kind"), column("subject"), column("venue"),
+        effective_at, received_at, available_at, column("revision_of"), column("payload_hash"),
+        column("unit"), column("value_kind"), column("completeness"), column("origin"),
+        column("candidate_universe"), column("clock_quality"), column("quality_flags_json"),
+        column("source_ref_json"), column("payload_json"),
+    ))

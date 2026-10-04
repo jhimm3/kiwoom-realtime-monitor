@@ -14,13 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-PROVIDER_FIELDS = {
-    "kiwoom_real": ("app_key", "secret_key"),
-    "kiwoom_mock": ("app_key", "secret_key"),
-    "naver": ("client_id", "client_secret"),
-    "dart": ("api_key",), "openai": ("api_key",),
-    "gemini": ("api_key",), "claude": ("api_key",),
-}
+from kiwoom_monitor.domain.credential_contract import PROVIDER_FIELDS
 
 
 class CredentialStoreError(RuntimeError):

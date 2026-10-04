@@ -50,7 +50,7 @@ class HistoricalNewsPcJobsTests(unittest.TestCase):
 
         store = PostgresQueryStore("postgresql://unused")
         store._connect = lambda: Connection()  # type: ignore[method-assign]
-        with patch("kiwoom_monitor.central_server.database.monotonic",
+        with patch("kiwoom_monitor.central_server.database_historical_news.monotonic",
                    side_effect=[0.0, 0.005, 1.605, 1.610]), \
              self.assertLogs("kiwoom_monitor.central_server.database", level="WARNING") as logs:
             self.assertIsNone(store.claim_external_historical_news_job("BODY", scope="pc_search"))
@@ -80,7 +80,7 @@ class HistoricalNewsPcJobsTests(unittest.TestCase):
 
         store = PostgresQueryStore("postgresql://unused")
         store._connect = lambda: Connection()  # type: ignore[method-assign]
-        with patch("kiwoom_monitor.central_server.database.monotonic",
+        with patch("kiwoom_monitor.central_server.database_historical_news.monotonic",
                    side_effect=[0.0, 0.005, 1.605, 1.610]), \
              self.assertLogs("kiwoom_monitor.central_server.database", level="WARNING") as logs:
             with self.assertRaises(TimeoutError):

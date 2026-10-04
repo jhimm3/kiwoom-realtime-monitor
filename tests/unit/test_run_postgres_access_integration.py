@@ -1,15 +1,28 @@
 from __future__ import annotations
 
+import sys
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from scripts.run_postgres_access_integration import (
     _dedicated_url,
     _explicit_dedicated_url,
+    _install_project_import_paths,
     _resolve_target_url,
 )
 
 
 class DedicatedPostgresUrlTests(unittest.TestCase):
+    def test_candidate_src_precedes_installed_packages_and_test_root(self) -> None:
+        root = Path("candidate.zip")
+        with patch.object(sys, "path", ["existing"]):
+            _install_project_import_paths(root)
+            self.assertEqual(
+                [str(root / "src"), str(root), "existing"],
+                sys.path,
+            )
+
     def test_replaces_database_and_preserves_connection_options(self) -> None:
         source = "postgresql://user:secret@database:5432/kiwoom_monitor?sslmode=prefer"
         self.assertEqual(

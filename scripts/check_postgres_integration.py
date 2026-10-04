@@ -18,9 +18,7 @@ from kiwoom_monitor.central_server.config import CentralServerSettings
 from kiwoom_monitor.central_server.database import (
     PostgresQueryStore,
     StoredQuery,
-    _append_postgres_news_articles,
     _append_postgres_observation_revision,
-    _append_postgres_theme_snapshot,
     _load_postgres_confirmed_news_articles,
     _save_postgres_news_ai,
     _save_postgres_news_body,
@@ -32,6 +30,10 @@ from kiwoom_monitor.central_server.database import (
     _load_account_settings,
     _save_real_account_recovery,
     _save_real_account_event,
+)
+from kiwoom_monitor.central_server.database_documents import (
+    _append_postgres_news_articles,
+    _append_postgres_theme_snapshot,
 )
 from kiwoom_monitor.central_server.market_observations import ranking_observation
 from kiwoom_monitor.application.news_rules import classify_supply_contract, rule_input_hash

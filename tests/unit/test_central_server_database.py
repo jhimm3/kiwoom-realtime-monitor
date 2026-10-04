@@ -1036,7 +1036,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 raise RuntimeError("revision batch failed")
 
             with patch(
-                "kiwoom_monitor.central_server.database._insert_sqlite_observation_revisions_batch",
+                "kiwoom_monitor.central_server.database_market_bars._insert_sqlite_observation_revisions_batch",
                 side_effect=fail_after_revision_insert,
             ), self.assertRaisesRegex(RuntimeError, "revision batch failed"):
                 store.replace_minute_bars(
@@ -1679,12 +1679,12 @@ class CentralServerDatabaseTests(unittest.TestCase):
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
             value = {"owner": "005930", "key": "article", "document": {"title": "same"}}
-            with patch("kiwoom_monitor.central_server.database.time", return_value=10.0):
+            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=10.0):
                 store.upsert_documents("news_article", [value])
-            with patch("kiwoom_monitor.central_server.database.time", return_value=20.0):
+            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=20.0):
                 store.upsert_documents("news_article", [value])
             unchanged = store.load_documents("news_article")[0]
-            with patch("kiwoom_monitor.central_server.database.time", return_value=30.0):
+            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=30.0):
                 store.upsert_documents("news_article", [{
                     **value, "document": {"title": "changed"},
                 }])
@@ -1727,9 +1727,9 @@ class CentralServerDatabaseTests(unittest.TestCase):
         store = PostgresQueryStore("postgresql://unused")
         store._connect = lambda: connection  # type: ignore[method-assign]
         with patch(
-            "kiwoom_monitor.central_server.database.monotonic",
+            "kiwoom_monitor.central_server.database_query_cache.monotonic",
             side_effect=[index * 0.25 for index in range(12)],
-        ), patch("kiwoom_monitor.central_server.database.logger.warning") as warning:
+        ), patch("kiwoom_monitor.central_server.database_query_cache.logger.warning") as warning:
             store.save_query("cache-key", "ka10081", time.time() + 30, StoredQuery({"rows": [1]}, False, ""))
 
         self.assertEqual(2, len(cursor.statements))
@@ -1784,15 +1784,15 @@ class CentralServerDatabaseTests(unittest.TestCase):
         store = PostgresQueryStore("postgresql://unused")
         store._connect = lambda: connection  # type: ignore[method-assign]
         with patch(
-            "kiwoom_monitor.central_server.database.monotonic",
+            "kiwoom_monitor.central_server.database_market_bars.monotonic",
             side_effect=[index * 0.1 for index in range(14)],
         ), patch(
-            "kiwoom_monitor.central_server.database.bar_value_rows",
+            "kiwoom_monitor.central_server.database_market_bars.bar_value_rows",
             return_value=[(
                 "2026-09-25", "09:30", "005930", "KRX", 100, 100, 100,
                 100, 1, 1, 1_790_000_000.0,
             )],
-        ), patch("kiwoom_monitor.central_server.database.logger.warning") as warning:
+        ), patch("kiwoom_monitor.central_server.database_market_bars.logger.warning") as warning:
             store.replace_minute_bars([{"trading_date": "2026-09-25", "minute": "09:30", "code": "005930"}])
 
         self.assertIn("INSERT INTO central_minute_bars", cursor.sql)
@@ -1876,7 +1876,8 @@ class CentralServerDatabaseTests(unittest.TestCase):
         )
         with patch("kiwoom_monitor.central_server.diagnostic_metrics.refresh_capture_state",
                    return_value={"enabled": True}), \
-                patch("kiwoom_monitor.central_server.database.Thread", return_value=probe_thread), \
+                patch("kiwoom_monitor.central_server.database_market_bars.Thread", return_value=probe_thread), \
+                patch("kiwoom_monitor.central_server.postgres_access.Thread", return_value=probe_thread), \
                 patch("kiwoom_monitor.central_server.diagnostic_metrics.record_market_bar_save") as record:
             store.replace_minute_bars(
                 [value], observations=[(bar_observation_key(observation), observation)],
@@ -1899,8 +1900,8 @@ class CentralServerDatabaseTests(unittest.TestCase):
         store._connect = lambda: inactive_connection  # type: ignore[method-assign]
         with patch("kiwoom_monitor.central_server.diagnostic_metrics.refresh_capture_state",
                    return_value={"enabled": False}), \
-                patch("kiwoom_monitor.central_server.database.Thread") as inactive_thread, \
-                patch("kiwoom_monitor.central_server.database.Event") as inactive_event:
+                patch("kiwoom_monitor.central_server.database_market_bars.Thread") as inactive_thread, \
+                patch("kiwoom_monitor.central_server.database_market_bars.Event") as inactive_event:
             store.replace_minute_bars([value])
         self.assertTrue(inactive_connection.committed)
         self.assertNotIn("SAVEPOINT diagnostic_wal_timing", inactive_cursor.statements)
@@ -1912,7 +1913,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
         store._connect = lambda: broken_probe_connection  # type: ignore[method-assign]
         with patch("kiwoom_monitor.central_server.diagnostic_metrics.refresh_capture_state",
                    return_value={"enabled": True}), \
-                patch("kiwoom_monitor.central_server.database.Thread") as broken_thread, \
+                patch("kiwoom_monitor.central_server.database_market_bars.Thread") as broken_thread, \
                 patch("kiwoom_monitor.central_server.diagnostic_metrics.record_market_bar_save") as record:
             broken_thread.return_value.start.side_effect = RuntimeError("probe unavailable")
             store.replace_minute_bars([value])
@@ -1979,7 +1980,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
         rows = [(bar_observation_key(observation), observation)]
         with patch("kiwoom_monitor.central_server.diagnostic_workloads.is_paused",
                    side_effect=[False, True, False]), \
-                patch("kiwoom_monitor.central_server.database._save_postgres_metadata") as save_metadata, \
+                patch("kiwoom_monitor.central_server.database_market_bars._save_postgres_metadata") as save_metadata, \
                 patch("kiwoom_monitor.central_server.diagnostic_metrics.record_market_bar_save") as record:
             for _ in range(3):
                 store.replace_minute_bars([value], observations=rows)
@@ -2029,7 +2030,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
         store = PostgresQueryStore("postgresql://unused")
         store._connect = lambda: connection  # type: ignore[method-assign]
         with patch(
-            "kiwoom_monitor.central_server.database.bar_value_rows",
+            "kiwoom_monitor.central_server.database_market_bars.bar_value_rows",
             return_value=[("2026-09-25", "09:30", "005930", "KRX", 1, 1, 1, 1, 1, 1, 1)],
         ):
             with self.assertRaisesRegex(RuntimeError, "write failed"):

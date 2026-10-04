@@ -42,6 +42,16 @@ def _resolve_target_url(live_url: str, explicit_url: str) -> str:
     return _dedicated_url(live_url)
 
 
+def _install_project_import_paths(root: Path) -> None:
+    """Prefer the candidate source tree, including when root is a zipapp path."""
+    source = str(root / "src")
+    project = str(root)
+    for entry in (project, source):
+        while entry in sys.path:
+            sys.path.remove(entry)
+    sys.path[:0] = [source, project]
+
+
 def main() -> int:
     import psycopg
 
@@ -88,7 +98,7 @@ def main() -> int:
     os.environ["KIWOOM_DIAGNOSTIC_REQUIRE_EXISTING_CACHE_SCHEMA"] = "1"
 
     root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(root))
+    _install_project_import_paths(root)
     loader = unittest.defaultTestLoader
     suite = (
         unittest.TestSuite(loader.loadTestsFromName(name) for name in arguments.test)

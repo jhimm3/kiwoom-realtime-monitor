@@ -12,9 +12,9 @@ from typing import Any, Iterable, Mapping
 from kiwoom_monitor.application.news_analysis import NewsAssessment, is_price_reaction_news
 from kiwoom_monitor.application.news_grouping import group_similar_news, is_market_reaction_article
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
+from kiwoom_monitor.domain.news_observation import SUPPLY_CONTRACT_RULE_VERSION
 
 
-SUPPLY_CONTRACT_RULE_VERSION = "supply-contract-rule-v2"
 SUPPLY_CONTRACT_SCORE_VERSION = "supply-contract-score-v1"
 
 _SUPPLY = re.compile(r"공급\s*(?:계약|계약서|합의|논의|협의|검토|예정)|수주(?!\s*잔고)|납품|MOU|업무협약", re.I)

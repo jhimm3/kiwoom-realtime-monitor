@@ -128,7 +128,7 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
             store.initialize()
-            with patch("kiwoom_monitor.central_server.database.time", return_value=100.0):
+            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=100.0):
                 store.upsert_documents("news_article", _article())
             newer = _article("다른 종목 최신 기사")[0]
             newer["owner"] = "000660"
@@ -138,7 +138,7 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
                 "identity": "article-2", "link": "https://news/2",
                 "original_link": "https://origin/2",
             }
-            with patch("kiwoom_monitor.central_server.database.time", return_value=200.0):
+            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=200.0):
                 store.upsert_documents("news_article", [newer])
 
             selected = store.claim_news_jobs(priority_stock_code="005930", now=300.0)
@@ -150,7 +150,7 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
             store.initialize()
-            with patch("kiwoom_monitor.central_server.database.time", return_value=100.0):
+            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=100.0):
                 store.upsert_documents("news_article", _article())
             newer = _article("다른 종목 최신 기사")[0]
             newer["owner"] = "000660"
@@ -160,7 +160,7 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
                 "identity": "article-2", "link": "https://news/2",
                 "original_link": "https://origin/2",
             }
-            with patch("kiwoom_monitor.central_server.database.time", return_value=200.0):
+            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=200.0):
                 store.upsert_documents("news_article", [newer])
 
             claimed = store.claim_news_jobs(now=300.0)

@@ -1,0 +1,994 @@
+{
+  "scope": "static_source_evidence_only",
+  "source_root": "src/kiwoom_monitor",
+  "literal_rest_calls": [
+    {
+      "file": "src/kiwoom_monitor/application/ranking_service.py",
+      "line": 101,
+      "callee": "request",
+      "owner": "RankingService.load_top_stocks",
+      "api_id": "ka00198"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 179,
+      "callee": "request",
+      "owner": "AutonomousTop20Service.refresh_ranking_once",
+      "api_id": "ka00198"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 429,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._refresh_aux_rankings",
+      "api_id": "ka00198"
+    },
+    {
+      "file": "src/kiwoom_monitor/application/stock_fundamentals_service.py",
+      "line": 28,
+      "callee": "request",
+      "owner": "StockFundamentalsService.load",
+      "api_id": "ka10001"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1000,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._ensure_entry_basic",
+      "api_id": "ka10001"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/market_events.py",
+      "line": 532,
+      "callee": "request",
+      "owner": "MarketEventService._load_metadata",
+      "api_id": "ka10001"
+    },
+    {
+      "file": "src/kiwoom_monitor/application/investor_flow_service.py",
+      "line": 60,
+      "callee": "request",
+      "owner": "InvestorFlowService._request",
+      "api_id": "ka10045"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1156,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._capture_candidate_investor_flow",
+      "api_id": "ka10045"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1159,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._capture_candidate_investor_flow",
+      "api_id": "ka10045"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1219,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._backfill_candidate_flows",
+      "api_id": "ka10045"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1222,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._backfill_candidate_flows",
+      "api_id": "ka10045"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/market_events.py",
+      "line": 617,
+      "callee": "request",
+      "owner": "MarketEventService._backfill_vi",
+      "api_id": "ka10054"
+    },
+    {
+      "file": "src/kiwoom_monitor/application/minute_chart_service.py",
+      "line": 199,
+      "callee": "request",
+      "owner": "MinuteChartService._request_page",
+      "api_id": "ka10080"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1117,
+      "callee": "_request_with_retries",
+      "owner": "AutonomousTop20Service._backfill_entry_minutes",
+      "api_id": "ka10080"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1333,
+      "callee": "_request_with_retries",
+      "owner": "AutonomousTop20Service._backfill_minutes",
+      "api_id": "ka10080"
+    },
+    {
+      "file": "src/kiwoom_monitor/application/daily_high_service.py",
+      "line": 200,
+      "callee": "request",
+      "owner": "DailyHighService._load_bars_with_coverage",
+      "api_id": "ka10081"
+    },
+    {
+      "file": "src/kiwoom_monitor/application/trade_chart.py",
+      "line": 29,
+      "callee": "request",
+      "owner": "DailyTradeChartService.load",
+      "api_id": "ka10081"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1064,
+      "callee": "_request_with_retries",
+      "owner": "AutonomousTop20Service._collect_daily_history",
+      "api_id": "ka10081"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1066,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._collect_daily_history",
+      "api_id": "ka10081"
+    },
+    {
+      "file": "src/kiwoom_monitor/application/nxt_eligibility_service.py",
+      "line": 17,
+      "callee": "request",
+      "owner": "NxtEligibilityService.is_enabled",
+      "api_id": "ka10100"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 906,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._nxt_enabled",
+      "api_id": "ka10100"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/market_events.py",
+      "line": 508,
+      "callee": "request",
+      "owner": "MarketEventService._load_metadata",
+      "api_id": "ka10100"
+    },
+    {
+      "file": "src/kiwoom_monitor/application/market_index_chart_service.py",
+      "line": 69,
+      "callee": "request",
+      "owner": "MarketIndexChartService._request",
+      "api_id": "ka20005"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1258,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._backfill_market_indexes",
+      "api_id": "ka20005"
+    },
+    {
+      "file": "src/kiwoom_monitor/application/market_index_chart_service.py",
+      "line": 48,
+      "callee": "request",
+      "owner": "MarketIndexChartService.load_daily",
+      "api_id": "ka20006"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1282,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._backfill_market_indexes",
+      "api_id": "ka20006"
+    },
+    {
+      "file": "src/kiwoom_monitor/application/program_trade_service.py",
+      "line": 48,
+      "callee": "request",
+      "owner": "ProgramTradeService._request",
+      "api_id": "ka90008"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1225,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._backfill_candidate_flows",
+      "api_id": "ka90008"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1228,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._backfill_candidate_flows",
+      "api_id": "ka90008"
+    }
+  ],
+  "all_api_id_literals_in_source_not_proof_of_active_use": [
+    {
+      "api_id": "ka00001",
+      "files": [
+        "src/kiwoom_monitor/application/mock_automation_specification.py",
+        "src/kiwoom_monitor/central_server/database.py",
+        "src/kiwoom_monitor/central_server/mock_runtime.py",
+        "src/kiwoom_monitor/central_server/real_runtime.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py",
+        "src/kiwoom_monitor/domain/order_contract.py",
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/account_identity.py",
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/client.py",
+        "src/kiwoom_monitor/infrastructure/persistence/forward_evaluation_repository.py"
+      ]
+    },
+    {
+      "api_id": "ka00198",
+      "files": [
+        "src/kiwoom_monitor/application/ranking_service.py",
+        "src/kiwoom_monitor/central_server/autonomous_top20.py",
+        "src/kiwoom_monitor/central_server/market_ingest.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "ka10001",
+      "files": [
+        "src/kiwoom_monitor/application/stock_fundamentals_service.py",
+        "src/kiwoom_monitor/central_server/app.py",
+        "src/kiwoom_monitor/central_server/autonomous_top20.py",
+        "src/kiwoom_monitor/central_server/market_events.py",
+        "src/kiwoom_monitor/central_server/market_ingest.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "ka10016",
+      "files": [
+        "src/kiwoom_monitor/central_server/market_ingest.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "ka10045",
+      "files": [
+        "src/kiwoom_monitor/application/investor_flow_service.py",
+        "src/kiwoom_monitor/central_server/autonomous_top20.py",
+        "src/kiwoom_monitor/central_server/market_ingest.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "ka10054",
+      "files": [
+        "src/kiwoom_monitor/central_server/market_events.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "ka10075",
+      "files": [
+        "src/kiwoom_monitor/central_server/rest_broker.py",
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_account.py"
+      ]
+    },
+    {
+      "api_id": "ka10076",
+      "files": [
+        "src/kiwoom_monitor/central_server/rest_broker.py",
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_account.py"
+      ]
+    },
+    {
+      "api_id": "ka10080",
+      "files": [
+        "src/kiwoom_monitor/application/minute_chart_service.py",
+        "src/kiwoom_monitor/central_server/app.py",
+        "src/kiwoom_monitor/central_server/autonomous_top20.py",
+        "src/kiwoom_monitor/central_server/diagnostic_writer_registry.py",
+        "src/kiwoom_monitor/central_server/market_ingest.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "ka10081",
+      "files": [
+        "src/kiwoom_monitor/application/daily_high_service.py",
+        "src/kiwoom_monitor/application/historical_high_service.py",
+        "src/kiwoom_monitor/application/trade_chart.py",
+        "src/kiwoom_monitor/central_server/app.py",
+        "src/kiwoom_monitor/central_server/autonomous_top20.py",
+        "src/kiwoom_monitor/central_server/diagnostic_writer_registry.py",
+        "src/kiwoom_monitor/central_server/market_ingest.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "ka10083",
+      "files": [
+        "src/kiwoom_monitor/application/historical_high_service.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "ka10094",
+      "files": [
+        "src/kiwoom_monitor/application/historical_high_service.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "ka10100",
+      "files": [
+        "src/kiwoom_monitor/application/nxt_eligibility_service.py",
+        "src/kiwoom_monitor/central_server/app.py",
+        "src/kiwoom_monitor/central_server/autonomous_top20.py",
+        "src/kiwoom_monitor/central_server/market_events.py",
+        "src/kiwoom_monitor/central_server/market_ingest.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "ka20005",
+      "files": [
+        "src/kiwoom_monitor/application/market_index_chart_service.py",
+        "src/kiwoom_monitor/central_server/autonomous_top20.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "ka20006",
+      "files": [
+        "src/kiwoom_monitor/application/market_index_chart_service.py",
+        "src/kiwoom_monitor/central_server/autonomous_top20.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "ka90008",
+      "files": [
+        "src/kiwoom_monitor/application/program_trade_service.py",
+        "src/kiwoom_monitor/central_server/autonomous_top20.py",
+        "src/kiwoom_monitor/central_server/market_ingest.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "kt00001",
+      "files": [
+        "src/kiwoom_monitor/central_server/rest_broker.py",
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_account.py"
+      ]
+    },
+    {
+      "api_id": "kt00007",
+      "files": [
+        "src/kiwoom_monitor/application/trade_history_service.py",
+        "src/kiwoom_monitor/central_server/account_query.py",
+        "src/kiwoom_monitor/central_server/real_runtime.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py"
+      ]
+    },
+    {
+      "api_id": "kt00015",
+      "files": [
+        "src/kiwoom_monitor/application/trade_cost_service.py",
+        "src/kiwoom_monitor/central_server/account_query.py",
+        "src/kiwoom_monitor/central_server/real_runtime.py",
+        "src/kiwoom_monitor/central_server/rest_broker.py",
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_account.py"
+      ]
+    },
+    {
+      "api_id": "kt00018",
+      "files": [
+        "src/kiwoom_monitor/central_server/rest_broker.py",
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_account.py"
+      ]
+    },
+    {
+      "api_id": "kt10000",
+      "files": [
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_execution.py"
+      ]
+    },
+    {
+      "api_id": "kt10001",
+      "files": [
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_execution.py"
+      ]
+    },
+    {
+      "api_id": "kt10002",
+      "files": [
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_execution.py"
+      ]
+    },
+    {
+      "api_id": "kt10003",
+      "files": [
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_execution.py"
+      ]
+    },
+    {
+      "api_id": "kt10006",
+      "files": [
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_execution.py"
+      ]
+    },
+    {
+      "api_id": "kt10007",
+      "files": [
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_execution.py"
+      ]
+    },
+    {
+      "api_id": "kt10008",
+      "files": [
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_execution.py"
+      ]
+    },
+    {
+      "api_id": "kt10009",
+      "files": [
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_execution.py"
+      ]
+    },
+    {
+      "api_id": "kt50000",
+      "files": [
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_execution.py"
+      ]
+    },
+    {
+      "api_id": "kt50001",
+      "files": [
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_execution.py"
+      ]
+    },
+    {
+      "api_id": "kt50002",
+      "files": [
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_execution.py"
+      ]
+    },
+    {
+      "api_id": "kt50003",
+      "files": [
+        "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_execution.py"
+      ]
+    }
+  ],
+  "dynamic_request_calls_to_review": [
+    {
+      "file": "src/kiwoom_monitor/application/historical_high_service.py",
+      "line": 196,
+      "callee": "request_with_continuation",
+      "owner": "HistoricalHighService._load_rows",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/account_query.py",
+      "line": 156,
+      "callee": "request",
+      "owner": "AccountQuerySessionManager._query",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/account_query.py",
+      "line": 161,
+      "callee": "request",
+      "owner": "AccountQuerySessionManager._query",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/app.py",
+      "line": 1630,
+      "callee": "request",
+      "owner": "create_app.kiwoom_query",
+      "expression": "query.api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1408,
+      "callee": "request",
+      "owner": "AutonomousTop20Service._request_with_retries",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "line": 1520,
+      "callee": "request",
+      "owner": "_AsyncBrokerChartAdapter.request_with_continuation",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/account_identity.py",
+      "line": 65,
+      "callee": "request",
+      "owner": "KiwoomAccountIdentityReader.verify",
+      "expression": "ACCOUNT_ID_API"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/account_query.py",
+      "line": 104,
+      "callee": "request_with_continuation",
+      "owner": "LegacyAccountQueryAdapter.query_account_pages",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/account_query.py",
+      "line": 133,
+      "callee": "request",
+      "owner": "BoundDirectAccountQueryAdapter.request",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/account_query.py",
+      "line": 139,
+      "callee": "request_with_continuation",
+      "owner": "BoundDirectAccountQueryAdapter.request_with_continuation",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/failover_client.py",
+      "line": 37,
+      "callee": "request_with_continuation",
+      "owner": "FailoverKiwoomRestClient.request",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/failover_client.py",
+      "line": 47,
+      "callee": "request_with_continuation",
+      "owner": "FailoverKiwoomRestClient.request_with_continuation",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/failover_client.py",
+      "line": 60,
+      "callee": "request_with_continuation",
+      "owner": "FailoverKiwoomRestClient.request_with_continuation",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/mock_account.py",
+      "line": 166,
+      "callee": "request",
+      "owner": "_KiwoomAccountReader._pages",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/remote_client.py",
+      "line": 207,
+      "callee": "request_with_continuation",
+      "owner": "RemoteKiwoomRestClient.request",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/validation_client.py",
+      "line": 98,
+      "callee": "request_with_continuation",
+      "owner": "ParallelValidationClient.request",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/validation_client.py",
+      "line": 109,
+      "callee": "request_with_continuation",
+      "owner": "ParallelValidationClient.request_with_continuation",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/validation_client.py",
+      "line": 115,
+      "callee": "request_with_continuation",
+      "owner": "ParallelValidationClient.request_with_continuation",
+      "expression": "api_id"
+    },
+    {
+      "file": "src/kiwoom_monitor/infrastructure/kiwoom_rest/validation_client.py",
+      "line": 266,
+      "callee": "request_with_continuation",
+      "owner": "ParallelValidationClient._work",
+      "expression": "api_id"
+    }
+  ],
+  "declared_broker_api_ids_not_proof_of_active_use": [
+    "ka00001",
+    "ka00198",
+    "ka10001",
+    "ka10016",
+    "ka10045",
+    "ka10054",
+    "ka10075",
+    "ka10076",
+    "ka10080",
+    "ka10081",
+    "ka10083",
+    "ka10094",
+    "ka10100",
+    "ka20005",
+    "ka20006",
+    "ka90008",
+    "kt00001",
+    "kt00007",
+    "kt00015",
+    "kt00018"
+  ],
+  "registered_realtime_types_from_literal_lists": [
+    "00",
+    "04",
+    "0B",
+    "0J",
+    "0U",
+    "0g",
+    "0s",
+    "0w",
+    "1h"
+  ],
+  "postgres_methods_with_literal_write_sql": [
+    {
+      "method": "release_execution_runtime",
+      "line": 2609,
+      "tables_in_literal_sql": [
+        "central_execution_runtime_leases"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "save_query",
+      "line": 2811,
+      "tables_in_literal_sql": [
+        "central_api_query_cache"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "save_realtime_snapshots",
+      "line": 2905,
+      "tables_in_literal_sql": [
+        "central_realtime_latest"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "save_minute_bars",
+      "line": 2963,
+      "tables_in_literal_sql": [
+        "central_minute_bar_operations",
+        "central_minute_bars"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "finalize_minute_bars",
+      "line": 3111,
+      "tables_in_literal_sql": [
+        "central_minute_bar_operations"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "save_second_trade_bars",
+      "line": 3149,
+      "tables_in_literal_sql": [
+        "central_second_trade_bars"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "save_five_minute_bars",
+      "line": 3198,
+      "tables_in_literal_sql": [
+        "central_five_minute_bars"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "save_dataset_snapshots",
+      "line": 3544,
+      "tables_in_literal_sql": [
+        "central_dataset_snapshots"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "load_top20_statistics",
+      "line": 3707,
+      "tables_in_literal_sql": [
+        "central_dataset_snapshots"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "save_shadow_monitor_state",
+      "line": 3825,
+      "tables_in_literal_sql": [
+        "central_shadow_monitor_state"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "create_observation_export",
+      "line": 3906,
+      "tables_in_literal_sql": [
+        "central_research_export_members",
+        "central_research_exports"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "upsert_documents",
+      "line": 4018,
+      "tables_in_literal_sql": [
+        "central_documents"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "replace_documents",
+      "line": 4195,
+      "tables_in_literal_sql": [
+        "central_documents"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "claim_news_jobs",
+      "line": 4296,
+      "tables_in_literal_sql": [
+        "central_news_jobs"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "explain_news_job_claim_plan",
+      "line": 4352,
+      "tables_in_literal_sql": [
+        "central_news_jobs"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "claim_external_historical_news_job",
+      "line": 4470,
+      "tables_in_literal_sql": [
+        "central_news_jobs"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "finish_news_job",
+      "line": 4607,
+      "tables_in_literal_sql": [
+        "central_news_jobs"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "retry_news_job",
+      "line": 4625,
+      "tables_in_literal_sql": [
+        "central_news_jobs"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "save_news_ai_results",
+      "line": 4662,
+      "tables_in_literal_sql": [
+        "central_documents"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "claim_news_request",
+      "line": 4780,
+      "tables_in_literal_sql": [
+        "central_news_request_budget"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "append_vi_events",
+      "line": 4911,
+      "tables_in_literal_sql": [
+        "central_vi_event_revisions"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "record_hot_cohort_revision",
+      "line": 4930,
+      "tables_in_literal_sql": [
+        "central_hot_cohort_current",
+        "central_hot_cohort_revisions"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "append_upper_limit_facts",
+      "line": 4978,
+      "tables_in_literal_sql": [
+        "central_upper_limit_fact_revisions"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "save_external_bars",
+      "line": 5018,
+      "tables_in_literal_sql": [
+        "central_external_bars"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "create_execution_intent",
+      "line": 5056,
+      "tables_in_literal_sql": [
+        "central_execution_intents"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "append_execution_event",
+      "line": 5074,
+      "tables_in_literal_sql": [
+        "central_execution_events",
+        "central_execution_intents"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "save_execution_account_snapshot",
+      "line": 5177,
+      "tables_in_literal_sql": [
+        "central_execution_account_snapshots"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "save_mock_automation_control",
+      "line": 5232,
+      "tables_in_literal_sql": [
+        "central_documents"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "acquire_execution_runtime",
+      "line": 5271,
+      "tables_in_literal_sql": [
+        "central_execution_runtime_leases"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "register_account_identity",
+      "line": 5291,
+      "tables_in_literal_sql": [
+        "central_account_registry"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "append_account_binding",
+      "line": 5321,
+      "tables_in_literal_sql": [
+        "central_account_binding_revisions"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    },
+    {
+      "method": "register_account_scope_alias",
+      "line": 5381,
+      "tables_in_literal_sql": [
+        "central_account_scope_aliases"
+      ],
+      "note": "helper SQL and transaction count require manual review"
+    }
+  ],
+  "pc_sqlite_declared_tables": [
+    "central_column_setting_versions",
+    "central_setting_versions",
+    "column_settings",
+    "daily_bar_sync_log",
+    "daily_bars",
+    "daily_trade_costs",
+    "historical_high_evidence",
+    "if",
+    "intraday_highs",
+    "journal_analysis_revisions",
+    "journal_bar_backfill",
+    "journal_daily_bars",
+    "journal_enrichment_tasks",
+    "journal_execution_event_projections",
+    "journal_execution_projection_states",
+    "journal_legacy_imports",
+    "journal_minute_bars",
+    "journal_news_links",
+    "journal_research_links",
+    "journal_settings",
+    "journal_stocks",
+    "journal_sync_states",
+    "kind_name_disclosures",
+    "legacy_news_transfer_migrations",
+    "market_data_finalization_log",
+    "market_data_unconfirmed_log",
+    "market_index_daily_bars",
+    "market_index_minute_bars",
+    "minute_bars",
+    "minute_history_sync_log",
+    "new_high_snapshot",
+    "new_high_snapshot_meta",
+    "news_ai_requests",
+    "news_ai_shared",
+    "profile_stock_themes",
+    "profile_theme_name_decisions",
+    "profile_theme_suggestions",
+    "profile_themes",
+    "research_campaign_cycles",
+    "research_campaign_hypotheses",
+    "research_campaign_hypothesis_expansions",
+    "research_campaign_input_acceptances",
+    "research_campaign_input_sources",
+    "research_campaign_job_budgets",
+    "research_campaign_jobs",
+    "research_campaign_revisions",
+    "research_campaign_rolling_empty_days",
+    "research_campaign_staging_cleanups",
+    "research_campaign_storage_operations",
+    "research_campaign_worker_attempts",
+    "research_campaign_workers",
+    "research_campaigns",
+    "research_candidate_cards",
+    "research_candidate_events",
+    "research_comparisons",
+    "research_context_hypothesis_revisions",
+    "research_decisions",
+    "research_entry_theses",
+    "research_execution_events",
+    "research_feature_snapshots",
+    "research_final_holdout_events",
+    "research_final_holdout_executions",
+    "research_final_holdout_recoveries",
+    "research_final_holdout_windows",
+    "research_hypotheses",
+    "research_hypothesis_parents",
+    "research_independent_run_owner_history",
+    "research_independent_run_owners",
+    "research_outcome_labels",
+    "research_reports",
+    "research_run_evaluations",
+    "research_runs",
+    "research_search_experiments",
+    "research_search_job_events",
+    "research_search_jobs",
+    "research_search_trials",
+    "research_theme_leadership_revisions",
+    "research_thesis_decisions",
+    "research_trial_attempts",
+    "settings",
+    "stock_aliases",
+    "stock_name_history",
+    "stock_news",
+    "stock_news_ai",
+    "stock_news_sync",
+    "stock_themes",
+    "stocks",
+    "theme_profiles",
+    "themes",
+    "top20_statistics_daily_cache",
+    "top20_trade_value_index",
+    "trade_entry_snapshots",
+    "trade_fills",
+    "trade_group_overrides",
+    "trade_reviews",
+    "trade_setup_classifications",
+    "trade_setup_cycle_overrides"
+  ],
+  "limits": [
+    "dynamic API IDs, helper SQL, direct HTTP, generated SQL and transaction counts need manual review",
+    "no operational database is queried or modified"
+  ]
+}
