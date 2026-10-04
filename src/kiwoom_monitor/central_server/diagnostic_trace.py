@@ -22,6 +22,8 @@ _CAPACITY = 32768
 _SESSION: dict | None = None
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
+_MAX_CHUNK_BYTES = 1_048_576
+_MAX_DOWNLOAD_CHUNK_BYTES = 2_000_000  # Keep older, readable chunks compatible.
 _MAX_BYTES = 1_073_741_824
 _MAX_SESSIONS = 8
 _MAX_STORED_BYTES = 4 * _MAX_BYTES
@@ -76,7 +78,7 @@ def start(*, seconds: int) -> dict:
                     "known_dropped": 0, "bytes_written": 0, "chunks": [],
                     "chunk_flush_ms_total": 0.0, "chunk_flush_ms_max": 0.0,
                     "chunk_fsync_ms_total": 0.0, "chunk_fsync_ms_max": 0.0,
-                    "queue_high_water": 0, "reason": None}
+                    "queue_high_water": 0, "pending_events": 0, "reason": None}
         _THREAD = threading.Thread(target=_drain, args=(_SESSION, run_lock),
                                    name="diagnostic-trace", daemon=True)
         try:
@@ -89,7 +91,7 @@ def start(*, seconds: int) -> dict:
 
 
 def _public(session: dict) -> dict:
-    return {**session, "queued": len(_QUEUE)}
+    return {**session, "queued": len(_QUEUE) + session.get("pending_events", 0)}
 
 
 def status(trace_id: str | None = None) -> dict:
@@ -110,7 +112,7 @@ def chunk_bytes(trace_id: str, name: str) -> bytes:
         raise KeyError("invalid_trace_chunk")
     manifest = status(trace_id)
     expected = next((part for part in manifest.get("chunks", []) if part["name"] == name), None)
-    if expected is None or int(expected["bytes"]) > 2_000_000:
+    if expected is None or int(expected["bytes"]) > _MAX_DOWNLOAD_CHUNK_BYTES:
         raise KeyError("trace_chunk_not_committed")
     path = _directory() / trace_id / name
     if path.is_symlink() or not path.is_file():
@@ -210,6 +212,7 @@ def _manifest(directory: Path, session: dict) -> None:
 
 def _drain(session: dict, run_lock) -> None:
     directory = None
+    pending: deque[dict] = deque()
     try:
         directory = _directory() / session["trace_id"]
         directory.mkdir(mode=0o700, exist_ok=False)
@@ -229,14 +232,27 @@ def _drain(session: dict, run_lock) -> None:
             if not _STOP.is_set() and time.monotonic() < next_flush:
                 continue
             next_flush = time.monotonic() + 5
-            batch: list[dict] = []
             with _LOCK:
-                while _QUEUE and len(batch) < 4096:
-                    batch.append(_QUEUE.popleft())
-            if batch:
+                if not pending:
+                    while _QUEUE and len(pending) < 4096:
+                        pending.append(_QUEUE.popleft())
+                    session["pending_events"] = len(pending)
+            if pending:
                 flush_started = time.perf_counter()
-                content = b"".join(json.dumps(row, ensure_ascii=False, separators=(",", ":"),
-                                               default=str).encode("utf-8") + b"\n" for row in batch)
+                # Encoding stays in this worker. Keep the uncommitted suffix here
+                # so one periodic flush stays bounded without reordering the queue.
+                lines: list[bytes] = []
+                content_bytes = 0
+                for row in pending:
+                    line = json.dumps(row, ensure_ascii=False, separators=(",", ":"),
+                                      default=str).encode("utf-8") + b"\n"
+                    if content_bytes + len(line) > _MAX_CHUNK_BYTES:
+                        if not lines:
+                            raise OSError("trace_event_too_large")
+                        break
+                    lines.append(line)
+                    content_bytes += len(line)
+                content = b"".join(lines)
                 if session["bytes_written"] + len(content) > _MAX_BYTES:
                     raise OSError("trace_file_limit")
                 chunk_id = len(session["chunks"]) + 1
@@ -250,19 +266,25 @@ def _drain(session: dict, run_lock) -> None:
                     fsync_ms = (time.perf_counter() - fsync_started) * 1000
                 os.replace(temporary, directory / name)
                 flush_ms = (time.perf_counter() - flush_started) * 1000
-                session["chunk_flush_ms_total"] += flush_ms
-                session["chunk_flush_ms_max"] = max(session["chunk_flush_ms_max"], flush_ms)
-                session["chunk_fsync_ms_total"] += fsync_ms
-                session["chunk_fsync_ms_max"] = max(session["chunk_fsync_ms_max"], fsync_ms)
-                session["chunks"].append({"name": name, "first_seq": batch[0]["seq"],
-                                          "last_seq": batch[-1]["seq"], "count": len(batch),
-                                          "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()})
-                session["written"] += len(batch)
-                session["bytes_written"] += len(content)
+                count = len(lines)
+                checksum = hashlib.sha256(content).hexdigest()
+                with _LOCK:
+                    session["chunk_flush_ms_total"] += flush_ms
+                    session["chunk_flush_ms_max"] = max(session["chunk_flush_ms_max"], flush_ms)
+                    session["chunk_fsync_ms_total"] += fsync_ms
+                    session["chunk_fsync_ms_max"] = max(session["chunk_fsync_ms_max"], fsync_ms)
+                    session["chunks"].append({"name": name, "first_seq": pending[0]["seq"],
+                                              "last_seq": pending[count - 1]["seq"], "count": count,
+                                              "bytes": len(content), "sha256": checksum})
+                    for _ in range(count):
+                        pending.popleft()
+                    session["pending_events"] = len(pending)
+                    session["written"] += count
+                    session["bytes_written"] += len(content)
                 _manifest(directory, session)
             if _STOP.is_set():
                 with _LOCK:
-                    if not _QUEUE:
+                    if not pending and not _QUEUE:
                         break
         with _LOCK:
             session["state"] = "complete" if not session["known_dropped"] else "incomplete"
@@ -271,7 +293,9 @@ def _drain(session: dict, run_lock) -> None:
     except Exception as error:
         with _LOCK:
             session["state"] = "failed"
-            session["reason"] = type(error).__name__
+            session["reason"] = (str(error) if str(error) in {
+                "trace_event_too_large", "trace_file_limit",
+            } else type(error).__name__)
             session["finished_at"] = time.time()
         try:
             if directory is not None:

@@ -1,6 +1,6 @@
 # 장중 경량 trace와 장후 선택 재생 설계
 
-2026-10-03 · O12 · **NAS trace smoke 및 뉴스/shadow·query_minute 합성 replay 완료; 65분 burst 계약검사 통과; 실제 65분 내구성·오버헤드·장중 원본 capture 미완료**
+2026-10-05 · O12 · **NAS trace smoke 및 뉴스/shadow·query_minute 합성 replay 완료; 65분 burst와 바이트 기준 청크 검사 통과; chunk-bound 회귀 18건 NAS test container 통과; 실제 NAS 65분 내구성·오버헤드·장중 원본 capture 미완료**
 
 ## 목표와 이번 순서
 
@@ -54,7 +54,7 @@ seq는 **전역 실행 순서나 DB commit 순서가 아니다**. 여러 produce
 초기 설정값은 검증할 예산이며 달성된 성능 수치가 아니다.
 
 - producer당 queue 최대 32,768 이벤트와 보수적으로 계산한 RAM charge 64MiB 중 먼저 도달하는 제한을 적용한다. 문자열 상한과 Python 객체 오버헤드를 포함한 실제 RSS 증가를 검증한다.
-- background worker는 5초마다 최대 1MiB 정도의 묶음을 배출한다. 정상 envelope를 넘으면 과도한 flush 빈도로 NAS I/O를 늘리는 대신 backlog/drop을 표시한다. 한 이벤트가 최대 chunk 크기를 넘지 않게 한다.
+- background worker는 5초마다 최대 1MiB의 UTF-8 JSONL 청크 하나를 배출한다. 4,096 이벤트 batch의 남은 suffix는 producer 순서를 지켜 다음 배출까지 worker 메모리에 두며, 공개 `queued`에는 이 pending 이벤트도 포함한다. 이벤트 한 건이 1MiB보다 크면 읽을 수 없는 청크를 만들지 않고 trace를 `failed`로 끝낸다.
 - 파일은 plain UTF-8 JSONL chunk로 시작한다. 압축 비용은 별도 측정 전 도입하지 않는다. writer는 chunk 하나씩 `.partial`에 쓰고 checksum/first_seq/last_seq/count를 만든다.
 - **묶음당** flush/fsync 후 원자적 rename, manifest 원자 갱신으로 확정한다. 플랫폼의 directory sync가 확인되지 않으면 power-loss durability를 보장하지 않는다. fsync는 DB 업무 thread에서 실행하지 않는다.
 - capture당 1GiB, 보존 총량 4GiB를 초기 hard cap으로 둔다. preflight에서 여유 공간과 예상 발생률을 확인한다. 한도/디스크 오류는 trace를 incomplete로 종료하고 업무는 계속한다. 기존 파일을 몰래 지워 active capture 공간을 만들지 않는다.
@@ -119,7 +119,7 @@ adapter는 재생 call당 최대 1,000행, run당 30,000행으로 제한하고 d
 | 2. 제어·운영 | `diagnostic_workloads.py`, `diagnostic_runs.py`, `app.py`, `scripts/nas_workload_diagnostic.py` | trace child, TTL7200, 인증 API, 앱 수명 종료, 별도 manifest/download, 기존 capture 회귀 |
 | 3. NAS 적용/trace smoke | source-runtime 기존 절차 | active release·health·authenticated trace API 확인 및 60초 trace 633/633 저장, drop 0, checksum 12/12 완료. 장중 capture 아님 |
 | 4. 주말 replay adapter | `diagnostic_replay.py`, 해당 writer 계측, 전용 DB integration | 뉴스/shadow 38 calls 및 분봉 3 synthetic scenarios 전용 DB replay 완료. 분봉 원 trace shape counters 부재와 timing miss를 기록; 새 shape 기반 입력 적용은 다음 capture 이후 재평가 |
-| 5. 65분 acceptance/예약 | trace 테스트/운영 안내 | 로컬에서 3,900초 capture 허용과 20,000-event burst flush/no-drop 검사를 통과. Codex heartbeat `nas-65-minute-db-trace-capture`가 2026-10-06 08:54 KST trace를 시작하고 `verify-nas-db-trace-capture`가 10:01 KST manifest/chunk를 검증하도록 1회 등록됨(PC와 데스크톱 앱 실행 필요). 실제 65분 NAS 보존·오버헤드 측정 및 파일 검증은 실행 뒤 완료 |
+| 5. 65분 acceptance/예약 | trace 테스트/운영 안내 | 기존 3,900초·20,000-event burst에 더해 1,024 wide Unicode domain events가 약 3.90MB였던 청크 초과를 재현하고, 최대 1MiB로 분리된 모든 청크의 조회·checksum·순번·종료 drain 및 단일 oversized event의 명시적 실패를 로컬과 NAS test container의 trace/replay 18건으로 검사했다. 활성 NAS release `2026.10.03-db-minute-replay-v1-388841088675094c`를 기반으로 한 immutable release `2026.10.05-db-trace-chunk-bounds-v1-9209b8fd29423301`은 NAS 테스트 7/7 통과 후 배포했다. `/health`에서 새 build/release, DB 컨테이너 불변을 확인했고 현재 `WAITING_MARKET`, observation 미예정, trace OFF다. Codex heartbeat `nas-65-minute-db-trace-capture`가 2026-10-06 08:54 KST trace를 시작하고 `verify-nas-db-trace-capture`가 10:01 KST manifest/chunk를 검증하도록 1회 등록됨(PC와 데스크톱 앱 실행 필요). 실제 65분 NAS 보존·오버헤드 측정 및 파일 검증은 실행 뒤 완료 |
 
 ### Replay report call correlation (2026-10-03 local candidate)
 

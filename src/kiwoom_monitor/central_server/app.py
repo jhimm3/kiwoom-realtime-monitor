@@ -42,7 +42,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.10.03-db-minute-recorded-shape-v1"
+SERVER_BUILD = "2026.10.05-db-trace-chunk-bounds-v1"
 logger = logging.getLogger(__name__)
 
 

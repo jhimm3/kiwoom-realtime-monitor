@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-05 DB trace chunk bounds (로컬 검증 후보)
+
+- Trace drain now caps each UTF-8 chunk at 1 MiB, retains an unflushed suffix in sequence order, reports pending events in `queued`, and marks a trace failed if one event alone exceeds the limit. This prevents a trace from being marked complete when the chunk cannot be read back under the download limit.
+- `diagnostic_trace` and replay regression tests: 18 passed locally and in the NAS test container. Focused immutable release `2026.10.05-db-trace-chunk-bounds-v1-9209b8fd29423301` is based on the previous active release and changes only `app.py`, `diagnostic_trace.py`, and its trace test. Its manifest and active-base trace suite passed locally; NAS source-runtime tests passed 7/7. Deployment is confirmed by `/health` with the new build/release and unchanged database container. Realtime is `WAITING_MARKET` with observations not expected and trace is off; runtime overhead and a full 65-minute market capture remain open.
+
 ## 2026-09-29 NAS 진단 API 확장 (로컬 후보)
 
 - 인증 API에서 기존 진단 master/capture/선택 작업 제어와 고정 읽기 전용 PostgreSQL·host 표본, 단일 측정·A/B/A 비교의 시작/취소/상태, 보존 보고서·제어 이력 조회를 연결했다. CLI와 제어 파일 잠금·TTL 및 표본 계산을 공유한다. NAS 이미지 적용과 실 DB 수집 결과 검증은 진행 중이다.

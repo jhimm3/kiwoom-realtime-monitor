@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import itertools
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +14,120 @@ from kiwoom_monitor.central_server.diagnostic_workloads import diagnostic_run_lo
 
 
 class DiagnosticTraceTests(unittest.TestCase):
+    def test_periodic_byte_limit_keeps_pending_suffix_before_new_events(self):
+        with tempfile.TemporaryDirectory() as root:
+            control = Path(root) / "control.json"
+            committed = threading.Event()
+            release = threading.Event()
+            original_manifest = trace._manifest
+
+            def hold_first_chunk(directory, session):
+                original_manifest(directory, session)
+                if len(session["chunks"]) == 1 and session["state"] == "running":
+                    committed.set()
+                    release.wait(5)
+
+            with patch.object(trace, "control_path", return_value=control), \
+                 patch("kiwoom_monitor.central_server.diagnostic_workloads.control_path",
+                       return_value=control), \
+                 patch.object(trace, "_manifest", side_effect=hold_first_chunk), \
+                 patch.object(trace.time, "monotonic", side_effect=itertools.count(step=5)):
+                parent = _set_tool(control, True, 300)
+                session = parent["diagnostic_tool"]["session_id"]
+                _set_trace(control, True, 120, expected_session=session)
+                identifier = trace.start(seconds=60)["trace_id"]
+                counts = {f"{index:02d}-" + "가" * 47: index for index in range(24)}
+                event_count = 1024
+                try:
+                    for index in range(event_count):
+                        trace.emit(identifier, "domain", {
+                            "call_id": f"periodic-{index}", "domain_counts": counts,
+                        })
+                    self.assertTrue(committed.wait(5), "first periodic chunk was not committed")
+                    active = trace.status()
+                    self.assertEqual(1, len(active["chunks"]))
+                    self.assertGreater(active["pending_events"], 0)
+                    self.assertEqual(event_count, active["written"] + active["queued"])
+                    trace.emit(identifier, "call_end", {"call_id": "arrived-during-flush"})
+                finally:
+                    release.set()
+                    final = trace.stop()
+                    _set_tool(control, False)
+                self.assertEqual("complete", final["state"])
+                self.assertEqual((event_count + 1, event_count + 1, 0), (
+                    final["accepted"], final["written"], final["queued"],
+                ))
+                rows = [json.loads(line) for part in final["chunks"]
+                        for line in trace.chunk_bytes(identifier, part["name"]).splitlines()]
+                self.assertEqual(list(range(1, event_count + 2)), [row["seq"] for row in rows])
+                self.assertEqual("arrived-during-flush", rows[-1]["call_id"])
+
+    def test_oversized_event_fails_without_publishing_an_unreadable_chunk(self):
+        with tempfile.TemporaryDirectory() as root:
+            control = Path(root) / "control.json"
+            with patch.object(trace, "control_path", return_value=control), \
+                 patch("kiwoom_monitor.central_server.diagnostic_workloads.control_path",
+                       return_value=control):
+                parent = _set_tool(control, True, 300)
+                session = parent["diagnostic_tool"]["session_id"]
+                _set_trace(control, True, 120, expected_session=session)
+                identifier = trace.start(seconds=60)["trace_id"]
+                trace.emit(identifier, "call_start", {"call_id": "readable-prefix"})
+                trace.emit(identifier, "domain", {"extra": "가" * 1_048_576})
+                trace.emit(identifier, "call_end", {"call_id": "unwritten-suffix"})
+                final = trace.stop()
+                self.assertEqual("failed", final["state"])
+                self.assertEqual("trace_event_too_large", final["reason"])
+                self.assertEqual((3, 1, 2, 0), (
+                    final["accepted"], final["written"], final["queued"], final["known_dropped"],
+                ))
+                rows = [json.loads(line) for part in final["chunks"]
+                        for line in trace.chunk_bytes(identifier, part["name"]).splitlines()]
+                self.assertEqual(["readable-prefix"], [row["call_id"] for row in rows])
+                self.assertFalse(trace_status(control)["enabled"])
+                with diagnostic_run_lock(control):
+                    pass
+                _set_tool(control, False)
+
+    def test_wide_unicode_events_remain_downloadable_in_order_after_stop(self):
+        with tempfile.TemporaryDirectory() as root:
+            control = Path(root) / "control.json"
+            with patch.object(trace, "control_path", return_value=control), \
+                 patch("kiwoom_monitor.central_server.diagnostic_workloads.control_path",
+                       return_value=control):
+                parent = _set_tool(control, True, 300)
+                session = parent["diagnostic_tool"]["session_id"]
+                _set_trace(control, True, 120, expected_session=session)
+                identifier = trace.start(seconds=60)["trace_id"]
+                counts = {f"{index:02d}-" + "가" * 47: index for index in range(24)}
+                event_count = 1024
+                for index in range(event_count):
+                    trace.emit(identifier, "domain", {
+                        "call_id": f"wide-{index}", "writer_kind": "query_minute",
+                        "rows": 900, "domain_counts": counts,
+                    })
+
+                final = trace.stop()
+                self.assertEqual("complete", final["state"])
+                self.assertEqual((event_count, event_count, 0, 0), (
+                    final["accepted"], final["written"], final["known_dropped"], final["queued"],
+                ))
+                rows = []
+                for part in final["chunks"]:
+                    self.assertLessEqual(part["bytes"], 1_048_576)
+                    content = trace.chunk_bytes(identifier, part["name"])
+                    chunk_rows = [json.loads(line) for line in content.splitlines()]
+                    self.assertEqual((part["first_seq"], part["last_seq"], part["count"]), (
+                        chunk_rows[0]["seq"], chunk_rows[-1]["seq"], len(chunk_rows),
+                    ))
+                    rows.extend(chunk_rows)
+                self.assertGreater(len(final["chunks"]), 1)
+                self.assertEqual(list(range(1, event_count + 1)), [row["seq"] for row in rows])
+                self.assertEqual([f"wide-{index}" for index in range(event_count)],
+                                 [row["call_id"] for row in rows])
+                self.assertTrue(all(row["domain_counts"] == counts for row in rows))
+                _set_tool(control, False)
+
     def test_65_minute_budget_flushes_bounded_burst_without_loss(self):
         """Check the capture-duration envelope and queued writer under a burst."""
         with tempfile.TemporaryDirectory() as root:
