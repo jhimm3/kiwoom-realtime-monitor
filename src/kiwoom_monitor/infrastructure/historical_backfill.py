@@ -31,6 +31,9 @@ NAVER_STOCK_NEWS_PROVIDER = "naver_stock"
 NAVER_HISTORICAL_SEARCH_PROVIDER = "naver_historical_search"
 DAISHIN_PROVIDER = "daishin_creon"
 DATABASE_TIMEOUT_SECONDS = 60
+# User policy for historical original-article collection, retained across restarts.
+# Search observations and previously captured article bodies are kept.
+EXCLUDED_ORIGINAL_ARTICLE_HOSTS = frozenset({"hankyung.com", "www.hankyung.com"})
 
 
 def candidate_non_stock_codes(reference: Path) -> set[str]:
@@ -1210,6 +1213,16 @@ def fetch_article_publication(
         if source_url in seen_urls:
             continue
         seen_urls.add(source_url)
+        if (url_role == "publisher_original" and
+                (urlparse(source_url).hostname or "").lower() in EXCLUDED_ORIGINAL_ARTICLE_HOSTS):
+            last_status = "source_excluded"
+            last_url = source_url
+            attempts.append(ArticleFetchAttempt(
+                url_role, source_url, source_url, last_status, None,
+                "not requested: user excluded Hankyung original articles", "", "", "", "",
+                elapsed_ms=0, failure_phase="source_policy",
+            ))
+            continue
         attempt_started = time.monotonic()
         attempt_deadline = min(deadline, attempt_started + max(0.1, timeout))
         opened_at: float | None = None

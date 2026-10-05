@@ -30,6 +30,7 @@ from scripts.preprocess_historical_news_locally import ConcurrentArticlePreparat
 from scripts.historical_news_timing_log import NewsTimingLog
 
 from kiwoom_monitor.infrastructure.historical_backfill import (
+    EXCLUDED_ORIGINAL_ARTICLE_HOSTS,
     ArticleFetchAttempt,
     ArticlePublicationResult,
     NaverHistoricalNewsItem,
@@ -253,6 +254,13 @@ class _ArticleFetchPool:
 
     def submit(self, item: object) -> None:
         host = _article_request_host(item)
+        if self._primary_only and host in EXCLUDED_ORIGINAL_ARTICLE_HOSTS:
+            result = fetch_article_publication(item, source_roles=("publisher_original",))
+            self._skipped.append((item, result))
+            self._skipped_articles += 1
+            if self._timing_observer is not None:
+                self._timing_observer(item, result, host, 0)
+            return
         if host in self._unreachable_hosts and self._can_skip(item):
             self._skip_unreachable(item, host)  # type: ignore[arg-type]
             return

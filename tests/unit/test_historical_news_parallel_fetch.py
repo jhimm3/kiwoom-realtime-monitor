@@ -27,6 +27,31 @@ from scripts.probe_historical_backfill import (
 
 
 class HistoricalNewsParallelFetchTests(unittest.TestCase):
+    def test_hankyung_original_is_excluded_without_network_or_worker_delay(self) -> None:
+        item = NaverHistoricalNewsItem(
+            "key", "015", "123", "한국경제", "title", "summary",
+            "https://www.hankyung.com/article/123", "https://www.hankyung.com/article/123",
+            "https://n.news.naver.com/a", 1,
+        )
+        with patch("kiwoom_monitor.infrastructure.historical_backfill.urlopen") as opener:
+            with _ArticleFetchPool(workers=32, article_delay=60, primary_only=True) as pool:
+                pool.submit(item)
+                results = list(pool.drain(wait=True))
+            opener.assert_not_called()
+        self.assertEqual(1, len(results))
+        self.assertEqual("source_excluded", results[0][1].status)
+        self.assertEqual(item.original_url, results[0][1].attempts[0].requested_url)
+        self.assertIn("user excluded", results[0][1].attempts[0].error)
+
+    def test_hankyung_exclusion_does_not_match_other_domains(self) -> None:
+        item = NaverHistoricalNewsItem(
+            "key", "015", "123", "office", "title", "summary",
+            "https://www.hankyung.com.other.test/a", "https://www.hankyung.com.other.test/a", "", 1,
+        )
+        with patch("scripts.probe_historical_backfill.fetch_article_publication") as fetch:
+            _fetch_primary_article(item)
+            fetch.assert_called_once()
+
     def test_primary_fetch_defers_archive_when_original_exists(self) -> None:
         item = NaverHistoricalNewsItem(
             "key", "001", "123", "office", "title", "summary",
