@@ -83,6 +83,12 @@ $env:PYTHONIOENCODING = 'utf-8'
 $completed = 0
 Write-State 'running' $completed
 try {
+    # Reject a network-restricted launcher before it can resolve queue rows as failures.
+    $networkProbe = & $python -c "import socket; socket.getaddrinfo('s.search.naver.com', 443)" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Article collector DNS preflight failed; queue not processed: $networkProbe"
+    }
+    Write-Log "collector config: article_workers=$ArticleWorkers prepare_workers=$PrepareWorkers; DNS preflight passed"
     $recovered = & $python scripts\probe_historical_backfill.py article-finalize --output $Database 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "article-finalize failed: $recovered"
