@@ -1,5 +1,10 @@
 # 장중 경량 trace와 장후 선택 재생 설계
 
+2026-10-05 후속 [고정 장중 입력의 다중 workload 실험 계약](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md)은
+실제 입력 보존·전체/단독/제외·수정 전후 비교를 추가한다. 이 문서의 scalar trace와
+synthetic replay는 유지하지만 실제 payload/key 관계가 기록된 것으로 취급하지 않는다.
+새 payload capture와 처리량·보존 한도 변경은 아직 구현하지 않았다.
+
 2026-10-05 · O12 · **NAS trace smoke 및 뉴스/shadow·query_minute 합성 replay 완료; 65분 burst와 바이트 기준 청크 검사 통과; chunk-bound 회귀 18건 NAS test container 통과; 실제 NAS 65분 내구성·오버헤드·장중 원본 capture 미완료**
 
 ## 목표와 이번 순서
@@ -120,6 +125,47 @@ adapter는 재생 call당 최대 1,000행, run당 30,000행으로 제한하고 d
 | 3. NAS 적용/trace smoke | source-runtime 기존 절차 | active release·health·authenticated trace API 확인 및 60초 trace 633/633 저장, drop 0, checksum 12/12 완료. 장중 capture 아님 |
 | 4. 주말 replay adapter | `diagnostic_replay.py`, 해당 writer 계측, 전용 DB integration | 뉴스/shadow 38 calls 및 분봉 3 synthetic scenarios 전용 DB replay 완료. 분봉 원 trace shape counters 부재와 timing miss를 기록; 새 shape 기반 입력 적용은 다음 capture 이후 재평가 |
 | 5. 65분 acceptance/예약 | trace 테스트/운영 안내 | 기존 3,900초·20,000-event burst에 더해 1,024 wide Unicode domain events가 약 3.90MB였던 청크 초과를 재현하고, 최대 1MiB로 분리된 모든 청크의 조회·checksum·순번·종료 drain 및 단일 oversized event의 명시적 실패를 로컬과 NAS test container의 trace/replay 18건으로 검사했다. 활성 NAS release `2026.10.03-db-minute-replay-v1-388841088675094c`를 기반으로 한 immutable release `2026.10.05-db-trace-chunk-bounds-v1-9209b8fd29423301`은 NAS 테스트 7/7 통과 후 배포했다. `/health`에서 새 build/release, DB 컨테이너 불변을 확인했고 현재 `WAITING_MARKET`, observation 미예정, trace OFF다. Codex heartbeat `nas-65-minute-db-trace-capture`가 2026-10-06 08:54 KST trace를 시작하고 `verify-nas-db-trace-capture`가 10:01 KST manifest/chunk를 검증하도록 1회 등록됨(PC와 데스크톱 앱 실행 필요). 실제 65분 NAS 보존·오버헤드 측정 및 파일 검증은 실행 뒤 완료 |
+
+### Dedicated DB recorded-operation execution (2026-10-06)
+
+`diagnostic_replay_database_cli.py run`은 이미 봉인된 전용 replay DB와 baseline ID, trace ID,
+선택 window/workload/mode를 받아 checksummed schema-2 capture를 별도 프로세스에서 실행한다.
+운영 서버의 master/pause 설정은 건드리지 않으며 제한된 offline observer 제어 파일을 사용한다.
+각 operation은 source ID, 새 replay ID, 그리고 실행 프로세스에서 관측된 DB call ID를 연결한다.
+DB-call 집계는 replay connection scope, WAL transaction attribution은 unavailable로 보고한다.
+
+모든 입력·지원 메서드·codec은 baseline 획득/초기화 전에 검증한다. baseline allowlist에 없는
+history/projection 부수 쓰기(현재 `news_article`, `theme_metadata`)가 필요한 쓰기는 DB 변경 전에
+거부한다. 실행 후 actor/collector와 native DB connection이 모두 drain된 다음 table/sequence 상태를
+스냅샷하고 같은 sealed baseline으로 되돌린다. COMMIT acknowledgment 예외도 replay 소유 연결을
+닫고 receipt를 해제한 뒤 cleanup하도록 하며 production observed connection semantics는 바꾸지 않는다.
+NAS acceptance 명령은 `scripts/check_recorded_replay_baseline.py --execution-gates`다. 이 gate의
+controlled fixture는 로컬 기능 검증일 뿐 실제 장중 capture의 state-equivalence·성능 동등성을
+증명하지 않는다. NAS 후보 `2026.10.06-recorded-replay-execution-v1-624aade862f1b298`는
+887개 source file로 stage됐으며 active pointer는 바뀌지 않았다. NAS 전용 PostgreSQL 실행 gate
+2건이 2026-10-06 2/2 통과, skipped=0, 9.595초로 끝났고 sealed baseline 및 server/database
+container 불변을 확인했다. controlled fixture라 실제 장중 capture와 동등하지 않다. 다음 acceptance는
+실제 capture가 완성된 뒤 bounded window replay다. 공개 replay/run API, generated-ID adapter, WAL transaction
+attribution, 장중 acceptance는 남았다.
+
+### Authenticated trace input capture API (2026-10-06 local candidate)
+
+The authenticated trace-start API now accepts strict `store_inputs` and `collector_inputs`
+booleans, both defaulting to false, and forwards them to the schema-2 recorder. Either opt-in
+selects schema 2; both together retain allowlisted native store operation inputs and observed
+0B collector inputs while the collector excludes other event types and sensitive account data.
+The authenticated capabilities response advertises schema 2, the two OFF defaults, 0B scope,
+observed-path-only coverage, and `overhead_verified=false`. API/capture regression coverage passed
+33 local tests, including real SQLite store and collector paths, invalid/auth/session/TTL failures,
+and existing concurrent-start protection. Candidate build is
+`2026.10.06-recorded-capture-api-v1`; NAS staging, activation, a complete 65-minute capture,
+and capture overhead remain unverified. NAS source-runtime candidate
+`2026.10.06-recorded-capture-api-v1-af7d3d49b61aad09` (888 files) was staged and then activated.
+Authenticated `/health` and capabilities reads confirmed matching build/source release, schema 2,
+the 0B scope and both OFF defaults. Master and trace were OFF; realtime was `WAITING_MARKET` with
+observation not expected. The 08:54 capture and 10:01 verification automations require the active
+build/schema-2 capability and both input flags, and leave diagnostics off if preflight fails. A real
+65-minute capture and overhead measurement remain open.
 
 ### Replay report call correlation (2026-10-03 local candidate)
 

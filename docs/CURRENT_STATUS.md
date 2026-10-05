@@ -1,3 +1,135 @@
+2026-10-06 O12 trace 입력 API 연결: 인증된 trace 시작 요청에 엄격한 boolean
+`store_inputs`와 `collector_inputs`를 추가했다(기본 OFF). 둘 중 하나를 켜면 schema-2로
+기록하며, store 공개 호출 입력과 실제 관측 0B collector 사건은 기존 allowlist·민감정보
+제외 경계를 그대로 사용한다. capabilities는 이 기능의 schema, 기본값, 0B 범위와
+`overhead_verified=false`를 알린다. API·trace·capture 관련 로컬 회귀 33건이 통과했다.
+후보 `2026.10.06-recorded-capture-api-v1-af7d3d49b61aad09`(888 files)를 NAS source-runtime에
+stage한 뒤 사용자가 활성화했다. `/health`와 인증 capabilities API에서 server/capabilities build와
+source release가 일치하며 schema 2, 0B 범위, 두 기본 OFF 옵션 및 미측정 overhead를 확인했다.
+진단 master/trace는 OFF다. 실시간 상태는 장외 `WAITING_MARKET`, observation 미예정이다.
+배포 출력에서 DB 컨테이너가 바뀌지 않았음을 확인했다. 08:54 KST capture와 10:01 검증 예약은
+schema-2 지원/build preflight 및 두 opt-in 전달, manifest/chunk·입력 event 수 검증을 하도록
+갱신했다. 실제 65분 보존과 진단 오버헤드는 미검증이다.
+
+2026-10-06 O12 선택 재생 실행기를 전용 PostgreSQL에 연결했다. offline CLI가 checksummed
+schema-2 capture의 bounded window를 읽고 선택한 native store operation을 workload별로 실행하며,
+각 원본 operation ID → replay operation ID → 실제 관측 DB call ID를 연결한다. 보고서의 DB-call
+통계 범위는 replay 프로세스의 관측 connection이고 WAL은 transaction별 귀속 불가로 표시한다.
+실행 전에 미지원 projection을 거부하고, 성공·실패 뒤 owned connection drain 후 sealed baseline을
+복구한다. 특히 COMMIT 응답 유실 시 replay 전용 connection을 닫아 복구가 무한 대기하지 않게 했다.
+관련 로컬 회귀 47건 통과. NAS 후보 `2026.10.06-recorded-replay-execution-v1-624aade862f1b298`
+(887 files)를 X: source-runtime에 stage했다. 후보 전용 검사 스크립트
+`X:\kiwoom-monitor\artifacts\check-recorded-replay-execution-v1.sh`도 SHA-256
+`4fa890b00abe4ba7561f888f9437ea5bc4e8542e93beb6e154078f5024f03088`로 복사 검증했다.
+이 스크립트는 후보 helper의 PostgreSQL gate 2건만 실행하고 active pointer와 server/database
+container ID가 그대로인지 확인했다. NAS 결과는 2/2 통과, skipped=0, 9.595초이며 baseline ID는
+기존 봉인값과 같다. 마지막 `Acceptance verified` 출력까지 확인했다. 운영 source/active release는
+바뀌지 않았다. controlled capture fixture는 실장중 시작 상태와 같지 않아 동등 재현을 뜻하지 않는다.
+
+2026-10-06 O12 replay baseline PostgreSQL acceptance 완료: NAS operator helper가 고정 전용
+role/database에 controlled fixture baseline을 봉인하고 4개 PostgreSQL gate를 실행했다.
+4/4 통과, skipped=0, 2.787초. baseline ID는
+`4c4daa238a7e7d4221234087dce35a5b0956caf6629b05896fca7e8df175bbd4`다.
+복구·sequence·rollback·외부 연결 차단 경계가 검증됐다. fixture는 실제 장중 capture 시작
+상태와 동등하지 않으므로 `source_state_equivalent=false`다. helper 실행은 active pointer를
+바꾸지 않았으며 이 검증 결과만으로 NAS 운영 릴리즈가 갱신된 것은 아니다.
+
+검증 후보 `2026.10.06-recorded-replay-baseline-v1-c2bdaa4345836df6`(886 files)을
+X: source-runtime에 stage했다. 현재 active는
+`2026.10.05-realtime-minute-live-view-v2-ea54fd68a086689b`로 유지된다.
+
+2026-10-05 O12 후속: 내부 recorded-operation executor와 `collector_with_background` 실행을
+로컬에 연결했다. store allowlist를 actor별 순서·actor 간 동시성으로 호출하고 원본 operation
+ID와 새 replay ID, 원본 DB call 연결, scheduler/actor/concurrency 대기와 결과 digest를 남긴다.
+collector mode는 선택된 0B/source approval/gap을 기존 parser·accumulator·flush loop에 넣고
+그 component의 과거 sink 호출만 제외한다. 진행 중인 DB 호출과 종료 flush는 취소 뒤에도
+끝날 때까지 기다린다. 관련 executor/capture/collector 회귀 29건 통과. caller-owned test store
+내부 실행이며 전용 replay DB baseline/소유권/run lock, 미지원 operation reference adapter,
+공개 run/비교 API는 미구현이다. `baseline_managed=false`, `public_execution_ready=false`,
+`source_state_equivalent=false`; NAS는 변경하지 않았다.
+
+2026-10-05 O12 replay baseline 후속: 고정 replay DB 소유권/run lock, immutable logical
+baseline seal/restore, 14개 table과 accepted-sequence next value 검증, native per-call
+connection drain fence와 offline CLI를 로컬 구현했다. CLI·lease·executor·capture·collector·
+DB access audit unit regression 50건 통과. 실제 PostgreSQL rollback·
+sequence·외부 연결 acceptance 4건은 `kiwoom_monitor_replay_test`와 role이 준비되지 않아
+skip됐으며, 실제 DB 안전성은 아직 확인되지 않았다. 공개 API·운영 재생에는 연결하지 않았다.
+
+2026-10-05 장중 사건 반복 실험 capture 핵심을 로컬 구현했다. opt-in schema-2 trace가
+허용된 native store public call의 인수, async owner/actor/component, DB call 연결과 실제
+collector의 0B·구독 승인·gap 사건을 bounded immutable payload로 기록한다. plan compiler는
+전체/단독/제외/조합 workload를 검증하고, `collector_with_background`에서 같은 collector가
+만든 과거 sink 호출만 제외하며 다른 producer의 같은 method 호출은 보존한다. 혼합 최신값,
+누락·중복 sequence, censored operation, 미지원/잘린 입력은 선택 plan에서 거부한다.
+관련 로컬 capture/trace/PostgreSQL access/collector 80건과 뉴스·TOP20·shadow·REST loop
+회귀 111건이 통과했다. bounded window reader와 새 capture의 전용 PostgreSQL gate는
+후속 단계에서 추가 검증했다. **내부 실행기까지 로컬 구현:** caller-owned test store에서만
+실행한다. 동일 baseline 복구, 안전한 run/비교 API 및 운영 overhead 검증은 남았다.
+공개 plan은 계속 `execution_ready=false`; NAS 운영 capture는 하지 않았다. 자세한 경계는
+[반복 부하 실험 계약](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md)에 기록했다.
+
+2026-10-05 O12 다음 단계: bounded window reader를 로컬 구현했다. reader는 capture 전체
+chunk checksum·sequence·manifest 경계를 검증하면서 선택 구간의 operation payload만 읽고,
+collector 재생은 지정 collector의 capture-relative prefix를 최대 15분까지만 읽는다.
+선택 구간이 실제 capture 완료 시각을 넘으면 거부한다. payload 로드 한도는 32MiB다.
+관련 단위검사 17건 통과; Windows sandbox의 asyncio Proactor socketpair 대기 때문에
+collector async 통합 단위검사 2건은 이 실행에서 제외했다. 실제 collector→DB PostgreSQL
+회귀 7건은 직전 v3 candidate에서 통과했지만 이 reader 변경은 해당 candidate에 포함되지 않았다.
+**아직 plan-only:** replay runner/API, baseline 복구, window 선택과 재생의 end-to-end 연결,
+65분 NAS 보존·overhead 및 장중 capture acceptance는 남아 있다. NAS active release는 변경하지 않았다.
+
+같은 capture 소스의 전용 PostgreSQL gate 4건과 기존 collector→DB 2건을 후보
+`2026.10.05-recorded-capture-gate-v1-fdec04c4475dc1ef`에서 실행했다. 4건은 통과했으나
+capture ON/OFF 검사가 의도된 schema-1 trace를 schema-2 전용 replay reader에 넘겨 실패했고,
+기존 collector rollback 검사는 현재 key lookup 경계에 맞지 않는 실패 입력을 사용해
+rollback을 실제로 일으키지 못했다. 두 테스트 원인을 고쳐 새 후보
+`2026.10.05-recorded-capture-gate-v2-81fc0b5e7f04dbcf`(877 files)를 stage했다.
+stage는 각 파일 checksum/import를 확인했고 active 포인터는 기존
+`2026.10.05-realtime-minute-live-view-v2-ea54fd68a086689b`에 그대로다. 활성화·배포는 하지 않았다.
+수정한 두 묶음 게이트는 새 후보에서 재실행 대기 중이다. 이 샌드박스의 Windows asyncio
+socketpair 생성 제한으로 비동기 로컬 단위검사를 끝까지 재검증하지 못했으며, 동기 단위검사
+2건·문법 확인은 통과했다.
+
+2026-10-05 후속 NAS gate에서 collector rollback/commit-ack 검사가 계속 실패한 원인을 확인했다.
+분봉 metadata 연결이 분 시각만을 key로 사용해 같은 분에 여러 종목이 있으면 observation이
+서로 덮이는 것을 원인으로 확인했다. SQLite/PostgreSQL writer 모두 `(subject, minute)`로
+metadata를 찾도록 수정하고 같은 분 다종목 분리 검사를 추가했다. 로컬 SQLite 회귀 1건,
+py_compile 및 `git diff --check` 통과. 불변 후보
+`2026.10.05-recorded-capture-gate-v3-ed9daa478d48ac35`(877 files)를 stage하고 manifest
+checksum/import/build marker를 확인했다. NAS 전용 PostgreSQL gate에서 capture 4건, collector
+2건 및 다종목 metadata 회귀 1건이 7/7 통과했다(9.109초). 후보는 검사만 했고 active release는
+`2026.10.05-realtime-minute-live-view-v2-ea54fd68a086689b` 그대로다.
+
+2026-10-05 중앙 실시간 봉의 DB 저장 시점을 분리했다. 열린 분봉 delta는 RAM에 보관하고
+종료+2초에 저장한 다음 기존 확정 처리를 유지한다. 초봉은 매분 45초에 이전 분까지
+저장한다(10:04분 초봉은 10:05:45). 정상 종료·인증 전환은 전량 flush하고 실패분은
+다음 관리 주기에 재시도한다. 수신·집계·허브 전달과 다른 writer 주기는 유지한다.
+앱 표시용 두 분봉 API는 저장 이력과 미저장 RAM delta를 함께 반환해 신규 접속·편입에도
+현재 분 prefix를 복원한다. 저장 중·실패 재시도 operation ID는 같은 읽기 snapshot에서
+확인하여 중복 합산을 방지하고 완료된 ka10080 봉·장후 완료 coverage는 보존한다.
+관련 로컬 회귀 57건이 통과했다. 최초 NAS 후보 v1은 collector 저장 주기 함수가 빠져 테스트
+import 단계에서 중단됐고 배포되지 않았다. 수정한 v2 불변 스냅샷
+`2026.10.05-realtime-minute-live-view-v2-ea54fd68a086689b`(870 files)은 체크섬과 실제
+import 경로를 확인했으며, 그 스냅샷 자체에서 같은 로컬 회귀 57건이 통과했다.
+PostgreSQL을 포함한 NAS 묶음 검사 83건이 59.905초에 통과했고, 사용자 배포 출력과
+후속 API에서 v2 실행을 확인했다(HTTP 준비 15초, DB 컨테이너 유지).
+DB writer replay `20261005T100452Z-80ed9651`은 245건을 오류 없이 완료했다.
+입력 일정의 최대 지연은 약 394ms로 timing_preserved=false이며, 이 방식은 collector를
+거치지 않아 변경한 저장 주기의 부하 감소를 검증한 결과가 아니다.
+collector 입력부터 scheduler와 DB까지의 통합 replay는 고정 0B fixture 기반으로
+로컬 핵심 경로를 구현했다. 실제 parser·RAM 집계·저장 loop 및 취소/종료 검사는 통과했으나
+새 PostgreSQL gate 2건, API 연결과 NAS 1배속 성능 측정은 남아 있다. 입력 capture의 이후
+로컬 구현 상태는 이 문서 첫 항목을 따른다.
+구현 경계와 검증 순서는 [통합 재현 설계](NAS_RUNTIME_DIAGNOSTICS.md#collector-replay-design)에 기록했다.
+
+2026-10-05 실계좌 자동 복구 조회를 계좌 이벤트 중심으로 조정했다. 운영 시간은 평일
+08:00~20:00이며, 장전 08:00:15와 장후 20:05:15에 각각 확인하고 운영 중에는
+최근 조회로부터 약 5분 뒤의 `:15` 안전 조회를 유지한다. 주문·잔고 이벤트는 즉시 전체 계좌
+복구를 깨우고, 운영 시간 밖의 WebSocket 연결·해제 이벤트만으로는 재조회하지 않는다.
+초기 기동 복구와 실패 후 제한 재시도는 유지한다. 주문·잔고·현금이 하나의 복구
+스냅샷이므로 다섯 REST 응답 중 일부만 합치는 방식은 적용하지 않았다. 로컬 관련
+회귀 44건이 통과했으며 NAS active release·실제 키움 호출량은 아직 검증하지 않았다.
+
 2026-10-05 QueryStore 계약 첫 축소: REST 캐시 소비자에 `QueryCacheStore`의 두 메서드를
 적용하고, 기존 99개 aggregate 계약을 보존하도록 source 감사기를 확장했다. NAS 후보의
 PostgreSQL replay/reader, broker cache period·in-flight merge, SQLite round-trip/expiry 검사는
@@ -81,6 +213,8 @@ broker/service/collector로 향하는 import는 발견되지 않았다. 동적 i
 2026-10-01 O12 VI 동일 이벤트 동시 저장 완화: 전용 PostgreSQL 검사 4/4가 NAS source-runtime 후보 `2026.10.01-shadow-checkpoint-frames-v1-111044c01410cc8c`에서 통과했다. 동일 키 저장 병합, 선행 실패 후 재시도, 취소/서비스 종료 중 실제 commit 대기, commit 응답 유실 뒤 중복 이력 없는 재시도를 검증했다. 실패 로그 2건은 의도적으로 주입한 예외이며 복구 검사는 통과했다. 후보는 테스트만 수행했고 운영 release는 변경하지 않았다. 부하 개선 여부와 중복 수신의 상위 원인은 미확인이다.
 
 2026-10-01 O12 `realtime.latest` 호출 경로 검토: 수신 event는 client hub에 바로 전달되고 DB에는 `(event_type,item_key)`별 최신값만 1초 flush batch로 저장한다. PostgreSQL은 batch당 한 transaction/`executemany`를 사용하며 WebSocket subscribe 시에만 초기 snapshot을 읽는다. 매 event별 저장이나 매 event별 DB read는 아니다. `received_at` freshness 보존이 필요해 동일 payload처럼 보이는 값을 그대로 건너뛰는 최적화는 적용하지 않았다. 기존 운영표본 COMMIT max 2,370ms는 이 writer 고유 병목으로 귀속되지 않았다. 안전한 로컬 코드 최적화는 확인되지 않았다.
+
+2026-10-05 `realtime.latest` 후속 변경: 사용자 지정에 따라 DB 최신값 checkpoint를 매 5분 경계의 10초로 늦췄다. 기존 구독자에게는 수신 event를 즉시 전송하고 새 구독자에게는 최근 RAM 값을 DB checkpoint보다 우선한다. 정상 종료·인증 전환은 대기값을 즉시 저장하고 분봉·초봉 등 다른 1초 writer 주기는 유지한다. 비정상 종료 시 최대 약 5분의 latest projection 손실 가능성이 있으며 NAS 운영 반영과 장중 전후 계측은 아직 확인하지 않았다.
 
 2026-10-01 O12 `realtime.second_bar` 경로 검토: 수신 0B tick은 메모리 누적 후 dirty 초봉을 1초 단위 batch로 저장하며 PostgreSQL은 한 transaction의 `executemany` upsert를 사용한다. 지연 tick은 최근 5초 절대 상태 정정이고 재시도는 최신 상태만 유지한다. 앱 reader는 찾지 못했으나 데이터 계약은 부분 수집 원자료 보존이므로 저장을 중단하지 않는다. 운영 표본은 90초 62 calls/1,063 rows, COMMIT max 615ms였다. 기존 계측만으로 초봉의 신규/진행/늦은 정정/재시도 비중과 실제 update 여부를 분리할 수 없고 저장 지연 허용 계약도 확인되지 않아 flush를 늦추는 변경은 하지 않았다. 다음은 TOP20 편입 문서 writer를 확인한다.
 

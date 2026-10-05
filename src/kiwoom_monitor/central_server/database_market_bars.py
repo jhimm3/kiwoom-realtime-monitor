@@ -47,6 +47,9 @@ SQLITE_REVISION_LOOKUP_ROWS = 80
 def _minute_key(value: dict[str, Any]) -> str:
     return f"{value['trading_date']}T{value['minute']}"
 
+def _minute_observation_key(value: dict[str, Any]) -> tuple[str, str]:
+    return f"{value['code']}:{value.get('market', '') or 'UNKNOWN'}", _minute_key(value)
+
 def _minute_operation(
     value: dict[str, Any], *, finalization: bool = False,
 ) -> tuple[str, str]:
@@ -295,6 +298,69 @@ def _lock_postgres_minute_day_scopes(cursor: Any, values: list[dict[str, Any]]) 
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,1))",
             (json.dumps(scope, ensure_ascii=False, separators=(",", ":")),),
         )
+
+
+def _read_realtime_minute_overlay(
+    cursor: Any, bars: list[dict[str, Any]], deltas: list[dict[str, Any]], *, postgres: bool,
+) -> list[dict[str, Any]]:
+    """Use the caller's read snapshot to exclude committed or superseded deltas.
+
+    An open RAM segment already has its future operation ID. If that segment
+    commits while this read starts, its marker and canonical row are either
+    both visible or both absent, including a lost COMMIT acknowledgement.
+    """
+    operation_ids = list(dict.fromkeys(str(value["operation_id"]) for value in deltas))
+    keys = list(dict.fromkeys((f"{value['code']}:{value['market']}", _minute_key(value)) for value in deltas))
+    if postgres:
+        applied = set(_load_postgres_minute_operation_hashes(cursor, operation_ids))
+        authorities = _load_postgres_minute_query_authorities(cursor, keys)
+    else:
+        marks = ','.join('?' for _ in operation_ids)
+        applied = {str(row[0]) for row in cursor.execute(
+            f"SELECT operation_id FROM central_minute_bar_operations WHERE operation_id IN ({marks})",
+            operation_ids,
+        ).fetchall()}
+        subjects = list(dict.fromkeys(key[0] for key in keys))
+        observation_keys = list(dict.fromkeys(key[1] for key in keys))
+        subject_marks = ','.join('?' for _ in subjects)
+        key_marks = ','.join('?' for _ in observation_keys)
+        metadata = cursor.execute(
+            "SELECT subject,observation_key,origin,source,completeness "
+            "FROM central_market_data_observation_meta WHERE dataset_kind='minute_bar' "
+            f"AND subject IN ({subject_marks}) AND observation_key IN ({key_marks})",
+            [*subjects, *observation_keys],
+        ).fetchall()
+        authorities = {
+            (str(subject), str(key)): str(completeness)
+            for subject, key, origin, source, completeness in metadata
+            if str(origin) == ObservationOrigin.QUERY.value and str(source).startswith('kiwoom-ka10080')
+        }
+    indexed = {(str(row['minute']), str(row['market'])): dict(row) for row in bars}
+    seen = set(applied)
+    for delta in deltas:
+        operation_id = str(delta['operation_id'])
+        if operation_id in seen:
+            continue
+        seen.add(operation_id)
+        authority_key = (f"{delta['code']}:{delta['market']}", _minute_key(delta))
+        authority = authorities.get(authority_key, '')
+        if authority == DataCompleteness.COMPLETE.value:
+            continue
+        key = (str(delta['minute']), str(delta['market']))
+        previous = indexed.get(key)
+        value = {column: delta[column] for column in bar_columns(minute=True)}
+        if previous is not None and authority != DataCompleteness.IN_PROGRESS.value:
+            value.update(
+                open=previous['open'], high=max(int(previous['high']), int(delta['high'])),
+                low=min(int(previous['low']), int(delta['low'])),
+                volume=int(previous['volume']) + int(delta['volume']),
+                trade_value_million_won=int(previous['trade_value_million_won']) + int(delta['trade_value_million_won']),
+            )
+        indexed[key] = value
+        # The first pending realtime operation replaces an in-progress query;
+        # later operations add to that replacement, just as the writer does.
+        authorities.pop(authority_key, None)
+    return [indexed[key] for key in sorted(indexed)]
 
 def _load_postgres_latest_revisions(
     cursor: Any, sources: list[ObservationRevisionSource], *,
@@ -563,7 +629,13 @@ class SQLiteMarketBarStoreMixin:
             )
 
 
-    def load_minute_bars(self, code: str, trading_date: str, market: str = "") -> list[dict[str, Any]]:
+    def load_minute_bars(
+        self, code: str, trading_date: str, market: str = "", *,
+        realtime_deltas: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        realtime_deltas = [value for value in (realtime_deltas or [])
+                           if value['code'] == code and value['trading_date'] == trading_date
+                           and (not market or value['market'] == market)]
         sql = (
             "SELECT trading_date,minute,code,market,open,high,low,close,volume,trade_value_million_won,updated_at "
             "FROM central_minute_bars WHERE code=? AND trading_date=?"
@@ -574,7 +646,13 @@ class SQLiteMarketBarStoreMixin:
             parameters.append(market)
         sql += " ORDER BY minute"
         with self._lock, self._connection() as connection:
+            if realtime_deltas:
+                connection.execute("BEGIN")
             rows = connection.execute(sql, parameters).fetchall()
+            if realtime_deltas:
+                return _read_realtime_minute_overlay(
+                    connection, bar_result_rows(rows, minute=True), realtime_deltas, postgres=False,
+                )
         return bar_result_rows(rows, minute=True)
 
 
@@ -668,7 +746,9 @@ class SQLiteMarketBarStoreMixin:
     ) -> None:
         if not values:
             return
-        observation_by_key = dict(observations or ())
+        observation_by_key = {
+            (observation.subject, key): observation for key, observation in observations or ()
+        }
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             for value in values:
@@ -702,7 +782,7 @@ class SQLiteMarketBarStoreMixin:
                         bar_value_rows((value,), minute=True)[0],
                     )
                 key = _minute_key(value)
-                observation = observation_by_key.get(key)
+                observation = observation_by_key.get(_minute_observation_key(value))
                 if observation is not None and query_authority != DataCompleteness.COMPLETE.value:
                     merged = _load_sqlite_minute_bar(connection, value)
                     merged_observation = MarketDataObservation(
@@ -846,7 +926,13 @@ class PostgresMarketBarStoreMixin:
                                   db_call_id=writer.call_id)
 
 
-    def load_minute_bars(self, code: str, trading_date: str, market: str = "") -> list[dict[str, Any]]:
+    def load_minute_bars(
+        self, code: str, trading_date: str, market: str = "", *,
+        realtime_deltas: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        realtime_deltas = [value for value in (realtime_deltas or [])
+                           if value['code'] == code and value['trading_date'] == trading_date
+                           and (not market or value['market'] == market)]
         from .postgres_access import DBWriterContext, open_observed_connection
 
         sql = (
@@ -863,8 +949,14 @@ class PostgresMarketBarStoreMixin:
             operation="load_minute_bars", access_mode="read",
         )
         with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+            if realtime_deltas:
+                cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             cursor.execute(sql, parameters)
             rows = cursor.fetchall()
+            if realtime_deltas:
+                return _read_realtime_minute_overlay(
+                    cursor, bar_result_rows(rows, minute=True), realtime_deltas, postgres=True,
+                )
         return bar_result_rows(rows, minute=True)
 
 
@@ -983,7 +1075,9 @@ class PostgresMarketBarStoreMixin:
         from .postgres_access import DBWriterContext, open_observed_connection
 
         started_at = monotonic()
-        observation_by_key = dict(observations or ())
+        observation_by_key = {
+            (observation.subject, key): observation for key, observation in observations or ()
+        }
         domain_phase_ms: dict[str, float] = {}
         domain_counts = {"replayed": 0, "query_complete": 0,
                          "bar_upserts": 0, "metadata_upserts": 0,
@@ -1082,7 +1176,7 @@ class PostgresMarketBarStoreMixin:
                 else:
                     domain_counts["query_complete"] += 1
                 key = _minute_key(value)
-                observation = observation_by_key.get(key)
+                observation = observation_by_key.get(_minute_observation_key(value))
                 if observation is not None and query_authority != DataCompleteness.COMPLETE.value:
                     if merged_bar is None:
                         raise RuntimeError("minute bar upsert did not return its saved row")

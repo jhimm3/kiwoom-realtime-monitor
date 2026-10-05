@@ -323,7 +323,10 @@ class QueryStore(QueryCacheStore, Protocol):
         self, values: list[dict[str, Any]], *,
         observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
     ) -> None: ...
-    def load_minute_bars(self, code: str, trading_date: str, market: str = "") -> list[dict[str, Any]]: ...
+    def load_minute_bars(
+        self, code: str, trading_date: str, market: str = "", *,
+        realtime_deltas: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]: ...
     def save_five_minute_bars(self, values: list[dict[str, Any]]) -> None: ...
     def load_five_minute_bars(self, code: str, trading_date: str, adjustment_mode: str = "adjusted") -> list[dict[str, Any]]: ...
     def replace_daily_bars(
@@ -485,6 +488,8 @@ class SQLiteQueryStore(
         self._lock = RLock()
         self._memory_uri = f"file:central-query-store-{id(self)}?mode=memory&cache=shared" if str(path) == ":memory:" else ""
         self._keeper: sqlite3.Connection | None = None
+        from .diagnostic_replay_contract import install_store_capture
+        install_store_capture(self)
 
     def initialize(self) -> None:
         if self._memory_uri:
@@ -600,6 +605,8 @@ class PostgresQueryStore(
         self._observation_history_enabled = observation_history_enabled
         # Opt in only after storage/rollback and dedicated-PG gates pass.
         self._shadow_checkpoint_frames_enabled = shadow_checkpoint_frames_enabled
+        from .diagnostic_replay_contract import install_store_capture
+        install_store_capture(self)
 
     def initialize(self) -> None:
         from .postgres_access import DBWriterContext, open_observed_connection

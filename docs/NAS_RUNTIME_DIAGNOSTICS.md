@@ -1,5 +1,212 @@
 # NAS 작업별 병목 진단
 
+2026-10-05 후속 목표는 **같은 장중 사건 기록과 DB 초기 자료를 고정하여 전체·단독·
+하나씩 제외·코드 수정 전후를 비교**하는 것이다. [다중 workload 실험 계약](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md)이
+후속 구현 순서의 정본이다. 아래 0B fixture는 기반 검사이며 목표 전체의 구현 완료가 아니다.
+새 계약은 여러 작업의 실제 store 입력과 collector 입력을 함께 기록하고, collector가
+생성하는 DB 호출과 기록된 하위 호출을 중복 재생하지 않는 선택 경계를 정의한다.
+
+2026-10-05 로컬 진행: bounded schema-2 store/collector input capture 및 plan compiler 구현,
+관련 로컬 검사 191건 통과. compiler는 실제 작업을 실행하지 않으며 `execution_ready=false`다.
+새 capture 전용 PostgreSQL 검사, 장기 prefix/window reader, 동일 replay DB baseline,
+time-preserved collector/background runner, API·NAS 연결과 운영 overhead 검증이 남았다.
+
+첫 전용 PostgreSQL 실행은 capture gate 4건 통과, schema-1 trace 읽기 오류 1건,
+collector 실패주입 검사 오류 1건이었다. 두 검사를 수정한 후보
+`2026.10.05-recorded-capture-gate-v2-81fc0b5e7f04dbcf`를 stage했다.
+stage 자체 검증은 파일 checksum/import 통과이며 운영 active pointer는 기존 v2 그대로다.
+새 후보의 6건 묶음 검증에는 NAS 전용 테스트 DB가 필요하다.
+
+```sh
+sudo sh /volume1/docker/kiwoom-monitor/deploy/synology/source-runtime.sh test 2026.10.05-recorded-capture-gate-v2-81fc0b5e7f04dbcf \
+  --test tests.integration.test_recorded_workload_capture_postgres.RecordedWorkloadCapturePostgresTests \
+  --test tests.integration.test_diagnostic_collector_replay_postgres.DiagnosticCollectorReplayPostgresTests
+```
+
+PC capture 회귀 9건은 통과했고 새 PG 클래스는 URL 미설정으로 skip됐다. 따라서 위 묶음의
+실제 PostgreSQL 결과를 받기 전까지 capture 원자성·동시성 gate는 미확인으로 둔다.
+
+2026-10-05 v2 NAS gate에서 collector의 rollback 주입이 여전히 실행되지 않는 것을 확인했다.
+같은 분 시각의 서로 다른 종목 observation이 metadata lookup에서 충돌했다. SQLite/PostgreSQL
+분봉 writer가 subject와 분 시각을 함께 사용하도록 수정하고 양 backend 회귀를 추가했다.
+로컬 SQLite 검사·문법 검증은 통과했으며 v3 후보에서는 다음을 함께 확인한다.
+
+```sh
+sudo sh /volume1/docker/kiwoom-monitor/deploy/synology/source-runtime.sh test 2026.10.05-recorded-capture-gate-v3-ed9daa478d48ac35 \
+  --test tests.integration.test_recorded_workload_capture_postgres.RecordedWorkloadCapturePostgresTests \
+  --test tests.integration.test_diagnostic_collector_replay_postgres.DiagnosticCollectorReplayPostgresTests \
+  --test tests.integration.test_storage_boundary_postgres.PostgresStorageBoundaryTests.test_realtime_minute_metadata_is_scoped_by_subject_for_same_minute
+```
+
+후보 `2026.10.05-recorded-capture-gate-v3-ed9daa478d48ac35`에서 위 묶음 7/7이 통과했다
+(9.109초). collector의 statement rollback·lost commit ACK 재시도와 같은 분의 다종목 metadata
+격리를 전용 PostgreSQL에서 확인했다. 이 후보는 active로 선택하거나 운영 서버에 배포하지 않았다.
+
+<a id="collector-replay-design"></a>
+## 2026-10-05 collector fixture 기반 및 다중 입력 capture — 로컬 진행
+
+`diagnostic_collector_replay.py`의 고정 `collector-0b/v1` fixture와 collector의
+네트워크 없는 진입점·인스턴스별 저장 시계·기존 저장 loop를 연결했다.
+6분간 세 시장 0B 메시지 362개를 넣는 정확성 검사에서 분봉 21개·초봉 1,080개,
+정상 주기의 분봉/확정 각 6회·초봉 6회·latest 2회와 별도 종료 flush 3회가 확인됐다.
+단위검사는 인스턴스별 시계를 제어하므로 NAS 성능 측정 결과가 아니다.
+입력 파서의 계좌 자료 거부, 열린 분/직전 분 RAM 조회, QUERY 완료 봉 우선권,
+구독 기준/gap, 저장 중 취소 후 실제 DB 작업 대기도 검증했다.
+관련 확대 회귀 130건 중 127건 통과, 2건은 PC의 전용 PostgreSQL URL 미설정으로 skip,
+1건은 기존 trace route 5개 누락 API 계약 fixture 실패다. PostgreSQL 원자 rollback·
+COMMIT ACK loss·peer 보존·전체 scope cleanup 검사 2건은 준비했으나 아직 실행하지 않았다.
+다중 workload 입력 capture/compiler 핵심은 아래 최신 상태에 추가 구현됐다. 남은 후속은
+capture 전용 PostgreSQL 검사, API workload 연결, 실제 replay runner, NAS 배포·실제 1배속 측정이다.
+
+### 목적과 확인된 경계
+
+운영 v2 `2026.10.05-realtime-minute-live-view-v2-ea54fd68a086689b`의 NAS 검사
+83건은 통과했다. 후속 DB writer replay `20261005T100452Z-80ed9651`도 245건,
+오류 0건으로 완료됐다. 다만 기존 `diagnostic_replay.run_replay()`는 저장 함수를
+직접 호출하므로 collector의 저장 주기 변경 효과를 검증하지 않는다.
+해당 run의 일정 지연 최대값도 약 394ms로 `timing_preserved=false`였다.
+
+첫 구현은 **0B 입력 → 실제 파서 → 실제 RAM 집계 → 실제 저장 루프 → 전용 PostgreSQL**을
+검증한다. 뉴스, TOP20 REST, ka10080 보완, VI, 계좌 이벤트, 외부시장 수집과 GUI는
+이 범위에 포함되지 않는다. 시장 전체 또는 당시 NAS 전체 부하의 동일 재현이라고
+표시하지 않는다. 기존 DB-call replay는 writer 단독 비교 도구로 그대로 유지한다.
+
+### 실제 코드 재사용과 실행 수명
+
+- 새 `diagnostic_collector_replay.py`는 입력 재생, 실행 수명, 결과 검증을 소유한다.
+  집계와 저장 알고리즘은 이 모듈로 복사하지 않는다. 별도 범용 Manager는 만들지 않는다.
+- `CentralRealtimeCollector`에 외부 네트워크 없이 입력을 받아 저장 task만 소유하는
+  좁은 진단 진입점을 추가한다. 운영 `start()`의 네트워크 task 시작과 분리하되,
+  `_publish_parsed`, `_save_snapshots`, `_flush_snapshots`, `close()`를 그대로 사용한다.
+  전달만 하는 대체 파서·가짜 flush 루프는 만들지 않는다.
+- 진단 인스턴스는 독립 `RealtimeHub`와 전용 store를 가진다. 토큰 공급자는 호출되면
+  실패하는 함수이며 account callback, account resolver, market-events service는 없다.
+  운영 collector의 RAM·구독·pause·자격증명에는 접근하지 않는다.
+- 구독 승인 집합·연속 수신 시작·gap 적용은 현재 collector의 상태 전이를 작은 내부
+  메서드로 모아 운영과 재생이 공유한다. 재생 코드가 private dict를 임의 조작하지 않는다.
+  전체 WebSocket 연결/LOGIN/REG 통신 재현은 첫 버전 범위 밖이다.
+- 입력 종료 → feeder 종료 확인 → collector `close()` → shield된 저장 task 완료 확인
+  → 데이터 검증 → 진단 소유 행 정리 순서를 지킨다. 취소·master 만료도 같은 경로를 탄다.
+  DB thread가 살아 있는데 task만 취소하고 행을 지우거나 run lock을 풀지 않는다.
+  drain이 오래 걸리면 `finalizing`과 미완료 사유를 노출하고 실제 작업의 소유권을 유지한다.
+- `DiagnosticRunService`의 기존 run lock, master session/CAS, 휴장일/시간 제한,
+  보고서 보존·cleanup을 재사용한다. 전용 DB 이름은 연결 전과 후 모두 확인한다.
+  writer마다 기존 연결·transaction·operation ID·query authority 경계를 유지한다.
+
+### 시계와 저장 시점
+
+collector의 기존 `now_provider`를 시장 시각의 단일 기준으로 사용한다. 현재
+`received_at`, 최신값 만료, latest/second deadline에 직접 쓰는 `time.time()`도
+이 공급자의 timestamp로 맞춘다. 운영 기본 공급자는 기존 실제 시각이며,
+API 프로세스의 전역 `time` 또는 `asyncio.sleep`을 monkeypatch하지 않는다.
+
+성능 재현은 원본 시작 시각 + 실제 monotonic 경과를 쓰는 **1배속**으로 제한한다.
+1초 관리 sleep과 DB 실행은 실제 시간으로 진행한다. 입력 예정 시각과 실제 투입 시각을
+모두 남기며 밀린 입력을 삭제하거나 미래 입력을 앞당겨 timing 성공으로 만들지 않는다.
+원본의 분·5분 위상(:02/:45/5분 경계+:10)을 유지한다. sleep 이후 deadline 검사도
+실제 collector 코드가 담당하므로 DB 지연에 따른 저장 지연을 숨기지 않는다.
+
+단위검사에서만 인스턴스별 sleep/clock을 제어해 빠르게 경계를 검증한다.
+이 결과는 `correctness_only`이며 NAS 성능 결과와 합치지 않는다.
+네트워크 대기용 monotonic과 성능 측정용 perf counter는 실제 시간을 유지한다.
+
+### 입력 원본과 초기 상태
+
+1차는 고정된 버전의 대표 fixture를 사용한다(`collector_fixture`). 최소 6분 길이로
+분봉·초봉·latest 경계를 모두 지나며 KRX/NXT/SOR, 누적값 초기 기준, 지연·중복 체결,
+구독 변경·gap과 종료 시 미저장 자료를 포함한다. 입력은 실제 `REAL/0B` 형태이고
+예상 OHLC·거래량·거래대금·완료 여부를 별도로 검산한다. 실패 주입은 검증용 fixture로
+분리하며 정상 성능 fixture에 섞지 않는다. 과거 trace를 임의 체결로 변환해
+`recorded`라고 부르지 않는다.
+
+2차 `collector_recorded`는 새로 기록한 0B 입력만 사용한다. 기존 DB trace의 행 수,
+call ID, 변경량으로 원래 틱 순서·가격·누적량을 복원할 수 없으므로 해당 입력으로는 거부한다.
+중간 구간을 고를 때는 기록 시작부터 선택 구간까지의 prefix를 같은 collector에 먼저
+재생한다. prefix를 분석 구간에서 제외하고 별도 비용으로 보고한다. 첫 5분 미만의
+warm-up이나 구독 기준이 없는 종목은 초기 상태 미확인으로 표시한다.
+
+첫 버전은 운영 RAM 전체나 운영 DB snapshot을 복제하지 않는다. 따라서 충분한 prefix가
+있어도 capture 이전의 RAM·기존 DB·query authority·스케줄러 위상까지 동일하다는 보장은 없다.
+`initial_state=cold_with_prefix`, `database_state=isolated_fixture`로 명시하고 원본과의
+상태 동일성은 미확인으로 둔다. QUERY/COMPLETE 선점 행은 별도 fixture에서 검증한다.
+재시작으로 나뉜 capture를 연속 무손실 입력으로 이어 붙이지 않는다.
+
+### 경량 0B capture 계약
+
+기존 trace에 선택적인 `collector_input` 스트림을 추가한다. 기본값은 OFF이며 기존
+DB-call trace 계약은 유지한다. `trace_id/producer_id/input_seq`, 수신 wall/monotonic,
+원래 메시지의 row 순서, 실제 source release와 parser schema를 남긴다.
+0B 필드는 `item/stk_cd/code`와 FID `10,12,13,14,15,17,20,228,290,311`만 복사한다.
+문자열 부호·빈 값·필드 부재·시장 suffix는 그대로 보존한다. 구독 승인과 gap,
+capture 시작 시 승인 source/연속 수신 기준도 같은 입력 순서에 넣는다.
+같은 메시지 안의 제외된 종류는 개수로 공개한다. LOGIN·토큰·00/04 계좌 자료를
+수집하거나 fixture에 넣지 않는다. 지원하지 않는 schema는 추정 복원하지 않고 거부한다.
+
+수신 경로는 허용 필드의 bounded copy와 enqueue만 한다. JSON 인코딩·압축·파일 I/O·fsync는
+백그라운드에서 묶어서 한다. enqueue 실패와 한도를 넘는 입력은 순번/사유를 남기고
+자료 불완전으로 처리하며 실제 수신·집계를 막지 않는다. mutable 원본 dict를 queue에
+그대로 참조시키지 않는다. DB-call과 입력 queue 예산을 분리해 입력 폭주가 DB 계측을
+조용히 밀어내지 않도록 한다. 입력 queue는 32,768개 및 보수적 메모리 비용 64MiB 중
+먼저 도달하는 한도로 시작하고, 문자열·행 수 제한을 적용해 단일 이벤트 크기도 제한한다.
+큰 메시지는 순서와 원본 message ID를 보존한 bounded row group으로 나눈다.
+
+현재 writer는 5초마다 최대 4,096개/1MiB chunk 하나만 내보내므로 이를 그대로 틱에
+적용하지 않는다. 입력 스트림은 5초 또는 buffer high-water에 worker를 깨우고,
+worker만 bounded chunk들을 연속 처리하도록 한다. chunk별 batched fsync와 checksum,
+manifest의 committed high-water를 유지한다. 기존 저장 quota·부분 파일·재시작의
+unknown-tail-loss 의미도 보존한다. 디스크가 못 따라가면 명시적으로 incomplete이지
+무제한 RAM 증가나 수신 thread의 동기식 쓰기로 해결하지 않는다.
+
+65분 capture 허용은 구현만으로 보장하지 않는다. 실제 관측 peak와 그 2배 입력의
+65분 검증에서 seq/drop, queue bytes/RSS, worker CPU·flush/fsync, 수신 지연을 확인한다.
+동일 입력의 capture OFF/ON 반복 비교 결과가 나오기 전에는 개장 capture overhead가
+작다고 확정하지 않는다. 누락·quota 초과 trace로 원본 부하 동일성 판정은 하지 않는다.
+
+### 격리·보고서·비교
+
+재생 종목은 run별 진단 키로 매핑하고 시장·동일 키 관계를 보존한다. 원본 날짜/시각을
+유지하더라도 전용 DB와 진단 키로 격리한다. 선점 실패나 취소도 해당 run의 봉·metadata·
+revision·operation marker·latest 행만 지우며 peer sentinel로 보존을 검사한다.
+매핑이 실제 파서의 코드 해석을 바꾸지 않는지 fixture 검사에 포함한다.
+
+보고서에는 입력 수/누락/수신 지연, warm-up·측정·drain 단계, flush ID별 writer 호출,
+SQL/COMMIT 시간·실제 변경 행·revision, RAM pending 최대값, 최종 자료 검증과
+cleanup 결과를 분리한다. 입력→flush는 여러 틱이 한 저장으로 합쳐지는 관계이며
+1:1 call ID라고 표시하지 않는다. 가능한 key별 input seq 범위와 flush ID를 연결하고
+범위는 정확한 seq 집합이 아니라는 점을 명시한다. writer의 DB call ID 연결은 유지한다.
+
+`input_timing_preserved`는 누락 없이 1배속 투입되고 최대 일정 지연 100ms 이내일 때만
+true다. 이것도 당시 전체 시스템/DB 상태의 동일성 증거는 아니다. 저장 경계의 지연은
+별도 `flush_lateness_ms`로 기록한다. 종료 flush는 정상 주기 COMMIT 수에 섞지 않는다.
+DB transaction/WAL delta와 NAS 장치 통계는 **측정 구간 전체**로 명명하며 개별 replay
+writer에 귀속하지 않는다. fixture 준비/정리 WAL도 성능 구간 밖으로 분리한다.
+
+정확한 변경 전후 비교에는 동일 입력·초기 fixture·배속을 처리하는 실제 두 코드 버전이
+필요하다. 옛 1초 flush를 흉내 낸 다른 루프를 기준으로 만들지 않는다. 기준 버전에
+같은 진단 진입점이 없다면 우선 현재 버전의 정확성·실제 호출 수만 보고하고, 감소율은
+비교 가능 버전 준비 전까지 미확인으로 둔다. 단순 코드상 예상 감소율을 실측으로 쓰지 않는다.
+
+### 구현 순서와 완료 조건
+
+다음 번호는 0B 단독 경로의 기존 단계 구분이다. 후속 개발 우선순위는 위 다중 workload
+계약 8절을 따른다. 아래 고정 fixture·네트워크 없는 collector 검사는 이미 구현된 기반이며,
+다중 workload 원인 입력 capture 및 replay 완성을 뜻하지 않는다.
+
+1. **완료된 기반:** collector의 인스턴스 시계·네트워크 없는 수명 진입점,
+   `collector_fixture` runner와 고정 fixture 회귀. 실제 parser와 저장 loop, current/previous-minute
+   RAM 표시, :02/:45/5분+:10 저장과 종료 flush, 중복/지연/시장 분리/query authority를 검사한다.
+2. **완료된 로컬 capture 핵심:** 다중 workload store 입력과 0B·승인·gap 원인 사건의 bounded capture,
+   actor/component 연결 및 선택 plan compiler. 아직 runner/API에 연결되지 않아 실제 replay를 실행하지 않는다.
+3. **다음 단계:** 새 capture의 전용 PostgreSQL 원자성·정리 검사를 추가하고, prefix/warm-state를
+   포함한 장기 trace window reader와 동일 replay DB baseline 복구를 구현한다. 그 뒤 원인 입력과
+   동시 background operation을 같은 시계로 실행하는 runner, 코드 A/B, plan/run API·보고서를 연결한다.
+   선택 workload의 descendant DB call을 두 번 적용하지 않고 peer producer의 동일 메서드 호출은
+   보존하는지 검증한다. capture 입력/순번/queue 포화/파일 한도/중단 복구와 65분 overhead gate를
+   통과한 후보만 장중 capture에 사용한다.
+
+위 기반 fixture와 다중 workload capture/compiler 핵심은 로컬 구현했지만 실행 경로는 미완성이다.
+이 변경을 NAS 운영 릴리즈에 적용하지 않았다.
+
 2026-09-29 로컬 v4 후보에서는 인증 API로 master/capture 제어, 고정 PostgreSQL·host snapshot, 단일 진단 run 시작·상태·취소, 기존/new JSON 보고서 및 history 조회를 연결했다. API는 같은 `diagnostic-workloads.json`과 기존 CLI 수집·report 로직을 공유한다. 로컬 구현·검사 단계이며 실제 NAS 서버는 아래 v2 설명의 build가 실행 중이다. [API 범위와 제한](NAS_DIAGNOSTIC_API_DESIGN.md) 및 [OPEN_ITEMS](OPEN_ITEMS.md)의 배포 잔여를 확인한다.
 
 NAS build `2026.09.28-db-observability-v2`에서 인증된 `GET /api/v1/diagnostics/news-job-claim-plan`으로 stale news-job 복구 UPDATE와 BODY/RULE 선점 SELECT의 PostgreSQL 실행계획을 조회할 수 있다. 이 경로는 임의 SQL을 받지 않고 `EXPLAIN (FORMAT JSON)`만 실행하며 `ANALYZE`는 사용하지 않는다. 응답은 database/version과 제한된 plan node 정보를 반환한다. 2026-09-29 확인한 PostgreSQL 17.11 계획 및 추정치의 한계는 [OPEN_ITEMS](OPEN_ITEMS.md)에 기록했다.
@@ -295,4 +502,4 @@ transaction 경계 또는 실시간 저장 흐름을 실제 수정하는 단계�
 
 현재 재생 가능한 호출은 원본 raw의 `sql_calls=2`인 **빈** `news_job_claim`과 `sql_calls=2`인 **inline** `shadow_monitor_state`뿐이다. 다른 뉴스 상태, 0B, 분봉, TOP20, reader, frame 저장 및 원본 SQL parameter는 재생하지 않는다. 따라서 이 pilot으로 장중 전체 부하나 어떤 writer의 인과적 기여를 판정하지 않는다. 원본 호출 개수, 선택 구간 호출 개수, 실제 재생/누락/밀림 개수를 결과에 분리한다. 원본 시각 간격은 유지하고 뉴스 최대 3개·shadow 최대 1개로 병렬 실행한다. 속도 배율과 임의 동시성 옵션은 아직 없다.
 
-재생은 평일 KST 07:30~20:30에 거부하며, 기존 진단 master/capture/run lock을 요구한다. DB 이름은 전용 `kiwoom_monitor_diagnostic_test`로 연결 전후 확인하고, 해당 DB의 뉴스 작업 행이 비어 있어야 한다. shadow는 별도 진단 키만 쓰고 측정 종료 후 삭제·검증한다. 운영 DB에는 재생 쓰기를 하지 않는다. PostgreSQL 전체 WAL과 NAS 장치 통계에는 다른 호스트 작업도 포함되므로 결과의 차이가 재생 writer에 귀속된다고 단정하지 않는다. 이 후보는 로컬 단위검사까지만 통과했으며, NAS 전용 PostgreSQL 실행과 운영 배포는 아직 하지 않았다.
+재생은 평일 KST 07:30~20:30에 거부한다. 다만 `KIWOOM_ENVIRONMENT=real`이고 `diagnostic_replay.py`에 실계좌 한국 증권시장 휴장일로 확인해 등록한 날짜, 그리고 주말은 이 시각 제한에서 제외한다. 2026년 휴장일은 [한국거래소의 휴장 규칙](https://global.krx.co.kr/contents/GLB/06/0602/0602010201/GLB0602010201T1.jsp)과 [공식 2026년 월력요항 발표](https://www.kasi.re.kr/kor/post/newsMaterial/32031)에 따라 등록했다. 새해의 날짜나 임시 휴장은 근거를 확인해 등록하기 전까지 일반 평일로 취급한다. WebSocket `READY`나 당일 `0s` 미수신만으로 휴장을 추정하지 않는다. 기존 진단 master/capture/run lock을 요구한다. DB 이름은 전용 `kiwoom_monitor_diagnostic_test`로 연결 전후 확인하고, 해당 DB의 뉴스 작업 행이 비어 있어야 한다. shadow는 별도 진단 키만 쓰고 측정 종료 후 삭제·검증한다. 운영 DB에는 재생 쓰기를 하지 않는다. PostgreSQL 전체 WAL과 NAS 장치 통계에는 다른 호스트 작업도 포함되므로 결과의 차이가 재생 writer에 귀속된다고 단정하지 않는다.

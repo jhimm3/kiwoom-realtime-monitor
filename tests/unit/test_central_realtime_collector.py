@@ -4,7 +4,8 @@ import unittest
 import asyncio
 import json
 import tempfile
-from datetime import datetime
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
@@ -12,6 +13,8 @@ from kiwoom_monitor.central_server.realtime_collector import (
     CentralRealtimeCollector,
     REALTIME_ITEMS_PER_TYPE,
     _registered_trade_sources,
+    _next_latest_checkpoint,
+    _next_second_checkpoint,
     contains_krx_observation,
 )
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
@@ -26,6 +29,297 @@ from kiwoom_monitor.domain.market_data_contract import (
 
 
 class CentralRealtimeCollectorTests(unittest.TestCase):
+    def test_live_read_keeps_inflight_and_lost_ack_delta_visible_without_double_count(self) -> None:
+        from threading import Event
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / 'live.sqlite3')
+            store.initialize()
+            entered, release = Event(), Event()
+
+            class LostAckStore:
+                def save_minute_bars(self, rows, *, observations=None):
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError('test did not release writer')
+                    store.save_minute_bars(rows, observations=observations)
+                    raise OSError('injected lost commit acknowledgement')
+
+                def load_minute_bars(self, *args, **kwargs):
+                    return store.load_minute_bars(*args, **kwargs)
+
+            at = datetime(2026, 10, 6, 10, 4, 40)
+            collector = CentralRealtimeCollector(lambda: 'token', 'real', RealtimeHub(), lambda: at, LostAckStore())
+            collector._minute_bars.add(TradeTick('005930', 100, None, None, 2, None, '100440'), at, at.timestamp())
+
+            async def exercise():
+                flush = asyncio.create_task(collector._flush_snapshots(flush_latest=False, flush_seconds=False))
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                    [during] = await collector.load_live_minute_bars('005930', '2026-10-06', 'KRX')
+                    self.assertEqual(2, during['volume'])
+                    self.assertEqual([], store.load_minute_bars('005930', '2026-10-06', 'KRX'))
+                finally:
+                    release.set()
+                    with self.assertRaisesRegex(OSError, 'lost commit'):
+                        await flush
+                collector._minute_bars.add(TradeTick('005930', 110, None, None, 3, None, '100441'), at, at.timestamp())
+                [after] = await collector.load_live_minute_bars('005930', '2026-10-06', 'KRX')
+                self.assertEqual(5, after['volume'])
+                self.assertEqual(2, store.load_minute_bars('005930', '2026-10-06', 'KRX')[0]['volume'])
+
+            try:
+                asyncio.run(exercise())
+            finally:
+                release.set()
+                store.close()
+
+    def test_delayed_bar_cadence_persists_late_trades_and_final_closed_metadata(self) -> None:
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'cadence.sqlite3'
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            now = [datetime(2026, 10, 6, 10, 4, 59)]
+            collector = CentralRealtimeCollector(lambda: 'token', 'real', RealtimeHub(), lambda: now[0], store)
+
+            async def exercise():
+                tick = TradeTick('005930', 100, 1, 1000, 2, None, '100459')
+                collector._minute_bars.add(tick, now[0], now[0].timestamp())
+                collector._second_trades.add(tick, now[0], now[0].timestamp())
+                await collector._flush_snapshots(flush_latest=False, periodic=True, flush_seconds=False)
+                self.assertFalse(store.load_minute_bars('005930', '2026-10-06', 'KRX'))
+                now[0] = datetime(2026, 10, 6, 10, 5, 2)
+                late = TradeTick('005930', 110, 2, 1010, 3, None, '100459')
+                collector._minute_bars.add(late, now[0], now[0].timestamp())
+                collector._second_trades.add(late, now[0], now[0].timestamp())
+                await collector._flush_snapshots(flush_latest=False, periodic=True, flush_seconds=False)
+                [bar] = store.load_minute_bars('005930', '2026-10-06', 'KRX')
+                self.assertEqual((100, 110, 100, 110, 5), tuple(bar[key] for key in ('open', 'high', 'low', 'close', 'volume')))
+                revisions = store.load_observation_revisions_after(0, kinds=('minute_bar',), limit=100)
+                self.assertTrue(revisions[-1]['payload']['window_closed'])
+                now[0] = datetime(2026, 10, 6, 10, 5, 45)
+                await collector._flush_snapshots(flush_latest=False, periodic=True)
+                with closing(sqlite3.connect(path)) as db:
+                    row = db.execute('SELECT volume,trade_count FROM central_second_trade_bars').fetchone()
+                self.assertEqual((5, 2), row)
+
+            try:
+                asyncio.run(exercise())
+            finally:
+                store.close()
+
+    def test_periodic_loop_delays_second_writer_until_forty_five(self) -> None:
+        from unittest.mock import patch
+        clock = [datetime(2026, 10, 6, 10, 5, 43).timestamp()]
+        calls = []
+
+        async def sleep(_):
+            clock[0] += 1
+            if len(calls) == 3:
+                raise asyncio.CancelledError
+
+        async def flush(**kwargs):
+            calls.append(kwargs)
+
+        collector = CentralRealtimeCollector(
+            lambda: 'token', 'real', RealtimeHub(), lambda: datetime.fromtimestamp(clock[0]),
+            snapshot_sleep=sleep,
+        )
+
+        async def exercise():
+            with patch.object(collector, '_flush_snapshots', side_effect=flush):
+                with self.assertRaises(asyncio.CancelledError):
+                    await collector._save_snapshots()
+
+        asyncio.run(exercise())
+        self.assertEqual([False, True, False], [call['flush_seconds'] for call in calls])
+        self.assertTrue(all(call['periodic'] for call in calls))
+        self.assertTrue(all(not call['flush_latest'] for call in calls))
+
+    def test_slow_closed_minute_save_does_not_finalize_still_buffered_next_minute(self) -> None:
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+        now = [datetime(2026, 10, 6, 10, 5, 2)]
+
+        class Store:
+            def __init__(self):
+                self.saved, self.closed, self.available = [], [], []
+
+            def save_minute_bars(self, rows, *, observations=None):
+                self.saved.extend(row['minute'] for row in rows)
+                # Simulate a DB stall crossing the next minute's close.
+                now[0] = datetime(2026, 10, 6, 10, 6, 2)
+
+            def finalize_minute_bars(self, rows):
+                self.closed.extend(row['minute'] for row in rows)
+                self.available.extend(row['available_at'] for row in rows)
+
+        store = Store()
+        collector = CentralRealtimeCollector(lambda: 'token', 'real', RealtimeHub(), lambda: now[0], store)
+        for minute in (4, 5):
+            at = datetime(2026, 10, 6, 10, minute, 1)
+            collector._minute_bars.add(TradeTick('005930', 100, None, None, 1, None, at.strftime('%H%M%S')),
+                                       at, at.timestamp())
+
+        async def exercise():
+            await collector._flush_snapshots(flush_latest=False, periodic=True, flush_seconds=False)
+            self.assertEqual(['10:04'], store.saved)
+            self.assertEqual(['10:04'], store.closed)
+            self.assertEqual([now[0].timestamp()], store.available)
+            await collector._flush_snapshots(flush_latest=False, periodic=True, flush_seconds=False)
+
+        asyncio.run(exercise())
+        self.assertEqual(['10:04', '10:05'], store.saved)
+        self.assertEqual(['10:04', '10:05'], store.closed)
+
+    def test_second_checkpoint_uses_next_minute_forty_five_seconds(self) -> None:
+        start = datetime(2026, 10, 6, 10, 5, tzinfo=timezone(timedelta(hours=9))).timestamp()
+        self.assertEqual(start + 45, _next_second_checkpoint(start))
+        self.assertEqual(start + 45, _next_second_checkpoint(start + 44.9))
+        self.assertEqual(start + 105, _next_second_checkpoint(start + 45))
+
+    def test_periodic_bars_keep_open_minute_and_save_previous_seconds_at_forty_five(self) -> None:
+        class Store:
+            def __init__(self):
+                self.minutes, self.seconds, self.closures, self.order, self.documents = [], [], [], [], []
+
+            def save_minute_bars(self, rows, *, observations=None):
+                self.minutes.extend(rows)
+                self.order.append('minute')
+
+            def finalize_minute_bars(self, rows):
+                self.closures.extend(rows)
+                self.order.append('finalize')
+
+            def save_second_trade_bars(self, rows):
+                self.seconds.extend(rows)
+
+            def upsert_documents(self, collection, rows):
+                self.documents.append(collection)
+
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+        now = [datetime(2026, 10, 6, 10, 4, 59)]
+        store = Store()
+        collector = CentralRealtimeCollector(lambda: 'token', 'real', RealtimeHub(), lambda: now[0], store)
+
+        def add(at, volume, cumulative):
+            now[0] = at
+            tick = TradeTick('005930', 100, cumulative, cumulative, volume, None, at.strftime('%H%M%S'))
+            collector._minute_bars.add(tick, at, at.timestamp())
+            collector._second_trades.add(tick, at, at.timestamp())
+
+        async def exercise():
+            add(now[0], 2, 1)
+            collector._pending_stock_references['005930'] = {'owner': '005930', 'key': 'reference'}
+            await collector._flush_snapshots(flush_latest=False, periodic=True, flush_seconds=False)
+            self.assertFalse(store.minutes)
+            self.assertFalse(store.seconds)
+            self.assertEqual(['stock_price_references'], store.documents)
+            add(datetime(2026, 10, 6, 10, 5, 1), 3, 2)
+            await collector._flush_snapshots(flush_latest=False, periodic=True, flush_seconds=False)
+            self.assertFalse(store.minutes)
+            now[0] = datetime(2026, 10, 6, 10, 5, 2)
+            await collector._flush_snapshots(flush_latest=False, periodic=True, flush_seconds=False)
+            self.assertEqual(['minute', 'finalize'], store.order)
+            self.assertEqual(['10:04'], [row['minute'] for row in store.minutes])
+            self.assertEqual(2, store.minutes[0]['volume'])
+            self.assertFalse(store.seconds)
+            now[0] = datetime(2026, 10, 6, 10, 5, 45)
+            await collector._flush_snapshots(flush_latest=False, periodic=True)
+            self.assertEqual(['10:04:59'], [row['trade_second'] for row in store.seconds])
+            self.assertEqual(['10:04'], [row['minute'] for row in store.minutes])
+            # Normal shutdown flushes the open minute and all deferred seconds.
+            await collector.close()
+            self.assertEqual(['10:04', '10:05'], [row['minute'] for row in store.minutes])
+            self.assertEqual(['10:04:59', '10:05:01'], [row['trade_second'] for row in store.seconds])
+
+        asyncio.run(exercise())
+
+    def test_failed_delayed_seconds_retry_without_waiting_for_next_deadline(self) -> None:
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+
+        class Store:
+            def __init__(self):
+                self.calls, self.saved = 0, []
+
+            def save_second_trade_bars(self, rows):
+                self.calls += 1
+                if self.calls == 1:
+                    raise OSError('delayed second batch failed')
+                self.saved.extend(rows)
+
+        store = Store()
+        at = datetime(2026, 10, 6, 10, 4, 59)
+        collector = CentralRealtimeCollector(
+            lambda: 'token', 'real', RealtimeHub(), lambda: at.replace(minute=5, second=45), store,
+        )
+        collector._second_trades.add(TradeTick('005930', 100, 1, 1, 2, None, '100459'), at, at.timestamp())
+
+        async def exercise():
+            with self.assertRaises(OSError):
+                await collector._flush_snapshots(flush_latest=False, periodic=True)
+            await collector._flush_snapshots(flush_latest=False, periodic=True, flush_seconds=False)
+
+        asyncio.run(exercise())
+        self.assertEqual(2, store.calls)
+        self.assertEqual(2, store.saved[0]['volume'])
+
+    def test_latest_checkpoint_uses_five_minute_boundary_plus_ten_seconds(self) -> None:
+        kst = timezone(timedelta(hours=9))
+        at_nine = datetime(2026, 10, 6, 9, tzinfo=kst).timestamp()
+        self.assertEqual(at_nine + 10, _next_latest_checkpoint(at_nine))
+        self.assertEqual(at_nine + 310, _next_latest_checkpoint(at_nine + 10))
+        self.assertEqual(at_nine + 310, _next_latest_checkpoint(at_nine + 309.9))
+
+    def test_periodic_flush_keeps_latest_pending_but_normal_close_saves_it(self) -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.saved = []
+
+            def save_realtime_snapshots(self, values):
+                self.saved.extend(values)
+
+        store = Store()
+        collector = CentralRealtimeCollector(
+            lambda: "token", "real", RealtimeHub(), lambda: datetime(2026, 10, 6, 9), store,
+        )
+        snapshot = {
+            "event_type": "trade", "item_key": "005930", "received_at": 1.0,
+            "event": {"type": "trade", "payload": {"code": "005930"}},
+        }
+        collector._pending_snapshots[("trade", "005930")] = snapshot
+
+        async def exercise() -> None:
+            await collector._flush_snapshots(flush_latest=False)
+            self.assertEqual([], store.saved)
+            self.assertEqual(snapshot, collector._pending_snapshots[("trade", "005930")])
+            await collector.close()
+
+        asyncio.run(exercise())
+        self.assertEqual([snapshot], store.saved)
+        self.assertFalse(collector._pending_snapshots)
+
+    def test_subscribe_uses_fresh_ram_snapshot_over_older_db_checkpoint(self) -> None:
+        collector = CentralRealtimeCollector(
+            lambda: "token", "real", RealtimeHub(), lambda: datetime(2026, 10, 6, 9),
+        )
+        old = {"type": "trade", "payload": {"code": "005930", "current_price": 100}}
+        current = {"type": "trade", "payload": {"code": "005930", "current_price": 101}}
+        other = {"type": "trade", "payload": {"code": "000660", "current_price": 200}}
+        collector._latest_snapshots[("trade", "005930")] = {
+            "received_at": collector._now_provider().timestamp(), "event": current,
+        }
+        collector._latest_snapshots[("trade", "035420")] = {
+            "received_at": collector._now_provider().timestamp(),
+            "event": {"type": "trade", "payload": {"code": "035420"}},
+        }
+        self.assertEqual(
+            [other, current],
+            collector.initial_realtime_snapshots([old, other], ["005930", "000660"]),
+        )
+
     def test_integrated_trade_is_sor_source_and_not_strict_krx_observation(self) -> None:
         message = {"trnm": "REAL", "data": [{"type": "0B", "item": "005930_AL"}]}
         groups = {"1000": [{"item": ["005930_AL", "000660", "035420_NX"], "type": ["0B"]}]}
@@ -473,12 +767,14 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
                 }],
             })
 
-            asyncio.run(collector._flush_snapshots())
+            asyncio.run(collector._flush_snapshots(flush_latest=False))
             metadata = store.load_market_data_metadata(
                 MarketDatasetKind.MINUTE_BAR,
                 "005930:KRX",
                 "2026-09-10T10:15",
             )
+            self.assertEqual([], store.load_realtime_snapshots(["005930"]))
+            self.assertIn(("trade", "005930"), collector._pending_snapshots)
             store.close()
 
         self.assertIsNotNone(metadata)

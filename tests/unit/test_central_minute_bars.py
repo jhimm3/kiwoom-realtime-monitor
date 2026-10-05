@@ -8,6 +8,37 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
 
 
 class MinuteBarAccumulatorTests(unittest.TestCase):
+    def test_live_copy_preserves_operation_id_without_consuming_pending_ticks(self) -> None:
+        accumulator = MinuteBarAccumulator()
+        now = datetime(2026, 10, 6, 10, 4, 40)
+        tick = TradeTick('005930', 100, None, None, 2, None, '100440')
+        accumulator.add(tick, now, now.timestamp())
+        [first] = accumulator.pending_bars('005930', '2026-10-06', 'KRX')
+        accumulator.add(tick, now, now.timestamp())
+        [second] = accumulator.pending_bars('005930', '2026-10-06', 'KRX')
+        self.assertEqual(first['operation_id'], second['operation_id'])
+        self.assertEqual((2, 4), (first['volume'], second['volume']))
+        self.assertEqual([], accumulator.pending_bars('000660', '2026-10-06'))
+        self.assertEqual([], accumulator.pending_bars('005930', '2026-10-05'))
+        self.assertEqual([second], accumulator.drain_dirty())
+        accumulator.add(tick, now, now.timestamp())
+        [next_segment] = accumulator.pending_bars('005930', '2026-10-06')
+        self.assertNotEqual(first['operation_id'], next_segment['operation_id'])
+
+    def test_closed_drain_retains_current_minute_until_its_own_close(self) -> None:
+        accumulator = MinuteBarAccumulator()
+        before = datetime(2026, 10, 6, 10, 4, 59)
+        current = datetime(2026, 10, 6, 10, 5, 1)
+        for at in (before, current):
+            accumulator.add(TradeTick('005930', 100, None, None, 2, None, at.strftime('%H%M%S')),
+                            at, at.timestamp())
+        self.assertEqual([], accumulator.drain_dirty(closed_before=before))
+        previous = accumulator.drain_dirty(closed_before=current.replace(second=0))
+        self.assertEqual(['10:04'], [row['minute'] for row in previous])
+        remaining = accumulator.drain_dirty()
+        self.assertEqual(['10:05'], [row['minute'] for row in remaining])
+        self.assertEqual(4, sum(row['volume'] for row in previous + remaining))
+
     def test_builds_ohlcv_and_cumulative_trade_value_increment(self) -> None:
         accumulator = MinuteBarAccumulator()
         now = datetime(2026, 9, 8, 10, 1)

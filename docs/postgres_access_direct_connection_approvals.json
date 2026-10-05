@@ -1,7 +1,63 @@
 {
   "schema": 1,
-  "reviewed_on": "2026-10-04",
+  "reviewed_on": "2026-10-05",
   "approved_sites": [
+    {
+      "file": "scripts/check_recorded_replay_baseline.py",
+      "owner": "_provision_role_database",
+      "call": "psycopg.connect",
+      "count": 2,
+      "category": "offline_maintenance",
+      "reason": "Explicit operator provisioning uses the fixed postgres catalog for the fixed replay role/database only; saved replay-role authentication cannot adopt or reset another resource. No operational table reads or writes."
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/diagnostic_collector_replay.py",
+      "owner": "_preflight",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_benchmark",
+      "reason": "Read-only collector fixture preflight checks the dedicated diagnostic DB identity, existing schema and empty UUID fixture scope."
+    },
+    {
+      "file": "tests/integration/test_recorded_workload_capture_postgres.py",
+      "owner": "RecordedWorkloadCapturePostgresTests.setUpClass",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "integration_test",
+      "reason": "Read-only identity/schema gate before any test mutation; refuses operational DBs."
+    },
+    {
+      "file": "tests/integration/test_recorded_workload_capture_postgres.py",
+      "owner": "RecordedWorkloadCapturePostgresTests._counts",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "integration_test",
+      "reason": "Read-only UUID subject row counts on the identity-verified dedicated diagnostic test DB."
+    },
+    {
+      "file": "tests/integration/test_recorded_workload_capture_postgres.py",
+      "owner": "RecordedWorkloadCapturePostgresTests._cleanup",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "integration_test",
+      "reason": "Delete and verify only this test's explicit UUID subjects on the preflight-verified dedicated DB; no table or sequence reset."
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/diagnostic_replay_baseline.py",
+      "owner": "_maintenance_connection",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "isolated_replay_maintenance",
+      "reason": "Offline replay DB ownership, advisory lock and exact-table logical baseline restore; fixed dedicated DB and nonprivileged owner role; no production or integration DB reset."
+    },
+    {
+      "file": "src/kiwoom_monitor/central_server/diagnostic_replay_baseline.py",
+      "owner": "ReplayDatabaseLease.connect_store",
+      "call": "_OwnedConnection.connect",
+      "count": 1,
+      "category": "isolated_replay_native_writer",
+      "reason": "Native psycopg subclass creates one connection per replay store call after owned baseline restore; original commit/rollback/context semantics retained and close receipts fence reset/lease retirement."
+    },
     {
       "file": "scripts/benchmark_minute_revision_batch_postgres.py",
       "owner": "_check_database",

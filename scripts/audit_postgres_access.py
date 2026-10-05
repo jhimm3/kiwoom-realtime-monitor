@@ -26,7 +26,7 @@ TABLE = re.compile(r"\bcentral_[a-z_0-9]+\b", re.I)
 DB_FILE = "src/kiwoom_monitor/central_server/database.py"
 ACCESS_FILE = "src/kiwoom_monitor/central_server/postgres_access.py"
 CONNECTION_APPROVALS_FILE = "docs/postgres_access_direct_connection_approvals.json"
-DRIVER_CONNECTS = {"psycopg.connect", "psycopg2.connect"}
+DRIVER_CONNECTS = {"psycopg.connect", "psycopg2.connect", "_OwnedConnection.connect"}
 
 
 def name(node: ast.AST) -> str:

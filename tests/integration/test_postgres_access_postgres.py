@@ -4105,6 +4105,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         service = object.__new__(AutonomousTop20Service)
         service._store = self.store
         service._minute_backfill_enabled = True
+        service._now = lambda: datetime(2026, 9, 28, 9, 0, tzinfo=KST)
 
         async def nxt_disabled(_code: str) -> bool:
             return False

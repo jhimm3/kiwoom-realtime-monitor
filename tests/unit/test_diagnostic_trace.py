@@ -138,7 +138,7 @@ class DiagnosticTraceTests(unittest.TestCase):
                 parent = _set_tool(control, True, 4000)
                 master_session = parent["diagnostic_tool"]["session_id"]
                 _set_trace(control, True, 3900, expected_session=master_session)
-                active = trace.start(seconds=3900)
+                active = trace.start(seconds=3900, store_inputs=True)
                 identifier = active["trace_id"]
                 event_count = 20_000
                 for index in range(event_count):
@@ -157,6 +157,16 @@ class DiagnosticTraceTests(unittest.TestCase):
                 self.assertEqual(sum(part["count"] for part in final["chunks"]), event_count)
                 for part in final["chunks"]:
                     self.assertEqual(part["bytes"], len(trace.chunk_bytes(identifier, part["name"])))
+                active = trace._SESSION
+                active["finished_mono_ns"] = active["started_mono_ns"] + 3900 * 1_000_000_000
+                trace._manifest(trace._directory() / identifier, active)
+                manifest, rows = trace.recorded_window_events(
+                    identifier, window_start_seconds=0, window_end_seconds=600,
+                    mode="recorded_operations",
+                )
+                self.assertEqual(event_count, len(rows))
+                self.assertEqual(event_count, manifest["window_read"]["events_verified"])
+                self.assertEqual(0, manifest["window_read"]["payload_bytes_loaded"])
                 _set_tool(control, False)
 
     def test_start_end_and_master_off_preserve_complete_chunk(self):

@@ -42,7 +42,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.10.05-db-trace-chunk-bounds-v1"
+SERVER_BUILD = "2026.10.06-recorded-capture-api-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -542,6 +542,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     app.state.credential_statuses = credential_statuses
     app.state.credential_runtime = credential_runtime
     app.state.realtime_hub = realtime_hub
+    app.state.realtime_collector = collector
     app.state.autonomous_top20_service = top20_service
     app.state.market_event_service = market_event_service
     app.state.external_market_collector = external_market_service
@@ -588,6 +589,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         model_config = ConfigDict(extra="forbid")
         seconds: int = Field(ge=60, le=7200)
         expected_session: str
+        store_inputs: bool = Field(default=False, strict=True)
+        collector_inputs: bool = Field(default=False, strict=True)
 
     class QueryRequest(BaseModel):
         api_id: str = Field(min_length=7, max_length=7)
@@ -1279,6 +1282,13 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                 "postgres_available": active.database_url.startswith("postgres"),
                 "sections": ["postgres", "activity", "news_jobs", "host", "storage"],
                 "run_kinds": ["measure", "compare", "replay"],
+                "trace_input_capture": {
+                    "schema_version": 2,
+                    "options": {"store_inputs": False, "collector_inputs": False},
+                    "collector_event_types": ["0B"],
+                    "coverage": "observed_paths_only",
+                    "overhead_verified": False,
+                },
                 "trace_replay_writer_kinds": sorted(TRACE_SYNTHETIC_KINDS),
                 "query_minute_scenarios": sorted(QUERY_MINUTE_SCENARIOS),
                 "limits": {"measure_seconds": 300, "compare_phase_seconds": 1100,
@@ -1347,7 +1357,9 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         try:
             await asyncio.to_thread(_set_trace, path, True, body.seconds,
                                     expected_session=body.expected_session)
-            return await asyncio.to_thread(start_trace, seconds=body.seconds)
+            return await asyncio.to_thread(start_trace, seconds=body.seconds,
+                                          store_inputs=body.store_inputs,
+                                          collector_inputs=body.collector_inputs)
         except ValueError as error:
             if trace_state().get("state") not in {"running", "stopping"}:
                 await asyncio.to_thread(_set_trace, path, False, body.seconds,
@@ -1866,6 +1878,12 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             store.load_market_news_feed, source, limit=limit,
         )}
 
+    async def load_display_minute_bars(code: str, day: str, market: str) -> list[dict[str, Any]]:
+        current_collector = app.state.realtime_collector
+        if current_collector is not None:
+            return await current_collector.load_live_minute_bars(code, day, market)
+        return await asyncio.to_thread(store.load_minute_bars, code, day, market)
+
     @app.get("/api/v1/market/minute-bars", dependencies=[Depends(authorize)])
     async def minute_bars(
         code: str = Query(min_length=6, max_length=12),
@@ -1873,8 +1891,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         market: str = Query(default="", pattern=r"^(|KRX|NXT|SOR|COMBINED)$"),
     ) -> dict[str, object]:
         requested_market = market.upper()
-        values = await asyncio.to_thread(
-            store.load_minute_bars, code, trading_date,
+        values = await load_display_minute_bars(
+            code, trading_date,
             "" if requested_market == "COMBINED" else requested_market,
         )
         if requested_market == "COMBINED":
@@ -1908,15 +1926,15 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         market: str = Query(default="", pattern=r"^(|KRX|NXT|SOR|COMBINED)$"),
         trading_days: int = Query(default=2, ge=1, le=5),
     ) -> dict[str, object]:
-        """TR 없이 중앙 DB에서 마지막 N개 실제 거래일 분봉을 반환한다."""
+        """TR 없이 중앙 저장 이력과 미저장 RAM 집계로 최근 거래일 분봉을 반환한다."""
         end = datetime.fromisoformat(end_date).date()
         values: list[dict[str, Any]] = []
         found_days: set[str] = set()
         for offset in range(31):
             day = (end - timedelta(days=offset)).isoformat()
             requested_market = market.upper()
-            rows = await asyncio.to_thread(
-                store.load_minute_bars, code, day,
+            rows = await load_display_minute_bars(
+                code, day,
                 "" if requested_market == "COMBINED" else requested_market,
             )
             if requested_market == "COMBINED":
@@ -2662,9 +2680,14 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                         "nxt_codes": sorted(subscriber.nxt_codes),
                         "upstream_code_count": len(codes), "upstream_nxt_code_count": len(nxt_codes),
                     })
-                    for snapshot in await asyncio.to_thread(
+                    snapshots = await asyncio.to_thread(
                         store.load_realtime_snapshots, sorted(subscriber.codes),
-                    ):
+                    )
+                    if collector is not None:
+                        snapshots = collector.initial_realtime_snapshots(
+                            snapshots, sorted(subscriber.codes),
+                        )
+                    for snapshot in snapshots:
                         await websocket.send_json(snapshot)
                     # 같은 종목을 이미 다른 앱이 구독 중이면 상류 구독 변경 이벤트가
                     # 다시 발생하지 않는다. 각 앱에는 별도로 준비 완료를 알려준다.

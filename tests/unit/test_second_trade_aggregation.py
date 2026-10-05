@@ -23,6 +23,19 @@ def _tick(
 
 
 class SecondTradeAggregationTests(unittest.TestCase):
+    def test_completed_minute_drain_does_not_prune_unsaved_early_current_seconds(self) -> None:
+        accumulator = SecondTradeAccumulator()
+        for minute, second in ((4, 59), (5, 1), (5, 44)):
+            at = datetime(2026, 10, 6, 10, minute, second)
+            accumulator.add(TradeTick('005930', 100, None, None, 2, None, at.strftime('%H%M%S')),
+                            at, at.timestamp())
+        prior = accumulator.drain_dirty(before=datetime(2026, 10, 6, 10, 5))
+        self.assertEqual(['10:04:59'], [row['trade_second'] for row in prior])
+        # Unsaved :01 must survive pruning despite being outside the late window.
+        current = accumulator.drain_dirty(before=datetime(2026, 10, 6, 10, 6))
+        self.assertEqual({'10:05:01', '10:05:44'}, {row['trade_second'] for row in current})
+        self.assertEqual(6, sum(row['volume'] for row in prior + current))
+
     def test_same_second_builds_ohlcv_trade_value_and_count(self) -> None:
         accumulator = SecondTradeAccumulator()
         now = datetime(2026, 9, 10, 10, 0, 1)

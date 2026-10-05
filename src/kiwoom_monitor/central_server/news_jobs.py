@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .diagnostic_replay_contract import captured_workload
+
 import asyncio
 import logging
 from dataclasses import asdict
@@ -293,6 +295,7 @@ class NewsJobRunner:
             "result": result.as_document(),
         })
 
+    @captured_workload("news", "news_jobs")
     async def _loop(self, preferred_stage: str | None = None,
                     wake: asyncio.Event | None = None) -> None:
         empty_polls = 0

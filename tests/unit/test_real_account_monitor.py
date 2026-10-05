@@ -6,18 +6,25 @@ import threading
 import unittest
 from dataclasses import replace
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from kiwoom_monitor.central_server.credential_runtime import CredentialOperationError
 from kiwoom_monitor.central_server.database import _save_real_account_recovery
 from kiwoom_monitor.central_server.market_observations import as_kst
+from kiwoom_monitor.central_server.real_runtime import (
+    _account_check_due, _account_safety_wait, _account_session_open,
+    _account_startup_wait, _seconds_until_account_check,
+)
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 import test_real_account_reads as support
 
 
 class RealAccountMonitorTests(unittest.IsolatedAsyncioTestCase):
-    asyncSetUp = support.RealAccountReadsTests.asyncSetUp
+    async def asyncSetUp(self):
+        await support.RealAccountReadsTests.asyncSetUp(self)
+        self.monitor_clock = datetime(2026, 10, 6, 10, tzinfo=timezone(timedelta(hours=9)))
+        self.owner._monitor_now = lambda context: self.monitor_clock
     asyncTearDown = support.RealAccountReadsTests.asyncTearDown
     ready = support.RealAccountReadsTests.ready
     apply = support.RealAccountReadsTests.apply
@@ -35,6 +42,95 @@ class RealAccountMonitorTests(unittest.IsolatedAsyncioTestCase):
     def documents(self, context):
         return self.store.load_documents("real_account_recovery",
             "kiwoom:real:" + context.binding.scope.account_ref)
+
+    async def test_session_checks_run_at_open_and_after_close_without_offhours_polling(self):
+        self.owner._account_poll_interval = 0.02
+        self.owner._account_timer_cap = 0.02
+        self.monitor_clock = self.monitor_clock.replace(hour=20, minute=6)
+        context = await self.active()
+        await self.until(lambda: len(context.client.account_calls) == 5)
+        await asyncio.sleep(0.1)
+        self.assertEqual(5, len(context.client.account_calls))
+
+        self.monitor_clock += timedelta(hours=11, minutes=54, seconds=15)
+        await self.until(lambda: len(context.client.account_calls) == 10)
+        await asyncio.sleep(0.1)
+        self.assertEqual(10, len(context.client.account_calls))
+
+        self.monitor_clock += timedelta(hours=12, minutes=5)
+        await self.until(lambda: len(context.client.account_calls) == 15)
+        await asyncio.sleep(0.1)
+        self.assertEqual(15, len(context.client.account_calls))
+
+    async def test_active_safety_check_is_infrequent_and_event_resets_its_deadline(self):
+        self.owner._account_poll_interval = 0.02
+        self.owner._account_safety_interval = 0.15
+        self.owner._account_timer_cap = 0.01
+        context = await self.active()
+        await self.until(lambda: len(context.client.account_calls) == 5)
+        await self.until(lambda: len(context.client.account_calls) == 10)
+        self.owner._handle_account_event(self.profile, context, context.binding,
+                                         "order_changed", context.binding.scope)
+        await self.until(lambda: len(context.client.account_calls) == 15)
+        await asyncio.sleep(0.08)
+        self.assertEqual(15, len(context.client.account_calls))
+
+    async def test_offhours_connection_events_do_not_refresh_but_account_change_does(self):
+        self.owner._account_poll_interval = 0.02
+        self.owner._account_timer_cap = 0.01
+        self.monitor_clock = self.monitor_clock.replace(hour=21)
+        context = await self.active()
+        await self.until(lambda: len(context.client.account_calls) == 5)
+        self.owner._handle_account_event(self.profile, context, context.binding, "disconnected", None)
+        self.owner._handle_account_event(self.profile, context, context.binding, "connected", None)
+        await asyncio.sleep(0.08)
+        self.assertEqual(5, len(context.client.account_calls))
+        self.owner._handle_account_event(self.profile, context, context.binding,
+                                         "account_balance_changed", context.binding.scope)
+        await self.until(lambda: len(context.client.account_calls) == 10)
+
+    async def test_failed_offhours_recovery_retries_only_twice_then_waits_for_new_trigger(self):
+        self.owner._account_poll_interval = 0.02
+        self.owner._account_timer_cap = 0.01
+        self.monitor_clock = self.monitor_clock.replace(hour=21)
+        context = await self.active()
+        original = context.client.request_with_continuation
+        def broken(api_id, path, body, **kwargs):
+            return ({}, False, "") if api_id == "ka10076" else original(api_id, path, body, **kwargs)
+        with patch.object(context.client, "request_with_continuation", side_effect=broken):
+            await self.until(lambda: context.monitor_error_code is not None)
+            await asyncio.sleep(0.13)
+            calls = len(context.client.account_calls)
+            self.assertEqual(3, calls)
+            await asyncio.sleep(0.08)
+            self.assertEqual(calls, len(context.client.account_calls))
+        self.owner._handle_account_event(self.profile, context, context.binding,
+                                         "order_changed", context.binding.scope)
+        await self.until(lambda: context.monitor_last_success_at is not None)
+
+    def test_account_check_calendar_skips_weekend_and_waits_until_final_check(self):
+        kst = timezone(timedelta(hours=9))
+        friday = datetime(2026, 10, 2, 19, 59, tzinfo=kst)
+        self.assertTrue(_account_session_open(friday))
+        self.assertEqual("before_open", _account_check_due(friday, None, None))
+        self.assertEqual(375, _seconds_until_account_check(friday, friday.date(), None))
+        self.assertIsNone(_account_check_due(friday.replace(hour=20, minute=4), friday.date(), None))
+        self.assertIsNone(_account_check_due(friday.replace(hour=20, minute=5), friday.date(), None))
+        self.assertEqual("after_close", _account_check_due(
+            friday.replace(hour=20, minute=5, second=15), friday.date(), None))
+        saturday = friday + timedelta(days=1)
+        self.assertFalse(_account_session_open(saturday))
+        self.assertIsNone(_account_check_due(saturday, None, None))
+
+    def test_scheduled_account_reads_use_the_fifteenth_second(self):
+        kst = timezone(timedelta(hours=9))
+        at_boundary = datetime(2026, 10, 6, 8, 0, tzinfo=kst)
+        self.assertEqual(75, _account_startup_wait(at_boundary, 30))
+        self.assertEqual(315, _account_safety_wait(at_boundary, 300))
+        self.assertEqual(300, _account_safety_wait(at_boundary.replace(second=15), 300))
+        self.assertEqual(330, _account_safety_wait(at_boundary.replace(second=45), 300))
+        self.assertIsNone(_account_check_due(at_boundary, None, None))
+        self.assertEqual("before_open", _account_check_due(at_boundary.replace(second=15), None, None))
 
     async def toggle(self, context, enabled, revision=None):
         current = self.settings(context)

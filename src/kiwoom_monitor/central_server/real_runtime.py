@@ -10,7 +10,7 @@ import hmac
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, time as clock_time, timedelta
 from typing import Any
 
 from kiwoom_monitor.application.account_identity import (
@@ -24,6 +24,72 @@ from .account_query import AccountQuerySessionManager
 from .credential_runtime import CredentialOperationError, CredentialRuntimeHooks, ValidatedCredential
 from .market_observations import as_kst
 from .rest_broker import CentralRestBroker, ACCOUNT_RECOVERY_ENDPOINTS
+
+
+# Account WebSocket reception includes the after-hours market until 20:00.
+_ACCOUNT_SESSION_START = clock_time(8)
+_ACCOUNT_SESSION_END = clock_time(20)
+_ACCOUNT_FINAL_CHECK = clock_time(20, 5)
+_ACCOUNT_SAFETY_INTERVAL_SECONDS = 300.0
+_ACCOUNT_SCHEDULE_SECOND = 15
+
+
+def _account_startup_wait(now: datetime, interval: float) -> float:
+    if interval < 1:
+        return interval
+    target = now + timedelta(seconds=interval)
+    scheduled = target.replace(second=_ACCOUNT_SCHEDULE_SECOND, microsecond=0)
+    if scheduled < target:
+        scheduled += timedelta(minutes=1)
+    return (scheduled - now).total_seconds()
+
+
+def _account_safety_wait(now: datetime, interval: float) -> float:
+    if interval < 60:
+        return interval
+    target = now + timedelta(seconds=interval)
+    scheduled = target.replace(second=0, microsecond=0) + timedelta(seconds=_ACCOUNT_SCHEDULE_SECOND)
+    if (target - scheduled).total_seconds() >= 30:
+        scheduled += timedelta(minutes=1)
+    elif (scheduled - target).total_seconds() > 30:
+        scheduled -= timedelta(minutes=1)
+    return max(1.0, (scheduled - now).total_seconds())
+
+
+def _account_session_open(now: datetime) -> bool:
+    current = now.time().replace(tzinfo=None)
+    return now.weekday() < 5 and _ACCOUNT_SESSION_START <= current < _ACCOUNT_SESSION_END
+
+
+def _account_check_due(now: datetime, prechecked: date | None, final_checked: date | None,
+                       spread_seconds: int = _ACCOUNT_SCHEDULE_SECOND) -> str | None:
+    if now.weekday() >= 5:
+        return None
+    current = now.time().replace(tzinfo=None)
+    precheck_at = (datetime.combine(now.date(), _ACCOUNT_SESSION_START)
+                   + timedelta(seconds=spread_seconds)).time()
+    final_at = (datetime.combine(now.date(), _ACCOUNT_FINAL_CHECK)
+                + timedelta(seconds=spread_seconds)).time()
+    if current >= final_at and final_checked != now.date():
+        return "after_close"
+    if precheck_at <= current < _ACCOUNT_SESSION_END and prechecked != now.date():
+        return "before_open"
+    return None
+
+
+def _seconds_until_account_check(now: datetime, prechecked: date | None, final_checked: date | None,
+                                 spread_seconds: int = _ACCOUNT_SCHEDULE_SECOND) -> float:
+    for offset in range(8):
+        day = now.date() + timedelta(days=offset)
+        if day.weekday() >= 5:
+            continue
+        for checked, at in ((prechecked, _ACCOUNT_SESSION_START), (final_checked, _ACCOUNT_FINAL_CHECK)):
+            if checked == day:
+                continue
+            target = datetime.combine(day, at, tzinfo=now.tzinfo) + timedelta(seconds=spread_seconds)
+            if target > now:
+                return (target - now).total_seconds()
+    return 60.0
 
 
 @dataclass
@@ -93,6 +159,7 @@ class RealCredentialOwner:
 
     def __init__(self, store, vault, *, hmac_key: bytes, market_client=None,
                  market_broker=None, market_collector=None, on_change=None, account_poll_interval=30.0,
+                 account_safety_interval=_ACCOUNT_SAFETY_INTERVAL_SECONDS,
                  account_realtime_factory=None, account_event_publisher=None):
         from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
         self.store, self.vault, self.hmac_key = store, vault, hmac_key
@@ -103,7 +170,11 @@ class RealCredentialOwner:
         self._settings_tasks = set()
         if account_poll_interval <= 0:
             raise ValueError("account_poll_interval must be positive")
+        if account_safety_interval <= 0:
+            raise ValueError("account_safety_interval must be positive")
         self._account_poll_interval = account_poll_interval
+        self._account_safety_interval = account_safety_interval
+        self._account_timer_cap = 60.0
         if account_realtime_factory is None:
             from .mock_account_monitor import RealAccountRealtimeCollector
             account_realtime_factory = RealAccountRealtimeCollector
@@ -257,6 +328,9 @@ class RealCredentialOwner:
         if context is not None:
             self._handle_account_event(self.market_profile_id, context, context.binding, name, value)
 
+    def _monitor_now(self, context):
+        return as_kst(context.client.server_now())
+
     def _handle_account_event(self, profile_id, context, binding, name, value, *, expected_generation=None):
         if (self._closing or self.bundle(profile_id) is not context or context.binding != binding
                 or context.account_reads_paused or not context.monitor_enabled or context.monitor_stop.is_set()):
@@ -280,7 +354,9 @@ class RealCredentialOwner:
                     context.event_error_code = "REAL_ACCOUNT_EVENT_DELIVERY_FAILED"
         if name in {"connected", "disconnected", "order_changed", "account_balance_changed",
                     "order_execution", "account_balance"}:
-            context.monitor_wake.set()
+            if name not in {"connected", "disconnected"} or _account_session_open(
+                    self._monitor_now(context)):
+                context.monitor_wake.set()
 
     async def _write_account_events(self, context):
         stop = context.monitor_stop
@@ -332,13 +408,39 @@ class RealCredentialOwner:
     async def _monitor_account_cycles(self, profile_id, context):
         # Leave bootstrap's first ranking request ahead of supplemental account reads.
         stop, wake, binding, revision = context.monitor_stop, context.monitor_wake, context.binding, context.monitor_revision
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        last_attempt_at = started_at
+        # Keep scheduled reads between the 00/30-second ranking boundaries.
+        startup_delay = _account_startup_wait(self._monitor_now(context), self._account_poll_interval)
+        safety_delay = self._account_safety_interval
+        startup_pending = True
+        retry_at = None
+        failures = 0
+        prechecked = final_checked = None
         while not stop.is_set():
-            try:
-                await asyncio.wait_for(wake.wait(), self._account_poll_interval)
-            except asyncio.TimeoutError:
-                pass
-            if stop.is_set():
-                break
+            now = self._monitor_now(context)
+            monotonic_now = loop.time()
+            boundary = _account_check_due(now, prechecked, final_checked)
+            active = _account_session_open(now)
+            startup_due = startup_pending and monotonic_now - started_at >= startup_delay
+            retry_due = retry_at is not None and monotonic_now >= retry_at
+            safety_due = (active and not startup_pending and retry_at is None
+                          and monotonic_now - last_attempt_at >= safety_delay)
+            if not (wake.is_set() or startup_due or retry_due or (boundary and not startup_pending) or safety_due):
+                delay = min(self._account_timer_cap, _seconds_until_account_check(
+                    now, prechecked, final_checked))
+                if startup_pending:
+                    delay = min(delay, started_at + startup_delay - monotonic_now)
+                elif retry_at is not None:
+                    delay = min(delay, retry_at - monotonic_now)
+                elif active:
+                    delay = min(delay, last_attempt_at + safety_delay - monotonic_now)
+                try:
+                    await asyncio.wait_for(wake.wait(), max(0.001, delay))
+                except asyncio.TimeoutError:
+                    pass
+                continue
             if wake.is_set():
                 try:
                     await asyncio.wait_for(stop.wait(), 0.5)
@@ -346,6 +448,18 @@ class RealCredentialOwner:
                 except asyncio.TimeoutError:
                     pass
                 wake.clear()
+            if stop.is_set():
+                break
+            now = self._monitor_now(context)
+            current = now.time().replace(tzinfo=None)
+            # An earlier event refresh fulfills the same day's scheduled check.
+            if _ACCOUNT_SESSION_START <= current < _ACCOUNT_SESSION_END:
+                prechecked = now.date()
+            elif current >= _ACCOUNT_FINAL_CHECK:
+                final_checked = now.date()
+            startup_pending = False
+            last_attempt_at = loop.time()
+            safety_delay = _account_safety_wait(now, self._account_safety_interval)
             try:
                 recovery = await self.read_account(profile_id, expected_binding_revision=binding.binding_revision)
                 received_at = as_kst(context.client.server_now())
@@ -353,18 +467,26 @@ class RealCredentialOwner:
                                         received_at, settings_revision=revision)
                 context.monitor_last_success_at = received_at.isoformat()
                 context.monitor_error_code = None
+                failures = 0
+                retry_at = None
             except CredentialOperationError as error:
                 # A manual read owns the current cycle; skip rather than duplicate it.
                 if error.code != "PROFILE_BUSY" and not stop.is_set():
                     context.monitor_error_code = "REAL_ACCOUNT_COLLECTION_FAILED"
+                failures += 1
+                retry_at = (loop.time() + self._account_poll_interval
+                            if _account_session_open(now) or failures < 3 else None)
             except Exception:
                 context.monitor_error_code = "REAL_ACCOUNT_COLLECTION_FAILED"
+                failures += 1
+                retry_at = (loop.time() + self._account_poll_interval
+                            if _account_session_open(now) or failures < 3 else None)
 
     def account_monitor_status(self, scope):
         context = next((value for value in self._contexts.values()
                         if value.binding is not None and value.binding.scope.to_dict() == scope), None)
         if context is None:
-            return {"mode": "rest_poll", "state": "unavailable", "poll_interval_seconds": self._account_poll_interval,
+            return {"mode": "rest_poll", "state": "unavailable", "poll_interval_seconds": self._account_safety_interval,
                     "last_success_at": None, "error_code": None}
         state = ("paused" if context.account_reads_paused else "off" if not context.monitor_enabled
                  else "collecting" if context.account_reads else "waiting")
@@ -376,7 +498,7 @@ class RealCredentialOwner:
                  else getattr(context.realtime, "ready", False) is True)
         ws_state = ("off" if not context.monitor_enabled else "paused" if context.account_reads_paused
                     else "ready" if ready else "waiting")
-        return {"mode": "rest_poll", "state": state, "poll_interval_seconds": self._account_poll_interval,
+        return {"mode": "rest_poll", "state": state, "poll_interval_seconds": self._account_safety_interval,
                 "last_success_at": context.monitor_last_success_at, "error_code": context.monitor_error_code,
                 "realtime": {"source": "shared_market" if shared else "account_only", "state": ws_state,
                              "last_event_at": context.last_event_at, "dropped_events": context.dropped_events,

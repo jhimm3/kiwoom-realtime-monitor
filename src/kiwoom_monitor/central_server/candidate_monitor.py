@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .diagnostic_replay_contract import captured_workload
+
 from .diagnostic_workloads import is_paused
 
 import asyncio
@@ -108,6 +110,7 @@ class CandidateMonitor:
             pass
         self._task = None
 
+    @captured_workload("shadow", "candidate_monitor")
     async def _run(self) -> None:
         while True:
             try:

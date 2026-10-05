@@ -40,6 +40,44 @@ from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRe
 
 
 class CentralServerAppTests(unittest.TestCase):
+    def test_minute_routes_restore_current_ram_minute_without_persisting_or_marking_complete(self) -> None:
+        from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
+        from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'live.sqlite3'
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            at = datetime(2026, 10, 6, 10, 4, 40)
+            collector = CentralRealtimeCollector(lambda: 'token', 'real', RealtimeHub(), lambda: at, store)
+            for minute, volume in ((3, 7), (4, 13)):
+                seen = at.replace(minute=minute)
+                collector._minute_bars.add(TradeTick('005930', 100, None, None, volume, None,
+                                                    seen.strftime('%H%M%S'), market='SOR'), seen, seen.timestamp())
+                if minute == 3:
+                    store.save_minute_bars(collector._minute_bars.drain_dirty())
+            settings = CentralServerSettings(f'sqlite:///{path}', 'private-token',
+                                             autonomous_top20_enabled=False, market_event_collection_enabled=False)
+            app = create_app(settings)
+            with TestClient(app) as client:
+                app.state.realtime_collector = collector
+                headers = {'Authorization': 'Bearer private-token'}
+                for route, date_key in (('minute-bars', 'trading_date'), ('recent-minute-bars', 'end_date')):
+                    params = {'code': '005930', date_key: '2026-10-06', 'market': 'COMBINED'}
+                    if route == 'recent-minute-bars':
+                        params['trading_days'] = 1
+                    self.assertEqual(401, client.get('/api/v1/market/' + route, params=params).status_code)
+                    response = client.get('/api/v1/market/' + route, params=params, headers=headers)
+                    self.assertEqual(200, response.status_code, response.text)
+                    data = response.json()
+                    self.assertEqual([('10:03', 7), ('10:04', 13)],
+                                     [(bar['minute'], bar['volume']) for bar in data['bars']])
+                    if route == 'minute-bars':
+                        self.assertFalse(data['coverage']['complete'])
+            self.assertEqual(['10:03'], [bar['minute'] for bar in store.load_minute_bars('005930', '2026-10-06')])
+            self.assertEqual(1, len(collector._minute_bars.pending_bars('005930', '2026-10-06')))
+            store.close()
+
     def test_verified_account_alias_round_trips_journal_content_and_rejects_wrong_scope(self) -> None:
         import uuid
 

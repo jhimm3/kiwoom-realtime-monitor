@@ -1,7 +1,7 @@
 param(
     [ValidateRange(1, 1000000)][int]$Jobs = 1000000,
     [ValidateRange(1, 100)][int]$BatchSize = 100,
-    [ValidateRange(1, 16)][int]$ArticleWorkers = 16,
+    [ValidateRange(1, 32)][int]$ArticleWorkers = 16,
     [ValidateRange(1, 8)][int]$PrepareWorkers = 4,
     [ValidateRange(0.0, 60.0)][double]$ArticleDelay = 0.2,
     [string]$Database = 'data\historical_intelligence.sqlite3'
@@ -31,6 +31,8 @@ function Write-State([string]$Status, [int]$Completed, [string]$ErrorText = '') 
     $document = [ordered]@{
         schema = 'historical-news-article-collector-state/v1'
         pid = $PID
+        article_workers = $ArticleWorkers
+        prepare_workers = $PrepareWorkers
         status = $Status
         completed_this_run = $Completed
         log = $logFile

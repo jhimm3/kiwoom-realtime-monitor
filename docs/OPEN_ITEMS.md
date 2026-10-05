@@ -1,5 +1,82 @@
 # 남은 작업과 보류 사항
 
+2026-10-06 O12 trace 입력 API 후속: `/api/v1/diagnostics/trace`가 `store_inputs`와
+`collector_inputs`를 기본 OFF의 strict boolean으로 받아 schema-2 recorder까지 전달한다.
+capabilities는 schema 2, 0B 범위, 관측 전용 coverage 및 미검증 overhead를 광고한다.
+API/capture 관련 로컬 회귀 33건 통과. 후보
+`2026.10.06-recorded-capture-api-v1-af7d3d49b61aad09`(888 files)를 NAS source-runtime에
+stage하고 사용자가 활성화했다. `/health`와 인증 capabilities API에서 server/capabilities build,
+source release, schema 2, `0B`, 기본 OFF 두 옵션을 확인했다. master/trace는 OFF이며 실시간은
+장외 `WAITING_MARKET` 상태다. 08:54 KST 시작 예약은 expected build와 schema-2
+capability를 preflight하고 `store_inputs=true`, `collector_inputs=true`를 보내도록 갱신했다.
+10:01 검증 예약도 schema/옵션, 무손실·입력거부·체크섬·sequence 및 collector/store event 수를
+확인하도록 갱신했다. 운영 active 전환은 아직이며 preflight 실패 시 capture는 시작하지 않는다.
+실제 65분 event 보존, drop 0, 파일 checksum, 입력 수 및 capture overhead는 실행 후 검증한다.
+
+**현행 O12 상태 (2026-10-06):** 전용 replay DB baseline lease/restore와 선택 실행 offline CLI를 구현했고,
+기존 관련 unit 회귀 50건이 통과했다. NAS operator helper는 고정 role/database 준비와 비밀
+저장, controlled fixture 봉인, PostgreSQL acceptance 4건을 한 번에 수행한다. helper·lease·CLI·
+direct-access audit 25건이 통과했다. NAS에서 acceptance 4/4 통과, skipped=0 (2.787초),
+baseline ID `4c4daa238a7e7d4221234087dce35a5b0956caf6629b05896fca7e8df175bbd4`를 확인했다.
+기준은 controlled fixture라 `source_state_equivalent=false`이며 실제 capture 시작 상태의
+재현은 검증되지 않았다. 로컬 CLI/실행기 회귀는 총 47건 통과했다. NAS 후보
+`--execution-gates` 2건도 2/2 통과했다(9.595초, skipped=0). 반복 재생·workload 제외·원본/재생
+DB-call 연결·COMMIT 응답 유실 뒤 baseline 복구를 검사했고 baseline ID가 유지됐다. 실행 전후
+active release와 두 컨테이너 ID도 동일했다. generated-ID/projection adapters, 공개 run/비교 API,
+capture overhead 및 실제 장중 capture replay acceptance는 남아 있다.
+
+선택 replay 후보 `2026.10.06-recorded-replay-execution-v1-624aade862f1b298`(887 files)는
+X: source-runtime에 stage했고 `active_changed=false`를 확인했다. 운영자 실행 파일은
+`X:\kiwoom-monitor\artifacts\check-recorded-replay-execution-v1.sh`이며 SHA-256은
+`4fa890b00abe4ba7561f888f9437ea5bc4e8542e93beb6e154078f5024f03088`다. 이 파일은 고정 후보
+경로·현재 bind mount·기존 두 컨테이너를 확인한 뒤 새 프로세스로 후보 helper의 PostgreSQL gate
+2건을 실행하고, 종료 뒤 active pointer와 컨테이너 ID가 바뀌지 않았는지 검사한다. 결과는 2/2
+통과, skipped=0, 9.595초다. baseline ID와 cleanup이 보존되고 `Acceptance verified` 출력까지
+확인했다. controlled fixture 결과이므로 장중 상태 재현이나 성능 acceptance로 해석하지 않는다.
+
+2026-10-05 O12 다중 workload 부하 실험 다음 단계: [반복 실험 계약](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md).
+schema-2 capture·원인 사건·bounded window reader·선택 compiler에 더해 내부 실행기를 로컬
+구현했다. 지원 allowlist store operation은 actor별 순서·actor 간 동시성으로 재생한다. 실제
+0B 사건은 collector loop로 넣고 동일 component의 과거 sink만 제외하며 다른 생산자는 유지한다.
+재생 ID와 DB 관측 context를 연결한다. 취소/drain 및 혼합 경로를 포함한 관련 단위 회귀 29건
+통과. caller-provided test store 내부 검사이며 공개 API나 전용 replay PostgreSQL 검증은 아니다.
+이후 baseline lease/restore·run lock과 operator helper를 구현했다. 실제 PostgreSQL
+rollback/sequence/foreign-session acceptance는 NAS 전용 replay DB에서 4/4 통과했다.
+미지원/generated-ID operation adapter,
+캡처 코드 A/B 실행·결과/API, NAS capture overhead와 실제 장중 acceptance는 남았다.
+
+2026-10-05 O12 bounded window reader 후속: operation 입력은 선택 구간에 한해 payload를
+hydrate하고, `collector_with_background`는 지정 component의 prefix를 최대 15분까지
+포함한다. capture 종료 monotonic 시각을 넘는 범위와 32MiB 초과 payload window는 거부한다.
+chunk checksum·sequence·manifest를 capture 전체에서 확인한다. trace/capture 동기 회귀 17건이
+통과했다. Windows sandbox에서 asyncio Proactor가 socketpair 초기화에 멈추는 기존 collector
+비동기 단위검사 2건은 실행 완료로 세지 않는다. NAS active release 및 운영 자료는 변경하지 않았다.
+
+2026-10-05 O12 capture 전용 PostgreSQL gate 4건과 기존 collector→DB 2건의 첫 NAS 실행에서
+4건 통과, schema-1 reader 사용 오류 1건, stale 실패주입 1건을 확인했다. 두 테스트만 수정해
+새 불변 후보 `2026.10.05-recorded-capture-gate-v2-81fc0b5e7f04dbcf`(877 files)를 stage했다.
+stage checksum/import는 통과했고 운영 active pointer는 기존 v2를 유지한다. 남음: 새 후보에서
+6건 묶음 재실행. 동기 단위검사 2건과 py_compile은 통과했으나 현재 샌드박스의 Windows asyncio
+socketpair 제한 때문에 비동기 로컬 회귀를 완료하지 못했다. 운영 활성 릴리즈·DB는 변경하지 않는다.
+
+후속 v2 NAS 결과에서도 collector 실패주입 검사가 실패했다. 분봉 metadata가 분 시각만으로
+연결되어 같은 분에 저장되는 종목 observation끼리 충돌하는 실제 writer 결함을 확인했다.
+SQLite/PostgreSQL lookup을 `(subject, minute)`로 좁히고 전용 PG 회귀를 추가했다. 로컬 대상
+SQLite 검사 및 정적 검증은 통과했다. 불변 후보
+`2026.10.05-recorded-capture-gate-v3-ed9daa478d48ac35`(877 files)의 manifest checksum/import도
+확인했다. NAS 전용 PostgreSQL gate 7/7이 통과했다. candidate는 검사만 했으며 기존 active
+release와 운영 DB는 변경하지 않았다. 운영에 이 writer 수정을 반영하려면 별도 release 전환이 남았다.
+
+2026-10-05 O12 collector fixture 단계 기록 (이후 상태는 위 최신 항목으로 갱신): 실제 0B parser·RAM 집계·저장 loop를
+네트워크 없이 실행하는 `diagnostic_collector_replay.py`와 고정 6분 fixture를 추가했다.
+세 시장·중복/지연 체결·RAM 표시/query authority·구독 reset/gap·취소 후 owned write 대기를
+검증했다. 확대 130건 중 127 통과·전용 PostgreSQL URL 미설정 2 skip·기존 trace route 계약
+fixture 누락 1 실패다. **기반 검증 잔여:** 새 PostgreSQL 묶음 2건을 NAS 전용 DB에서 실행한다.
+이 기록 이후 schema-2 multi-workload input capture와 plan compiler의 핵심을 로컬 구현했다.
+API workload·보고서 observer join·master/measurement/drain 연결, 기존 helper의 report_url 대기,
+capture 전용 PostgreSQL 검사와 65분 overhead 검증은 여전히 후속이다. 현재 NAS active release는 기존 v2이며
+이 로컬 구현의 저장 감소율·장중 부하 효과를 실측 완료로 보지 않는다.
+
 2026-10-04 자격증명 DB 회귀에서 확인한 기존 DART API 검사 실패: `tests.unit.test_dart_credential_owner.DartCredentialAPITests.test_keyless_on_server_collects_disclosures_after_default_profile_activation`은 활성화 뒤 뉴스 검색 결과가 생길 것을 기대하지만, `create_app`은 `CentralNewsService(read_only_search=True)`로 구성되어 검색 중 외부 수집을 하지 않는다. 같은 테스트가 변경 전 `database.py` 및 `credential_store.py` 복사본으로도 동일하게 실패해 이번 DB 이동으로 생긴 회귀가 아님을 확인했다. DB 범위와 분리된 뉴스 테스트/제품 계약 문제로 남겨 둔다.
 
 2026-10-04 MainWindow → AppController 단계 A-D 로컬 구현·회귀 완료: 가격/고가/시가총액, 종목·시장 분봉 및 비교 pending, timer, 실패 복구를 AppController로 옮겼다. 변경 전 정적 연결 116건은 MainWindow 99건 + AppController 이동 17건으로 모두 대응했고 UI/control 연결 17건이 추가됐다. 현재 worktree `src` 기준 offscreen 관련 검사 142건이 통과했다. **남음:** 실제 설치 테스트 앱에서 순위·NXT/일반 세션·차트·뉴스·일지·설정/API 재연결·종료 흐름을 확인하고, 거래 중 실제 체결·시장 전환 검증은 장중에 수행한다. 이번 작업은 커밋·NAS 반영을 하지 않았다. 근거와 연결별 대응은 [계획](MAIN_WINDOW_APP_CONTROLLER_PLAN.md), [정적 연결 대조](MAIN_WINDOW_CONNECTION_COMPARISON.json), `artifacts/app-controller-validation/stage-d-suite.log`에 있다.
@@ -527,3 +604,5 @@ SOR 프리/애프터 시장가 주문 UX, 시장 수급/Open Space/Base/M/W/압�
 
 2.0.0 리팩터링의 1~5단계는 완료다. controller 통합·대형 UI 분할을 크기만으로 재개하지 않는다. 장시간/다른 PC 확인은 O12로 승계했다. [종료 상태](../REFACTORING_CLOSEOUT_PLAN.md)와 [과거 보고서](archive/2026-09-22/reports/REFACTORING_CLOSEOUT_REPORT.md)를 참조한다.
 2026-10-05 O12 DB trace chunk bound: reproduced a 3,899,223-byte UTF-8 chunk that exceeded the 2,000,000-byte download limit while the trace could otherwise finish as complete. Local fix caps new chunks at 1 MiB, preserves ordered pending suffixes across flushes, counts pending events in status, and fails explicitly for a single oversized event. The trace/replay unit suite passed 18/18 locally and in the NAS test container. Focused immutable source release `2026.10.05-db-trace-chunk-bounds-v1-9209b8fd29423301`, based on active release `2026.10.03-db-minute-replay-v1-388841088675094c`, changed only `app.py`, `diagnostic_trace.py`, and its trace test; NAS source-runtime trace tests passed 7/7. Deployment is confirmed by the reported `/health` build/release and `database_container_unchanged=true`. Post-deploy status is `WAITING_MARKET`, `observation_expected=false`, trace `off`. Still open: measure capture overhead and verify a full 65-minute market trace and replay.
+
+2026-10-05 분봉 RAM 표시 보완 회귀: 중앙 앱 계약 fixture가 기존 trace route 5개(GET/POST trace, POST trace/stop, GET trace/{trace_id}, GET trace/{trace_id}/chunks/{chunk_name})를 누락하여 test_public_api_route_contract_is_stable 1건 실패. 이번 변경은 route 추가가 아니므로 해당 계약 fixture 보완은 별도 작업으로 남긴다. 관련 로컬 159건 중 나머지 158건 통과. QueryStore 소비자 감사는 load_minute_bars의 선택 realtime_deltas 인자 및 앱 표시 조회 경로 이동으로 review_required이며 기준 원장은 덮어쓰지 않았다. 후속 후보 v1은 collector 함수 누락으로 import 오류가 나 배포되지 않았다. v2 불변 게시본에서 관련 로컬 57개, 이후 NAS 전용 PostgreSQL 포함 83개가 통과했고 배포와 health v2를 확인했다. writer replay 20261005T100452Z-80ed9651은 245건 오류 없이 완료했지만 timing_preserved=false이며 collector 저장 주기 효과는 검증하지 않는다. **남음:** [collector 통합 재현 설계](NAS_RUNTIME_DIAGNOSTICS.md#collector-replay-design)에 따른 실제 parser/집계/저장 loop의 전용 DB fixture 검증, 이후 경량 0B 입력 capture와 recorded replay. 현재 trace의 5초당 4,096건·1MiB 단일 chunk 처리량으로 개장 틱 수집을 보장하지 않는다. replay 조회 helper는 finalizing 및 report_url 게시를 기다리지 않는 결함이 있으므로 API 연결 단계에서 보완한다. 직전 404가 어느 중간 상태에서 발생했는지는 당시 상태 출력이 없어 확정하지 않는다.

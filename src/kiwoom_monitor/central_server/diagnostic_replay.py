@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, time as clock_time, timedelta, timezone
+from datetime import date, datetime, time as clock_time, timedelta, timezone
 from threading import Event
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -29,12 +30,36 @@ MAX_QUERY_MINUTE_ROWS = 1000
 MAX_QUERY_MINUTE_TOTAL_ROWS = 30_000
 QUERY_MINUTE_SCENARIOS = frozenset({"unchanged_page", "one_changed_bar", "fresh_page", "recorded_counts"})
 
+# Only confirmed closures of the real Korean securities market may bypass the
+# weekday replay guard. KRX closes on statutory holidays, Labor Day and its
+# year-end closing day; the 2026 public dates come from the published 2026
+# calendar. An absent 0s observation or an idle WebSocket is not closure proof.
+# https://global.krx.co.kr/contents/GLB/06/0602/0602010201/GLB0602010201T1.jsp
+# https://www.kasi.re.kr/kor/post/newsMaterial/32031
+VERIFIED_REAL_MARKET_CLOSED_DATES = frozenset({
+    date(2026, 1, 1),
+    date(2026, 2, 16), date(2026, 2, 17), date(2026, 2, 18),
+    date(2026, 3, 2),
+    date(2026, 5, 1), date(2026, 5, 5), date(2026, 5, 25),
+    date(2026, 6, 3),
+    date(2026, 8, 17),
+    date(2026, 9, 24), date(2026, 9, 25),
+    date(2026, 10, 5), date(2026, 10, 9),
+    date(2026, 12, 25), date(2026, 12, 31),
+})
+
 
 def require_after_hours(now: datetime | None = None) -> None:
-    """Avoid synthetic NAS load during KRX/NXT collection hours."""
+    """Avoid synthetic NAS load while the real Korean market may be active."""
     local = (now or datetime.now(ZoneInfo("Asia/Seoul"))).astimezone(
         ZoneInfo("Asia/Seoul"))
-    if local.weekday() < 5 and clock_time(7, 30) <= local.time() < clock_time(20, 30):
+    verified_real_market_holiday = (
+        os.environ.get("KIWOOM_ENVIRONMENT", "").strip().lower() == "real"
+        and local.date() in VERIFIED_REAL_MARKET_CLOSED_DATES
+    )
+    if (local.weekday() < 5
+            and not verified_real_market_holiday
+            and clock_time(7, 30) <= local.time() < clock_time(20, 30)):
         raise ValueError("replay_allowed_after_market_hours_only")
 
 

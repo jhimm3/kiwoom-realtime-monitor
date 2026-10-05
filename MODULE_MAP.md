@@ -8,6 +8,28 @@
 
 `src/kiwoom_monitor/` 기준 경로다.
 
+0B collector 통합 진단은 `central_server/diagnostic_collector_replay.py`가 고정 입력,
+실행/종료 수명, 전용 DB 검증·정리를 소유한다. 실제 파서·RAM 집계·저장 주기는
+`central_server/realtime_collector.py`와 `minute_bars.py`를 재사용한다. 추가로
+`diagnostic_trace.py`가 선택된 store 입력과 collector 원인 사건을 bounded schema-2
+capture로 보존하고, `diagnostic_replay_contract.py`가 허용 메서드·codec·workload 선택과
+collector descendant 제외 계획을 검사한다. `diagnostic_recorded_execution.py`는 명시된
+store allowlist를 caller-owned test store에서 실행하며 actor 순서·동시성·replay ID를 기록한다.
+collector mode는 0B 원인 사건을 실제 collector loop에 전달하고 그 component의 과거 sink만
+제외한다. `postgres_access.py`는 replay operation ID와 owner·actor·component를 DB call에
+전달한다. `diagnostic_replay_baseline.py`는 새 고정 replay DB의 역할·소유권·run lock,
+14개 허용 테이블/sequence baseline, atomic restore와 native connection drain을 소유한다.
+`diagnostic_replay_database_cli.py`는 offline provisioning/status/seal/restore와 bounded
+schema-2 recorded-operation replay를 제공한다. 실행은 기존에 봉인한 dedicated baseline 아래서
+수행하고 종료 후 기준 상태를 복구한다. 원본 operation ID와 replay operation ID를 실제 DB-call
+관측 ID에 연결하며, 이 연결은 workload가 발생시킨 연결만 관측한다. `news_article` 및
+`theme_metadata`의 history projection처럼 baseline allowlist 밖의 부수 쓰기가 필요한 입력은
+사전 거부한다. `scripts/check_recorded_replay_baseline.py --execution-gates`는 NAS 운영자가
+기존 sealed DB에서 반복 재생·workload 제외·실패 후 정리를 검사한다. 공개 선택/비교 API와
+장중 원본 동등성은 아직 없으며 운영 실행 경로에는 연결되지 않았다.
+역할과 검증 경계는
+[반복 부하 실험 계약](docs/RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md)을 따른다.
+
 | 영역 | 먼저 볼 파일 | 책임 |
 |---|---|---|
 | 조립·프로세스 | `bootstrap.py`, `news_process.py`, `journal_process.py`, `research_process.py` | 실행모드·자식 프로세스·작업 수명 |
@@ -21,7 +43,7 @@
 | 로컬 쓰기 | `infrastructure/persistence/market_cache_writer.py`, `infrastructure/persistence/minute_bar_repository.py` | 비동기 직렬 쓰기·봉 저장 |
 | 중앙 DB/API | `central_server/app.py`, `central_server/database.py`, `central_server/central_schema.py` | 라우트·DB 트랜잭션·스키마 |
 | 외부시장 봉 DB | `central_server/database_external_market.py`, `central_server/database.py` | SQLite/PostgreSQL 외부시장 봉 저장·조회 실제 구현. QueryStore 계약과 store 조립은 `database.py`에 유지 |
-| 국내 시장 봉 DB | `central_server/database_market_bars.py`, `central_server/database_observation_writes.py`, `central_server/database.py`, `central_server/postgres_access.py` | SQLite/PostgreSQL 분봉·초봉·5분봉·일봉 저장·조회 구현과 revision/metadata writer helper. QueryStore 계약·store 조립·기존 호출 연결은 유지하고, 공통 PostgreSQL wait probe는 뉴스 claim과 공유. 로컬 회귀·정적 연결 gate 및 NAS 전용 PostgreSQL gate 9/9 통과 |
+| 국내 시장 봉 DB | `central_server/database_market_bars.py`, `central_server/database_observation_writes.py`, `central_server/database.py`, `central_server/postgres_access.py` | SQLite/PostgreSQL 분봉·초봉·5분봉·일봉 저장·조회 구현과 revision/metadata writer helper. 분봉 metadata는 `(subject, trading_date+minute)`로 각 종목에 연결한다. QueryStore 계약·store 조립·기존 호출 연결은 유지하고, 공통 PostgreSQL wait probe는 뉴스 claim과 공유. 로컬 회귀·정적 연결 gate 및 NAS 전용 PostgreSQL gate 9/9 통과 |
 | 시장 관측 메타데이터 DB | `central_server/database_market_metadata.py`, `central_server/database_observation_writes.py`, `central_server/database.py`, `domain/market_data_contract.py` | SQLite/PostgreSQL metadata 저장·단건·범위 조회. QueryStore/API 계약과 native transaction을 유지하며 `CoverageObservation`을 하위 value contract로 둔다. 로컬 회귀·정적 연결 및 NAS 전용 PostgreSQL gate 3/3 통과 |
 | REST 응답 캐시 DB | `central_server/database_query_cache.py`, `central_server/database.py` | SQLite/PostgreSQL cache read/write와 `StoredQuery` 실제 구현. `QueryCacheStore`는 REST broker가 쓰는 두 메서드 계약이며 `QueryStore` aggregate·store 조립은 유지. NAS PostgreSQL·broker·SQLite gate 5/5 및 SQLite-backed API ASGI 연결 1/1 통과 |
 | 저장소 진단 DB | `central_server/database_storage_diagnostics.py`, `central_server/database.py` | SQLite/PostgreSQL 저장 크기·분류 조회와 공통 분류 구현. 인증된 `/api/v1/diagnostics/resources` 응답 및 PC 리소스 화면의 기존 연결 유지 |

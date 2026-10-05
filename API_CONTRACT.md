@@ -1,5 +1,15 @@
 # NAS API 계약
 
+2026-10-06 recorded input trace candidate (`2026.10.06-recorded-capture-api-v1`):
+authenticated `GET /api/v1/diagnostics/capabilities` advertises `trace_input_capture`
+(schema 2, collector event type `0B`, `observed_paths_only`, `overhead_verified=false`).
+`POST /api/v1/diagnostics/trace` accepts `seconds`, `expected_session`, and strict boolean
+`store_inputs` / `collector_inputs`, both defaulting to false. Enabling either produces a
+schema-2 trace; enabling both records allowlisted native store inputs and observed 0B collector
+inputs. Other event types and sensitive account fields are excluded by the collector capture
+boundary. This is a local candidate API contract; NAS staging/deployment and the scheduled
+capture remain separate acceptance steps. Capture overhead has not been measured.
+
 2026-09-29 NAS 진단 API v4(`2026.09.29-diagnostic-api-v4`)가 NAS에 배포됐다. 기존 Bearer 인증 아래 `GET /api/v1/diagnostics/capabilities`, `PUT /api/v1/diagnostics/control`, `GET /api/v1/diagnostics/snapshot`, `POST /api/v1/diagnostics/runs`, `GET /api/v1/diagnostics/runs/{run_id}`, `POST /api/v1/diagnostics/runs/{run_id}/cancel`, `GET /api/v1/diagnostics/reports`, `GET /api/v1/diagnostics/reports/{report_id}`, `GET /api/v1/diagnostics/history`를 제공한다. control은 `target=master|capture|workload`, `expected_revision` 필수, 기존 session/TTL/owner 규칙을 따른다. PostgreSQL snapshot은 고정 read-only query만 실행하며 `sections=postgres,activity,news_jobs,host,storage`에서 선택한다. query text·parameter·DSN은 반환하지 않는다. run은 `kind=measure|compare`, `seconds`와 선택 label/workload/request_id를 받아 202와 run ID를 반환하고, 동일 session/request_id의 같은 요청은 기존 run을 반환한다. 한 번에 한 run만 허용하며 409 충돌은 큐잉하지 않는다. 보고서는 기존 diagnostic-results JSON도 조회한다. 실제 검증은 [설계·검증 문서](docs/NAS_DIAGNOSTIC_API_DESIGN.md)에 기록하며, 관측 범위는 `opt_in_observed_calls_only`와 각 section의 scope에 한정된다.
 
 2026-09-27 공통 DB 관측 pilot: 인증된 `GET /api/v1/diagnostics/db-calls?start=<epoch>&end=<epoch>&mode=summary|verbose|raw&limit=200&slow_ms=500`는 capture 중 공통 경계를 통과한 호출만 반환한다. 구간은 0초 초과·1,800초 이내, `limit`은 1~500, `slow_ms`는 1~30,000이다. 응답은 `coverage=opt_in_observed_calls_only`, capture 상태, 보존 범위와 drop 수, `(writer_family,writer_kind)`별 `writers`와 `readers` 집계 및 무등록 수를 포함한다. 기존 call record에 `access_mode`가 없으면 `write`로 취급한다. `raw`는 최대 `limit`개 호출별 ID·PID·접근 분류·단계 시간·outcome·오류 타입만 노출하며 SQL/parameter/DSN은 담지 않는다. 현재 이관 writer는 REST query cache 한 종류이며 cache reader는 별도 `read.query_cache/query_cache` 집계다. capture OFF/만료나 미이관 경로는 0건 활동으로 해석하지 않는다. 기존 `/diagnostics/market-bar-saves`와 `/diagnostics/writers`는 유지한다.
@@ -582,6 +592,8 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 NAS 연결 중 TOP20 차트는 `top20_index` 중앙 스냅샷을 읽고, 통계는 서버의 날짜별 저장 집계 `top20_statistics_day`를 합쳐 읽는다. 과거일에 집계가 없으면 처음 한 번 계산해 저장하고, 원본 TOP20·시장 일봉이 보완되면 해당 날짜 집계를 무효화한다. 당일은 원본의 새 분을 반영해 조회한다. PC 직접 연결은 앱 실행 중에만 TOP20 자료를 자동 수집하며 로컬 `monitor.sqlite3`의 날짜별 집계를 재사용한다. 0원 TOP20 행은 관측 표본과 일별 비교에서 제외한다. 정규장 TOP20 합계는 09:00부터 15:30 종가 단일가 체결분까지 포함한다. 과거 전체시장 분모는 `ka20006` 일봉의 코스피·코스닥 거래대금을 사용하므로 장중 `0J/0U` 최종 수신 전에 끝난 값으로 과거 통계를 고정하지 않는다.
 
 거래대금 비교의 `summary.complete_count`와 차이 통계는 `query_scope=KRX+NXT`인 분만 대상으로 한다. `partial_count`와 `scope_counts`는 KRX 또는 NXT 한쪽만 보완된 중간 자료를 따로 보여준다. `total_difference_percent`는 완전 비교 합계의 `(SOR-조회)/조회`, `average_difference_percent`는 분별 차이율 평균이며 `mean_absolute_difference_percent`와 `max_absolute_difference_percent`는 방향을 제거한 오차 크기다.
+
+앱 표시용 `minute-bars`와 `recent-minute-bars`의 `bars[]`는 저장된 이력에 중앙 수집기의 미저장 RAM 분봉을 합친다. 현재 분·저장 중·실패 재시도 delta를 복사한 뒤 DB 봉과 operation marker, QUERY 완료 상태를 동일한 읽기 snapshot에서 조회하므로 저장 완료 응답 유실이나 동시 COMMIT 때 두 번 합산하지 않는다. 완료된 ka10080 봉을 RAM 값으로 덮어쓰지 않는다. 이 GET은 DB write·revision·Kiwoom TR·coverage 완료를 만들지 않으며 저장된 이력만 사용하는 일반 QueryStore/연구 조회는 기존 동작을 유지한다. NAS가 수신하지 못한 시간은 RAM 보완으로 복원하지 않는다.
 
 NAS 클라이언트의 당일 분봉은 `GET /api/v1/market/minute-bars`, 오늘과 직전 거래일 분봉은 `GET /api/v1/market/recent-minute-bars`의 `COMBINED` 보기를 한 번 읽는다. 같은 분에 SOR가 있으면 SOR 한 벌을 사용하고, 없을 때만 KRX+NXT를 합친다. `minute-bars.coverage.complete`는 해당 거래일의 장후 분봉 수집이 끝났다는 중앙 완료 문서가 있을 때만 참이다. 매매일지는 행이 하나 이상 있다는 이유만으로 장 종료 확정하지 않으며 이 값을 받은 뒤에만 `after_close_confirmed`로 저장한다. 구 NAS가 COMBINED를 지원하지 않으면 앱은 기존 KRX·NXT 중앙 조회로 호환한다. 중앙 연결이 정상인데 저장 행이 없으면 빈 결과를 반환하며 앱이 `/api/v1/kiwoom/query`의 `ka10080`을 대신 발생시키지 않는다. 중앙 연결 자체가 끊기고 사용자가 로컬 장애전환을 켠 경우에만 PC 직접 조회가 허용된다. 범용 조회의 첫 페이지는 완료 coverage가 있는 `ka10080/ka10081` 아카이브와 `ka10001/ka10100` 최신 중앙 문서를 먼저 검사한다. 적합한 저장 자료가 있으면 broker queue와 Kiwoom TR을 사용하지 않고 `archive_hit=true`로 반환한다.
 

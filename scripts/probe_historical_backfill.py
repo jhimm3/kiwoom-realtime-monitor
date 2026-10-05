@@ -510,7 +510,7 @@ def _write_news_heartbeat(
 def _run_deferred_articles(args: argparse.Namespace) -> int:
     if not 1 <= args.limit <= 100:
         raise ValueError("--limit must be between 1 and 100")
-    if not 1 <= args.article_workers <= 16 or not 1 <= args.prepare_workers <= 8:
+    if not 1 <= args.article_workers <= 32 or not 1 <= args.prepare_workers <= 8:
         raise ValueError("invalid article or preparation worker count")
     timing_log = _NewsTimingLog(args.diagnostic_log)
     claimed = claim_news_article_pipeline(args.output, limit=args.limit)
@@ -808,8 +808,8 @@ def main() -> int:
             parser.error("--search-workers must be between 1 and 8")
         if args.throttle_delay < 0 or args.throttle_delay > 600:
             parser.error("--throttle-delay must be between 0 and 600 seconds")
-        if args.article_workers < 1 or args.article_workers > 16:
-            parser.error("--article-workers must be between 1 and 16")
+        if args.article_workers < 1 or args.article_workers > 32:
+            parser.error("--article-workers must be between 1 and 32")
         if args.prepare_workers < 1 or args.prepare_workers > 8:
             parser.error("--prepare-workers must be between 1 and 8")
         diagnostic_path = args.diagnostic_log

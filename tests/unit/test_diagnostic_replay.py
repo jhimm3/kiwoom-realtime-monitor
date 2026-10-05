@@ -213,6 +213,16 @@ class ReplayProfileTests(unittest.TestCase):
         kst = ZoneInfo("Asia/Seoul")
         with self.assertRaisesRegex(ValueError, "after_market_hours_only"):
             require_after_hours(datetime(2026, 10, 2, 9, tzinfo=kst))
+        with self.assertRaisesRegex(ValueError, "after_market_hours_only"):
+            require_after_hours(datetime(2026, 10, 6, 9, tzinfo=kst))
+        with self.assertRaisesRegex(ValueError, "after_market_hours_only"):
+            require_after_hours(datetime(2027, 10, 5, 9, tzinfo=kst))
+        with patch.dict("os.environ", {"KIWOOM_ENVIRONMENT": "real"}):
+            require_after_hours(datetime(2026, 10, 5, 9, tzinfo=kst))
+            require_after_hours(datetime(2026, 10, 9, 14, tzinfo=kst))
+        with patch.dict("os.environ", {"KIWOOM_ENVIRONMENT": "mock"}):
+            with self.assertRaisesRegex(ValueError, "after_market_hours_only"):
+                require_after_hours(datetime(2026, 10, 5, 9, tzinfo=kst))
         require_after_hours(datetime(2026, 10, 2, 20, 30, tzinfo=kst))
         require_after_hours(datetime(2026, 10, 3, 9, tzinfo=kst))
 

@@ -6,8 +6,8 @@ import logging
 import time
 from uuid import uuid4
 from dataclasses import asdict
-from datetime import datetime, time as clock_time, timezone
-from typing import Any, Callable
+from datetime import datetime, time as clock_time, timedelta, timezone
+from typing import Any, Awaitable, Callable
 
 from websockets.asyncio.client import connect
 
@@ -27,6 +27,7 @@ from kiwoom_monitor.domain.market_data_contract import (
 from kiwoom_monitor.domain.order_contract import AccountScope
 from .realtime_hub import RealtimeHub
 from .database import QueryStore
+from .diagnostic_replay_contract import captured_workload
 from .minute_bars import MinuteBarAccumulator, SecondTradeAccumulator
 from .market_observations import (
     bar_observation_key,
@@ -46,6 +47,21 @@ WS_BASE_URLS = {
 REALTIME_ITEMS_PER_GROUP = 100
 REALTIME_ITEMS_PER_TYPE = 200
 REALTIME_REG_INTERVAL_SECONDS = 0.25
+LATEST_CHECKPOINT_SECONDS = 300
+LATEST_CHECKPOINT_OFFSET_SECONDS = 10
+
+
+def _next_latest_checkpoint(now: float) -> float:
+    """Next five-minute wall-clock boundary plus ten seconds (also in KST)."""
+    boundary = int(now // LATEST_CHECKPOINT_SECONDS) * LATEST_CHECKPOINT_SECONDS
+    due = boundary + LATEST_CHECKPOINT_OFFSET_SECONDS
+    return float(due if due > now else due + LATEST_CHECKPOINT_SECONDS)
+
+
+def _next_second_checkpoint(now: float) -> float:
+    boundary = int(now // 60) * 60
+    due = boundary + 45
+    return float(due if due > now else due + 60)
 
 
 def _chunks(values: tuple[str, ...], size: int = REALTIME_ITEMS_PER_GROUP) -> tuple[tuple[str, ...], ...]:
@@ -106,6 +122,7 @@ class CentralRealtimeCollector:
         market_events: Any | None = None,
         account_scope_resolver: Callable[[str], AccountScope | None] | None = None,
         account_event_handler: Callable[[str, object], None] | None = None,
+        *, snapshot_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._token_provider = token_provider
         self._environment = environment
@@ -115,9 +132,12 @@ class CentralRealtimeCollector:
         self._market_events = market_events
         self._account_scope_resolver = account_scope_resolver
         self._account_event_handler = account_event_handler
+        self._snapshot_sleep = snapshot_sleep or asyncio.sleep
+        self._input_replay_only = False
         self._task: asyncio.Task[None] | None = None
         self._snapshot_task: asyncio.Task[None] | None = None
         self._pending_snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+        self._latest_snapshots: dict[tuple[str, str], dict[str, Any]] = {}
         self._pending_account_entry_symbols: dict[tuple[str, str], dict[str, Any]] = {}
         self._pending_stock_references: dict[str, dict[str, Any]] = {}
         self._pending_market_history: dict[
@@ -125,6 +145,7 @@ class CentralRealtimeCollector:
             tuple[str, str, dict[str, Any], MarketDataObservation[dict[str, Any]]],
         ] = {}
         self._pending_minute_retries: dict[str, dict[str, Any]] = {}
+        self._inflight_minute_bars: list[dict[str, Any]] = []
         self._pending_minute_finalizations: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self._minute_bars = MinuteBarAccumulator()
         self._pending_second_retries: dict[tuple[str, str, str, str], dict[str, Any]] = {}
@@ -266,7 +287,7 @@ class CentralRealtimeCollector:
         if self._boundary_task is not None:
             await asyncio.shield(self._boundary_task)
         self._hub.set_upstream_ready((), False)
-        self._minute_bars.mark_capture_gap()
+        self._mark_capture_gap(clear_continuous=True)
         self._continuous_from.clear()
         try:
             await self._flush_snapshots()
@@ -313,6 +334,8 @@ class CentralRealtimeCollector:
         self._credential_drain_task = None
 
     async def start(self) -> None:
+        if self._input_replay_only:
+            raise RuntimeError("INPUT_REPLAY_CANNOT_OPEN_NETWORK")
         if self._close_task is not None:
             if not self._close_task.done():
                 raise RuntimeError("REALTIME_CLOSE_IN_PROGRESS")
@@ -326,6 +349,79 @@ class CentralRealtimeCollector:
             self._task = asyncio.create_task(self._run(), name="kiwoom-central-realtime")
         if self._store is not None and self._snapshot_task is None:
             self._snapshot_task = asyncio.create_task(self._save_snapshots(), name="kiwoom-realtime-snapshots")
+
+    async def start_input_replay(self) -> None:
+        """Start the real persistence loop on a fresh, isolated market collector."""
+        if (self._task is not None or self._snapshot_task is not None or self._close_task is not None
+                or self._input_replay_only or self._store is None or self._market_events is not None
+                or self._account_scope_resolver is not None or self._account_event_handler is not None):
+            raise RuntimeError("INPUT_REPLAY_REQUIRES_FRESH_MARKET_COLLECTOR")
+        self._input_replay_only = True
+        self._snapshot_task = asyncio.create_task(self._save_snapshots(), name="kiwoom-replay-snapshots")
+
+    def accept_replay_message(self, message: dict[str, Any]) -> None:
+        """Replay only allowlisted market input; account events cannot enter here."""
+        if not self._input_replay_only or self._credential_shutdown:
+            raise RuntimeError("INPUT_REPLAY_NOT_RUNNING")
+        rows = message.get("data")
+        if (message.get("trnm") != "REAL" or not isinstance(rows, list) or not 1 <= len(rows) <= 100
+                or any(not isinstance(row, dict) or row.get("type") != "0B" for row in rows)):
+            raise ValueError("INPUT_REPLAY_REQUIRES_0B_MESSAGE")
+        self._publish_parsed(message)
+
+    def restore_replay_source_state(
+        self, sources: set[tuple[str, str]], continuous_from: dict[tuple[str, str], datetime],
+    ) -> None:
+        """Restore source boundaries only; this is not a warm accumulator restore."""
+        if not self._input_replay_only or self._credential_shutdown:
+            raise RuntimeError("INPUT_REPLAY_NOT_RUNNING")
+        if self._approved_trade_sources or self._pending_snapshots or self._minute_bars._dirty:
+            raise RuntimeError("INPUT_REPLAY_SOURCE_STATE_REQUIRES_FRESH_COLLECTOR")
+        if (not set(continuous_from).issubset(sources)
+                or any(not isinstance(at, datetime) or at.tzinfo is None
+                       for at in continuous_from.values())):
+            raise ValueError("INPUT_REPLAY_SOURCE_STATE_INVALID")
+        self._approved_trade_sources = set(sources)
+        self._continuous_from = dict(continuous_from)
+
+    def accept_replay_sources(self, sources: set[tuple[str, str]], *, reset_all: bool = False,
+                              subscribed_at: datetime | None = None) -> None:
+        if not self._input_replay_only or self._credential_shutdown:
+            raise RuntimeError("INPUT_REPLAY_NOT_RUNNING")
+        self._apply_trade_source_approval(sources, subscribed_at or self._now_provider(), reset_all=reset_all)
+
+    def accept_replay_gap(self, *, clear_continuous: bool = True) -> None:
+        if not self._input_replay_only or self._credential_shutdown:
+            raise RuntimeError("INPUT_REPLAY_NOT_RUNNING")
+        self._mark_capture_gap()
+        if clear_continuous:
+            self._continuous_from.clear()
+
+    def input_replay_status(self) -> dict[str, Any]:
+        if not self._input_replay_only:
+            raise RuntimeError("INPUT_REPLAY_NOT_RUNNING")
+        return {"pending_records": len(self._pending_snapshots) + len(self._minute_bars._dirty)
+                + len(self._second_trades._dirty) + len(self._pending_minute_retries)
+                + len(self._inflight_minute_bars) + len(self._pending_minute_finalizations)
+                + len(self._pending_second_retries),
+                "stopped": self._credential_phase == "STOPPED"}
+
+    def _apply_trade_source_approval(
+        self, sources: set[tuple[str, str]], subscribed_at: datetime, *, reset_all: bool,
+    ) -> None:
+        self._record_upstream("source_approval", {
+            "sources": tuple(sorted(sources)), "subscribed_at": subscribed_at, "reset_all": reset_all,
+        })
+        added_sources = sources - self._approved_trade_sources
+        removed_sources = self._approved_trade_sources - sources
+        reset_sources = sources if reset_all else added_sources
+        self._minute_bars.reset_cumulative_sources(reset_sources)
+        self._second_trades.reset_cumulative_sources(reset_sources)
+        for key in removed_sources:
+            self._continuous_from.pop(key, None)
+        for key in reset_sources:
+            self._continuous_from[key] = subscribed_at
+        self._approved_trade_sources = set(sources)
 
     async def close(self) -> None:
         self._credential_shutdown = True
@@ -383,7 +479,7 @@ class CentralRealtimeCollector:
                 self._deliver_account_event("disconnected", self._environment)
                 self._credential_phase = "RECONNECTING" if self._market_session() == session else "WAITING_MARKET"
                 if self._market_session() == session:
-                    self._minute_bars.mark_capture_gap()
+                    self._mark_capture_gap()
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -393,7 +489,7 @@ class CentralRealtimeCollector:
                 self._hub.set_upstream_ready((), False)
                 self._deliver_account_event("disconnected", self._environment)
                 self._abnormal_disconnects += 1
-                self._minute_bars.mark_capture_gap()
+                self._mark_capture_gap()
                 logger.warning("키움 중앙 실시간 연결 실패: %s", error)
                 self._hub.publish({"type": "connection_failed", "message": str(error),
                                    "connection_status": self.credential_connection_status()})
@@ -504,17 +600,10 @@ class CentralRealtimeCollector:
                         "connection_status": self.credential_connection_status(),
                     })
                     subscribed_at = self._now_provider()
-                    added_sources = pending_trade_sources - self._approved_trade_sources
-                    removed_sources = self._approved_trade_sources - pending_trade_sources
-                    reset_sources = added_sources if connection_approved else pending_trade_sources
-                    self._minute_bars.reset_cumulative_sources(reset_sources)
-                    self._second_trades.reset_cumulative_sources(reset_sources)
-                    for subscription_key in removed_sources:
-                        self._continuous_from.pop(subscription_key, None)
-                    for subscription_key in reset_sources:
-                        self._continuous_from[subscription_key] = subscribed_at
+                    self._apply_trade_source_approval(
+                        pending_trade_sources, subscribed_at, reset_all=not connection_approved,
+                    )
                     connection_approved = True
-                    self._approved_trade_sources = set(pending_trade_sources)
                     pending_trade_sources = set()
                     if pending_added:
                         self._hub.publish({"type": "codes_added", "codes": list(pending_added)})
@@ -529,7 +618,88 @@ class CentralRealtimeCollector:
                 self._publish_parsed(message)
             await self._notify_market_event_boundaries()
 
+    def _mark_capture_gap(self, *, clear_continuous: bool = False) -> None:
+        self._record_upstream("capture_gap", {"clear_continuous": clear_continuous})
+        self._minute_bars.mark_capture_gap()
+
+    def _record_upstream(self, kind: str, payload: dict, *, excluded_types: dict | None = None) -> None:
+        from . import diagnostic_trace as trace
+        trace_id = trace.input_token("collector_inputs")
+        if trace_id is None or self._input_replay_only:
+            return
+        fields = {"workload_id": "realtime", "producer_component": f"realtime_collector:{id(self):x}",
+                  "input_kind": kind, "input_id": uuid4().hex, "excluded_types": excluded_types or {},
+                  "entered_mono_ns": time.monotonic_ns(), "entered_wall_ns": time.time_ns()}
+        try:
+            if getattr(self, "_recorded_capture_epoch", None) != trace_id:
+                initial = {"source_time": self._now_provider(),
+                           "approved_sources": tuple(sorted(self._approved_trade_sources)),
+                           "continuous_from": tuple((code, market, at) for (code, market), at in
+                                                    sorted(self._continuous_from.items())),
+                           "initial_state": "cold_with_prefix",
+                           "warm_accumulators": bool(self._pending_snapshots or self._minute_bars._dirty
+                                                     or self._second_trades._dirty)}
+                trace.emit_payload(trace_id, "collector_input", {
+                    **fields, "input_kind": "initial_state", "input_id": uuid4().hex,
+                }, initial)
+                self._recorded_capture_epoch = trace_id
+            if trace.emit_payload(trace_id, "collector_input", fields,
+                                  {"source_time": self._now_provider(), **payload}):
+                self._recorded_input_high_water = (trace_id, fields["input_id"])
+        except Exception:
+            try:
+                trace.reject_input(trace_id, {**fields, "reason": "collector_capture_error"})
+            except Exception:
+                pass
+
+    def _record_upstream_message(self, message: dict[str, Any]) -> None:
+        from . import diagnostic_trace as trace
+        trace_id = trace.input_token("collector_inputs")
+        if trace_id is None or self._input_replay_only or str(message.get("trnm", "")).upper() != "REAL":
+            return
+        try:
+            rows = message.get("data")
+            if type(rows) is not list or len(rows) > 10000:
+                raise ValueError("collector_message_bounds")
+            selected, excluded = [], {}
+            message_id, offset = uuid4().hex, 0
+            def flush_group():
+                nonlocal offset, selected, excluded
+                self._record_upstream("message", {"message_id": message_id, "row_offset": offset,
+                    "message": {"trnm": "REAL", "data": selected}}, excluded_types=excluded)
+                offset += len(selected)
+                selected, excluded = [], {}
+            for row in rows:
+                if type(row) is not dict:
+                    raise ValueError("collector_row_type")
+                kind = row.get("type")
+                if type(kind) is not str or len(kind) > 8:
+                    raise ValueError("collector_event_type")
+                if kind != "0B":
+                    label = kind if kind in {"0w", "0J", "0U", "00", "04"} else "other"
+                    excluded[label] = excluded.get(label, 0) + 1
+                    continue  # Never copy account fields or credentials.
+                values = row.get("values")
+                if type(values) is not dict:
+                    raise ValueError("collector_values_type")
+                selected.append({**{key: row[key] for key in ("item", "stk_cd", "code") if key in row},
+                                 "type": "0B", "values": {key: values[key] for key in
+                                    ("10", "12", "13", "14", "15", "17", "20", "228", "290", "311")
+                                    if key in values}})
+                if len(selected) == 100:
+                    flush_group()
+            if selected or excluded:
+                flush_group()
+        except Exception:
+            try:
+                trace.reject_input(trace_id, {"workload_id": "realtime",
+                    "producer_component": f"realtime_collector:{id(self):x}",
+                    "reason": "collector_message_not_captureable"})
+            except Exception:
+                pass
+
     def _publish_parsed(self, message: dict[str, Any]) -> None:
+        self._record_upstream_message(message)
         for tick in parse_market_operation_ticks(message):
             self._hub.publish({
                 "type": "market_operation",
@@ -573,14 +743,16 @@ class CentralRealtimeCollector:
                 self._hub.publish(event, code)
                 if name in {"trade", "market_state", "program_trade"}:
                     item_key = code or str(payload.get("market", ""))
-                    self._pending_snapshots[(name, item_key)] = {
+                    snapshot = {
                         "event_type": name, "item_key": item_key,
-                        "received_at": time.time(), "event": event,
+                        "received_at": self._now_provider().timestamp(), "event": event,
                     }
+                    self._pending_snapshots[(name, item_key)] = snapshot
+                    self._latest_snapshots[(name, item_key)] = snapshot
                 if name == "trade":
                     self._observe_reconnect_trade()
                     now = self._now_provider()
-                    received_at = time.time()
+                    received_at = now.timestamp()
                     self._minute_bars.add(
                         value, now, received_at,
                         capture_complete=self._minute_capture_complete(value, now),
@@ -624,6 +796,31 @@ class CentralRealtimeCollector:
                     "code": code, "environment": self._environment,
                     "last_executed_at": observed_at.isoformat(timespec="seconds"), "source": "kiwoom-realtime-00"}}
 
+    def initial_realtime_snapshots(
+        self, persisted: list[dict[str, Any]], codes: list[str],
+    ) -> list[dict[str, Any]]:
+        """Overlay current RAM values on the checkpoint sent to a new subscriber."""
+        cutoff = self._now_provider().timestamp() - 300
+        self._latest_snapshots = {
+            key: snapshot for key, snapshot in self._latest_snapshots.items()
+            if float(snapshot["received_at"]) > cutoff
+        }
+        requested = set(codes)
+        live = {
+            key: value for key, value in self._latest_snapshots.items()
+            if key[0] == "market_state" or key[1] in requested
+        }
+
+        def key_for(event: dict[str, Any]) -> tuple[str, str]:
+            payload = event.get("payload")
+            values = payload if isinstance(payload, dict) else {}
+            kind = str(event.get("type", ""))
+            return kind, str(values.get("market" if kind == "market_state" else "code", ""))
+
+        return [event for event in persisted if key_for(event) not in live] + [
+            value["event"] for value in sorted(live.values(), key=lambda row: row["received_at"])
+        ]
+
     def _deliver_account_event(self, event_type, value):
         if self._credential_paused or self._account_event_handler is None:
             return
@@ -632,11 +829,32 @@ class CentralRealtimeCollector:
         except Exception:
             logger.warning("계좌 이벤트 전달 실패: %s", event_type)
 
+    async def load_live_minute_bars(
+        self, code: str, trading_date: str, market: str = "",
+    ) -> list[dict[str, Any]]:
+        """Read persisted history plus a frozen copy of uncommitted RAM segments."""
+        if self._store is None:
+            return []
+        deltas = [dict(value) for value in [
+            *self._pending_minute_retries.values(), *self._inflight_minute_bars,
+            *self._minute_bars.pending_bars(code, trading_date, market),
+        ] if str(value['code']) == code and str(value['trading_date']) == trading_date
+            and (not market or str(value['market']) == market)]
+        if deltas:
+            return await asyncio.to_thread(
+                self._store.load_minute_bars, code, trading_date, market, realtime_deltas=deltas,
+            )
+        return await asyncio.to_thread(self._store.load_minute_bars, code, trading_date, market)
+
     async def _save_snapshots(self) -> None:
+        next_latest = _next_latest_checkpoint(self._now_provider().timestamp())
+        next_second = _next_second_checkpoint(self._now_provider().timestamp())
         while True:
-            await asyncio.sleep(1)
+            await self._snapshot_sleep(1)
+            latest_due = self._now_provider().timestamp() >= next_latest
+            second_due = self._now_provider().timestamp() >= next_second
             try:
-                await self._flush_snapshots()
+                await self._flush_snapshots(flush_latest=latest_due, periodic=True, flush_seconds=second_due)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -644,38 +862,56 @@ class CentralRealtimeCollector:
                 # 루프까지 종료되면 이후 모든 실시간 자료가 조용히 누락되므로
                 # 다음 주기에 다시 시도한다.
                 logger.exception("키움 중앙 실시간 DB 저장 실패; 다음 주기에 재시도합니다")
+            else:
+                if second_due:
+                    next_second = _next_second_checkpoint(self._now_provider().timestamp())
+                if latest_due:
+                    next_latest = _next_latest_checkpoint(self._now_provider().timestamp())
+                    cutoff = self._now_provider().timestamp() - 300
+                    self._latest_snapshots = {
+                        key: value for key, value in self._latest_snapshots.items()
+                        if float(value["received_at"]) > cutoff
+                    }
 
-    async def _flush_snapshots(self) -> None:
-        task = asyncio.create_task(self._flush_serialized(), name="realtime-owned-save")
+    @captured_workload("realtime", "realtime_collector")
+    async def _flush_snapshots(
+        self, *, flush_latest: bool = True, periodic: bool = False, flush_seconds: bool = True,
+    ) -> None:
+        task = asyncio.create_task(self._flush_serialized(flush_latest, periodic, flush_seconds), name="realtime-owned-save")
         self._flush_tasks.add(task)
         task.add_done_callback(self._flush_tasks.discard)
         task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
         await asyncio.shield(task)
 
-    async def _flush_serialized(self) -> None:
+    async def _flush_serialized(self, flush_latest: bool, periodic: bool, flush_seconds: bool) -> None:
         async with self._flush_lock:
             from .diagnostic_metrics import CURRENT_FLUSH_ID
             token = CURRENT_FLUSH_ID.set(uuid4().hex)
             try:
-                await self._flush_snapshot_cycle()
+                await self._flush_snapshot_cycle(flush_latest, periodic, flush_seconds)
             finally:
                 CURRENT_FLUSH_ID.reset(token)
 
-    async def _flush_snapshot_cycle(self) -> None:
+    async def _flush_snapshot_cycle(
+        self, flush_latest: bool = True, periodic: bool = False, flush_seconds: bool = True,
+    ) -> None:
         if self._store is None:
             return
-        snapshots = self._pending_snapshots
-        values = list(snapshots.values())
-        self._pending_snapshots.clear()
-        if values:
-            try:
-                await asyncio.to_thread(self._store.save_realtime_snapshots, values)
-            except Exception:
-                for value in values:
-                    key = (str(value["event_type"]), str(value["item_key"]))
-                    self._pending_snapshots.setdefault(key, value)
-                raise
-        drained_minute_bars = self._minute_bars.drain_dirty()
+        cycle_now = self._now_provider()
+        if flush_latest:
+            values = list(self._pending_snapshots.values())
+            self._pending_snapshots.clear()
+            if values:
+                try:
+                    await asyncio.to_thread(self._store.save_realtime_snapshots, values)
+                except Exception:
+                    for value in values:
+                        key = (str(value["event_type"]), str(value["item_key"]))
+                        self._pending_snapshots.setdefault(key, value)
+                    raise
+        drained_minute_bars = self._minute_bars.drain_dirty(
+            closed_before=cycle_now - timedelta(seconds=2) if periodic else None,
+        )
         minute_bars = list(self._pending_minute_retries.values()) + drained_minute_bars
         self._pending_minute_retries.clear()
         if minute_bars:
@@ -689,6 +925,7 @@ class CentralRealtimeCollector:
                     value_kind=DataValueKind.ACTUAL,
                 )
                 observations.append((bar_observation_key(observation), observation))
+            self._inflight_minute_bars = minute_bars
             try:
                 await asyncio.to_thread(
                     self._store.save_minute_bars,
@@ -699,6 +936,8 @@ class CentralRealtimeCollector:
                 for value in minute_bars:
                     self._merge_minute_retry(value)
                 raise
+            finally:
+                self._inflight_minute_bars = []
         entry_symbols = self._pending_account_entry_symbols
         entry_values = list(entry_symbols.values())
         self._pending_account_entry_symbols = {}
@@ -730,7 +969,11 @@ class CentralRealtimeCollector:
                 raise
         closures = list(self._pending_minute_finalizations.values())
         self._pending_minute_finalizations.clear()
-        closures.extend(self._minute_bars.drain_closed(self._now_provider()))
+        new_closures = self._minute_bars.drain_closed(cycle_now)
+        finalized_at = self._now_provider().timestamp()
+        for closure in new_closures:
+            closure['available_at'] = finalized_at
+        closures.extend(new_closures)
         if closures:
             try:
                 await asyncio.to_thread(self._store.finalize_minute_bars, closures)
@@ -742,7 +985,9 @@ class CentralRealtimeCollector:
                     )
                     self._pending_minute_finalizations[key] = value
                 raise
-        drained_second_bars = self._second_trades.drain_dirty()
+        drained_second_bars = self._second_trades.drain_dirty(
+            before=cycle_now.replace(second=0, microsecond=0) if periodic else None,
+        ) if flush_seconds else []
         for value in drained_second_bars:
             self._keep_second_retry(value)
         second_bars = list(self._pending_second_retries.values())

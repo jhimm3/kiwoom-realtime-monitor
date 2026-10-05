@@ -39,6 +39,47 @@ def _bar(code: str, operation_id: str, *, minute: str = "10:00", volume: int = 7
 
 
 class StorageBoundaryConcurrencyTests(unittest.TestCase):
+    def test_live_overlay_is_read_only_scoped_and_excludes_committed_operations(self) -> None:
+        base = _bar('005930', 'base', volume=7)
+        pending = _bar('005930', 'pending', volume=3)
+        self.store.save_minute_bars([base])
+        deltas = [base, pending, pending, _bar('000660', 'peer'),
+                  {**pending, 'operation_id': 'other-day', 'trading_date': '2026-09-22'},
+                  {**pending, 'operation_id': 'other-market', 'market': 'NXT'}]
+        [live] = self.store.load_minute_bars('005930', base['trading_date'], 'KRX', realtime_deltas=deltas)
+        self.assertEqual(10, live['volume'])
+        self.assertNotIn('operation_id', live)
+        self.assertEqual(7, self.store.load_minute_bars('005930', base['trading_date'], 'KRX')[0]['volume'])
+        self.assertEqual(1, self._operation_count())
+        # The RAM snapshot was copied before COMMIT; a later read must not add it twice.
+        self.store.save_minute_bars([pending])
+        [after] = self.store.load_minute_bars('005930', base['trading_date'], 'KRX', realtime_deltas=deltas)
+        self.assertEqual(live, after)
+
+    def test_live_overlay_preserves_closed_query_and_replaces_partial_query_once(self) -> None:
+        for completeness in (DataCompleteness.COMPLETE, DataCompleteness.IN_PROGRESS):
+            with self.subTest(completeness=completeness):
+                minute = '10:00' if completeness == DataCompleteness.COMPLETE else '10:01'
+                base = _bar('005930', 'query-' + minute, minute=minute, volume=100)
+                observation = minute_bar_observation(
+                    base, origin=ObservationOrigin.QUERY, completeness=completeness,
+                    source='kiwoom-ka10080', value_kind=DataValueKind.ACTUAL,
+                )
+                self.store.replace_minute_bars([base], observations=[(bar_observation_key(observation), observation)])
+                pending = [_bar('005930', 'delta1-' + minute, minute=minute, volume=3),
+                           _bar('005930', 'delta2-' + minute, minute=minute, volume=4)]
+                live = self.store.load_minute_bars('005930', base['trading_date'], 'KRX', realtime_deltas=pending)
+                [row] = [bar for bar in live if bar['minute'] == minute]
+                self.assertEqual(100 if completeness == DataCompleteness.COMPLETE else 7, row['volume'])
+                realtime_observations = [minute_bar_observation(
+                    value, origin=ObservationOrigin.REALTIME, completeness=DataCompleteness.IN_PROGRESS,
+                    source='kiwoom-websocket-0B', value_kind=DataValueKind.ACTUAL,
+                ) for value in pending]
+                self.store.save_minute_bars(pending, observations=[
+                    (bar_observation_key(value), value) for value in realtime_observations
+                ])
+                self.assertEqual(live, self.store.load_minute_bars('005930', base['trading_date'], 'KRX'))
+
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.path = Path(self.directory.name) / "isolated.sqlite3"
@@ -159,6 +200,27 @@ class StorageBoundaryConcurrencyTests(unittest.TestCase):
         self.assertEqual(DataValueKind.ACTUAL, metadata.value_kind)
         self.assertEqual(1, len(revisions))
         self.assertEqual(1, self._operation_count())
+
+    def test_same_minute_observations_remain_scoped_to_each_subject(self) -> None:
+        values = [_bar(code, f"same-minute-{code}") for code in ("005930", "000660")]
+        observations = []
+        for value in values:
+            observation = minute_bar_observation(
+                value, origin=ObservationOrigin.REALTIME,
+                completeness=DataCompleteness.IN_PROGRESS,
+                source=f"source-{value['code']}", value_kind=DataValueKind.ACTUAL,
+            )
+            observations.append((bar_observation_key(observation), observation))
+
+        self.store.save_minute_bars(values, observations=observations)
+
+        for value in values:
+            key = f"{value['trading_date']}T{value['minute']}"
+            metadata = self.store.load_market_data_metadata(
+                MarketDatasetKind.MINUTE_BAR, f"{value['code']}:{value['market']}", key,
+            )
+            self.assertIsNotNone(metadata)
+            self.assertEqual(f"source-{value['code']}", metadata.source)
 
 
 if __name__ == "__main__":

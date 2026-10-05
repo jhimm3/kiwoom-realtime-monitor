@@ -28,7 +28,7 @@ from kiwoom_monitor.central_server.market_observations import (
     bar_observation_key, daily_bar_observation, minute_bar_observation,
 )
 from kiwoom_monitor.domain.market_data_contract import (
-    DataCompleteness, DataValueKind, ObservationOrigin,
+    DataCompleteness, DataValueKind, MarketDatasetKind, ObservationOrigin,
 )
 from kiwoom_monitor.domain.research_contract import ObservationRevisionSource
 
@@ -70,6 +70,50 @@ def _writer_metrics_capture():
 
 
 class PostgresStorageBoundaryTests(unittest.TestCase):
+    def test_live_minute_read_uses_one_snapshot_across_concurrent_commit(self) -> None:
+        from threading import Event
+        from kiwoom_monitor.central_server import database_market_bars
+        code = str(900000 + uuid.uuid4().int % 99999)
+        operation_id = 'diagnostic-live-' + uuid.uuid4().hex
+        delta = {
+            'trading_date': '2099-01-10', 'minute': '10:04', 'code': code, 'market': 'KRX',
+            'open': 100, 'high': 110, 'low': 100, 'close': 110, 'volume': 13,
+            'trade_value_million_won': 7, 'updated_at': 1_790_000_000.0,
+            'operation_id': operation_id,
+        }
+        selected, committed = Event(), Event()
+        original = database_market_bars._read_realtime_minute_overlay
+
+        def overlay(*args, **kwargs):
+            # Canonical rows have already been read. Commit on a peer connection
+            # before the operation-marker lookup to expose a mixed-snapshot bug.
+            selected.set()
+            if not committed.wait(10):
+                raise TimeoutError('concurrent writer did not commit')
+            return original(*args, **kwargs)
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                with patch.object(database_market_bars, '_read_realtime_minute_overlay', side_effect=overlay):
+                    future = executor.submit(self.store.load_minute_bars, code, delta['trading_date'],
+                                             'KRX', realtime_deltas=[delta])
+                    try:
+                        self.assertTrue(selected.wait(10))
+                        self.store.save_minute_bars([delta])
+                    finally:
+                        committed.set()
+                    [during] = future.result(timeout=15)
+            [after] = self.store.load_minute_bars(code, delta['trading_date'], 'KRX', realtime_deltas=[delta])
+            self.assertEqual(13, during['volume'])
+            self.assertEqual(during, after)
+            self.assertEqual(after, self.store.load_minute_bars(code, delta['trading_date'], 'KRX')[0])
+        finally:
+            committed.set()
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute('DELETE FROM central_minute_bar_operations WHERE operation_id=%s', (operation_id,))
+                cursor.execute('DELETE FROM central_minute_bars WHERE code=%s AND trading_date=%s',
+                               (code, delta['trading_date']))
+
     @classmethod
     def setUpClass(cls) -> None:
         url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "")
@@ -153,6 +197,48 @@ class PostgresStorageBoundaryTests(unittest.TestCase):
                         "DELETE FROM central_minute_bars WHERE code=%s AND trading_date=%s",
                         (code, "2099-01-09"),
                     )
+
+    def test_realtime_minute_metadata_is_scoped_by_subject_for_same_minute(self) -> None:
+        token = uuid.uuid4().hex
+        codes = [f"D{token[:8]}A", f"D{token[:8]}B"]
+        values = [{
+            "trading_date": "2099-01-11", "minute": "10:01", "code": code,
+            "market": "KRX", "open": 10000, "high": 10100, "low": 9900,
+            "close": 10050, "volume": 7, "trade_value_million_won": 1,
+            "updated_at": 1_790_000_000.0, "operation_id": f"diagnostic-{token}-{index}",
+        } for index, code in enumerate(codes)]
+        observations = []
+        for value in values:
+            observation = minute_bar_observation(
+                value, origin=ObservationOrigin.REALTIME,
+                completeness=DataCompleteness.IN_PROGRESS,
+                source=f"source-{value['code']}", value_kind=DataValueKind.ACTUAL,
+            )
+            observations.append((bar_observation_key(observation), observation))
+        operation_ids = [value["operation_id"] for value in values]
+        try:
+            self.store.save_minute_bars(values, observations=observations)
+            key = "2099-01-11T10:01"
+            for code in codes:
+                metadata = self.store.load_market_data_metadata(
+                    MarketDatasetKind.MINUTE_BAR, f"{code}:KRX", key,
+                )
+                self.assertIsNotNone(metadata)
+                self.assertEqual(f"source-{code}", metadata.source)
+        finally:
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM central_observation_revisions WHERE kind='minute_bar' AND subject=ANY(%s)",
+                    ([f"{code}:KRX" for code in codes],),
+                )
+                cursor.execute(
+                    "DELETE FROM central_market_data_observation_meta WHERE dataset_kind='minute_bar' AND subject=ANY(%s)",
+                    ([f"{code}:KRX" for code in codes],),
+                )
+                cursor.execute("DELETE FROM central_minute_bar_operations WHERE operation_id=ANY(%s)",
+                               (operation_ids,))
+                cursor.execute("DELETE FROM central_minute_bars WHERE code=ANY(%s) AND trading_date=%s",
+                               (codes, "2099-01-11"))
 
     def test_realtime_minute_duplicate_keys_keep_sequential_delta_updates(self) -> None:
         from kiwoom_monitor.central_server.diagnostic_metrics import summarize_market_bar_saves
@@ -458,7 +544,7 @@ class PostgresStorageBoundaryTests(unittest.TestCase):
             return count
 
         try:
-            with patch("kiwoom_monitor.central_server.database._execute_multirow_upsert",
+            with patch("kiwoom_monitor.central_server.database_market_bars._execute_multirow_upsert",
                        side_effect=record_upsert):
                 self.store.replace_minute_bars(values, observations=observations)
             self.assertEqual(3, len(statements))
@@ -668,7 +754,7 @@ class PostgresStorageBoundaryTests(unittest.TestCase):
             raise RuntimeError("revision write failed")
 
         with patch(
-            "kiwoom_monitor.central_server.database._insert_postgres_observation_revisions_batch",
+            "kiwoom_monitor.central_server.database_market_bars._insert_postgres_observation_revisions_batch",
             side_effect=fail_after_insert,
         ), self.assertRaisesRegex(RuntimeError, "revision write failed"):
             self.store.replace_minute_bars(

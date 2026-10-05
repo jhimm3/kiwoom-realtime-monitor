@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .diagnostic_replay_contract import captured_workload
+
 import asyncio
 import copy
 import hashlib
@@ -519,6 +521,7 @@ class CentralRestBroker:
             finally:
                 self._queue.task_done()
 
+    @captured_workload("rest_market", "rest_broker")
     async def _run_persistence(self) -> None:
         from .diagnostic_metrics import CURRENT_API_ID
         while True:

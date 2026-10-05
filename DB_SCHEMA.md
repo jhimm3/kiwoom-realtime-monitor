@@ -2,6 +2,13 @@
 
 **2026-10-01 실 DB 전수 카탈로그:** [NAS 43개 테이블·418개 컬럼 관계도/사전](docs/database/README.md). 운영 migration 20과 로컬 PostgreSQL migration 21 후보를 구분하며, 아래 기존 설계/도입 이력을 대체하지 않는다. [PC SQLite 파일·구조 목록](docs/database/SQLITE_INVENTORY.md)도 함께 제공한다.
 
+2026-10-05 반복 부하 재생용 선택 자원은 전용 `kiwoom_monitor_replay_test` DB에만 생성한다.
+`replay_meta.ownership`은 고정 role/token/version을, `replay_meta.baseline`은 불변 manifest와
+baseline ID를 보유한다. `replay_baseline` schema의 snapshot tables는 명시 allowlist의 14개
+기존 PostgreSQL table을 논리 복구하기 위한 복사본이다. 이 schema와 metadata tables는 공통
+앱 migration에 포함되지 않으며 운영·기존 진단 DB에도 만들지 않는다. 초기 baseline은
+`controlled_fixture`로 봉인되므로 운영 DB나 장중 시작 상태와 동등하다는 뜻이 아니다.
+
 2026-09-24 과거 검색뉴스 로컬 캐시: `data/historical_intelligence.sqlite3.news_article_body_snapshots`는 `(provider, office_id, article_id, extractor_version, body_sha256)`를 기본키로 하여 발행시각 확인에 사용한 동일 HTML에서 추출한 `body_text`, `source_url`, `published_at`, `fetched_at`을 불변 보존한다. 기존 `news_articles`나 NAS 본문 revision을 덮어쓰지 않는다. PC 역사 BODY 작업은 해당 extractor 버전의 최신 스냅샷을 우선 읽고 없을 때만 원문을 조회한다. NAS의 `central_news_jobs` 완료 상태가 재처리를 방지하며 NAS 실시간 뉴스 작업과는 별개다.
 
 기준: 2.1.0 / 2026-09-22. 이 문서는 테이블·마이그레이션 상세 참조다. 연구 현재 버전은 v27이며 아래 도입 버전은 이력이다. [현재 상태](docs/CURRENT_STATUS.md)와 [남은 작업](docs/OPEN_ITEMS.md)으로 구현·운영 범위를 구분한다. 신규 대신/뉴스 백필의 입력 저장 계약은 [수집 기획](docs/HISTORICAL_BACKFILL_PLAN.md) 단계에서 확정한다.

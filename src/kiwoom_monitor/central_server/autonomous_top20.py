@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .diagnostic_replay_contract import captured_workload
+
 import asyncio
 import logging
 import time
@@ -486,6 +488,7 @@ class AutonomousTop20Service:
         }
         self._market_catalog_day = day
 
+    @captured_workload("top20", "autonomous_top20")
     async def backfill_day(self, day: str) -> bool:
         target_day = datetime.fromisoformat(day).date()
         now = self._now()
@@ -567,6 +570,7 @@ class AutonomousTop20Service:
             self._backfill_completed_steps.clear()
         return completed_day
 
+    @captured_workload("top20", "autonomous_top20")
     async def _schedule_loop(self) -> None:
         first_iteration = True
         while True:
@@ -682,6 +686,7 @@ class AutonomousTop20Service:
         self._backfill_retry_at = time.monotonic() + delay
         logger.warning("TOP20 장후 보완 미완료: %s; %d초 후 재시도; error=%s", day, delay, error)
 
+    @captured_workload("top20", "autonomous_top20")
     async def _event_loop(self) -> None:
         while True:
             subscriber = self._subscriber
@@ -746,6 +751,7 @@ class AutonomousTop20Service:
                 continue
             self._trade_values.ingest(tick, self._now())
 
+    @captured_workload("top20", "autonomous_top20")
     async def _index_loop(self) -> None:
         while True:
             try:
@@ -931,6 +937,7 @@ class AutonomousTop20Service:
         self._fundamentals_tasks.add(task)
         task.add_done_callback(self._fundamentals_tasks.discard)
 
+    @captured_workload("top20", "autonomous_top20")
     async def _ensure_fundamentals(self, codes: tuple[str, ...], day: str = "") -> None:
         """Retry failed stages without repeating successful stock/day preparation."""
         current = self._now()

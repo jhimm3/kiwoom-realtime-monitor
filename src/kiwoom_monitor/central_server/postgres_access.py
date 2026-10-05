@@ -21,6 +21,15 @@ _DB_CALL_SOURCE: ContextVar[str] = ContextVar("db_call_source", default="")
 _DB_CALL_REQUEST_ID: ContextVar[str] = ContextVar("db_call_request_id", default="")
 
 
+def current_db_call_tags() -> dict[str, str]:
+    return {"source": _DB_CALL_SOURCE.get()[:100], "request_id": _DB_CALL_REQUEST_ID.get()[:100]}
+
+
+def _recorded_identity() -> dict[str, str]:
+    from .diagnostic_replay_contract import operation_identity
+    return operation_identity()
+
+
 @contextmanager
 def db_call_source(source: str):
     """Identify the owning operation across asyncio.to_thread DB reads."""
@@ -53,6 +62,7 @@ class DBWriterContext:
     request_id: str = field(default_factory=_DB_CALL_REQUEST_ID.get)
     call_id: str = field(default_factory=lambda: uuid4().hex)
     access_mode: str = "write"
+    recorded_identity: dict[str, str] = field(default_factory=_recorded_identity)
 
 
 class DBSlowHook(Protocol):
@@ -322,6 +332,7 @@ class ObservedDBConnection:
             "source": context.source if context else "",
             "parent_call_id": context.parent_call_id if context else "",
             "request_id": context.request_id if context else "",
+            **(context.recorded_identity if context else {}),
             "backend_pid": self.backend_pid,
             "database_name": self.database_name,
             "rows_attempted": context.rows_attempted if context else None,
@@ -351,6 +362,7 @@ class ObservedDBConnection:
                 from .diagnostic_trace import emit
                 emit(self._trace_token, "call_end", {
                     "call_id": self.call_id, "backend_pid": self.backend_pid,
+                    **(context.recorded_identity if context else {}),
                     "database_name": record["database_name"],
                     "commits": self._commits, "rollbacks": self._rollbacks,
                     "sql_calls": self._sql_calls, "outcome": self._outcome,
@@ -537,7 +549,8 @@ def _trace_start(context: DBWriterContext | None, call_id: str | None = None) ->
             "source": context.source[:100] if context else "",
             "api_id": context.api_id[:40] if context else "",
             "parent_call_id": context.parent_call_id[:40] if context else "",
-            "rows_attempted": context.rows_attempted if context else None}
+            "rows_attempted": context.rows_attempted if context else None,
+            **(context.recorded_identity if context else {})}
 
 
 # Dataset and news writer wait probes; preserve the existing bounded diagnostic behavior.

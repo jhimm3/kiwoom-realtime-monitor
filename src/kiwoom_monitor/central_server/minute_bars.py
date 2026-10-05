@@ -49,6 +49,7 @@ class MinuteBarAccumulator:
 
     def __init__(self) -> None:
         self._bars: dict[tuple[str, str, str, str], CentralMinuteBar] = {}
+        self._operation_ids: dict[tuple[str, str, str, str], str] = {}
         self._cumulative: dict[tuple[str, str, str], int] = {}
         self._dirty: set[tuple[str, str, str, str]] = set()
         self._open_windows: dict[tuple[str, str, str, str], bool] = {}
@@ -76,6 +77,7 @@ class MinuteBarAccumulator:
                 volume, trade_value, received_at,
             )
             self._bars[key] = bar
+            self._operation_ids[key] = str(uuid.uuid4())
         else:
             bar.high = max(bar.high, price)
             bar.low = min(bar.low, price)
@@ -88,14 +90,28 @@ class MinuteBarAccumulator:
         if not capture_complete:
             self._open_windows[key] = True
 
-    def drain_dirty(self) -> list[dict[str, object]]:
+    def drain_dirty(self, *, closed_before: datetime | None = None) -> list[dict[str, object]]:
         values = []
-        for key in self._dirty:
+        selected = {
+            key for key in self._dirty
+            if closed_before is None or datetime.fromisoformat(f"{key[0]}T{key[1]}").replace(
+                tzinfo=closed_before.tzinfo,
+            ) + timedelta(minutes=1) <= closed_before
+        }
+        for key in selected:
             value = self._bars.pop(key).as_record()
-            value["operation_id"] = str(uuid.uuid4())
+            value["operation_id"] = self._operation_ids.pop(key)
             values.append(value)
-        self._dirty.clear()
+        self._dirty.difference_update(selected)
         return values
+
+    def pending_bars(self, code: str, trading_date: str, market: str = "") -> list[dict[str, object]]:
+        """Copy unflushed deltas without consuming them or changing their IDs."""
+        return [
+            {**self._bars[key].as_record(), "operation_id": self._operation_ids[key]}
+            for key in self._dirty
+            if key[0] == trading_date and key[2] == code and (not market or key[3] == market)
+        ]
 
     def mark_capture_gap(self) -> None:
         """현재 열린 모든 분 구간에 구독 연속성 공백을 표시한다."""
@@ -221,9 +237,15 @@ class SecondTradeAccumulator:
             bar.available_at = max(bar.available_at, float(received_at))
         self._dirty.add(key)
 
-    def drain_dirty(self) -> list[dict[str, object]]:
-        values = [self._bars[key].as_record() for key in self._dirty]
-        self._dirty.clear()
+    def drain_dirty(self, *, before: datetime | None = None) -> list[dict[str, object]]:
+        selected = {
+            key for key in self._dirty
+            if before is None or datetime.fromisoformat(f"{key[0]}T{key[1]}").replace(
+                tzinfo=before.tzinfo,
+            ) < before
+        }
+        values = [self._bars[key].as_record() for key in selected]
+        self._dirty.difference_update(selected)
         self._prune_old_state()
         return values
 
@@ -270,7 +292,7 @@ class SecondTradeAccumulator:
         cutoff = self._latest_second - self._max_late
         self._bars = {
             key: bar for key, bar in self._bars.items()
-            if datetime.fromisoformat(f"{key[0]}T{key[1]}").replace(
+            if key in self._dirty or datetime.fromisoformat(f"{key[0]}T{key[1]}").replace(
                 tzinfo=self._latest_second.tzinfo,
             ) >= cutoff
         }
