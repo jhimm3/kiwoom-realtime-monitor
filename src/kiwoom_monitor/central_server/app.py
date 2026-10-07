@@ -42,7 +42,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.10.08-trace-ram-blocks-v1"
+SERVER_BUILD = "2026.10.08-trace-ram-blocks-v2"
 logger = logging.getLogger(__name__)
 
 

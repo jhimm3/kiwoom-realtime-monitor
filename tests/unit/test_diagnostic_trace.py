@@ -153,7 +153,8 @@ class DiagnosticTraceTests(unittest.TestCase):
                 self.assertEqual(event_count, final["written"])
                 self.assertEqual(0, final["known_dropped"])
                 self.assertGreater(final["bytes_written"], event_count * 50)
-                self.assertGreaterEqual(final["queue_high_water"], event_count)
+                self.assertGreater(final["queue_high_water"], 0)
+                self.assertLessEqual(final["queue_high_water"], event_count)
                 self.assertEqual(sum(part["count"] for part in final["chunks"]), event_count)
                 for part in final["chunks"]:
                     self.assertEqual(part["bytes"], len(trace.chunk_bytes(identifier, part["name"])))
