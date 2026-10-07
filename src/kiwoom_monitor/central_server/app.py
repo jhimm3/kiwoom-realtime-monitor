@@ -42,7 +42,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.10.08-trace-ram-blocks-v2"
+SERVER_BUILD = "2026.10.08-trace-ram-8g-5m-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -1307,8 +1307,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                     "overhead_verified": False,
                     "deferred_persistence": {
                         "supported": True, "request_field": "persist_at", "max_delay_seconds": 86400,
-                        "memory_limit_bytes": 4 * 1024 * 1024 * 1024,
-                        "event_capacity": 1_000_000, "write_bytes_per_second": 1024 * 1024,
+                        "memory_limit_bytes": 8 * 1024 * 1024 * 1024,
+                        "event_capacity": 5_000_000, "write_bytes_per_second": 1024 * 1024,
                     },
                 },
                 "trace_replay_writer_kinds": sorted(TRACE_SYNTHETIC_KINDS),

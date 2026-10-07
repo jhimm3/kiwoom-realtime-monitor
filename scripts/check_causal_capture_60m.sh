@@ -27,7 +27,7 @@ finish() {
     exit "$code"
 }
 trap finish EXIT
-echo "report=$REPORT stage=starting private_probe_memory_gib=15 operational_defaults_unchanged=true"
+echo "report=$REPORT stage=starting private_probe_memory_gib=8 operational_defaults_unchanged=true"
 run_logged() {
     STATUS_FILE=$(mktemp "$ROOT/artifacts/.causal-capture-status.XXXXXX")
     (
@@ -48,7 +48,7 @@ run_python() {
     # host and cgroup reserve while sampling actual RSS and MemAvailable.
     "$DOCKER" run --rm --network none --memory 20g --entrypoint python \
         --mount "type=bind,src=$CANDIDATE,dst=/app/candidate,readonly" \
-        --tmpfs /tmp:rw,nosuid,size=5g \
+        --tmpfs /tmp:rw,nosuid,size=9g \
         -w /app/candidate -e PYTHONPATH=/app/candidate/src:/app/candidate \
         -e PYTHONDONTWRITEBYTECODE=1 -e TMPDIR=/tmp "$IMAGE" "$@"
 }
@@ -73,8 +73,8 @@ for round in 1 2; do
     done
 done
 echo 'capture_window=09:00-10:00_KST duration_seconds=3600 synthetic_timestamps_not_wall_clock=true'
-echo 'stage=15g_60m_synthetic_envelope messages=36000 cadence_ms=100 mixed_every=30'
+echo 'stage=8g_60m_synthetic_envelope messages=36000 cadence_ms=100 mixed_every=30'
 run_logged run_python scripts/check_causal_capture_capacity.py --capture-seconds 3600 --mode on --messages 36000 --rows 20 \
-    --mixed-every 30 --catalog-rows 5000 --memory-gib 15 --event-capacity 5000000 \
+    --mixed-every 30 --catalog-rows 5000 --memory-gib 8 --event-capacity 5000000 \
     --reserve-gib 4 --progress
 echo '{"private_probe_gates":"passed","synthetic_60m_envelope":"completed_without_rejection_or_drop","capacity_acceptance":"not_approved","operational_defaults_changed":false,"active_changed":false,"scheduled_capture_changed":false,"full_capacity_persistence_verified":false}'

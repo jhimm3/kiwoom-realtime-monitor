@@ -436,9 +436,9 @@ def main():
     parser.add_argument('--capture-seconds', type=int, default=3900, help='Requested recorder duration; synthetic timestamps advance 100ms per message')
     parser.add_argument('--messages', type=int, default=1000)
     parser.add_argument('--rows', type=int, default=20)
-    parser.add_argument('--memory-gib', type=int, choices=(4,8,12,15,16), default=4,
+    parser.add_argument('--memory-gib', type=int, choices=(4,8,12,15,16), default=8,
                         help='Private probe budget only; never changes operational recorder defaults')
-    parser.add_argument('--event-capacity', type=int, choices=(1000000,5000000), default=1000000)
+    parser.add_argument('--event-capacity', type=int, choices=(1000000,5000000), default=5000000)
     parser.add_argument('--scratch', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--mixed-every', type=int, default=0, help='Add catalog once and native REST/subscription/store round every N messages')

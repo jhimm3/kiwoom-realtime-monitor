@@ -23,6 +23,9 @@ with tempfile.TemporaryDirectory() as temp:
         if metadata['schema_version'] != 3 or metadata['options'] != {
                 'store_inputs':False, 'collector_inputs':False, 'top20_inputs':False}:
             raise RuntimeError('causal_capture_capabilities_mismatch')
+        deferred = metadata['deferred_persistence']
+        if (deferred['memory_limit_bytes'], deferred['event_capacity'], deferred['write_bytes_per_second']) != (8 * 1024**3, 5_000_000, 1024**2):
+            raise RuntimeError('deferred_capture_limits_mismatch')
         profiles = metadata.get('store_input_profiles')
         if profiles != {'stock-catalog-documents/v1': {
                 'method': 'replace_documents', 'collection': 'stock_catalog',

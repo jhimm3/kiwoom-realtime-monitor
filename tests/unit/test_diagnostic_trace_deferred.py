@@ -54,8 +54,9 @@ class DeferredTraceTests(unittest.TestCase):
             trace.stop(timeout=0.01)
             held = wait_state('awaiting_persistence')
             self.assertEqual((33_001, 0, 0), (held['accepted'], held['written'], held['known_dropped']))
-            self.assertEqual((4 * 1024**3, 1_000_000), (held['memory_limit_bytes'], held['event_capacity']))
+            self.assertEqual((8 * 1024**3, 5_000_000), (held['memory_limit_bytes'], held['event_capacity']))
             self.assertIsNone(trace.token())
+            self.assertEqual(8 * 1024**3, held['storage_limit_bytes'])
             self.assertIsNone(trace.input_token('collector_inputs'))
             trace.emit(identifier, 'call_end', {'call_id': 'after-capture'})
             self.assertEqual(held['accepted'], trace.status()['accepted'])
@@ -146,10 +147,10 @@ class DeferredTraceTests(unittest.TestCase):
                     trace.start(seconds=60, persist_at=deadline)
             check.assert_not_called()
 
-    def test_host_and_container_headroom_both_gate_four_gib_capture(self):
+    def test_host_and_container_headroom_both_gate_eight_gib_capture(self):
         def read(path):
-            values = {'/proc/meminfo': 'MemAvailable: 8388608 kB\n',
-                      '/sys/fs/cgroup/memory.max': str(5 * 1024**3),
+            values = {'/proc/meminfo': 'MemAvailable: 12582912 kB\n',
+                      '/sys/fs/cgroup/memory.max': str(9 * 1024**3),
                       '/sys/fs/cgroup/memory.current': str(1024**3)}
             return values[str(path).replace('\\', '/')]
         with patch.object(Path, 'read_text', read):
@@ -165,6 +166,24 @@ class DeferredTraceTests(unittest.TestCase):
         with patch.object(Path, 'read_text', read):
             with self.assertRaisesRegex(ValueError, 'trace_container_memory_headroom_unavailable'):
                 trace._deferred_memory_check()
+
+    def test_eight_gib_budget_requires_one_gib_extra_on_host_and_container(self):
+        required = 9 * 1024**3
+        for host, container, passes in ((required, required, True),
+                                        (required - 1024, required, False),
+                                        (required, required - 1, False)):
+            with self.subTest(host=host, container=container):
+                def read(path):
+                    values = {'/proc/meminfo': f'MemAvailable: {host // 1024} kB\n',
+                              '/sys/fs/cgroup/memory.max': str(container + 1024**3),
+                              '/sys/fs/cgroup/memory.current': str(1024**3)}
+                    return values[str(path).replace('\\', '/')]
+                with patch.object(Path, 'read_text', read):
+                    if passes:
+                        trace._deferred_memory_check()
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'trace_memory_headroom_insufficient'):
+                            trace._deferred_memory_check()
 
 
 if __name__ == '__main__':
