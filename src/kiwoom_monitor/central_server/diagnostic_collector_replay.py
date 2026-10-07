@@ -145,7 +145,8 @@ class _MeasuredStore:
                   "rows_attempted": len(values), "state": "failed"}
         started = time.perf_counter()
         with self._lock:
-            self.operation_ids.update(str(value["operation_id"]) for value in values if value.get("operation_id"))
+            self.operation_ids.update(str(value["operation_id"]) for value in values
+                                      if isinstance(value, dict) and value.get("operation_id"))
         try:
             result = getattr(self.store, name)(values, **kwargs)
             record["state"] = "returned"

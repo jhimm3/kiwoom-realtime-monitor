@@ -139,6 +139,7 @@ class StockNewsWindow(QDialog):
         super().__init__(None, Qt.WindowType.Window)
         self._main_window = parent
         self._allow_close = False
+        self._has_been_shown = False
         self.setWindowTitle("종목 뉴스 (시험 기능)")
         self.resize(980, 650)
         self.setMinimumSize(720, 460)
@@ -1267,14 +1268,19 @@ class StockNewsWindow(QDialog):
 
     def showEvent(self, event: QShowEvent) -> None:
         self._auto_refresh.start()
+        if self._has_been_shown and self._stock_code:
+            self._schedule_prepare()
+        self._has_been_shown = True
         super().showEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._save_window_geometry()
+        # The news child process remains alive after its window closes. Stop the
+        # display-driven refresh timer in both the parented and standalone paths.
+        self._auto_refresh.stop()
         # 메인 앱이 살아 있는 동안에는 창만 숨긴다. 네트워크 요청 중 QThread가
         # 파괴되는 문제 없이 종목명을 다시 누르면 같은 창을 즉시 재사용한다.
         if not self._allow_close and self._main_window is not None and self._main_window.isVisible():
-            self._auto_refresh.stop()
             self.hide()
             event.ignore()
             return

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from kiwoom_monitor.application.daily_bar_coverage import (
     COLLECTION, DailySourceWindow, assess_daily_coverage,
 )
 from kiwoom_monitor.application.daily_high_service import DailyHighService
+from kiwoom_monitor.application.historical_high_service import HistoricalHighTarget
 from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service, KST
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
@@ -164,6 +166,7 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
             fail_save = False
             started = None
             release = None
+            on_daily_change = None
 
             async def request(self, api_id, path, body, **kwargs):
                 self.calls.append((body, kwargs))
@@ -174,16 +177,159 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
                 second = kwargs["cont_yn"] == "Y"
                 payload = {"stk_dt_pole_chart_qry": rows[100:] if second else rows[:100]}
                 if not self.fail_save:
-                    MarketDataIngestor(store).ingest(api_id, body, payload)
+                    MarketDataIngestor(store, on_daily_change=self.on_daily_change).ingest(api_id, body, payload)
                 return BrokerResult(payload, not second, "page2" if not second else "", recording_succeeded=True)
 
         self.broker = Broker()
         self.broker.calls = []
         self.service = AutonomousTop20Service(self.broker, RealtimeHub(), self.store, now_provider=lambda: self.now)
+        self.broker.on_daily_change = self.service.notify_daily_bars_changed
 
     def tearDown(self):
         self.store.close()
         self.directory.cleanup()
+
+    def _mark_entry_ready(self, code="005930"):
+        for stage in ("basic", "minutes", "daily", "daily:KRX", "flow", "high"):
+            self.service._entry_stage_ready[(code, stage)] = self.service._entry_stage_token(stage, "2026-09-30")
+        self.service._daily_stage_versions[(code, "high")] = self.service._daily_versions(code)
+
+    async def test_changed_daily_input_reopens_only_daily_and_high_preparation(self):
+        self.service._nxt_enabled = AsyncMock(return_value=False)
+        await self.service._ensure_entry_daily_history("005930", "2026-09-30")
+        self._mark_entry_ready()
+        self._mark_entry_ready("000660")
+        changed = {**source_rows(1, end=date(2026, 9, 29))[0], "high_pric": "999"}
+        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
+        await asyncio.to_thread(ingestor.ingest, "ka10081", {"stk_cd": "005930"},
+                                {"stk_dt_pole_chart_qry": [changed]})
+        self.assertFalse(self.service._entry_data_complete("005930", "2026-09-30"))
+        self.assertTrue(self.service._entry_data_complete("000660", "2026-09-30"))
+        for stage in ("basic", "minutes", "flow"):
+            self.assertEqual(self.service._entry_stage_token(stage, "2026-09-30"),
+                             self.service._entry_stage_ready[("005930", stage)])
+        self.service._ensure_historical_high = AsyncMock()
+        self.service._ensure_entry_basic = AsyncMock()
+        self.service._capture_candidate_investor_flow = AsyncMock()
+        self.service._schedule_fundamentals(("005930",), "2026-09-30")
+        self.assertEqual({"005930"}, self.service._fundamentals_pending)
+        await asyncio.gather(*self.service._fundamentals_tasks)
+        self.assertTrue(self.service._entry_data_complete("005930", "2026-09-30"))
+        self.service._ensure_historical_high.assert_awaited_once()
+        self.service._ensure_entry_basic.assert_not_awaited()
+        self.service._capture_candidate_investor_flow.assert_not_awaited()
+
+    async def test_same_daily_values_preserve_preparation_and_timestamp(self):
+        self.service._nxt_enabled = AsyncMock(return_value=False)
+        await self.service._ensure_entry_daily_history("005930", "2026-09-30")
+        self._mark_entry_ready()
+        before = self.store.load_daily_bars("005930", "KRX", 1)[0]
+        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
+        await asyncio.to_thread(ingestor.ingest, "ka10081", {"stk_cd": "005930"},
+                                {"stk_dt_pole_chart_qry": source_rows(1, end=date(2026, 9, 29))})
+        self.assertTrue(self.service._entry_data_complete("005930", "2026-09-30"))
+        self.assertEqual(before, self.store.load_daily_bars("005930", "KRX", 1)[0])
+
+    async def test_restart_historical_high_cache_checks_daily_input_identity(self):
+        self.service._nxt_enabled = AsyncMock(return_value=False)
+        await self.service._ensure_entry_daily_history("005930", "2026-09-30")
+        first = HistoricalHighTarget(400, 2020, 2026, "2026-09", ())
+        second = HistoricalHighTarget(999, 2020, 2026, "2026-09", ())
+        with patch("kiwoom_monitor.central_server.autonomous_top20.HistoricalHighService.load",
+                   side_effect=[first, second]) as calculate:
+            await self.service._ensure_historical_high("005930", "2026-09-30")
+            await self.service._ensure_historical_high("005930", "2026-09-30")
+            self.assertEqual(1, calculate.call_count)
+            row = self.store.load_daily_bars("005930", "KRX", 1)[0]
+            self.store.replace_daily_bars([{**row, "high": 999}])
+            # No in-process signal: restart must compare persistent input identity.
+            restarted = AutonomousTop20Service(self.broker, RealtimeHub(), self.store, now_provider=lambda: self.now)
+            restarted._nxt_enabled = AsyncMock(return_value=False)
+            await restarted._ensure_historical_high("005930", "2026-09-30")
+            self.assertEqual(2, calculate.call_count)
+        self.assertEqual(999, self.store.load_documents("historical_highs", "005930", 1)[0]["document"]["target"]["price"])
+
+    async def test_changed_market_keeps_other_market_verified(self):
+        self.service._nxt_enabled = AsyncMock(return_value=True)
+        await self.service._ensure_entry_daily_history("005930", "2026-09-30")
+        self.broker.calls.clear()
+        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
+        changed = {**source_rows(1, end=date(2026, 9, 29))[0], "high_pric": "999"}
+        ingestor.ingest("ka10081", {"stk_cd": "005930"}, {"stk_dt_pole_chart_qry": [changed]})
+        await self.service._ensure_entry_daily_history("005930", "2026-09-30")
+        self.assertEqual(["005930", "005930"], [body["stk_cd"] for body, _ in self.broker.calls])
+
+    async def test_change_during_coverage_publication_cannot_mark_stage_complete(self):
+        self.service._nxt_enabled = AsyncMock(return_value=False)
+        original = self.store.upsert_documents
+        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
+        fired = False
+
+        def publish_and_change(collection, *args, **kwargs):
+            nonlocal fired
+            result = original(collection, *args, **kwargs)
+            if collection == COLLECTION and not fired:
+                fired = True
+                changed = {**source_rows(1, end=date(2026, 9, 29))[0], "high_pric": "999"}
+                ingestor.ingest("ka10081", {"stk_cd": "005930"}, {"stk_dt_pole_chart_qry": [changed]})
+            return result
+
+        self.store.upsert_documents = publish_and_change
+        with self.assertRaisesRegex(RuntimeError, "검증 중 입력"):
+            await self.service._ensure_entry_daily_history("005930", "2026-09-30")
+        self.assertFalse(self.service._entry_stage_is_ready("005930", "daily:KRX", "2026-09-30"))
+        await self.service._ensure_entry_daily_history("005930", "2026-09-30")
+        self.assertTrue(self.service._entry_stage_is_ready("005930", "daily:KRX", "2026-09-30"))
+
+    async def test_change_during_historical_calculation_keeps_retry_open(self):
+        self.service._nxt_enabled = AsyncMock(return_value=False)
+        await self.service._ensure_entry_daily_history("005930", "2026-09-30")
+        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
+
+        def calculate(_code):
+            changed = {**source_rows(1, end=date(2026, 9, 29))[0], "high_pric": "999"}
+            ingestor.ingest("ka10081", {"stk_cd": "005930"}, {"stk_dt_pole_chart_qry": [changed]})
+            return HistoricalHighTarget(400, 2020, 2026, "2026-09", ())
+
+        with patch("kiwoom_monitor.central_server.autonomous_top20.HistoricalHighService.load", side_effect=calculate):
+            with self.assertRaisesRegex(RuntimeError, "計算|계산 중 일봉"):
+                await self.service._ensure_historical_high("005930", "2026-09-30")
+        self.assertEqual([], self.store.load_documents("historical_highs", "005930", 1))
+        self.assertFalse(self.service._entry_stage_is_ready("005930", "daily:KRX", "2026-09-30"))
+
+    async def test_rollback_and_lost_commit_ack_both_revalidate_without_losing_dirty_state(self):
+        self.service._nxt_enabled = AsyncMock(return_value=False)
+        await self.service._ensure_entry_daily_history("005930", "2026-09-30")
+        self._mark_entry_ready()
+        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
+        original = self.store.replace_daily_bars
+        changed = {**source_rows(1, end=date(2026, 9, 29))[0], "high_pric": "999"}
+        before_calls = len(self.broker.calls)
+
+        def rollback(*args, **kwargs):
+            raise OSError("injected rollback")
+
+        self.store.replace_daily_bars = rollback
+        with self.assertRaisesRegex(OSError, "rollback"):
+            ingestor.ingest("ka10081", {"stk_cd": "005930"}, {"stk_dt_pole_chart_qry": [changed]})
+        self.store.replace_daily_bars = original
+        await self.service._ensure_entry_daily_history("005930", "2026-09-30")
+        self.assertEqual(before_calls, len(self.broker.calls))  # Intact proof: no new TR.
+
+        def lose_ack(*args, **kwargs):
+            original(*args, **kwargs)
+            raise OSError("injected lost COMMIT acknowledgement")
+
+        self.store.replace_daily_bars = lose_ack
+        with self.assertRaisesRegex(OSError, "COMMIT"):
+            ingestor.ingest("ka10081", {"stk_cd": "005930"}, {"stk_dt_pole_chart_qry": [changed]})
+        self.store.replace_daily_bars = original
+        version = self.service._daily_versions("005930")
+        ingestor.ingest("ka10081", {"stk_cd": "005930"}, {"stk_dt_pole_chart_qry": [changed]})
+        self.assertEqual(version, self.service._daily_versions("005930"))  # No-op retry.
+        self.assertFalse(self.service._entry_data_complete("005930", "2026-09-30"))
+        await self.service._ensure_entry_daily_history("005930", "2026-09-30")
+        self.assertEqual(before_calls + 2, len(self.broker.calls))
 
     async def test_old_rows_are_refreshed_once_premarket_then_reused_and_reverified(self):
         MarketDataIngestor(self.store).ingest("ka10081", {"stk_cd": "005930"},

@@ -164,6 +164,66 @@ class HistoricalHighServiceTests(unittest.TestCase):
         monthly_body = next(body for api_id, body in client.bodies if api_id == "ka10083")
         self.assertEqual(date.today().strftime("%Y%m%d"), monthly_body["base_dt"])
 
+    def test_source_as_of_is_used_for_adjustment_chart_requests(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.bodies: list[tuple[str, dict[str, object]]] = []
+
+            def request_with_continuation(self, api_id: str, path: str, body: dict[str, object], *, cont_yn: str = "N", next_key: str = "") -> tuple[dict[str, object], bool, str]:
+                self.bodies.append((api_id, body))
+                if api_id == "ka10094":
+                    return {"stk_yr_pole_chart_qry": [{"dt": "20240000", "high_pric": "150", "upd_stkpc_tp": "8"}]}, False, ""
+                if api_id == "ka10083":
+                    return {"stk_mth_pole_chart_qry": [{"dt": "20241000", "high_pric": "140", "upd_stkpc_tp": "8"}]}, False, ""
+                return {"stk_dt_pole_chart_qry": [{"dt": "20241002", "high_pric": "130"}]}, False, ""
+
+        source_day = date(2001, 4, 3)
+        client = Client()
+        target = HistoricalHighService(client).load("003350", as_of=source_day)
+
+        self.assertEqual(130, target.price)
+        self.assertEqual(["20010403"] * 3, [body["base_dt"] for _, body in client.bodies])
+
+    def test_source_as_of_is_used_for_250_day_evidence(self) -> None:
+        class Client:
+            def request_with_continuation(self, api_id: str, path: str, body: dict[str, object], *, cont_yn: str = "N", next_key: str = "") -> tuple[dict[str, object], bool, str]:
+                return {"stk_yr_pole_chart_qry": [{"dt": "20240000", "high_pric": "150"}]}, False, ""
+
+        target = HistoricalHighService(
+            Client(), high_250_loader=lambda _code: 200,
+        ).load("003350", as_of=date(2001, 4, 3))
+
+        self.assertEqual("20010403", target.evidence[-1].trade_date)
+
+    def test_incremental_historical_high_uses_source_as_of_date(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.bodies: list[dict[str, object]] = []
+
+            def load_stored_historical_high(self, code):
+                return None
+
+            def request_with_continuation(self, api_id: str, path: str, body: dict[str, object], *, cont_yn: str = "N", next_key: str = "") -> tuple[dict[str, object], bool, str]:
+                self.bodies.append(body)
+                return {"stk_yr_pole_chart_qry": [{"dt": "20250000", "high_pric": "100"}]}, False, ""
+
+        client = Client()
+        cache = HistoricalHighCache(
+            HistoricalHighTarget(100, 2025, 2025, "20250000", (
+                HistoricalHighEvidence("year", "20250000", 100),
+            )),
+            "2025-01-01",
+        )
+        service = HistoricalHighService(
+            client, cache_loader=lambda _code: cache,
+            high_250_loader=lambda _code: 90,
+        )
+
+        target = service.load("003350", as_of=date(2001, 4, 3))
+
+        self.assertEqual(["20010403"], [body["base_dt"] for body in client.bodies])
+        self.assertEqual("20010403", target.evidence[-1].trade_date)
+
     def test_keeps_current_adjusted_price_after_share_consolidations(self) -> None:
         class Client:
             def request_with_continuation(self, api_id: str, path: str, body: dict[str, object], *, cont_yn: str = "N", next_key: str = "") -> tuple[dict[str, object], bool, str]:

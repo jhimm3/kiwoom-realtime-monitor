@@ -96,6 +96,10 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             # Create an actual verified source-window marker and canonical bars.
             first = AutonomousTop20Service(broker, RealtimeHub(), store, now_provider=lambda: now)
             await first._ensure_entry_daily_history("005930", "2026-09-30")
+            from kiwoom_monitor.application.historical_high_service import HistoricalHighTarget
+            with patch("kiwoom_monitor.central_server.autonomous_top20.HistoricalHighService.load",
+                       return_value=HistoricalHighTarget(110, 2026, 2026, "2026-09", ())):
+                await first._ensure_historical_high("005930", "2026-09-30")
             for _ in range(2):
                 restarted = AutonomousTop20Service(
                     broker, RealtimeHub(), store, minute_backfill_enabled=False, now_provider=lambda: now,
@@ -627,6 +631,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             hub = RealtimeHub()
             service = AutonomousTop20Service(
                 _Broker(), hub, store, catalog_loader=lambda: (),
+                now_provider=lambda: datetime.fromisoformat("2026-09-10T09:00:00+09:00"),
             )
             service._subscriber = hub.connect()
             service._entrants_day = "2026-09-10"
@@ -639,6 +644,10 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(latest)
                 assert latest is not None
                 self.assertEqual("pending", latest["persistence_state"])
+                self.assertEqual(
+                    datetime.fromisoformat("2026-09-10T09:00:00+09:00").timestamp(),
+                    latest["saved_at"],
+                )
                 self.assertEqual(20, len(latest["payload"]["items"]))
                 requested, _nxt = hub.requested_codes()
                 self.assertEqual(set(latest["payload"]["codes"]), set(requested))

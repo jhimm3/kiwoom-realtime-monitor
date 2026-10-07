@@ -76,9 +76,11 @@ class MarketDataIngestor:
         store: QueryStore,
         *,
         now_provider: Callable[[], datetime] | None = None,
+        on_daily_change: Callable[[str, str], None] | None = None,
     ) -> None:
         self._store = store
         self._now = now_provider or (lambda: datetime.now(KST))
+        self._on_daily_change = on_daily_change
 
     def ingest(self, api_id: str, body: dict[str, Any], payload: dict[str, Any]) -> None:
         if api_id == "ka10080":
@@ -108,8 +110,8 @@ class MarketDataIngestor:
         if not code or not isinstance(records, list):
             return
         prepare_started = monotonic()
-        base_date = _base_date(body.get("base_dt"))
         now = self._now()
+        base_date = _base_date(body.get("base_dt"), fallback=now)
         values: list[dict[str, Any]] = []
         for record in records:
             if not isinstance(record, dict):
@@ -287,7 +289,24 @@ class MarketDataIngestor:
             )
             observation = daily_bar_observation(value, completeness=completeness)
             observations.append((bar_observation_key(observation), observation))
-        self._store.replace_daily_bars(values, observations=observations)
+        try:
+            changed = self._store.replace_daily_bars(values, observations=observations)
+        except Exception:
+            # COMMIT acknowledgement can be lost after the actual write. Revalidate
+            # conservatively; a real rollback reuses intact coverage without a new TR.
+            if values:
+                self._notify_daily_change(code, market)
+            raise
+        if changed:
+            self._notify_daily_change(code, market)
+
+    def _notify_daily_change(self, code: str, market: str) -> None:
+        if self._on_daily_change is not None:
+            try:
+                self._on_daily_change(code, market)
+            except Exception:
+                # An observer failure must not turn a committed response into a save failure.
+                logger.exception("일봉 준비 상태 갱신 알림 실패: %s %s", code, market)
 
     def _ingest_ranking(self, body: dict[str, Any], payload: dict[str, Any]) -> None:
         now = self._now()
@@ -384,11 +403,11 @@ def _code_and_market(raw: str) -> tuple[str, str]:
     return raw.removesuffix("_NX").removesuffix("_AL"), market
 
 
-def _base_date(value: object) -> datetime:
+def _base_date(value: object, *, fallback: datetime) -> datetime:
     try:
         return datetime.strptime(str(value), "%Y%m%d")
     except ValueError:
-        return datetime.now()
+        return datetime.combine(fallback.date(), clock_time())
 
 
 def _minute(value: object, base_date: datetime) -> datetime | None:

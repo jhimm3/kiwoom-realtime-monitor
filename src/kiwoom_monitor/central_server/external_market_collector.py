@@ -46,6 +46,9 @@ class YahooDelayedMarketCollector:
         self._opener = opener
         self._task: asyncio.Task[None] | None = None
         self._last_daily_date = ""
+        self._daily_tracking_date = ""
+        self._daily_completed_contracts: set[tuple[str, str]] = set()
+        self._daily_collection_complete = False
         self._daily_reference_closes: dict[tuple[str, str], float] = {}
         self._collection: asyncio.Task | None = None
         self._collection_daily = False
@@ -168,6 +171,13 @@ class YahooDelayedMarketCollector:
         if not task.cancelled(): task.exception()
 
     async def _collect_once(self, *, include_daily: bool) -> dict[str, int]:
+        daily_date = datetime.now(timezone.utc).date().isoformat()
+        if self._daily_tracking_date != daily_date:
+            self._daily_tracking_date = daily_date
+            self._daily_completed_contracts.clear()
+        daily_complete = include_daily
+        if include_daily:
+            self._daily_collection_complete = False
         saved: dict[str, int] = {}
         for instrument, configured_contract in self._symbols.items():
             count = 0
@@ -180,19 +190,24 @@ class YahooDelayedMarketCollector:
             intraday_by_contract: dict[str, list[dict[str, Any]]] = {}
             errors: list[str] = []
             for contract in contracts:
+                daily_key = (instrument, contract)
+                daily_pending = include_daily and daily_key not in self._daily_completed_contracts
                 try:
                     intraday = await asyncio.to_thread(self._fetch, instrument, contract, "5m", "5d")
                     intraday_by_contract[contract] = intraday
                     await asyncio.to_thread(self._store.save_external_bars, intraday)
                     count += len(intraday)
-                    if include_daily:
+                    if daily_pending:
                         daily = await asyncio.to_thread(self._fetch, instrument, contract, "1d", "2y")
                         await asyncio.to_thread(self._store.save_external_bars, daily)
                         count += len(daily)
+                        self._daily_completed_contracts.add(daily_key)
                         reference = previous_daily_close(daily)
                         if reference is not None:
                             self._daily_reference_closes[(instrument, contract)] = reference
                 except Exception as error:
+                    if daily_pending:
+                        daily_complete = False
                     errors.append(f"{contract}: {error}")
                     logger.warning("Yahoo 지연 시세 월물 수집 실패: %s(%s) %s", instrument, contract, error)
             try:
@@ -228,12 +243,19 @@ class YahooDelayedMarketCollector:
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
                 await asyncio.to_thread(self._save_roll_state, instrument, new_state)
-                status = "ok" if selected in intraday_by_contract else "failed"
+                status = "ok" if selected in intraday_by_contract and not errors else "failed"
                 await asyncio.to_thread(self._save_status, instrument, selected, status, "; ".join(errors), count)
             except Exception as error:
                 logger.warning("Yahoo 지연 시세 수집 실패: %s(%s) %s", instrument, active_contract, error)
+                if include_daily and any(
+                    (instrument, contract) not in self._daily_completed_contracts
+                    for contract in contracts
+                ):
+                    daily_complete = False
                 await asyncio.to_thread(self._save_status, instrument, active_contract, "failed", str(error), count)
             saved[instrument] = count
+        if include_daily:
+            self._daily_collection_complete = daily_complete
         return saved
 
     async def _run(self) -> None:
@@ -242,7 +264,7 @@ class YahooDelayedMarketCollector:
                 today = datetime.now(timezone.utc).date().isoformat()
                 include_daily = self._last_daily_date != today
                 await self.collect_once(include_daily=include_daily)
-                if include_daily:
+                if include_daily and self._daily_collection_complete:
                     self._last_daily_date = today
             await asyncio.sleep(self._poll_seconds)
 

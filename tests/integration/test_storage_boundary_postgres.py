@@ -358,10 +358,12 @@ class PostgresStorageBoundaryTests(unittest.TestCase):
         replay = {**original, "updated_at": original["updated_at"] + 60}
         corrected = {**replay, "close": 10060, "updated_at": replay["updated_at"] + 60}
 
-        self.store.replace_daily_bars([original])
-        self.store.replace_daily_bars([replay])
+        self.assertEqual(((original["trading_date"], code, "KRX"),),
+                         self.store.replace_daily_bars([original]))
+        self.assertEqual((), self.store.replace_daily_bars([replay]))
         [unchanged] = self.store.load_daily_bars(code, "KRX", 1)
-        self.store.replace_daily_bars([corrected])
+        self.assertEqual(((corrected["trading_date"], code, "KRX"),),
+                         self.store.replace_daily_bars([corrected]))
         [changed] = self.store.load_daily_bars(code, "KRX", 1)
 
         self.assertEqual(original["updated_at"], unchanged["updated_at"])

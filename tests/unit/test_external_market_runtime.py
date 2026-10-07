@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from kiwoom_monitor.central_server.app import create_app
@@ -99,6 +100,115 @@ class ExternalMarketRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.collector.release.set()
         await asyncio.gather(first, second)
         self.assertEqual(2, sum(interval == "1d" for _, interval in self.collector.calls))
+
+    async def test_daily_failure_retries_only_failed_contract_on_next_poll(self):
+        self.collector.release.set()
+        original_fetch = self.collector._fetch
+        daily_attempts = {}
+
+        def fetch(instrument, contract, interval, range_value):
+            if interval == "1d":
+                daily_attempts[contract] = daily_attempts.get(contract, 0) + 1
+                if contract == "CLX26.NYM" and daily_attempts[contract] == 1:
+                    raise OSError("injected daily fetch failure")
+            return original_fetch(instrument, contract, interval, range_value)
+
+        with patch.object(self.collector, "_fetch", side_effect=fetch):
+            await self.collector.collect_once(include_daily=True)
+            self.assertFalse(self.collector._daily_collection_complete)
+            self.assertEqual(
+                "failed",
+                self.store.documents[("external_market_collection_status", "WTI_FUTURES")]["status"],
+            )
+            await self.collector.collect_once(include_daily=True)
+
+        self.assertEqual(1, daily_attempts["CLV26.NYM"])
+        self.assertEqual(2, daily_attempts["CLX26.NYM"])
+        self.assertTrue(self.collector._daily_collection_complete)
+        self.assertEqual(
+            "ok",
+            self.store.documents[("external_market_collection_status", "WTI_FUTURES")]["status"],
+        )
+
+    async def test_daily_store_failure_retries_only_failed_contract(self):
+        self.collector.release.set()
+        original_save = self.store.save_external_bars
+        daily_attempts = {}
+
+        def save(values):
+            if values and values[0]["timeframe"] == "1d":
+                contract = values[0]["contract"]
+                daily_attempts[contract] = daily_attempts.get(contract, 0) + 1
+                if contract == "CLX26.NYM" and daily_attempts[contract] == 1:
+                    raise OSError("injected daily database save failure")
+            original_save(values)
+
+        with patch.object(self.store, "save_external_bars", side_effect=save):
+            await self.collector.collect_once(include_daily=True)
+            self.assertFalse(self.collector._daily_collection_complete)
+            await self.collector.collect_once(include_daily=True)
+
+        self.assertEqual(1, daily_attempts["CLV26.NYM"])
+        self.assertEqual(2, daily_attempts["CLX26.NYM"])
+        self.assertTrue(self.collector._daily_collection_complete)
+
+    async def test_restart_retries_unfinished_daily_contracts(self):
+        self.collector.release.set()
+        original_fetch = self.collector._fetch
+        daily_attempts = {}
+
+        def fail_next_daily_once(instrument, contract, interval, range_value):
+            if interval == "1d":
+                daily_attempts[contract] = daily_attempts.get(contract, 0) + 1
+                if contract == "CLX26.NYM" and daily_attempts[contract] == 1:
+                    raise OSError("injected daily fetch failure before restart")
+            return original_fetch(instrument, contract, interval, range_value)
+
+        with patch.object(self.collector, "_fetch", side_effect=fail_next_daily_once):
+            await self.collector.collect_once(include_daily=True)
+        self.assertFalse(self.collector._daily_collection_complete)
+
+        restarted = _SyntheticCollector(self.store, {"WTI_FUTURES": "CLV26.NYM"})
+        restart_attempts = {}
+        restarted_fetch = restarted._fetch
+
+        def count_restart_daily(instrument, contract, interval, range_value):
+            if interval == "1d":
+                restart_attempts[contract] = restart_attempts.get(contract, 0) + 1
+            return restarted_fetch(instrument, contract, interval, range_value)
+
+        with patch.object(restarted, "_fetch", side_effect=count_restart_daily):
+            await restarted.collect_once(include_daily=True)
+
+        self.assertEqual(1, daily_attempts["CLV26.NYM"])
+        self.assertEqual(1, daily_attempts["CLX26.NYM"])
+        self.assertEqual(1, restart_attempts["CLV26.NYM"])
+        self.assertEqual(1, restart_attempts["CLX26.NYM"])
+        self.assertTrue(restarted._daily_collection_complete)
+        self.assertEqual(
+            "ok",
+            self.store.documents[("external_market_collection_status", "WTI_FUTURES")]["status"],
+        )
+
+    async def test_poll_loop_does_not_mark_daily_complete_after_partial_failure(self):
+        class StopAfterCycle(Exception):
+            pass
+
+        async def stop_after_cycle(_seconds):
+            raise StopAfterCycle
+
+        self.collector._daily_collection_complete = False
+        with patch.object(self.collector, "collect_once", new=AsyncMock(return_value={})), patch(
+            "kiwoom_monitor.central_server.external_market_collector.is_paused",
+            return_value=False,
+        ), patch(
+            "kiwoom_monitor.central_server.external_market_collector.asyncio",
+            SimpleNamespace(sleep=stop_after_cycle),
+        ):
+            with self.assertRaises(StopAfterCycle):
+                await self.collector._run()
+
+        self.assertEqual("", self.collector._last_daily_date)
 
     async def test_shutdown_waits_for_cancelled_settings_operation(self):
         first = asyncio.create_task(self.collector.collect_once())

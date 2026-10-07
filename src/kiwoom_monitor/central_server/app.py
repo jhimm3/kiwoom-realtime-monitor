@@ -42,7 +42,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.10.06-recorded-capture-api-v1"
+SERVER_BUILD = "2026.10.07-top20-replay-drain-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -213,8 +213,12 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         kiwoom_client = KiwoomRestClient(KiwoomSettings(
             active.kiwoom_app_key, active.kiwoom_secret_key, active.kiwoom_environment,
         ))
+        def daily_bars_changed(code: str, market: str) -> None:
+            if top20_service is not None:
+                top20_service.notify_daily_bars_changed(code, market)
+
         broker = CentralRestBroker(
-            kiwoom_client, store, MarketDataIngestor(store).ingest,
+            kiwoom_client, store, MarketDataIngestor(store, on_daily_change=daily_bars_changed).ingest,
             ranking_reservation=True,
         )
         if active.account_identity_registry_enabled and not real_runtime_enabled:
@@ -591,6 +595,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         expected_session: str
         store_inputs: bool = Field(default=False, strict=True)
         collector_inputs: bool = Field(default=False, strict=True)
+        top20_inputs: bool = Field(default=False, strict=True)
+        persist_at: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     class QueryRequest(BaseModel):
         api_id: str = Field(min_length=7, max_length=7)
@@ -1284,10 +1290,22 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                 "run_kinds": ["measure", "compare", "replay"],
                 "trace_input_capture": {
                     "schema_version": 2,
-                    "options": {"store_inputs": False, "collector_inputs": False},
-                    "collector_event_types": ["0B"],
+                    "options": {"store_inputs": False, "collector_inputs": False, "top20_inputs": False},
+                    "top20_input_capture": {"schema_version": 3,
+                        "input_version": "top20-ranking-input/v1",
+                        "scope": "ranking_validation_only", "downstream_replay_supported": False,
+                        "candidate_flow_input_version": "top20-candidate-flow-input/v1",
+                        "candidate_flow_scope": "candidate_flow_consumer_and_ingest",
+                        "broker_queue_and_cache_scheduling_replayed": False},
+                    "collector_input_version": "collector-input/v2",
+                    "collector_event_types": ["0B", "0w", "0J", "0U"],
                     "coverage": "observed_paths_only",
                     "overhead_verified": False,
+                    "deferred_persistence": {
+                        "supported": True, "request_field": "persist_at", "max_delay_seconds": 86400,
+                        "memory_limit_bytes": 4 * 1024 * 1024 * 1024,
+                        "event_capacity": 1_000_000, "write_bytes_per_second": 1024 * 1024,
+                    },
                 },
                 "trace_replay_writer_kinds": sorted(TRACE_SYNTHETIC_KINDS),
                 "query_minute_scenarios": sorted(QUERY_MINUTE_SCENARIOS),
@@ -1352,16 +1370,19 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         control = control_snapshot(path)
         if control["diagnostic_tool"]["session_id"] != body.expected_session:
             raise HTTPException(409, detail="diagnostic_control_conflict")
-        if trace_state().get("state") in {"running", "stopping"}:
+        busy_states = {"running", "stopping", "awaiting_persistence", "persisting"}
+        if trace_state().get("state") in busy_states:
             raise HTTPException(409, detail="trace_already_running")
         try:
             await asyncio.to_thread(_set_trace, path, True, body.seconds,
                                     expected_session=body.expected_session)
             return await asyncio.to_thread(start_trace, seconds=body.seconds,
                                           store_inputs=body.store_inputs,
-                                          collector_inputs=body.collector_inputs)
+                                          collector_inputs=body.collector_inputs,
+                                          top20_inputs=body.top20_inputs,
+                                          persist_at=body.persist_at)
         except ValueError as error:
-            if trace_state().get("state") not in {"running", "stopping"}:
+            if trace_state().get("state") not in busy_states:
                 await asyncio.to_thread(_set_trace, path, False, body.seconds,
                                         expected_session=body.expected_session)
             raise HTTPException(409, detail=str(error)) from error

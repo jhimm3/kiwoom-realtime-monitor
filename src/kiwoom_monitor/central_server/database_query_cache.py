@@ -10,6 +10,12 @@ from typing import Any, Protocol
 logger = logging.getLogger("kiwoom_monitor.central_server.database")
 
 
+def _cache_wall_time(store) -> float:
+    # Only an owned replay store supplies this clock. Production stays unchanged.
+    provider = getattr(store, "_query_cache_wall_time", None)
+    return time() if provider is None else provider()
+
+
 @dataclass(frozen=True)
 class StoredQuery:
     payload: dict[str, Any]
@@ -30,7 +36,7 @@ class SQLiteQueryCacheStoreMixin:
         with self._lock, self._connection() as connection:
             row = connection.execute(
                 "SELECT payload_json,has_next,next_key FROM central_api_query_cache "
-                "WHERE cache_key=? AND expires_at>?", (cache_key, time()),
+                "WHERE cache_key=? AND expires_at>?", (cache_key, _cache_wall_time(self)),
             ).fetchone()
         if row is None:
             return None
@@ -47,7 +53,7 @@ class SQLiteQueryCacheStoreMixin:
                 "has_next=excluded.has_next,next_key=excluded.next_key",
                 (cache_key, api_id, expires_at, encoded, int(value.has_next), value.next_key),
             )
-            connection.execute("DELETE FROM central_api_query_cache WHERE expires_at<=?", (time(),))
+            connection.execute("DELETE FROM central_api_query_cache WHERE expires_at<=?", (_cache_wall_time(self),))
 
 
 class PostgresQueryCacheStoreMixin:
@@ -61,7 +67,7 @@ class PostgresQueryCacheStoreMixin:
         with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT payload_json,has_next,next_key FROM central_api_query_cache "
-                "WHERE cache_key=%s AND expires_at>%s", (cache_key, time()),
+                "WHERE cache_key=%s AND expires_at>%s", (cache_key, _cache_wall_time(self)),
             )
             row = cursor.fetchone()
         if row is None:
@@ -98,7 +104,7 @@ class PostgresQueryCacheStoreMixin:
                 upsert_ms = round((monotonic() - phase_started) * 1000)
 
                 phase_started = monotonic()
-                cursor.execute("DELETE FROM central_api_query_cache WHERE expires_at<=%s", (time(),))
+                cursor.execute("DELETE FROM central_api_query_cache WHERE expires_at<=%s", (_cache_wall_time(self),))
                 cleanup_ms = round((monotonic() - phase_started) * 1000)
 
             phase_started = monotonic()

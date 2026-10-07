@@ -1,5 +1,438 @@
 # 남은 작업과 보류 사항
 
+**2026-10-08 NAS log display timezone:** `server_logging.py` now has a local candidate change to
+format timestamps in Asia/Seoul and rotate daily logs at 15:00 UTC (KST midnight), without changing
+the process timezone, database timestamps or scheduler. It is not deployed. The already armed
+October 8 capture checks the active release `2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9`;
+deploying another release or restarting the server before its deferred trace persistence completes
+would invalidate that capture plan. Validate and activate after the trace reaches `complete` at or
+after 20:10 KST, then verify the new timestamp and rotation behavior on NAS. No test suite was run.
+
+
+**2026-10-08 O12 local start armed:** detached NAS PID 3492 runs the stdlib one-shot scheduler
+for 08:59:50–09:59:50 / 20:10 deferred persistence. Seven scheduler tests and NAS read-only
+preflight passed; the immutable server release and both containers are unchanged.
+Start heartbeat is now read-only at 09:01; final verifier reads the NAS `.status.json` trace_id.
+No duplicate chat start or automatic retry after an uncertain POST. Confirm actual start and
+accepted growth; written may remain zero during deferred RAM retention. This wait does not
+survive a NAS reboot. Actual start/capture coverage/persistence acceptance remains open.
+The earlier chat-driven 08:58 preflight reservation is superseded.
+
+**2026-10-08 O12 current acceptance:** NAS 103 tests, private API gate and a 294-event durable
+smoke passed. Release `2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9` is active;
+live API confirms schema 3 / 8GiB / 5,000,000 events / 1MiB/s. Start and verification automations
+now require this exact release and all three input flags, targeting 08:59:50–09:59:50 on October 8,
+deferred persistence at 20:10, verification October 9 02:30. Actual timing must be checked.
+The post-deploy helper's image-source import error did not undo deployment; the helper check
+now reads the live API and PID1 source identity. No new activation or regression rerun is needed.
+Still open: actual opening capture integrity/replay coverage, whole-app capture overhead,
+full-capacity persistence and source-state equivalence. A small smoke is not proof of these.
+Earlier gate-pending and older release/window notes below are historical.
+
+**2026-10-08 O12 NAS gate loading failure:** optional Starlette TestClient dependency prevented
+the first 8GiB/5M NAS gate from loading; deployment did not proceed. Do not install httpx2.
+The candidate API tests now execute real HTTP ASGI authentication/middleware/validation and
+retain all four acceptance tests without TestClient/httpx/httpx2. PC API 4/4 and related full
+suite 103/103 passed; no optional HTTP client modules were loaded in the API-only run.
+Republish the test-only correction, then run exact NAS regression, bounded durable smoke and
+source activation before updating the two schedules. Full persistence/market overhead gaps remain.
+
+**2026-10-08 O12 latest request supersedes earlier window/defaults:** 08:59:50–09:59:50 KST,
+3,600 seconds, actual deferred defaults 8GiB / 5,000,000 events. Staged immutable candidate
+`2026.10.08-trace-ram-8g-5m-v1-abece6f02adbe726` has matching API capabilities, 8GiB total
+storage quota, unchanged 1MiB/s paced persistence, and 9GiB host/cgroup start headroom.
+PC related regression passed 68 tests and direct schema-3 API forwarding/default limits gate.
+Active v6 and both schedules remain unchanged pending exact-source NAS gate and activation.
+Then update capture and verification schedules together, including all three input flags and
+the existing 20:10 KST deferred persistence deadline. Still unverified: real opening maximum,
+whole-app capture overhead, and full-capacity persistence. Prior synthetic capacity results
+must not be generalized as a whole-app performance baseline. Release preparation is authorized
+by the user's explicit 8GiB/5M release request; this does not make missing measurements verified.
+
+**2026-10-08 O12 requested capture window: 09:00–10:00 KST (60 minutes):**
+The user shortened the target to 3,600 seconds, excluding the pre-open five minutes. Prepare an
+inactive exact-v11-derived 36,000-message probe using the same 20-row/100ms synthetic input envelope,
+REST/catalog/subscription/lifecycle mix, private 15GiB/5M budget and 4GiB physical reserve guard.
+Logical charge is not RSS: v11 charged 16,075,246,320 bytes while RSS peaked at 4,675,239,936 bytes.
+Do not recalibrate accounting or infer a physical 15GiB RAM requirement from this change. Keep
+operational 4GiB/1M defaults and active v6 unchanged until exact-source regression, NAS memory/capacity,
+overhead and persistence gates pass. Both capture-start and verification reservations must then agree
+on 09:00–10:00, the accepted limits, schema 3, all three input flags, exact build/release and deferred
+persistence deadline. A private synthetic capacity pass alone does not authorize deployment.
+
+Staged private candidate: `2026.10.08-causal-capture-60m-v1-a8376b5b6bdf96e7` (929 files,
+isolated commit `ffc47de13c7348081845f2d876988c67c28eb785`). Exact-source PC unit/API regression
+passed 101 tests with no skips; API forwarding, 100-message smoke and POSIX shell syntax passed.
+NAS active/runtime/runner metadata stayed identical. User report `causal-capture-60m.wMVk6k.log`
+completed all 36,000 synthetic messages: accepted 2,307,608, input_rejected=known_dropped=0,
+written=0 (deferred RAM). Charge=15,550,948,874, high-water=15,559,223,163,
+RSS peak=4,526,362,624, minimum host available=13,554,601,984 bytes. Only about3.4% charge
+margin remains. This is not an actual market maximum or full consumer execution benchmark.
+ON short-message p95=7.45–7.71ms vs OFF=2.94–2.99ms; full ON max=1,837ms,
+payload copy max=2,477ms. Next isolate slow copy inputs/GC without changing runtime policy;
+do not attribute the maximum to GC without correlation evidence. The 294-event durable smoke
+passed, but full-capacity persistence and overhead acceptance remain pending. Operational
+defaults and both reservations are unchanged.
+Inactive diagnosis candidate `2026.10.08-causal-capture-copy-profile-v1-f5b07b1d5fd17b0e`
+adds only private per-input copy timing and GC correlation (worst8 records bounded). Recorder,
+contract, GC policy and operational limits are unchanged. PC20-message smoke preserved accepted294,
+zero rejected/drop; POSIX syntax passed. Run `scripts/check_causal_copy_profile.sh` on NAS.
+Instrumented results narrow causes only; they do not replace uninstrumented overhead acceptance.
+
+User report `causal-copy-profile.1gzqXn.log` completed the same36,000-message envelope losslessly
+in RAM (accepted2,307,608, written0). Largest REST copy=2448.337ms, GC inside=2430.272ms;
+small realtime-input copy=1989.087ms, GC=1988.862ms; save_query copy=1636.053ms,
+GC=1617.831ms. Gen2 GC totaled24801.542ms over38 collections. Observed long-copy stalls
+are predominantly GC pauses in this controlled probe, not simply large payload traversal.
+Remaining decision: reduce retained Python object-graph cost without changing process-wide GC
+policy or moving unacceptable CPU/queue delay into collector paths. Current DeliveryStage/Context
+ownership and frozen tuples must retain charge/refcounts, event ordering, causal IDs and durable schema.
+No production gc.disable/gc.freeze/threshold change is authorized by this diagnosis. Large paced
+persistence, uninstrumented overhead and actual market maximum remain unverified.
+
+**2026-10-08 O12 v10 sizing did not start; v11 15GiB private probe prepared:**
+v8 private 12GiB/5M sizing had two market_request_lane_limit rejections at mixed round 24,361. v9
+stores the exact canonical UTF-8 request signature internally and charges its byte length, retaining
+per-signature ordinals, replay pairing, wire payload, 4MiB byte cap, and 32,768 lane cap. Exact v9
+source passed 100 unit regressions/API gate; focused REST/tape/lifecycle tests passed 49/49.
+The v9 NAS 12GiB/5M run retained 3,968 request keys charged at 2,911,020 bytes. Copy reservation
+then saturated at 29,731 messages (about 49.6 minutes at the probe's 100ms cadence): 1,905,826
+accepted, 28 capture_memory_full input rejections, zero known drops, 12,851,783,703 charged bytes,
+RSS peak 3,735,203,840 bytes, minimum host MemAvailable 14,344,683,520 bytes, and cgroup headroom
+13,431,042,048 bytes. This was an expected classified saturation, not a complete 65-minute input
+run. It does not establish sufficient capacity.
+
+Inactive v10 candidate 2026.10.07-causal-deferred-capture-v10-fdbeeef6e982aa2e is staged. It probes
+39,000 messages at 100ms intervals (65 minutes of synthetic timestamps) with a private 16GiB charge
+budget inside a 20GiB cgroup, preserving a 4GiB host/cgroup reserve. The gate must complete all
+39,000 with zero input rejection/drop and report actual RSS/headroom. Exact-source PC regression
+100/API and a small 16GiB smoke passed; POSIX shell syntax passed. The NAS 65-minute gate then failed
+before recording input: its preflight requires 17GiB host/cgroup headroom for a 16GiB charge budget,
+while the preceding host MemAvailable sample was 18,073,481,216 bytes, 180,129,792 bytes below that
+threshold. It is a startup-headroom failure, not evidence that the 16GiB charge budget saturated.
+Inactive v11 `2026.10.08-causal-deferred-capture-v11-dffa8b971619a1ea` was staged from exact v10 source
+(928 files, commit `ae1e7cbe9c71ec44ca83cdeddbcae4bf529137d8`, active/runtime unchanged). Its 15GiB NAS
+probe reached copy-reservation saturation after 37,201 of 39,000 messages (about 62:00 of synthetic
+65:00), with 2,384,653 accepted events, 28 `capture_memory_full` rejections and zero known drops.
+The memory charge limit was first; event count remained below its 5M cap. Charged bytes were
+16,075,246,320; RSS peak 4,675,239,936 bytes; minimum host MemAvailable 13,404,901,376 bytes and
+cgroup headroom 16,789,262,336 bytes. The 4GiB runtime guard remained satisfied. Therefore 15GiB is
+insufficient for this envelope.
+
+The probe also reported `copy_ms_max=2,481` and message latency max 1,833ms, without identifying which
+input caused the maximum. Capture overhead is not approved. Next: read current NAS MemAvailable and
+rerun the staged v10 16GiB private gate only if it is at least 18,253,611,008 bytes (17GiB); otherwise
+stop before the probe. Do not weaken production preflight. Active release/runtime, containers,
+4GiB/1M defaults and the capture reservation remain unchanged. Even a complete synthetic envelope
+does not establish actual market maximum, 65-minute live capture, paced near-capacity persistence,
+global file quota, or the source of the copy-time outlier.
+
+**2026-10-07 O12 v7 NAS correctness 통과, capacity/overhead 승인 보류:** API, 94개 회귀,
+15개 PostgreSQL gate 및 294event catalog durable smoke가 통과했다. 4GiB/1M은 630,132event,
+8GiB/5M은 1,267,390event에서 copy admission RAM 한도로 입력 거부가 발생했다. known_dropped=0도
+input_rejected>0을 무손실로 바꾸지 않는다. OFF/ON p95 2.967/7.896ms 및 mixed 경로 지연을 포함해
+전체 장중 consumer의 영향은 아직 미확정이다. private v8 12GiB/5M sizing 후보는 PC 97개 회귀/API
+검증을 통과했지만 NAS 포화·RSS/headroom·ON/OFF 및 full-capacity durable drain은 남아 있다.
+운영 한도·active v6·Oct 8 예약은 유지한다. 실제 최대 입력 envelope, 파일 4GiB quota, 지연 gate까지
+통과하기 전 65분 충분성을 승인하거나 예약 expected build를 바꾸지 않는다.
+
+**2026-10-07 O12 catalog copy profile PC 구현 완료, NAS gate 대기:** 혼합 native 경로의 5,000종목 catalog 저장
+인자가 8MiB copy charge에 걸려 input rejection을 재현했다. 원형 인자 14,038,408 bytes를 담는
+catalog-only 16MiB profile을 capture reserve와 replay decoder/preflight에 대칭 적용했다.
+일반 입력 8MiB, node/type/secret 한도와 native 단일 호출은 보존한다. 프로파일 구현·회귀·NAS gate 전에는
+활성 v6/Oct 8 예약을 바꾸지 않는다. 2,500종목/150event durable 성공을 5,000종목 또는 65분 성공으로
+대체하지 않는다. [계약·파일·검증 범위](DB_REPLAY_TRACE_DESIGN.md#catalog-copy-profile-decision-2026-10-07-implementation-pending).
+현재 비활성 NAS 후보는 `2026.10.07-causal-deferred-capture-v7-5127bafdc15c374a`이다. v4는 DSM Docker의
+미지원 `--cpus 1` 옵션으로 테스트 시작 전에 실패했다. v5 API는 통과했으나 v6까지 deferred trace의
+4GiB+64MiB 파일 저장 여유 preflight에 작은 tmpfs가 걸렸고, 게이트가 요구하는 T1–T4 테스트 파일 3개도
+release에 누락되어 51개 중 21개 오류가 났다. v7은 5GiB tmpfs와 누락 테스트를 포함한다. NAS 회귀,
+RSS/MemAvailable/cgroup, ON/OFF 지연 및 paced persistence는 아직 미검증이며 활성 release와 예약은 그대로다.
+
+**2026-10-07 O12 shared delivery retention PC 검증 완료, NAS 용량 gate 대기:** immutable
+source/subscriber/delivery identity와 slotted stage record를 deferred capture에 적용했다. 세
+delivery stage·JSONL 필드와 replay coverage는 보존되고 관련 84개 회귀가 통과했다. input rejection은
+terminal incomplete로 처리한다. 중간 PC 샘플은 4만 tick에서 charge 998MiB→219MiB, RSS 증가
+155MiB→113MiB였고 지연 개선은 확인하지 않았다. 이 작은 분포를 65분·장초 혼합 입력의 capacity
+보장으로 일반화하지 않는다. 새 비활성 후보를 exact-source로 staging한 뒤 NAS에서 OFF/ON·mixed
+shape·실 RSS/MemAvailable/cgroup·output bytes 및 persist deadline을 검증한다. 기존 4GiB/1M은
+아직 판정하지 않았고 8GiB/5M도 미승인이다. active v6와 Oct 8 예약은 gate 통과 전까지 유지한다.
+
+**2026-10-07 causal capture/deferred 후보 용량 gate 보류:** 기능 통합 및 로컬 회귀 78건은
+통과했지만 native delivery 경로의 통제 burst에서 8GiB/5M도 memory charge 한도에 먼저 도달했다.
+326,960 tick에서 약 101만 accepted event, RSS 약 1.26GiB였으며 `capture_memory_full`이 발생했다.
+delivery receipt가 작은 fixture charge의 약 88%를 차지한다. 실제 장초 입력 최대량은 아직 미확정이다.
+receipt/provenance 정합성을 보존하면서 retained metadata와 charge 계산을 재검토하고, 전체 causal
+혼합 입력량 및 NAS RSS/MemAvailable/ON-OFF 지연을 확인해야 한다. 비활성 후보의 NAS gate 후에도
+65분 용량 acceptance가 별도로 필요하다. 그 전에는 active v6와 10월 8일 08:55 예약의 build/options를
+변경하지 않는다. 불완전한 10월 6일 trace로 전체 성능·용량 기준선을 대신하지 않는다.
+
+**2026-10-07 O12 T4 native TOP20 + peer acceptance 완료:** 비활성 v2 candidate에서 15개 테스트가
+skipped=0으로 통과했다. 반복 실행과 service OFF/peer 조합, descendant 중복 방지, ACK loss 후 실제 drain,
+DB/outbox 복구와 v1 baseline 보존을 확인했다. report `replay-cache-v2-acceptance-ec337a0eda5c1167ff7f36c17a59a872.log`.
+두 stale/partial ranking 경고는 fixed controlled response가 후속 source slot에 맞지 않아 service가 해당 회차를
+저장하지 않은 것이다. 따라서 이 gate는 T4 lifecycle correctness만 승인하며 실제 장중 source-state 등가나
+성능을 승인하지 않는다(`source_state_equivalent=false`). **다음:** 무손실·유효 coverage의 실제 capture를 확보하면
+현재 코드 상태부터 같은 입력으로 baseline replay하고 이후 한 후보씩 전후 비교한다. 불완전한 capture는 전체
+성능 기준선으로 사용하지 않는다.
+
+**2026-10-07 O12 T4 shared execution 경계 로컬 검증:** 당시 v2 `_ReplayStore` clock을 lease generation/active/run-ready
+검증을 보존하는 explicit bound method로 연결했고, TOP20 native core가 store/clock/lease identity를 검사한다.
+기존 recorded peer scheduler는 이미 arm된 동일 source clock과 run 소유 native task/executor를 재사용할 수
+있도록 확장했다. operation error 및 waiter cancellation은 runtime 결과를 실패로 남기며 standalone runner가
+공유 runtime을 획득하는 경로는 DB restore 전 차단한다. 관련 회귀 34건 통과, 결과는
+`artifacts/t4-shared-clock-native-worker-tests.log`. 검증은 unit/fake store이며 전용 PostgreSQL의 TOP20+peer
+통합 실행·descendant 중복 방지·최종 DB/revision 비교·DB/outbox 복구는 미실행이다. **다음:** source manifest
+preflight와 workload mask가 확정된 뒤 owned lease 안에서 TOP20+peer를 함께 실행하고 반복/제외 및 최종 복구를
+검증했다. 이후 T4 controlled PostgreSQL acceptance 15건이 skipped=0으로 통과해 lifecycle gate는 완료됐다.
+전체 장중 상태 등가와 성능 비교는 유효한 실제 capture replay 전까지 미완료다. NAS active release와 capture 설정은 그대로다.
+
+**2026-10-07 O12 T3 NAS acceptance 완료:** 비활성 후보
+`2026.10.07-top20-replay-drain-v1-795caf04dde5e9ce`의 임시 RAM-backed·network-isolated PostgreSQL
+검사 13건이 모두 통과했고 skipped=0이었다. cancelled executor의 실제 drain 전 baseline reset 차단,
+native outbox commit ACK loss 후 재시도, DB/file 공동 복구 실패 처리, v1 snapshot 보존을 확인했다.
+report `replay-cache-v2-acceptance-ac1d6c7568abcfccedf0547c765c517c.log`;
+v1 `56e88db7bc556afdd8a64a5800a47a1f6663f339aa299cb9f462a4fb804b56a3`, v2
+`36e6ece20620ade0804ca28782fe23340fd9bceb24ce48d991883636e7e97446`. 운영 active release와 두
+컨테이너는 변경되지 않았다. **다음:** T4 native TOP20 lifecycle runner. 이 acceptance는 controlled
+fixture 정확성만 검증했으며 장중 상태 등가·성능을 뜻하지 않는다.
+
+**2026-10-07 O12 T1–T3 TOP20 입력·종료 경계 로컬 구현 및 후속 검증:** T1의 `diagnostic_rest_input.py`는 native broker/catalog
+입력 pair와 effect closure를 검증하고 offline tape로 공급한다. T2의 `diagnostic_top20_lifecycle_input.py`는
+0s·구독 intent·ACK/READY·hub control·gap 입력을 검증하고 실제 구독 요청에 대응하는 tape 및 descendant
+실행 계획을 제공한다. 관련 로컬 회귀 174건이 통과했다. 검증은 fake WebSocket/REST와 SQLite 경계이며,
+PostgreSQL·실제 capture overhead·전체 lifecycle replay acceptance는 아니다. T3의 run 소유 task/thread drain은
+실제 executor 종료를 확인한 뒤에만 reset/release를 허용하고, native `JsonRecordOutbox`는 실행 전용 파일과
+hash로 seed·복구를 확인한다. 기존 TOP20·broker·collector 회귀 142건, NAS PostgreSQL acceptance 13건이
+모두 통과했다. NAS gate는 controlled fixture에서 drain·DB/outbox 공동 복구를 검증했다. native lifecycle
+runner는 T4에 남아 있다.
+활성 NAS release와 녹화 설정은 유지한다.
+실제 capture overhead·무손실 새 입력 수용은 미검증이다.
+
+**2026-10-07 O12 TOP20 lifecycle 후속 구현 순서:**
+[실험 설계의 단계별 gate](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md#top20-lifecycle-실행-계약과-구현-순서--2026-10-07-설계-확정)를 따른다.
+T1 request/catalog 입력 경계는 관련 회귀 135건, T2 0s·subscription/ACK/READY/gap 입력과 descendant plan은
+관련 회귀 174건으로 로컬 구현을 마쳤다. T2의 검증은 fake WebSocket/REST와 SQLite 경계이며 PostgreSQL·실제
+capture overhead·전체 lifecycle acceptance를 뜻하지 않는다. 활성 NAS release와 녹화 설정은 그대로다. T3의
+owner/drain/outbox core와 관련 142건 회귀는 로컬 통과했다. PostgreSQL acceptance 13건도 NAS에서 통과했다.
+다음은 T4 native lifecycle 반복 gate,
+T5의 유효한 실제 입력 baseline 및
+동일 replay 전후 비교다. DB 연결 수 0만으로 drain을 판정하지 않으며 뒤늦게 연결을 여는 thread도 막아야 한다.
+불완전한 capture에서 입력을 추정해 채우지 않고 `input_unavailable`/미지원을 유지한다. 단계별 세부 검증 경계는
+실험 설계 문서에 기록한다.
+
+**2026-10-07 TOP20 replay v2 clock/cache/run (PostgreSQL correctness acceptance 통과):**
+`CentralRestBroker` 선택적 source wall clock과 query-cache v2 lease clock을 연결했다. 기존
+production/default broker와 baseline v1은 변하지 않는다. 별도 v2는 기존 14개 테이블 위에
+`central_api_query_cache`를 포함한다. CLI status/seal/restore 및 로컬 offline `run`에 opt-in v2가
+연결됐으며 기본값은 v1이다. 새 v2 실행은 복구 후 source clock을 arm하고 cache store 호출을 허용한다.
+v2 봉인은 복구된 v1 parent와 frozen source origin을 확인한다. source origin 불일치 복구와 오래된 lease
+연결은 거부한다. 로컬 cache expiry/07:00 key boundary/baseline ownership/seed gate focused 58건과 로컬
+clock 및 baseline unit 20건이 통과했다. 이어 NAS 임시 RAM-backed, network-isolated PostgreSQL에서 v1/v2
+acceptance 7건이 통과했고 skipped=0이었다. 이로써 v1 snapshot 보존과 v2 봉인·복구·rollback·generation
+fencing 및 snapshot/clock mismatch 거부를 실제 PostgreSQL에서 확인했다. v1/v2 baseline ID는 삭제된 임시
+cluster의 controlled fixture에만 해당하므로 재사용 가능한 NAS baseline이 아니다. `source_state_equivalent=false`이며
+성능 검증도 아니다. 임시 컨테이너와 비밀 파일은 제거됐고 운영 active release 및 서버/DB container는
+변경되지 않았다. 새 `run` 연결 후보 `2026.10.07-replay-cache-run-v1-329cb888022f0de9`의 NAS 임시
+RAM-backed·network-isolated PostgreSQL harness에서 기존 7건과 run gate 3건, 총 10건이 skipped=0으로 통과했다.
+반복 source-TTL run, collector/cache 공통 source clock, 제외 mask에서 cache descendant 미주입, COMMIT ACK loss
+뒤 drain 및 v1/v2 baseline 복구를 확인했다. report는
+`replay-cache-v2-acceptance-ed1cd3ae0653aff1d8db76f329493bc9.log`다. v1 fixture baseline은
+`56e88db7bc556afdd8a64a5800a47a1f6663f339aa299cb9f462a4fb804b56a3`, v2는
+`50f49c0274a116d846d0134b4b4379cc96940f539b630e0c7facefbbdbdf2a35`; 두 ID와 임시 cluster는 검사 뒤 제거됐다.
+active release 및 서버/DB container는 유지됐다. **완료:** service source-clock 감사의 3개 경로(신고가 TR
+기준일/250일 evidence, 분봉 날짜 fallback, membership 공개시각)를 수정했다. 신고가 12건, ingestor 13건,
+TOP20 67건이 통과했고 source 날짜 2001-04-03의 native fake broker/store 재현에서 세 누수 모두 사라졌다.
+이는 clock 정합성만 검증하며 성능 증거나 전체 service replay가 아니다. 시간 의존 TR의 ingestor shared-clock
+바인딩은 미래 native runner의 필수 조건이다. 그 뒤 request-identity
+REST/catalog 입력, durable outbox, TOP20 lifecycle runner를 진행한다. 전체 TOP20 실행/기능 ON-OFF replay는
+여전히 미지원이다. 앞선 baseline-only report `replay-cache-v2-acceptance-50caa849ae0c62fbcbc8717d8ae13f05.log`는
+실행 gate 추가 전의 별도 7건 결과다. 그때의 v2 fixture ID `3e59d961fd9d4c69f215003d1075ce741607a79693c46516964c933614bab291`와
+이번 run report의 v2 ID는 서로 다른 삭제된 임시 DB에서 왔으며 재사용하지 않는다.
+
+**2026-10-07 TOP20 원인 receipt·window manifest·cold seed preflight (로컬 구현, service replay 미지원):**
+[반복 부하 실험 계약](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md)의 구현 결과와 coverage 경계를 따른다.
+collector→hub→TOP20 dequeue에 trade/program 입력 receipt를 전달하고 subscriber queue coverage와
+`top20_index`/`program_flow`의 제한 sink 분할을 사전 검사한다. TOP20/capture/replay 검사 80개가
+통과했다. 새 window 판독은 전체 chunk sequence/checksum 및 payload hash를 확인하고 window store
+pair와 capture 시작~window 끝의 TOP20 전달 prefix에 필요한 행만 보유한다. 65분 통제 fixture에서
+12,013개 중 13개 행을 유지했다. 한도는 window 10분, capture-relative 7,200초, 보유 metadata 50,000행/32 MiB,
+payload 32 MiB이며 초과는 오류로 드러난다. 일반 부분 replay 판정은 유지한다. 이 결과는 로컬 fixture며
+실제 NAS trace 검증이 아니다. 추가 cold fixture gate는 versioned semantic state를 확인하고 readiness/
+pending write/collector 누적/broker queue·cache/구독/사용 중 lock이 있으면 거부한다. baseline ID,
+입력 manifest hash, mask, 원본 component 역할, frozen-before-start source clock을 묶으며, gate는
+service 실행이나 DB restore를 하지 않는다. 결합 focused 검사 총 30건 통과. cold fixture이므로
+`source_state_equivalent=false`; `database_restore_verified=false`, `execution_authorized=false`,
+`top20_session_execution_ready=false`를 유지한다. broker의 cache expiry/reservation이 직접 system clock을
+읽는 경로, baseline의 `central_api_query_cache` 누락, durable outbox, REST/catalog adapter 및 실제
+service lifecycle runner가 남았다. market_operation/0s·구독 상태도 재생 미지원이다. 활성 NAS와 capture
+설정은 바뀌지 않았다. 기존 `recorded_top20_queue_frontier`의 10,000 event 제한도 유지된다. 다음은 이
+차단 항목과 dedicated PostgreSQL restore/drain 검증이며, 장중 성능 판단이나 구조 튜닝은 포함하지 않는다.
+
+**2026-10-07 TOP20 원인 입력 후보(로컬 상태):** `top20_inputs` capture 옵션과 schema 3
+`ka00198 qry_tp=5` 회차 기록, 최신성·20-slot·재시도만 재생하는 offline 경로가 로컬 작업트리에 있다.
+기본값은 OFF다. 이 경로는 downstream subscriber/fundamentals/index/database 작업을 실행하지 않아
+전체 TOP20 기능 replay·부하 실험을 지원하지 않는다. 활성 NAS와 10월 8일 capture 예약은 변경되지 않았다.
+
+**2026-10-07 TOP20 최초 편입 수급 입력(비활성 NAS 후보):** `top20-candidate-flow-input/v1` 회차가
+`ka10045` 응답의 실제 investor-flow ingest와 완료 marker를 연결한다. 별도 `top20_inputs` 플래그 대신
+v6와 호환되는 `store_inputs` opt-in 경계로 기록한다. 실제 consumer/ingest 로직은 전용 replay DB에서
+재생할 수 있지만 broker scheduling과 일반 수급 경로는 제외된다. fake-client/SQLite 및 TOP20/broker
+결합 회귀 108건과 후보 소스의 flow/replay-operator 16건이 통과했다. NAS 비활성 후보
+`2026.10.07-top20-flow-replay-v1-997871fd90ff5074`는 v6 기반 894개 파일로 stage됐으며 manifest와
+핵심 변경 파일 해시가 일치한다. active는 계속 `2026.10.07-trace-market-inputs-v6-2597a00f99c13b50`다.
+봉인된 전용 PostgreSQL에서 candidate flow 반복 ingest·COMMIT 응답 유실 복구와 mixed collector replay를 포함한
+두 acceptance 묶음을 실행했다. 총 9 tests, skipped=0, unittest `OK`였다. 최종 JSON의 `state=failed`는
+acceptance runner가 캡처 4개+execution 5개인 9개 대신 7개를 기대한 판정기 오류다. execution-only 기대 수도
+3에서 5로 고쳐야 함을 확인했다. 로컬 후보 복사본의 checker는 이 수치로 수정했지만, 895개 전체 release 재복사는
+중단해 NAS에는 반영되지 않았다. 기능 테스트 결과와 checker 상태를 구분하며, NAS 비활성 후보 v1·active v6 및
+10월 8일 녹화 예약은 변경하지 않았다. 운영 활성화는 보류한다.
+
+**현재 상태 보정(2026-10-07):** 아래의 collector-input/v2 항목 중 “v6 비활성/미활성” 표현은
+stage 시점의 기록이다. 사용자가 이후 `2026.10.07-trace-market-inputs-v6-2597a00f99c13b50`를
+운영 활성화했으며 build/release 일치와 DB container unchanged가 확인됐다. 후속 health는
+`WAITING_MARKET`, `observation_expected=false`라 장외 실시간 구독·수신은 확인되지 않았다.
+현재 예약된 capture는 0B/0w/0J/0U의 부분 입력 범위다. TOP20 순위의 `ka00198` 응답과 retry,
+news/REST 원인 입력은 포함되지 않으며 이 사실을 전체 replay coverage로 일반화하지 않는다.
+
+2026-10-07 O12 collector-input/v2 후속: 혼합 0B/0w/0J/0U 입력 재생과 같은 component descendant 대체를 구현했다. NAS active `2026.10.07-trace-deferred-ram-v1-2c08d26bca5b6f4f`에서 시작한 비활성 후보 `2026.10.07-trace-market-inputs-v6-2597a00f99c13b50`는 892개 파일, working tree clean으로 stage됐고 `active_changed=false`다. 후보 build/import 및 collector/replay 단위 테스트 35건 통과. v6의 grouped PostgreSQL gate는 capture invariant 4건(`kiwoom_monitor_diagnostic_test`)과 recorded execution 3건(sealed `kiwoom_monitor_replay_test`)을 19.215초에 `tests=7, skipped=0`으로 통과했다. baseline은 `4c4daa238a7e7d4221234087dce35a5b0956caf6629b05896fca7e8df175bbd4`; fixture는 controlled이며 `source_state_equivalent=false`다. 별도 PC controlled-overhead 실행은 active code snapshot과 v6를 각각 OFF/ON으로 3회씩 비교했다. 0B profile은 라운드당 100 WS-shaped messages × 10 ticks(1,000건), mixed profile은 같은 0B에 각 100건의 0w/0J/0U를 추가했고 12개의 isolated in-memory SQLite dataset commits를 확인했다. 모든 조합에서 collector RAM 상태·store payload·hub count가 OFF/ON 및 두 소스 사이에 일치했고, drop/reject=0, written=0이었다. collector copy time은 0B에서 24–40ms/라운드, mixed에서 28–40ms/라운드였다. 입력 처리 paired p50 차이 중앙값은 active snapshot에서 0.34ms/메시지(0B), 0.40ms/메시지(mixed), v6에서 0.37ms와 0.36ms였다. loop p50 차이는 반복 간 일관된 증가가 없었고 OS 스케줄 변동 outlier가 있었다. trace charged bytes는 각 1,000행 표본에서 3.6–4.4MiB, memory high-water는 11.6–12.3MiB였다. Windows 실행이라 process RSS는 측정 불가이며, 이 도구는 PostgreSQL·NAS·collector socket task·디스크 저장 및 09:00~09:10 부하를 측정하지 않는다. 상세 24회 결과는 `artifacts/capture-overhead-20261007-partial.json`에 있다. 이는 capture copy overhead의 부분 비교이지 운영 성능 수용 기준이 아니다. **NAS 후속 측정 완료(2026-10-07):** active 2026.10.07-trace-deferred-ram-v1와 inactive v6 후보에서 0B/mixed·OFF/ON 각 3회, 총 24조건을 실제 NAS Linux 프로세스로 실행했다. fixture parity가 맞고 drop/reject/written은 0이었다. capture ON의 입력 처리 paired p50 증가는 active 기준 0.462ms(0B)/0.467ms(mixed), v6 기준 0.472ms/0.557ms per WebSocket-shaped message였다. 프로세스 RSS 증가는 중앙값 0B 약 1.67MiB, mixed 약 1.95MiB(active)/2.25MiB(v6)였고, trace 내부 charged bytes는 3.58~4.38MiB였다. 이벤트 루프 지연은 반복 간 일관된 악화가 없었다. 단, 전체 cgroup 여유·PostgreSQL·실제 WebSocket task·파일 저장·65분 지속 부하는 측정하지 않았다. 보고서는 rtifacts/capture-overhead-20261007-nas.json이다. **남음:** 이 결과는 작은 합성 fixture의 recorder copy 비용만 확인한 것이므로 성능 승인이나 장초 전체 부하 기준선으로 일반화하지 않는다. 후보 v6는 아직 활성화하지 않는다. 다음 정상 장중 capture를 우선 확보하고, 그 동일 trace의 현재 코드 baseline replay와 workload coverage를 검증한다. TOP20·뉴스·REST 원인 replay, cross-component causal replay, 초기 RAM 상태 등가는 계속 미지원이다.
+
+2026-10-07 O12 replay coverage 후속: [기능별 범위와 구현 순서](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md#2026-10-07-재생-범위-감사와-다음-구현-결정)를 확정했다. v6의 0B·0w·0J·0U collector 입력 재생, 같은 component market_state sink 대체, grouped NAS PostgreSQL gate 및 controlled capture overhead 검증은 완료됐지만 이는 실제 장중 상태 등가나 전체 앱 성능 acceptance가 아니다. TOP20 subscriber·뉴스·REST outcome 원인 replay, generated-ID/clock adapter, 초기 RAM 상태 동등성, 기능별 인과 제외, 긴 capture의 bounded reader는 별도 미완료다. store 입력이 기록된다는 사실만으로 현재 executor 지원이나 전체 앱 원인 재현을 완료 처리하지 않는다. 사용자가 2026-10-07 v6를 활성화했고 배포 출력은 health ok, build/release 일치, DB container unchanged를 확인했다. realtime phase는 CONNECTING으로 구독·수신 정상 여부가 미확인이다. 10월 8일 capture/verification 예약은 v6 build와 0B·0w·0J·0U를 검사한다. 부분 trace 결과는 지원된 입력과 발생 건수만 보고하고 미지원 workload를 전체 coverage로 일반화하지 않는다.
+
+2026-10-07 O12 시장 TR 원인 replay 우선순위(최초 정적 감사 당시 상태): TOP20 root input은 `ka00198 qry_tp=5`이고 유효 응답이 membership publish, 0B 구독 갱신, 신규 종목 준비와 index 작업을 시작한다. 이후 로컬 후보에서 이를 위한 opt-in `top20_inputs` 기록과 순위 최신성·20-slot·재시도 판정만 실행하는 validation replay를 추가했다. 이는 순위 입력 판정의 반복 검증이지 membership publish, 0B 구독, 신규 종목 준비/index fan-out을 재실행하는 전체 TOP20 workload replay는 아니다. 이 입력 경로는 기본 OFF이며 활성 NAS/예정 capture에는 적용되지 않았다. 다음 후보는 fan-out에서 발생한 `ka10001/10100`, `ka10080/81`, `ka10045`의 최소 응답 payload와 descendant ID 연결이다. `ka90008`, index, VI, 역사적 고가는 다른 owner/trigger라 TOP20과 한 workload로 묶지 않는다. 세부 mapping과 최소 payload 범위는 [반복 부하 실험 계약](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md#2026-10-07-kiwoom-resttr-원인-입력-경계-확인)에 기록했다. live 호출 빈도·운영 성능 영향 및 전체 fan-out replay는 미검증이며, capture는 기본 OFF로 둔다.
+
+2026-10-07 O12 deferred-RAM trace follow-up (candidate staged, not active): implemented opt-in
+`persist_at`, 4GiB charged-memory budget, 1,000,000 event cap, host+cgroup 5GiB startup
+headroom gate, and 1MiB/s paced post-deadline persistence. Local deferred lifecycle/chunk/trace/input
+regressions passed in grouped runs (46 tests). Candidate
+`2026.10.07-trace-deferred-ram-v1-2c08d26bca5b6f4f` was posted as an immutable inactive release
+from exactly active release `2026.10.06-top20-daily-freshness-v2-8fe3781e9c3ba685`; it contains
+892 files and staging left the active pointer unchanged. NAS candidate tests/deployment are still
+pending because SSH can read the NAS but `sudo` requires an interactive password. The API and controls
+remain on the old build. The existing 08:55 capture automation now fails closed unless the new build
+and deferred capability are active, and requests `persist_at=20:10 KST`; verification is moved to
+October 9 at 02:30 KST to allow paced persistence to finish. Before the capture, run source-runtime
+tests on NAS, verify container headroom and `/health`/capabilities, then activate only the server.
+require complete state, accepted/written equality, zero drops/rejections, all chunks/checksums/sequence,
+and captured/persisted timestamps. Do not use the old 10:01 verification schedule. Process restart/OOM
+before 20:10 loses volatile payloads by design; disk capacity and actual RSS/65-minute market load
+remain unverified.
+
+2026-10-06 O12 trace-recorder-v3 확인: 사용자가 배포한 active release/build
+`2026.10.06-trace-recorder-v3-e8bfc0fa8ce80117` / `2026.10.06-trace-recorder-v3`를
+인증 API로 확인했다. 장외 60초 smoke trace `20261006T122707Z-ffbb6ed84bbb`는
+588/588 accepted/written, known_dropped=0, censored=false로 완결됐으나 input_rejected 10건
+(의도적 제외 2, 미지원 `load_documents` 6, shadow payload budget 2)이 있다. 0B가 없고
+미지원 writer 입력도 있어 이 trace를 장중 replay baseline으로 쓰지 않는다. recorder v3의
+API/저장 동작 확인이지 장초 수집 완전성, capture overhead, 운영 DB 부하 검증이 아니다.
+후속 PC 후보는 거부 이유에 collection 및 byte/node 한도 관측치를 payload 없이 덧붙여
+다음 짧은/정상 장중 capture에서 거부 경로를 구분한다. 관련 recorder/trace/capture unit 묶음은
+28/28 통과했다. 현재 코드 전체의 다른 미커밋 작업과 혼합하지 말고 이 후보만 분리 검토한다.
+남음: 지원할 `load_documents` collection/consumer를 실제 재생 계약으로 확정할지 판단하고,
+PostgreSQL 전용 capture 테스트를 dependency가 갖춰진 환경에서 실행하며, 이후 정상 장중 trace를
+현재 활성 코드 baseline으로 완전성 gate부터 통과시킨다. 이 과정 전까지 해당 입력을 조용히
+추가/제거하거나 운영 release에 반영하지 않는다.
+
+2026-10-06 O12 `load_documents` 거부 경로 정적 대조: 현재 replay allowlist와 literal callsite를
+비교해 `server_operational_settings`(앱 설정 초기 로드), `credential_vault_state`(credential
+store 상태 marker), `execution_mock_automation_runner_current`(mock runner 복구 상태)가
+명시적 누락 후보임을 찾았다. `app.py`의 동적 일봉 coverage 상수는
+`daily_bar_history_coverage`로 허용 목록에 있다.
+`ForwardEvaluationRepository`의 collection 상수는 forward report/spec, feedback/revalidation,
+mock automation 실행·복구 상태를 가리키며 허용 목록 바깥이다. 호출은 연구용 mock 후보/spec
+API의 명시 요청과 mock automation runner/supervisor의 활성화·복구 경로에서 발생하므로,
+일반 장중 hot path나 ownerless 수집으로 분류하지 않는다. 기존 v3 trace는 거부 당시
+collection 이름을 보존하지 않아, 이 중 무엇이 실제 6건을 만들었는지 소급할 수 없다.
+신규 metadata-only 후보가 다음 capture에 기록할 이름과 대조한다. Replay는 기록된 인자로
+진단 DB에서 실제 store method를 실행하고 원본 상태 등가를
+보장하지 않는다(`source_state_equivalent=false`). 따라서 collection을 전부 allowlist에 추가하는
+것은 보류하고, 정확한 collection별 consumer·시험 DB seed·복구 영향이 확인된 읽기부터 따로 승인한다.
+
+2026-10-06 O12 C1 0w 종료 보존: PC에서 재현 3건 실패→수정 후 관련 74건 통과.
+`2026.10.06-top20-program-drain-v1`은 단일 owned save/drain·최종 flush와 실패 시 최신
+pending 보존을 구현했다. NAS 후보 `2026.10.06-top20-program-drain-v1-b619e0fc91db27cf`
+(890 files)의 전용 PostgreSQL 검사 2건은 skipped=0, 0.562초로 통과했다. 2026-10-06 사용자
+배포 결과에서 active source release와 server build가 각각 후보 ID와
+`2026.10.06-top20-program-drain-v1`로 일치했고 health는 `ok`, realtime phase는 `READY`,
+database container는 unchanged였다. 이는 정상 재시작 후 health 확인이며 실제 장중 0w 입력
+보존·강제 종료·지속 DB 장애·미처리 subscriber queue의 영속 복구나 성능 개선을 뜻하지 않는다.
+저장 주기·batch·DB transaction과 UPSERT는 그대로다. 로컬 전용 DSN이 없어 NAS PostgreSQL
+검사 전 로컬에서는 해당 2건이 skip된 상태였음을 함께 기록한다.
+
+2026-10-06 O12 전체 부하·외부 입력 감사 후속:
+[부하 분류/검증 기준](WHOLE_APP_LOAD_OPTIMIZATION_REVIEW.md),
+[collector lifecycle/최신성 원장](EXTERNAL_INPUT_LIFECYCLE_AUDIT.md).
+숨김+알람 OFF 후보 polling(A1)과 뉴스 child close timer(P8)는 PC 소스에서 수정·기능 검증했다.
+뉴스창 close 시 60초 준비 timer를 멈추고 재열기 시 저장 자료를 즉시 다시 준비한다. 실제
+외부 요청 수·DB/CPU 절감량은 미측정이다.
+P9 중앙 sync는 뉴스/AI/매매일지 링크의 실패 push 재시도와 체결 진입 뉴스 snapshot용 PC cache
+갱신 소비자가 있어 유지한다. 창 닫힘 중 delta pull 비용 및 on-open catch-up 대안은 실측·정합성
+비교 전까지 보류한다.
+0w 종료 drain과 기본정보 갱신 부족은 별도 정합성 항목으로 남긴다. 일봉 coverage/신고가(U1)는
+SQLite 재현으로 결함을 확인했다: 같은 code/day의 일봉 값 변경 뒤 coverage fingerprint가
+불일치가 되어도 TOP20 stage RAM 표식이 준비 완료로 남아 재검증 task가 예약되지 않는다.
+재진입해 `_ensure_historical_high`를 직접 호출해도 `checked_on >= day` 조건만으로 기존 신고가를
+그대로 반환한다. 이 때문에 변경된 원본으로 coverage가 무효화된 뒤에도 표시/소비되는 신고가가
+오래될 수 있다. 매 30초 순위 주기마다 일봉을 재조회하는 방식은 추가 부하 때문에 채택하지 않는다.
+2026-10-06 로컬 수정: canonical daily UPSERT가 실제 변경된 `(trading_date, code, market)` 키만
+반환하고, 변경 또는 COMMIT 응답 불확실 시 해당 종목·시장 세대만 무효화한다. 순위 schedule은
+DB 재조회 없이 RAM 세대와 stage marker를 비교하며 기본정보·분봉·수급은 유지하고 일봉·신고가만
+재검증한다. 동일 값 재수신은 기존 준비를 보존한다. 일봉 coverage 기록과 신고가 계산 중 입력이
+다시 바뀌면 완료 표식을 발급하지 않는다. 신고가 문서에는 KRX 및 대상이면 NXT의 canonical
+일봉 fingerprint/coverage identity를 넣어 재시작 뒤에도 같은 날의 오래된 계산을 구분한다.
+저장 실패는 커밋됐을 가능성을 고려해 RAM 준비 상태를 보수적으로 무효화하고, 다음 확인에서
+원본 coverage가 그대로면 새 TR 없이 다시 신뢰할 수 있다. SQLite·TOP20·ingest focused 회귀
+158건과 핵심 focused 9건 통과. NAS 전용 PostgreSQL 후보에서 canonical 변경키 반환, 동일값 재수신,
+중복 key와 metadata, invalid metadata rollback을 확인하는 3건이 0.303초에 통과했다. 이후 사용자가
+v2 후보를 활성화했고 `/health`의 build/release는 후보와 일치했으며 database container는 unchanged였다.
+직후 `CONNECTING`에서 이후 `WAITING_MARKET`, `observation_expected=false`로 바뀌었다. 조회는 23:26
+KST 장외 표본이며 ranking snapshot은 08:05, top20_index는 19:59, market_state는 15:32였다.
+장중 WebSocket 재구독과 체결 수신은 아직 확인할 수 없다.
+이 검증은 저장 정합성만 다루고 성능 이득은 측정하지 않았다. 현재 화면/API가 보관된
+과거 신고가를 계산 완료 여부와 별개로 계속 제공하는 의미는 별도 consumer 검토 대상으로 남긴다.
+외부시장 일봉 실패 뒤 날짜가
+완료 처리되어 재시도가 막히던 결함은 코드 주입으로 재현하고 로컬 수정했다. 실패한 월물만
+다음 polling에서 재요청하고 이미 성공한 월물은 그 날짜에 중복 fetch하지 않도록 했다. 관련 PC
+collector/runtime 테스트 20건과 focused 회귀 2건에 DB 저장 실패·재시작 복구 검사 2건을 더해
+관련 두 모듈 22건이 통과했다. 이는 stub store·synthetic provider 검사다. 수정은 PC 소스에만 있고
+NAS에는 미반영이다. 실 Yahoo 응답 및 NAS 후보 실행은 별도 확인 대상이며, 성능 개선을 측정한
+결과는 아니다.
+Naver/DART pagination·cursor 공백 후보는 현재 활성 source와 기존 coverage 증거부터 대조한다.
+현재 incomplete capture는 전체 성능 baseline이나 주기/batch/writer/concurrency 변경 근거가 아니다.
+정상 capture와 현재 코드 baseline을 먼저 고정하고 peak 기여가 큰 변경부터 하나씩 비교한다.
+새 상시 계측은 만들지 않으며, 기존 로그로 부족한 경로에만 한정된 임시 확인을 허용한다.
+
+2026-10-06 O12 trace recorder 후속(NAS 후보 미활성): NAS에 비활성 v2 후보를 복사해
+private-control 검사 4종을 돌렸다. 모두 pass, accepted=written, known_dropped=0이었다.
+grouped 검사 32회 fsync 합계 19.905초, 최대 단일 fsync 10.682초를 보여 NAS 종료 지연의
+직접 원인이 recorder 파일 동기화 대기임을 확인했다. 이 결과는 진단기 파일 I/O만 포함하고
+운영 업무의 DB/WAL 지연이나 장중 recorder overhead 전체를 대표하지 않는다. 또 종료 manifest
+동기화가 끝나기 전에 `complete`가 노출되는 정합성 결함을 재현해 PC 코드와 회귀 2건을 수정했고
+관련 drain/manifest 테스트 15건이 통과했다. 수정본은 후보
+`2026.10.06-trace-recorder-v3-e8bfc0fa8ce80117`(891 files)로 NAS에 stage했고 active는 그대로다.
+v3 묶음 시험, NAS 재검증, ON/OFF 비용/RSS, peak/2배 burst 65분 검증이 남아 있으므로
+후보를 활성화하지 않는다.
+
+2026-10-06 O12 trace 묶음 동기화/메모리 후속(PC 소스): payload를 최대 16MiB
+청크 묶음으로 보존해 fsync를 묶음당 한 번 수행하고 RAM charge 예산을 256MiB로
+상향했다. 기존 schema-2 payload JSON/API bytes와 hash dedup은 호환한다. 실제
+20261005T235952Z-c138934f2486 manifest에는 capture_memory_full 96,876건,
+known_dropped 35,251건과 payload fsync 합계 약 3,548초가 기록돼 있어 이 두 경로를
+개선 대상으로 삼았다. input_rejected와 known_dropped는 서로 다른 지표이며 합산한
+숫자를 앱 원본 데이터 유실 건수로 취급하지 않는다. 로컬 burst 검사는 기존 48MiB
+queue 예산을 넘는 입력을 수용하고 64개 unique payload를 fsync 2회로 저장했다.
+NAS 배포·capture ON/OFF 비용/RSS 대조 및 실제 peak/2배 burst 65분 검증은 남아 있다.
+한도 확대는 무손실 보장이 아니며 기존 단일 사본 8MiB/미지원 입력 거부도 유지된다.
+PC에서 batching·256MiB 메모리 예산·65분 bounded burst 관련 단위검사 13건은 통과했지만,
+활성 NAS release의 64MiB recorder와는 다른 코드이므로 NAS 수용이나 운영 오버헤드 증거가 아니다.
+별도 PC 프로세스의 5,000건×3회 synthetic OFF/ON은 recorder 추가 p95 38.2~44.6µs,
+RSS 표본 증가 약 10.4MB, 매회 payload fsync 1회와 drain 209~241ms였다. DB/네트워크/NAS IO는
+측정하지 않았으므로 기존 65분/2배 burst gate와 NAS OFF/ON 비용·RSS 검증은 계속 미완료다.
+20261005T235952Z-c138934f2486은 chunk 160개 무결성이 모두 일치하지만 35,251 sequence 누락,
+97,849 payload 입력 거부(그중 capture_memory_full 96,876), 거부/누락 없는 1분 구간 0개라
+전체 또는 부분 replay source로 사용할 수 없다. 캡처 시작 당시 활성 NAS recorder는 64MiB였고
+PC의 256MiB 변경은 아직 NAS에 반영되지 않았다. 다음 capture 전 후보를 활성화한 뒤 OFF/ON 비용·RSS,
+실제 peak 및 2배 burst를 먼저 검증하고, 정상 장중 capture 완전성 gate를 통과시킨다.
+
 2026-10-06 O12 trace 입력 API 후속: `/api/v1/diagnostics/trace`가 `store_inputs`와
 `collector_inputs`를 기본 OFF의 strict boolean으로 받아 schema-2 recorder까지 전달한다.
 capabilities는 schema 2, 0B 범위, 관측 전용 coverage 및 미검증 overhead를 광고한다.
@@ -606,3 +1039,5 @@ SOR 프리/애프터 시장가 주문 UX, 시장 수급/Open Space/Base/M/W/압�
 2026-10-05 O12 DB trace chunk bound: reproduced a 3,899,223-byte UTF-8 chunk that exceeded the 2,000,000-byte download limit while the trace could otherwise finish as complete. Local fix caps new chunks at 1 MiB, preserves ordered pending suffixes across flushes, counts pending events in status, and fails explicitly for a single oversized event. The trace/replay unit suite passed 18/18 locally and in the NAS test container. Focused immutable source release `2026.10.05-db-trace-chunk-bounds-v1-9209b8fd29423301`, based on active release `2026.10.03-db-minute-replay-v1-388841088675094c`, changed only `app.py`, `diagnostic_trace.py`, and its trace test; NAS source-runtime trace tests passed 7/7. Deployment is confirmed by the reported `/health` build/release and `database_container_unchanged=true`. Post-deploy status is `WAITING_MARKET`, `observation_expected=false`, trace `off`. Still open: measure capture overhead and verify a full 65-minute market trace and replay.
 
 2026-10-05 분봉 RAM 표시 보완 회귀: 중앙 앱 계약 fixture가 기존 trace route 5개(GET/POST trace, POST trace/stop, GET trace/{trace_id}, GET trace/{trace_id}/chunks/{chunk_name})를 누락하여 test_public_api_route_contract_is_stable 1건 실패. 이번 변경은 route 추가가 아니므로 해당 계약 fixture 보완은 별도 작업으로 남긴다. 관련 로컬 159건 중 나머지 158건 통과. QueryStore 소비자 감사는 load_minute_bars의 선택 realtime_deltas 인자 및 앱 표시 조회 경로 이동으로 review_required이며 기준 원장은 덮어쓰지 않았다. 후속 후보 v1은 collector 함수 누락으로 import 오류가 나 배포되지 않았다. v2 불변 게시본에서 관련 로컬 57개, 이후 NAS 전용 PostgreSQL 포함 83개가 통과했고 배포와 health v2를 확인했다. writer replay 20261005T100452Z-80ed9651은 245건 오류 없이 완료했지만 timing_preserved=false이며 collector 저장 주기 효과는 검증하지 않는다. **남음:** [collector 통합 재현 설계](NAS_RUNTIME_DIAGNOSTICS.md#collector-replay-design)에 따른 실제 parser/집계/저장 loop의 전용 DB fixture 검증, 이후 경량 0B 입력 capture와 recorded replay. 현재 trace의 5초당 4,096건·1MiB 단일 chunk 처리량으로 개장 틱 수집을 보장하지 않는다. replay 조회 helper는 finalizing 및 report_url 게시를 기다리지 않는 결함이 있으므로 API 연결 단계에서 보완한다. 직전 404가 어느 중간 상태에서 발생했는지는 당시 상태 출력이 없어 확정하지 않는다.
+
+2026-10-06 과거자료 수집기 모니터의 반복 DB 전수 집계를 SQLite transaction 내부 증분 카운터로 교체했다. 기준 집계는 PC 원장 4개에서 1회 완료됐고, 이후 3초마다 summary만 읽는다. 모니터 재실행 뒤 자동 진행률 갱신과 SSD 사용량을 확인하고, 카운터와 원장 상태가 일치하는지 다음 운영 점검에서 재확인한다.

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -38,11 +40,14 @@ def _parser():
     )
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('provision', help='initialize an already-created, empty replay database')
-    commands.add_parser('status', help='verify replay DB identity and baseline marker')
-    commands.add_parser('seal', help='seal the current controlled fixture as immutable baseline')
+    status = commands.add_parser('status', help='verify replay DB identity and baseline marker')
+    seal = commands.add_parser('seal', help='seal the current controlled fixture as immutable baseline')
     restore = commands.add_parser('restore', help='restore the specified baseline atomically')
     restore.add_argument('--baseline-id', required=True)
     run = commands.add_parser('run', help='offline replay of a bounded, checksummed schema-2 trace')
+    for command in (status, seal, restore, run):
+        command.add_argument('--baseline-version', type=int, choices=(1, 2), default=1)
+        command.add_argument('--source-origin', help='aware ISO trace-start time; required only for cache baseline v2')
     run.add_argument('--baseline-id', required=True)
     run.add_argument('--trace-id', required=True)
     run.add_argument('--window-start', type=float, required=True)
@@ -56,6 +61,18 @@ def _parser():
     return parser
 
 
+def _baseline_options(args):
+    if args.baseline_version == 2:
+        if not args.source_origin:
+            raise ValueError('replay_v2_source_origin_required')
+        from .diagnostic_top20_seed import Top20FixtureClock
+        return {'baseline_version': 2,
+                'cache_clock': Top20FixtureClock(datetime.fromisoformat(args.source_origin))}
+    if args.source_origin is not None:
+        raise ValueError('replay_v1_does_not_accept_source_origin')
+    return {}
+
+
 def _run_trace(url, token, args):
     """Separate offline process only; never point diagnostic control at the app."""
     from . import diagnostic_trace as trace
@@ -63,10 +80,16 @@ def _run_trace(url, token, args):
     from .diagnostic_recorded_execution import run_owned_recorded_experiment
     from .diagnostic_workloads import _set_capture, _set_tool
 
+    baseline_options = _baseline_options(args)
     manifest, events = trace.recorded_window_events(
         args.trace_id, window_start_seconds=args.window_start,
         window_end_seconds=args.window_end, mode=args.mode,
         collector_components=tuple(args.collector_component))
+    if baseline_options:
+        started_at = manifest.get('started_at')
+        if (type(started_at) not in (int, float) or not math.isfinite(started_at)
+                or abs(started_at - baseline_options['cache_clock'].origin.timestamp()) > .1):
+            raise ValueError('recorded_execution_trace_source_origin_mismatch')
     selection = dict(started_mono_ns=manifest['started_mono_ns'],
                      window_start_seconds=args.window_start, window_end_seconds=args.window_end,
                      include_workloads=tuple(args.include_workload),
@@ -85,7 +108,8 @@ def _run_trace(url, token, args):
             _set_capture(control, True, 7200, expected_session=session)
             refresh_capture_state(force=True)
             started = time.time()
-            result = run_owned_recorded_experiment(url, token, args.baseline_id, events, **selection)
+            result = run_owned_recorded_experiment(url, token, args.baseline_id, events,
+                                                  **baseline_options, **selection)
             observed = summarize_db_calls(started, time.time(), mode='raw', limit=10_000)
             by_operation = {}
             for call in observed.get('calls', ()):
@@ -134,7 +158,8 @@ def main(argv=None, *, environ=None, output=None):
         elif args.command == 'run':
             result = _run_trace(url, token, args)
         else:
-            with ReplayDatabaseLease(url, token) as lease:
+            options = _baseline_options(args)
+            with ReplayDatabaseLease(url, token, **options) as lease:
                 if args.command == 'status':
                     result = lease.status()
                 elif args.command == 'seal':

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from .diagnostic_replay_contract import captured_workload
+from .diagnostic_rest_input import (
+    captured_broker_request, link_request, recording_scope,
+    request_origin, transport_call,
+)
 
 import asyncio
+from .diagnostic_replay_runtime import owned_create_task, owned_to_thread
 import copy
 import hashlib
 import json
@@ -147,6 +152,8 @@ class _Job:
     future: asyncio.Future[BrokerResult]
     record_response: bool = True
     queued_at: float = field(default_factory=time.monotonic)
+    flow_capture: dict | None = field(default=None, repr=False)
+    input_group: Any = field(default=None, repr=False)
 
 
 @dataclass
@@ -168,6 +175,7 @@ class CentralRestBroker:
         response_handler: Callable[[str, dict[str, Any], dict[str, Any]], None] | None = None,
         *, allowed_endpoints: dict[str, str] | None = None, namespace: str = "market",
         ranking_reservation: bool = False,
+        wall_time: Callable[[], float] | None = None,
     ) -> None:
         self._client = client
         self._store = store
@@ -175,12 +183,16 @@ class CentralRestBroker:
         self._allowed_endpoints = dict(allowed_endpoints or READ_ONLY_ENDPOINTS)
         self._namespace = namespace.strip()
         self._ranking_reservation = bool(ranking_reservation)
+        # Replay changes calendar/expiry decisions, never real queue durations.
+        self._source_wall_time = wall_time
         if not self._namespace:
             raise ValueError("broker namespace is required")
         self._queue: asyncio.PriorityQueue[tuple[int, int, _Job | _CredentialJob | None]] = asyncio.PriorityQueue()
         self._persist_queue: asyncio.Queue[tuple[_Job, BrokerResult] | None] = asyncio.Queue()
         self._sequence = count()
         self._inflight: dict[str, asyncio.Future[BrokerResult]] = {}
+        # Opt-in receipts only; future completion removes the small diagnostic link.
+        self._flow_inflight: dict[asyncio.Future[BrokerResult], dict] = {}
         self._lookup_tasks: set[asyncio.Task[None]] = set()
         self._cache: dict[str, tuple[float, BrokerResult]] = {}
         self._guard = asyncio.Lock()
@@ -231,14 +243,14 @@ class CentralRestBroker:
         async with self._guard:
             self._credential_paused = True
             if self._drain_task is None:
-                self._drain_task = asyncio.create_task(self._drain_credentials(), name="credential-broker-drain")
+                self._drain_task = owned_create_task(self._drain_credentials(), name="credential-broker-drain")
         # Cancelling the waiter never cancels actual HTTP/DB work or token-refresh drain.
         await asyncio.shield(self._drain_task)
 
     async def _drain_credentials(self) -> None:
         await self._queue.join()
         await self._persist_queue.join()
-        await asyncio.to_thread(self._client.begin_credential_change)
+        await owned_to_thread(self._client.begin_credential_change)
 
     async def activate_prepared_credentials(self, prepared: Any) -> int:
         if not self._credential_paused or self._drain_task is None or not self._drain_task.done():
@@ -246,7 +258,7 @@ class CentralRestBroker:
         self._drain_task.result()
         if self._activation_task is None:
             self._activating_credentials = prepared
-            self._activation_task = asyncio.create_task(asyncio.to_thread(
+            self._activation_task = owned_create_task(owned_to_thread(
                 self._client.activate_prepared_credentials, prepared,
             ), name="credential-client-activate")
         elif self._activating_credentials is not prepared:
@@ -255,7 +267,7 @@ class CentralRestBroker:
 
     async def end_credential_change(self) -> None:
         if self._resume_task is None:
-            self._resume_task = asyncio.create_task(self._end_credential_change(), name="credential-broker-resume")
+            self._resume_task = owned_create_task(self._end_credential_change(), name="credential-broker-resume")
         try:
             await asyncio.shield(self._resume_task)
         finally:
@@ -293,7 +305,7 @@ class CentralRestBroker:
             if self._activation_task is not None and not self._activation_task.done():
                 raise BrokerCredentialBusyError("CREDENTIAL_ACTIVATION_NOT_COMPLETE")
             generation = self._activation_task.result() if self._activation_task is not None else None
-            await asyncio.to_thread(self._client.end_credential_change)
+            await owned_to_thread(self._client.end_credential_change)
             if generation is not None:
                 self._credential_generation = max(self._credential_generation + 1, generation)
                 self._cache.clear()
@@ -309,13 +321,13 @@ class CentralRestBroker:
             self._close_task.result()
             self._close_task = None
         if self._persist_worker is None or self._persist_worker.done():
-            self._persist_worker = asyncio.create_task(self._run_persistence(), name="kiwoom-broker-persistence")
+            self._persist_worker = owned_create_task(self._run_persistence(), name="kiwoom-broker-persistence")
         if self._worker is None or self._worker.done():
-            self._worker = asyncio.create_task(self._run(), name="kiwoom-central-rest-broker")
+            self._worker = owned_create_task(self._run(), name="kiwoom-central-rest-broker")
 
     async def close(self) -> None:
         if self._close_task is None:
-            self._close_task = asyncio.create_task(self._close(), name="kiwoom-broker-close")
+            self._close_task = owned_create_task(self._close(), name="kiwoom-broker-close", shutdown=True)
         await asyncio.shield(self._close_task)
 
     async def _close(self) -> None:
@@ -354,10 +366,15 @@ class CentralRestBroker:
             record_response=False,
         )
 
+    @captured_broker_request
     async def _request(
         self, api_id: str, path: str, body: dict[str, Any], *, cont_yn: str,
         next_key: str, record_response: bool,
     ) -> BrokerResult:
+        flow_link = None
+        if api_id == "ka10045":
+            from .diagnostic_top20_flow_input import broker_flow_link
+            flow_link = broker_flow_link(api_id, path, body)
         self._validate(api_id, path, cont_yn, next_key)
         await self.start()
         key = self._fingerprint(api_id, path, body, cont_yn, next_key)
@@ -373,6 +390,9 @@ class CentralRestBroker:
                 and cached is not None and cached[1].recording_succeeded is None
             )
             if cached and cached[0] > time.monotonic() and not basic_recording_pending:
+                request_origin("ram_cache")
+                if flow_link is not None:
+                    flow_link["receipt"]["origin"] = "ram_cache"
                 value = cached[1]
                 return BrokerResult(
                     copy.deepcopy(value.payload), value.has_next, value.next_key,
@@ -382,39 +402,59 @@ class CentralRestBroker:
             if existing is None:
                 future = asyncio.get_running_loop().create_future()
                 self._inflight[key] = future
+                link_request(future)
                 future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+                if flow_link is not None:
+                    self._flow_inflight[future] = flow_link
+                    future.add_done_callback(lambda done: self._flow_inflight.pop(done, None))
                 generation = self._credential_generation
-                task = asyncio.create_task(
+                task = owned_create_task(
                     self._resolve_cache_or_queue(
                         key, api_id, path, copy.deepcopy(body), cont_yn,
                         next_key, record_response, generation, future,
+                        flow_link=flow_link,
                     ),
                     name=f"broker-cache-lookup-{api_id}",
                 )
                 self._lookup_tasks.add(task)
                 task.add_done_callback(self._lookup_tasks.discard)
                 existing = future
+            else:
+                link_request(existing, shared=True)
+                linked = self._flow_inflight.get(existing)
+                if linked is not None:
+                    linked["receipt"]["shared"] = True
+                if flow_link is not None:
+                    flow_link["receipt"].update(origin="shared_inflight", shared=True)
         return await asyncio.shield(existing)
 
     async def _resolve_cache_or_queue(
         self, key: str, api_id: str, path: str, body: dict[str, Any],
         cont_yn: str, next_key: str, record_response: bool, generation: int,
         future: asyncio.Future[BrokerResult],
+        *, flow_link: dict | None = None,
     ) -> None:
         try:
             stored = None
+            input_group = getattr(future, "_market_input_group", None)
             if record_response and _persistent_cache_ttl(api_id, cont_yn) and self._store is not None:
-                stored = await asyncio.to_thread(self._store.load_query, key)
+                with recording_scope(input_group, "cache_read"):
+                    stored = await owned_to_thread(self._store.load_query, key)
             if api_id == "ka10001" and key != self._fingerprint(api_id, path, body, cont_yn, next_key):
                 # A slow DB lookup can cross 07:00/midnight. Do not stamp the
                 # previous period's cached payload as a fresh observation.
                 stored = None
             recording_succeeded: bool | None = None
+            if stored is not None:
+                request_origin("persistent_cache")
             if stored is not None and self._response_handler is not None:
+                if flow_link is not None:
+                    flow_link["receipt"]["origin"] = "persistent_cache"
                 from .diagnostic_metrics import CURRENT_API_ID
                 api_token = CURRENT_API_ID.set(api_id)
                 try:
-                    await asyncio.to_thread(self._response_handler, api_id, body, stored.payload)
+                    with recording_scope(input_group, "cache_ingest"):
+                        await owned_to_thread(self._response_handler, api_id, body, stored.payload)
                     recording_succeeded = True
                 except Exception:
                     recording_succeeded = False
@@ -429,6 +469,7 @@ class CentralRestBroker:
                 # A separate request may have populated RAM while the DB lookup ran.
                 cached = self._cache.get(key)
                 if cached and cached[0] > time.monotonic():
+                    request_origin("ram_cache_after_lookup")
                     value = cached[1]
                     self._inflight.pop(key, None)
                     future.set_result(BrokerResult(copy.deepcopy(value.payload), value.has_next, value.next_key, True, value.recording_succeeded))
@@ -440,7 +481,8 @@ class CentralRestBroker:
                     self._inflight.pop(key, None)
                     future.set_result(copy.deepcopy(result))
                 else:
-                    job = _Job(key, api_id, path, body, cont_yn, next_key, future, record_response)
+                    job = _Job(key, api_id, path, body, cont_yn, next_key, future, record_response,
+                               flow_capture=flow_link, input_group=input_group)
                     self._queue.put_nowait((REQUEST_PRIORITIES.get(api_id, 50), next(self._sequence), job))
         except BaseException as error:
             async with self._guard:
@@ -463,7 +505,7 @@ class CentralRestBroker:
                         function = (self._client.prepare_drained_credentials if job.phase == "drained" else
                                     self._client.prepare_credential_token if job.phase == "token"
                                     else self._client.verify_prepared_credentials)
-                        result = await asyncio.to_thread(function, job.settings)
+                        result = await owned_to_thread(function, job.settings)
                         if not job.future.done():
                             job.future.set_result(result)
                     except Exception:
@@ -474,7 +516,7 @@ class CentralRestBroker:
                     self._ranking_reservation
                     and self._namespace == "market"
                     and priority > REQUEST_PRIORITIES["ka00198"]
-                    and (delay := ranking_reservation_delay(time.time())) > 0
+                    and (delay := ranking_reservation_delay(self._wall_time())) > 0
                 ):
                     # Put the low-priority job back before yielding. Sleeping first
                     # would occupy the only broker worker and make a newly queued
@@ -486,10 +528,7 @@ class CentralRestBroker:
                     delegated = False
                     started_at = time.monotonic()
                     queue_wait_ms = round((started_at - job.queued_at) * 1000)
-                    payload, has_next, next_key = await asyncio.to_thread(
-                        self._client.request_with_continuation,
-                        job.api_id, job.path, job.body, cont_yn=job.cont_yn, next_key=job.next_key,
-                    )
+                    payload, has_next, next_key = await owned_to_thread(transport_call, self._client, job)
                     api_audit_logger.info(
                         "request completed namespace=%s api_id=%s continuation=%s queue_wait_ms=%d duration_ms=%d",
                         self._namespace, job.api_id, job.cont_yn,
@@ -538,7 +577,9 @@ class CentralRestBroker:
                     if self._response_handler is not None:
                         phase_started = time.monotonic()
                         try:
-                            await asyncio.to_thread(self._response_handler, job.api_id, job.body, result.payload)
+                            from .diagnostic_top20_flow_input import flow_recording_scope
+                            with recording_scope(job.input_group, "ingest"), flow_recording_scope(job.flow_capture, self._response_handler):
+                                await owned_to_thread(self._response_handler, job.api_id, job.body, result.payload)
                             recording_succeeded = True
                         except Exception:
                             recording_succeeded = False
@@ -548,10 +589,11 @@ class CentralRestBroker:
                     if ttl > 0 and self._store is not None:
                         phase_started = time.monotonic()
                         try:
-                            await asyncio.to_thread(
-                                self._store.save_query, job.key, job.api_id, time.time() + ttl,
-                                StoredQuery(result.payload, result.has_next, result.next_key),
-                            )
+                            with recording_scope(job.input_group, "cache_write"):
+                                await owned_to_thread(
+                                    self._store.save_query, job.key, job.api_id, self._wall_time() + ttl,
+                                    StoredQuery(result.payload, result.has_next, result.next_key),
+                                )
                         except Exception:
                             logger.exception("recording_gap: 중앙 조회 캐시 저장에 실패했습니다: %s", job.api_id)
                         cache_ms = round((time.monotonic() - phase_started) * 1000)
@@ -605,12 +647,16 @@ class CentralRestBroker:
         if cont_yn == "Y" and not next_key:
             raise ValueError("연속조회에는 next_key가 필요합니다.")
 
+    def _wall_time(self) -> float:
+        return time.time() if self._source_wall_time is None else self._source_wall_time()
+
     def _fingerprint(self, api_id: str, path: str, body: dict[str, Any], cont_yn: str, next_key: str) -> str:
         parts = [self._namespace if self._credential_generation == 0 else
                  f"{self._namespace}:credential-generation:{self._credential_generation}",
                  api_id, path, body, cont_yn, next_key]
         if api_id == "ka10001":
-            current = datetime.now(KST)
+            current = (datetime.now(KST) if self._source_wall_time is None
+                       else datetime.fromtimestamp(self._wall_time(), KST))
             # Both RAM and persistent caches must exclude pre-refresh responses.
             parts.append(fundamentals_refresh_key(current.date(), current))
         raw = json.dumps(

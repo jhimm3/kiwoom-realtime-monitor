@@ -16,9 +16,47 @@ capture로 보존하고, `diagnostic_replay_contract.py`가 허용 메서드·co
 collector descendant 제외 계획을 검사한다. `diagnostic_recorded_execution.py`는 명시된
 store allowlist를 caller-owned test store에서 실행하며 actor 순서·동시성·replay ID를 기록한다.
 collector mode는 0B 원인 사건을 실제 collector loop에 전달하고 그 component의 과거 sink만
-제외한다. `postgres_access.py`는 replay operation ID와 owner·actor·component를 DB call에
-전달한다. `diagnostic_replay_baseline.py`는 새 고정 replay DB의 역할·소유권·run lock,
-14개 허용 테이블/sequence baseline, atomic restore와 native connection drain을 소유한다.
+제외한다. 로컬 collector-input/v2는 최소 0w·0J·0U 입력과 같은 component의 market_state-only
+dataset sink 대체도 지원하며 peer 및 다른 dataset은 유지한다. TOP20 subscriber 자체는
+실행하지 않으며 cross-component causal replay는 미지원이다. NAS 검증·활성화는 별도 gate다.
+로컬 `diagnostic_top20_input.py`는 `ka00198 qry_tp=5` freshness/slot/retry 판정만 재생한다.
+`diagnostic_top20_flow_input.py`는 TOP20 최초 편입 `ka10045` 입력에서 실제 investor-flow
+ingestor와 완료 marker까지 전용 replay DB 안에서 실행하며 native descendant를 중복 실행하지 않는다.
+일반 수급 fan-out, broker scheduling, 전체 TOP20 subscriber/준비 작업은 지원하지 않는다.
+`diagnostic_rest_input.py`는 top20_inputs opt-in의 broker 논리 요청/전송/cache·ingest 원인 및 catalog
+입력 pair를 기록·검증하고 명시 lane의 offline tape client를 제공한다. `diagnostic_top20_lifecycle_input.py`는
+0s·구독 intent/ACK/READY·hub control·gap 입력 pair와 descendant preflight를 검증하고, 현재 native 구독 intent에
+일치하는 결과만 offline tape로 공급한다. 둘 다 native broker/collector lifecycle을 그대로 실행하지 않으며
+full TOP20 executor를 열지 않는다. `diagnostic_replay_runtime.py`는 opt-in 실행의 Task와 실제 executor
+작업을 제출 시점부터 추적하고 실제 종료 전 DB reset/release를 차단한다. `diagnostic_top20_outbox.py`는
+run 소유 native 파일 outbox의 검증된 seed와 복구를 담당한다. 둘은 로컬 구현·native 회귀 142건을
+마쳤다. NAS 임시 RAM-backed·network-isolated PostgreSQL acceptance 13건이 skipped=0으로 통과했고
+취소 thread 종료, native outbox ACK 재시도, DB/file baseline 공동 복구를 확인했다. T4 v1 gate는 T3 13건 뒤
+fixture setup timeout으로 실패했으나, disposable PostgreSQL gate에만 180초를 지정한 비활성 v2 candidate
+`2026.10.07-top20-session-v2-57de01203aa5af84`의 후속 acceptance 15건이 skipped=0으로 통과했다.
+두 baseline 보존 및 반복 복구, TOP20 단독/제외와 peer writer 유지, descendant 대체, drain 및 DB/outbox
+복구를 controlled fixture에서 검증했다. 보고서는 `source_state_equivalent=false`이며 실제 장중 상태 등가,
+입력 coverage, 성능을 검증하지 않는다. 로그의 stale ranking `recording_gap` 두 건은 고정 시각 fixture가
+stale해져 해당 회차 저장을 건너뛴 것이며 acceptance 실패나 DB 입력 유실은 아니다. 운영 release와 두
+운영 container는 변경하지 않았다.
+`diagnostic_top20_seed.py`는 native TOP20 service의 의미 상태를 명시 목록으로만 검사하고, controlled
+cold fixture의 baseline/input/mask/component/source-clock identity를 window frontier에 결합한다.
+lock·Task·cache·pending work가 비었는지 확인하지만 RAM을 복원하거나 DB를 restore하지 않으며 execution
+gate를 열지 않는다. REST/catalog 및 lifecycle 입력 tape와 native service lifecycle runner가 연결됐다.
+T4 controlled PostgreSQL acceptance는 통과했으며, 장중 상태 등가 및 성능 결론은 유효한 실제 capture replay 전까지 보류한다.
+`postgres_access.py`는 replay operation ID와 owner·actor·component를 DB call에
+전달한다. `diagnostic_replay_baseline.py`는 고정 replay DB의 역할·소유권·run lock, baseline v1 14개
+허용 테이블/sequence 및 별도 opt-in v2 15개 테이블(`central_api_query_cache` 포함) snapshot,
+atomic restore와 native connection drain을 소유한다. 로컬 offline replay `run`도 v2를 선택할 수 있다.
+v2 query-cache store 호출은 lease의 source clock을 사용하며 v1에서 거부한다. `rest_broker.py`의 선택적
+source wall clock과 `database_query_cache.py`의
+per-store clock hook은 v2 lease에서만 연결되고 운영 기본값에는 변화가 없다.
+비활성 NAS candidate에서 임시 RAM-backed·network-isolated PostgreSQL baseline gate 7건과 새 native
+run gate 3건, 총 10건이 skipped=0으로 통과했다. 반복 run의 source TTL과 collector/cache 공통 clock,
+exclusion의 과거 cache 결과 비주입, ACK-loss 뒤 drain 및 baseline 복구를 확인했다. 성능이나 장중
+상태 동등성은 입증하지 않았다. 후속 service clock 감사의 세 누수(신고가 helper 날짜, 분봉 날짜 fallback,
+membership 공개시각)는 로컬 수정과 신고가 12/ingestor 13/TOP20 67 단위 회귀 및 source-date 재현으로
+통과했다. 전체 TOP20 runner와 그 안에서 시간 의존 TR에 같은 clock을 바인딩하는 단계는 남아 있다.
 `diagnostic_replay_database_cli.py`는 offline provisioning/status/seal/restore와 bounded
 schema-2 recorded-operation replay를 제공한다. 실행은 기존에 봉인한 dedicated baseline 아래서
 수행하고 종료 후 기준 상태를 복구한다. 원본 operation ID와 replay operation ID를 실제 DB-call
@@ -38,12 +76,13 @@ schema-2 recorded-operation replay를 제공한다. 실행은 기존에 봉인�
 | REST | `central_server/rest_broker.py`, `infrastructure/kiwoom_rest/client.py`, `infrastructure/kiwoom_rest/remote_client.py` | 중앙 우선순위·직접/원격 경계 |
 | 실시간 | `central_server/realtime_collector.py`, `infrastructure/kiwoom_rest/realtime.py`, `infrastructure/kiwoom_rest/realtime_worker.py`, `infrastructure/kiwoom_rest/central_realtime_worker.py` | 중앙/직접 구독·REG·장애전환, 0s 장운영(215) 원본 이벤트 파싱·중계 |
 | 세션 | `application/market_session_schedule.py`, `application/realtime_subscription.py`, `central_server/autonomous_top20.py` | 거래일별 venue/phase·구독 대상, NAS 장후 보완은 저장된 0s 거래일 증거가 있을 때만 예약. 공식 연간 휴장 달력 자동 동기화는 미구현 |
-| 봉·관측 | `central_server/minute_bars.py`, `central_server/market_ingest.py`, `central_server/market_observations.py` | 1초/1분 집계·TR 적재·revision 의미 |
-| TOP20 | `application/top20_trade_value_collector.py`, `presentation/top20_trade_value.py` | 코호트·지수·차트 |
+| 봉·관측 | `central_server/minute_bars.py`, `central_server/market_ingest.py`, `central_server/market_observations.py` | 1초/1분 집계·TR 적재·revision 의미. 실제 일봉 changed key 또는 저장 결과가 불확실할 때만 TOP20 daily/high 준비 상태를 code/market 범위로 재검증한다. |
+| TOP20 | `application/top20_trade_value_collector.py`, `presentation/top20_trade_value.py`, `central_server/autonomous_top20.py` | 코호트·지수·차트. NAS 0w 저장은 단일 owned task를 공유하고 종료 시 producer stop→실제 save drain→pending final flush를 수행한다. 호출자 취소가 DB thread 소유권을 끊지 않는다. |
 | 로컬 쓰기 | `infrastructure/persistence/market_cache_writer.py`, `infrastructure/persistence/minute_bar_repository.py` | 비동기 직렬 쓰기·봉 저장 |
 | 중앙 DB/API | `central_server/app.py`, `central_server/database.py`, `central_server/central_schema.py` | 라우트·DB 트랜잭션·스키마 |
+| 중앙 서버 로그 | `central_server/server_logging.py` | 파일·콘솔 로그를 KST로 표시하고 날짜 회전을 한국 자정 기준으로 유지 |
 | 외부시장 봉 DB | `central_server/database_external_market.py`, `central_server/database.py` | SQLite/PostgreSQL 외부시장 봉 저장·조회 실제 구현. QueryStore 계약과 store 조립은 `database.py`에 유지 |
-| 국내 시장 봉 DB | `central_server/database_market_bars.py`, `central_server/database_observation_writes.py`, `central_server/database.py`, `central_server/postgres_access.py` | SQLite/PostgreSQL 분봉·초봉·5분봉·일봉 저장·조회 구현과 revision/metadata writer helper. 분봉 metadata는 `(subject, trading_date+minute)`로 각 종목에 연결한다. QueryStore 계약·store 조립·기존 호출 연결은 유지하고, 공통 PostgreSQL wait probe는 뉴스 claim과 공유. 로컬 회귀·정적 연결 gate 및 NAS 전용 PostgreSQL gate 9/9 통과 |
+| 국내 시장 봉 DB | `central_server/database_market_bars.py`, `central_server/database_observation_writes.py`, `central_server/database.py`, `central_server/postgres_access.py` | SQLite/PostgreSQL 분봉·초봉·5분봉·일봉 저장·조회 구현과 revision/metadata writer helper. 분봉 metadata는 `(subject, trading_date+minute)`로 각 종목에 연결한다. 일봉 UPSERT는 commit이 확인된 changed key만 반환해 coverage freshness 입력으로 쓴다. QueryStore 계약·store 조립·기존 호출 연결은 유지하고, 공통 PostgreSQL wait probe는 뉴스 claim과 공유. 로컬 회귀 및 NAS 전용 PostgreSQL 일봉 changed-key/no-op/중복·metadata/rollback 검사 3/3 통과 |
 | 시장 관측 메타데이터 DB | `central_server/database_market_metadata.py`, `central_server/database_observation_writes.py`, `central_server/database.py`, `domain/market_data_contract.py` | SQLite/PostgreSQL metadata 저장·단건·범위 조회. QueryStore/API 계약과 native transaction을 유지하며 `CoverageObservation`을 하위 value contract로 둔다. 로컬 회귀·정적 연결 및 NAS 전용 PostgreSQL gate 3/3 통과 |
 | REST 응답 캐시 DB | `central_server/database_query_cache.py`, `central_server/database.py` | SQLite/PostgreSQL cache read/write와 `StoredQuery` 실제 구현. `QueryCacheStore`는 REST broker가 쓰는 두 메서드 계약이며 `QueryStore` aggregate·store 조립은 유지. NAS PostgreSQL·broker·SQLite gate 5/5 및 SQLite-backed API ASGI 연결 1/1 통과 |
 | 저장소 진단 DB | `central_server/database_storage_diagnostics.py`, `central_server/database.py` | SQLite/PostgreSQL 저장 크기·분류 조회와 공통 분류 구현. 인증된 `/api/v1/diagnostics/resources` 응답 및 PC 리소스 화면의 기존 연결 유지 |
@@ -73,7 +112,7 @@ schema-2 recorded-operation replay를 제공한다. 실행은 기존에 봉인�
 | 영역 | 먼저 볼 파일 | 책임 |
 |---|---|---|
 | 뉴스 입력·작업 | `central_server/news_sources.py`, `central_server/news_service.py`, `central_server/news_jobs.py`, `infrastructure/naver_stock_news.py` | Naver 검색·증권 종목 목록, TOP20 수집 범위와 BODY/RULE/AI 단계 |
-| 과거 뉴스 PC 전처리·시황 업로드 | `scripts/preprocess_historical_news_locally.py`, `scripts/probe_historical_backfill.py`, `scripts/run_naver_stock_market_news.py`, `scripts/import_prepared_historical_news_to_nas.py`, `scripts/historical_collection_monitor.py`, `central_server/database.py` | 두 원천 수집기가 기사별 BODY/RULE 준비를 병렬 실행해 PC 원장에 저장하고, 준비된 결과만 불변 스냅샷으로 NAS 정상 뉴스 테이블에 적재 |
+| 과거 뉴스 PC 전처리·시황 업로드 | `scripts/preprocess_historical_news_locally.py`, `scripts/probe_historical_backfill.py`, `scripts/run_naver_stock_market_news.py`, `scripts/import_prepared_historical_news_to_nas.py`, `scripts/historical_collection_monitor.py`, `scripts/historical_collection_counts.py`, `central_server/database.py` | 두 원천 수집기가 기사별 BODY/RULE 준비를 병렬 실행해 PC 원장에 저장하고, 준비된 결과만 불변 스냅샷으로 NAS 정상 뉴스 테이블에 적재. 모니터 건수는 SQLite trigger로 원래 writer transaction 안에서 증분 갱신하며 최초 1회 집계 후 작은 summary 테이블을 읽음 |
 | 종목 뉴스 조회 | `central_server/app.py`, `central_server/database.py`, `infrastructure/central_news_client.py`, `presentation/news_workers.py`, `presentation/stock_news_window.py`, `presentation/historical_news_archive_dialog.py`, `infrastructure/persistence/stock_news_repository.py` | NAS 저장분 200건 offset 페이지와 별도 과거 archive의 dataset/cursor·정확 ID 클라이언트/읽기 전용 창. 기존 화면 스크롤 추가 조회와 PC 직접 연결 보존 건수는 기존 경로 유지 |
 | 뉴스창 실행·명령 | `presentation/news_window_coordinator.py`, `presentation/process_control.py`, `presentation/main_window.py` | 독립 뉴스 프로세스·명령 번호·창 복원 상태는 coordinator가 소유하고 메인 표는 사용자 입력만 전달 |
 | 네이버 증권 시황 피드 | `infrastructure/naver_stock_market_news.py`, `central_server/market_news_sources.py`, `scripts/run_naver_stock_market_news.py`, `scripts/historical_collection_monitor.py` | FLASH/WORLD 날짜별 응답·발행시각, NAS 독립 cursor 수집, 역사 원응답 보존·진행 확인·재시작/정지 |

@@ -100,6 +100,33 @@ class MarketDataIngestorTests(unittest.TestCase):
         self.assertEqual(DataValueKind.ESTIMATED, metadata.value_kind)
         self.assertIn("trade_value=ohlcv_estimate", metadata.source)
 
+    def test_time_only_minute_uses_injected_source_date_when_base_date_is_missing(self) -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.saved: list[dict[str, object]] = []
+
+            def load_market_data_metadata_range(self, *args, **kwargs):
+                return ()
+
+            def replace_minute_bars(self, values, *, observations=()):
+                self.saved.extend(values)
+
+            def load_minute_bars(self, *args, **kwargs):
+                return ()
+
+        store = Store()
+        source_now = datetime.fromisoformat("2001-04-03T09:00:02+09:00")
+        MarketDataIngestor(store, now_provider=lambda: source_now)._ingest_minutes(
+            {"stk_cd": "005930"}, {"stk_min_pole_chart_qry": [{
+                "cntr_tm": "085900", "open_pric": "100", "high_pric": "101",
+                "low_pric": "99", "cur_prc": "100", "trde_qty": "10",
+            }]},
+        )
+
+        self.assertEqual(1, len(store.saved))
+        self.assertEqual("2001-04-03", store.saved[0]["trading_date"])
+        self.assertEqual("08:59", store.saved[0]["minute"])
+
     def test_closed_query_replaces_realtime_minute_and_late_delta_cannot_change_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")

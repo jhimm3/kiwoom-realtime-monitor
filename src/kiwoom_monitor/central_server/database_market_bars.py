@@ -720,8 +720,8 @@ class SQLiteMarketBarStoreMixin:
     def replace_daily_bars(
         self, values: list[dict[str, Any]], *,
         observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
-    ) -> None:
-        self._replace_bars(
+    ) -> tuple[tuple[str, str, str], ...]:
+        return self._replace_bars(
             "central_daily_bars", values, minute=False, observations=observations
         )
 
@@ -811,9 +811,9 @@ class SQLiteMarketBarStoreMixin:
     def _replace_bars(
         self, table: str, values: list[dict[str, Any]], *, minute: bool,
         observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
-    ) -> None:
+    ) -> tuple[tuple[str, ...], ...]:
         if not values:
-            return
+            return ()
         columns = bar_columns(minute=minute)
         updates = ",".join(f"{column}=excluded.{column}" for column in columns if column not in BAR_KEY_COLUMNS)
         conflict = "trading_date,minute,code,market" if minute else "trading_date,code,market"
@@ -834,7 +834,7 @@ class SQLiteMarketBarStoreMixin:
             changed_bar_rows: list[tuple[Any, ...]] = []
             returning = (
                 "trading_date,minute,code,market" if minute else "trading_date,code,market"
-            ) if observations else ""
+            ) if observations or not minute else ""
             if minute:
                 changed_guard = (
                     " WHERE " + " OR ".join(
@@ -890,6 +890,8 @@ class SQLiteMarketBarStoreMixin:
                 _insert_sqlite_observation_revisions_batch(
                     connection, revision_sources, latest_by_key,
                 )
+        # The connection context has committed before changes become visible to callers.
+        return tuple(dict.fromkeys(tuple(str(value) for value in row) for row in changed_bar_rows))
 
 
 
@@ -1037,8 +1039,8 @@ class PostgresMarketBarStoreMixin:
     def replace_daily_bars(
         self, values: list[dict[str, Any]], *,
         observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
-    ) -> None:
-        self._replace_bars(
+    ) -> tuple[tuple[str, str, str], ...]:
+        return self._replace_bars(
             "central_daily_bars", values, minute=False, observations=observations
         )
 
@@ -1220,9 +1222,9 @@ class PostgresMarketBarStoreMixin:
     def _replace_bars(
         self, table: str, values: list[dict[str, Any]], *, minute: bool,
         observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
-    ) -> None:
+    ) -> tuple[tuple[str, ...], ...]:
         if not values:
-            return
+            return ()
         columns = bar_columns(minute=minute)
         updates = ",".join(f"{column}=EXCLUDED.{column}" for column in columns if column not in BAR_KEY_COLUMNS)
         conflict = "trading_date,minute,code,market" if minute else "trading_date,code,market"
@@ -1307,7 +1309,7 @@ class PostgresMarketBarStoreMixin:
                 changed_bar_rows: list[tuple[Any, ...]] = []
                 returning = (
                     "trading_date,minute,code,market" if minute else "trading_date,code,market"
-                ) if observations and not metadata_suppressed_rows else ""
+                ) if (not minute or (observations and not metadata_suppressed_rows)) else ""
                 earlier_rows, latest_rows = _partition_rows_by_last_key(
                     bar_rows, (0, 1, 2, 3) if minute else (0, 1, 2),
                 )
@@ -1494,3 +1496,4 @@ class PostgresMarketBarStoreMixin:
                 revision_insert_statements, revision_insert_rows,
                 commit_ms, close_ms, total_ms,
             )
+        return tuple(dict.fromkeys(tuple(str(value) for value in row) for row in changed_bar_rows))

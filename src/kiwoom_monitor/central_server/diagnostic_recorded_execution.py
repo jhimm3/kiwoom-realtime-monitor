@@ -13,14 +13,14 @@ import inspect
 import json
 import time
 from collections import defaultdict
-from contextvars import copy_context
 from datetime import datetime, timedelta
 from threading import Event
 from uuid import uuid4
 
 from .diagnostic_replay_contract import (
+    LEGACY_COLLECTOR_INPUT_VERSION,
     capture_owner, compile_recorded_plan, freeze_payload,
-    replay_operation_identity, thaw_payload,
+    replay_operation_identity, thaw_payload, thaw_operation_arguments, validate_collector_message,
 )
 from .postgres_access import db_call_request_id, db_call_source
 from .diagnostic_collector_replay import _MeasuredStore, _ReplayClock, _owned_close
@@ -29,7 +29,8 @@ from .realtime_hub import RealtimeHub
 
 
 # Explicit native methods with supplied natural keys. No arbitrary trace dispatch,
-# query-cache expiry decisions, news generated-ID chains or sequence cursor reads.
+# news generated-ID chains or sequence cursor reads. Query cache needs v2's
+# restored cache table and lease-owned source clock, never the host wall time.
 _METHODS = frozenset({
     'save_realtime_snapshots', 'save_minute_bars', 'finalize_minute_bars',
     'save_second_trade_bars', 'replace_minute_bars', 'replace_daily_bars',
@@ -41,11 +42,12 @@ _METHODS = frozenset({
     'replace_documents', 'load_documents', 'load_document',
     'save_shadow_monitor_state', 'load_shadow_monitor_state',
     'save_external_bars', 'load_external_bars',
+    'save_query', 'load_query',
 })
 
 
 def run_owned_recorded_experiment(database_url, owner_token, baseline_id, events, *,
-                                  config=None, **selection):
+                                  config=None, baseline_version=1, cache_clock=None, **selection):
     """Offline worker entry: restore under ownership, execute, drain, unlock.
 
     This is not an API route. The native scheduler owns cancellation draining;
@@ -54,7 +56,18 @@ def run_owned_recorded_experiment(database_url, owner_token, baseline_id, events
     """
     from .diagnostic_replay_baseline import ReplayDatabaseLease, _ReplayStore
 
-    lease = ReplayDatabaseLease(database_url, owner_token, config=config)
+    if {'_shared_runtime', '_peer_operation_ids'} & selection.keys():
+        raise ValueError('recorded_execution_shared_runtime_requires_lifecycle_owner')
+
+    lease_options = {} if baseline_version == 1 and cache_clock is None else {
+        'baseline_version': baseline_version, 'cache_clock': cache_clock}
+    lease = ReplayDatabaseLease(database_url, owner_token, config=config, **lease_options)
+    if baseline_version == 2:
+        from .diagnostic_top20_seed import Top20FixtureClock
+        if (not isinstance(cache_clock, Top20FixtureClock) or cache_clock.armed
+                or 'clock' in selection):
+            raise ValueError('recorded_execution_v2_requires_fresh_owned_clock')
+        selection = {**selection, 'clock': cache_clock}
     bound = inspect.signature(_execute_recorded_operations).bind(None, events, **selection)
     bound.apply_defaults()
     options = bound.arguments
@@ -65,7 +78,17 @@ def run_owned_recorded_experiment(database_url, owner_token, baseline_id, events
         'include_workloads', 'exclude_workloads', 'mode', 'collector_components')})
     # Binding/codec/clock errors must not reset even the dedicated test DB.
     _prepare(_ReplayStore(lease), events, plan)
-    _collector_inputs(events, plan)
+    inputs = _collector_inputs(events, plan)
+    if baseline_version == 2:
+        # Paired source time and monotonic metadata are sampled separately. The
+        # same 100 ms timing budget used in the result bounds their alignment;
+        # another source day/clock must fail before any restore or connection.
+        for values in inputs.values():
+            for row, value in values:
+                expected = cache_clock.origin + timedelta(
+                    seconds=(row['mono_ns'] - options['started_mono_ns']) / 1e9)
+                if abs((value['source_time'] - expected).total_seconds()) > .1:
+                    raise ValueError('recorded_execution_source_clock_mismatch')
     with lease:
         baseline = lease.restore(baseline_id)
         try:
@@ -79,8 +102,16 @@ def run_owned_recorded_experiment(database_url, owner_token, baseline_id, events
                 result['final_tables'] = lease._tables_digest(cursor, 'public')
                 result['final_sequences'] = lease._sequences(cursor)
             result.update(baseline_managed=True, baseline=baseline,
+                          baseline_version=baseline_version,
                           database_ownership_verified=True,
                           fidelity='native_operations_on_owned_logical_baseline')
+            if baseline_version == 2:
+                result['cache_clock'] = {
+                    'policy': cache_clock.policy, 'origin': cache_clock.origin.isoformat(),
+                    'start_seconds': 0 if inputs else options['window_start_seconds'],
+                    'scope': 'query_cache_and_selected_collector_only',
+                    'collector_alignment_tolerance_ms': 100,
+                }
         finally:
             # restore independently verifies drain and outsider-session gates.
             # Refusal propagates; do not claim cleanup after a failed reset.
@@ -107,10 +138,13 @@ def _prepare(store, events, plan):
         method = row['method']
         if method not in _METHODS:
             raise ValueError(f'recorded_execution_adapter_missing:{method}')
+        if method in {'save_query', 'load_query'} and not callable(
+                getattr(store, '_query_cache_wall_time', None)):
+            raise ValueError('recorded_execution_query_cache_requires_v2')
         native = getattr(store, method, None)
         if not callable(native) or inspect.iscoroutinefunction(native):
             raise ValueError(f'recorded_execution_native_method_missing:{method}')
-        arguments = thaw_payload(row['payload'])
+        arguments = thaw_operation_arguments(row)
         if type(arguments) is not dict:
             raise ValueError('recorded_execution_arguments_invalid')
         if (method in {'upsert_documents', 'replace_documents'}
@@ -173,12 +207,9 @@ def _collector_inputs(events, plan):
         if not isinstance(at, datetime) or at.tzinfo is None:
             raise ValueError('recorded_execution_collector_clock_missing')
         if kind == 'message':
-            message = value.get('message', {})
-            data = message.get('data') if type(message) is dict else None
-            if (type(message) is not dict or message.get('trnm') != 'REAL'
-                    or type(data) is not list or not 1 <= len(data) <= 100
-                    or any(type(item) is not dict or item.get('type') != '0B' for item in data)):
-                raise ValueError('recorded_execution_collector_message_invalid')
+            version = row.get('collector_input_version', LEGACY_COLLECTOR_INPUT_VERSION)
+            validate_collector_message(value.get('message'), version=version,
+                                       allow_empty=bool(row.get('excluded_types')))
         elif kind in {'initial_state', 'source_approval'}:
             sources = _source_keys(value.get('approved_sources' if kind == 'initial_state' else 'sources'))
             if kind == 'initial_state':
@@ -215,6 +246,11 @@ class _RecordedCollectorStore(_MeasuredStore):
         self.input_id = ''
         self.draining = False
 
+    def save_dataset_snapshots(self, values):
+        if any(value[0] != 'market_state' for value in values):
+            raise ValueError('recorded_collector_dataset_sink_unsupported')
+        return self._write('save_dataset_snapshots', 'market_state', values)
+
     def _write(self, name, kind, values, **kwargs):
         identifier = uuid4().hex
         self.phase = 'drain' if self.draining else (
@@ -237,15 +273,26 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                                        window_start_seconds, window_end_seconds,
                                        include_workloads=(), exclude_workloads=(),
                                        concurrency=8, stop=None,
-                                       mode='recorded_operations', collector_components=(), clock=None):
+                                       mode='recorded_operations', collector_components=(), clock=None,
+                                       _shared_runtime=None, _peer_operation_ids=None):
     """Execute on a caller-owned test store; no baseline/reset/network access.
 
     Intended only for local correctness and a future gated runner. Source wall
-    timestamps in arguments are preserved. Native system-time decisions are not
-    virtualized and source DB/RAM equivalence is not claimed.
+    timestamps in arguments are preserved. The v2 clock virtualizes query-cache
+    and selected collector time only; source DB/RAM equivalence is not claimed.
     """
     if type(concurrency) is not int or not 1 <= concurrency <= 16:
         raise ValueError('recorded_execution_concurrency_invalid')
+    from .diagnostic_replay_runtime import ReplayRuntimeScope, owned_create_task, owned_to_thread
+    if _shared_runtime is not None:
+        from .diagnostic_top20_seed import Top20FixtureClock
+        if (type(_shared_runtime) is not ReplayRuntimeScope or type(clock) is not Top20FixtureClock
+                or not clock.armed or mode != 'recorded_operations' or collector_components):
+            raise ValueError('recorded_execution_shared_runtime_invalid')
+        _shared_runtime.require_active()
+        lease = getattr(store, '_lease', None)
+        if lease is not None and (lease._runtime is not _shared_runtime or lease._cache_clock is not clock):
+            raise ValueError('recorded_execution_shared_lease_mismatch')
     plan = compile_recorded_plan(
         events, started_mono_ns=started_mono_ns,
         window_start_seconds=window_start_seconds,
@@ -253,6 +300,18 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
         include_workloads=include_workloads, exclude_workloads=exclude_workloads,
         mode=mode, collector_components=collector_components,
     )
+    if _peer_operation_ids is not None:
+        from dataclasses import replace
+        if (_shared_runtime is None or type(_peer_operation_ids) is not tuple
+                or any(type(value) is not str or not value for value in _peer_operation_ids)
+                or len(set(_peer_operation_ids)) != len(_peer_operation_ids)
+                or set(_peer_operation_ids) - set(plan.operation_ids)):
+            raise ValueError('recorded_execution_peer_frontier_invalid')
+        selected = set(_peer_operation_ids)
+        plan = replace(plan, operation_ids=tuple(identifier for identifier in plan.operation_ids
+                                                 if identifier in selected),
+                       excluded_operation_ids=(*plan.excluded_operation_ids,
+                           *(identifier for identifier in plan.operation_ids if identifier not in selected)))
     actors = _prepare(store, events, plan)
     inputs = _collector_inputs(events, plan)
     stop = stop if stop is not None else Event()
@@ -262,7 +321,18 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
         first, value = next(iter(inputs.values()))[0]
         clock = _ReplayClock(value['source_time'] - timedelta(
             seconds=(first['mono_ns'] - started_mono_ns) / 1e9))
-    timeline_start = 0 if inputs else window_start_seconds
+    # An owned lifecycle already started at source zero. Peers join that same
+    # absolute timeline; they must not reset its clock or shift the window.
+    timeline_start = 0 if inputs or _shared_runtime is not None else window_start_seconds
+    # v2's source origin identifies trace zero, while native-operation-only
+    # windows skip the prefix. Cache wall time must advance to that window, but
+    # scheduling/duration still start at zero. Restoration/preflight never arm.
+    clock_offset = 0.0
+    if _shared_runtime is None and clock is not None and callable(getattr(clock, 'arm', None)):
+        if clock.armed:
+            raise ValueError('recorded_execution_clock_already_armed')
+        clock.arm(start_seconds=timeline_start)
+        clock_offset = timeline_start
     records = []
     collector_reports = []
     # Source spans are associations, not a promise that the new code will issue
@@ -273,7 +343,7 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
             source_calls[row.get('input_operation_id')].add(row['call_id'])
 
     def elapsed():
-        return clock.elapsed() if clock is not None else time.monotonic() - origin
+        return clock.elapsed() - clock_offset if clock is not None else time.monotonic() - origin
 
     async def until(offset):
         while not stop.is_set() and elapsed() < offset:
@@ -289,6 +359,7 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                 'replay_operation_id': uuid4().hex,
                 'source_call_ids': sorted(source_calls[row['operation_id']]),
                 'method': row['method'], 'workload_id': row['workload_id'],
+                'producer_component': row['producer_component'],
                 'actor_id': row['actor_id'], 'actor_sequence': row['actor_sequence'],
                 'scheduled_seconds': offset, 'source_outcome': ending.get('outcome'),
                 'state': 'not_started',
@@ -324,6 +395,8 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                             value = native(**arguments)
                         except Exception as error:
                             record.update(state='failed', exception_type=type(error).__name__)
+                            if _shared_runtime is not None:
+                                _shared_runtime._failure('native_operation', type(error).__name__)
                             stop.set()
                         else:
                             record['native_finished_seconds'] = elapsed()
@@ -340,8 +413,9 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                 # Context variables reach the worker; the native method still owns
                 # its connection, rollback, commit and close. Never cancel a worker
                 # and claim that its DB transaction has already stopped.
-                context = copy_context()
-                await asyncio.to_thread(context.run, invoke)
+                # owned_to_thread installs its native-work token inside the
+                # copied context. A second context.run here would erase it.
+                await owned_to_thread(invoke)
                 predecessor_finished = record['finished_seconds']
 
     async def collector_actor(component, values):
@@ -351,6 +425,8 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
         collector = CentralRealtimeCollector(no_token, 'real', RealtimeHub(), clock.now,
                                              measured, snapshot_sleep=clock.sleep)
         report = {'component': component, 'input_count': 0, 'input_lag_ms_max': 0,
+                  'collector_input_version': dict(plan.collector_input_versions)[component],
+                  'event_type_counts': {}, 'excluded_type_counts': {},
                   'state': 'incomplete', 'initial_state': 'cold_with_prefix',
                   'source_state_equivalent': False}
         collector_reports.append(report)
@@ -380,7 +456,13 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                     elif kind == 'capture_gap':
                         collector.accept_replay_gap(clear_continuous=value['clear_continuous'])
                     else:
-                        collector.accept_replay_message(value['message'])
+                        if value['message']['data']:
+                            collector.accept_replay_message(value['message'])
+                        for item in value['message']['data']:
+                            name = item['type']
+                            report['event_type_counts'][name] = report['event_type_counts'].get(name, 0) + 1
+                        for name, count in row.get('excluded_types', {}).items():
+                            report['excluded_type_counts'][name] = report['excluded_type_counts'].get(name, 0) + count
                     report['input_count'] += 1
                 await until(window_end_seconds)
                 if not stop.is_set():
@@ -396,8 +478,8 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                 report['calls'] = measured.calls
                 report['call_records_dropped'] = measured.records_dropped
 
-    tasks = [asyncio.create_task(actor(values)) for values in actors.values()]
-    tasks.extend(asyncio.create_task(collector_actor(component, values))
+    tasks = [owned_create_task(actor(values), name='recorded-replay-actor') for values in actors.values()]
+    tasks.extend(owned_create_task(collector_actor(component, values), name='recorded-replay-collector')
                  for component, values in inputs.items())
     drain = asyncio.gather(*tasks, return_exceptions=True)
     cancelled = False
@@ -409,6 +491,8 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
             stop.set()
     errors = drain.result()
     if cancelled:
+        if _shared_runtime is not None:
+            _shared_runtime._failure('peer_waiter_cancelled', 'CancelledError')
         raise asyncio.CancelledError
     if any(isinstance(error, BaseException) for error in errors):
         raise RuntimeError('recorded_execution_scheduler_failed')
@@ -423,7 +507,16 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
     return {
         'state': 'complete' if complete else 'incomplete', 'calls': records,
         'collector_reports': collector_reports, 'mode': mode,
+        'selection_semantics': 'hybrid_collector_and_native_operations' if inputs else 'native_operation_mask',
+        'cross_component_causal_replay': False,
+        'warnings': list(plan.warnings),
         'replaced_operations': list(plan.replaced_operation_ids),
+        'replaced_operation_details': [
+            {'source_operation_id': row['operation_id'], 'method': row['method'],
+             'producer_component': row['producer_component'],
+             'source_call_ids': sorted(source_calls[row['operation_id']])}
+            for row in events if row.get('event_type') == 'operation_start'
+            and row['operation_id'] in plan.replaced_operation_ids],
         'selected_workloads': list(plan.selected_workloads),
         'excluded_operations': len(plan.excluded_operation_ids),
         'actor_known': plan.actor_known, 'source_outcomes_match': outcomes_match,
@@ -432,7 +525,9 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
             and all(value.get('start_lag_ms', float('inf')) <= 100 for value in records)
             and all(value['input_lag_ms_max'] <= 100 for value in collector_reports),
         'source_state_equivalent': False,
-        'source_time_semantics': 'collector_trace_clock_and_native_arguments' if inputs else 'arguments_only',
+        'source_time_semantics': 'cache_and_selected_collector_source_clock'
+            if getattr(clock, 'policy', None) == 'source_wall_real_elapsed/v1' else
+            'collector_trace_clock_and_native_arguments' if inputs else 'arguments_only',
         'baseline_managed': False, 'public_execution_ready': False,
         'fidelity': 'native_operations_on_caller_owned_test_store',
         'elapsed_seconds': elapsed(),

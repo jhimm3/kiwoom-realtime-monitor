@@ -1,5 +1,13 @@
 # 키움 저장 경로 감사 — 첫 계측 범위
 
+2026-10-06 C1 후속: `autonomous_top20`의 0w pending 저장은 단일 owned save task가
+실제 DB thread의 완료/실패까지 소유한다. index-loop/종료 대기 취소가 save를 취소하지
+않으며 종료는 producer stop→실제 save drain→pending final flush 순서다. 실패분은
+같은 종목의 새 pending을 덮지 않고 복원한다. 최종 실패는 예외와 pending으로 남는다.
+기존 snapshot key/UPSERT/transaction 및 0.25초 관리 주기는 유지한다. PC 관련 74건
+통과, 전용 PostgreSQL 2건은 미실행(skip). 강제 종료·지속 장애의 RAM 소실과
+subscriber queue의 아직 처리하지 않은 입력은 이 종료 수정의 보존 보장 범위 밖이다.
+
 기준: 2026-09-26 · 앱 2.1.0 · NAS `2026.09.26-writer-diagnostics-v4` 실행 확인
 
 ## 소스 전수 열거와 실행 경계 (2026-09-26 추가)

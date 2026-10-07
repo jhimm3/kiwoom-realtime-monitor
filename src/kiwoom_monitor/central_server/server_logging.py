@@ -1,8 +1,22 @@
 from __future__ import annotations
 
 import logging.config
+from datetime import time as datetime_time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+
+
+class KSTFormatter(logging.Formatter):
+    """Render timestamps in Korea Standard Time independently of the host timezone."""
+
+    _timezone = ZoneInfo("Asia/Seoul")
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        timestamp = datetime.fromtimestamp(record.created, timezone.utc).astimezone(self._timezone)
+        rendered = timestamp.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
+        return f"{rendered},{int(record.msecs):03d} KST"
 
 
 def configure_server_logging(log_dir: Path, *, retention_days: int = 14) -> Path:
@@ -20,6 +34,7 @@ def _logging_config(log_path: Path, *, retention_days: int) -> dict[str, Any]:
         "disable_existing_loggers": False,
         "formatters": {
             "standard": {
+                "()": "kiwoom_monitor.central_server.server_logging.KSTFormatter",
                 "format": "%(asctime)s %(levelname)s %(name)s: %(message)s",
             },
         },
@@ -28,6 +43,9 @@ def _logging_config(log_path: Path, *, retention_days: int) -> dict[str, Any]:
                 "class": "logging.handlers.TimedRotatingFileHandler",
                 "filename": str(log_path),
                 "when": "midnight",
+                # 15:00 UTC is midnight in Korea; suffixes remain the completed KST date.
+                "atTime": datetime_time(15, 0),
+                "utc": True,
                 "interval": 1,
                 "backupCount": retention,
                 "encoding": "utf-8",

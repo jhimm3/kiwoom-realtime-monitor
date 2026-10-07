@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from .diagnostic_replay_runtime import owned_create_task, owned_to_thread
 import json
 import logging
 import time
@@ -25,9 +26,14 @@ from kiwoom_monitor.domain.market_data_contract import (
     ObservationOrigin,
 )
 from kiwoom_monitor.domain.order_contract import AccountScope
-from .realtime_hub import RealtimeHub
+from .realtime_hub import (
+    RealtimeHub, CapturedMessageReceipt, CapturedParserReceipt, CapturedHubEvent,
+)
 from .database import QueryStore
-from .diagnostic_replay_contract import captured_workload
+from .diagnostic_replay_contract import (
+    COLLECTOR_EVENT_FIELDS, COLLECTOR_INPUT_VERSION, captured_workload, validate_collector_message,
+)
+from .diagnostic_top20_lifecycle_input import captured_subscription
 from .minute_bars import MinuteBarAccumulator, SecondTradeAccumulator
 from .market_observations import (
     bar_observation_key,
@@ -209,7 +215,7 @@ class CentralRealtimeCollector:
             self._reconnect_first_trade_at = None
             self._reconnect_gap_seconds = None
             self._reconnect_outcome = "pending"
-            self._reconnect_expiry_task = asyncio.create_task(self._expire_planned_reconnect(), name="realtime-reconnect-deadline")
+            self._reconnect_expiry_task = owned_create_task(self._expire_planned_reconnect(), name="realtime-reconnect-deadline")
         self._publish_connection_status()
 
     def _finish_planned_reconnect(self, outcome: str) -> None:
@@ -267,7 +273,7 @@ class CentralRealtimeCollector:
             self._credential_phase = "DRAINING"
             self._hub.set_upstream_ready((), False)
             self._start_planned_reconnect()
-            self._credential_drain_task = asyncio.create_task(
+            self._credential_drain_task = owned_create_task(
                 self._drain_for_credentials(), name="realtime-credential-drain")
         await asyncio.shield(self._credential_drain_task)
 
@@ -300,7 +306,7 @@ class CentralRealtimeCollector:
 
     async def end_credential_change(self) -> None:
         if self._credential_resume_task is None:
-            self._credential_resume_task = asyncio.create_task(
+            self._credential_resume_task = owned_create_task(
                 self._resume_after_credentials(), name="realtime-credential-resume")
             def completed(done):
                 if self._credential_resume_task is done:
@@ -346,9 +352,9 @@ class CentralRealtimeCollector:
             self._credential_paused = False
         self._credential_shutdown = False
         if not self._credential_paused and (self._task is None or self._task.done()):
-            self._task = asyncio.create_task(self._run(), name="kiwoom-central-realtime")
+            self._task = owned_create_task(self._run(), name="kiwoom-central-realtime")
         if self._store is not None and self._snapshot_task is None:
-            self._snapshot_task = asyncio.create_task(self._save_snapshots(), name="kiwoom-realtime-snapshots")
+            self._snapshot_task = owned_create_task(self._save_snapshots(), name="kiwoom-realtime-snapshots")
 
     async def start_input_replay(self) -> None:
         """Start the real persistence loop on a fresh, isolated market collector."""
@@ -357,16 +363,13 @@ class CentralRealtimeCollector:
                 or self._account_scope_resolver is not None or self._account_event_handler is not None):
             raise RuntimeError("INPUT_REPLAY_REQUIRES_FRESH_MARKET_COLLECTOR")
         self._input_replay_only = True
-        self._snapshot_task = asyncio.create_task(self._save_snapshots(), name="kiwoom-replay-snapshots")
+        self._snapshot_task = owned_create_task(self._save_snapshots(), name="kiwoom-replay-snapshots")
 
     def accept_replay_message(self, message: dict[str, Any]) -> None:
         """Replay only allowlisted market input; account events cannot enter here."""
         if not self._input_replay_only or self._credential_shutdown:
             raise RuntimeError("INPUT_REPLAY_NOT_RUNNING")
-        rows = message.get("data")
-        if (message.get("trnm") != "REAL" or not isinstance(rows, list) or not 1 <= len(rows) <= 100
-                or any(not isinstance(row, dict) or row.get("type") != "0B" for row in rows)):
-            raise ValueError("INPUT_REPLAY_REQUIRES_0B_MESSAGE")
+        validate_collector_message(message)
         self._publish_parsed(message)
 
     def restore_replay_source_state(
@@ -403,7 +406,8 @@ class CentralRealtimeCollector:
         return {"pending_records": len(self._pending_snapshots) + len(self._minute_bars._dirty)
                 + len(self._second_trades._dirty) + len(self._pending_minute_retries)
                 + len(self._inflight_minute_bars) + len(self._pending_minute_finalizations)
-                + len(self._pending_second_retries),
+                + len(self._pending_second_retries) + len(self._pending_market_history)
+                + len(self._pending_stock_references) + len(self._pending_account_entry_symbols),
                 "stopped": self._credential_phase == "STOPPED"}
 
     def _apply_trade_source_approval(
@@ -426,7 +430,7 @@ class CentralRealtimeCollector:
     async def close(self) -> None:
         self._credential_shutdown = True
         if self._close_task is None:
-            self._close_task = asyncio.create_task(self._close(), name="realtime-close")
+            self._close_task = owned_create_task(self._close(), name="realtime-close", shutdown=True)
         await asyncio.shield(self._close_task)
 
     async def _close(self) -> None:
@@ -498,7 +502,7 @@ class CentralRealtimeCollector:
 
     async def _receive(self, session: str) -> None:
         generation = self._connection_generation
-        token_task = asyncio.create_task(asyncio.to_thread(self._token_provider), name="realtime-owned-token")
+        token_task = owned_create_task(owned_to_thread(self._token_provider), name="realtime-owned-token")
         self._token_tasks.add(token_task)
         token_task.add_done_callback(self._token_tasks.discard)
         token_task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
@@ -584,30 +588,18 @@ class CentralRealtimeCollector:
                     await websocket.send(json.dumps(message))
                     continue
                 if str(message.get("trnm", "")).upper() == "REG":
-                    if message.get("return_code") not in (None, 0, "0"):
-                        raise RuntimeError(f"WebSocket 구독 실패: {message.get('return_msg', '')}")
-                    pending_registration_acks = max(0, pending_registration_acks - 1)
+                    from .diagnostic_top20_lifecycle_input import record_ack
+                    recorded_approval = record_ack(self, message)
+                    pending_registration_acks = self._accept_registration_ack(
+                        message, pending_registration_acks,
+                        session=session, subscribed=subscribed, sources=pending_trade_sources,
+                        added=pending_added, reset_all=not connection_approved,
+                        approval=recorded_approval,
+                    )
                     if pending_registration_acks:
                         continue
-                    logger.info("키움 중앙 실시간 구독 승인: %s · %s종목", session, len(subscribed))
-                    self._credential_phase = "READY"
-                    self._finish_planned_reconnect("registered")
-                    self._hub.set_upstream_ready(subscribed, True)
-                    self._deliver_account_event("connected", self._environment)
-                    self._hub.publish({
-                        "type": "connection_opened", "scope": "upstream",
-                        "codes": list(subscribed),
-                        "connection_status": self.credential_connection_status(),
-                    })
-                    subscribed_at = self._now_provider()
-                    self._apply_trade_source_approval(
-                        pending_trade_sources, subscribed_at, reset_all=not connection_approved,
-                    )
                     connection_approved = True
                     pending_trade_sources = set()
-                    if pending_added:
-                        self._hub.publish({"type": "codes_added", "codes": list(pending_added)})
-                    self._hub.publish({"type": "subscription_ready"})
                     pending_added = ()
                     continue
                 if market_events_connected and self._market_events is not None:
@@ -618,17 +610,44 @@ class CentralRealtimeCollector:
                 self._publish_parsed(message)
             await self._notify_market_event_boundaries()
 
+    def _accept_registration_ack(
+        self, message, pending, *, session, subscribed, sources, added, reset_all, approval=None,
+    ) -> int:
+        """Shared live/offline approval policy; only the final successful ACK is READY."""
+        if message.get("return_code") not in (None, 0, "0"):
+            raise RuntimeError(f"WebSocket 구독 실패: {message.get('return_msg', '')}")
+        remaining = max(0, pending - 1)
+        if remaining:
+            return remaining
+        logger.info("키움 중앙 실시간 구독 승인: %s · %s종목", session, len(subscribed))
+        self._credential_phase = "READY"
+        self._finish_planned_reconnect("registered")
+        self._hub.set_upstream_ready(subscribed, True, approval=approval)
+        self._deliver_account_event("connected", self._environment)
+        self._hub.publish({
+            "type": "connection_opened", "scope": "upstream", "codes": list(subscribed),
+            "connection_status": self.credential_connection_status(),
+        })
+        self._apply_trade_source_approval(sources, self._now_provider(), reset_all=reset_all)
+        if added:
+            self._hub.publish({"type": "codes_added", "codes": list(added)})
+        self._hub.publish({"type": "subscription_ready"})
+        return remaining
+
     def _mark_capture_gap(self, *, clear_continuous: bool = False) -> None:
+        from .diagnostic_top20_lifecycle_input import record_gap
+        record_gap(self, clear_continuous)
         self._record_upstream("capture_gap", {"clear_continuous": clear_continuous})
         self._minute_bars.mark_capture_gap()
 
-    def _record_upstream(self, kind: str, payload: dict, *, excluded_types: dict | None = None) -> None:
+    def _record_upstream(self, kind: str, payload: dict, *, excluded_types: dict | None = None) -> str | None:
         from . import diagnostic_trace as trace
         trace_id = trace.input_token("collector_inputs")
         if trace_id is None or self._input_replay_only:
             return
         fields = {"workload_id": "realtime", "producer_component": f"realtime_collector:{id(self):x}",
                   "input_kind": kind, "input_id": uuid4().hex, "excluded_types": excluded_types or {},
+                  "collector_input_version": COLLECTOR_INPUT_VERSION,
                   "entered_mono_ns": time.monotonic_ns(), "entered_wall_ns": time.time_ns()}
         try:
             if getattr(self, "_recorded_capture_epoch", None) != trace_id:
@@ -646,27 +665,37 @@ class CentralRealtimeCollector:
             if trace.emit_payload(trace_id, "collector_input", fields,
                                   {"source_time": self._now_provider(), **payload}):
                 self._recorded_input_high_water = (trace_id, fields["input_id"])
+                return fields["input_id"]
         except Exception:
             try:
                 trace.reject_input(trace_id, {**fields, "reason": "collector_capture_error"})
             except Exception:
                 pass
 
-    def _record_upstream_message(self, message: dict[str, Any]) -> None:
+    def _record_upstream_message(self, message: dict[str, Any]) -> CapturedMessageReceipt | None:
         from . import diagnostic_trace as trace
         trace_id = trace.input_token("collector_inputs")
         if trace_id is None or self._input_replay_only or str(message.get("trnm", "")).upper() != "REAL":
             return
+        receipt_enabled = trace.input_token("top20_inputs") == trace_id
+        parents = []
+        complete = True
+        message_id = uuid4().hex
         try:
             rows = message.get("data")
             if type(rows) is not list or len(rows) > 10000:
                 raise ValueError("collector_message_bounds")
             selected, excluded = [], {}
-            message_id, offset = uuid4().hex, 0
+            offset = 0
             def flush_group():
-                nonlocal offset, selected, excluded
-                self._record_upstream("message", {"message_id": message_id, "row_offset": offset,
+                nonlocal offset, selected, excluded, complete
+                identifier = self._record_upstream("message", {"message_id": message_id, "row_offset": offset,
                     "message": {"trnm": "REAL", "data": selected}}, excluded_types=excluded)
+                if receipt_enabled:
+                    if identifier:
+                        parents.append(identifier)
+                    else:
+                        complete = False
                 offset += len(selected)
                 selected, excluded = [], {}
             for row in rows:
@@ -675,7 +704,8 @@ class CentralRealtimeCollector:
                 kind = row.get("type")
                 if type(kind) is not str or len(kind) > 8:
                     raise ValueError("collector_event_type")
-                if kind != "0B":
+                fields = COLLECTOR_EVENT_FIELDS.get(kind)
+                if fields is None:
                     label = kind if kind in {"0w", "0J", "0U", "00", "04"} else "other"
                     excluded[label] = excluded.get(label, 0) + 1
                     continue  # Never copy account fields or credentials.
@@ -683,28 +713,43 @@ class CentralRealtimeCollector:
                 if type(values) is not dict:
                     raise ValueError("collector_values_type")
                 selected.append({**{key: row[key] for key in ("item", "stk_cd", "code") if key in row},
-                                 "type": "0B", "values": {key: values[key] for key in
-                                    ("10", "12", "13", "14", "15", "17", "20", "228", "290", "311")
+                                 "type": kind, "values": {key: values[key] for key in fields
                                     if key in values}})
                 if len(selected) == 100:
                     flush_group()
             if selected or excluded:
                 flush_group()
         except Exception:
+            complete = False
             try:
                 trace.reject_input(trace_id, {"workload_id": "realtime",
                     "producer_component": f"realtime_collector:{id(self):x}",
                     "reason": "collector_message_not_captureable"})
             except Exception:
                 pass
+        if receipt_enabled:
+            receipt = CapturedMessageReceipt(trace_id, f"realtime_collector:{id(self):x}",
+                                             message_id, tuple(parents), complete)
+            try:
+                trace.emit(trace_id, "collector_message_receipt", {
+                    "producer_component": receipt.producer_component, "message_id": message_id,
+                    "parent_input_ids": receipt.input_ids, "complete": complete,
+                })
+            except Exception:
+                return CapturedMessageReceipt(trace_id, receipt.producer_component, message_id,
+                                              receipt.input_ids, False)
+            return receipt
 
     def _publish_parsed(self, message: dict[str, Any]) -> None:
-        self._record_upstream_message(message)
+        message_receipt = self._record_upstream_message(message)
         for tick in parse_market_operation_ticks(message):
-            self._hub.publish({
+            from .diagnostic_top20_lifecycle_input import record_market_operation
+            receipt = record_market_operation(self, tick)
+            event = {
                 "type": "market_operation",
                 "payload": asdict(tick),
-            })
+            }
+            self._hub.publish(CapturedHubEvent(event, source=receipt) if receipt is not None else event)
         if (str(message.get("trnm", "")).upper() == "REAL"
                 and self._account_event_handler is not None and self._account_scope_resolver is not None):
             for row in message.get("data") or ():
@@ -726,7 +771,7 @@ class CentralRealtimeCollector:
             ("market_state", parse_market_index_ticks), ("program_trade", parse_program_trade_ticks),
             ("stock_reference", parse_stock_price_references),
         ):
-            for value in parser(message):
+            for ordinal, value in enumerate(parser(message)):
                 if (
                     name == "trade" and self._approved_trade_sources
                     and (str(value.code), str(value.market).upper())
@@ -740,7 +785,10 @@ class CentralRealtimeCollector:
                     continue
                 event = {"type": name, "payload": payload}
                 code = str(payload.get("code", ""))
-                self._hub.publish(event, code)
+                delivered = event
+                if message_receipt is not None and name in {"trade", "program_trade"}:
+                    delivered = CapturedHubEvent(event, source=CapturedParserReceipt(message_receipt, name, ordinal))
+                self._hub.publish(delivered, code)
                 if name in {"trade", "market_state", "program_trade"}:
                     item_key = code or str(payload.get("market", ""))
                     snapshot = {
@@ -841,10 +889,10 @@ class CentralRealtimeCollector:
         ] if str(value['code']) == code and str(value['trading_date']) == trading_date
             and (not market or str(value['market']) == market)]
         if deltas:
-            return await asyncio.to_thread(
+            return await owned_to_thread(
                 self._store.load_minute_bars, code, trading_date, market, realtime_deltas=deltas,
             )
-        return await asyncio.to_thread(self._store.load_minute_bars, code, trading_date, market)
+        return await owned_to_thread(self._store.load_minute_bars, code, trading_date, market)
 
     async def _save_snapshots(self) -> None:
         next_latest = _next_latest_checkpoint(self._now_provider().timestamp())
@@ -877,7 +925,7 @@ class CentralRealtimeCollector:
     async def _flush_snapshots(
         self, *, flush_latest: bool = True, periodic: bool = False, flush_seconds: bool = True,
     ) -> None:
-        task = asyncio.create_task(self._flush_serialized(flush_latest, periodic, flush_seconds), name="realtime-owned-save")
+        task = owned_create_task(self._flush_serialized(flush_latest, periodic, flush_seconds), name="realtime-owned-save")
         self._flush_tasks.add(task)
         task.add_done_callback(self._flush_tasks.discard)
         task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
@@ -903,7 +951,7 @@ class CentralRealtimeCollector:
             self._pending_snapshots.clear()
             if values:
                 try:
-                    await asyncio.to_thread(self._store.save_realtime_snapshots, values)
+                    await owned_to_thread(self._store.save_realtime_snapshots, values)
                 except Exception:
                     for value in values:
                         key = (str(value["event_type"]), str(value["item_key"]))
@@ -927,7 +975,7 @@ class CentralRealtimeCollector:
                 observations.append((bar_observation_key(observation), observation))
             self._inflight_minute_bars = minute_bars
             try:
-                await asyncio.to_thread(
+                await owned_to_thread(
                     self._store.save_minute_bars,
                     minute_bars,
                     observations=observations,
@@ -943,7 +991,7 @@ class CentralRealtimeCollector:
         self._pending_account_entry_symbols = {}
         if entry_values:
             try:
-                await asyncio.to_thread(
+                await owned_to_thread(
                     self._store.upsert_documents,
                     "account_entry_symbols_daily",
                     entry_values,
@@ -958,7 +1006,7 @@ class CentralRealtimeCollector:
         self._pending_stock_references.clear()
         if reference_values:
             try:
-                await asyncio.to_thread(
+                await owned_to_thread(
                     self._store.upsert_documents,
                     "stock_price_references",
                     reference_values,
@@ -976,7 +1024,7 @@ class CentralRealtimeCollector:
         closures.extend(new_closures)
         if closures:
             try:
-                await asyncio.to_thread(self._store.finalize_minute_bars, closures)
+                await owned_to_thread(self._store.finalize_minute_bars, closures)
             except Exception:
                 for value in closures:
                     key = tuple(
@@ -994,7 +1042,7 @@ class CentralRealtimeCollector:
         self._pending_second_retries.clear()
         if second_bars:
             try:
-                await asyncio.to_thread(self._store.save_second_trade_bars, second_bars)
+                await owned_to_thread(self._store.save_second_trade_bars, second_bars)
             except Exception:
                 for value in second_bars:
                     self._keep_second_retry(value)
@@ -1004,7 +1052,7 @@ class CentralRealtimeCollector:
         self._pending_market_history.clear()
         if market_history:
             try:
-                await asyncio.to_thread(
+                await owned_to_thread(
                     self._store.save_dataset_snapshots,
                     [
                         ("market_state", subject, snapshot_key, payload, observation)
@@ -1057,6 +1105,7 @@ class CentralRealtimeCollector:
         except TypeError:
             return False
 
+    @captured_subscription
     async def _send_subscription(
         self, websocket: Any, session: str, codes: tuple[str, ...], nxt_codes: tuple[str, ...],
         program_codes: tuple[str, ...] | None = None,
@@ -1155,7 +1204,7 @@ class CentralRealtimeCollector:
         if self._market_events is None:
             return
         if self._boundary_task is None:
-            self._boundary_task = asyncio.create_task(
+            self._boundary_task = owned_create_task(
                 self._notify_market_event_boundary_cycle(), name="realtime-owned-market-close")
             def completed(done):
                 if self._boundary_task is done:

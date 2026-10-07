@@ -14,6 +14,8 @@
 | PC에서 완성한 과거뉴스를 NAS가 읽기만 하는 단발성 이관 | [과거뉴스 archive 설계·구현 계약](PREPARED_NEWS_ARCHIVE_DESIGN_REVIEW.md) |
 | 미완료·보류·실환경 검증 | [남은 작업](OPEN_ITEMS.md) |
 | 키움 PostgreSQL writer 계측과 미완료 전수 감사 | [저장 경로 감사](KIWOOM_STORAGE_WRITE_AUDIT.md) |
+| 앱 전체 중복·몰림·복구 및 성능 후보 분류 | [전체 부하 감사와 변경 기준](WHOLE_APP_LOAD_OPTIMIZATION_REVIEW.md) |
+| 외부 수집의 시작·종료·소비자·과수집/갱신 부족 | [외부 입력 lifecycle 감사](EXTERNAL_INPUT_LIFECYCLE_AUDIT.md) |
 | PostgreSQL 공통 접근·관측 계층 검토와 이관 기준 | [공통 DB 경계 검토](COMMON_DB_ACCESS_OBSERVABILITY_REVIEW.md) |
 | 장중 trace를 고정 입력으로 재생·비교 | [반복 부하 실험 계약](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md) |
 | DB 변경 전 연결 기준선과 동작 보존 절차 | [DB 리팩터링 연결 기준선](db_refactoring/README.md) |

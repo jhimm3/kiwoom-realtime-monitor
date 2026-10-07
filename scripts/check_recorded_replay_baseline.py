@@ -24,6 +24,7 @@ sys.path[:0] = [str(ROOT / 'src'), str(ROOT)]
 import psycopg
 from psycopg import sql
 from kiwoom_monitor.central_server import diagnostic_replay_baseline as baseline
+from scripts.run_postgres_access_integration import _dedicated_url
 
 
 def _endpoint(server_url):
@@ -156,9 +157,13 @@ def main(argv=None):
     parser.add_argument('--secrets-directory', type=Path, default=Path('/app/secrets'))
     parser.add_argument('--execution-gates', action='store_true',
                         help='capture/window/native replay gates on the already sealed replay DB')
+    parser.add_argument('--recorded-capture-gates', action='store_true',
+                        help='run capture invariants and recorded collector replay gates together')
     args = parser.parse_args(argv)
-    if args.execution_gates and args.provision:
-        parser.error('execution gates require an already provisioned and sealed replay DB')
+    if args.execution_gates and args.recorded_capture_gates:
+        parser.error('choose one acceptance gate set')
+    if (args.execution_gates or args.recorded_capture_gates) and args.provision:
+        parser.error('acceptance gates require an already provisioned and sealed replay DB')
     stage = 'settings'
     try:
         server_url = os.environ.get('KIWOOM_SERVER_DATABASE_URL', '')
@@ -182,13 +187,26 @@ def main(argv=None):
                     os.environ.pop(name, None)
             os.environ['KIWOOM_REPLAY_DATABASE_URL'] = _replay_url(settings)
             os.environ['KIWOOM_REPLAY_OWNER_TOKEN'] = settings['owner_token']
+            # Capture invariants use the existing diagnostic test DB; recorded
+            # execution gates use the separately sealed replay DB above.
+            os.environ['KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL'] = _dedicated_url(server_url)
             stage = 'postgres_acceptance'
-            suite_name = ('tests.integration.test_recorded_execution_postgres.RecordedExecutionPostgresTests'
-                          if args.execution_gates else
-                          'tests.integration.test_recorded_replay_baseline_postgres.RecordedReplayBaselinePostgresTests')
-            suite = unittest.defaultTestLoader.loadTestsFromName(suite_name)
+            if args.recorded_capture_gates:
+                suite = unittest.TestSuite((
+                    unittest.defaultTestLoader.loadTestsFromName(
+                        'tests.integration.test_recorded_workload_capture_postgres.RecordedWorkloadCapturePostgresTests'),
+                    unittest.defaultTestLoader.loadTestsFromName(
+                        'tests.integration.test_recorded_execution_postgres.RecordedExecutionPostgresTests'),
+                ))
+                expected_tests = 9
+            else:
+                suite_name = ('tests.integration.test_recorded_execution_postgres.RecordedExecutionPostgresTests'
+                              if args.execution_gates else
+                              'tests.integration.test_recorded_replay_baseline_postgres.RecordedReplayBaselinePostgresTests')
+                suite = unittest.defaultTestLoader.loadTestsFromName(suite_name)
+                expected_tests = 5 if args.execution_gates else 4
             result = unittest.TextTestRunner(verbosity=2).run(suite)
-            success = result.wasSuccessful() and result.testsRun == (2 if args.execution_gates else 4) and not result.skipped
+            success = result.wasSuccessful() and result.testsRun == expected_tests and not result.skipped
             print(json.dumps({'state': 'passed' if success else 'failed',
                               'database': baseline.DATABASE_NAME, 'source': str(ROOT),
                               'baseline_id': baseline_id, 'tests': result.testsRun,

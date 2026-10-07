@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+from datetime import datetime
 from threading import Condition, Lock, RLock
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -36,6 +38,8 @@ TABLES = (
     'central_shadow_monitor_state', 'central_shadow_checkpoint_state',
     'central_shadow_checkpoint_frames',
 )
+TABLES_V2 = TABLES + ('central_api_query_cache',)
+CACHE_CLOCK_POLICY = 'source_wall_real_elapsed/v1'
 SEQUENCES = ('central_observation_revisions_accepted_sequence_seq',)
 DEFAULT_CONFIG = {'observation_history_enabled': True, 'shadow_checkpoint_frames_enabled': False}
 
@@ -114,6 +118,12 @@ class _ReplayStore(PostgresQueryStore):
         super().__init__(lease.database_url, **lease.config)
         self._lease = lease
         self._generation = lease._generation
+        if lease.baseline_version == 2:
+            self._query_cache_wall_time = self._owned_query_cache_wall_time
+
+    def _owned_query_cache_wall_time(self):
+        # Keep the lease/generation fence on cache reads as well as connections.
+        return self._lease.cache_wall_time(self._generation)
 
     def _connect(self):
         return self._lease.connect_store(self._generation)
@@ -128,11 +138,23 @@ class ReplayDatabaseLease:
     Releasing the lease fences new connections and waits for every connection
     already opening/open to close. It never treats cancellation as DB rollback.
     """
-    def __init__(self, database_url, owner_token, *, config=None):
+    def __init__(self, database_url, owner_token, *, config=None,
+                 baseline_version=BASELINE_VERSION, cache_clock=None):
         self.database_url = validate_replay_url(database_url)
         if type(owner_token) is not str or not re.fullmatch('[a-f0-9]{32}', owner_token):
             raise ValueError('replay_owner_token_invalid')
         self.owner_token, self._config = owner_token, _config(config)
+        if type(baseline_version) is not int or baseline_version not in (1, 2):
+            raise ValueError('replay_baseline_version_unsupported')
+        if (baseline_version == 1 and cache_clock is not None
+                or baseline_version == 2 and cache_clock is None):
+            raise ValueError('replay_baseline_cache_clock_required_only_for_v2')
+        self._baseline_version = baseline_version
+        self._tables = TABLES if baseline_version == 1 else TABLES_V2
+        self._snapshot_schema = 'replay_baseline' if baseline_version == 1 else 'replay_baseline_v2'
+        self._metadata_table = 'baseline' if baseline_version == 1 else 'baseline_v2'
+        self._cache_clock = cache_clock
+        self._clock_contract = self._read_clock_contract() if baseline_version == 2 else None
         self.connection = None
         self._condition = Condition()
         self._management_lock = RLock()
@@ -142,10 +164,43 @@ class ReplayDatabaseLease:
         self._run_ready = False
         self._baseline_id = None
         self._process_locked = False
+        self._runtime = None
 
     @property
     def config(self):
         return dict(self._config)
+
+    @property
+    def baseline_version(self):
+        return self._baseline_version
+
+    @property
+    def tables(self):
+        return self._tables
+
+    def _read_clock_contract(self):
+        origin = getattr(self._cache_clock, 'origin', None)
+        if (getattr(self._cache_clock, 'policy', None) != CACHE_CLOCK_POLICY
+                or not isinstance(origin, datetime) or origin.tzinfo is None
+                or origin.utcoffset() is None
+                or type(getattr(self._cache_clock, 'armed', None)) is not bool
+                or not callable(getattr(self._cache_clock, 'wall_time', None))):
+            raise ValueError('replay_baseline_cache_clock_invalid')
+        epoch = origin.timestamp()
+        if not math.isfinite(epoch):
+            raise ValueError('replay_baseline_cache_clock_invalid')
+        return {'policy': CACHE_CLOCK_POLICY, 'origin_epoch': epoch}
+
+    def cache_wall_time(self, generation):
+        with self._condition:
+            if (not self._active or not self._run_ready or generation != self._generation):
+                raise RuntimeError('replay_lease_not_ready_or_retired')
+        if self.baseline_version != 2 or self._read_clock_contract() != self._clock_contract:
+            raise RuntimeError('replay_baseline_cache_clock_changed')
+        value = self._cache_clock.wall_time()
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise RuntimeError('replay_baseline_cache_clock_invalid')
+        return value
 
     def __enter__(self):
         with self._management_lock:
@@ -183,6 +238,10 @@ class ReplayDatabaseLease:
             self._retire()
 
     def _retire(self):
+        # No connection count can see an admitted thread that has not connected
+        # yet. Retain both ownership locks if that runtime is not fully drained.
+        if self._runtime is not None:
+            self._runtime.require_drained()
         with self._condition:
             self._active = False
             self._run_ready = False
@@ -205,6 +264,8 @@ class ReplayDatabaseLease:
             raise RuntimeError('replay_external_database_session_present')
 
     def _maintenance(self, cursor):
+        if self._runtime is not None:
+            self._runtime.require_drained()
         # Fence before checking: no owned connect may race with restore/seal.
         with self._condition:
             if not self._active or self._open_count:
@@ -216,30 +277,31 @@ class ReplayDatabaseLease:
 
     def _lock_tables(self, cursor):
         cursor.execute(sql.SQL('LOCK TABLE {} IN ACCESS EXCLUSIVE MODE').format(
-            sql.SQL(',').join(sql.Identifier('public', name) for name in TABLES)))
+            sql.SQL(',').join(sql.Identifier('public', name) for name in self.tables)))
         cursor.execute('LOCK TABLE replay_meta.ownership IN ACCESS EXCLUSIVE MODE')
         self._no_external_sessions(cursor)
 
-    def _schema(self, cursor):
+    def _schema(self, cursor, *, tables=None):
+        tables = self.tables if tables is None else tables
         cursor.execute('SELECT table_name,column_name,ordinal_position,data_type,udt_name,is_nullable,'
                        'column_default FROM information_schema.columns WHERE table_schema=\'public\' '
-                       'AND table_name=ANY(%s) ORDER BY table_name,ordinal_position', (list(TABLES),))
+                       'AND table_name=ANY(%s) ORDER BY table_name,ordinal_position', (list(tables),))
         columns = cursor.fetchall()
-        if {row[0] for row in columns} != set(TABLES):
+        if {row[0] for row in columns} != set(tables):
             raise RuntimeError('replay_baseline_required_tables_missing')
         cursor.execute('SELECT tablename,indexname,indexdef FROM pg_indexes WHERE schemaname=\'public\' '
-                       'AND tablename=ANY(%s) ORDER BY tablename,indexname', (list(TABLES),))
+                       'AND tablename=ANY(%s) ORDER BY tablename,indexname', (list(tables),))
         indexes = cursor.fetchall()
         cursor.execute('SELECT c.relname,k.conname,pg_get_constraintdef(k.oid) FROM pg_constraint k '
                        'JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace '
                        'WHERE n.nspname=\'public\' AND c.relname=ANY(%s) '
-                       'ORDER BY c.relname,k.conname', (list(TABLES),))
+                       'ORDER BY c.relname,k.conname', (list(tables),))
         constraints = cursor.fetchall()
         cursor.execute('SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity,c.reloptions,'
                        'pg_get_userbyid(c.relowner) '
                        'FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace '
                        'WHERE n.nspname=\'public\' AND c.relname=ANY(%s) ORDER BY c.relname',
-                       (list(TABLES),))
+                       (list(tables),))
         table_options = cursor.fetchall()
         if any(row[1] or row[2] for row in table_options):
             raise RuntimeError('replay_baseline_row_security_unsupported')
@@ -248,7 +310,7 @@ class ReplayDatabaseLease:
         cursor.execute('SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid '
                        'JOIN pg_namespace n ON n.oid=c.relnamespace '
                        'WHERE n.nspname=\'public\' AND c.relname=ANY(%s) AND NOT t.tgisinternal LIMIT 1',
-                       (list(TABLES),))
+                       (list(tables),))
         if cursor.fetchone() is not None:
             raise RuntimeError('replay_baseline_custom_trigger_unsupported')
         cursor.execute('SELECT version,name FROM public.central_schema_migrations ORDER BY version')
@@ -269,9 +331,9 @@ class ReplayDatabaseLease:
             result[name] = {'definition': list(definition), 'next_value': last + int(called)}
         return result
 
-    def _tables_digest(self, cursor, schema):
+    def _tables_digest(self, cursor, schema, *, tables=None):
         result, total_bytes, total_rows = {}, 0, 0
-        for name in TABLES:
+        for name in self.tables if tables is None else tables:
             cursor.execute(sql.SQL('SELECT to_jsonb(t)::text FROM {} t '
                                    'ORDER BY to_jsonb(t)::text COLLATE "C"').format(sql.Identifier(schema, name)))
             digest, count = hashlib.sha256(), 0
@@ -288,13 +350,26 @@ class ReplayDatabaseLease:
             result[name] = {'rows': count, 'sha256': digest.hexdigest()}
         return result
 
+    def _baseline_row(self, cursor):
+        if self.baseline_version == 2:
+            cursor.execute('SELECT to_regclass(%s)', ('replay_meta.baseline_v2',))
+            if cursor.fetchone()[0] is None:
+                return None
+        cursor.execute(sql.SQL('SELECT baseline_id,manifest FROM {} WHERE singleton').format(
+            sql.Identifier('replay_meta', self._metadata_table)))
+        return cursor.fetchone()
+
     def _baseline(self, cursor):
-        cursor.execute('SELECT baseline_id,manifest FROM replay_meta.baseline WHERE singleton')
-        row = cursor.fetchone()
-        if not row or row[0] != _hash(row[1]) or row[1].get('version') != BASELINE_VERSION:
+        row = self._baseline_row(cursor)
+        if (not row or row[0] != _hash(row[1]) or row[1].get('version') != self.baseline_version
+                or set(row[1].get('tables', {})) != set(self.tables)):
             raise RuntimeError('replay_baseline_missing_or_invalid')
         if row[1].get('config') != self.config:
             raise RuntimeError('replay_baseline_config_mismatch')
+        if self.baseline_version == 2:
+            if (self._read_clock_contract() != self._clock_contract
+                    or row[1].get('cache_clock') != self._clock_contract):
+                raise RuntimeError('replay_baseline_cache_clock_mismatch')
         return row
 
     def seal(self):
@@ -308,20 +383,40 @@ class ReplayDatabaseLease:
         with self.connection.transaction(), self.connection.cursor() as cursor:
             self._maintenance(cursor)
             self._lock_tables(cursor)
-            cursor.execute('SELECT baseline_id FROM replay_meta.baseline WHERE singleton')
-            if cursor.fetchone() is not None:
+            if self._baseline_row(cursor) is not None:
                 raise RuntimeError('replay_baseline_already_sealed')
+            parent_id = None
+            if self.baseline_version == 2:
+                if self._read_clock_contract() != self._clock_contract or self._cache_clock.armed:
+                    raise RuntimeError('replay_baseline_cache_clock_must_be_frozen')
+                cursor.execute('SELECT baseline_id,manifest FROM replay_meta.baseline WHERE singleton')
+                parent = cursor.fetchone()
+                if (not parent or parent[0] != _hash(parent[1]) or parent[1].get('version') != 1
+                        or parent[1].get('config') != self.config
+                        or self._schema(cursor, tables=TABLES) != parent[1].get('schema_sha256')
+                        or self._tables_digest(cursor, 'public', tables=TABLES) != parent[1].get('tables')
+                        or self._sequences(cursor) != parent[1].get('sequences')):
+                    raise RuntimeError('replay_v2_requires_restored_v1_parent_fixture')
+                parent_id = parent[0]
+                cursor.execute('CREATE SCHEMA replay_baseline_v2')
+                cursor.execute('CREATE TABLE replay_meta.baseline_v2 '
+                               '(singleton boolean PRIMARY KEY CHECK(singleton), '
+                               'baseline_id text NOT NULL, manifest jsonb NOT NULL)')
             schema_hash = self._schema(cursor)
-            for name in TABLES:
+            for name in self.tables:
                 cursor.execute(sql.SQL('CREATE TABLE {} AS TABLE {}').format(
-                    sql.Identifier('replay_baseline', name), sql.Identifier('public', name)))
-            manifest = {'version': BASELINE_VERSION, 'origin': 'controlled_fixture',
+                    sql.Identifier(self._snapshot_schema, name), sql.Identifier('public', name)))
+            manifest = {'version': self.baseline_version, 'origin': 'controlled_fixture',
                         'source_state_equivalent': False, 'config': self.config,
-                        'schema_sha256': schema_hash, 'tables': self._tables_digest(cursor, 'replay_baseline'),
+                        'schema_sha256': schema_hash, 'tables': self._tables_digest(cursor, self._snapshot_schema),
                         'sequences': self._sequences(cursor)}
+            if self.baseline_version == 2:
+                manifest.update(cache_clock=self._clock_contract, parent_baseline_id=parent_id)
             baseline_id = _hash(manifest)
-            cursor.execute('INSERT INTO replay_meta.baseline(singleton,baseline_id,manifest) '
-                           'VALUES(true,%s,%s::jsonb)', (baseline_id, json.dumps(manifest)))
+            cursor.execute(sql.SQL('INSERT INTO {}(singleton,baseline_id,manifest) '
+                                  'VALUES(true,%s,%s::jsonb)').format(
+                                      sql.Identifier('replay_meta', self._metadata_table)),
+                           (baseline_id, json.dumps(manifest)))
         return {'baseline_id': baseline_id, 'manifest': manifest}
 
     def restore(self, expected_baseline_id):
@@ -340,17 +435,17 @@ class ReplayDatabaseLease:
             self._lock_tables(cursor)
             if self._schema(cursor) != manifest['schema_sha256']:
                 raise RuntimeError('replay_baseline_schema_mismatch')
-            if self._tables_digest(cursor, 'replay_baseline') != manifest['tables']:
+            if self._tables_digest(cursor, self._snapshot_schema) != manifest['tables']:
                 raise RuntimeError('replay_baseline_snapshot_changed')
             sequence_before = self._sequences(cursor)
             if any(sequence_before[name]['definition'] != manifest['sequences'][name]['definition']
                    for name in SEQUENCES):
                 raise RuntimeError('replay_baseline_sequence_definition_changed')
             cursor.execute(sql.SQL('TRUNCATE {}').format(sql.SQL(',').join(
-                sql.Identifier('public', name) for name in TABLES)))
-            for name in TABLES:
+                sql.Identifier('public', name) for name in self.tables)))
+            for name in self.tables:
                 cursor.execute(sql.SQL('INSERT INTO {} SELECT * FROM {}').format(
-                    sql.Identifier('public', name), sql.Identifier('replay_baseline', name)))
+                    sql.Identifier('public', name), sql.Identifier(self._snapshot_schema, name)))
             for name in SEQUENCES:
                 # Preserve the next observable value, with RESTART's rollback and
                 # locking semantics. Do not use nontransactional setval().
@@ -377,11 +472,11 @@ class ReplayDatabaseLease:
         with self.connection.cursor() as cursor:
             _identity(cursor)
             _marker(cursor, self.owner_token)
-            cursor.execute('SELECT baseline_id,manifest FROM replay_meta.baseline WHERE singleton')
-            row = cursor.fetchone()
+            row = self._baseline_row(cursor)
         with self._condition:
             count = self._open_count
         return {'database': DATABASE_NAME, 'ownership_verified': True,
+                'baseline_version': self.baseline_version,
                 'baseline_id': row[0] if row else None, 'baseline_sealed': bool(row),
                 'owned_connections': count, 'run_ready': self._run_ready}
 
@@ -391,7 +486,24 @@ class ReplayDatabaseLease:
                 raise RuntimeError('replay_baseline_restore_required')
             return _ReplayStore(self)
 
+    def bind_runtime(self, runtime):
+        """Opt-in native lifecycle ownership, after a verified baseline restore."""
+        from .diagnostic_replay_runtime import ReplayRuntimeScope
+        if type(runtime) is not ReplayRuntimeScope:
+            raise ValueError('replay_native_runtime_required')
+        with self._management_lock, self._condition:
+            if not self._active or not self._run_ready or self._open_count:
+                raise RuntimeError('replay_baseline_restore_required')
+            if self._runtime is not None:
+                self._runtime.require_drained()
+            state = runtime.status()
+            if state['phase'] != 'running' or state['pending_tasks'] or state['pending_threads']:
+                raise RuntimeError('replay_native_runtime_not_fresh')
+            self._runtime = runtime
+
     def connect_store(self, generation):
+        if self._runtime is not None:
+            self._runtime.require_native_work()
         with self._condition:
             if (not self._active or not self._run_ready
                     or generation != self._generation):

@@ -52,6 +52,51 @@ class StockNewsWindowTests(unittest.TestCase):
             self.assertIn("일시적인 API 오류", window._status_label.text())
             window.shutdown()
 
+    def test_closed_news_window_stops_periodic_prepare_and_reopens_with_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            window.show()
+            self.app.processEvents()
+            self.assertTrue(window._auto_refresh.isActive())
+
+            window._stock_code = "005930"
+            window.close()
+            self.app.processEvents()
+            self.assertFalse(window.isVisible())
+            self.assertFalse(window._auto_refresh.isActive())
+
+            with patch.object(window, "_schedule_prepare") as prepare:
+                window.show()
+                self.app.processEvents()
+            self.assertTrue(window._auto_refresh.isActive())
+            prepare.assert_called_once_with()
+            window.shutdown()
+
+    def test_parented_news_window_stops_timer_when_close_hides_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            main = QWidget()
+            main.show()
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3", main)
+            window.show()
+            self.app.processEvents()
+            self.assertTrue(window._auto_refresh.isActive())
+            window._stock_code = "005930"
+
+            window.close()
+            self.app.processEvents()
+            self.assertFalse(window.isVisible())
+            self.assertFalse(window._auto_refresh.isActive())
+
+            with patch.object(window, "_schedule_prepare") as prepare:
+                window.show()
+                self.app.processEvents()
+            self.assertTrue(window._auto_refresh.isActive())
+            prepare.assert_called_once_with()
+            window.shutdown()
+            main.close()
+
     def test_window_mode_can_switch_between_independent_and_attached(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

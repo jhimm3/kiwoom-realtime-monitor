@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts import historical_collection_monitor as monitor
+from scripts.historical_collection_counts import initialize_counts
 from kiwoom_monitor.infrastructure.naver_stock_market_news import initialize_database
 
 
@@ -38,7 +39,7 @@ class HistoricalCollectionMonitorTests(unittest.TestCase):
                 {"pid": 5678, "updated_at": "old"}, {},
             )
         self.assertEqual(health[0], "응답 지연 · 프로세스 실행 중")
-        self.assertEqual(monitor.PROCESSING_REFRESH_SECONDS, 60)
+        self.assertEqual(monitor.PROCESSING_REFRESH_SECONDS, 3)
 
     def test_article_wait_without_completed_fetches_is_reported_as_delayed(self) -> None:
         with (
@@ -70,6 +71,7 @@ class HistoricalCollectionMonitorTests(unittest.TestCase):
             database = Path(temporary) / "prepared.sqlite3"
             with closing(sqlite3.connect(database)) as connection:
                 with connection:
+                    connection.execute("PRAGMA journal_mode=WAL")
                     connection.execute(
                         "CREATE TABLE prepared_news(state TEXT,body_json TEXT,updated_at REAL)"
                     )
@@ -78,6 +80,7 @@ class HistoricalCollectionMonitorTests(unittest.TestCase):
                         ("ready", '{"body_status":"summary_only"}', 11),
                         ("failed", "{}", 12),
                     ])
+            initialize_counts(database, ["prepared_news"])
             snapshot = monitor._prepared_snapshot(database)
             self.assertEqual(snapshot["counts"], {"ready": 2, "failed": 1})
             self.assertEqual(snapshot["body_counts"], {"fulltext": 1, "summary_only": 1})
@@ -97,7 +100,9 @@ class HistoricalCollectionMonitorTests(unittest.TestCase):
                             ("flash", "2019-01-02", "running", 5, 4, 60, "", "2026-09-23T04:00:02+00:00"),
                         ],
                     )
+            initialize_counts(database, ["market_news_days"])
             with (
+                patch.object(monitor, "_read_json", return_value={"date": "2019-01-02"}),
                 patch.object(monitor, "MARKET_NEWS_DATABASE", database),
                 patch.object(monitor, "MARKET_NEWS_START", monitor.date(2019, 1, 1)),
                 patch.object(monitor, "MARKET_NEWS_END", monitor.date(2019, 1, 2)),

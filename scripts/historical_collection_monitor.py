@@ -17,6 +17,9 @@ from tkinter import messagebox, ttk
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from scripts.historical_collection_counts import read_counts
 STATE_ROOT = PROJECT_ROOT / "data" / "historical_collection"
 DATABASE = PROJECT_ROOT / "data" / "historical_intelligence.sqlite3"
 MARKET_NEWS_DATABASE = PROJECT_ROOT / "data" / "naver_stock_market_news.sqlite3"
@@ -39,7 +42,7 @@ NAS_STATUS_PATHS = (
     Path(r"\\192.168.0.5\docker\kiwoom-monitor\deploy\synology\server-data\historical-intelligence\v1\STATUS.md"),
 )
 CREATE_NO_WINDOW = 0x08000000
-PROCESSING_REFRESH_SECONDS = 60
+PROCESSING_REFRESH_SECONDS = 3
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -70,7 +73,7 @@ def _local_time(value: object) -> str:
     return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S") if parsed else "-"
 
 
-def _process_alive(pid: object) -> bool:
+def _process_alive(pid: object) -> bool | None:
     try:
         process_id = int(pid)
     except (TypeError, ValueError):
@@ -79,78 +82,49 @@ def _process_alive(pid: object) -> bool:
         return False
     handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, process_id)
     if not handle:
-        return False
+        # Admin-owned collector PIDs are visible in state/heartbeat but may be
+        # inaccessible to this unelevated monitor. Distinguish denial from exit.
+        return None if ctypes.windll.kernel32.GetLastError() == 5 else False
     ctypes.windll.kernel32.CloseHandle(handle)
     return True
 
 
 def _database_snapshot() -> dict[str, object]:
-    result: dict[str, object] = {"news_counts": {}, "news_current": {},
-                                 "article_queue_counts": {}}
+    heartbeat = _read_json(NEWS_HEARTBEAT)
+    result: dict[str, object] = {
+        "news_counts": {}, "article_queue_counts": {},
+        "news_current": {**heartbeat, "query_text": heartbeat.get("query", "")},
+    }
     if not DATABASE.is_file():
         return result
-    uri = f"file:{DATABASE.resolve().as_posix()}?mode=ro"
     try:
-        with closing(sqlite3.connect(uri, uri=True, timeout=1)) as connection:
-            connection.row_factory = sqlite3.Row
-            result["news_counts"] = {
-                str(row["state"]): int(row["count"])
-                for row in connection.execute(
-                    "SELECT state,COUNT(*) AS count FROM news_backfill_jobs GROUP BY state"
-                )
-            }
-            if connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='news_article_pipeline'"
-            ).fetchone():
-                result["article_queue_counts"] = {
-                    str(row["state"]): int(row["count"])
-                    for row in connection.execute(
-                        "SELECT state,COUNT(*) AS count FROM news_article_pipeline "
-                        "GROUP BY state"
-                    )
-                }
-            news = connection.execute(
-                "SELECT code,target_date,query_text,attempts,pages_observed,items_observed,updated_at "
-                "FROM news_backfill_jobs WHERE state='running' ORDER BY updated_at DESC LIMIT 1"
-            ).fetchone()
-            if news is None and connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='news_range_jobs'"
-            ).fetchone():
-                news = connection.execute(
-                    "SELECT code,start_date AS target_date,query_text,attempts,"
-                    "pages_observed,items_observed,updated_at "
-                    "FROM news_range_jobs WHERE state='running' "
-                    "ORDER BY updated_at DESC LIMIT 1"
-                ).fetchone()
-            result["news_current"] = dict(news) if news else {}
+        with closing(sqlite3.connect(
+            f"file:{DATABASE.resolve().as_posix()}?mode=ro", uri=True, timeout=1,
+        )) as connection:
+            connection.execute("BEGIN")
+            result["news_counts"] = read_counts(connection, "news_backfill_jobs")["counts"]
+            result["article_queue_counts"] = read_counts(connection, "news_article_pipeline")["counts"]
     except sqlite3.Error as error:
         result["database_error"] = str(error)
     return result
 
 
 def _market_news_snapshot() -> dict[str, object]:
-    result: dict[str, object] = {"counts": {}, "current": {}}
+    state = _read_json(MARKET_NEWS_STATE)
+    result: dict[str, object] = {"counts": {}, "current": {
+        **state, "target_date": state.get("date", ""),
+    }}
     if not MARKET_NEWS_DATABASE.is_file():
         return result
-    uri = f"file:{MARKET_NEWS_DATABASE.resolve().as_posix()}?mode=ro"
     try:
-        with closing(sqlite3.connect(uri, uri=True, timeout=1)) as connection:
-            connection.row_factory = sqlite3.Row
-            counts = {
-                str(row["state"]): int(row["count"])
-                for row in connection.execute(
-                    "SELECT state,COUNT(*) AS count FROM market_news_days GROUP BY state"
-                )
-            }
+        with closing(sqlite3.connect(
+            f"file:{MARKET_NEWS_DATABASE.resolve().as_posix()}?mode=ro", uri=True, timeout=1,
+        )) as connection:
+            connection.execute("BEGIN")
+            counts = read_counts(connection, "market_news_days")["counts"]
             expected = ((MARKET_NEWS_END - MARKET_NEWS_START).days + 1) * 2
-            counts["pending"] = max(0, expected - sum(counts.values()))
-            current = connection.execute(
-                "SELECT source,target_date,state,pages,articles,last_error,updated_at "
-                "FROM market_news_days ORDER BY updated_at DESC LIMIT 1"
-            ).fetchone()
+            counts["pending"] = counts.get("pending", 0) + max(0, expected - sum(counts.values()))
             result["counts"] = counts
-            result["current"] = dict(current) if current else {}
     except sqlite3.Error as error:
         result["database_error"] = str(error)
     return result
@@ -172,20 +146,8 @@ def _prepared_snapshot(path: Path) -> dict[str, object]:
         with closing(sqlite3.connect(
             f"file:{path.resolve().as_posix()}?mode=ro", uri=True, timeout=1,
         )) as connection:
-            result["counts"] = {
-                str(state): int(count) for state, count in connection.execute(
-                    "SELECT state,COUNT(*) FROM prepared_news GROUP BY state"
-                )
-            }
-            result["body_counts"] = {
-                str(status): int(count) for status, count in connection.execute(
-                    "SELECT json_extract(body_json,'$.body_status'),COUNT(*) "
-                    "FROM prepared_news WHERE state='ready' GROUP BY 1"
-                ) if status
-            }
-            result["updated_at"] = connection.execute(
-                "SELECT MAX(updated_at) FROM prepared_news"
-            ).fetchone()[0]
+            connection.execute("BEGIN")
+            result.update(read_counts(connection, "prepared_news"))
     except sqlite3.Error as error:
         result["database_error"] = str(error)
     return result
@@ -206,7 +168,7 @@ def _collector_health(
         return "오류로 정지", "#b42318"
     if state_name == "environment_unavailable":
         return "CREON 연결 끊김", "#b42318"
-    if state_name == "throttled" and _process_alive(state.get("pid")):
+    if state_name == "throttled" and _process_alive(state.get("pid")) is not False:
         return "요청 제한 대기 중", "#b54708"
     if state_name == "complete_with_errors":
         return "오류 포함 완료", "#b54708"
@@ -216,9 +178,10 @@ def _collector_health(
         return "정지", "#475467"
     heartbeat_age = _age_seconds(heartbeat.get("updated_at"))
     current_age = _age_seconds(current.get("updated_at"))
+    heartbeat_process = _process_alive(heartbeat.get("pid"))
     heartbeat_alive = (
         heartbeat_age is not None and heartbeat_age < 180
-        and _process_alive(heartbeat.get("pid"))
+        and heartbeat_process is not False
     )
     if state_name == "running" and heartbeat_alive and heartbeat.get("phase") == "article_wait":
         progress_age = _age_seconds(heartbeat.get("last_article_progress_at"))
@@ -232,13 +195,14 @@ def _collector_health(
                 "#b54708",
             )
     current_fresh = current_age is not None and current_age < 600
-    state_alive = _process_alive(state.get("pid"))
+    state_process = _process_alive(state.get("pid"))
+    state_alive = state_process is True
     if state_name == "running" and (heartbeat_alive or (state_alive and current_fresh)):
         return "정상 실행 중", "#067647"
     state_age = _age_seconds(state.get("updated_at"))
-    if state_name == "running" and state_alive and state_age is not None and state_age < 180:
+    if state_name == "running" and state_process is not False and state_age is not None and state_age < 180:
         return "시작 중", "#b54708"
-    if state_name == "running" and state_alive:
+    if state_name == "running" and state_process is not False:
         return "응답 지연 · 프로세스 실행 중", "#b54708"
     if state_name == "running":
         return "응답 없음", "#b42318"
@@ -287,11 +251,12 @@ class CollectorPanel(ttk.LabelFrame):
 
     def update_view(
         self, health: tuple[str, str], counts: dict[str, int], current: str,
-        heartbeat: str, error: str, progress_detail: str = "",
+        heartbeat: str, error: str, progress_detail: str = "", counts_error: str = "",
     ) -> None:
         self.status.configure(text=health[0], foreground=health[1])
         progress_text, percent = _counts_text(counts)
-        self.progress_text.configure(text=progress_text + progress_detail)
+        self.progress_text.configure(text=(f"집계 준비 필요 또는 읽기 오류: {counts_error}"
+                                           if counts_error else progress_text + progress_detail))
         self.progress.configure(value=percent)
         self.current.configure(text=f"현재 작업: {current}")
         self.heartbeat.configure(text=f"마지막 응답: {heartbeat}")
@@ -310,6 +275,10 @@ class ProcessingPanel(ttk.LabelFrame):
         self.detail.grid(row=2, column=0, sticky="ew", pady=(6, 0))
 
     def update_view(self, snapshot: dict[str, object], total: int) -> None:
+        if snapshot.get("database_error"):
+            self.summary.configure(text=f"집계 준비 필요 또는 읽기 오류: {snapshot['database_error']}")
+            self.detail.configure(text="전수 조회로 대체하지 않습니다. 최초 집계 완료 후 자동 갱신합니다.")
+            return
         counts = snapshot.get("counts") or {}
         bodies = snapshot.get("body_counts") or {}
         assert isinstance(counts, dict) and isinstance(bodies, dict)
@@ -398,9 +367,14 @@ class HistoricalCollectionMonitor(tk.Tk):
             "정상 실행 중", "시작 중",
         }:
             article_state = _read_json(NEWS_ARTICLE_STATE)
-            if not _process_alive(article_state.get("pid")):
+            article_process = _process_alive(article_state.get("pid"))
+            if article_process is False:
                 NEWS_ARTICLE_STOP.unlink(missing_ok=True)
                 self._launch("run_historical_news_article_collector.ps1", 1000000)
+            elif article_process is None:
+                messagebox.showinfo(
+                    "뉴스 수집기", "원문 수집기 PID는 권한상 확인할 수 없습니다. 중복 실행을 피하려고 재시작하지 않았습니다."
+                )
             messagebox.showinfo("뉴스 수집기", "검색 수집기가 실행 중입니다. 원문 수집기도 확인했습니다.")
             return
         NEWS_STOP.unlink(missing_ok=True)
@@ -475,6 +449,7 @@ class HistoricalCollectionMonitor(tk.Tk):
         self.news_panel.update_view(
             _collector_health(news_state, news_heartbeat, news_current),
             news_counts, news_label, news_heartbeat_text, str(news_state.get("error") or ""),
+            counts_error=str(snapshot.get("database_error") or ""),
             progress_detail=(
                 " · 원문 대기 {pending:,} / 처리 중 {running:,} / 완료 {complete:,}"
                 " · 원문 수집기 {worker}"
@@ -507,6 +482,7 @@ class HistoricalCollectionMonitor(tk.Tk):
         self.market_news_panel.update_view(
             _collector_health(market_news_state, {}, market_news_current),
             market_news_counts, market_news_label, market_news_heartbeat, market_news_error,
+            counts_error=str(market_news_snapshot.get("database_error") or ""),
         )
 
         if self._processing_future is not None and self._processing_future.done():

@@ -46,7 +46,8 @@ class HistoricalHighService:
         self._cache_loader = cache_loader
         self._high_250_loader = high_250_loader
 
-    def load(self, code: str) -> HistoricalHighTarget:
+    def load(self, code: str, *, as_of: date | None = None) -> HistoricalHighTarget:
+        source_day = as_of or date.today()
         stored_loader = getattr(self._client, "load_stored_historical_high", None)
         stored = stored_loader(code) if callable(stored_loader) else None
         if isinstance(stored, dict):
@@ -61,15 +62,15 @@ class HistoricalHighService:
         high_250 = self._high_250_loader(code) if self._high_250_loader is not None else None
         cache = self._cache_loader(code) if self._cache_loader is not None else None
         if cache is not None and cache.target.evidence:
-            return self._load_incremental(code, cache, high_250)
-        return self._load_fresh(code, high_250)
+            return self._load_incremental(code, cache, high_250, source_day)
+        return self._load_fresh(code, high_250, source_day)
 
-    def _load_fresh(self, code: str, high_250: int | None) -> HistoricalHighTarget:
+    def _load_fresh(self, code: str, high_250: int | None, source_day: date) -> HistoricalHighTarget:
         """오늘 기준 수정주가만으로 계산 근거를 처음부터 다시 만든다."""
-        evidence = self._load_market(code, high_250)
+        evidence = self._load_market(code, high_250, source_day)
         if self._include_nxt:
             try:
-                evidence.extend(self._load_market(f"{code}_NX", high_250))
+                evidence.extend(self._load_market(f"{code}_NX", high_250, source_day))
             except Exception:
                 pass
         if not evidence:
@@ -78,10 +79,12 @@ class HistoricalHighService:
         years = [int(item.trade_date[:4]) for item in evidence if item.trade_date[:4].isdigit()]
         return HistoricalHighTarget(winner.high_price, min(years), max(years), winner.trade_date, tuple(evidence))
 
-    def _load_incremental(self, code: str, cache: HistoricalHighCache, high_250: int | None) -> HistoricalHighTarget:
+    def _load_incremental(
+        self, code: str, cache: HistoricalHighCache, high_250: int | None, source_day: date,
+    ) -> HistoricalHighTarget:
         checked = cache.checked_on.replace("-", "")[:8]
         since_month = checked[:6]
-        today = date.today().strftime("%Y%m%d")
+        today = source_day.strftime("%Y%m%d")
         yearly = self._load_rows("ka10094", "stk_yr_pole_chart_qry", code, today, since=checked[:4])
         floor = max(cache.target.price or 0, high_250 or 0)
         years_to_refine: set[str] = set()
@@ -113,7 +116,7 @@ class HistoricalHighService:
                     # 저장된 근거는 이전 조회일의 주식 단위다. 새 권리변동이
                     # 생기면 수정비율을 직접 곱하지 않고, 키움이 오늘 기준으로
                     # 보정한 전체 차트를 다시 받아 DB 근거를 통째로 교체한다.
-                    return self._load_fresh(code, high_250)
+                    return self._load_fresh(code, high_250, source_day)
                 detailed = [item for row in daily if (item := _evidence("day", row)) is not None]
                 evidence.extend(detailed)
             elif (item := _evidence("month", month_row)) is not None:
@@ -124,8 +127,11 @@ class HistoricalHighService:
         years = [int(item.trade_date[:4]) for item in evidence if item.trade_date[:4].isdigit()]
         return HistoricalHighTarget(winner.high_price, min(years), max(years), winner.trade_date, tuple(evidence))
 
-    def _load_market(self, code: str, high_250: int | None = None) -> list[HistoricalHighEvidence]:
-        yearly = self._load_rows("ka10094", "stk_yr_pole_chart_qry", code, date.today().strftime("%Y%m%d"))
+    def _load_market(
+        self, code: str, high_250: int | None, source_day: date,
+    ) -> list[HistoricalHighEvidence]:
+        today = source_day.strftime("%Y%m%d")
+        yearly = self._load_rows("ka10094", "stk_yr_pole_chart_qry", code, today)
         evidence_by_year: dict[str, list[HistoricalHighEvidence]] = {}
         yearly_rows: dict[str, dict[str, Any]] = {}
         for row in yearly:
@@ -139,8 +145,8 @@ class HistoricalHighService:
         if high_250 is not None and evidence_by_year:
             annual_max = max(item.high_price for items in evidence_by_year.values() for item in items)
             if annual_max <= high_250:
-                evidence_by_year.setdefault(date.today().strftime("%Y"), []).append(
-                    HistoricalHighEvidence("250day", date.today().strftime("%Y%m%d"), high_250)
+                evidence_by_year.setdefault(source_day.strftime("%Y"), []).append(
+                    HistoricalHighEvidence("250day", today, high_250)
                 )
                 return [item for items in evidence_by_year.values() for item in items]
 
@@ -151,26 +157,30 @@ class HistoricalHighService:
         for year, row in yearly_rows.items():
             if _has_adjustment(row):
                 if high_250 is None or (_price(row.get("high_pric")) or 0) > high_250:
-                    evidence_by_year[year] = self._refine_year(code, year, row, high_250)
+                    evidence_by_year[year] = self._refine_year(code, year, row, high_250, source_day)
                 refined.add(year)
         while evidence_by_year:
             winner = max((item for items in evidence_by_year.values() for item in items), key=lambda item: item.high_price)
             winner_year = winner.trade_date[:4]
             if winner.period == "250day" or winner_year in refined or winner_year not in yearly_rows:
                 break
-            evidence_by_year[winner_year] = self._refine_year(code, winner_year, yearly_rows[winner_year], high_250)
+            evidence_by_year[winner_year] = self._refine_year(
+                code, winner_year, yearly_rows[winner_year], high_250, source_day,
+            )
             refined.add(winner_year)
         return [item for items in evidence_by_year.values() for item in items]
 
-    def _refine_year(self, code: str, year: str, fallback: dict[str, Any], high_250: int | None = None) -> list[HistoricalHighEvidence]:
-        today = date.today().strftime("%Y%m%d")
+    def _refine_year(
+        self, code: str, year: str, fallback: dict[str, Any], high_250: int | None, source_day: date,
+    ) -> list[HistoricalHighEvidence]:
+        today = source_day.strftime("%Y%m%d")
         monthly = self._load_rows("ka10083", "stk_mth_pole_chart_qry", code, today, prefix=year)
         if not monthly:
             item = _evidence("year", fallback)
             return [item] if item is not None else []
         monthly_evidence = [item for row in monthly if (item := _evidence("month", row)) is not None]
         if high_250 is not None and monthly_evidence and max(item.high_price for item in monthly_evidence) <= high_250:
-            return monthly_evidence + [HistoricalHighEvidence("250day", date.today().strftime("%Y%m%d"), high_250)]
+            return monthly_evidence + [HistoricalHighEvidence("250day", today, high_250)]
         evidence: list[HistoricalHighEvidence] = []
         for month_row in monthly:
             month = _date_text(month_row)[:6]

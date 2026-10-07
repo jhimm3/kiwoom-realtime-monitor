@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from typing import Any
 
@@ -25,26 +26,56 @@ class CandidatePollWorker(QThread):
         self._poll_milliseconds = max(500, int(poll_seconds * 1000))
         self._cursor = 0
         self._initial = True
+        self._condition = threading.Condition()
+        self._polling_enabled = False
+        self._suppress_alerts_until_caught_up = False
+
+    def set_polling_enabled(self, enabled: bool) -> None:
+        with self._condition:
+            enabled = bool(enabled)
+            if enabled and not self._polling_enabled:
+                # Catch up silently after a period with no UI or alert consumer.
+                self._suppress_alerts_until_caught_up = True
+            self._polling_enabled = enabled
+            self._condition.notify_all()
+
+    def wake_for_shutdown(self) -> None:
+        with self._condition:
+            self._polling_enabled = True
+            self._condition.notify_all()
 
     def run(self) -> None:
         while not self.isInterruptionRequested():
+            with self._condition:
+                while not self._polling_enabled and not self.isInterruptionRequested():
+                    self._condition.wait()
+                if self.isInterruptionRequested():
+                    return
             try:
                 page = self._client.load_candidate_events(
                     after_sequence=self._cursor,
                     limit=1000,
                 )
-                page["initial_sync"] = self._initial
                 next_cursor = page.get("next_cursor")
                 if next_cursor is not None:
                     self._cursor = max(self._cursor, int(next_cursor))
-                if not bool(page.get("has_more")):
+                caught_up = not bool(page.get("has_more"))
+                with self._condition:
+                    page["initial_sync"] = (
+                        self._initial or self._suppress_alerts_until_caught_up
+                    )
+                    if caught_up:
+                        self._initial = False
+                        self._suppress_alerts_until_caught_up = False
+                if caught_up:
                     self._cursor = max(self._cursor, int(page.get("high_watermark", self._cursor)))
-                    self._initial = False
                 page["consumed_sequence"] = self._cursor
                 self.pageReceived.emit(page)
             except (RuntimeError, ValueError, OSError) as error:
                 self.failed.emit(str(error))
-            self.msleep(self._poll_milliseconds)
+            with self._condition:
+                if self._polling_enabled and not self.isInterruptionRequested():
+                    self._condition.wait(self._poll_milliseconds / 1000)
 
 
 class CandidateSettingsWorker(QThread):
@@ -91,9 +122,7 @@ class CandidateMonitorDialog(QDialog):
         self._alert_enabled.setChecked(
             str(self._settings.value("alert_enabled", "0")) == "1"
         )
-        self._alert_enabled.toggled.connect(
-            lambda checked: self._settings.setValue("alert_enabled", "1" if checked else "0")
-        )
+        self._alert_enabled.toggled.connect(self._on_alert_enabled_changed)
         top = QHBoxLayout()
         top.addWidget(self._quality, 1)
         top.addWidget(self._alert_enabled)
@@ -143,14 +172,31 @@ class CandidateMonitorDialog(QDialog):
         self._worker = CandidatePollWorker(client, self)
         self._worker.pageReceived.connect(self._apply_page)
         self._worker.failed.connect(self._show_failure)
-        self._worker.start()
+        self._sync_polling_state()
         if self._operational_client is None:
             self._settings_status.setText("NAS 운영 설정 연결을 사용할 수 없습니다.")
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self._sync_polling_state()
         if not self._operational_settings_loaded and self._operational_client is not None:
             self._start_settings_request()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._sync_polling_state()
+
+    def _on_alert_enabled_changed(self, checked: bool) -> None:
+        self._settings.setValue("alert_enabled", "1" if checked else "0")
+        self._sync_polling_state()
+
+    def _sync_polling_state(self) -> None:
+        if not hasattr(self, "_worker"):
+            return
+        enabled = self.isVisible() or self._alert_enabled.isChecked()
+        self._worker.set_polling_enabled(enabled)
+        if enabled and not self._worker.isRunning():
+            self._worker.start()
 
     def _apply_page(self, page: dict[str, Any]) -> None:
         quality = page.get("quality", {})
@@ -283,6 +329,7 @@ class CandidateMonitorDialog(QDialog):
         self._settings.setValue("geometry", self.saveGeometry())
         if self._worker.isRunning():
             self._worker.requestInterruption()
+            self._worker.wake_for_shutdown()
             self._worker.wait(6000)
         if self._settings_worker is not None and self._settings_worker.isRunning():
             self._settings_worker.requestInterruption()

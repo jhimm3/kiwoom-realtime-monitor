@@ -24,6 +24,42 @@ from kiwoom_monitor.domain.market_data_contract import (
 from .database_query_cache import StoredQuery
 
 CODEC_VERSION = "store-input/v1"
+CATALOG_COPY_PROFILE = "stock-catalog-documents/v1"
+CATALOG_MAX_COPY_BYTES = 16 * 1024 * 1024
+_UNSET_PAYLOAD = object()
+COLLECTOR_INPUT_VERSION = "collector-input/v2"
+LEGACY_COLLECTOR_INPUT_VERSION = "collector-input/v1"
+# Only parser-consumed market fields. Never expand this to arbitrary REAL rows.
+COLLECTOR_EVENT_FIELDS = {
+    "0B": ("10", "12", "13", "14", "15", "17", "20", "228", "290", "311"),
+    "0w": ("20", "210", "211", "212", "213"),
+    "0J": ("20", "10", "12", "14", "252", "255", "253"),
+    "0U": ("20", "10", "12", "14", "252", "255", "253"),
+}
+
+
+def validate_collector_message(message: Any, *, version: str = COLLECTOR_INPUT_VERSION,
+                               allow_empty: bool = False) -> None:
+    """Validate recorded market input before any parser or native store runs."""
+    allowed = {"0B"} if version == LEGACY_COLLECTOR_INPUT_VERSION else set(COLLECTOR_EVENT_FIELDS)
+    if version not in {COLLECTOR_INPUT_VERSION, LEGACY_COLLECTOR_INPUT_VERSION}:
+        raise ValueError("recorded_collector_input_version_unsupported")
+    data = message.get("data") if type(message) is dict else None
+    if (type(message) is not dict or set(message) != {"trnm", "data"}
+            or message.get("trnm") != "REAL" or type(data) is not list
+            or not (0 if allow_empty else 1) <= len(data) <= 100):
+        raise ValueError("recorded_execution_collector_message_invalid")
+    for item in data:
+        if type(item) is not dict:
+            raise ValueError("recorded_execution_collector_message_invalid")
+        kind = item.get("type")
+        if (type(kind) is not str or kind not in allowed
+                or set(item) - {"type", "item", "stk_cd", "code", "values"}
+                or type(item.get("values")) is not dict
+                or set(item["values"]) - set(COLLECTOR_EVENT_FIELDS[kind])):
+            raise ValueError("recorded_execution_collector_message_invalid")
+
+
 MAX_COPY_BYTES = 8 * 1024 * 1024
 MAX_NODES = 120_000
 MAX_DEPTH = 32
@@ -103,7 +139,9 @@ _SECRET_FIELDS = frozenset({
 
 
 class InputRejected(ValueError):
-    pass
+    def __init__(self, reason: str, *, details: dict[str, int | str] | None = None):
+        super().__init__(reason)
+        self.details = dict(details or {})
 
 
 @dataclass(frozen=True)
@@ -122,7 +160,13 @@ def freeze_payload(value: Any, *, maximum_bytes: int = MAX_COPY_BYTES) -> Frozen
         nodes += 1
         charge += size
         if charge > maximum_bytes or nodes > MAX_NODES:
-            raise InputRejected("payload_budget_exceeded")
+            raise InputRejected("payload_budget_exceeded", details={
+                "budget": "bytes" if charge > maximum_bytes else "nodes",
+                "observed_bytes": charge,
+                "observed_nodes": nodes,
+                "maximum_bytes": maximum_bytes,
+                "maximum_nodes": MAX_NODES,
+            })
 
     def visit(item: Any, depth: int) -> Any:
         if depth > MAX_DEPTH:
@@ -180,8 +224,10 @@ def freeze_payload(value: Any, *, maximum_bytes: int = MAX_COPY_BYTES) -> Frozen
     return FrozenPayload(frozen, charge)
 
 
-def thaw_payload(node: Any) -> Any:
+def thaw_payload(node: Any, *, maximum_bytes: int = MAX_COPY_BYTES) -> Any:
     """Decode only explicit tags/types, with the same bounds as capture."""
+    if maximum_bytes not in (MAX_COPY_BYTES, CATALOG_MAX_COPY_BYTES):
+        raise InputRejected("invalid_payload_copy_limit")
     budget = [0]
 
     def decode(value: Any, depth: int) -> Any:
@@ -227,8 +273,36 @@ def thaw_payload(node: Any) -> Any:
         raise InputRejected("invalid_payload_tag")
 
     result = decode(node, 0)
-    freeze_payload(result)  # Recheck byte limits, secrets, and primitive validity after decoding.
+    freeze_payload(result, maximum_bytes=maximum_bytes)
     return result
+
+
+def payload_copy_limit(event_type: str, fields: dict, value: Any = _UNSET_PAYLOAD) -> int:
+    """Select the single named exception; never infer it from payload size."""
+    if "payload_profile" not in fields:
+        return MAX_COPY_BYTES
+    if (fields["payload_profile"] != CATALOG_COPY_PROFILE
+            or event_type != "operation_start"
+            or fields.get("method") != "replace_documents"
+            or fields.get("collection") != "stock_catalog"):
+        raise InputRejected("invalid_payload_profile")
+    if value is not _UNSET_PAYLOAD and (type(value) is not dict or value.get("collection") != "stock_catalog"):
+        raise InputRejected("payload_profile_collection_mismatch")
+    return CATALOG_MAX_COPY_BYTES
+
+
+def thaw_operation_arguments(row: dict) -> dict:
+    """Validate the operation envelope and decoded binding before native execution."""
+    limit = payload_copy_limit(row.get("event_type"), row)
+    if row.get("codec_version") != CODEC_VERSION:
+        raise InputRejected("invalid_operation_codec")
+    arguments = thaw_payload(row.get("payload"), maximum_bytes=limit)
+    payload_copy_limit(row.get("event_type"), row, arguments)
+    if "collection" in row and (type(arguments) is not dict
+                                or arguments.get("collection") != row["collection"]):
+        raise InputRejected("operation_collection_mismatch")
+    validate_operation(row.get("method"), arguments)
+    return arguments
 
 
 def validate_operation(method: str, arguments: dict) -> str:
@@ -237,6 +311,20 @@ def validate_operation(method: str, arguments: dict) -> str:
     group = OPERATIONS[method]
     if group == "documents":
         collection = arguments.get("collection")
+        if collection == "account_entry_symbols_daily" and method == "load_documents":
+            # TOP20 reads a date-owned stock-code cohort, not account state.
+            # Capture arguments/count only; writes and response documents stay
+            # outside this boundary. Do not broaden the document allowlist.
+            owner = arguments.get("owner")
+            try:
+                valid_day = type(owner) is str and date.fromisoformat(owner).isoformat() == owner
+            except ValueError:
+                valid_day = False
+            if (not valid_day or type(arguments.get("limit")) is not int
+                    or not 1 <= arguments["limit"] <= 5000
+                    or arguments.get("offset", 0) != 0 or arguments.get("updated_after", 0) != 0):
+                raise InputRejected("unsupported_document_collection")
+            return "top20"
         if type(collection) is not str or collection not in _DOCUMENT_COLLECTIONS:
             raise InputRejected("unsupported_document_collection")
         if collection.startswith("news_"):
@@ -310,6 +398,9 @@ def captured_workload(workload_id: str, component: str):
             from .diagnostic_trace import input_token
             high_water = getattr(self, "_recorded_input_high_water", (None, ""))
             cause = high_water[1] if high_water[0] == input_token("collector_inputs") else ""
+            parent = _OWNER.get()
+            if not cause and parent is not None and parent.producer_component == producer:
+                cause = parent.cause_input_id
             with capture_owner(workload_id, producer, actor, cause_input_id=cause):
                 return await function(self, *args, **kwargs)
         return run
@@ -375,6 +466,7 @@ def install_store_capture(store: Any) -> None:
                       "actor_known": owner is not None,
                       "cause_input_id": owner.cause_input_id if owner else "",
                       "workload_id": owner.workload_id if owner else OPERATIONS.get(__name, "unsupported")}
+            arguments = None
             try:
                 fields["actor_sequence"] = _actor_sequence(trace_id, fields["actor_id"])
                 if __name in EXCLUDED_METHODS:
@@ -384,13 +476,23 @@ def install_store_capture(store: Any) -> None:
                 bound = __signature.bind(*args, **kwargs)
                 bound.apply_defaults()
                 arguments = dict(bound.arguments)
+                if __name == "load_documents":
+                    collection = arguments.get("collection")
+                    if type(collection) is str:
+                        fields["collection"] = collection[:160]
                 group = validate_operation(__name, arguments)
                 fields["workload_id"] = owner.workload_id if owner else group
                 from .postgres_access import current_db_call_tags
                 fields.update(current_db_call_tags())
+                if __name == "replace_documents" and arguments.get("collection") == "stock_catalog":
+                    fields["collection"] = "stock_catalog"
+                    fields["payload_profile"] = CATALOG_COPY_PROFILE
                 trace.emit_payload(trace_id, "operation_start", fields, arguments)
             except Exception as error:
                 reason = str(error) if isinstance(error, InputRejected) else "capture_boundary_error"
+                details = getattr(error, "details", None)
+                if isinstance(details, dict) and details:
+                    fields["rejection_detail"] = details
                 try:
                     trace.reject_input(trace_id, {**fields, "reason": reason})
                 except Exception:
@@ -430,6 +532,7 @@ class RecordedPlan:
     actor_known: bool
     warnings: tuple[str, ...]
     execution_ready: bool = False  # Baseline/clock/ref adapters and public runner are not yet wired.
+    collector_input_versions: tuple[tuple[str, str], ...] = ()
 
 
 @contextmanager
@@ -445,7 +548,8 @@ def replay_operation_identity(operation_id: str):
 def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
                           window_start_seconds: float, window_end_seconds: float,
                           include_workloads: tuple[str, ...] = (), exclude_workloads: tuple[str, ...] = (),
-                          mode: str = "recorded_operations", collector_components: tuple[str, ...] = ()) -> RecordedPlan:
+                          mode: str = "recorded_operations", collector_components: tuple[str, ...] = (),
+                          _source_sequences_verified: bool = False) -> RecordedPlan:
     if (mode not in {"recorded_operations", "collector_with_background"}
             or not all(math.isfinite(value) for value in (window_start_seconds, window_end_seconds))
             or not 0 <= window_start_seconds < window_end_seconds <= 7200
@@ -456,7 +560,7 @@ def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
         raise ValueError("invalid_recorded_selection")
     if mode == "collector_with_background" and window_end_seconds > 900:
         raise ValueError("recorded_collector_prefix_exceeds_limit")
-    starts, ends, inputs, rejected = {}, {}, [], []
+    starts, ends, inputs, rejected, market_inputs = {}, {}, [], [], []
     seen_sequences = set()
     for row in events:
         seq = row.get("seq")
@@ -472,9 +576,13 @@ def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
             target[identifier] = row
         elif kind == "collector_input":
             inputs.append(row)
+        elif kind == "market_input":
+            market_inputs.append(row)
         elif kind == "input_rejected":
             rejected.append(row)
-    if seen_sequences and seen_sequences != set(range(1, max(seen_sequences) + 1)):
+    if _source_sequences_verified and [row["seq"] for row in events] != sorted(seen_sequences):
+        raise ValueError("recorded_event_sequence_invalid")
+    if not _source_sequences_verified and seen_sequences and seen_sequences != set(range(1, max(seen_sequences) + 1)):
         raise ValueError("recorded_event_sequence_gap")
 
     def in_window(row):
@@ -497,6 +605,7 @@ def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
     operations, excluded, replaced, included_inputs = [], [], [], []
     actor_known = True
     components = set(collector_components)
+    collector_versions = {}
     if mode == "recorded_operations" and components:
         raise ValueError("recorded_frontier_conflict")
     if mode == "collector_with_background":
@@ -521,10 +630,20 @@ def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
                 value = thaw_payload(row["payload"])
                 if type(value) is not dict or row.get("input_kind") not in {"initial_state", "message", "source_approval", "capture_gap"}:
                     raise ValueError("recorded_collector_input_invalid")
+                version = row.get("collector_input_version", LEGACY_COLLECTOR_INPUT_VERSION)
+                if version not in {LEGACY_COLLECTOR_INPUT_VERSION, COLLECTOR_INPUT_VERSION}:
+                    raise ValueError("recorded_collector_input_version_unsupported")
+                component = row["producer_component"]
+                if collector_versions.setdefault(component, version) != version:
+                    raise ValueError("recorded_collector_input_version_mixed")
                 if row["input_kind"] == "initial_state":
                     initial_components.add(row["producer_component"])
-                if row.get("excluded_types", {}).get("0w", 0) or any(
-                    row.get("excluded_types", {}).get(name, 0) for name in ("0J", "0U")
+                omissions = row.get("excluded_types", {})
+                if (type(omissions) is not dict or any(type(key) is not str or type(count) is not int
+                                                       or count <= 0 for key, count in omissions.items())):
+                    raise ValueError("recorded_collector_excluded_types_invalid")
+                if omissions.get("0w", 0) or any(
+                    omissions.get(name, 0) for name in ("0J", "0U")
                 ):
                     raise ValueError("recorded_collector_mixed_latest_unsupported")
                 # Keep prefix to reconstruct source resets before the selected window.
@@ -542,18 +661,32 @@ def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
             raise ValueError("recorded_operation_censored_or_codec_invalid")
         ending = ends[identifier]
         if (any(ending.get(key) != row.get(key) for key in
-                ("method", "workload_id", "producer_component", "actor_id"))
+                ("method", "workload_id", "producer_component", "actor_id", "payload_profile", "collection"))
+                or any((key in ending) != (key in row) for key in ("payload_profile", "collection"))
                 or ending.get("finished_mono_ns", 0) < row["entered_mono_ns"]):
             raise ValueError("recorded_operation_pair_invalid")
         if row.get("codec_version") != CODEC_VERSION or "payload" not in row:
             raise ValueError("recorded_payload_missing")
-        arguments = thaw_payload(row["payload"])
-        validate_operation(row["method"], arguments)
-        if mode == "collector_with_background" and row.get("producer_component") in components and row["method"] in _COLLECTOR_SINKS:
-            if row["method"] == "save_realtime_snapshots" and any(
-                value.get("event_type") != "trade" for value in arguments.get("values", ())
-            ):
-                raise ValueError("recorded_collector_mixed_latest_unsupported")
+        arguments = thaw_operation_arguments(row)
+        replace = False
+        if mode == "collector_with_background" and row.get("producer_component") in components:
+            version = collector_versions[row["producer_component"]]
+            replace = row["method"] in _COLLECTOR_SINKS
+            if row["method"] == "save_realtime_snapshots":
+                allowed = {"trade"} if version == LEGACY_COLLECTOR_INPUT_VERSION else {
+                    "trade", "program_trade", "market_state"}
+                if any(type(value) is not dict or value.get("event_type") not in allowed
+                       for value in arguments.get("values", ())):
+                    raise ValueError("recorded_collector_mixed_latest_unsupported")
+            if row["method"] == "save_dataset_snapshots":
+                kinds = {value[0] for value in arguments["values"]}
+                if "market_state" in kinds:
+                    if kinds != {"market_state"}:
+                        raise ValueError("recorded_collector_mixed_dataset_unsupported")
+                    if version != COLLECTOR_INPUT_VERSION:
+                        raise ValueError("recorded_collector_market_input_missing")
+                    replace = True
+        if replace:
             replaced.append(identifier)
         else:
             operations.append(identifier)
@@ -565,5 +698,75 @@ def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
         warnings.append("causal_actor_unconfirmed")
     if mode == "collector_with_background":
         warnings.append("collector_initial_state_cold_with_prefix")
+        warnings.append("hybrid_frontier_not_cross_component_causal_replay")
+    if any(row.get("workload_id") in selected and in_window(row) for row in market_inputs):
+        warnings.append("top20_market_cause_not_executed_store_calls_only")
     return RecordedPlan(mode, tuple(operations), tuple(included_inputs), tuple(excluded), tuple(replaced),
-                        tuple(sorted(selected)), actor_known, tuple(warnings))
+                        tuple(sorted(selected)), actor_known, tuple(warnings),
+                        collector_input_versions=tuple(sorted(collector_versions.items())))
+
+
+def compile_top20_queue_frontier(events: list[dict], *, trace_id: str, component: str,
+                                 manifest: dict | None = None, **selection):
+    """Preflight a queue-derived sink frontier, without enabling execution.
+
+    Multiple consumed causes are retained as a set of receipts. No last-tick
+    guess is used to classify aggregated program/index transactions. Other
+    TOP20 stages still require their own inputs and a complete service runner.
+    """
+    from .diagnostic_trace import validate_top20_capture_manifest
+    validate_top20_capture_manifest(manifest, events, trace_id=trace_id)
+    source_start = manifest["started_mono_ns"]
+    if selection.get("started_mono_ns", source_start) != source_start:
+        raise ValueError("top20_capture_clock_mismatch")
+    selection["started_mono_ns"] = source_start
+    end = selection.get("window_end_seconds")
+    if type(end) not in (int, float) or end * 1_000_000_000 > manifest["finished_mono_ns"] - source_start:
+        raise ValueError("top20_capture_window_out_of_bounds")
+    return _compile_top20_queue_frontier_verified(events, trace_id=trace_id, component=component,
+                                                  **selection)
+
+
+def _compile_top20_queue_frontier_verified(events, *, trace_id, component,
+                                          source_sequences_verified=False, **selection):
+    # A sparse list is allowed only by the file reader after the complete
+    # manifest/chunk sequence gate. Public in-memory preflight stays strict.
+    from .diagnostic_top20_input import compile_delivery_coverage
+    coverage = compile_delivery_coverage(events, trace_id=trace_id, component=component,
+                                         _source_sequences_verified=source_sequences_verified)
+    plan = compile_recorded_plan(events, _source_sequences_verified=source_sequences_verified, **selection)
+    if "top20" not in plan.selected_workloads:
+        raise ValueError("top20_queue_frontier_not_selected")
+    starts = {row["operation_id"]: row for row in events if row.get("event_type") == "operation_start"}
+    remaining, replaced = [], list(plan.replaced_operation_ids)
+    for identifier in plan.operation_ids:
+        row = starts[identifier]
+        if row.get("producer_component") != component:
+            remaining.append(identifier)
+            continue
+        if (row.get("workload_id") != "top20" or row.get("actor_known") is not True
+                or row.get("shared_owner_components")):
+            raise ValueError("top20_queue_frontier_shared_or_unknown_owner")
+        value = thaw_payload(row["payload"])
+        if row["method"] == "save_dataset_snapshot":
+            kinds = {value["kind"]}
+        elif row["method"] == "save_dataset_snapshots":
+            kinds = {item[0] for item in value["values"]}
+        else:
+            remaining.append(identifier)
+            continue
+        sinks = {"top20_index", "program_flow"}
+        if kinds & sinks:
+            if kinds - sinks:
+                raise ValueError("top20_queue_frontier_mixed_transaction")
+            replaced.append(identifier)
+        else:
+            remaining.append(identifier)
+    return {"coverage": coverage, "operation_ids": tuple(remaining),
+            "source_integrity": "manifest_and_events",
+            "replaced_operation_ids": tuple(replaced),
+            "excluded_operation_ids": plan.excluded_operation_ids,
+            "collector_input_ids": plan.collector_input_ids,
+            "scope": "top20_queue_frontier_preflight_only",
+            "top20_session_execution_ready": False,
+            "warnings": (*plan.warnings, "top20_session_runner_and_other_stage_inputs_pending")}

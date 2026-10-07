@@ -243,7 +243,7 @@ class RecordedWorkloadCapturePostgresTests(unittest.TestCase):
         original = trace.os.replace
 
         def fail_blob(source, target):
-            if Path(target).name.startswith("payload-"):
+            if Path(target).suffix == ".payloads":
                 raise OSError("injected capture disk failure")
             return original(source, target)
 

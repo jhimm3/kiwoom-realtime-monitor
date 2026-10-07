@@ -14,7 +14,7 @@ from kiwoom_monitor.central_server import diagnostic_trace as trace
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.database_query_cache import StoredQuery
 from kiwoom_monitor.central_server.diagnostic_replay_contract import (
-    CODEC_VERSION, InputRejected, capture_owner, compile_recorded_plan, freeze_payload,
+    CODEC_VERSION, COLLECTOR_INPUT_VERSION, MAX_NODES, InputRejected, capture_owner, compile_recorded_plan, freeze_payload,
     install_store_capture, thaw_payload,
 )
 from kiwoom_monitor.central_server.diagnostic_workloads import _set_tool, _set_trace
@@ -39,6 +39,20 @@ def capture(*, store_inputs=True, collector_inputs=True):
                 _set_tool(control, False)
 
 
+def rejected_evidence(identifier):
+    """Inspect committed evidence, without opening an incomplete trace for replay."""
+    manifest = trace.status(identifier)
+    rows = []
+    for part in manifest['chunks']:
+        for line in trace.chunk_bytes(identifier, part['name']).splitlines():
+            row = json.loads(line)
+            digest = row.pop('payload_ref', None)
+            if digest is not None:
+                row['payload'] = json.loads(trace.payload_bytes(identifier, digest))
+            rows.append(row)
+    return manifest, rows
+
+
 class NativeStore:
     def __init__(self):
         self.calls = []
@@ -56,6 +70,9 @@ class NativeStore:
     def save_realtime_snapshots(self, values):
         self.calls.append(values)
 
+    def load_documents(self, collection, owner="", limit=1000, offset=0, *, subject_prefix=None):
+        return []
+
     def load_daily_bars(self, code, limit=250):
         if code == 'fail':
             raise LookupError('native failure')
@@ -63,6 +80,38 @@ class NativeStore:
 
 
 class RecordedCaptureTests(unittest.TestCase):
+    def test_mixed_market_capture_preserves_order_fields_and_omissions_across_bounded_groups(self):
+        now = datetime(2026, 10, 7, 1, tzinfo=timezone.utc)
+        collector = CentralRealtimeCollector(lambda: '', 'real', RealtimeHub(), lambda: now)
+        source_rows = [
+            {'type': '0B', 'item': '005930_AL', 'values': {'10': '100', '20': '100000', 'unused': 'discard'}},
+            {'type': '0w', 'item': ['005930_NX'], 'values': {'20': '100000', '210': '-5', '211': '2',
+                '212': '7', '213': '-1', '9201': 'private-account'}},
+            {'type': '0J', 'item': '001', 'values': {'20': '100000', '10': '2500.1', '12': '-1.2',
+                '14': '99', '252': '100', '255': '200', '253': '30', 'unused': 'discard'}},
+            {'type': '0U', 'item': '101', 'values': {'20': '100000', '10': '800.5'}},
+        ]
+        rows = source_rows * 26 + [{'type': '00', 'values': {'9201': 'private-account'}},
+                                  {'type': '0g', 'item': '005930', 'values': {'305': '100'}}]
+        with capture(store_inputs=False) as session:
+            collector._record_upstream_message({'trnm': 'REAL', 'data': rows})
+            trace.stop()
+            manifest, recorded = trace.recorded_events(session['trace_id'])
+            self.assertEqual(0, manifest['input_rejected'])
+            messages = [row for row in recorded if row.get('input_kind') == 'message']
+            self.assertEqual([100, 4], [len(thaw_payload(row['payload'])['message']['data']) for row in messages])
+            self.assertEqual([0, 100], [thaw_payload(row['payload'])['row_offset'] for row in messages])
+            self.assertEqual(1, len({thaw_payload(row['payload'])['message_id'] for row in messages}))
+            copied = [item for row in messages for item in thaw_payload(row['payload'])['message']['data']]
+            self.assertEqual([row['type'] for row in source_rows] * 26, [row['type'] for row in copied])
+            self.assertEqual(['005930_NX'], copied[1]['item'])
+            self.assertEqual({'20': '100000', '210': '-5', '211': '2', '212': '7', '213': '-1'}, copied[1]['values'])
+            self.assertEqual({'00': 1, 'other': 1}, messages[-1]['excluded_types'])
+            self.assertTrue(all(row['collector_input_version'] == COLLECTOR_INPUT_VERSION
+                                for row in recorded if row['event_type'] == 'collector_input'))
+            self.assertNotIn('private-account', json.dumps(recorded))
+            self.assertNotIn('discard', json.dumps(recorded))
+
     def test_window_reader_resolves_only_measured_operation_payloads(self):
         with capture(store_inputs=True, collector_inputs=False) as session:
             manifest = trace.status(session['trace_id'])
@@ -120,6 +169,49 @@ class RecordedCaptureTests(unittest.TestCase):
                 window_end_seconds=901, mode='collector_with_background',
                 collector_components=('realtime_collector:test',),
             )
+
+    def test_late_operation_window_remains_available_without_collector_state(self):
+        with capture(store_inputs=True, collector_inputs=False) as session:
+            identifier = session['trace_id']
+            started = trace.status(identifier)['started_mono_ns']
+            for name, offset in (('early', 20), ('late', 3600)):
+                fields = {
+                    'operation_id': name, 'method': 'save_dataset_snapshot',
+                    'codec_version': CODEC_VERSION, 'workload_id': 'top20',
+                    'producer_component': 'top20:source', 'actor_id': 'top20:actor',
+                    'actor_known': True, 'actor_sequence': 1 if name == 'early' else 2,
+                    'entered_mono_ns': started + offset * 1_000_000_000,
+                }
+                self.assertTrue(trace.emit_payload(identifier, 'operation_start', fields, {
+                    'kind': 'ranking', 'subject': name, 'key': 'key', 'payload': {'value': offset},
+                }))
+                trace.emit(identifier, 'operation_end', {
+                    **fields, 'outcome': 'returned',
+                    'finished_mono_ns': started + (offset + 1) * 1_000_000_000,
+                })
+            trace.stop()
+            active = trace._SESSION
+            active['finished_mono_ns'] = started + 3900 * 1_000_000_000
+            trace._manifest(trace._directory() / identifier, active)
+
+            manifest, rows = trace.recorded_window_events(
+                identifier, window_start_seconds=3550, window_end_seconds=3650,
+                mode='recorded_operations',
+            )
+            plan = compile_recorded_plan(
+                rows, started_mono_ns=started, window_start_seconds=3550,
+                window_end_seconds=3650,
+            )
+            self.assertEqual(('late',), plan.operation_ids)
+            self.assertEqual(1, manifest['window_read']['payload_blobs_loaded'])
+            self.assertNotIn('payload', next(row for row in rows
+                             if row.get('operation_id') == 'early' and row['event_type'] == 'operation_start'))
+            with self.assertRaisesRegex(ValueError, 'recorded_window_out_of_bounds'):
+                trace.recorded_window_events(
+                    identifier, window_start_seconds=3550, window_end_seconds=3650,
+                    mode='collector_with_background',
+                    collector_components=('realtime_collector:test',),
+                )
 
     def test_window_reader_resolves_collector_prefix_payloads(self):
         with capture(store_inputs=True, collector_inputs=True) as session:
@@ -186,10 +278,40 @@ class RecordedCaptureTests(unittest.TestCase):
         for value in (cyclic, {'access_token': 'must never copy'}, (x for x in range(3))):
             with self.assertRaises(InputRejected):
                 freeze_payload(value)
-        with self.assertRaises(InputRejected):
+        with self.assertRaises(InputRejected) as byte_error:
             freeze_payload('a' * 1000, maximum_bytes=100)
+        self.assertEqual('payload_budget_exceeded', str(byte_error.exception))
+        self.assertEqual('bytes', byte_error.exception.details['budget'])
+        with self.assertRaises(InputRejected) as node_error:
+            freeze_payload([None] * (MAX_NODES + 1), maximum_bytes=16 * 1024 * 1024)
+        self.assertEqual('payload_budget_exceeded', str(node_error.exception))
+        self.assertEqual('nodes', node_error.exception.details['budget'])
         with self.assertRaises(InputRejected):
             thaw_payload(['enum', [], 'unknown'])
+
+    def test_rejections_include_safe_collection_and_payload_budget_details(self):
+        store = NativeStore()
+        with capture(store_inputs=True, collector_inputs=False) as session:
+            self.assertEqual([], store.load_documents('not_allowlisted', 'scope', 1))
+            budget_error = InputRejected('payload_budget_exceeded', details={
+                'budget': 'nodes', 'observed_bytes': 4096, 'observed_nodes': 120001,
+                'maximum_bytes': 8 * 1024 * 1024, 'maximum_nodes': MAX_NODES,
+            })
+            with patch('kiwoom_monitor.central_server.diagnostic_replay_contract.freeze_payload',
+                       side_effect=budget_error):
+                store.save_dataset_snapshot('ranking', 'subject', 'key', {'value': 1})
+            trace.stop()
+            with self.assertRaisesRegex(ValueError, 'incomplete'):
+                trace.recorded_events(session['trace_id'])
+            manifest, events = rejected_evidence(session['trace_id'])
+            self.assertEqual('incomplete', manifest['state'])
+            rejected = [event for event in events if event['event_type'] == 'input_rejected']
+            collection = next(event for event in rejected if event.get('method') == 'load_documents')
+            self.assertEqual('not_allowlisted', collection['collection'])
+            self.assertNotIn('payload', collection)
+            budget = next(event for event in rejected if event.get('method') == 'save_dataset_snapshot')
+            self.assertEqual('nodes', budget['rejection_detail']['budget'])
+            self.assertEqual(MAX_NODES, budget['rejection_detail']['maximum_nodes'])
 
     def test_off_path_and_observer_failure_preserve_native_result_and_exception(self):
         store = NativeStore()
@@ -313,7 +435,7 @@ class RecordedCaptureTests(unittest.TestCase):
             self.assertEqual(0, manifest['charged_bytes'])
             self.assertEqual(3, len(events))
             digest = next(iter(manifest['blobs']))
-            path = trace._directory() / session['trace_id'] / f'payload-{digest}.json'
+            path = trace._directory() / session['trace_id'] / manifest['blobs'][digest]['name']
             path.write_bytes(b'changed')
             with self.assertRaisesRegex(ValueError, 'checksum'):
                 trace.payload_bytes(session['trace_id'], digest)
@@ -370,7 +492,10 @@ class RecordedCaptureTests(unittest.TestCase):
                     for thread in threads:
                         thread.join(2)
                 trace.stop()
-            manifest, events = trace.recorded_events(session['trace_id'])
+            with self.assertRaisesRegex(ValueError, 'incomplete'):
+                trace.recorded_events(session['trace_id'])
+            manifest, events = rejected_evidence(session['trace_id'])
+            self.assertEqual('incomplete', manifest['state'])
             self.assertEqual(0, manifest['copy_reserved_bytes'])
             with self.assertRaisesRegex(ValueError, 'selected_input_unsupported'):
                 compile_recorded_plan(events, started_mono_ns=manifest['started_mono_ns'],
@@ -380,7 +505,7 @@ class RecordedCaptureTests(unittest.TestCase):
         store = NativeStore()
         original = trace.os.replace
         def fail_payload(source, target):
-            if str(target).endswith('.json') and 'payload-' in str(target):
+            if str(target).endswith('.payloads'):
                 raise OSError('injected disk failure')
             return original(source, target)
         with capture() as session:

@@ -42,6 +42,7 @@ runs/
 reports/*.json
 .local-news-audit/
 source-runtime/
+artifacts/diagnostic-traces/
 
 # 편집기·운영체제 파일
 .idea/

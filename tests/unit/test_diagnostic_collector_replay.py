@@ -72,7 +72,7 @@ class CollectorReplayTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'CANNOT_OPEN_NETWORK'):
                         await collector.start()
                     for rows in ([{'type': '00'}], [{'type': '0B'}, {'type': '04'}], []):
-                        with self.assertRaisesRegex(ValueError, 'REQUIRES_0B'):
+                        with self.assertRaisesRegex(ValueError, 'collector_message_invalid'):
                             collector.accept_replay_message({'trnm': 'REAL', 'data': rows})
                 finally:
                     await collector.close()

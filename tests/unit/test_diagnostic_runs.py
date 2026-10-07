@@ -21,6 +21,37 @@ from kiwoom_monitor.central_server.diagnostic_workloads import (
 
 
 class DiagnosticRunTests(unittest.TestCase):
+    def test_trace_api_forwards_deferred_deadline_and_guards_ram_held_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'diagnostic-workloads.json'
+            settings = CentralServerSettings(f'sqlite:///{Path(directory) / "monitor.sqlite3"}', 'private-token')
+            with patch.dict(os.environ, {'KIWOOM_DIAGNOSTIC_WORKLOAD_PATH': str(path)}):
+                client = TestClient(create_app(settings))  # No lifespan/network collectors.
+                try:
+                    session = _set_tool(path, True, 300)['diagnostic_tool']['session_id']
+                    body = {'seconds': 60, 'expected_session': session, 'persist_at': time.time() + 3600,
+                            'store_inputs': True, 'collector_inputs': True}
+                    headers = {'Authorization': 'Bearer private-token'}
+                    with patch('kiwoom_monitor.central_server.diagnostic_trace.status', return_value={'state': 'off'}), \
+                            patch('kiwoom_monitor.central_server.diagnostic_trace.start', return_value={'state': 'running'}) as start:
+                        response = client.post('/api/v1/diagnostics/trace', json=body, headers=headers)
+                        self.assertEqual(200, response.status_code, response.text)
+                        self.assertEqual(body['persist_at'], start.call_args.kwargs['persist_at'])
+                    for state in ('awaiting_persistence', 'persisting'):
+                        with patch('kiwoom_monitor.central_server.diagnostic_trace.status', return_value={'state': state}), \
+                                patch('kiwoom_monitor.central_server.diagnostic_workloads._set_trace') as child:
+                            response = client.post('/api/v1/diagnostics/trace', json=body, headers=headers)
+                            self.assertEqual(409, response.status_code, response.text)
+                            child.assert_not_called()
+                    capabilities = client.get('/api/v1/diagnostics/capabilities', headers=headers).json()
+                    deferred = capabilities['trace_input_capture']['deferred_persistence']
+                    self.assertEqual('collector-input/v2', capabilities['trace_input_capture']['collector_input_version'])
+                    self.assertEqual(['0B', '0w', '0J', '0U'], capabilities['trace_input_capture']['collector_event_types'])
+                    self.assertEqual(4 * 1024**3, deferred['memory_limit_bytes'])
+                    self.assertEqual(1_000_000, deferred['event_capacity'])
+                finally:
+                    client.close()
+
     def test_api_forwards_explicit_minute_scenario_and_rejects_unknown_recipe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "diagnostic-workloads.json"

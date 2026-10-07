@@ -4,6 +4,7 @@ import io
 import json
 import os
 import unittest
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from kiwoom_monitor.central_server import diagnostic_replay_database_cli as cli
@@ -15,6 +16,60 @@ ENV = {cli._URL_ENV: URL, cli._TOKEN_ENV: TOKEN}
 
 
 class RecordedReplayDatabaseCliTests(unittest.TestCase):
+    def test_v2_run_origin_errors_fail_before_observer_or_database(self):
+        from kiwoom_monitor.central_server import diagnostic_trace as trace
+        from kiwoom_monitor.central_server import diagnostic_workloads as controls
+        arguments = ['run', '--trace-id', 'capture', '--baseline-id', 'c' * 64,
+                     '--window-start', '10', '--window-end', '11']
+        variants = [arguments + ['--baseline-version', '2'],
+                    arguments + ['--source-origin', '2026-10-06T08:55:00+09:00'],
+                    arguments + ['--baseline-version', '2', '--source-origin', '2026-10-06T08:55:00'],
+                    arguments + ['--baseline-version', '2', '--source-origin', '2026-10-06T08:55:00+09:00']]
+        for args in variants:
+            with self.subTest(args=args), patch.object(trace, 'recorded_window_events', return_value=(
+                    {'started_at': datetime.fromisoformat('2026-10-07T08:55:00+09:00').timestamp()}, [])), \
+                 patch.object(controls, '_set_tool') as control:
+                code, _ = self.invoke(args, ENV)
+                self.assertEqual(1, code)
+                control.assert_not_called()
+
+    def test_v2_run_passes_one_frozen_clock_without_serializing_it_in_selection(self):
+        from kiwoom_monitor.central_server import diagnostic_trace as trace
+        from kiwoom_monitor.central_server import diagnostic_metrics as metrics
+        from kiwoom_monitor.central_server import diagnostic_recorded_execution as execution
+        origin = '2026-10-06T08:55:00+09:00'
+        manifest = {'started_at': datetime.fromisoformat(origin).timestamp(),
+                    'started_mono_ns': 1, 'source_release': 'source', 'window_read': {}}
+        arguments = ['run', '--trace-id', 'capture', '--baseline-id', 'c' * 64,
+                     '--window-start', '10', '--window-end', '11',
+                     '--baseline-version', '2', '--source-origin', origin]
+        with patch.object(trace, 'recorded_window_events', return_value=(manifest, [])), \
+             patch.object(execution, 'run_owned_recorded_experiment', return_value={
+                 'state': 'complete', 'calls': [], 'collector_reports': []}) as run, \
+             patch.object(metrics, 'summarize_db_calls', return_value={'calls': []}):
+            code, result = self.invoke(arguments, ENV)
+        self.assertEqual(0, code)
+        self.assertEqual(2, run.call_args.kwargs['baseline_version'])
+        self.assertFalse(run.call_args.kwargs['cache_clock'].armed)
+        self.assertNotIn('clock', result['result']['selection'])
+        self.assertNotIn('cache_clock', result['result']['selection'])
+
+    def test_v2_management_requires_explicit_aware_source_origin_and_stays_opt_in(self):
+        for args in (['status', '--baseline-version', '2'],
+                     ['seal', '--baseline-version', '2', '--source-origin', '2026-10-06T08:55:00'],
+                     ['status', '--source-origin', '2026-10-06T08:55:00+09:00']):
+            with self.subTest(args=args), patch.object(cli, 'ReplayDatabaseLease') as factory:
+                code, _ = self.invoke(args, ENV)
+                self.assertEqual(1, code)
+                factory.assert_not_called()
+        with patch.object(cli, 'ReplayDatabaseLease') as factory:
+            factory.return_value.__enter__.return_value.status.return_value = {'baseline_sealed': False}
+            code, _ = self.invoke(['status', '--baseline-version', '2', '--source-origin',
+                                   '2026-10-06T08:55:00+09:00'], ENV)
+            self.assertEqual(0, code)
+            self.assertEqual(2, factory.call_args.kwargs['baseline_version'])
+            self.assertFalse(factory.call_args.kwargs['cache_clock'].armed)
+
     def invoke(self, args, environ=None):
         output = io.StringIO()
         code = cli.main(args, environ=environ, output=output)

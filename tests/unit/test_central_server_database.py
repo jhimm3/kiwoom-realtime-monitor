@@ -1114,13 +1114,13 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 observation = daily_bar_observation(
                     value, completeness=DataCompleteness.COMPLETE,
                 )
-                store.replace_daily_bars(
+                return store.replace_daily_bars(
                     [value], observations=[(bar_observation_key(observation), observation)],
                 )
 
-            save(original)
+            self.assertEqual(((original["trading_date"], original["code"], original["market"]),), save(original))
             replay = {**original, "updated_at": original["updated_at"] + 60}
-            save(replay)
+            self.assertEqual((), save(replay))
             [unchanged] = store.load_daily_bars("005930", "KRX", 1)
             with store._lock, store._connection() as connection:
                 metadata = connection.execute(
@@ -1130,7 +1130,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 ).fetchone()
 
             corrected = {**replay, "close": 70060, "updated_at": replay["updated_at"] + 60}
-            save(corrected)
+            self.assertEqual(((corrected["trading_date"], corrected["code"], corrected["market"]),), save(corrected))
             [changed] = store.load_daily_bars("005930", "KRX", 1)
             with store._lock, store._connection() as connection:
                 corrected_metadata = connection.execute(
