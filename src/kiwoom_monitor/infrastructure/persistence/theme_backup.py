@@ -1,0 +1,484 @@
+"""테마 DB만 별도로 이식하는 JSON 백업."""
+
+from __future__ import annotations
+
+import json
+import hashlib
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+
+from .backup_file import write_json_backup
+
+
+class ThemeBackupError(ValueError):
+    pass
+
+
+class ThemeRevisionConflict(ThemeBackupError):
+    pass
+
+
+class ThemeBackupService:
+    FORMAT = "kiwoom-realtime-monitor-theme-db"
+    VERSION = 1
+
+    @classmethod
+    def validate_document(cls, document: object) -> None:
+        if not isinstance(document, dict) or document.get("format") != cls.FORMAT or document.get("version") != cls.VERSION:
+            raise ThemeBackupError("이 프로그램에서 만든 테마 DB 백업 파일이 아닙니다.")
+        if not isinstance(document.get("profiles"), list):
+            raise ThemeBackupError("테마 프로필 백업 형식이 올바르지 않습니다.")
+
+    def __init__(self, database_path: Path, profile_name: str | None = None) -> None:
+        self._database_path = database_path
+        self._profile_name = profile_name
+
+    def revision(self) -> str:
+        connection = sqlite3.connect(self._database_path)
+        try:
+            return self._revision(connection)
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _revision(connection: sqlite3.Connection) -> str:
+        tables = (
+            "theme_profiles", "profile_themes", "profile_stock_themes",
+            "profile_theme_name_decisions", "profile_theme_suggestions",
+            "stock_aliases", "stocks",
+        )
+        available = {str(row[0]) for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        digest = hashlib.sha256()
+        for table in tables:
+            if table not in available:
+                continue
+            digest.update(table.encode())
+            for row in connection.execute(f"SELECT * FROM {table} ORDER BY rowid"):
+                digest.update(json.dumps(row, ensure_ascii=False, default=str).encode())
+        if "settings" in available:
+            row = connection.execute(
+                "SELECT value FROM settings WHERE key='theme_active_profile'"
+            ).fetchone()
+            digest.update(json.dumps(row, ensure_ascii=False).encode())
+        return digest.hexdigest()
+
+    def export_document(self, connection: sqlite3.Connection | None = None) -> dict[str, object]:
+        """현재 테마 저장 구조를 파일 형식과 동일한 문서로 반환한다."""
+        if self._profile_name is not None:
+            raise ThemeBackupError("개별 프로필은 파일 내보내기를 사용하세요.")
+        owns_connection = connection is None
+        if connection is None:
+            connection = sqlite3.connect(self._database_path)
+        try:
+            active_row = connection.execute(
+                "SELECT value FROM settings WHERE key='theme_active_profile'"
+            ).fetchone()
+            common = {
+                "format": self.FORMAT,
+                "version": self.VERSION,
+                "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "active_profile": str(active_row[0]) if active_row is not None else "",
+                "aliases": [{"alias": alias, "code": code} for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")],
+                "stock_catalog": [{"code": code, "name": name, "market": market} for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")],
+            }
+            has_profiles = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='theme_profiles'"
+            ).fetchone() is not None
+            if has_profiles:
+                profiles = []
+                for profile_id, name in connection.execute("SELECT profile_id, profile_name FROM theme_profiles ORDER BY profile_name COLLATE NOCASE"):
+                    profiles.append({
+                        "name": name,
+                        "themes": [{"name": theme, "color": color} for theme, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
+                        "stock_themes": [{"code": code, "theme": theme, "color": color} for code, theme, color in connection.execute("SELECT stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=? ORDER BY stock_code, theme_name", (profile_id,))],
+                        "theme_name_decisions": self._decision_documents(connection, profile_id),
+                        "theme_suggestions": self._suggestion_documents(connection, profile_id),
+                    })
+                return {**common, "profiles": profiles}
+            return {
+                **common,
+                "themes": [{"name": name, "color": color} for name, color in connection.execute("SELECT theme_name, default_color FROM themes ORDER BY theme_name")],
+                "stock_themes": [
+                    {"code": code, "theme": theme, "color": color}
+                    for code, theme, color in connection.execute(
+                        "SELECT st.stock_code, t.theme_name, st.custom_color FROM stock_themes st "
+                        "JOIN themes t ON t.theme_id = st.theme_id ORDER BY st.stock_code, t.theme_name"
+                    )
+                ],
+            }
+        finally:
+            if owns_connection:
+                connection.close()
+
+    def import_document(self, document: dict[object, object], *,
+                        expected_revision: str | None = None) -> None:
+        """현재 프로필 문서를 적용한다. 예전 문서는 기존 import_from 경로가 처리한다."""
+        if self._profile_name is not None:
+            raise ThemeBackupError("개별 프로필은 파일 가져오기를 사용하세요.")
+        if isinstance(document.get("profiles"), list):
+            self._import_all_profiles(document, expected_revision=expected_revision)
+            return
+        raise ThemeBackupError("테마 프로필 백업 형식이 올바르지 않습니다.")
+
+    def apply_document_in_transaction(
+        self, connection: sqlite3.Connection, document: dict[object, object],
+    ) -> None:
+        """Apply profiles inside a caller-owned transaction on this database."""
+        self.validate_document(document)
+        self._apply_all_profiles(connection, document)
+
+    def export_to(self, path: Path) -> None:
+        if self._profile_name is not None:
+            self._export_profile(path)
+            return
+        if self._has_profile_schema():
+            write_json_backup(path, self.export_document())
+            return
+        connection = sqlite3.connect(self._database_path)
+        try:
+            document = {
+                "format": self.FORMAT,
+                "version": self.VERSION,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "themes": [{"name": name, "color": color} for name, color in connection.execute("SELECT theme_name, default_color FROM themes ORDER BY theme_name")],
+                "stock_themes": [
+                    {"code": code, "theme": theme, "color": color}
+                    for code, theme, color in connection.execute(
+                        "SELECT st.stock_code, t.theme_name, st.custom_color FROM stock_themes st "
+                        "JOIN themes t ON t.theme_id = st.theme_id ORDER BY st.stock_code, t.theme_name"
+                    )
+                ],
+                "aliases": [{"alias": alias, "code": code} for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")],
+                "stock_catalog": [{"code": code, "name": name, "market": market} for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")],
+            }
+        finally:
+            connection.close()
+        write_json_backup(path, document)
+
+    def import_from(self, path: Path) -> None:
+        if self._profile_name is not None:
+            self._import_profile(path)
+            return
+        try:
+            preview = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ThemeBackupError("테마 DB 백업 파일을 읽을 수 없습니다.") from error
+        if isinstance(preview, dict) and isinstance(preview.get("profiles"), list):
+            self._import_all_profiles(preview)
+            return
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ThemeBackupError("테마 DB 백업 파일을 읽을 수 없습니다.") from error
+        if not isinstance(document, dict) or document.get("format") != self.FORMAT or document.get("version") != self.VERSION:
+            raise ThemeBackupError("이 프로그램에서 만든 테마 DB 백업 파일이 아닙니다.")
+        themes = document.get("themes")
+        stock_themes = document.get("stock_themes")
+        aliases = document.get("aliases")
+        catalog = document.get("stock_catalog", [])
+        if not all(isinstance(value, list) for value in (themes, stock_themes, aliases, catalog)):
+            raise ThemeBackupError("테마 DB 백업 파일 형식이 올바르지 않습니다.")
+        connection = sqlite3.connect(self._database_path)
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            with connection:
+                for item in catalog:
+                    if not isinstance(item, dict):
+                        continue
+                    code, name, market = str(item.get("code", "")).upper(), str(item.get("name", "")).strip(), str(item.get("market", "")).strip()
+                    if len(code) == 6 and code.isalnum() and name:
+                        connection.execute("INSERT INTO stocks(code, name, market) VALUES (?, ?, ?) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, updated_at=CURRENT_TIMESTAMP", (code, name, market))
+                connection.execute("DELETE FROM stock_themes")
+                connection.execute("DELETE FROM themes")
+                for item in themes:
+                    if isinstance(item, dict) and str(item.get("name", "")).strip():
+                        connection.execute("INSERT INTO themes(theme_name, default_color) VALUES (?, ?)", (str(item["name"]).strip(), str(item.get("color") or "#DCE6F1")))
+                codes = {row[0] for row in connection.execute("SELECT code FROM stocks")}
+                for item in stock_themes:
+                    if not isinstance(item, dict):
+                        continue
+                    code, theme = str(item.get("code", "")), str(item.get("theme", "")).strip()
+                    if code not in codes or not theme:
+                        continue
+                    row = connection.execute("SELECT theme_id FROM themes WHERE theme_name = ?", (theme,)).fetchone()
+                    if row:
+                        connection.execute("INSERT INTO stock_themes(stock_code, theme_id, custom_color) VALUES (?, ?, ?)", (code, row[0], item.get("color") or None))
+                connection.execute("DELETE FROM stock_aliases")
+                for item in aliases:
+                    if isinstance(item, dict) and str(item.get("alias", "")).strip() and str(item.get("code", "")) in codes:
+                        connection.execute("INSERT INTO stock_aliases(alias, stock_code) VALUES (?, ?)", (str(item["alias"]).strip(), str(item["code"])))
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            raise ThemeBackupError("테마 DB 백업 파일을 적용할 수 없습니다.") from error
+        finally:
+            connection.close()
+
+    def _has_profile_schema(self) -> bool:
+        connection = sqlite3.connect(self._database_path)
+        try:
+            return connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='theme_profiles'").fetchone() is not None
+        finally:
+            connection.close()
+
+    def _export_all_profiles(self, path: Path) -> None:
+        connection = sqlite3.connect(self._database_path)
+        try:
+            profiles = []
+            for profile_id, name in connection.execute("SELECT profile_id, profile_name FROM theme_profiles ORDER BY profile_name COLLATE NOCASE"):
+                profiles.append({
+                    "name": name,
+                    "themes": [{"name": theme, "color": color} for theme, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
+                    "stock_themes": [{"code": code, "theme": theme, "color": color} for code, theme, color in connection.execute("SELECT stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=? ORDER BY stock_code, theme_name", (profile_id,))],
+                    "theme_name_decisions": self._decision_documents(connection, profile_id),
+                    "theme_suggestions": self._suggestion_documents(connection, profile_id),
+                })
+            document = {
+                "format": self.FORMAT, "version": self.VERSION, "created_at": datetime.now().isoformat(timespec="seconds"),
+                "profiles": profiles,
+                "aliases": [{"alias": alias, "code": code} for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")],
+                "stock_catalog": [{"code": code, "name": name, "market": market} for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")],
+            }
+        finally:
+            connection.close()
+        write_json_backup(path, document)
+
+    def _import_all_profiles(self, document: dict[object, object], *,
+                             expected_revision: str | None = None) -> None:
+        self.validate_document(document)
+        connection = sqlite3.connect(self._database_path)
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if expected_revision is not None and self._revision(connection) != expected_revision:
+                    raise ThemeRevisionConflict("원격 조회 중 로컬 테마가 변경되었습니다.")
+                self._apply_all_profiles(connection, document)
+        except ThemeRevisionConflict:
+            raise
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            raise ThemeBackupError("테마 프로필 백업 파일을 적용할 수 없습니다.") from error
+        finally:
+            connection.close()
+
+    def _export_profile(self, path: Path) -> None:
+        connection = sqlite3.connect(self._database_path)
+        try:
+            profile = connection.execute("SELECT profile_id, profile_name FROM theme_profiles WHERE profile_name=? COLLATE NOCASE", (self._profile_name,)).fetchone()
+            if profile is None:
+                raise ThemeBackupError("내보낼 테마 프로필을 찾을 수 없습니다.")
+            profile_id, profile_name = profile
+            document = {
+                "format": self.FORMAT, "version": self.VERSION, "created_at": datetime.now().isoformat(timespec="seconds"), "profile": profile_name,
+                "themes": [{"name": name, "color": color} for name, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
+                "stock_themes": [{"code": code, "theme": theme, "color": color} for code, theme, color in connection.execute("SELECT stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=? ORDER BY stock_code, theme_name", (profile_id,))],
+                "theme_name_decisions": self._decision_documents(connection, profile_id),
+                "theme_suggestions": self._suggestion_documents(connection, profile_id),
+                "aliases": [{"alias": alias, "code": code} for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")],
+                "stock_catalog": [{"code": code, "name": name, "market": market} for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")],
+            }
+        finally:
+            connection.close()
+        write_json_backup(path, document)
+
+    def _import_profile(self, path: Path) -> None:
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ThemeBackupError("테마 DB 백업 파일을 읽을 수 없습니다.") from error
+        if not isinstance(document, dict) or document.get("format") != self.FORMAT or document.get("version") != self.VERSION:
+            raise ThemeBackupError("이 프로그램에서 만든 테마 DB 백업 파일이 아닙니다.")
+        themes, stock_themes = document.get("themes"), document.get("stock_themes")
+        if not isinstance(themes, list) or not isinstance(stock_themes, list):
+            raise ThemeBackupError("테마 DB 백업 파일 형식이 올바르지 않습니다.")
+        connection = sqlite3.connect(self._database_path)
+        try:
+            with connection:
+                profile = connection.execute("SELECT profile_id FROM theme_profiles WHERE profile_name=? COLLATE NOCASE", (self._profile_name,)).fetchone()
+                if profile is None:
+                    connection.execute("INSERT INTO theme_profiles(profile_name) VALUES (?)", (self._profile_name,))
+                    profile = connection.execute("SELECT profile_id FROM theme_profiles WHERE profile_name=?", (self._profile_name,)).fetchone()
+                profile_id = profile[0]
+                connection.execute("DELETE FROM profile_stock_themes WHERE profile_id=?", (profile_id,))
+                connection.execute("DELETE FROM profile_themes WHERE profile_id=?", (profile_id,))
+                connection.execute("DELETE FROM profile_theme_name_decisions WHERE profile_id=?", (profile_id,))
+                connection.execute("DELETE FROM profile_theme_suggestions WHERE profile_id=?", (profile_id,))
+                for item in themes:
+                    if isinstance(item, dict) and str(item.get("name", "")).strip():
+                        connection.execute("INSERT INTO profile_themes(profile_id, theme_name, default_color) VALUES (?, ?, ?)", (profile_id, str(item["name"]).strip(), str(item.get("color") or "#DCE6F1")))
+                for item in stock_themes:
+                    if isinstance(item, dict) and str(item.get("code", "")).strip() and str(item.get("theme", "")).strip():
+                        connection.execute("INSERT OR IGNORE INTO profile_stock_themes(profile_id, stock_code, theme_name, custom_color) VALUES (?, ?, ?, ?)", (profile_id, str(item["code"]), str(item["theme"]).strip(), item.get("color") or None))
+                decisions = document.get("theme_name_decisions", [])
+                if isinstance(decisions, list):
+                    self._import_name_decisions(connection, profile_id, decisions)
+                suggestions = document.get("theme_suggestions", [])
+                if isinstance(suggestions, list):
+                    self._import_suggestions(connection, profile_id, suggestions)
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            raise ThemeBackupError("테마 DB 백업 파일을 적용할 수 없습니다.") from error
+        finally:
+            if owns_connection:
+                connection.close()
+
+    def _apply_all_profiles(self, connection: sqlite3.Connection,
+                            document: dict[object, object]) -> None:
+        """Apply profiles using the caller's transaction and SQLite connection."""
+        profiles = document["profiles"]
+        connection.execute("DELETE FROM profile_stock_themes")
+        connection.execute("DELETE FROM profile_themes")
+        connection.execute("DELETE FROM theme_profiles")
+        catalog = document.get("stock_catalog", [])
+        if isinstance(catalog, list):
+            for item in catalog:
+                if not isinstance(item, dict):
+                    continue
+                code = str(item.get("code", "")).upper()
+                name = str(item.get("name", "")).strip()
+                market = str(item.get("market", "")).strip()
+                if len(code) == 6 and code.isalnum() and name:
+                    connection.execute("INSERT INTO stocks(code, name, market) VALUES (?, ?, ?) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, updated_at=CURRENT_TIMESTAMP", (code, name, market))
+        for profile in profiles:
+            if not isinstance(profile, dict) or not str(profile.get("name", "")).strip():
+                continue
+            name = str(profile["name"]).strip()
+            connection.execute("INSERT INTO theme_profiles(profile_name) VALUES (?)", (name,))
+            profile_id = connection.execute("SELECT profile_id FROM theme_profiles WHERE profile_name=?", (name,)).fetchone()[0]
+            themes = profile.get("themes", [])
+            if isinstance(themes, list):
+                for item in themes:
+                    if isinstance(item, dict) and str(item.get("name", "")).strip():
+                        connection.execute("INSERT INTO profile_themes(profile_id, theme_name, default_color) VALUES (?, ?, ?)", (profile_id, str(item["name"]).strip(), str(item.get("color") or "#DCE6F1")))
+            assignments = profile.get("stock_themes", [])
+            if isinstance(assignments, list):
+                for item in assignments:
+                    if isinstance(item, dict) and str(item.get("code", "")).strip() and str(item.get("theme", "")).strip():
+                        connection.execute("INSERT OR IGNORE INTO profile_stock_themes(profile_id, stock_code, theme_name, custom_color) VALUES (?, ?, ?, ?)", (profile_id, str(item["code"]), str(item["theme"]).strip(), item.get("color") or None))
+            decisions = profile.get("theme_name_decisions", [])
+            if isinstance(decisions, list):
+                self._import_name_decisions(connection, profile_id, decisions)
+            suggestions = profile.get("theme_suggestions", [])
+            if isinstance(suggestions, list):
+                self._import_suggestions(connection, profile_id, suggestions)
+        if not connection.execute("SELECT 1 FROM theme_profiles").fetchone():
+            connection.execute("INSERT INTO theme_profiles(profile_name) VALUES ('기본 테마')")
+        active_profile = str(document.get("active_profile", "")).strip()
+        if active_profile and connection.execute(
+            "SELECT 1 FROM theme_profiles WHERE profile_name=? COLLATE NOCASE",
+            (active_profile,),
+        ).fetchone():
+            connection.execute(
+                "INSERT INTO settings(key,value) VALUES('theme_active_profile',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (active_profile,),
+            )
+        codes = {str(row[0]) for row in connection.execute("SELECT code FROM stocks")}
+        connection.execute("DELETE FROM stock_aliases")
+        aliases = document.get("aliases", [])
+        if isinstance(aliases, list):
+            for item in aliases:
+                if isinstance(item, dict) and str(item.get("alias", "")).strip() and str(item.get("code", "")) in codes:
+                    connection.execute("INSERT INTO stock_aliases(alias, stock_code) VALUES (?, ?)", (str(item["alias"]).strip(), str(item["code"])))
+
+    @staticmethod
+    def _decision_documents(
+        connection: sqlite3.Connection, profile_id: int,
+    ) -> list[dict[str, object]]:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='profile_theme_name_decisions'"
+        ).fetchone()
+        if exists is None:
+            return []
+        return [
+            {
+                "kind": kind,
+                "source": source,
+                "target": target,
+                "decision_source": decision_source,
+                "updated_at": updated_at,
+            }
+            for kind, source, target, decision_source, updated_at in connection.execute(
+                "SELECT decision_kind,source_name,target_name,decision_source,updated_at "
+                "FROM profile_theme_name_decisions WHERE profile_id=? "
+                "ORDER BY decision_kind,source_name,target_name",
+                (profile_id,),
+            )
+        ]
+
+    @staticmethod
+    def _import_name_decisions(
+        connection: sqlite3.Connection, profile_id: int, decisions: list[object],
+    ) -> None:
+        allowed = {"alias", "split_to", "keep_separate"}
+        for item in decisions:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind", ""))
+            source = str(item.get("source", "")).strip()
+            target = str(item.get("target", "")).strip()
+            if kind not in allowed or not source or not target:
+                continue
+            connection.execute(
+                "INSERT OR IGNORE INTO profile_theme_name_decisions("
+                "profile_id,decision_kind,source_name,target_name,decision_source,updated_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (profile_id, kind, source, target,
+                 str(item.get("decision_source") or "user"),
+                 str(item.get("updated_at") or datetime.now().astimezone().isoformat(timespec="seconds"))),
+            )
+
+    @staticmethod
+    def _suggestion_documents(
+        connection: sqlite3.Connection, profile_id: int,
+    ) -> list[dict[str, object]]:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='profile_theme_suggestions'"
+        ).fetchone()
+        if exists is None:
+            return []
+        columns = (
+            "stock_code", "news_identity", "raw_theme_name", "evidence", "confidence",
+            "provider", "model", "body_hash", "analyzed_at", "status",
+            "reviewed_theme_names", "reviewed_at", "article_title",
+            "article_published_at", "article_url",
+        )
+        return [
+            dict(zip(columns, row, strict=True))
+            for row in connection.execute(
+                "SELECT stock_code,news_identity,raw_theme_name,evidence,confidence,provider,model,"
+                "body_hash,analyzed_at,status,reviewed_theme_names,reviewed_at,article_title,"
+                "article_published_at,article_url "
+                "FROM profile_theme_suggestions WHERE profile_id=? "
+                "ORDER BY analyzed_at,stock_code,news_identity,raw_theme_name",
+                (profile_id,),
+            )
+        ]
+
+    @staticmethod
+    def _import_suggestions(
+        connection: sqlite3.Connection, profile_id: int, suggestions: list[object],
+    ) -> None:
+        for item in suggestions:
+            if not isinstance(item, dict):
+                continue
+            stock_code = str(item.get("stock_code", ""))
+            identity = str(item.get("news_identity", ""))
+            raw_name = str(item.get("raw_theme_name", "")).strip()
+            status = str(item.get("status", "pending"))
+            if not stock_code or not identity or not raw_name or status not in {"pending", "approved", "rejected"}:
+                continue
+            connection.execute(
+                "INSERT OR REPLACE INTO profile_theme_suggestions("
+                "profile_id,stock_code,news_identity,raw_theme_name,evidence,confidence,provider,model,"
+                "body_hash,analyzed_at,status,reviewed_theme_names,reviewed_at,article_title,"
+                "article_published_at,article_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (profile_id, stock_code, identity, raw_name, str(item.get("evidence", "")),
+                 max(0, min(100, int(item.get("confidence", 0)))), str(item.get("provider", "")),
+                 str(item.get("model", "")), str(item.get("body_hash", "")),
+                 str(item.get("analyzed_at", "")), status,
+                 str(item.get("reviewed_theme_names") or "[]"), item.get("reviewed_at"),
+                 str(item.get("article_title", "")), str(item.get("article_published_at", "")),
+                 str(item.get("article_url", ""))),
+            )

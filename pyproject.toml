@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kiwoom-realtime-monitor"
+version = "2.1.0"
+description = "키움 REST API 기반 실시간 종목 모니터"
+requires-python = ">=3.13"
+dependencies = [
+    "PySide6==6.11.1",
+    "websockets==16.1.1",
+    "paddlepaddle==3.2.2",
+    "paddleocr==3.7.0",
+    "Pillow==12.3.0",
+    "google-api-python-client==2.187.0",
+    "google-auth-oauthlib==1.2.3",
+    "fastapi>=0.116,<1",
+    "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+server = [
+    "psycopg[binary]>=3.2,<4",
+    "cryptography>=46,<47",
+]
+
+[project.scripts]
+kiwoom-monitor = "kiwoom_monitor.bootstrap:main"
+kiwoom-monitor-server = "kiwoom_monitor.central_server.__main__:main"
+kiwoom-monitor-check = "kiwoom_monitor.central_server.deployment_check:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

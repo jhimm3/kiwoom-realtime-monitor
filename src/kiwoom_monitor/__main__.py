@@ -1,0 +1,5 @@
+from kiwoom_monitor.bootstrap import main
+
+
+if __name__ == "__main__":
+    main()

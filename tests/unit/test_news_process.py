@@ -1,0 +1,160 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from kiwoom_monitor.news_process import (
+    _apply_show_command,
+    _command_account_scopes,
+    _file_signature,
+    _news_content_signature,
+    _parent_is_alive,
+)
+
+
+class NewsProcessTests(unittest.TestCase):
+    def test_scope_free_command_is_legacy_but_partial_or_malformed_scope_is_rejected(self) -> None:
+        legacy = _command_account_scopes({"code": "005930", "name": "삼성전자"})
+        self.assertIsNotNone(legacy)
+        assert legacy is not None
+        self.assertEqual(legacy[0], legacy[1])
+        self.assertEqual("legacy-unassigned", legacy[0].account_ref)
+        self.assertIsNone(_command_account_scopes({"origin_scope": {"broker": "kiwoom"}}))
+        self.assertIsNone(_command_account_scopes({
+            "origin_scope": {
+                "broker": "kiwoom", "environment": "real",
+                "account_ref": "11111111-1111-4111-8111-111111111111",
+            },
+            "account_scope": {
+                "broker": "kiwoom", "environment": "mock",
+                "account_ref": "22222222-2222-4222-8222-222222222222",
+            },
+        }))
+
+    def test_receiver_does_not_replace_previous_context_for_malformed_late_command(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        class Window:
+            def set_stock(self, _code: str, _name: str, **kwargs: object) -> None:
+                calls.append(kwargs)
+
+        valid = {
+            "code": "005930", "name": "삼성전자",
+            "origin_scope": {
+                "broker": "kiwoom", "environment": "real",
+                "account_ref": "11111111-1111-4111-8111-111111111111",
+            },
+            "account_scope": {
+                "broker": "kiwoom", "environment": "real",
+                "account_ref": "11111111-1111-4111-8111-111111111111",
+            },
+        }
+        self.assertTrue(_apply_show_command(Window(), valid))  # type: ignore[arg-type]
+        self.assertFalse(_apply_show_command(Window(), {
+            "code": "000660", "name": "SK하이닉스",
+            "origin_scope": valid["origin_scope"],
+        }))  # type: ignore[arg-type]
+        self.assertEqual(1, len(calls))
+
+    def test_file_signature_changes_when_database_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "news.sqlite3"
+            self.assertEqual(_file_signature(path), (0, 0))
+            path.write_bytes(b"first")
+            first = _file_signature(path)
+            path.write_bytes(b"second-version")
+            self.assertNotEqual(first, _file_signature(path))
+
+    def test_news_content_signature_ignores_unrelated_monitor_database_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor = root / "monitor.sqlite3"
+            news = root / "news.sqlite3"
+            monitor.write_bytes(b"ranking-before")
+            news.write_bytes(b"news-before")
+            initial = _news_content_signature(news)
+
+            monitor.write_bytes(b"ranking-after-with-more-bytes")
+
+            self.assertEqual(initial, _news_content_signature(news))
+            news.write_bytes(b"news-after-with-more-bytes")
+            self.assertNotEqual(initial, _news_content_signature(news))
+
+    def test_current_process_is_reported_as_alive(self) -> None:
+        self.assertTrue(_parent_is_alive(os.getpid()))
+
+    def test_process_receives_stock_command_and_shuts_down(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            command_path = root / "news_command.json"
+            environment = os.environ.copy()
+            environment["QT_QPA_PLATFORM"] = "offscreen"
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "kiwoom_monitor.news_process",
+                    "--config",
+                    str(root / "naver_news.dat"),
+                    "--database",
+                    str(root / "news.sqlite3"),
+                    "--command-file",
+                    str(command_path),
+                    "--parent-pid",
+                    str(os.getpid()),
+                ],
+                env=environment,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            try:
+                deadline = time.monotonic() + 8
+                while not (root / "news.sqlite3").is_file() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue((root / "news.sqlite3").is_file())
+                # 첫 종목 명령이 오기 전에도 뉴스 전용 프로세스가 대기해야 한다.
+                # 부모 생존 타이머(1초)가 한 번 이상 실행된 뒤에도 유지되어야 한다.
+                time.sleep(1.3)
+                self.assertIsNone(process.poll())
+                command_path.write_text(
+                    json.dumps({"request_id": 1, "action": "show", "code": "005930", "name": "삼성전자"}),
+                    encoding="utf-8",
+                )
+                time.sleep(0.2)
+                command_path.write_text(
+                    json.dumps({
+                        "request_id": 2, "action": "sync", "window_mode": "linked",
+                        "main_geometry": [100, 100, 800, 600],
+                    }),
+                    encoding="utf-8",
+                )
+                time.sleep(0.15)
+                self.assertIsNone(process.poll())
+                command_path.write_text(
+                    json.dumps({"request_id": 3, "action": "minimize"}),
+                    encoding="utf-8",
+                )
+                time.sleep(0.15)
+                command_path.write_text(
+                    json.dumps({"request_id": 4, "action": "restore"}),
+                    encoding="utf-8",
+                )
+                time.sleep(0.15)
+                command_path.write_text(
+                    json.dumps({"request_id": 5, "action": "shutdown"}),
+                    encoding="utf-8",
+                )
+                self.assertEqual(0, process.wait(timeout=12))
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+
+
+if __name__ == "__main__":
+    unittest.main()

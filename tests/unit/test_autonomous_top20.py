@@ -1,0 +1,1845 @@
+from __future__ import annotations
+
+import asyncio
+import tempfile
+import threading
+import unittest
+from datetime import datetime
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from kiwoom_monitor.central_server.autonomous_top20 import (
+    AutonomousTop20Service,
+    _collection_open,
+    _entry_minute_query_due,
+    _ranking_collection_due,
+    _ranking_expected_at,
+)
+from kiwoom_monitor.central_server.database import SQLiteQueryStore
+from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+from kiwoom_monitor.central_server.rest_broker import BrokerResult
+from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import MarketOperationTick
+from kiwoom_monitor.domain.market_data_contract import (
+    DataCompleteness,
+    MarketDatasetKind,
+    ObservationOrigin,
+)
+
+
+class _Broker:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def request(self, api_id, path, body, **kwargs):
+        self.calls.append((api_id, body, kwargs))
+        if api_id == "ka00198":
+            return BrokerResult({"item_inq_rank": _ranking_rows("090000")}, False, "")
+        if api_id == "ka10100":
+            return BrokerResult({"nxtEnable": "Y" if body["stk_cd"] == "005930" else "N"}, False, "")
+        if api_id == "ka10001":
+            return BrokerResult({"mac": "1000", "dstr_rt": "40"}, False, "")
+        raise AssertionError(api_id)
+
+
+def _ranking_rows(clock: str) -> list[dict[str, str]]:
+    rows = [
+        {"dt": "20260910", "tm": clock, "stk_cd": "A005930", "stk_nm": "삼성전자", "bigd_rank": "1"},
+        {"dt": "20260910", "tm": clock, "stk_cd": "000660_AL", "stk_nm": "SK하이닉스", "bigd_rank": "2"},
+    ]
+    rows.extend({
+        "dt": "20260910", "tm": clock, "stk_cd": f"{100000 + rank:06d}",
+        "stk_nm": f"종목{rank}", "bigd_rank": str(rank),
+    } for rank in range(3, 21))
+    return rows
+
+
+class _FlakyIndexStore:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.saved: list[tuple] = []
+
+    def save_dataset_snapshot(self, *args, **kwargs) -> None:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary database failure")
+        self.saved.append((args, kwargs))
+
+
+class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_restart_rechecks_durable_entry_markers_without_new_tr_requests(self) -> None:
+        now = datetime.fromisoformat("2026-09-30T09:00:00+09:00")
+        class DailyBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                self.calls.append((api_id, body, kwargs))
+                if api_id != "ka10081":
+                    raise AssertionError(f"unexpected repeated TR {api_id}")
+                payload = {"stk_dt_pole_chart_qry": [{
+                    "dt": "20260930", "open_pric": "100", "high_pric": "110",
+                    "low_pric": "90", "cur_prc": "105", "trde_qty": "10",
+                }]}
+                MarketDataIngestor(store, now_provider=lambda: now).ingest(api_id, body, payload)
+                return BrokerResult(payload, False, "", recording_succeeded=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            self.addCleanup(store.close)
+            broker = DailyBroker()
+            for collection, owner, document in (
+                ("stock_fundamentals", "005930", {"observed_at": now.isoformat(), "payload": {"mac": "1000"}}),
+                ("stock_nxt_eligibility", "005930", {"observed_at": now.isoformat(), "payload": {"nxtEnable": "N"}}),
+                ("candidate_flow_capture", "2026-09-30:005930", {"scope": "initial"}),
+                ("historical_highs", "005930", {"checked_on": "2026-09-30", "target": 110}),
+            ):
+                store.upsert_documents(collection, [{"owner": owner, "key": "latest", "document": document}])
+            # Create an actual verified source-window marker and canonical bars.
+            first = AutonomousTop20Service(broker, RealtimeHub(), store, now_provider=lambda: now)
+            await first._ensure_entry_daily_history("005930", "2026-09-30")
+            from kiwoom_monitor.application.historical_high_service import HistoricalHighTarget
+            with patch("kiwoom_monitor.central_server.autonomous_top20.HistoricalHighService.load",
+                       return_value=HistoricalHighTarget(110, 2026, 2026, "2026-09", ())):
+                await first._ensure_historical_high("005930", "2026-09-30")
+            for _ in range(2):
+                restarted = AutonomousTop20Service(
+                    broker, RealtimeHub(), store, minute_backfill_enabled=False, now_provider=lambda: now,
+                )
+                await restarted._ensure_fundamentals(("005930",), "2026-09-30")
+                await restarted._ensure_fundamentals(("005930",), "2026-09-30")
+                self.assertEqual("2026-09-30", restarted._fundamentals_ready["005930"])
+            self.assertEqual(1, len(broker.calls))
+
+    async def test_current_day_entry_minutes_wait_until_0800_without_marking_ready(self) -> None:
+        now = [datetime.fromisoformat("2026-09-30T07:59:59+09:00")]
+        broker = _Broker()
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(
+            broker, RealtimeHub(), store, now_provider=lambda: now[0],
+        )
+        with patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock, return_value=True) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as highs:
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            self.assertFalse(service._fundamentals_tasks)
+            minutes.assert_not_awaited()
+            self.assertNotIn("005930", service._fundamentals_ready)
+            now[0] = datetime.fromisoformat("2026-09-30T08:00:00+09:00")
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await asyncio.gather(*service._fundamentals_tasks)
+            minutes.assert_awaited_once_with("005930", "2026-09-30")
+            daily.assert_awaited_once_with("005930", "2026-09-30")
+            flow.assert_awaited_once_with("005930", "2026-09-30")
+            highs.assert_awaited_once_with("005930", "2026-09-30")
+            store.load_documents.assert_called_once_with("stock_fundamentals", "005930", 1)
+            self.assertEqual(1, len(broker.calls))
+            self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
+
+        self.assertFalse(_entry_minute_query_due("2026-09-30", datetime.fromisoformat("2026-09-30T07:59:59+09:00")))
+        self.assertTrue(_entry_minute_query_due("2026-09-29", datetime.fromisoformat("2026-09-30T07:59:59+09:00")))
+
+    async def test_entry_data_is_reused_while_minutes_are_paused_and_resumed(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), store,
+            now_provider=lambda: datetime.fromisoformat("2026-09-30T09:00:00+09:00"),
+        )
+        paused = [True]
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def minutes_ready(*args):
+            started.set()
+            await release.wait()
+            return True
+
+        with patch("kiwoom_monitor.central_server.autonomous_top20.is_paused", side_effect=lambda _: paused[0]), \
+                patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock, side_effect=minutes_ready) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as highs:
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await asyncio.gather(*service._fundamentals_tasks)
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            self.assertFalse(service._fundamentals_pending)
+            minutes.assert_not_awaited()
+            self.assertNotIn("005930", service._fundamentals_ready)
+            paused[0] = False
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await started.wait()
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            self.assertEqual(1, minutes.await_count)
+            release.set()
+            await asyncio.gather(*service._fundamentals_tasks)
+            daily.assert_awaited_once()
+            flow.assert_awaited_once()
+            highs.assert_awaited_once()
+            store.load_documents.assert_called_once()
+            self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
+
+    async def test_deferred_minute_result_is_retried_without_repeating_entry_data(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), store,
+            now_provider=lambda: datetime.fromisoformat("2026-09-30T09:00:00+09:00"),
+        )
+        with patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock, side_effect=[False, True]) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as highs:
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertNotIn("005930", service._fundamentals_ready)
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertEqual(2, minutes.await_count)
+            daily.assert_awaited_once()
+            flow.assert_awaited_once()
+            highs.assert_awaited_once()
+            store.load_documents.assert_called_once()
+            self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
+
+    async def test_failed_entry_data_is_not_cached_before_minutes_are_due(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), store,
+            now_provider=lambda: datetime.fromisoformat("2026-09-30T07:00:00+09:00"),
+        )
+        with patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock,
+                             side_effect=[RuntimeError("incomplete daily history"), None]) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as highs:
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertNotIn("005930", service._entry_data_ready)
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertEqual(2, daily.await_count)
+            self.assertEqual(1, store.load_documents.call_count)
+            flow.assert_awaited_once()
+            highs.assert_awaited_once()
+            minutes.assert_not_awaited()
+            self.assertEqual("2026-09-30", service._entry_data_ready["005930"])
+
+    async def test_each_failed_stage_retries_without_repeating_other_successes(self) -> None:
+        for failed_stage in ("basic", "minutes", "daily", "flow", "high"):
+            with self.subTest(stage=failed_stage):
+                store = MagicMock()
+                service = AutonomousTop20Service(
+                    _Broker(), RealtimeHub(), store,
+                    now_provider=lambda: datetime.fromisoformat("2026-09-30T09:00:00+09:00"),
+                )
+                names = {"basic": "_ensure_entry_basic", "minutes": "_backfill_entry_minutes",
+                         "daily": "_ensure_entry_daily_history", "flow": "_capture_candidate_investor_flow",
+                         "high": "_ensure_historical_high"}
+                preparations = {}
+                for stage, name in names.items():
+                    prepare = AsyncMock(return_value=True)
+                    if stage == failed_stage:
+                        prepare.side_effect = [RuntimeError(f"failed {stage}"), True]
+                    setattr(service, name, prepare)
+                    preparations[stage] = prepare
+                service._schedule_fundamentals(("005930",), "2026-09-30")
+                await asyncio.gather(*service._fundamentals_tasks)
+                self.assertNotIn("005930", service._fundamentals_ready)
+                self.assertEqual(0 if failed_stage == "daily" else 1,
+                                 preparations["high"].await_count)
+                service._schedule_fundamentals(("005930",), "2026-09-30")
+                service._schedule_fundamentals(("005930",), "2026-09-30")
+                await asyncio.gather(*service._fundamentals_tasks)
+                for stage, prepare in preparations.items():
+                    self.assertEqual(2 if stage == failed_stage else 1, prepare.await_count, stage)
+                self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
+                service._schedule_fundamentals(("005930",), "2026-09-30")
+                self.assertFalse(service._fundamentals_pending)
+
+    async def test_daily_markets_retry_independently_and_defer_high_until_verified(self) -> None:
+        for failed_market in ("KRX", "NXT"):
+            with self.subTest(market=failed_market):
+                service = AutonomousTop20Service(
+                    _Broker(), RealtimeHub(), MagicMock(), minute_backfill_enabled=False,
+                    now_provider=lambda: datetime.fromisoformat("2026-09-30T09:00:00+09:00"),
+                )
+                markets = []
+                async def daily(code, day, market, **kwargs):
+                    markets.append(market)
+                    if market == failed_market and markets.count(market) == 1:
+                        raise RuntimeError(f"{market} unavailable")
+                    return {}
+                with patch.object(service, "_ensure_entry_basic", new_callable=AsyncMock) as basics, \
+                        patch.object(service, "_ensure_daily_history", side_effect=daily), \
+                        patch.object(service, "_nxt_enabled", new_callable=AsyncMock, return_value=True), \
+                        patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                        patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as high:
+                    await service._ensure_fundamentals(("005930",), "2026-09-30")
+                    self.assertEqual(["KRX", "NXT"], markets)
+                    high.assert_not_awaited()
+                    await service._ensure_fundamentals(("005930",), "2026-09-30")
+                    self.assertEqual(["KRX", "NXT", failed_market], markets)
+                    basics.assert_awaited_once()
+                    flow.assert_awaited_once()
+                    high.assert_awaited_once()
+
+    async def test_pre0700_basics_refresh_on_reappearance_without_repeating_other_stages(self) -> None:
+        now = [datetime.fromisoformat("2026-09-30T06:59:59+09:00")]
+        store = MagicMock()
+        store.load_documents.return_value = [{"document": {"observed_at": now[0].isoformat()}}]
+        broker = _Broker()
+        service = AutonomousTop20Service(
+            broker, RealtimeHub(), store, minute_backfill_enabled=False, now_provider=lambda: now[0],
+        )
+        with patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as high:
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await asyncio.gather(*service._fundamentals_tasks)
+            self.assertEqual([], broker.calls)
+            now[0] = datetime.fromisoformat("2026-09-30T07:00:00+09:00")
+            service._schedule_fundamentals((), "2026-09-30")
+            self.assertFalse(service._fundamentals_pending)
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await asyncio.gather(*service._fundamentals_tasks)
+            self.assertEqual([("ka10001", {"stk_cd": "005930"}, {})], broker.calls)
+            self.assertEqual(2, store.load_documents.call_count)
+            daily.assert_awaited_once()
+            flow.assert_awaited_once()
+            high.assert_awaited_once()
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertEqual(1, len(broker.calls))
+
+    async def test_failed_basic_persistence_is_retried_without_repeating_other_stages(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = []
+        broker = MagicMock()
+        broker.request = AsyncMock(side_effect=[
+            BrokerResult({"mac": "1000"}, False, "", recording_succeeded=False),
+            BrokerResult({"mac": "1000"}, False, "", recording_succeeded=True),
+        ])
+        service = AutonomousTop20Service(
+            broker, RealtimeHub(), store, minute_backfill_enabled=False,
+            now_provider=lambda: datetime.fromisoformat("2026-09-30T09:00:00+09:00"),
+        )
+        with patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock) as high:
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertNotIn(("005930", "basic"), service._entry_stage_ready)
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            self.assertEqual(2, broker.request.await_count)
+            daily.assert_awaited_once()
+            flow.assert_awaited_once()
+            high.assert_awaited_once()
+
+    async def test_entry_data_is_checked_again_after_date_change_or_restart(self) -> None:
+        now = [datetime.fromisoformat("2026-09-30T07:00:00+09:00")]
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(_Broker(), RealtimeHub(), store, now_provider=lambda: now[0])
+        for selected in (service, AutonomousTop20Service(_Broker(), RealtimeHub(), store, now_provider=lambda: now[0])):
+            with patch.object(selected, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                    patch.object(selected, "_capture_candidate_investor_flow", new_callable=AsyncMock), \
+                    patch.object(selected, "_ensure_historical_high", new_callable=AsyncMock):
+                day = now[0].date().isoformat()
+                await selected._ensure_fundamentals(("005930",), day)
+                await selected._ensure_fundamentals(("005930",), day)
+                daily.assert_awaited_once_with("005930", day)
+                if selected is service:
+                    now[0] = datetime.fromisoformat("2026-10-01T07:00:00+09:00")
+                    await selected._ensure_fundamentals(("005930",), "2026-10-01")
+                    self.assertEqual(2, daily.await_count)
+        self.assertEqual(3, store.load_documents.call_count)
+
+    async def test_entry_data_completes_when_minute_backfill_is_disabled(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), store, minute_backfill_enabled=False,
+            now_provider=lambda: datetime.fromisoformat("2026-09-30T07:00:00+09:00"),
+        )
+        with patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock), \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock), \
+                patch("kiwoom_monitor.central_server.autonomous_top20.is_paused", return_value=True):
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            daily.assert_awaited_once()
+            minutes.assert_not_awaited()
+            self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
+
+    async def test_cancelled_minute_preparation_retries_without_repeating_entry_data(self) -> None:
+        now = [datetime.fromisoformat("2026-09-30T07:00:00+09:00")]
+        store = MagicMock()
+        store.load_documents.return_value = []
+        service = AutonomousTop20Service(_Broker(), RealtimeHub(), store, now_provider=lambda: now[0])
+        started = asyncio.Event()
+
+        async def interrupted_minutes(*args):
+            started.set()
+            await asyncio.Event().wait()
+
+        with patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock,
+                          side_effect=interrupted_minutes) as minutes, \
+                patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
+                patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock), \
+                patch.object(service, "_ensure_historical_high", new_callable=AsyncMock):
+            await service._ensure_fundamentals(("005930",), "2026-09-30")
+            now[0] = datetime.fromisoformat("2026-09-30T08:00:00+09:00")
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await started.wait()
+            task = next(iter(service._fundamentals_tasks))
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertFalse(service._fundamentals_pending)
+            self.assertNotIn("005930", service._fundamentals_ready)
+            minutes.side_effect = None
+            minutes.return_value = True
+            service._schedule_fundamentals(("005930",), "2026-09-30")
+            await asyncio.gather(*service._fundamentals_tasks)
+            self.assertEqual(2, minutes.await_count)
+            daily.assert_awaited_once()
+            store.load_documents.assert_called_once()
+            self.assertEqual("2026-09-30", service._fundamentals_ready["005930"])
+
+    async def test_direct_entry_minute_backfill_does_not_request_before_0800(self) -> None:
+        broker = _Broker()
+        service = AutonomousTop20Service(
+            broker, RealtimeHub(), object(),
+            now_provider=lambda: datetime.fromisoformat("2026-09-30T07:59:59+09:00"),
+        )
+        self.assertFalse(await service._backfill_entry_minutes("005930", "2026-09-30"))
+        self.assertEqual([], broker.calls)
+
+    async def test_minute_backfill_can_be_disabled_without_store_or_broker_work(self) -> None:
+        broker = _Broker()
+        service = AutonomousTop20Service(
+            broker, RealtimeHub(), object(), minute_backfill_enabled=False,
+        )
+
+        await service._backfill_entry_minutes("005930", "2026-09-14")
+        await service._backfill_minutes("005930", "2026-09-14", "KRX")
+
+        self.assertEqual([], broker.calls)
+
+    async def test_stale_nxt_document_is_queried_again(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.upsert_documents("stock_nxt_eligibility", [{
+                "owner": "005930", "key": "latest",
+                "document": {"enabled": False, "observed_at": "2026-09-13T09:00:00+09:00"},
+            }])
+            broker = _Broker()
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store,
+                now_provider=lambda: datetime.fromisoformat("2026-09-14T10:00:00+09:00"),
+            )
+            self.assertTrue(await service._nxt_enabled("005930"))
+            self.assertEqual(1, len(broker.calls))
+            store.close()
+
+    async def test_failed_flow_recording_does_not_mark_initial_complete(self) -> None:
+        class FailedFlowBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                return BrokerResult(
+                    {"stk_orgn_trde_trnsn": [{"dt": "20260914"}]}, False, "",
+                    recording_succeeded=False,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            service = AutonomousTop20Service(FailedFlowBroker(), RealtimeHub(), store)
+            with self.assertRaises(RuntimeError):
+                await service._capture_candidate_investor_flow("005930", "2026-09-14")
+            self.assertEqual([], store.load_documents("candidate_flow_capture", "2026-09-14:005930", 1))
+            store.close()
+
+    async def test_empty_market_index_does_not_mark_day_complete(self) -> None:
+        class EmptyIndexBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                return BrokerResult(
+                    {"inds_min_pole_qry": []} if api_id == "ka20005" else
+                    {"inds_dt_pole_qry": []}, False, "",
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            service = AutonomousTop20Service(EmptyIndexBroker(), RealtimeHub(), store)
+            with self.assertRaises(RuntimeError):
+                await service._backfill_market_indexes("2026-09-14")
+            self.assertEqual([], store.load_documents("market_index_chart_coverage", "2026-09-14", 1))
+            store.close()
+
+    async def test_nxt_lookup_failure_remains_retryable(self) -> None:
+        class EmptyStore:
+            def load_documents(self, *_args):
+                return []
+
+        broker = _Broker()
+        service = AutonomousTop20Service(broker, RealtimeHub(), EmptyStore())  # type: ignore[arg-type]
+        service._subscriber = service._hub.connect()
+        service._collector.active_codes = ("005930",)
+        original = broker.request
+        failures = 0
+
+        async def flaky(api_id, path, body, **kwargs):
+            nonlocal failures
+            if api_id == "ka10100" and failures == 0:
+                failures += 1
+                raise TimeoutError("temporary NXT failure")
+            return await original(api_id, path, body, **kwargs)
+
+        broker.request = flaky  # type: ignore[method-assign]
+        await service._update_subscription()
+        self.assertNotIn("005930", service._nxt_eligible)
+        await service._update_subscription()
+        self.assertTrue(service._nxt_eligible["005930"])
+
+    async def test_failed_backfill_day_is_not_marked_complete_and_retries(self) -> None:
+        service = AutonomousTop20Service(_Broker(), RealtimeHub(), object())  # type: ignore[arg-type]
+        calls = 0
+
+        async def flaky(_day: str) -> bool:
+            nonlocal calls
+            calls += 1
+            return calls > 1
+
+        service.backfill_day = flaky  # type: ignore[method-assign]
+        service._schedule_backfill("2026-09-24")
+        await service._backfill_task
+        await asyncio.sleep(0)
+        self.assertEqual("", service._last_backfill_day)
+        service._backfill_retry_at = 0.0
+        service._schedule_backfill("2026-09-24")
+        await service._backfill_task
+        await asyncio.sleep(0)
+        self.assertEqual("2026-09-24", service._last_backfill_day)
+        self.assertEqual(2, calls)
+
+    async def test_failed_flow_retry_skips_successful_bar_steps_and_checks_new_codes(self) -> None:
+        class CohortStore:
+            codes = ["A", "B"]
+
+            def load_dataset_snapshots(self, *_args):
+                return []
+
+            def load_observation_revisions(self, *_args):
+                return []
+
+            def load_documents(self, collection, _owner, _limit):
+                if collection == "top20_daily_entrants":
+                    return [{"key": code} for code in self.codes]
+                return []
+
+            def load_hot_cohort(self, *, active_only):
+                return []
+
+        store = CohortStore()
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), store,  # type: ignore[arg-type]
+            now_provider=lambda: datetime.fromisoformat("2026-09-14T20:05:00+09:00"),
+        )
+        service._backfill_market_indexes = AsyncMock()  # type: ignore[method-assign]
+        service._nxt_enabled = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        service._backfill_daily = AsyncMock()  # type: ignore[method-assign]
+        service._backfill_minutes = AsyncMock()  # type: ignore[method-assign]
+        flow_calls: list[str] = []
+        fail_b = True
+
+        async def flow(code: str, _day: str) -> None:
+            flow_calls.append(code)
+            if code == "B" and fail_b:
+                raise RuntimeError("empty program flow")
+
+        service._backfill_candidate_flows = flow  # type: ignore[method-assign]
+        self.assertFalse(await service.backfill_day("2026-09-14"))
+        self.assertFalse(await service.backfill_day("2026-09-14"))
+        self.assertEqual(["A", "B"], [call.args[0] for call in service._backfill_daily.await_args_list])
+        self.assertEqual(["A", "B", "B"], flow_calls)
+
+        store.codes.append("C")
+        fail_b = False
+        self.assertTrue(await service.backfill_day("2026-09-14"))
+        self.assertEqual(["A", "B", "C"], [call.args[0] for call in service._backfill_daily.await_args_list])
+        self.assertEqual(["A", "B", "B", "B", "C"], flow_calls)
+
+        # A later explicit rerun revalidates persisted completion after the retry finishes.
+        self.assertTrue(await service.backfill_day("2026-09-14"))
+        self.assertEqual(["A", "B", "C", "A", "B", "C"],
+                         [call.args[0] for call in service._backfill_daily.await_args_list])
+
+    async def test_weekday_without_0s_trading_evidence_does_not_start_after_close_backfill(self) -> None:
+        class EmptyStore:
+            def load_documents(self, *_args):
+                return []
+
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), EmptyStore(),
+            now_provider=lambda: datetime.fromisoformat("2026-09-25T20:06:00+09:00"),
+        )  # type: ignore[arg-type]
+        service.refresh_ranking_once = AsyncMock(return_value=())  # type: ignore[method-assign]
+        service.backfill_day = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+        with patch(
+            "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
+            side_effect=asyncio.CancelledError,
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await service._schedule_loop()
+
+        service.backfill_day.assert_not_awaited()
+
+    def test_market_operation_day_is_saved_as_kiwoom_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            service = AutonomousTop20Service(
+                _Broker(), RealtimeHub(), store,
+                now_provider=lambda: datetime.fromisoformat("2026-09-28T09:00:00+09:00"),
+            )
+
+            service._save_market_operation_day(
+                "2026-09-28", MarketOperationTick("3", "090000", "000000"),
+            )
+            values = store.load_documents("krx_trading_day_observations", "2026-09-28", 1)
+            store.close()
+
+        self.assertEqual("kiwoom_websocket_0s", values[0]["document"]["source"])
+        self.assertEqual("3", values[0]["document"]["status_code"])
+
+    async def test_validated_membership_is_visible_while_database_save_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            entered = threading.Event()
+            release = threading.Event()
+
+            def blocked_save(*args, **kwargs):
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise TimeoutError("test did not release dataset save")
+
+            store.save_dataset_snapshot = blocked_save  # type: ignore[method-assign]
+            store.upsert_documents = lambda *args, **kwargs: None  # type: ignore[method-assign]
+            hub = RealtimeHub()
+            service = AutonomousTop20Service(
+                _Broker(), hub, store, catalog_loader=lambda: (),
+                now_provider=lambda: datetime.fromisoformat("2026-09-10T09:00:00+09:00"),
+            )
+            service._subscriber = hub.connect()
+            service._entrants_day = "2026-09-10"
+            refresh = asyncio.create_task(
+                service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0, 0)),
+            )
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                latest = service.latest_membership_snapshot("2026-09-10")
+                self.assertIsNotNone(latest)
+                assert latest is not None
+                self.assertEqual("pending", latest["persistence_state"])
+                self.assertEqual(
+                    datetime.fromisoformat("2026-09-10T09:00:00+09:00").timestamp(),
+                    latest["saved_at"],
+                )
+                self.assertEqual(20, len(latest["payload"]["items"]))
+                requested, _nxt = hub.requested_codes()
+                self.assertEqual(set(latest["payload"]["codes"]), set(requested))
+                self.assertFalse(refresh.done())
+            finally:
+                release.set()
+            await refresh
+            self.assertEqual(
+                "persisted",
+                service.latest_membership_snapshot("2026-09-10")["persistence_state"],
+            )
+            if service._market_catalog_task is not None:
+                await service._market_catalog_task
+            await service.close()
+            store.close()
+
+    def test_nonboundary_start_uses_current_half_minute_as_freshness_target(self) -> None:
+        self.assertEqual(
+            datetime(2026, 9, 15, 1, 5, 0),
+            _ranking_expected_at(datetime(2026, 9, 15, 1, 5, 17, 900000)),
+        )
+        self.assertEqual(
+            datetime(2026, 9, 15, 1, 5, 30),
+            _ranking_expected_at(datetime(2026, 9, 15, 1, 5, 48, 900000)),
+        )
+
+    async def test_schedule_loop_collects_immediately_between_boundaries(self) -> None:
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), object(),
+            now_provider=lambda: datetime(2026, 9, 15, 1, 5, 17),
+        )  # type: ignore[arg-type]
+        service.refresh_ranking_once = AsyncMock(side_effect=asyncio.CancelledError())  # type: ignore[method-assign]
+
+        with self.assertRaises(asyncio.CancelledError):
+            await service._schedule_loop()
+
+        service.refresh_ranking_once.assert_awaited_once_with(
+            datetime(2026, 9, 15, 1, 5, 17),
+        )
+
+    async def test_schedule_loop_catches_up_after_refresh_crosses_boundary(self) -> None:
+        moments = iter((
+            datetime(2026, 9, 15, 10, 21, 29, 900000),
+            datetime(2026, 9, 15, 10, 21, 31),
+        ))
+        current = datetime(2026, 9, 15, 10, 21, 31)
+
+        def now_provider() -> datetime:
+            nonlocal current
+            current = next(moments, current)
+            return current
+
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), object(), now_provider=now_provider,
+        )  # type: ignore[arg-type]
+        service.refresh_ranking_once = AsyncMock(return_value=())  # type: ignore[method-assign]
+        sleep_count = 0
+
+        async def stop_after_two_iterations(_delay: float) -> None:
+            nonlocal sleep_count
+            sleep_count += 1
+            if sleep_count >= 2:
+                raise asyncio.CancelledError()
+
+        with patch(
+            "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
+            side_effect=stop_after_two_iterations,
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await service._schedule_loop()
+
+        self.assertEqual(
+            [
+                datetime(2026, 9, 15, 10, 21, 29, 900000),
+                datetime(2026, 9, 15, 10, 21, 31),
+            ],
+            [call.args[0] for call in service.refresh_ranking_once.await_args_list],
+        )
+
+    async def test_after_close_backfill_does_not_block_next_ranking_slot(self) -> None:
+        moments = iter((
+            datetime(2026, 9, 21, 20, 19, 10),
+            datetime(2026, 9, 21, 20, 19, 30),
+        ))
+        current = datetime(2026, 9, 21, 20, 19, 30)
+
+        def now_provider() -> datetime:
+            nonlocal current
+            current = next(moments, current)
+            return current
+
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), object(), now_provider=now_provider,
+        )  # type: ignore[arg-type]
+        service._is_observed_krx_trading_day = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        service.refresh_ranking_once = AsyncMock(return_value=())  # type: ignore[method-assign]
+        backfill_started = asyncio.Event()
+
+        async def blocked_backfill(_day: str) -> None:
+            backfill_started.set()
+            await asyncio.Event().wait()
+
+        service.backfill_day = blocked_backfill  # type: ignore[method-assign]
+        sleep_count = 0
+
+        async def stop_after_two_iterations(_delay: float) -> None:
+            nonlocal sleep_count
+            sleep_count += 1
+            await asyncio.sleep(0)
+            if sleep_count >= 2:
+                raise asyncio.CancelledError()
+
+        real_sleep = asyncio.sleep
+
+        async def controlled_sleep(delay: float) -> None:
+            if delay == 0:
+                await real_sleep(0)
+                return
+            await stop_after_two_iterations(delay)
+
+        with patch(
+            "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
+            side_effect=controlled_sleep,
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await service._schedule_loop()
+
+        self.assertTrue(backfill_started.is_set())
+        self.assertEqual(2, service.refresh_ranking_once.await_count)
+        for task in tuple(service._fundamentals_tasks):
+            task.cancel()
+        await asyncio.gather(*tuple(service._fundamentals_tasks), return_exceptions=True)
+
+    async def test_stale_kiwoom_ranking_retries_with_adaptive_delay(self) -> None:
+        class StaleRankingBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                self.calls.append((api_id, body, kwargs))
+                attempt = len(self.calls)
+                clock = "010530" if attempt >= 5 else "010500"
+                rows = _ranking_rows(clock)
+                for row in rows:
+                    row["dt"] = "20260915"
+                return BrokerResult({"item_inq_rank": rows}, False, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            broker = StaleRankingBroker()
+            service = AutonomousTop20Service(broker, RealtimeHub(), store)
+            with patch(
+                "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
+                new=AsyncMock(),
+            ) as sleeper:
+                await service.refresh_ranking_once(datetime(2026, 9, 15, 1, 5, 30))
+            if service._market_catalog_task is not None:
+                await service._market_catalog_task
+            store.close()
+
+        self.assertEqual(5, len(broker.calls))
+        self.assertEqual([0.25, 0.25, 0.5, 0.5], [call.args[0] for call in sleeper.await_args_list])
+
+    async def test_latest_timestamp_with_empty_rank_slots_is_retried_before_storage(self) -> None:
+        class PartialRankingBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                self.calls.append((api_id, body, kwargs))
+                attempt = len(self.calls)
+                rows = []
+                for rank in range(1, 21):
+                    valid = attempt >= 3 or rank <= 3
+                    rows.append({
+                        "dt": "20260915", "tm": "010530", "bigd_rank": str(rank),
+                        "stk_cd": f"{rank:06d}" if valid else "",
+                        "stk_nm": f"종목{rank}" if valid else "",
+                    })
+                return BrokerResult({"item_inq_rank": rows}, False, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            broker = PartialRankingBroker()
+            service = AutonomousTop20Service(broker, RealtimeHub(), store)
+            with patch(
+                "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
+                new=AsyncMock(),
+            ) as sleeper:
+                codes = await service.refresh_ranking_once(
+                    datetime(2026, 9, 15, 1, 5, 30),
+                )
+            if service._market_catalog_task is not None:
+                await service._market_catalog_task
+            snapshots = store.load_dataset_snapshots(
+                "top20_membership", "2026-09-15", 1,
+            )
+            store.close()
+
+        self.assertEqual(20, len(codes))
+        self.assertEqual(3, len(broker.calls))
+        self.assertEqual([0.25, 0.25], [call.args[0] for call in sleeper.await_args_list])
+        self.assertEqual(20, len(snapshots[0]["payload"]["items"]))
+
+    async def test_latest_timestamp_with_short_rank_list_is_retried_before_storage(self) -> None:
+        class ShortRankingBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                self.calls.append((api_id, body, kwargs))
+                count = 20 if len(self.calls) >= 3 else 3
+                return BrokerResult({"item_inq_rank": [{
+                    "dt": "20260915", "tm": "010530", "bigd_rank": str(rank),
+                    "stk_cd": f"{rank:06d}", "stk_nm": f"종목{rank}",
+                } for rank in range(1, count + 1)]}, False, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            broker = ShortRankingBroker()
+            service = AutonomousTop20Service(broker, RealtimeHub(), store)
+            with patch(
+                "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
+                new=AsyncMock(),
+            ) as sleeper:
+                codes = await service.refresh_ranking_once(
+                    datetime(2026, 9, 15, 1, 5, 30),
+                )
+            if service._market_catalog_task is not None:
+                await service._market_catalog_task
+            snapshots = store.load_dataset_snapshots(
+                "top20_membership", "2026-09-15", 1,
+            )
+            store.close()
+
+        self.assertEqual(20, len(codes))
+        self.assertEqual(3, len(broker.calls))
+        self.assertEqual([0.25, 0.25], [call.args[0] for call in sleeper.await_args_list])
+        self.assertEqual(20, len(snapshots[0]["payload"]["items"]))
+
+    async def test_failed_entry_enrichment_is_not_marked_ready_and_retries(self) -> None:
+        class FailingEntryBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                if api_id == "ka10080":
+                    self.calls.append((api_id, dict(body), kwargs))
+                    raise OSError("temporary chart failure")
+                return await super().request(api_id, path, body, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            broker = FailingEntryBroker()
+            service = AutonomousTop20Service(broker, RealtimeHub(), store)
+
+            await service._ensure_fundamentals(("005930",), "2026-09-14")
+            await service._ensure_fundamentals(("005930",), "2026-09-14")
+            store.close()
+
+        self.assertNotIn("005930", service._fundamentals_ready)
+        self.assertEqual(
+            6, len([call for call in broker.calls if call[0] == "ka10080"]),
+        )
+
+    async def test_account_entry_symbol_is_subscribed_without_entering_top20_membership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.upsert_documents("account_entry_symbols_daily", [{
+                "owner": "2026-09-10", "key": "035420", "document": {
+                    "code": "035420", "environment": "real",
+                },
+            }])
+            hub = RealtimeHub()
+            service = AutonomousTop20Service(
+                _Broker(), hub, store,
+                catalog_loader=lambda: (
+                    ("005930", "삼성전자", "KOSPI"),
+                    ("000660", "SK하이닉스", "KOSPI"),
+                    ("035420", "NAVER", "KOSPI"),
+                ),
+            )
+            service._subscriber = hub.connect()
+
+            await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0))
+            assert service._subscription_task is not None
+            await service._subscription_task
+
+            requested, _nxt = hub.requested_codes()
+            membership = store.load_dataset_snapshots(
+                "top20_membership", "2026-09-10", 1,
+            )[0]["payload"]["codes"]
+            store.close()
+
+        self.assertIn("035420", requested)
+        self.assertNotIn("035420", membership)
+
+    async def test_nas_collects_due_nondefault_rankings(self) -> None:
+        broker = _Broker()
+        service = AutonomousTop20Service(broker, RealtimeHub(), object())  # type: ignore[arg-type]
+
+        await service._refresh_aux_rankings(("4", "1", "2", "3"))
+
+        self.assertEqual(["4", "1", "2", "3"], [call[1]["qry_tp"] for call in broker.calls])
+
+    async def test_aux_rankings_are_only_scheduled_during_morning_archive_window(self) -> None:
+        service = AutonomousTop20Service(_Broker(), RealtimeHub(), object())  # type: ignore[arg-type]
+        with patch.object(service, "_refresh_aux_rankings", new_callable=AsyncMock) as refresh:
+            for hour, minute in ((7, 54), (8, 6), (9, 0)):
+                service._schedule_aux_rankings(datetime(2026, 9, 10, hour, minute, 0))
+            refresh.assert_not_awaited()
+            service._schedule_aux_rankings(datetime(2026, 9, 10, 7, 55, 0))
+            await asyncio.gather(*service._fundamentals_tasks)
+            service._schedule_aux_rankings(datetime(2026, 9, 10, 8, 5, 0))
+            await asyncio.gather(*service._fundamentals_tasks)
+            self.assertEqual(2, refresh.await_count)
+
+    async def test_nas_calculates_and_reuses_historical_high(self) -> None:
+        class HistoricalBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                if api_id == "ka10094":
+                    self.calls.append((api_id, dict(body), kwargs))
+                    return BrokerResult({"stk_yr_pole_chart_qry": [
+                        {"dt": "2026", "high_pric": "90000"},
+                    ]}, False, "")
+                if api_id == "ka10083":
+                    self.calls.append((api_id, dict(body), kwargs))
+                    return BrokerResult({"stk_mth_pole_chart_qry": [
+                        {"dt": "202609", "high_pric": "90000"},
+                    ]}, False, "")
+                return await super().request(api_id, path, body, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.upsert_documents("stock_nxt_eligibility", [{
+                "owner": "005930", "key": "latest",
+                "document": {"enabled": False, "observed_at": "2026-09-14T09:00:00+09:00", "payload": {"nxtEnable": "N"}},
+            }])
+            broker = HistoricalBroker()
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store,
+                now_provider=lambda: datetime.fromisoformat("2026-09-14T10:00:00+09:00"),
+            )
+
+            await service._ensure_historical_high("005930", "2026-09-14")
+            await service._ensure_historical_high("005930", "2026-09-14")
+            values = store.load_documents("historical_highs", "005930", 1)
+            store.close()
+
+        self.assertEqual(90000, values[0]["document"]["target"]["price"])
+        self.assertEqual(2, len(broker.calls))
+
+    async def test_nas_backfills_market_indexes_once_per_day(self) -> None:
+        class IndexBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                if api_id == "ka20005":
+                    self.calls.append((api_id, dict(body), kwargs))
+                    return BrokerResult({"inds_min_pole_qry": [{
+                        "cntr_tm": "20260914200000", "cur_prc": "100",
+                    }]}, False, "")
+                if api_id == "ka20006":
+                    self.calls.append((api_id, dict(body), kwargs))
+                    return BrokerResult({"inds_dt_pole_qry": [{
+                        "dt": "20260914", "cur_prc": "100",
+                    }]}, False, "")
+                return await super().request(api_id, path, body, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            broker = IndexBroker()
+            service = AutonomousTop20Service(broker, RealtimeHub(), store)
+            await service._backfill_market_indexes("2026-09-14")
+            await service._backfill_market_indexes("2026-09-14")
+            values = store.load_dataset_snapshots(
+                "market_index_chart", "20260914:kospi", 1,
+            )
+            store.close()
+
+        self.assertEqual(4, len(broker.calls))
+        self.assertEqual("20260914200000", values[0]["payload"]["minutes"][0]["cntr_tm"])
+    async def test_candidate_flow_capture_and_finalization_are_nas_owned_and_idempotent(self) -> None:
+        class FlowBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                if api_id in {"ka10045", "ka90008"}:
+                    self.calls.append((api_id, dict(body), kwargs))
+                    key = "stk_orgn_trde_trnsn" if api_id == "ka10045" else "stk_tm_prm_trde_trnsn"
+                    return BrokerResult({key: [{"dt": "20260914", "cur_prc": "100"}]}, False, "")
+                return await super().request(api_id, path, body, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            broker = FlowBroker()
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store,
+                now_provider=lambda: datetime(2026, 9, 14, 20, 5),
+            )
+
+            await service._capture_candidate_investor_flow("005930", "2026-09-14")
+            await service._capture_candidate_investor_flow("005930", "2026-09-14")
+            await service._backfill_candidate_flows("005930", "2026-09-14")
+            await service._backfill_candidate_flows("005930", "2026-09-14")
+            initial = store.load_documents(
+                "candidate_flow_capture", "2026-09-14:005930", 1,
+            )
+            final = store.load_documents(
+                "candidate_flow_finalization", "2026-09-14:005930", 1,
+            )
+            store.close()
+
+        self.assertEqual(["ka10045", "ka10045", "ka90008"], [call[0] for call in broker.calls])
+        self.assertEqual("candidate_first_seen", initial[0]["document"]["scope"])
+        self.assertEqual("candidate_after_close", final[0]["document"]["scope"])
+
+    async def test_empty_program_flow_is_recorded_once_only_on_requested_day(self) -> None:
+        class EmptyProgramBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                self.calls.append((api_id, dict(body), kwargs))
+                if api_id == "ka10045":
+                    return BrokerResult({"stk_orgn_trde_trnsn": [{"dt": "20260914"}]}, False, "",
+                                        recording_succeeded=True)
+                return BrokerResult({"stk_tm_prm_trde_trnsn": []}, False, "",
+                                    recording_succeeded=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            broker = EmptyProgramBroker()
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store,
+                now_provider=lambda: datetime.fromisoformat("2026-09-14T20:05:00+09:00"),
+            )
+            await service._backfill_candidate_flows("005935", "2026-09-14")
+            await service._backfill_candidate_flows("005935", "2026-09-14")
+            marker = store.load_documents("candidate_flow_finalization", "2026-09-14:005935", 1)
+            store.close()
+
+        self.assertEqual(2, len(broker.calls))
+        self.assertEqual(0, marker[0]["document"]["program_flow_rows"])
+
+    async def test_empty_program_flow_does_not_finalize_unverified_prior_day(self) -> None:
+        class EmptyProgramBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                if api_id == "ka10045":
+                    return BrokerResult({"stk_orgn_trde_trnsn": [{"dt": "20260914"}]}, False, "",
+                                        recording_succeeded=True)
+                return BrokerResult({"stk_tm_prm_trde_trnsn": []}, False, "",
+                                    recording_succeeded=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            service = AutonomousTop20Service(
+                EmptyProgramBroker(), RealtimeHub(), store,
+                now_provider=lambda: datetime.fromisoformat("2026-09-15T05:20:00+09:00"),
+            )
+            with self.assertRaisesRegex(RuntimeError, "응답이 비었습니다"):
+                await service._backfill_candidate_flows("005935", "2026-09-14")
+            self.assertEqual([], store.load_documents("candidate_flow_finalization", "2026-09-14:005935", 1))
+            store.close()
+
+    async def test_empty_program_flow_with_failed_recording_is_not_finalized(self) -> None:
+        class UnrecordedProgramBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                if api_id == "ka10045":
+                    return BrokerResult({"stk_orgn_trde_trnsn": [{"dt": "20260914"}]}, False, "",
+                                        recording_succeeded=True)
+                return BrokerResult({"stk_tm_prm_trde_trnsn": []}, False, "",
+                                    recording_succeeded=False)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            service = AutonomousTop20Service(
+                UnrecordedProgramBroker(), RealtimeHub(), store,
+                now_provider=lambda: datetime.fromisoformat("2026-09-14T20:05:00+09:00"),
+            )
+            with self.assertRaisesRegex(RuntimeError, "원본 저장이 확인되지 않았습니다"):
+                await service._backfill_candidate_flows("005935", "2026-09-14")
+            self.assertEqual([], store.load_documents("candidate_flow_finalization", "2026-09-14:005935", 1))
+            store.close()
+
+    async def test_realtime_program_snapshot_is_archived_without_tr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            service = AutonomousTop20Service(_Broker(), RealtimeHub(), store)
+            service._pending_program_snapshots["005930"] = {
+                "subject": "005930", "snapshot_key": "20260914:REALTIME:100100",
+                "payload": {"market": "KRX", "rows": [{"trade_time": "100100"}]},
+            }
+
+            await service._flush_program_snapshots()
+            values = store.load_dataset_snapshots("program_flow", "005930", 10)
+            store.close()
+
+        self.assertEqual("100100", values[0]["payload"]["rows"][0]["trade_time"])
+    async def test_entry_minute_backfill_is_owned_by_nas_and_runs_once(self) -> None:
+        class EntryBroker(_Broker):
+            def __init__(self, store) -> None:
+                super().__init__()
+                self.ingestor = MarketDataIngestor(store)
+
+            async def request(self, api_id, path, body, **kwargs):
+                if api_id == "ka10080":
+                    self.calls.append((api_id, body, kwargs))
+                    payload = {"stk_min_pole_chart_qry": [{
+                        "cntr_tm": "20260914100100", "open_pric": "100",
+                        "high_pric": "110", "low_pric": "90", "cur_prc": "105",
+                        "trde_qty": "10",
+                    }]}
+                    self.ingestor.ingest(api_id, body, payload)
+                    return BrokerResult(payload, False, "", recording_succeeded=True)
+                return await super().request(api_id, path, body, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.upsert_documents("stock_nxt_eligibility", [{
+                "owner": "005930", "key": "latest",
+                "document": {"enabled": False, "observed_at": "2026-09-14T09:00:00+09:00", "payload": {"nxtEnable": "N"}},
+            }])
+            broker = EntryBroker(store)
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store,
+                now_provider=lambda: datetime.fromisoformat("2026-09-14T10:02:00+09:00"),
+            )
+
+            self.assertTrue(await service._backfill_entry_minutes("005930", "2026-09-14"))
+            self.assertTrue(await service._backfill_entry_minutes("005930", "2026-09-14"))
+            coverage = store.load_documents(
+                "market_data_coverage_intraday", "2026-09-14:005930:KRX", 1,
+            )
+            store.close()
+
+        minute_calls = [call for call in broker.calls if call[0] == "ka10080"]
+        self.assertEqual(1, len(minute_calls))
+        self.assertEqual("through_entry", coverage[0]["document"]["scope"])
+
+    async def test_stored_nxt_document_is_reused_after_service_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.upsert_documents("stock_nxt_eligibility", [{
+                "owner": "005930", "key": "latest",
+                "document": {"enabled": True, "observed_at": "2026-09-14T09:00:00+09:00", "payload": {"nxtEnable": "Y"}},
+            }])
+            broker = _Broker()
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store,
+                now_provider=lambda: datetime.fromisoformat("2026-09-14T10:00:00+09:00"),
+            )
+
+            enabled = await service._nxt_enabled("005930")
+            store.close()
+
+        self.assertTrue(enabled)
+        self.assertEqual([], broker.calls)
+
+    async def test_fundamentals_query_runs_once_only_when_central_document_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.upsert_documents("stock_fundamentals", [{
+                "owner": "005930", "key": "latest",
+                "document": {
+                    "observed_at": "2026-09-14T09:00:00+09:00",
+                    "payload": {"mac": "1000", "dstr_rt": "40"},
+                },
+            }])
+            broker = _Broker()
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store,
+                now_provider=lambda: datetime(2026, 9, 14, 10, 0),
+            )
+
+            await service._ensure_fundamentals(("005930", "000660"))
+            await service._ensure_fundamentals(("005930", "000660"))
+            store.close()
+
+        fundamental_calls = [call for call in broker.calls if call[0] == "ka10001"]
+        self.assertEqual([("ka10001", {"stk_cd": "000660"}, {})], fundamental_calls)
+
+    async def test_stale_fundamentals_are_refreshed_once_for_the_current_day(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.upsert_documents("stock_fundamentals", [{
+                "owner": "005930", "key": "latest",
+                "document": {
+                    "observed_at": "2026-09-13T20:00:00+09:00",
+                    "payload": {"mac": "900"},
+                },
+            }])
+            broker = _Broker()
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store,
+                now_provider=lambda: datetime(2026, 9, 14, 10, 0),
+            )
+
+            await service._ensure_fundamentals(("005930",))
+            await service._ensure_fundamentals(("005930",))
+            store.close()
+
+        fundamental_calls = [call for call in broker.calls if call[0] == "ka10001"]
+        self.assertEqual(1, len(fundamental_calls))
+
+    async def test_missing_entry_daily_history_is_requested_by_nas_once(self) -> None:
+        class DailyBroker(_Broker):
+            def __init__(self, store) -> None:
+                super().__init__()
+                self.ingestor = MarketDataIngestor(store)
+
+            async def request(self, api_id, path, body, **kwargs):
+                self.calls.append((api_id, body, kwargs))
+                if api_id == "ka10081":
+                    payload = {"stk_dt_pole_chart_qry": [{
+                        "dt": "20260914", "open_pric": "100", "high_pric": "110",
+                        "low_pric": "90", "cur_prc": "105", "trde_qty": "10",
+                    }]}
+                    self.ingestor.ingest(api_id, body, payload)
+                    return BrokerResult(payload, False, "", recording_succeeded=True)
+                return await super().request(api_id, path, body, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            broker = DailyBroker(store)
+            service = AutonomousTop20Service(broker, RealtimeHub(), store)
+            service._nxt_eligible["005930"] = False
+            service._nxt_checked_on["005930"] = service._now().date().isoformat()
+
+            await service._ensure_entry_daily_history("005930", "2026-09-14")
+            store.close()
+
+        calls = [call for call in broker.calls if call[0] == "ka10081"]
+        self.assertEqual(1, len(calls))
+        self.assertEqual("005930", calls[0][1]["stk_cd"])
+
+    def _entrant_service(self, store, broker, now=None):
+        service = AutonomousTop20Service(
+            broker, RealtimeHub(), store,
+            now_provider=lambda: now or datetime.fromisoformat("2026-09-11T07:00:00+09:00"),
+        )
+        service._schedule_market_catalog = lambda _day: None
+        service._schedule_subscription_update = lambda _day: None
+        service._backfill_market_indexes = AsyncMock()
+        service._nxt_enabled = AsyncMock(return_value=False)
+        service._backfill_daily = AsyncMock()
+        service._backfill_minutes = AsyncMock()
+        service._backfill_candidate_flows = AsyncMock()
+        return service
+
+    async def test_daily_entrants_retry_departed_code_skip_replay_and_reset_next_day(self) -> None:
+        class Broker(_Broker):
+            clock = "090000"
+            day = "20260910"
+            first = "005930"
+
+            async def request(self, *args, **kwargs):
+                rows = _ranking_rows(self.clock)
+                for row in rows:
+                    row["dt"] = self.day
+                rows[0]["stk_cd"] = self.first
+                return BrokerResult({"item_inq_rank": rows}, False, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            self.addCleanup(store.close)
+            broker = Broker()
+            service = self._entrant_service(store, broker)
+            original_save = store.upsert_documents
+            with patch.object(store, "upsert_documents", side_effect=RuntimeError("save failed")):
+                with self.assertRaisesRegex(RuntimeError, "save failed"):
+                    await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0))
+            self.assertEqual(set(), service._entrant_persisted_codes)
+            broker.clock, broker.first = "090030", "099999"
+            with patch.object(store, "upsert_documents", wraps=original_save) as save:
+                await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0, 30))
+                self.assertEqual(21, len(save.call_args.args[1]))
+                broker.clock = "090100"
+                await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 1))
+                self.assertEqual(1, save.call_count)
+                restarted = self._entrant_service(store, broker)
+                await restarted.refresh_ranking_once(datetime(2026, 9, 10, 9, 1))
+                self.assertEqual(1, save.call_count)
+                broker.day = "20260911"
+                await service.refresh_ranking_once(datetime(2026, 9, 11, 9, 1))
+                self.assertEqual(2, save.call_count)
+                self.assertEqual({"2026-09-11"}, {row["owner"] for row in save.call_args.args[1]})
+            documents = store.load_documents("top20_daily_entrants", "2026-09-10")
+            samsung = next(row for row in documents if row["key"] == "005930")
+            self.assertEqual("2026-09-10T09:00:00", samsung["document"]["first_seen_at"])
+            self.assertNotIn("last_seen_at", samsung["document"])
+            self.assertEqual(3, len(store.load_dataset_snapshots("top20_membership", "2026-09-10")))
+            store.close()
+
+    async def test_backfill_recovers_failed_entrant_from_corrected_membership_history(self) -> None:
+        class Broker(_Broker):
+            first = "005930"
+
+            async def request(self, *args, **kwargs):
+                rows = _ranking_rows("090000")
+                rows[0]["stk_cd"] = self.first
+                return BrokerResult({"item_inq_rank": rows}, False, "")
+
+        for history_enabled in (True, False):
+            with self.subTest(history_enabled=history_enabled), tempfile.TemporaryDirectory() as directory:
+                store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3",
+                                         observation_history_enabled=history_enabled)
+                store.initialize()
+                broker = Broker()
+                service = self._entrant_service(store, broker)
+                with patch.object(store, "upsert_documents", side_effect=RuntimeError("save failed")):
+                    for first in ("005930", "099999"):
+                        broker.first = first
+                        with self.assertRaisesRegex(RuntimeError, "save failed"):
+                            await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0))
+                restarted = self._entrant_service(store, broker)
+                self.assertTrue(await restarted.backfill_day("2026-09-10"))
+                codes = {row["key"] for row in store.load_documents("top20_daily_entrants", "2026-09-10")}
+                self.assertIn("099999", codes)
+                self.assertEqual(history_enabled, "005930" in codes)
+                self.assertEqual(codes, {call.args[0] for call in restarted._backfill_daily.await_args_list})
+                self.assertEqual("", restarted._entrants_day)
+                store.close()
+
+    async def test_previous_day_backfill_and_current_ranking_keep_separate_entrant_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            old_day = "2026-09-09"
+            store.save_dataset_snapshot("top20_membership", old_day, old_day + "T09:00:00", {
+                "observed_at": old_day + "T09:00:00", "codes": ["OLD"],
+            })
+            service = self._entrant_service(store, _Broker(), datetime(2026, 9, 10, 7, 0))
+            entered, release = threading.Event(), threading.Event()
+            original_save = store.upsert_documents
+
+            def blocked_save(collection, documents):
+                if documents[0]["owner"] == old_day:
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError("backfill save not released")
+                return original_save(collection, documents)
+
+            with patch.object(store, "upsert_documents", side_effect=blocked_save):
+                task = asyncio.create_task(service.backfill_day(old_day))
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                    codes = await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0))
+                    self.assertEqual(set(codes), service._entrant_persisted_codes)
+                    self.assertEqual("2026-09-10", service._entrants_day)
+                finally:
+                    release.set()
+                    completed = await task
+                self.assertTrue(completed)
+            previous = store.load_documents("top20_daily_entrants", old_day)
+            current = store.load_documents("top20_daily_entrants", "2026-09-10")
+            self.assertEqual(["OLD"], [row["key"] for row in previous])
+            self.assertEqual(old_day + "T09:00:00", previous[0]["document"]["first_seen_at"])
+            self.assertEqual(set(codes), {row["key"] for row in current})
+            self.assertTrue(all(row["document"]["first_seen_at"].startswith("2026-09-10") for row in current))
+            self.assertEqual(["OLD"], [call.args[0] for call in service._backfill_daily.await_args_list])
+            store.close()
+
+    async def test_daily_entrant_recovery_does_not_silently_accept_truncated_history(self) -> None:
+        store = MagicMock()
+        store.load_documents.return_value = []
+        store.load_dataset_snapshots.return_value = [{}] * 5000
+        store.load_observation_revisions.return_value = []
+        service = self._entrant_service(store, _Broker())
+        with self.assertRaisesRegex(RuntimeError, "recovery limit reached"):
+            await service.backfill_day("2026-09-10")
+        store.upsert_documents.assert_not_called()
+        service._backfill_daily.assert_not_awaited()
+
+    async def test_ranking_is_archived_and_keeps_an_internal_subscription(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            hub = RealtimeHub()
+            broker = _Broker()
+            service = AutonomousTop20Service(
+                broker, hub, store,
+                catalog_loader=lambda: (
+                    ("005930", "삼성전자", "KOSPI"),
+                    ("000660", "SK하이닉스", "KOSPI"),
+                ),
+            )
+            service._subscriber = hub.connect()
+
+            codes = await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0, 0))
+            subscription_task = service._subscription_task
+            catalog_task = service._market_catalog_task
+            assert subscription_task is not None
+            await subscription_task
+            if catalog_task is not None:
+                await catalog_task
+
+            snapshots = store.load_dataset_snapshots("top20_membership", "2026-09-10")
+            metadata = store.load_market_data_metadata(
+                MarketDatasetKind.CANDIDATE_SET,
+                "2026-09-10",
+                "2026-09-10T09:00:00",
+            )
+            entrants = store.load_documents("top20_daily_entrants", "2026-09-10")
+            requested, nxt = hub.requested_codes()
+            store.close()
+        self.assertEqual(("005930", "000660"), codes[:2])
+        self.assertEqual(20, len(codes))
+        self.assertEqual(["005930", "000660"], snapshots[0]["payload"]["codes"][:2])
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual(DataCompleteness.COMPLETE, metadata.completeness)
+        self.assertEqual(ObservationOrigin.QUERY, metadata.origin)
+        self.assertEqual(set(codes), {row["key"] for row in entrants})
+        self.assertEqual(set(codes), set(requested))
+        self.assertEqual(("005930",), nxt)
+        self.assertEqual("KOSPI", service._markets["005930"])
+
+    async def test_slow_catalog_and_nxt_enrichment_do_not_block_next_ranking(self) -> None:
+        release_catalog = threading.Event()
+        release_nxt = asyncio.Event()
+
+        class SlowEnrichmentBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                if api_id == "ka10100":
+                    await release_nxt.wait()
+                if api_id == "ka00198":
+                    self.calls.append((api_id, body, kwargs))
+                    clock = "090030" if len([
+                        call for call in self.calls if call[0] == "ka00198"
+                    ]) >= 2 else "090000"
+                    return BrokerResult({"item_inq_rank": _ranking_rows(clock)}, False, "")
+                return await super().request(api_id, path, body, **kwargs)
+
+        def slow_catalog():
+            release_catalog.wait(5)
+            return (("005930", "삼성전자", "KOSPI"),)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            broker = SlowEnrichmentBroker()
+            hub = RealtimeHub()
+            service = AutonomousTop20Service(
+                broker, hub, store, catalog_loader=slow_catalog,
+            )
+            service._subscriber = hub.connect()
+            try:
+                await asyncio.wait_for(
+                    service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0, 0)),
+                    timeout=0.5,
+                )
+                await asyncio.wait_for(
+                    service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0, 30)),
+                    timeout=0.5,
+                )
+                ranking_calls = [call for call in broker.calls if call[0] == "ka00198"]
+                requested, _nxt = hub.requested_codes()
+                self.assertEqual(2, len(ranking_calls))
+                self.assertEqual(20, len(requested))
+                self.assertEqual({"005930", "000660"}, set(requested[:2]))
+            finally:
+                release_catalog.set()
+                release_nxt.set()
+                await service.close()
+                store.close()
+
+    async def test_saved_catalog_is_reused_without_network_and_classifies_markets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.replace_documents("stock_catalog", [
+                {"owner": "krx", "key": "005930", "document": {
+                    "code": "005930", "name": "삼성전자", "market": "KOSPI",
+                    "as_of": "2026-09-10",
+                }},
+                {"owner": "krx", "key": "000660", "document": {
+                    "code": "000660", "name": "SK하이닉스", "market": "KOSDAQ",
+                    "as_of": "2026-09-10",
+                }},
+                {"owner": "krx", "key": "_meta", "document": {
+                    "as_of": "2026-09-10", "rows": 2,
+                }},
+            ])
+            service = AutonomousTop20Service(
+                _Broker(), RealtimeHub(), store,
+                catalog_loader=lambda: (_ for _ in ()).throw(AssertionError("network")),
+            )
+            await service._ensure_market_catalog("2026-09-10")
+            store.close()
+        self.assertEqual({"005930": "KOSPI", "000660": "KOSDAQ"}, service._markets)
+
+    async def test_catalog_loader_duplicate_codes_are_saved_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            service = AutonomousTop20Service(
+                _Broker(), RealtimeHub(), store,
+                catalog_loader=lambda: (
+                    ("0001A0", "중복종목", "KOSPI"),
+                    ("0001A0", "중복종목", "KOSPI"),
+                    ("005930", "삼성전자", "KOSPI"),
+                ),
+            )
+            await service._ensure_market_catalog("2026-09-14")
+            values = store.load_documents("stock_catalog", "krx", 100)
+            store.close()
+
+        self.assertEqual(3, len(values))
+        self.assertEqual(2, next(
+            value["document"]["rows"] for value in values if value["key"] == "_meta"
+        ))
+
+    def test_collection_window_is_weekday_0800_until_2000(self) -> None:
+        self.assertTrue(_collection_open(datetime(2026, 9, 10, 8, 0)))
+        self.assertTrue(_collection_open(datetime(2026, 9, 10, 19, 59, 59)))
+        self.assertFalse(_collection_open(datetime(2026, 9, 10, 20, 0)))
+        self.assertFalse(_collection_open(datetime(2026, 9, 12, 10, 0)))
+
+    def test_ranking_collection_remains_due_overnight_and_on_weekends(self) -> None:
+        self.assertTrue(_ranking_collection_due(datetime(2026, 9, 15, 1, 5, 30)))
+        self.assertTrue(_ranking_collection_due(datetime(2026, 9, 12, 10, 0)))
+        self.assertFalse(_ranking_collection_due(datetime(2026, 9, 15, 1, 5, 29)))
+
+    def test_top20_collection_is_paused_when_nas_loses_kiwoom_realtime(self) -> None:
+        hub = RealtimeHub()
+        service = AutonomousTop20Service(_Broker(), hub, _FlakyIndexStore())  # type: ignore[arg-type]
+        service._collector.prepare(
+            ("005930",), datetime(2026, 9, 10, 9, 0),
+            enabled=True, collection_open=True,
+        )
+
+        update = service._advance(datetime(2026, 9, 10, 9, 0, 30))
+
+        self.assertFalse(update.collection_open)
+        self.assertEqual((), service._collector.active_codes)
+
+    async def test_effective_date_full_day_backfill_waits_for_2000(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            broker = _Broker()
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store,
+                now_provider=lambda: datetime(2026, 9, 14, 15, 35),
+            )
+
+            await service.backfill_day("2026-09-14")
+            store.close()
+
+        self.assertEqual([], broker.calls)
+
+    async def test_legacy_minute_coverage_is_upgraded_before_it_is_reused(self) -> None:
+        class MinuteBroker:
+            def __init__(self, store) -> None:
+                self.calls = 0
+                self.ingestor = MarketDataIngestor(store)
+
+            async def request(self, api_id, path, body, **kwargs):
+                self.calls += 1
+                payload = {"stk_min_pole_chart_qry": [{
+                    "cntr_tm": "20260914195900", "open_pric": "1",
+                    "high_pric": "1", "low_pric": "1", "cur_prc": "1",
+                    "trde_qty": "1",
+                }]}
+                self.ingestor.ingest(api_id, body, payload)
+                return BrokerResult(payload, False, "", recording_succeeded=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            store.upsert_documents("market_data_coverage", [{
+                "owner": "2026-09-14:001210:KRX", "key": "complete",
+                "document": {"kind": "minute", "pages": 2},
+            }])
+            broker = MinuteBroker(store)
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store,
+                now_provider=lambda: datetime(2026, 9, 15, 5, 20),
+            )
+
+            await service._backfill_minutes("001210", "2026-09-14", "KRX")
+            await service._backfill_minutes("001210", "2026-09-14", "KRX")
+            coverage = store.load_documents(
+                "market_data_coverage", "2026-09-14:001210:KRX", 1,
+            )
+            store.close()
+
+        self.assertEqual(1, broker.calls)
+        self.assertTrue(coverage[0]["document"]["window_closed"])
+        self.assertTrue(coverage[0]["document"]["session_finalized"])
+
+    async def test_failed_minute_storage_never_finalizes_coverage(self) -> None:
+        class UnrecordedMinuteBroker:
+            async def request(self, api_id, path, body, **kwargs):
+                return BrokerResult({"stk_min_pole_chart_qry": [{
+                    "cntr_tm": "20260914195900", "open_pric": "1",
+                    "high_pric": "1", "low_pric": "1", "cur_prc": "1", "trde_qty": "1",
+                }]}, False, "", recording_succeeded=False)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            service = AutonomousTop20Service(UnrecordedMinuteBroker(), RealtimeHub(), store)
+            with self.assertRaisesRegex(RuntimeError, "저장되지 않은 봉"):
+                await service._backfill_minutes("001210", "2026-09-14", "KRX")
+            self.assertEqual([], store.load_documents("market_data_coverage", "2026-09-14:001210:KRX", 1))
+            store.close()
+
+    async def test_completed_index_enters_outbox_before_membership_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            original_save = store.save_dataset_snapshot
+
+            def fail_membership(collection, *args, **kwargs):
+                if collection == "top20_membership":
+                    raise RuntimeError("membership unavailable")
+                return original_save(collection, *args, **kwargs)
+
+            store.save_dataset_snapshot = fail_membership  # type: ignore[method-assign]
+            outbox = Path(directory) / "top20-outbox.json"
+            service = AutonomousTop20Service(_Broker(), RealtimeHub(), store, outbox_path=outbox)
+            service._collector.minute = datetime(2026, 9, 10, 8, 59)
+            service._collector.samples = [(30, 0.0)]
+            service._collector.active_codes = ("005930",)
+            service._collector.minute_codes = {"005930"}
+            with self.assertRaisesRegex(RuntimeError, "membership unavailable"):
+                await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0))
+            self.assertIn("2026-09-10T08:59", service._pending_index_records)
+            self.assertIn("2026-09-10T08:59", outbox.read_text(encoding="utf-8"))
+            store.close()
+
+    async def test_empty_nxt_daily_response_is_not_marked_complete(self) -> None:
+        class EmptyDailyBroker:
+            async def request(self, api_id, path, body, **kwargs):
+                self.body = body
+                return BrokerResult({"stk_dt_pole_chart_qry": []}, False, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            service = AutonomousTop20Service(EmptyDailyBroker(), RealtimeHub(), store)
+
+            with self.assertRaisesRegex(RuntimeError, "NXT 일봉"):
+                await service._backfill_daily("000660", "2026-09-09", "NXT")
+
+            coverage = store.load_documents("market_data_coverage_daily", "000660:NXT", 1)
+            store.close()
+        self.assertEqual([], coverage)
+
+    async def test_daily_coverage_requires_the_requested_day(self) -> None:
+        class OlderDailyBroker:
+            async def request(self, api_id, path, body, **kwargs):
+                return BrokerResult({"stk_dt_pole_chart_qry": [{
+                    "dt": "20260913", "open_pric": "1", "high_pric": "1",
+                    "low_pric": "1", "cur_prc": "1", "trde_qty": "1",
+                }]}, False, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            service = AutonomousTop20Service(
+                OlderDailyBroker(), RealtimeHub(), store,
+                now_provider=lambda: datetime(2026, 9, 14, 20, 5),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "KRX 일봉"):
+                await service._backfill_daily("005930", "2026-09-14", "KRX")
+
+            coverage = store.load_documents("market_data_coverage_daily", "005930:KRX", 1)
+            store.close()
+        self.assertEqual([], coverage)
+
+    async def test_top20_index_keeps_partial_capture_metadata(self) -> None:
+        from kiwoom_monitor.application.top20_trade_value_collector import Top20MinuteRecord
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            now = datetime(2026, 9, 10, 10, 2)
+            service = AutonomousTop20Service(
+                _Broker(), RealtimeHub(), store, now_provider=lambda: now
+            )
+            record = Top20MinuteRecord(
+                minute=datetime(2026, 9, 10, 10, 1),
+                market_values=(10.0, 20.0, 0.0),
+                codes=("005930", "000660"),
+                market_counts=(1, 1, 0),
+                cohort_segments=(),
+                capture_state="partial",
+            )
+
+            await service._save_index(record)
+            metadata = store.load_market_data_metadata(
+                MarketDatasetKind.TOP20_INDEX,
+                "2026-09-10",
+                "2026-09-10T10:01",
+            )
+            store.close()
+
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual(DataCompleteness.PARTIAL, metadata.completeness)
+        self.assertEqual(ObservationOrigin.REALTIME, metadata.origin)
+
+    async def test_failed_top20_index_save_is_retained_for_retry(self) -> None:
+        from kiwoom_monitor.application.top20_trade_value_collector import Top20MinuteRecord
+
+        store = _FlakyIndexStore()
+        service = AutonomousTop20Service(_Broker(), RealtimeHub(), store)  # type: ignore[arg-type]
+        record = Top20MinuteRecord(
+            minute=datetime(2026, 9, 10, 10, 1),
+            market_values=(10.0, 20.0, 0.0),
+            codes=("005930", "000660"),
+            market_counts=(1, 1, 0),
+            cohort_segments=(),
+            capture_state="complete",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "temporary database failure"):
+            await service._save_index(record)
+        self.assertEqual(1, len(service._pending_index_records))
+
+        await service._flush_pending_indexes()
+
+        self.assertEqual({}, service._pending_index_records)
+        self.assertEqual(1, len(store.saved))
+
+    async def test_failed_top20_index_is_recovered_after_service_restart(self) -> None:
+        from kiwoom_monitor.application.top20_trade_value_collector import Top20MinuteRecord
+
+        with tempfile.TemporaryDirectory() as directory:
+            outbox = Path(directory) / "top20-outbox.json"
+            failed_store = _FlakyIndexStore()
+            first = AutonomousTop20Service(
+                _Broker(), RealtimeHub(), failed_store, outbox_path=outbox,
+            )  # type: ignore[arg-type]
+            record = Top20MinuteRecord(
+                minute=datetime(2026, 9, 10, 10, 1),
+                market_values=(10.0, 20.0, 0.0), codes=("005930",),
+                market_counts=(1, 0, 0), cohort_segments=(), capture_state="complete",
+            )
+            with self.assertRaisesRegex(RuntimeError, "temporary database failure"):
+                await first._save_index(record)
+
+            recovered_store = _FlakyIndexStore()
+            recovered_store.calls = 1
+            second = AutonomousTop20Service(
+                _Broker(), RealtimeHub(), recovered_store, outbox_path=outbox,
+            )  # type: ignore[arg-type]
+            await second.start()
+            await second.close()
+
+            self.assertEqual(1, len(recovered_store.saved))
+            self.assertEqual({}, second._pending_index_records)
+            self.assertEqual("{}", outbox.read_text(encoding="utf-8"))
+
+    async def test_index_drain_waits_for_outbox_registration(self) -> None:
+        from kiwoom_monitor.application.top20_trade_value_collector import Top20MinuteRecord
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            store.initialize()
+            outbox = Path(directory) / "top20-outbox.json"
+            service = AutonomousTop20Service(_Broker(), RealtimeHub(), store, outbox_path=outbox)
+            assert service._outbox is not None
+            original_put = service._outbox.put
+            entered = threading.Event()
+            release = threading.Event()
+
+            def slow_put(key, payload):
+                entered.set()
+                release.wait(2)
+                original_put(key, payload)
+
+            service._outbox.put = slow_put  # type: ignore[method-assign]
+            record = Top20MinuteRecord(
+                datetime(2026, 9, 10, 10, 1), (1.0, 0.0, 0.0),
+                ("005930",), (1, 0, 0), (), "partial",
+            )
+            queued = asyncio.create_task(service._queue_index(record))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            drained = asyncio.create_task(service._flush_pending_indexes())
+            await asyncio.sleep(0.05)
+            self.assertFalse(drained.done())
+            release.set()
+            await asyncio.gather(queued, drained)
+            self.assertEqual({}, service._pending_index_records)
+            self.assertEqual("{}", outbox.read_text(encoding="utf-8"))
+            store.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

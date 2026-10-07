@@ -1,0 +1,881 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import tempfile
+import threading
+import time
+import unittest
+from contextlib import closing
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+
+from kiwoom_monitor.infrastructure.historical_backfill import (
+    ArticleFetchAttempt,
+    ArticlePublicationResult,
+    article_publication_records,
+    NaverHistoricalNewsItem,
+    NAVER_HISTORICAL_SEARCH_PROVIDER,
+    NAVER_STOCK_NEWS_PROVIDER,
+    claim_news_backfill_job,
+    claim_news_range_job,
+    finish_news_backfill_job,
+    finish_news_range_job,
+    fetch_article_publication,
+    import_daishin_backfill_ndjson,
+    initialize_probe_database,
+    load_article_body_snapshot,
+    parse_naver_historical_search_page,
+    parse_naver_stock_news_page,
+    release_news_backfill_job,
+    seed_news_backfill_jobs,
+    exclude_non_stock_news_jobs,
+    seed_news_range_jobs,
+    parse_article_publication_html,
+    store_article_publication_result,
+    store_naver_historical_search_page,
+    store_naver_stock_news_page,
+    store_daishin_probe_payload,
+    split_news_range_job,
+)
+from scripts.preprocess_historical_news_locally import _search_article
+
+
+class HistoricalBackfillTest(unittest.TestCase):
+    def test_collection_identity_index_and_publication_status_preserve_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.sqlite3"
+            initialize_probe_database(path)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO news_articles "
+                    "(provider,office_id,article_id,published_at,published_precision,"
+                    "office_name,title,summary,article_url,image_url,first_observed_at,"
+                    "last_observed_at,article_fetch_status) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (NAVER_HISTORICAL_SEARCH_PROVIDER, "001", "known", "2026-09-27", "date",
+                     "매체", "제목", "요약", "https://example.test", "", "now", "now",
+                     "published_at_found"),
+                )
+                connection.execute(
+                    "INSERT INTO news_search_observations "
+                    "(provider,office_id,article_id,code,source_date,query_text,"
+                    "start,position,observed_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (NAVER_HISTORICAL_SEARCH_PROVIDER, "001", "known", "005930",
+                     "2026-09-27", "삼성전자", 1, 1, "now"),
+                )
+                plan = connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT a.article_id FROM news_articles a "
+                    "JOIN news_search_observations o ON o.provider=a.provider "
+                    "AND o.office_id=a.office_id AND o.article_id=a.article_id "
+                    "WHERE o.code=? AND COALESCE(NULLIF(a.original_url,''),"
+                    "NULLIF(a.portal_url,''),'naver:'||a.office_id||':'||a.article_id)=?",
+                    ("005930", "naver:001:known"),
+                ).fetchall()
+            self.assertTrue(any("idx_news_articles_collection_identity" in row[3]
+                                for row in plan), plan)
+            self.assertEqual("naver:001:known",
+                             _search_article(path, "005930", "naver:001:known")["identity"])
+            items = [SimpleNamespace(office_id="001", article_id="known")]
+            items.extend(SimpleNamespace(office_id="001", article_id=f"missing-{n}")
+                         for n in range(9))
+            items.append(items[0])
+            result = article_publication_records(path, items)
+            self.assertEqual(10, len(result))
+            self.assertEqual(("published_at_found", "2026-09-27"), result[("001", "known")])
+            self.assertEqual(("not_fetched", ""), result[("001", "missing-8")])
+
+    def test_publication_fetch_enforces_total_deadline_for_slow_streams(self) -> None:
+        class Response:
+            status = 200
+
+            def __init__(self) -> None:
+                self.chunks = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read1(self, _size: int) -> bytes:
+                time.sleep(0.02)
+                self.chunks += 1
+                return b"x" if self.chunks < 10 else b""
+
+            def geturl(self) -> str:
+                return "https://publisher.test/article"
+
+            class headers:
+                @staticmethod
+                def get_content_charset():
+                    return "utf-8"
+
+        item = NaverHistoricalNewsItem(
+            "key", "001", "123", "매체", "제목", "요약",
+            "https://publisher.test/article", "https://publisher.test/article", "", 1,
+        )
+        started = time.monotonic()
+        result = fetch_article_publication(
+            item, total_timeout=0.04, opener=lambda *_args, **_kwargs: Response(),
+        )
+
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual("fetch_error", result.status)
+        self.assertIn("deadline exceeded", result.attempts[0].error)
+
+    def test_publication_fetch_limits_each_site_read_independently(self) -> None:
+        class SlowResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read1(self, _size: int) -> bytes:
+                time.sleep(0.02)
+                return b"x"
+
+        item = NaverHistoricalNewsItem(
+            "key", "001", "123", "매체", "제목", "요약",
+            "https://publisher.test/article", "https://publisher.test/article", "", 1,
+        )
+        result = fetch_article_publication(
+            item, timeout=0.04, total_timeout=1,
+            opener=lambda *_args, **_kwargs: SlowResponse(),
+        )
+        self.assertEqual("fetch_error", result.status)
+        self.assertEqual("response_read", result.attempts[0].failure_phase)
+        self.assertLess(result.attempts[0].elapsed_ms, 200)
+
+    def test_publication_fetch_uses_two_second_limit_per_url_and_tries_archive(self) -> None:
+        timeouts = []
+        def unavailable(_request, *, timeout, context):
+            timeouts.append(timeout)
+            raise TimeoutError("timed out")
+        item = NaverHistoricalNewsItem(
+            "key", "001", "123", "매체", "제목", "요약",
+            "https://publisher.test/article", "https://publisher.test/article",
+            "https://n.news.naver.com/article/001/123", 1,
+        )
+        result = fetch_article_publication(item, timeout=2, opener=unavailable)
+        self.assertEqual(["publisher_original", "naver_archive"],
+                         [attempt.url_role for attempt in result.attempts])
+        self.assertEqual(2, len(timeouts))
+        self.assertTrue(all(0 < timeout <= 2 for timeout in timeouts))
+
+    def test_publication_fetch_can_defer_archive_without_requesting_it(self) -> None:
+        requested = []
+        def unavailable(request, *, timeout, context):
+            requested.append(request.full_url)
+            raise TimeoutError("timed out")
+        item = NaverHistoricalNewsItem(
+            "key", "001", "123", "매체", "제목", "요약",
+            "https://publisher.test/article", "https://publisher.test/article",
+            "https://n.news.naver.com/article/001/123", 1,
+        )
+        result = fetch_article_publication(
+            item, opener=unavailable, source_roles=("publisher_original",),
+        )
+        self.assertEqual(["https://publisher.test/article"], requested)
+        self.assertEqual(["publisher_original"],
+                         [attempt.url_role for attempt in result.attempts])
+
+    def test_publication_fetch_reuses_same_html_for_body_snapshot(self) -> None:
+        html = (
+            '<html><head><title>삼성전자 공급계약</title>'
+            '<meta property="article:published_time" content="2020-01-02T10:31:42+09:00">'
+            '</head><body><div id="dic_area">'
+            + '삼성전자가 새로운 공급계약을 체결했다. ' * 12
+            + '</div></body></html>'
+        )
+        calls = []
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return html.encode()
+
+            def geturl(self):
+                return "https://publisher.test/article"
+
+            class headers:
+                @staticmethod
+                def get_content_charset():
+                    return "utf-8"
+
+        def opener(*args, **kwargs):
+            calls.append((args, kwargs))
+            return Response()
+
+        item = NaverHistoricalNewsItem(
+            "key", "001", "123", "매체", "삼성전자 공급계약", "요약",
+            "https://publisher.test/article", "https://publisher.test/article",
+            "", 1,
+        )
+        result = fetch_article_publication(item, opener=opener)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("published_at_found", result.status)
+        self.assertIn("공급계약을 체결했다", result.body_text)
+        self.assertEqual("https://publisher.test/article", result.body_source_url)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "news.sqlite3"
+            store_article_publication_result(path, result)
+            snapshot = load_article_body_snapshot(path, result.provider, "001", "123")
+            self.assertIsNotNone(snapshot)
+            self.assertEqual(result.body_text, snapshot["body_text"])
+
+    def test_dense_pending_days_are_grouped_and_completed_as_one_range(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.sqlite3"
+            initialize_probe_database(output)
+            now = "2026-09-22T00:00:00+00:00"
+            with closing(sqlite3.connect(output)) as connection, connection:
+                connection.executemany(
+                    """
+                    INSERT INTO news_backfill_jobs
+                    (code,target_date,query_text,state,updated_at)
+                    VALUES('005930',?,'삼성전자','pending',?)
+                    """,
+                    [(value, now) for value in (
+                        "2026-09-01", "2026-09-02", "2026-09-03",
+                    )],
+                )
+
+            self.assertEqual(1, seed_news_range_jobs(output, minimum_density=0.5))
+            job = claim_news_range_job(output)
+            assert job is not None
+            self.assertEqual(("2026-09-01", "2026-09-03", 3), (
+                job.target_date, job.target_end_date, job.member_count,
+            ))
+            finish_news_range_job(
+                output, job, state="complete", pages_observed=2,
+                items_observed=12, usable_articles=8,
+                unreadable_articles=3, missing_time_articles=1,
+            )
+            with closing(sqlite3.connect(output)) as connection:
+                states = connection.execute(
+                    "SELECT state,COUNT(*) FROM news_backfill_jobs GROUP BY state"
+                ).fetchall()
+                member_pages = connection.execute(
+                    "SELECT DISTINCT pages_observed FROM news_backfill_jobs"
+                ).fetchall()
+                range_state = connection.execute(
+                    "SELECT state FROM news_range_jobs"
+                ).fetchone()[0]
+            self.assertEqual([("complete", 3)], states)
+            self.assertEqual([(0,)], member_pages)
+            self.assertEqual("complete", range_state)
+
+    def test_range_seed_caps_members_from_observed_page_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.sqlite3"
+            initialize_probe_database(output)
+            now = "2026-09-22T00:00:00+00:00"
+            dates = [f"2026-09-{day:02d}" for day in range(1, 11)]
+            with closing(sqlite3.connect(output)) as connection, connection:
+                connection.execute(
+                    """
+                    INSERT INTO news_backfill_jobs
+                    (code,target_date,query_text,state,pages_observed,updated_at)
+                    VALUES('005930','2026-08-31','삼성전자','complete',20,?)
+                    """,
+                    (now,),
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO news_backfill_jobs
+                    (code,target_date,query_text,state,updated_at)
+                    VALUES('005930',?,'삼성전자','pending',?)
+                    """,
+                    [(value, now) for value in dates],
+                )
+
+            self.assertEqual(3, seed_news_range_jobs(output, minimum_density=0.5))
+            with closing(sqlite3.connect(output)) as connection:
+                sizes = [
+                    int(row[0]) for row in connection.execute(
+                        "SELECT member_count FROM news_range_jobs ORDER BY start_date"
+                    ).fetchall()
+                ]
+            self.assertEqual([4, 4, 2], sizes)
+
+    def test_range_search_uses_image_origin_date_for_relation(self) -> None:
+        article = {
+            "content": "요약",
+            "contentHref": "https://example.test/article/1",
+            "imageSrc": (
+                "https://search.pstatic.net/common/?src=https%3A%2F%2F"
+                "imgnews.pstatic.net%2Fimage%2Forigin%2F001%2F2026%2F09%2F03%2F1.jpg"
+            ),
+            "sourceProfile": {"title": "매체"},
+            "title": "삼성전자 범위 검색 기사",
+        }
+        bootstrap = {"body": {"props": {"children": [{"props": article}]}}}
+        payload = {"collection": [{"script": (
+            "entry.bootstrap(document.getElementById(\"root\"), "
+            + json.dumps(bootstrap, ensure_ascii=False) + ");"
+        )}]}
+        page = parse_naver_historical_search_page(
+            "005930", "삼성전자", "2026-09-01", 1, payload,
+            target_end_date="2026-09-05",
+            observed_at=datetime(2026, 9, 22, 5, 0, tzinfo=UTC),
+        )
+        self.assertEqual("2026-09-03", page.items[0].search_published_date)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.sqlite3"
+            store_naver_historical_search_page(output, page)
+            with closing(sqlite3.connect(output)) as connection:
+                source_date = connection.execute(
+                    "SELECT source_date FROM news_search_observations"
+                ).fetchone()[0]
+                endpoint = connection.execute(
+                    "SELECT endpoint FROM source_pages"
+                ).fetchone()[0]
+        self.assertEqual("2026-09-03", source_date)
+        self.assertIn("from20260901to20260905", endpoint)
+
+    def test_truncated_range_splits_without_releasing_daily_members(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.sqlite3"
+            initialize_probe_database(output)
+            now = "2026-09-22T00:00:00+00:00"
+            dates = ("2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04")
+            with closing(sqlite3.connect(output)) as connection, connection:
+                connection.executemany(
+                    """
+                    INSERT INTO news_backfill_jobs
+                    (code,target_date,query_text,state,updated_at)
+                    VALUES('005930',?,'삼성전자','pending',?)
+                    """,
+                    [(value, now) for value in dates],
+                )
+            seed_news_range_jobs(output, minimum_density=0.5)
+            job = claim_news_range_job(output)
+            assert job is not None
+
+            self.assertEqual(2, split_news_range_job(output, job))
+
+            with closing(sqlite3.connect(output)) as connection:
+                range_states = connection.execute(
+                    "SELECT state,COUNT(*) FROM news_range_jobs GROUP BY state ORDER BY state"
+                ).fetchall()
+                daily_states = connection.execute(
+                    "SELECT DISTINCT state FROM news_backfill_jobs"
+                ).fetchall()
+            self.assertEqual([("pending", 2), ("split", 1)], range_states)
+            self.assertEqual([("grouped",)], daily_states)
+
+    def test_news_job_finish_waits_for_a_transient_database_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.sqlite3"
+            output = root / "output.sqlite3"
+            with closing(sqlite3.connect(candidate)) as connection, connection:
+                connection.executescript(
+                    "CREATE TABLE candidate_days(dt TEXT, code TEXT);"
+                    "CREATE TABLE stocks(code TEXT, name TEXT);"
+                    "INSERT INTO stocks VALUES('005930','삼성전자');"
+                    "INSERT INTO candidate_days VALUES('2026-09-22','005930');"
+                )
+            seed_news_backfill_jobs(candidate, output)
+            job = claim_news_backfill_job(output)
+            assert job is not None
+
+            locked = threading.Event()
+            release = threading.Event()
+
+            def hold_writer_lock() -> None:
+                with closing(sqlite3.connect(output)) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(
+                        "UPDATE news_backfill_jobs SET last_error='other_writer'"
+                    )
+                    locked.set()
+                    release.wait(timeout=2)
+                    connection.commit()
+
+            writer = threading.Thread(target=hold_writer_lock)
+            writer.start()
+            self.assertTrue(locked.wait(timeout=1))
+            timer = threading.Timer(0.1, release.set)
+            timer.start()
+            try:
+                finish_news_backfill_job(output, job, state="complete")
+            finally:
+                release.set()
+                timer.cancel()
+                writer.join(timeout=2)
+
+            with closing(sqlite3.connect(output)) as connection:
+                state = connection.execute(
+                    "SELECT state FROM news_backfill_jobs"
+                ).fetchone()[0]
+            self.assertEqual("complete", state)
+
+    def test_seeds_and_resumes_candidate_news_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.sqlite3"
+            with closing(sqlite3.connect(candidate)) as connection:
+                connection.executescript(
+                    "CREATE TABLE candidate_days(dt TEXT, code TEXT);"
+                    "CREATE TABLE stocks(code TEXT, name TEXT);"
+                    "CREATE TABLE stock_aliases(stock_code TEXT, stock_name TEXT, "
+                    "valid_from TEXT, valid_to TEXT, source TEXT, source_ref TEXT);"
+                    "INSERT INTO stocks VALUES('005930','삼성전자'),('004770','써니전자');"
+                    "INSERT INTO stock_aliases VALUES"
+                    "('004770','옛써니','2019-01-01','2020-01-02','KIND','D001'),"
+                    "('004770','새써니','2020-01-03',NULL,'KIND','D001');"
+                    "INSERT INTO candidate_days VALUES"
+                    "('2020-01-02','004770'),('2020-01-03','005930');"
+                )
+            output = root / "output.sqlite3"
+            self.assertEqual(3, seed_news_backfill_jobs(candidate, output))
+            self.assertEqual(0, seed_news_backfill_jobs(candidate, output))
+            job = claim_news_backfill_job(output)
+            self.assertIsNotNone(job)
+            assert job is not None
+            self.assertEqual(("005930", "2020-01-03", "삼성전자", "stocks.current", 1), (
+                job.code, job.target_date, job.query_text, job.name_source, job.attempts,
+            ))
+            finish_news_backfill_job(
+                output, job, state="complete", pages_observed=2,
+                items_observed=12, usable_articles=7, unreadable_articles=3,
+                missing_time_articles=2,
+            )
+            with closing(sqlite3.connect(output)) as connection:
+                state = connection.execute(
+                    "SELECT state, usable_articles, unreadable_articles, "
+                    "missing_time_articles FROM news_backfill_jobs WHERE code='005930'"
+                ).fetchone()
+                alias_rows = connection.execute(
+                    "SELECT query_text, name_source, name_source_ref "
+                    "FROM news_backfill_jobs WHERE code='004770' ORDER BY query_text"
+                ).fetchall()
+        self.assertEqual(("complete", 7, 3, 2), state)
+        self.assertEqual(
+            [
+                ("새써니", "name_transition_window:KIND", "D001"),
+                ("옛써니", "KIND", "D001"),
+            ],
+            alias_rows,
+        )
+
+    def test_non_stock_news_jobs_are_excluded_without_deleting_archived_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate, output = root / "candidate.sqlite3", root / "output.sqlite3"
+            with closing(sqlite3.connect(candidate)) as connection, connection:
+                connection.executescript(
+                    "CREATE TABLE candidate_days(dt TEXT, code TEXT);"
+                    "CREATE TABLE stocks(code TEXT, name TEXT, market_code TEXT);"
+                    "INSERT INTO stocks VALUES('005930','삼성전자','0'),"
+                    "('233740','KODEX 코스닥150레버리지','8');"
+                    "INSERT INTO candidate_days VALUES('2026-09-21','005930'),"
+                    "('2026-09-21','233740'),('2026-09-22','233740');"
+                )
+            self.assertEqual(1, seed_news_backfill_jobs(candidate, output))
+            with closing(sqlite3.connect(output)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO news_backfill_jobs(code,target_date,query_text,state,updated_at) "
+                    "VALUES('233740','2026-09-21','KODEX 코스닥150레버리지','pending','2026-09-24')"
+                )
+                connection.execute(
+                    "INSERT INTO news_range_jobs(range_id,code,query_text,start_date,end_date,"
+                    "state,attempts,member_count,updated_at) VALUES('range','233740',"
+                    "'KODEX 코스닥150레버리지','2026-09-21','2026-09-22',"
+                    "'pending',0,2,'2026-09-24')"
+                )
+            self.assertEqual({"daily": 1, "ranges": 1},
+                             exclude_non_stock_news_jobs(candidate, output))
+            self.assertEqual({"daily": 0, "ranges": 0},
+                             exclude_non_stock_news_jobs(candidate, output))
+            with closing(sqlite3.connect(output)) as connection:
+                self.assertEqual(
+                    [("005930", "pending"), ("233740", "excluded")],
+                    connection.execute("SELECT code,state FROM news_backfill_jobs ORDER BY code").fetchall(),
+                )
+                self.assertEqual("excluded", connection.execute(
+                    "SELECT state FROM news_range_jobs WHERE range_id='range'").fetchone()[0])
+
+    def test_claim_recovers_only_stale_running_news_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.sqlite3"
+            with closing(sqlite3.connect(candidate)) as connection, connection:
+                connection.executescript(
+                    "CREATE TABLE candidate_days(dt TEXT, code TEXT);"
+                    "CREATE TABLE stocks(code TEXT, name TEXT);"
+                    "INSERT INTO stocks VALUES('005930','삼성전자'),('000660','SK하이닉스');"
+                    "INSERT INTO candidate_days VALUES"
+                    "('2020-01-02','005930'),('2020-01-02','000660');"
+                )
+            output = root / "output.sqlite3"
+            seed_news_backfill_jobs(candidate, output)
+            with closing(sqlite3.connect(output)) as connection, connection:
+                connection.execute(
+                    "UPDATE news_backfill_jobs SET state='running',attempts=1,updated_at=? "
+                    "WHERE code='000660'", ("2020-01-01T00:00:00+00:00",),
+                )
+                connection.execute(
+                    "UPDATE news_backfill_jobs SET state='running',attempts=1,updated_at=? "
+                    "WHERE code='005930'", (datetime.now(UTC).isoformat(),),
+                )
+            job = claim_news_backfill_job(output)
+            self.assertIsNotNone(job)
+            assert job is not None
+            self.assertEqual("000660", job.code)
+            self.assertEqual(2, job.attempts)
+            with closing(sqlite3.connect(output)) as connection:
+                active = connection.execute(
+                    "SELECT state FROM news_backfill_jobs WHERE code='005930'"
+                ).fetchone()[0]
+            self.assertEqual("running", active)
+
+    def test_releases_collector_environment_failure_without_consuming_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.sqlite3"
+            with closing(sqlite3.connect(candidate)) as connection, connection:
+                connection.executescript(
+                    "CREATE TABLE candidate_days(dt TEXT, code TEXT);"
+                    "CREATE TABLE stocks(code TEXT, name TEXT);"
+                    "INSERT INTO stocks VALUES('005930','삼성전자');"
+                    "INSERT INTO candidate_days VALUES('2020-01-02','005930');"
+                )
+            output = root / "output.sqlite3"
+            seed_news_backfill_jobs(candidate, output)
+            job = claim_news_backfill_job(output)
+            assert job is not None
+
+            release_news_backfill_job(
+                output, job, error="collector_unavailable: WinError 10013",
+            )
+
+            with closing(sqlite3.connect(output)) as connection:
+                state = connection.execute(
+                    "SELECT state,attempts,last_error FROM news_backfill_jobs"
+                ).fetchone()
+            self.assertEqual(
+                ("pending", 0, "collector_unavailable: WinError 10013"), state,
+            )
+
+    def test_extracts_original_publication_time_with_source_and_precision(self) -> None:
+        document = """
+        <html><head>
+          <title>써니전자 관련 기사 - 매체</title>
+          <script type="application/ld+json">
+            {"@type":"NewsArticle","datePublished":"2020-01-02T10:31:22+09:00"}
+          </script>
+        </head></html>
+        """
+        value, precision, source, raw = parse_article_publication_html(
+            document, expected_title="써니전자 관련 기사"
+        )
+        self.assertEqual("2020-01-02T10:31:22+09:00", value)
+        self.assertEqual("second", precision)
+        self.assertEqual("json_ld:datePublished", source)
+        self.assertEqual("2020-01-02T10:31:22+09:00", raw)
+
+    def test_does_not_turn_date_only_metadata_into_midnight(self) -> None:
+        document = '<meta property="article:published_time" content="2020-01-02">'
+        self.assertEqual(("", "", "", "time_not_found"), parse_article_publication_html(document))
+
+    def test_parses_structured_historical_search_bootstrap(self) -> None:
+        article = {
+            "content": "<mark>써니전자</mark> 기사 요약",
+            "contentHref": "https://example.test/original/1",
+            "sourceProfile": {
+                "title": "연합뉴스",
+                "subTexts": [{
+                    "text": "네이버뉴스",
+                    "textHref": "https://n.news.naver.com/mnews/article/001/0000000001?sid=101",
+                }],
+            },
+            "title": "<mark>써니전자</mark> 관련 기사",
+        }
+        bootstrap = {"body": {"props": {"children": [{"props": article}]}}}
+        payload = {"collection": [{
+            "script": "entry.bootstrap(document.getElementById(\"root\"), "
+            + json.dumps(bootstrap, ensure_ascii=False) + ");",
+            "html": "",
+        }]}
+
+        page = parse_naver_historical_search_page(
+            "004770", "써니전자", "2020-01-02", 1, payload,
+            observed_at=datetime(2026, 9, 22, 5, 0, tzinfo=UTC),
+        )
+
+        self.assertTrue(page.has_structured_news)
+        self.assertEqual(1, len(page.items))
+        self.assertEqual("NAVER:001:0000000001", page.items[0].article_key)
+        self.assertEqual("써니전자 관련 기사", page.items[0].title)
+        self.assertEqual("써니전자 기사 요약", page.items[0].summary)
+        self.assertEqual("연합뉴스", page.items[0].office_name)
+        self.assertEqual("https://example.test/original/1", page.items[0].original_url)
+        self.assertIn("n.news.naver.com", page.items[0].portal_url)
+
+    def test_parses_primary_and_related_articles_with_minute_precision(self) -> None:
+        payload = {
+            "total": 123,
+            "clusters": [{
+                "itemTotal": "2",
+                "items": [
+                    {
+                        "officeId": "001", "articleId": "0000000001", "officeName": "매체",
+                        "datetime": "202609221305", "title": "대표 기사", "body": "요약",
+                        "imageOriginLink": "https://example.test/image.jpg",
+                    },
+                    {
+                        "officeId": "002", "articleId": "0000000002", "officeName": "관련 매체",
+                        "datetime": "202609221259", "title": "관련 기사", "body": "",
+                    },
+                ],
+            }],
+        }
+        page = parse_naver_stock_news_page(
+            "A005930", 1, 20, payload, observed_at=datetime(2026, 9, 22, 4, 6, tzinfo=UTC)
+        )
+
+        self.assertEqual("005930", page.code)
+        self.assertEqual(2, len(page.items))
+        self.assertEqual("2026-09-22T13:05+09:00", page.items[0].published_at)
+        self.assertEqual(0, page.items[0].related_index)
+        self.assertEqual(1, page.items[1].related_index)
+        self.assertEqual("https://n.news.naver.com/article/001/0000000001", page.items[0].article_url)
+        self.assertEqual(123, page.reported_total)
+
+    def test_stores_raw_observation_and_deduplicates_article(self) -> None:
+        payload = {
+            "total": 1,
+            "clusters": [{"items": [{
+                "officeId": "001", "articleId": "0000000001", "officeName": "매체",
+                "datetime": "202609221305", "title": "기사", "body": "요약",
+            }]}],
+        }
+        first = parse_naver_stock_news_page(
+            "005930", 2, 20, payload, observed_at=datetime(2026, 9, 22, 4, 6, tzinfo=UTC)
+        )
+        second = parse_naver_stock_news_page(
+            "005930", 1, 20, payload, observed_at=datetime(2026, 9, 22, 4, 7, tzinfo=UTC)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.sqlite3"
+            store_naver_stock_news_page(path, first)
+            store_naver_stock_news_page(path, second)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(2, connection.execute("SELECT COUNT(*) FROM source_pages").fetchone()[0])
+                self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM news_articles").fetchone()[0])
+                source = connection.execute(
+                    "SELECT published_at_source FROM news_articles"
+                ).fetchone()[0]
+                relation = connection.execute(
+                    "SELECT provider, page FROM news_article_symbols"
+                ).fetchone()
+                raw = connection.execute("SELECT payload_json FROM source_pages LIMIT 1").fetchone()[0]
+        self.assertEqual((NAVER_STOCK_NEWS_PROVIDER, 1), relation)
+        self.assertEqual("naver_stock_api:datetime", source)
+        self.assertEqual(payload, json.loads(raw))
+
+    def test_rejects_response_without_cluster_contract(self) -> None:
+        with self.assertRaisesRegex(ValueError, "clusters"):
+            parse_naver_stock_news_page("005930", 1, 20, {"total": 0})
+
+    def test_accepts_six_character_alphanumeric_short_code(self) -> None:
+        page = parse_naver_stock_news_page(
+            "0011A0", 1, 20, {"total": 0, "clusters": []},
+        )
+
+        self.assertEqual("0011A0", page.code)
+
+    def test_stores_historical_date_precision_and_search_relation(self) -> None:
+        article = {
+            "content": "요약", "contentHref": "https://example.test/article/1",
+            "sourceProfile": {"title": "매체"}, "title": "써니전자 관련 기사",
+        }
+        bootstrap = {"body": {"props": {"children": [{"props": article}]}}}
+        payload = {"collection": [{"script": (
+            "entry.bootstrap(document.getElementById(\"root\"), "
+            + json.dumps(bootstrap, ensure_ascii=False) + ");"
+        )}]}
+        page = parse_naver_historical_search_page(
+            "004770", "써니전자", "2020-01-02", 1, payload,
+            observed_at=datetime(2026, 9, 22, 5, 0, tzinfo=UTC),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.sqlite3"
+            store_naver_historical_search_page(path, page)
+            result = ArticlePublicationResult(
+                NAVER_HISTORICAL_SEARCH_PROVIDER, page.items[0].office_id,
+                page.items[0].article_id, "published_at_found",
+                "2020-01-02T10:31+09:00", "minute", "meta:article:published_time",
+                "2020-01-02T10:31:00+09:00", page.items[0].original_url,
+                page.items[0].original_url, "2026-09-22T05:01:00+00:00",
+                (ArticleFetchAttempt(
+                    "publisher_original", page.items[0].original_url,
+                    page.items[0].original_url, "published_at_found", 200, "",
+                    "2020-01-02T10:31+09:00", "minute",
+                    "meta:article:published_time", "2020-01-02T10:31:00+09:00",
+                ),),
+            )
+            store_article_publication_result(path, result)
+            with closing(sqlite3.connect(path)) as connection:
+                article_row = connection.execute(
+                    "SELECT provider, published_at, published_precision, published_at_source, "
+                    "article_fetch_status, training_eligible, training_exclusion_reason "
+                    "FROM news_articles"
+                ).fetchone()
+                relation = connection.execute(
+                    "SELECT source_date, query_text FROM news_search_observations"
+                ).fetchone()
+                endpoint = connection.execute(
+                    "SELECT endpoint FROM source_pages"
+                ).fetchone()[0]
+                attempt = connection.execute(
+                    "SELECT url_role, http_status, status FROM news_article_fetch_attempts"
+                ).fetchone()
+        self.assertEqual((
+            NAVER_HISTORICAL_SEARCH_PROVIDER, "2020-01-02T10:31+09:00", "minute",
+            "meta:article:published_time", "published_at_found", 1, "",
+        ), article_row)
+        self.assertEqual(("2020-01-02", "써니전자"), relation)
+        self.assertEqual(("publisher_original", 200, "published_at_found"), attempt)
+        self.assertIn("query=%EC%8D%A8%EB%8B%88%EC%A0%84%EC%9E%90", endpoint)
+        self.assertIn("from20200102to20200102", endpoint)
+
+    def test_records_readable_article_without_time_as_training_excluded(self) -> None:
+        article = {
+            "content": "요약", "contentHref": "https://example.test/article/2",
+            "sourceProfile": {"title": "매체"}, "title": "써니전자 시간 없는 기사",
+        }
+        bootstrap = {"body": {"props": {"children": [{"props": article}]}}}
+        payload = {"collection": [{"script": (
+            "entry.bootstrap(document.getElementById(\"root\"), "
+            + json.dumps(bootstrap, ensure_ascii=False) + ");"
+        )}]}
+        page = parse_naver_historical_search_page(
+            "004770", "써니전자", "2020-01-02", 1, payload,
+            observed_at=datetime(2026, 9, 22, 5, 0, tzinfo=UTC),
+        )
+        result = ArticlePublicationResult(
+            NAVER_HISTORICAL_SEARCH_PROVIDER, page.items[0].office_id,
+            page.items[0].article_id, "time_not_found", "", "", "", "",
+            page.items[0].original_url, page.items[0].original_url,
+            "2026-09-22T05:01:00+00:00",
+            (ArticleFetchAttempt(
+                "publisher_original", page.items[0].original_url,
+                page.items[0].original_url, "time_not_found", 200, "",
+                "", "", "", "",
+            ),),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.sqlite3"
+            store_naver_historical_search_page(path, page)
+            store_article_publication_result(path, result)
+            with closing(sqlite3.connect(path)) as connection:
+                article_state = connection.execute(
+                    "SELECT published_precision, article_fetch_status, training_eligible, "
+                    "training_exclusion_reason FROM news_articles"
+                ).fetchone()
+                attempt_state = connection.execute(
+                    "SELECT http_status, status FROM news_article_fetch_attempts"
+                ).fetchone()
+        self.assertEqual(("date", "time_not_found", 0, "time_not_found"), article_state)
+        self.assertEqual((200, "time_not_found"), attempt_state)
+
+    def test_stores_daishin_bars_with_source_dimensions(self) -> None:
+        payload = {
+            "provider": "daishin_creon", "code": "005930", "interval_seconds": 300,
+            "venue": "K", "session_scope": "regular", "adjustment_mode": "raw",
+            "bar_time_semantics": "interval_end",
+            "observed_at": "2026-09-22T05:30:00+00:00",
+            "bars": [{
+                "bar_time": "2026-09-21T15:30:00+09:00",
+                "raw_date": 20260921, "raw_time": 1530, "open": 100, "high": 110,
+                "low": 90, "close": 105, "volume": 1000, "trading_value": 102000,
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.sqlite3"
+            self.assertEqual(1, store_daishin_probe_payload(path, payload))
+            with closing(sqlite3.connect(path)) as connection:
+                row = connection.execute(
+                    "SELECT provider, interval_seconds, venue, session_scope, adjustment_mode, "
+                    "bar_time_semantics, raw_date, raw_time "
+                    "FROM market_bars"
+                ).fetchone()
+        self.assertEqual((
+            "daishin_creon", 300, "K", "regular", "raw", "interval_end", 20260921, 1530,
+        ), row)
+
+    def test_imports_only_five_minute_dates_before_one_minute_boundary(self) -> None:
+        page = {
+            "record_type": "page", "provider": "daishin_creon", "code": "005930",
+            "interval_seconds": 300, "venue": "K", "session_scope": "regular",
+            "adjustment_mode": "raw", "bar_time_semantics": "interval_end", "page": 1,
+            "observed_at": "2026-09-22T06:00:00+00:00", "bars": [
+                {"bar_time": "2024-09-02T09:05:00+09:00", "close": 102},
+                {"bar_time": "2024-08-30T15:30:00+09:00", "close": 101},
+            ],
+        }
+        summary = {
+            "record_type": "summary", "provider": "daishin_creon", "code": "005930",
+            "interval_seconds": 300, "provider_has_more": False,
+            "stopped_by_max_pages": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "bars.ndjson"
+            artifact.write_text(
+                json.dumps(page) + "\n" + json.dumps(summary) + "\n", encoding="utf-8"
+            )
+            result = import_daishin_backfill_ndjson(
+                artifact, root / "probe.sqlite3", before_date="2024-09-02",
+            )
+            with closing(sqlite3.connect(root / "probe.sqlite3")) as connection:
+                stored = connection.execute("SELECT bar_time FROM market_bars").fetchall()
+        self.assertEqual(2, result["observed_bars"])
+        self.assertEqual(1, result["selected_bars"])
+        self.assertEqual([("2024-08-30T15:30:00+09:00",)], stored)
+
+    def test_daishin_artifact_import_is_atomic_across_pages(self) -> None:
+        valid_page = {
+            "record_type": "page", "provider": "daishin_creon", "code": "005930",
+            "interval_seconds": 60, "venue": "K", "session_scope": "regular",
+            "adjustment_mode": "raw", "bar_time_semantics": "interval_end", "page": 1,
+            "observed_at": "2026-09-22T06:00:00+00:00",
+            "bars": [{"bar_time": "2026-09-22T09:01:00+09:00", "close": 100}],
+        }
+        invalid_page = {**valid_page, "page": 2, "provider": "unexpected"}
+        summary = {
+            "record_type": "summary", "provider": "daishin_creon", "code": "005930",
+            "interval_seconds": 60, "provider_has_more": False,
+            "stopped_by_max_pages": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "bars.ndjson"
+            artifact.write_text(
+                "\n".join(json.dumps(value) for value in (valid_page, invalid_page, summary)),
+                encoding="utf-8",
+            )
+            database = root / "probe.sqlite3"
+            with self.assertRaisesRegex(ValueError, "unexpected Daishin provider"):
+                import_daishin_backfill_ndjson(artifact, database)
+            with closing(sqlite3.connect(database)) as connection:
+                count = connection.execute("SELECT COUNT(*) FROM market_bars").fetchone()[0]
+
+        self.assertEqual(0, count)
+
+
+if __name__ == "__main__":
+    unittest.main()

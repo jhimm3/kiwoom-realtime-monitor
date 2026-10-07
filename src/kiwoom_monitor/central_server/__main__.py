@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+
+from .app import create_app
+from .config import CentralServerSettings
+from .server_logging import configure_server_logging
+from kiwoom_monitor.infrastructure.persistence.strict_restore import StrictRestoreCoordinator
+
+
+def main() -> None:
+    _ensure_standard_streams()
+    try:
+        import uvicorn
+    except ImportError as error:
+        raise SystemExit("중앙 서버 의존성을 설치하세요: pip install -e .[server]") from error
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--parent-pid", type=int, default=0)
+    arguments, _ = parser.parse_known_args()
+    settings = CentralServerSettings.from_environment()
+    configure_server_logging(
+        Path(os.environ.get("CENTRAL_SERVER_LOG_DIR", "data/logs")),
+        retention_days=_log_retention_days(),
+    )
+    lease = None
+    # The NAS service has no desktop parent and is not part of local restore.
+    if arguments.parent_pid > 0 and settings.database_url.startswith("sqlite:///"):
+        database_path = Path(settings.database_url.removeprefix("sqlite:///"))
+        lease = StrictRestoreCoordinator(
+            database_path, database_path.with_name("news.sqlite3"),
+        ).enter_child()
+    try:
+        server = uvicorn.Server(uvicorn.Config(
+            create_app(settings), host=settings.host, port=settings.port, log_level="info",
+            proxy_headers=False, log_config=None,
+        ))
+        if arguments.parent_pid > 0:
+            threading.Thread(
+                target=_stop_with_parent, args=(server, arguments.parent_pid), daemon=True,
+                name="central-server-parent-watch",
+            ).start()
+        server.run()
+    finally:
+        if lease is not None:
+            lease.close()
+
+
+def _log_retention_days() -> int:
+    try:
+        return max(1, min(int(os.environ.get("CENTRAL_SERVER_LOG_RETENTION_DAYS", "14")), 365))
+    except ValueError:
+        return 14
+
+
+def _ensure_standard_streams() -> None:
+    """Provide streams required by Uvicorn in a PyInstaller windowed child."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+
+def _stop_with_parent(server: object, parent_pid: int) -> None:
+    while not getattr(server, "should_exit", False):
+        if not _process_is_alive(parent_pid):
+            setattr(server, "should_exit", True)
+            return
+        time.sleep(1)
+
+
+def _process_is_alive(process_id: int) -> bool:
+    if process_id <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(process_id, 0)
+            return True
+        except OSError:
+            return False
+    import ctypes
+    handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, process_id)
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        return bool(ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+if __name__ == "__main__":
+    main()
