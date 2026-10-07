@@ -1,0 +1,194 @@
+param(
+    [ValidateRange(1, 100000)]
+    [int]$Jobs = 50,
+
+    [ValidateRange(1, 100)]
+    [int]$MaxPages = 100,
+
+    [ValidateRange(0.0, 60.0)]
+    [double]$RequestDelay = 0.7,
+
+    [ValidateRange(1, 8)]
+    [int]$SearchWorkers = 4,
+
+    [ValidateRange(0.0, 600.0)]
+    [double]$ThrottleDelaySeconds = 60.0,
+
+    [ValidateRange(0.0, 60.0)]
+    [double]$ArticleDelay = 0.2,
+
+    [ValidateRange(1, 16)]
+    [int]$ArticleWorkers = 16,
+
+    [ValidateRange(1, 8)]
+    [int]$PrepareWorkers = 4,
+
+    [ValidateRange(1, 1000)]
+    [int]$PublishEvery = 10,
+
+    [ValidateRange(1, 10000)]
+    [int]$StatusEvery = 100,
+
+    [string]$Database = "data\historical_intelligence.sqlite3",
+
+    [string]$NasProject = "X:\kiwoom-monitor"
+)
+
+$ErrorActionPreference = 'Stop'
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+$projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$python = 'C:\Users\pc-1\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+$logRoot = Join-Path $projectRoot 'data\historical_collection\logs'
+$stateRoot = Join-Path $projectRoot 'data\historical_collection'
+$stopFile = Join-Path $stateRoot 'STOP_NEWS'
+$stateFile = Join-Path $stateRoot 'news-collector-state.json'
+$heartbeatFile = Join-Path $stateRoot 'news-job-heartbeat.json'
+$stamp = [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')
+$logFile = Join-Path $logRoot "news-$stamp.log"
+$diagnosticLog = Join-Path $logRoot "news-timing-$stamp.jsonl"
+
+[IO.Directory]::CreateDirectory($logRoot) | Out-Null
+$lockFile = Join-Path $stateRoot 'news-collector.lock'
+try {
+    $singleInstance = [IO.File]::Open(
+        $lockFile, [IO.FileMode]::OpenOrCreate,
+        [IO.FileAccess]::ReadWrite, [IO.FileShare]::None
+    )
+}
+catch [IO.IOException] {
+    $message = 'News collector is already running; duplicate launch skipped.'
+    [IO.File]::AppendAllText($logFile, "$([DateTimeOffset]::Now.ToString('o')) $message$([Environment]::NewLine)")
+    Write-Output $message
+    exit 0
+}
+if (Test-Path -LiteralPath $stopFile) {
+    Remove-Item -LiteralPath $stopFile -Force
+}
+$env:PYTHONPATH = Join-Path $projectRoot 'src'
+$env:PYTHONIOENCODING = 'utf-8'
+
+function Write-State([string]$Status, [int]$Completed, [string]$ErrorText = '') {
+    [ordered]@{
+        schema = 'historical-news-collector-state/v1'
+        pid = $PID
+        status = $Status
+        requested_jobs = $Jobs
+        finished_this_run = $Completed
+        database = [IO.Path]::GetFullPath((Join-Path $projectRoot $Database))
+        log = $logFile
+        diagnostic_log = $diagnosticLog
+        error = $ErrorText
+        updated_at = [DateTimeOffset]::UtcNow.ToString('o')
+    } | ConvertTo-Json | Set-Content -LiteralPath $stateFile -Encoding utf8
+}
+
+function Write-Log([string]$Message) {
+    $line = "{0} {1}" -f [DateTimeOffset]::Now.ToString('o'), $Message
+    [IO.File]::AppendAllText($logFile, $line + [Environment]::NewLine)
+}
+
+Set-Location $projectRoot
+$completed = 0
+$stopRequested = $false
+Write-State 'running' $completed
+Write-Log "search collector started jobs=$Jobs max_pages=$MaxPages search_workers=$SearchWorkers throttle_delay_seconds=$ThrottleDelaySeconds; original/BODY/RULE run in the separate article collector"
+Write-Log "request timing and errors: $diagnosticLog"
+try {
+    $excludeOutput = & $python scripts\probe_historical_backfill.py news-exclude-nonstocks `
+        --output $Database 2>&1
+    foreach ($line in $excludeOutput) { Write-Log ([string]$line) }
+    if ($LASTEXITCODE -ne 0) {
+        throw "news-exclude-nonstocks exited with code $LASTEXITCODE"
+    }
+    $rangeSeedOutput = & $python scripts\probe_historical_backfill.py news-range-seed `
+        --minimum-density 0.5 --output $Database 2>&1
+    foreach ($line in $rangeSeedOutput) { Write-Log ([string]$line) }
+    if ($LASTEXITCODE -ne 0) {
+        throw "news-range-seed exited with code $LASTEXITCODE"
+    }
+    for ($index = 1; $index -le $Jobs; $index++) {
+        if (Test-Path -LiteralPath $stopFile) {
+            Write-Log 'stop file observed'
+            $stopRequested = $true
+            break
+        }
+        $previousErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $output = & $python scripts\probe_historical_backfill.py news-run `
+            --jobs 1 --search-only --max-pages $MaxPages --request-delay $RequestDelay `
+            --search-workers $SearchWorkers --throttle-delay $ThrottleDelaySeconds `
+            --heartbeat-file $heartbeatFile `
+            --diagnostic-log $diagnosticLog `
+            --output $Database 2>&1
+        $collectorExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorAction
+        foreach ($line in $output) { Write-Log ([string]$line) }
+        $detail = ($output | ForEach-Object { [string]$_ }) -join ' '
+        if ($detail -match '"claimed_jobs"\s*:\s*0') {
+            Write-Log 'no pending news job remains'
+            break
+        }
+        if ($collectorExitCode -eq 2) {
+            # news-run records an individual failed job (including transient
+            # remote disconnects) in the resumable ledger. Keep the long-lived
+            # collector moving so another job failure cannot stop the queue.
+            Write-Log "news job failed and was retained for retry: $detail"
+        }
+        elseif ($collectorExitCode -eq 3) {
+            if ($detail -match 'HTTP Error (403|429)') {
+                Write-Log "Naver search throttled; job returned to pending, retrying after $ThrottleDelaySeconds seconds: $detail"
+                Start-Sleep -Milliseconds ([int][Math]::Round($ThrottleDelaySeconds * 1000))
+                continue
+            }
+            throw "news-run exited with code ${collectorExitCode}: $detail"
+        }
+        elseif ($collectorExitCode -ne 0) {
+            throw "news-run exited with code ${collectorExitCode}: $detail"
+        }
+        $completed += 1
+        Write-State 'running' $completed
+        if (($completed % $PublishEvery) -ne 0) {
+            continue
+        }
+        try {
+            Write-Log 'Collected articles are prepared on PC; raw NAS import remains disabled.'
+            if (($completed % $StatusEvery) -eq 0) {
+                $statusOutput = & $python scripts\report_historical_collection_status.py `
+                    --database $Database --nas-project $NasProject --fast 2>&1
+                foreach ($line in $statusOutput) { Write-Log ([string]$line) }
+            }
+        }
+        catch {
+            Write-Log "status publish failed: $($_.Exception.Message)"
+        }
+    }
+    if ($stopRequested) {
+        try {
+            & $python scripts\report_historical_collection_status.py `
+                --database $Database --nas-project $NasProject --fast 2>&1 |
+                ForEach-Object { Write-Log ([string]$_) }
+        }
+        catch {
+            Write-Log "final status publish failed: $($_.Exception.Message)"
+        }
+        Write-State 'stopped' $completed
+        Write-Log "collector stopped completed=$completed"
+        exit 0
+    }
+    & $python scripts\report_historical_collection_status.py `
+        --database $Database --nas-project $NasProject --fast 2>&1 |
+        ForEach-Object { Write-Log ([string]$_) }
+    Write-State 'complete' $completed
+    Write-Log "collector finished completed=$completed"
+}
+catch {
+    $ErrorActionPreference = 'Stop'
+    Write-State 'failed' $completed $_.Exception.Message
+    Write-Log "collector failed: $($_.Exception.Message)"
+    exit 2
+}
+finally {
+    $singleInstance.Dispose()
+}
