@@ -1,5 +1,40 @@
 # 남은 작업과 보류 사항
 
+**2026-10-08 의존성 축소와 기능 보존 검증:**
+[실행 계획](DEPENDENCY_REFACTOR_VERIFICATION_PLAN.md). 기존 143회 회귀 호출(142개 고유 모듈)
+및 batch 목록을 같은 순서로 새 manifest에 옮겼다. Windows Job Object로 worker를 프로세스
+시작 시점부터 묶고, timeout/중단/부모 종료 때 자손을 종료한 뒤 각 PID의 종료 신호를 확인한다.
+실행기 검사 17건, PC 수명 검사 69건, 뉴스 기준선 비교 2건, TOP20 수명 검사 10건과
+기존 core 1,365건을 포함한 `all-local` 1,465건이 사용자 Windows 환경에서 모두 통과했다.
+9개 worker 모두 종료됐고 process tree 종료도 확인됐다. 잔류 자손은 없었다. 첫 실행에서 드러난 다섯 테스트
+fixture/기대값 문제는 원인을 확인해 테스트만 보정했다. 앱 동작 코드는 바꾸지 않았다.
+기존 ASGI 기준선 12건은 유지했고,
+`tests/fixtures/api_contract_baselines/news_reads_http_v1.json`에 Uvicorn loopback 실제 HTTP
+기준선 13건을 추가했다. 200 네 건, 인증 실패 401 네 건, 404 한 건, 422 네 건의 전체 JSON
+본문과 content-type/content-length를 보존한다. 이전 기준선은 덮어쓰지 않았다.
+
+제한 실행 환경에서 TOP20과 broker 테스트가 멈춘 원인은 Windows Proactor 이벤트 루프의
+socketpair 내부 accept 단계였다. 같은 두 테스트는 사용자 Windows 실행 환경에서 각각
+0.032초와 0.281초에 통과했다.
+
+첫 core 실행에서 운영 설정 실패 주입이 store 인스턴스에 닿지 않았고, trace 경로 5개가
+명시 기대 목록에서 빠졌으며, 일봉·통계·뉴스 fixture 조건이 각 테스트 기대와 맞지 않는
+문제가 확인됐다. 각각의 조건을 테스트에서 수정한 뒤 1,365건 core와 전체 1,463건
+`all-local`이 실패·오류·skip 없이 통과했다. 상세 원인과 실행 결과는 계획 문서에 기록했다.
+
+새 사용자 요구: Windows worker의 timeout/중단 때 worker 자손까지 종료됐는지 확인하고,
+뉴스 API 이동 전후 같은 HTTP 요청의 상태·헤더·본문을 비교한다. 자손 종료 검사는 구현·검증했고
+뉴스 조회 세 경로를 독립 라우트 모듈로 옮긴 뒤 ASGI 12건과 loopback HTTP 13건의 기준선,
+SQLite 무변경 검사, 전체 `all-local` 1,465건을 통과했다. 정적 QueryStore 감사는 이동 전후
+모두 `review_required`로 남았으며 parse 오류나 stale binding은 없다. 네 조회 binding은
+새 모듈로 승인 기록했고 app router 등록 forwarding edge 하나가 추가됐다. 기존 감사의
+계약 변경 및 미해결 항목이 있으므로 전체 감사 통과로 보지 않는다.
+`.github/workflows/dependency-regression.yml`에 PR·push·수동 실행 workflow를 추가했다.
+Windows `all-local`과 격리 PostgreSQL 17 integration job이 각각 실행 결과·로그를 보관한다.
+로컬 YAML parsing과 두 job/runner 구성, regression profile 목록 확인은 통과했다.
+GitHub hosted runner의 실제 실행과 branch protection 필수 check 적용 여부는 아직 확인되지 않았다.
+CI가 실제 통과하고 required check가 적용되기 전까지 3단계는 미완료다. NAS 배포는 진행하지 않았다.
+
 **2026-10-08 NAS restricted operator local implementation:**
 The fixed client/supervisor/installer and isolated worker are implemented in the PC workspace;
 `tests.unit.test_nas_operator` passed 19 tests. The offline Linux filesystem/ACL acceptance in
