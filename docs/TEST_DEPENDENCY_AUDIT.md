@@ -26,8 +26,11 @@
   6개만 전용 격리 profile로 편입한 현재 manifest는 178개 등록/231개 미등록(Windows 226, Linux 5)이다.
   이전 226+5+6 및 실패 기록은 편입 전 단계의 상태다. 178개 현재 목록의 all-local은 1,868건/38 worker,
   실패·오류·skip·expected failure·미실행 0, process tree 종료 38/38과 자손 누수 0으로 통과했다.
-  새 모듈 coverage 검사도 미등록 0개다. Linux 권한/symlink/shell/fcntl 5개는 Windows all-local에 넣지 않고
-  별도 Ubuntu job에서 발견·실행하도록 workflow를 추가했다. 이 hosted run 및 disposable PostgreSQL 결과는 대기 중이다.
+  새 모듈 coverage 검사도 미등록 0개다. Linux 권한/symlink/shell/fcntl 5개는 별도 Ubuntu job에서
+  65/65 통과했다. 첫 시도는 fake Docker 실행 permission fixture 문제로 5건 실패했으나 POSIX 전용
+  실행 bit 수정 뒤 최종 run에서 통과했다. hosted run [37805647697](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37805647697),
+  commit `fe62396df07477e6d6fad81d5a69a2b3df96caa5`는 Windows 1,868/38 worker와 disposable PostgreSQL
+  87건도 통과했다. PostgreSQL live/NAS 운영 검증을 뜻하지 않는다.
 - 기존 149개 all-local: 9/9 worker, 1,467건 통과, 실패·오류·skip·미실행 0, 전체 process tree 종료 확인.
 - 실행 소유권 검사 `test_mock_account_drain`: 내부 값 변환 함수 위치 patch를 SQLite authorizer 대기로
   교체했다. 원래 14건 중 1건이 gate 미도달로 실패하던 상태에서 14/14 통과하며, BEGIN IMMEDIATE
