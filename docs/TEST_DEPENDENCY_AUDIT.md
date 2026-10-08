@@ -26,7 +26,8 @@
   6개만 전용 격리 profile로 편입한 현재 manifest는 178개 등록/231개 미등록(Windows 226, Linux 5)이다.
   이전 226+5+6 및 실패 기록은 편입 전 단계의 상태다. 178개 현재 목록의 all-local은 1,868건/38 worker,
   실패·오류·skip·expected failure·미실행 0, process tree 종료 38/38과 자손 누수 0으로 통과했다.
-  새 모듈 coverage 검사도 미등록 0개다. hosted CI와 실제 PostgreSQL 검증은 별도이며 아직이다.
+  새 모듈 coverage 검사도 미등록 0개다. Linux 권한/symlink/shell/fcntl 5개는 Windows all-local에 넣지 않고
+  별도 Ubuntu job에서 발견·실행하도록 workflow를 추가했다. 이 hosted run 및 disposable PostgreSQL 결과는 대기 중이다.
 - 기존 149개 all-local: 9/9 worker, 1,467건 통과, 실패·오류·skip·미실행 0, 전체 process tree 종료 확인.
 - 실행 소유권 검사 `test_mock_account_drain`: 내부 값 변환 함수 위치 patch를 SQLite authorizer 대기로
   교체했다. 원래 14건 중 1건이 gate 미도달로 실패하던 상태에서 14/14 통과하며, BEGIN IMMEDIATE

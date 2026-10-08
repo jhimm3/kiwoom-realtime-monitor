@@ -88,6 +88,54 @@ jobs:
       - name: Install locked dependencies and PostgreSQL driver
         run: python -m pip install -r requirements.lock.txt
 
+      - name: Run Linux-only POSIX regression modules
+        shell: bash
+        run: |
+          python - <<'PY'
+          import sys
+          import unittest
+
+          modules = (
+              "tests.unit.test_credential_store",
+              "tests.unit.test_diagnostic_cli_controls",
+              "tests.unit.test_nas_diagnostic_commit_correlation",
+              "tests.unit.test_source_runtime_deploy",
+              "tests.unit.test_publish_historical_daishin_raw_to_nas",
+          )
+          loader = unittest.defaultTestLoader
+          runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2)
+          planned = 0
+          ran = 0
+          failures = errors = skipped = expected_failures = unexpected_successes = 0
+          for module in modules:
+              suite = loader.loadTestsFromName(module)
+              count = suite.countTestCases()
+              print(f"\n[{module}] discovered={count}")
+              if count == 0:
+                  errors += 1
+                  print(f"ERROR: no tests discovered for {module}")
+                  continue
+              planned += count
+              result = runner.run(suite)
+              ran += result.testsRun
+              failures += len(result.failures)
+              errors += len(result.errors)
+              skipped += len(result.skipped)
+              expected_failures += len(result.expectedFailures)
+              unexpected_successes += len(result.unexpectedSuccesses)
+
+          print(
+              "\nLinux platform regression: "
+              f"modules={len(modules)} planned={planned} ran={ran} "
+              f"failures={failures} errors={errors} skipped={skipped} "
+              f"expected_failures={expected_failures} "
+              f"unexpected_successes={unexpected_successes}"
+          )
+          if (ran != planned or failures or errors or skipped or expected_failures
+                  or unexpected_successes):
+              raise SystemExit(1)
+          PY
+
       - name: Prepare disposable database and run PostgreSQL boundary checks
         shell: bash
         env:

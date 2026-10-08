@@ -7,7 +7,8 @@
 현재 manifest 178개 등록/231개 미등록(Windows 후보 226개/Linux 5개)이다. 해결한 6개는 전용
 격리 profile로 편입했다. 1,868건/38 worker의 현재 `all-local`과 새 테스트 모듈 누락 검사는
 통과했다. 17개 수정 테스트 중 등록된 6개는 현재 all-local에 포함됐고, 나머지 함수형 변환 11개는
-별도 45건 통과 결과가 있다. Linux 5개, 실제 PostgreSQL, 최신 hosted CI,
+별도 45건 통과 결과가 있다. Linux 5개용 Ubuntu 검증과 disposable PostgreSQL 검사 job은 workflow에 추가했으며,
+현재 hosted 결과를 기다린다. 실제 PostgreSQL,
 `test_central_server_app`의 closure 주입은 요청 중 gateway snapshot을 검증하므로 유지하기로 했고 계좌 경계 변경 시 재검토한다.
 기존 409개 조사나 NAS 배포/main 병합을 다시 시작하지 않는다.
 
