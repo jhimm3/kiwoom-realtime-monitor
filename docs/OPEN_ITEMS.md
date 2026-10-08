@@ -1,29 +1,9 @@
 # 남은 작업과 보류 사항
 
-**2026-10-08 operator ACL preflight:** native-policy-v2 passed 44 NAS tests but installation
-stopped before access-file writes at acl_inspection_unavailable. Actual read-only NAS probes
-confirmed synoacltool's exact exit-255 POSIX-mode response and distinguished its same-code
-missing-path response. The candidate accepts only the former under POSIX ownership/mode/type/
-link checks; parent protection, warning/error rejection and ACL-mode checks remain. PC 26 portable
-tests pass. Native-policy-v3's 45-test gate and real installation/passwordless probes are pending.
-
-**2026-10-08 operator maintenance fence:** native-policy-v1 passed 43 NAS tests, but installation
-correctly reached and rejected the trace-state fence before granting access. Investigation confirmed
-the retained trace is durably terminal `incomplete` due to 1,188 rejected inputs, with all 2,033,667
-accepted events written and no retained RAM. The maintenance predicate now permits this terminal
-state only under the same full-drain and counter checks as complete; replay admission is unchanged.
-PC 26 tests passed; native-policy-v2's updated 44-test NAS gate and real passwordless install probe
-remain pending. No operational release or trace control was changed.
-
-**2026-10-08 NAS native sudo validation candidate:** The previous NAS offline gate passed 36 tests,
-but installer tool preflight rejected missing visudo. Live read-only inspection found sudo 1.9.5p2;
-no operator access was installed. The native_fixed_rule candidate adds fixed-rule/effective-policy
-checks and an actual target-UID passwordless status probe, plus grant-first rollback and revocation
-checks. PC 25 tests and Python 3.8 syntax pass. Updated NAS Linux gate and installation/live command
-acceptance remain open; do not present native listing alone as a general visudo replacement.
-The checksum-verified native-policy-v1 bundle is on NAS; its 43-test offline gate must pass before
-the bootstrap installs the fixed rule and proves target-account passwordless status. Read-only
-host Python/shell syntax checks passed, but do not close installation acceptance from those checks.
+**2026-10-08 NAS restricted operator:** Installation and acceptance are complete. The native-policy-v3
+NAS gate passed 45 tests, installer verified actual passwordless `status` as `k379`, and a separate
+SSH `kiwoom-nas status` succeeded. Temporary development access is enabled; after development ends,
+revoke it with `kiwoom-nas revoke`. No operator test, replay, or deployment has been run yet.
 
 **2026-10-08 NAS restricted operator local implementation:**
 The fixed client/supervisor/installer and isolated worker are implemented in the PC workspace;

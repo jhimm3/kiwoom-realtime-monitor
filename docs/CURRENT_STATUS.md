@@ -1,3 +1,14 @@
+2026-10-08 NAS restricted operator installation complete:
+The native-policy-v3 offline NAS gate passed all 45 tests and the installer completed. Its actual
+target-user probe confirmed `k379` can run the fixed `status` command with passwordless sudo.
+A direct SSH invocation of `/usr/local/bin/kiwoom-nas status` also returned `state=ok`,
+`installed=true`, `temporary_access=enabled`, active release/build
+`2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9` / `2026.10.08-trace-ram-8g-5m-v1`, diagnostics idle,
+and no active job. The prior trace remains durably `incomplete` because 1,188 inputs were rejected;
+all 2,033,667 accepted events were written and retained-memory counters are zero. Server was not
+restarted and the database container is unchanged. Use the operator only for development; run
+`kiwoom-nas revoke` after development ends. No test/replay/deploy command has yet been run.
+
 2026-10-08 NAS restricted operator POSIX ACL-tool response correction:
 The native-policy-v2 NAS gate passed all 44 tests without skips. Installation next stopped
 at `acl_inspection_unavailable`, before installing access files. Read-only SSH inspection found
@@ -6,11 +17,10 @@ root-owned system directories report synoacltool exit 255 with stdout exactly
 `Path not found`. The installer now accepts only the exact Linux-mode response, still verifies
 POSIX ownership/mode/type/link count, and rejects missing paths, warnings and other failures.
 PC 26 portable tests passed; new Linux ACL cases are included in native-policy-v3's 45-test gate.
-The v3 bundle is checksum-verified on NAS. On the same real NAS paths, a read-only before/after
+The v3 bundle was checksum-verified on NAS. On the same real NAS paths, a read-only before/after
 probe showed the old check reject /, /usr/local/libexec, /etc/sudoers.d and /volume1; the candidate
-accepts their verified POSIX mode and still rejects the absent helper path. This is not root
-installation acceptance and does not replace the updated isolated Linux gate.
-Actual installation and target-account passwordless acceptance remain pending.
+accepts their verified POSIX mode and still rejects the absent helper path. The updated isolated
+Linux gate and actual target-account passwordless installation have since passed.
 
 2026-10-08 NAS restricted operator durable-incomplete fence correction:
 The native-policy-v1 NAS gate passed all 43 tests without skips. Installation then stopped

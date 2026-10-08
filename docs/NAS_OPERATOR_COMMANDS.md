@@ -1,9 +1,8 @@
 # NAS 제한 운영 명령 구현 계약
 
-2026-10-08 · PC 구현 및 단위 검증 완료, Linux/NAS gate 및 설치 전.
+2026-10-08 · NAS Linux gate 45개 통과, 최초 설치 및 실제 `k379` 무암호 status 검증 완료.
 
-사용자가 capture 저장 후 NAS 설치 진행을 승인했다. 설치 및 실제 사용은 별도 NAS
-acceptance를 거친다. 현재는 PC 수정 단계이며 설치 완료 보고가 아니다.
+`kiwoom-nas status`로 설치 상태를 확인했다. 운영 릴리즈와 두 컨테이너는 그대로다.
 이번 무암호 명령은 반복 개발 기간에만 사용하고, 개발 종료 때 권한을 회수한다.
 
 ## 목적과 선택
@@ -257,9 +256,9 @@ active pointer/journal fsync 실패, interrupted install/visudo 실패와 이전
 기존 sudoers 충돌, active operator 잠금 및 회수 후 일반 변경 명령 차단을 검증한다.
 skip만 있는 suite 및 테스트 로딩 오류를 성공으로 처리하지 않는다. `httpx2`를 추가하지 않는다.
 
-구현 파일과 portable 테스트는 준비됐다. Linux gate와 NAS 설치 acceptance는 별도이며,
-현재 capture의 `input_rejected`가 0이 아니므로 그 trace는 전체 lossless replay 입력으로 등록되지
-않는다. NAS 명령 사용은 관리자 설치와 실제 NAS gate가 끝난 뒤에만 가능하다.
+Linux gate와 최초 NAS 설치 acceptance가 완료됐다. 현재 capture의 `input_rejected`가 0이
+아니므로 그 trace는 전체 lossless replay 입력으로 등록되지 않는다. 전용 명령의 실제
+test/replay/deploy 실행 acceptance는 아직 별도다.
 
 근거: [sudo 공식 sudoers 문서](https://github.com/sudo-project/sudo/blob/main/docs/sudoers.man.in),
 [Docker 공식 보안 문서](https://docs.docker.com/engine/security/).
