@@ -1,5 +1,21 @@
 # 남은 작업과 보류 사항
 
+**2026-10-08 NAS restricted operator local implementation:**
+The fixed client/supervisor/installer and isolated worker are implemented in the PC workspace;
+`tests.unit.test_nas_operator` passed 19 tests. The offline Linux filesystem/ACL acceptance in
+`deploy/synology/check-nas-operator.sh` is prepared but has not been run. NAS install, sudoers
+validation, isolated NAS acceptance, and first command execution remain open. Do not treat this
+as available on NAS until those gates pass. The current 8GiB capture must finish and its deferred
+trace must persist before any NAS installation or server change. No production credentials are
+included in the prepared operator reports.
+
+**2026-10-08 opening capture partial input coverage:**
+At the 09:18 KST read-only check, trace `20261007T235957Z-e8cb574bf964` was running with 807,307
+accepted, 0 written (persistence is deferred), 0 known queue drops, and 355 rejected inputs.
+Rejections mean this trace cannot qualify as complete lossless input coverage even if its final
+chunks and checksums validate. Inspect the final rejection breakdown and chunk continuity after
+20:10; use only individually supported, non-rejected event groups for explicitly scoped replay.
+
 **2026-10-08 NAS log display timezone:** `server_logging.py` now has a local candidate change to
 format timestamps in Asia/Seoul and rotate daily logs at 15:00 UTC (KST midnight), without changing
 the process timezone, database timestamps or scheduler. It is not deployed. The already armed

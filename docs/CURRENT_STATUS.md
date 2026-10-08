@@ -1,3 +1,18 @@
+2026-10-08 NAS restricted operator implementation prepared locally:
+[NAS operator contract](NAS_OPERATOR_COMMANDS.md) now has a PC implementation for the fixed
+`kiwoom-nas` client, root-owned restricted supervisor/installer, candidate admission, isolated test/replay,
+capture/persistence fences, and deployment rollback/recovery. Its portable unit suite passed 19 tests.
+The separate Linux directory-fd/ACL gate has not run, and NAS installation/sudoers changes have not run.
+No operator command is available on NAS yet; local implementation is not deployment acceptance.
+
+2026-10-08 opening capture live check at 09:18 KST:
+The active release `2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9` is recording trace
+`20261007T235957Z-e8cb574bf964`, started 08:59:57 KST, due to end 09:59:57 and persist at 20:10.
+At the check, accepted=807,307, written=0 (deferred persistence), known_dropped=0, input_rejected=355,
+charged_bytes=646,480,771; therefore full input coverage is not lossless. The sanitized read-only
+snapshot is `artifacts/trace-live-status-20261008-readonly.json`. This is a live status sample, not
+the final manifest/checksum/replay acceptance.
+
 2026-10-08 accumulated source publication boundaries:
 The PC working source, regression tests and audit/design documents are being committed on `main`.
 The independently validated NAS capture snapshot is preserved on `codex/trace-ram-8g-5m-v1`

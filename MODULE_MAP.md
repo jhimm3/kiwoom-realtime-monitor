@@ -8,6 +8,13 @@
 
 `src/kiwoom_monitor/` 기준 경로다.
 
+2026-10-08 NAS operator PC preparation: `scripts/nas_operator.py` owns fixed command parsing,
+source/trace admission, capture fences, isolated jobs, and deploy recovery; the installer and
+worker live in `scripts/nas_operator_install.py` and `scripts/nas_operator_worker.py`. The
+`deploy/synology/check-nas-operator.sh` gate tests Linux fd/ACL behavior in a disposable offline
+container. PC unit tests pass; the Linux gate and NAS install have not run. See
+[the operator contract](docs/NAS_OPERATOR_COMMANDS.md) before changing this boundary.
+
 0B collector 통합 진단은 `central_server/diagnostic_collector_replay.py`가 고정 입력,
 실행/종료 수명, 전용 DB 검증·정리를 소유한다. 실제 파서·RAM 집계·저장 주기는
 `central_server/realtime_collector.py`와 `minute_bars.py`를 재사용한다. 추가로

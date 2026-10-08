@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin
+export PATH
+exec /usr/bin/sudo -n /usr/local/sbin/kiwoom-nas-root "$@"
