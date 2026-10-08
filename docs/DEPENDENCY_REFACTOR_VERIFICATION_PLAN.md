@@ -21,7 +21,10 @@ commit `2ecfbe0d0e34f345913a663d75c35936ff2f6454`다. 문서 정정만 포함한
 `all-local` 1,465건과 disposable PostgreSQL 검증을 모두 통과했다. main의 required check 강제 여부는
 현재 확인할 수 없다. GitHub branch-protection 조회는 통합 권한 403을 반환했고, ruleset 조회는 빈 목록을
 반환했지만 이 조합만으로 보호 규칙의 부재를 단정하지 않는다. 저장소 관리자 권한으로 설정을 확인하기 전까지
-main 병합 gate 적용 상태는 미검증으로 둔다. NAS 배포는 계획에 포함되지 않는다.
+main 병합 gate 적용 상태는 미검증으로 둔다. 성공한 check-run의 정확한 이름은
+`Windows all-local regression`과 `Disposable PostgreSQL integration`이다. main 병합을 두 독립 환경의
+전체 검증으로 보호하려면 설정 담당자가 이 두 검사를 required checks로 선택해야 한다.
+NAS 배포는 계획에 포함되지 않는다.
 
 이 계획은 새 사용자 요청에 따른 후속 작업이다. 완료된 과거 리팩터링 1~5단계를
 재개하지 않는다. [개발 불변 규칙](../DEVELOPMENT_GUARDRAILS.md),
