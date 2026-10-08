@@ -1,4 +1,4 @@
-# 2026-08-21 정상 실행을 확인한 Windows / Python 3.13 환경 잠금 목록.
+# Windows / Python 3.13 앱 및 CI 서버 회귀에 사용하는 잠금 목록.
 # 설치: .\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
 # 프로젝트 자체는 이 저장소에서 별도로 설치하거나 PYTHONPATH=src로 실행한다.
 aiohappyeyeballs==2.7.1
@@ -11,15 +11,18 @@ attrs==26.1.0
 bce-python-sdk==0.9.76
 certifi==2026.7.22
 cachetools==6.2.6
+cffi==2.1.1
 chardet==7.6.0
 charset-normalizer==3.5.0
 click==8.4.2
 colorama==0.4.6
 colorlog==6.12.0
+cryptography==46.0.7
 crc32c==2.8
 filelock==3.32.3
 frozenlist==1.8.0
 fsspec==2026.7.0
+fastapi==0.141.1
 future==1.0.0
 google-api-core==2.34.0
 google-api-python-client==2.187.0
@@ -32,6 +35,7 @@ hf-xet==1.6.0
 httpcore==1.0.9
 httpx==0.28.1
 httplib2==0.32.0
+httptools==0.8.0
 huggingface_hub==1.27.0
 idna==3.18
 imagesize==2.0.0
@@ -54,9 +58,12 @@ proto-plus==1.28.3
 propcache==0.5.2
 protobuf==7.35.1
 psutil==7.2.2
+psycopg==3.3.6
+psycopg-binary==3.3.6
 py-cpuinfo==9.0.0
 pyclipper==1.4.0
 pycryptodome==3.23.0
+pycparser==3.0
 pyasn1==0.6.4
 pyasn1_modules==0.4.2
 pydantic==2.13.4
@@ -67,6 +74,7 @@ PySide6_Addons==6.11.1
 PySide6_Essentials==6.11.1
 python-bidi==0.6.11
 python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
 PyYAML==6.0.2
 pyparsing==3.3.2
 requests==2.34.2
@@ -77,13 +85,16 @@ setuptools==84.0.0
 shapely==2.1.2
 shiboken6==6.11.1
 six==1.17.0
+starlette==1.6.0
 tqdm==4.70.0
 typing-inspection==0.4.4
 typing_extensions==4.16.0
 tzdata==2026.3
 ujson==5.13.0
+uvicorn==0.52.4
 urllib3==2.7.0
 uritemplate==4.2.0
 wcwidth==0.8.2
 websockets==16.1.1
+watchfiles==1.2.0
 yarl==1.24.5
