@@ -64,6 +64,11 @@ host helper/launcher는 `/usr/local/libexec/kiwoom-nas/`와 `/usr/local/sbin/kiw
 설정은 `/etc/kiwoom-nas/operator.json`, 사설 상태는 `/volume1/@kiwoom-nas-operator/`에 둔다.
 모두 root 소유로 설치하며 non-root 쓰기를 금지한다. parent 경로와 Synology ACL까지 검사한다.
 보호되지 않는 경로나 실행기면 설치 실패로 처리하고 권한 검사를 생략하지 않는다.
+현재 NAS의 `synoacltool -get`은 POSIX 권한 모드에 대해 종료 코드 255와 단일 stdout
+`(synoacltool.c, 596)It's Linux mode`를 반환한다. 이 정확한 응답 형식만 허용하고 target의
+root 소유·group/other 쓰기 금지·regular file/directory·non-symlink·file hardlink 금지를
+확인한다. 부모 경로의 protected Tree 검사도 유지한다. 다른 nonzero 응답, 경고 또는
+stderr는 허용하지 않으며, ACL 모드에서는 기존 non-root 쓰기 권한 거부 검사를 유지한다.
 
 설정에는 허용 UID/계정명, 검증한 Python/Docker/sudo 절대 경로와 권한 검증 방식,
 runtime/PG image **ID**, 서버·DB container

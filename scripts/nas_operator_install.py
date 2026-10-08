@@ -51,8 +51,19 @@ def check_acl(path, tool):
     result = subprocess.run([tool, '-get', str(path)], env=op.CLEAN_ENV,
                             cwd='/', stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
     text = result.stdout.decode('utf-8', errors='replace')
-    op.require(result.returncode == 0, 'acl_inspection_unavailable')
-    if 'Linux mode' in text or 'No ACL' in text:
+    op.require(not result.stderr and len(result.stdout) <= 64 * 1024, 'acl_inspection_unavailable')
+    # This NAS reports POSIX mode with exit 255, not success. Accept only that
+    # exact single-line response, never other exit-255 errors (e.g. missing path).
+    linux_mode = re.fullmatch(r"(?:\(synoacltool\.c, [0-9]+\))?It's Linux mode", text.strip())
+    plain_mode = text.strip() in ('Linux mode', 'No ACL')
+    if (result.returncode in (0, 255) and linux_mode) or (result.returncode == 0 and plain_mode):
+        # The caller also verifies every ancestor with a protected Tree. A
+        # no-ACL response never replaces checking the target's real POSIX mode.
+        info = os.stat(path, follow_symlinks=False)
+        op.require((stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)) and
+                   info.st_uid == 0 and not info.st_mode & 0o022 and
+                   (stat.S_ISDIR(info.st_mode) or info.st_nlink == 1),
+                   'protected_path_writable_or_invalid')
         return
     op.require(result.returncode == 0 and 'ACL version:' in text, 'acl_inspection_unavailable')
     entries = re.findall(r'\[\d+\]\s+([^\r\n]+)', text)

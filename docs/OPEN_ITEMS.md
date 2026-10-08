@@ -1,5 +1,12 @@
 # 남은 작업과 보류 사항
 
+**2026-10-08 operator ACL preflight:** native-policy-v2 passed 44 NAS tests but installation
+stopped before access-file writes at acl_inspection_unavailable. Actual read-only NAS probes
+confirmed synoacltool's exact exit-255 POSIX-mode response and distinguished its same-code
+missing-path response. The candidate accepts only the former under POSIX ownership/mode/type/
+link checks; parent protection, warning/error rejection and ACL-mode checks remain. PC 26 portable
+tests pass. Native-policy-v3's 45-test gate and real installation/passwordless probes are pending.
+
 **2026-10-08 operator maintenance fence:** native-policy-v1 passed 43 NAS tests, but installation
 correctly reached and rejected the trace-state fence before granting access. Investigation confirmed
 the retained trace is durably terminal `incomplete` due to 1,188 rejected inputs, with all 2,033,667

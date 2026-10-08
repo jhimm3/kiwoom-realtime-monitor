@@ -119,17 +119,48 @@ class NasOperatorLinuxTests(unittest.TestCase):
         from scripts import nas_operator_install as installer
         import subprocess
         cases = [(0, b'Linux mode', True),
+                 (255, b"(synoacltool.c, 596)It's Linux mode\n", True),
+                 (0, b"(synoacltool.c, 596)It's Linux mode\n", True),
                  (0, b'ACL version: 1\n[0] user:root:allow:rwxpdDaARWcCo:fd--', True),
                  (0, b'ACL version: 1\n[0] user:k379:allow:rwx:fd--', False),
-                 (1, b'No ACL', False), (0, b'unrecognized', False)]
-        for code, output, allowed in cases:
-            with self.subTest(output=output), patch.object(installer.subprocess, 'run',
-                    return_value=subprocess.CompletedProcess(['acl'], code, output, b'')):
-                if allowed:
-                    installer.check_acl('/protected', '/acl')
-                else:
-                    with self.assertRaises(op.Rejected):
-                        installer.check_acl('/protected', '/acl')
+                 (1, b'No ACL', False), (0, b'unrecognized', False),
+                 (255, b'(synoacltool.c, 596)Path not found\n', False),
+                 (255, b"warning\n(synoacltool.c, 596)It's Linux mode\n", False),
+                 (1, b"(synoacltool.c, 596)It's Linux mode\n", False),
+                 (0, b'warning No ACL', False)]
+        with self.tree('acl-target', protected=True) as tree:
+            for code, output, allowed in cases:
+                with self.subTest(code=code, output=output), patch.object(installer.subprocess, 'run',
+                        return_value=subprocess.CompletedProcess(['acl'], code, output, b'')):
+                    if allowed:
+                        installer.check_acl(tree.path, '/acl')
+                    else:
+                        with self.assertRaises(op.Rejected):
+                            installer.check_acl(tree.path, '/acl')
+
+    def test_linux_mode_acl_response_never_bypasses_posix_or_error_checks(self):
+        from scripts import nas_operator_install as installer
+        response = subprocess.CompletedProcess(['acl'], 255, b"(synoacltool.c, 596)It's Linux mode\n", b'')
+        with self.tree('linux-mode', protected=True) as tree, \
+                patch.object(installer.subprocess, 'run', return_value=response):
+            installer.check_acl(tree.path, '/acl')
+            tree.write('safe', b'content', 0o600)
+            installer.check_acl(str(Path(tree.path) / 'safe'), '/acl')
+            tree.write('writable', b'content', 0o666)
+            os.symlink('safe', Path(tree.path) / 'link')
+            os.link(Path(tree.path) / 'safe', Path(tree.path) / 'hardlink')
+            for name in ('writable', 'link', 'hardlink'):
+                with self.subTest(name=name), self.assertRaises(op.Rejected):
+                    installer.check_acl(str(Path(tree.path) / name), '/acl')
+            with self.assertRaises(FileNotFoundError):
+                installer.check_acl(str(Path(tree.path) / 'missing'), '/acl')
+            os.chmod(tree.path, 0o777)
+            with self.assertRaises(op.Rejected):
+                installer.check_acl(tree.path, '/acl')
+            os.chmod(tree.path, 0o700)
+            response.stderr = b'permission denied'
+            with self.assertRaisesRegex(op.Rejected, 'acl_inspection_unavailable'):
+                installer.check_acl(tree.path, '/acl')
 
     def test_resource_probe_cleans_up_on_success_bad_affinity_memory_and_start_failure(self):
         from scripts import nas_operator_install as installer

@@ -1,3 +1,17 @@
+2026-10-08 NAS restricted operator POSIX ACL-tool response correction:
+The native-policy-v2 NAS gate passed all 44 tests without skips. Installation next stopped
+at `acl_inspection_unavailable`, before installing access files. Read-only SSH inspection found
+root-owned system directories report synoacltool exit 255 with stdout exactly
+`(synoacltool.c, 596)It's Linux mode` and empty stderr; a missing path also exits 255 but reports
+`Path not found`. The installer now accepts only the exact Linux-mode response, still verifies
+POSIX ownership/mode/type/link count, and rejects missing paths, warnings and other failures.
+PC 26 portable tests passed; new Linux ACL cases are included in native-policy-v3's 45-test gate.
+The v3 bundle is checksum-verified on NAS. On the same real NAS paths, a read-only before/after
+probe showed the old check reject /, /usr/local/libexec, /etc/sudoers.d and /volume1; the candidate
+accepts their verified POSIX mode and still rejects the absent helper path. This is not root
+installation acceptance and does not replace the updated isolated Linux gate.
+Actual installation and target-account passwordless acceptance remain pending.
+
 2026-10-08 NAS restricted operator durable-incomplete fence correction:
 The native-policy-v1 NAS gate passed all 43 tests without skips. Installation then stopped
 before access-file writes at `trace_not_durably_idle`. A live authenticated API check at
