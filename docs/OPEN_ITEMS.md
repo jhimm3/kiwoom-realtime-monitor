@@ -17,6 +17,12 @@ fixture/기대값 문제는 원인을 확인해 테스트만 보정했다. 앱 �
 socketpair 내부 accept 단계였다. 같은 두 테스트는 사용자 Windows 실행 환경에서 각각
 0.032초와 0.281초에 통과했다.
 
+후속 hosted CI에서 Windows가 `monitor.sqlite3` 파일 잠금으로 실패했다. 느린 카탈로그/NXT
+보완을 검사하는 TOP20 테스트가 release event만 보내고 비동기 보완 작업이 DB 저장을 마치기 전에
+임시 디렉터리를 닫고 있었다. 테스트는 release 후 소유한 보완 task들을 drain한 다음 service와
+store를 닫도록 수정했다. 해당 테스트 5회와 TOP20 67건, 전체 `all-local` 1,465건이 사용자
+Windows 실행 환경에서 통과했다. 제품 동작 코드는 바꾸지 않았다.
+
 첫 core 실행에서 운영 설정 실패 주입이 store 인스턴스에 닿지 않았고, trace 경로 5개가
 명시 기대 목록에서 빠졌으며, 일봉·통계·뉴스 fixture 조건이 각 테스트 기대와 맞지 않는
 문제가 확인됐다. 각각의 조건을 테스트에서 수정한 뒤 1,365건 core와 전체 1,463건
@@ -31,9 +37,13 @@ SQLite 무변경 검사, 전체 `all-local` 1,465건을 통과했다. 정적 Que
 계약 변경 및 미해결 항목이 있으므로 전체 감사 통과로 보지 않는다.
 `.github/workflows/dependency-regression.yml`에 PR·push·수동 실행 workflow를 추가했다.
 Windows `all-local`과 격리 PostgreSQL 17 integration job이 각각 실행 결과·로그를 보관한다.
-로컬 YAML parsing과 두 job/runner 구성, regression profile 목록 확인은 통과했다.
-GitHub hosted runner의 실제 실행과 branch protection 필수 check 적용 여부는 아직 확인되지 않았다.
-CI가 실제 통과하고 required check가 적용되기 전까지 3단계는 미완료다. NAS 배포는 진행하지 않았다.
+로컬 YAML parsing과 두 job/runner 구성, regression profile 목록 확인은 통과했다. GitHub hosted
+run [37760150253](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37760150253),
+commit `b46150ce76f74640d1401c4707db711692e4e5f7`에서 Windows `all-local` 1,465건(실패·오류·skip
+0, 9/9 worker와 프로세스 트리 종료 확인) 및 PostgreSQL 경계 검사와 87개 통합 테스트가 통과했다.
+각 job 로그/report는 14일 artifact로 보관된다. 기본 브랜치 `main`은 branch protection이 없고
+저장소 ruleset도 비어 있어 CI가 병합을 차단하지 않는다. required check 적용 전까지 3단계는
+미완료다. NAS 배포는 진행하지 않았다.
 
 **2026-10-08 NAS restricted operator local implementation:**
 The fixed client/supervisor/installer and isolated worker are implemented in the PC workspace;

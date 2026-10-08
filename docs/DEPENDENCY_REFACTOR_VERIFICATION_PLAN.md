@@ -14,7 +14,9 @@ worker와 프로세스 트리 종료를 확인했고 잔류 자손은 없었다.
 
 뉴스 history/sources/market-feed 세 경로를 `news_read_routes.py`로 옮겼다. ASGI 요청
 12건과 Uvicorn loopback 실제 HTTP 요청 13건에서 상태, 헤더, 본문이 보존 기준선과 일치했고,
-조회 전후 SQLite dump도 동일했다. 다음은 3단계 CI 연결이며 NAS 배포는 계획에 포함되지 않는다.
+조회 전후 SQLite dump도 동일했다. 3단계 workflow를 hosted runner에서 실행해 Windows
+`all-local` 1,465건과 disposable PostgreSQL 검증을 모두 통과했다. 단, `main`에 branch
+protection과 저장소 ruleset이 없어 required check 적용은 남아 있다. NAS 배포는 계획에 포함되지 않는다.
 
 이 계획은 새 사용자 요청에 따른 후속 작업이다. 완료된 과거 리팩터링 1~5단계를
 재개하지 않는다. [개발 불변 규칙](../DEVELOPMENT_GUARDRAILS.md),
@@ -28,7 +30,7 @@ worker와 프로세스 트리 종료를 확인했고 잔류 자손은 없었다.
 | PC 수명 검증 | `test_app_controller`와 `test_main_window`를 독립 worker로 실행해 69건 통과 | 없음 |
 | TOP20 수명 검증 | shutdown 및 execution boundary 모듈 10건 통과 | 없음 |
 | API 경로 검증 | trace 경로 5개 기대값을 보완했고 뉴스 읽기 라우트를 4개 메서드만 가진 `NewsReadStore` 계약으로 분리했다 | 명시된 기대 목록과 변경 전 ASGI/HTTP 기준선을 유지 |
-| 자동 실행 | `.github/workflows/dependency-regression.yml`에 Windows `all-local`과 disposable PostgreSQL 통합 job을 추가했다. 각 job은 로그/report를 14일 artifact로 보존한다 | GitHub에서 첫 실행을 확인하고 필수 check 적용 여부를 확인 |
+| 자동 실행 | GitHub run [37760150253](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37760150253), commit `b46150ce76f74640d1401c4707db711692e4e5f7`: Windows `all-local` 1,465건(실패·오류·skip 0, 9/9 worker와 process tree 종료 확인)과 disposable PostgreSQL job(경계 검사 및 87 tests)이 모두 통과. job 로그/report는 14일 artifact로 보존 | `main`에 required check를 설정해 병합을 차단하도록 적용 |
 | DB 검증 | 소비자/직접 연결 정적 감사와 PostgreSQL 통합 테스트가 별도로 있다 | 정적 통과, SQLite 동작, PostgreSQL 동작을 서로 대신하지 않도록 결과 구분 |
 
 처음의 코드 구조와 목록은 소스 대조로 확인했다. 수정 후 `all-local`의 9개 worker와
@@ -207,9 +209,10 @@ DB 미제공은 미검증이며 SQLite 성공으로 대체하지 않는다. 실�
 Linux job은 PostgreSQL 17 disposable service를 띄우고, 전용 `kiwoom_monitor_diagnostic_test`
 DB에서 기존 스키마 경계 검사 후 PostgreSQL access integration suite를 실행한다. 둘 다 실패
 상태에서도 결과와 로그를 14일 보관한다. 로컬에서 workflow YAML을 parse하고 두 job 및 runner
-구성을 확인했으며 manifest 목록 명령도 성공했다. GitHub hosted runner의 첫 실행은 아직 없다.
-필수 check의 branch protection 적용 여부도 확인되지 않았다. workflow 파일 존재만으로 CI 성공이나
-병합 차단 완료라고 보고하지 않는다.
+구성을 확인했으며 manifest 목록 명령도 성공했다. 위 hosted run에서 두 job이 통과했다.
+GitHub 확인 결과 기본 브랜치는 `main`이고 branch protection 응답은 `Branch not protected`,
+저장소 rulesets는 빈 목록이었다. 따라서 workflow는 실행되지만 현재 required check로 병합을
+차단하지 않는다.
 
 저장소 전체 의존성 금지 규칙은 한 번에 적용하지 않는다. 첫 뉴스 라우트의 상위 앱/UI 역방향
 import 금지와 네 조회 계약부터 검사하고, 이후 실제로 분리한 경계만 늘린다.
@@ -219,11 +222,12 @@ import 금지와 네 조회 계약부터 검사하고, 이후 실제로 분리�
 
 1. **검증 진입점:** 기존 테스트 목록 보존, 실행기 실패 판정 회귀, 실제 결과 보고가 완료돼야 한다.
 2. **첫 분리:** 뉴스 조회 세 경로의 전후 동일성, 인증/오류, 실제 DB 연결, core 회귀가 통과해야 한다.
-3. **자동 실행:** 같은 명령의 CI 성공과 필수 check 적용 여부를 각각 기록한다.
+3. **자동 실행:** 같은 명령의 hosted CI 성공은 확인됐다. `main`의 required check 적용은 남아 있다.
 4. **다음 경계:** 위 방식으로 DB 소비 계약, TOP20 상태/저장, PC 수명 순서에서 하나씩 선정한다.
    여러 계층의 전면 재작성이나 transaction 통합은 별도 설계 없이는 시작하지 않는다.
 
 이번 설계로 실시간 성능, 장시간 무손실, 실주문, NAS 배포가 검증되지는 않는다.
 기존 O12와 진행 중인 capture/persistence 보호 조건은 그대로 따른다.
-1단계 검증 진입점과 2단계 뉴스 조회 분리는 완료됐다. 3단계 workflow 구성도 작성했으며,
-실제 CI 실행과 필수 check 적용 여부 확인이 남아 있다. 이 계획만으로 NAS 배포를 시작하지 않는다.
+1단계 검증 진입점과 2단계 뉴스 조회 분리는 완료됐다. 3단계 workflow의 hosted Windows와
+PostgreSQL job은 모두 통과했다. 기본 브랜치 보호와 required check 설정이 없어 3단계는 아직
+완료로 표시하지 않는다. 이 계획만으로 NAS 배포를 시작하지 않는다.
