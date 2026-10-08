@@ -1511,6 +1511,10 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             finally:
                 release_catalog.set()
                 release_nxt.set()
+                while service._fundamentals_tasks:
+                    await asyncio.gather(
+                        *tuple(service._fundamentals_tasks), return_exceptions=True,
+                    )
                 await service.close()
                 store.close()
 
