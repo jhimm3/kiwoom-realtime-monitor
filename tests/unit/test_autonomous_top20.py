@@ -1670,15 +1670,24 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             store.save_dataset_snapshot = fail_membership  # type: ignore[method-assign]
             outbox = Path(directory) / "top20-outbox.json"
             service = AutonomousTop20Service(_Broker(), RealtimeHub(), store, outbox_path=outbox)
+            # Keep this ordering assertion focused on index persistence; these
+            # unrelated scheduled readers would outlive this temporary store.
+            service._schedule_market_catalog = lambda _day: None
+            service._schedule_subscription_update = lambda _day: None
             service._collector.minute = datetime(2026, 9, 10, 8, 59)
             service._collector.samples = [(30, 0.0)]
             service._collector.active_codes = ("005930",)
             service._collector.minute_codes = {"005930"}
-            with self.assertRaisesRegex(RuntimeError, "membership unavailable"):
-                await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0))
-            self.assertIn("2026-09-10T08:59", service._pending_index_records)
-            self.assertIn("2026-09-10T08:59", outbox.read_text(encoding="utf-8"))
-            store.close()
+            try:
+                with self.assertRaisesRegex(RuntimeError, "membership unavailable"):
+                    await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0))
+                self.assertIn("2026-09-10T08:59", service._pending_index_records)
+                self.assertIn("2026-09-10T08:59", outbox.read_text(encoding="utf-8"))
+            finally:
+                try:
+                    await service.close()
+                finally:
+                    store.close()
 
     async def test_empty_nxt_daily_response_is_not_marked_complete(self) -> None:
         class EmptyDailyBroker:
