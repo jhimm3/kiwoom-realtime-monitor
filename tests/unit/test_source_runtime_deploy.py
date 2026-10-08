@@ -98,6 +98,8 @@ class SourceRuntimeDeployTests(unittest.TestCase):
             (fixture / "running").write_text("true\n")
             docker = fixture / "docker"
             docker.write_text(FAKE_DOCKER, newline="\n")
+            if os.name == "posix":
+                docker.chmod(0o755)
             # Only the test copy redirects Docker and accelerates its readiness
             # clock. Production still uses its fixed Docker binary and 90s wait.
             script = (Path(__file__).resolve().parents[2] / "deploy/synology/source-runtime.sh").read_text()
