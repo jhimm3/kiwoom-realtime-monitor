@@ -18,6 +18,15 @@
 
 ### 후속 반영 상태
 
+- **2026-10-09 계약 검토 6개 해결 및 편입:** [원인·기준선 조정·실행 증거](TEST_CONTRACT_RECONCILIATION_20261009.md).
+  변경 전 78건의 failure 5/error 1을 재현하고 테스트/fixture/감사 도구만 수정했다. 변경 후
+  81건 통과, failure/error/skip/미실행 0, worker tree 종료 6/6, 자손 누수 0이다.
+  일봉 invalidation 누락 대조군은 실제 실패했으며 정상 통과 건수에 넣지 않는다.
+  legacy 후보 hash를 보존하고 QueryStore 차이와 직접 연결 3곳만 검토해 원장에 반영했다.
+  6개만 전용 격리 profile로 편입한 현재 manifest는 178개 등록/231개 미등록(Windows 226, Linux 5)이다.
+  이전 226+5+6 및 실패 기록은 편입 전 단계의 상태다. 178개 현재 목록의 all-local은 1,868건/38 worker,
+  실패·오류·skip·expected failure·미실행 0, process tree 종료 38/38과 자손 누수 0으로 통과했다.
+  새 모듈 coverage 검사도 미등록 0개다. hosted CI와 실제 PostgreSQL 검증은 별도이며 아직이다.
 - 기존 149개 all-local: 9/9 worker, 1,467건 통과, 실패·오류·skip·미실행 0, 전체 process tree 종료 확인.
 - 실행 소유권 검사 `test_mock_account_drain`: 내부 값 변환 함수 위치 patch를 SQLite authorizer 대기로
   교체했다. 원래 14건 중 1건이 gate 미도달로 실패하던 상태에서 14/14 통과하며, BEGIN IMMEDIATE
@@ -108,10 +117,11 @@ fixture를 바꿀 때 공유 함수만 작은 `*_test_support.py`로 옮길지 �
 | 테스트의 용도 자체를 확정하지 못함 | 0 | 용도는 식별됨. 해시 호환성 등 해결 방법의 미확정은 별도로 기록 |
 | 합계 | 260 | 일괄 등록하지 않음 |
 
-246개 중 11개 파일/45개 함수는 현재 unittest에서 발견되지 않는다. 이는 오래된 기능이 아니라
-실행 방식 차이다. 보존된 변환 제안으로 45/45가 통과했지만 현재 원본으로 복구했으므로 아직
-현재 CI에서 실행되는 검사가 아니다. 선택 편입할 때 assertion·patch·초기 상태를 그대로 유지해
-TestCase 발견 경로를 보완한다. pytest 도입이나 범용 fixture 프레임워크는 만들지 않는다.
+11개 파일의 최상위 함수 45개는 unittest TestCase 메서드로 옮겨 발견 경로를 복구했다.
+tmp_path가 필요했던 테스트는 테스트 메서드마다 TemporaryDirectory를 만들고 정리한다.
+assertion·patch·검증 입력은 바꾸지 않았으며, 프로젝트 Python으로 11개 모듈을 함께 실행해
+45/45 통과했다. 이 11개 파일은 여전히 미등록이므로 현재 all-local이나 hosted CI 건수에는
+포함되지 않는다. CI 편입 여부는 위험도와 실행 비용을 검토한 뒤 별도로 정한다.
 
 ## 실제 실패와 상세 검토 대상
 
@@ -120,12 +130,12 @@ TestCase 발견 경로를 보완한다. pytest 도입이나 범용 fixture 프�
 | `test_mock_account_drain` | root `database._execution_intent_values` patch는 leaf 실행의 실제 helper를 가로채지 못해 gate에 도달하지 않았다 | **완료:** connection 경계의 SQLite authorizer에서 INSERT 준비를 gate하고 `in_transaction`, 경쟁 owner의 선점 불가, 이후 저장 결과를 확인한다. 14건 통과. BEGIN IMMEDIATE를 제거한 대조군은 transaction assertion 실패. 현재 CI에 P0로 편입했다. |
 | `test_global_credentials_ui` | 열린 SQLite의 정상 `-wal/-shm` 파일을 root 파일 목록의 unexpected 파일로 판정해 격리 실행 실패 | **완료:** 기존 root 파일 제한에 SQLite `-wal/-shm`만 추가 허용. Response/provider fake import를 제거하고 단독/P0 11건 통과 후 등록 |
 | `test_nas_credentials_ui_integration` | 테스트가 기본 목록에서 숨겨지는 profile의 선택 상태를 검사했고, 열린 SQLite의 정상 WAL도 unexpected root 파일로 오인 | **완료:** 선택 여부 대신 기본 목록 숨김과 표시 옵션의 disabled label을 분리 검증. API의 active profile 해제·주문 OFF·apply 요청 수, 암호화 자격증명 파일과 평문 비노출 검사는 유지 |
-| `test_daily_bar_coverage` | historical load fake가 추가된 `as_of` keyword를 받지 못해 계산 중 일봉 변경 검증에 도달하지 못함 | fake가 현재 입력 계약을 명시적으로 받아 날짜를 검증. retry-open, 결과 문서 미저장, readiness=False assertion 유지 |
-| `test_dart_credential_owner` | 실제 app의 search는 저장 조회 전용이다. fixture는 search로 공급자 수집을 기대하고, 고정 9월 15일 기사도 현재 수집 기간 밖이다 | 고정 시계/기사와 현재 TOP20 membership에서 refresh_once→저장→search 경로를 확인. 조회가 공급자 호출/watchlist 확대를 만들지 않는 계약 유지 |
-| `test_diagnostic_trace_api` | 원본 기대 options/event_types가 현재 응답 구성과 다름. 보존한 제안에서는 options의 top20_inputs와 0w/0J/0U를 포함해 통과 | 현행 문서/응답 계약을 확인한 뒤 fixture를 명시 갱신. 인증·전체 JSON·미검증 coverage/overhead 값은 유지 |
-| `test_audit_postgres_access` | 승인 기준선 50곳과 현재 53곳의 차이. 새 3곳은 cache-baseline disposable fixture와 NAS operator 격리 worker 연결 | 3곳의 고정 테스트 DB/클러스터 admission, connection 소유·종료를 검토한 뒤 정확한 owner/count 승인. 모든 connect 자동 승인 금지 |
-| `test_audit_query_store_consumers` | owned_to_thread의 직접 메서드 인자 45개가 bound_reference로 내려가며 dispatch 손실. 뉴스 라우트 이동/새 minute 읽기와 8개 signature 기록 차이도 있음 | 감사기가 실제 wrapper import를 인식하도록 보완하고 각 차이를 검토. 계약 3종(load_minute_bars, replace_daily_bars, _replace_bars)의 실제 의미를 확인한 뒤 기준선 갱신. 무조건 현재 값을 새 기준으로 삼지 않음 |
-| `test_research_final_preparation` | session profile의 지연 개장 3개 필드 추가로 현재 golden hash가 8b800…이고 기존은 b3b3…. 세 필드를 제외하면 기존 기대 해시가 정확히 재현됨 | 단순 기대 해시 교체 금지. 기존 final_candidate/v1 식별/영속 자료의 호환성을 먼저 검토. 현재/legacy 고정 descriptor fixture와 날짜·경로·budget 제외 assertion을 분리 |
+| `test_daily_bar_coverage` | 과거 fake가 `as_of` keyword를 받지 않아 계산 중 입력 변경 경로에 도달하지 않음 | **완료·P0 편입:** 종목/날짜 호출 검증을 보강하고 retry-open·결과 미저장·readiness assertion 유지; 22건 통과 |
+| `test_dart_credential_owner` | search는 저장 조회 전용이고 고정 기사 날짜가 수집 기간 밖이었음 | **완료·P0 편입:** 고정 시계, TOP20 membership, refresh→저장→search를 검증; 조회로 공급자 호출/watchlist/저장 변경이 없는 계약 포함; 18건 통과 |
+| `test_diagnostic_trace_api` | 기대 options/event_types가 현재 API 계약과 달랐음 | **완료·P0 편입:** 전체 capability를 확인하고 인증·schema·미검증 coverage 표시 유지; 4건 통과 |
+| `test_audit_postgres_access` | 승인 기준선 50곳에서 실제 격리 fixture 연결 3곳이 추가됨 | **완료·P0 편입:** 세 호출 owner와 disposable DB/container, connection 종료를 검토해 정확히 승인; 5건 통과 |
+| `test_audit_query_store_consumers` | owned_to_thread wrapper import를 놓쳐 dispatch 추적 손실, 검토가 필요한 호출/signature 차이 | **완료·P0 편입:** wrapper alias/shadowing 인식을 보완하고 8개 계약 차이를 검토해 제한 반영; 4건 통과 |
+| `test_research_final_preparation` | 지연 개장 세 필드 때문에 legacy/current 후보 식별자가 달라짐 | **완료·P0 편입:** 기존/현재 정적 hash fixture와 양쪽 reader 계약, 비정규 입력 거부를 검사; 28건 통과 |
 
 9개를 모두 '제품 버그' 또는 '잘못된 테스트'로 단정하지 않는다. 특히 golden hash와 public
 DB 반환 계약의 차이는 이전 저장 자료·소비자 의미를 검토해야 한다. 테스트를 통과시키기 위한
@@ -200,17 +210,17 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_analyze_db_trace.py](../tests/unit/test_analyze_db_trace.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_api_settings_dialog.py](../tests/unit/test_api_settings_dialog.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/7/0/0 |
 | [test_app_controller.py](../tests/unit/test_app_controller.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/40/12/0/0 |
-| [test_article_text.py](../tests/unit/test_article_text.py) | 미등록 | 일반 후보; 현재 unittest 0건, 발견 방식 보완 후 단독 검증 | 0/0/0/0/0/0 |
+| [test_article_text.py](../tests/unit/test_article_text.py) | 미등록 | 일반 후보; 18건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
 | [test_audit_historical_five_minute_clock.py](../tests/unit/test_audit_historical_five_minute_clock.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_audit_historical_monthly_gap_causes.py](../tests/unit/test_audit_historical_monthly_gap_causes.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_audit_historical_monthly_gap_raw.py](../tests/unit/test_audit_historical_monthly_gap_raw.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_audit_historical_nas_minute_alignment.py](../tests/unit/test_audit_historical_nas_minute_alignment.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_audit_kiwoom_adjusted_minute_overlap.py](../tests/unit/test_audit_kiwoom_adjusted_minute_overlap.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_audit_kiwoom_adjustment_candidates.py](../tests/unit/test_audit_kiwoom_adjustment_candidates.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
-| [test_audit_postgres_access.py](../tests/unit/test_audit_postgres_access.py) | 미등록 | 계약/fixture 검토; 원인별 재현·기존 assertion 대조 후 편입 | 0/0/0/0/0/0 |
+| [test_audit_postgres_access.py](../tests/unit/test_audit_postgres_access.py) | 기준선 미등록 → P0 계약/fixture 등록 | 격리 연결 3곳 owner 검토 후 5건 통과, all-local 포함 | 0/0/0/0/0/0 |
 | [test_audit_prepared_historical_archive_readiness.py](../tests/unit/test_audit_prepared_historical_archive_readiness.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/2/0 |
 | [test_audit_prepared_historical_body_provenance.py](../tests/unit/test_audit_prepared_historical_body_provenance.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
-| [test_audit_query_store_consumers.py](../tests/unit/test_audit_query_store_consumers.py) | 미등록 | 계약/fixture 검토; 원인별 재현·기존 assertion 대조 후 편입 | 0/0/1/0/3/0 |
+| [test_audit_query_store_consumers.py](../tests/unit/test_audit_query_store_consumers.py) | 기준선 미등록 → P0 계약/fixture 등록 | dispatcher alias/shadowing와 기준선 차이 검증; 4건 통과, all-local 포함 | 0/0/1/0/3/0 |
 | [test_autonomous_top20.py](../tests/unit/test_autonomous_top20.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/52/101/3/0 |
 | [test_auxiliary_window_geometry.py](../tests/unit/test_auxiliary_window_geometry.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/6/0/0 |
 | [test_breakout_strategy.py](../tests/unit/test_breakout_strategy.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
@@ -254,23 +264,23 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_central_sync_utils.py](../tests/unit/test_central_sync_utils.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_central_theme_sync.py](../tests/unit/test_central_theme_sync.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/1/0/0 |
 | [test_check_postgres_integration.py](../tests/unit/test_check_postgres_integration.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_classify_historical_stock_adjustments.py](../tests/unit/test_classify_historical_stock_adjustments.py) | 미등록 | 일반 후보; 현재 unittest 0건, 발견 방식 보완 후 단독 검증 | 0/0/0/0/0/0 |
-| [test_collect_candidate_event_disclosures.py](../tests/unit/test_collect_candidate_event_disclosures.py) | 미등록 | 일반 후보; 현재 unittest 0건, 발견 방식 보완 후 단독 검증 | 0/0/0/0/0/0 |
-| [test_collect_candidate_exchange_disclosures.py](../tests/unit/test_collect_candidate_exchange_disclosures.py) | 미등록 | 일반 후보; 현재 unittest 0건, 발견 방식 보완 후 단독 검증 | 0/0/2/0/1/0 |
-| [test_collect_historical_market_context.py](../tests/unit/test_collect_historical_market_context.py) | 미등록 | 일반 후보; 현재 unittest 0건, 발견 방식 보완 후 단독 검증 | 0/0/0/0/0/0 |
+| [test_classify_historical_stock_adjustments.py](../tests/unit/test_classify_historical_stock_adjustments.py) | 미등록 | 일반 후보; 2건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
+| [test_collect_candidate_event_disclosures.py](../tests/unit/test_collect_candidate_event_disclosures.py) | 미등록 | 일반 후보; 2건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
+| [test_collect_candidate_exchange_disclosures.py](../tests/unit/test_collect_candidate_exchange_disclosures.py) | 미등록 | 일반 후보; 1건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/2/0/1/0 |
+| [test_collect_historical_market_context.py](../tests/unit/test_collect_historical_market_context.py) | 미등록 | 일반 후보; 7건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
 | [test_column_settings_repository.py](../tests/unit/test_column_settings_repository.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_condition_runtime.py](../tests/unit/test_condition_runtime.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 2/0/7/7/0/0 |
 | [test_context_candidates.py](../tests/unit/test_context_candidates.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/7/0/0 |
 | [test_credential_barrier.py](../tests/unit/test_credential_barrier.py) | 기준선 미등록 → P1-1 등록 | 단독 115건·all-local 통합 통과 후 manifest 추가 | 0/0/1/2/0/0 |
 | [test_credential_runtime.py](../tests/unit/test_credential_runtime.py) | 기준선 미등록 → P1-2 등록 | 단독 22건·all-local 통합 통과; 자체 임시 DB/secret directory, runtime revision·commit/recovery 계약 | 0/0/3/0/0/0 |
 | [test_credential_store.py](../tests/unit/test_credential_store.py) | 미등록 | 별도 환경; Windows skip 방지, Linux 격리 실행 전 보류 | 0/0/3/6/4/1 |
-| [test_daily_bar_coverage.py](../tests/unit/test_daily_bar_coverage.py) | 미등록 | 계약/fixture 검토; 원인별 재현·기존 assertion 대조 후 편입 | 0/0/2/48/0/0 |
+| [test_daily_bar_coverage.py](../tests/unit/test_daily_bar_coverage.py) | 기준선 미등록 → P0 계약/fixture 등록 | 계산 중 입력 변경·재시도·결과 미저장 검증; 22건 통과, all-local 포함 | 0/0/2/48/0/0 |
 | [test_daily_bar_repository.py](../tests/unit/test_daily_bar_repository.py) | 기준선 미등록 → P1-1 등록 | 단독 115건·all-local 통합 통과 후 manifest 추가 | 0/0/0/0/0/0 |
 | [test_daily_high_service.py](../tests/unit/test_daily_high_service.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_daily_high_worker_controller.py](../tests/unit/test_daily_high_worker_controller.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_daishin_candidate_collection.py](../tests/unit/test_daishin_candidate_collection.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/12/0/0 |
-| [test_dart_credential_owner.py](../tests/unit/test_dart_credential_owner.py) | 미등록 | 계약/fixture 검토; 원인별 재현·기존 assertion 대조 후 편입 | 1/0/11/4/2/0 |
-| [test_dart_disclosure_filter.py](../tests/unit/test_dart_disclosure_filter.py) | 미등록 | 일반 후보; 현재 unittest 0건, 발견 방식 보완 후 단독 검증 | 0/0/0/0/0/0 |
+| [test_dart_credential_owner.py](../tests/unit/test_dart_credential_owner.py) | 기준선 미등록 → P0 계약/fixture 등록 | fixed clock과 저장 전용 search 경로; 18건 통과, all-local 포함 | 1/0/11/4/2/0 |
+| [test_dart_disclosure_filter.py](../tests/unit/test_dart_disclosure_filter.py) | 미등록 | 일반 후보; 1건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
 | [test_detached_chart_window.py](../tests/unit/test_detached_chart_window.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/3/2/0/0 |
 | [test_diagnostic_cli_controls.py](../tests/unit/test_diagnostic_cli_controls.py) | 미등록 | 별도 환경; Windows skip 방지, Linux 격리 실행 전 보류 | 0/0/30/58/0/0 |
 | [test_diagnostic_collector_replay.py](../tests/unit/test_diagnostic_collector_replay.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/0/0/0 |
@@ -284,7 +294,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_diagnostic_top20_flow_input.py](../tests/unit/test_diagnostic_top20_flow_input.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/19/7/0/0 |
 | [test_diagnostic_top20_input.py](../tests/unit/test_diagnostic_top20_input.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/13/0/0/0 |
 | [test_diagnostic_trace.py](../tests/unit/test_diagnostic_trace.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/17/2/4/0 |
-| [test_diagnostic_trace_api.py](../tests/unit/test_diagnostic_trace_api.py) | 미등록 | 계약/fixture 검토; 원인별 재현·기존 assertion 대조 후 편입 | 0/0/3/1/4/0 |
+| [test_diagnostic_trace_api.py](../tests/unit/test_diagnostic_trace_api.py) | 기준선 미등록 → P0 계약/fixture 등록 | capability/auth 응답 계약; 4건 통과, all-local 포함 | 0/0/3/1/4/0 |
 | [test_diagnostic_trace_batches.py](../tests/unit/test_diagnostic_trace_batches.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/11/7/4/2 |
 | [test_diagnostic_trace_deferred.py](../tests/unit/test_diagnostic_trace_deferred.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/8/6/1/2 |
 | [test_diagnostic_workloads.py](../tests/unit/test_diagnostic_workloads.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/1/7/0/0 |
@@ -339,7 +349,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_historical_research_split.py](../tests/unit/test_historical_research_split.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/1/0 |
 | [test_image_theme_ocr_worker_controller.py](../tests/unit/test_image_theme_ocr_worker_controller.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_import_historical_market_news_to_nas.py](../tests/unit/test_import_historical_market_news_to_nas.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
-| [test_import_krx_vi_history.py](../tests/unit/test_import_krx_vi_history.py) | 미등록 | 일반 후보; 현재 unittest 0건, 발견 방식 보완 후 단독 검증 | 0/0/0/0/0/0 |
+| [test_import_krx_vi_history.py](../tests/unit/test_import_krx_vi_history.py) | 미등록 | 일반 후보; 1건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
 | [test_inspect_research_operation_receipts.py](../tests/unit/test_inspect_research_operation_receipts.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/1/0 |
 | [test_investor_flow_service.py](../tests/unit/test_investor_flow_service.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_journal_backup.py](../tests/unit/test_journal_backup.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/1/0/2/1 |
@@ -355,7 +365,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_journal_settings_dialogs.py](../tests/unit/test_journal_settings_dialogs.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/1/0/0 |
 | [test_journal_snapshot_service.py](../tests/unit/test_journal_snapshot_service.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_journal_workers.py](../tests/unit/test_journal_workers.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_kind_name_history.py](../tests/unit/test_kind_name_history.py) | 미등록 | 일반 후보; 현재 unittest 0건, 발견 방식 보완 후 단독 검증 | 0/0/0/0/0/0 |
+| [test_kind_name_history.py](../tests/unit/test_kind_name_history.py) | 미등록 | 일반 후보; 2건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
 | [test_kiwoom_client_factory.py](../tests/unit/test_kiwoom_client_factory.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/3/0/0/0 |
 | [test_kiwoom_rest_client.py](../tests/unit/test_kiwoom_rest_client.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/3/1/0/0 |
 | [test_kiwoom_storage_audit.py](../tests/unit/test_kiwoom_storage_audit.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
@@ -413,7 +423,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_naver_news_config.py](../tests/unit/test_naver_news_config.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_naver_stock_market_news.py](../tests/unit/test_naver_stock_market_news.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/1/0/0/0 |
 | [test_naver_stock_news.py](../tests/unit/test_naver_stock_news.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
-| [test_news_ai.py](../tests/unit/test_news_ai.py) | 미등록 | 일반 후보; 현재 unittest 0건, 발견 방식 보완 후 단독 검증 | 0/0/4/0/0/0 |
+| [test_news_ai.py](../tests/unit/test_news_ai.py) | 미등록 | 일반 후보; 5건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/4/0/0/0 |
 | [test_news_ai_repository.py](../tests/unit/test_news_ai_repository.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_news_analysis.py](../tests/unit/test_news_analysis.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/4/0/0/0 |
 | [test_news_api_contract_baseline.py](../tests/unit/test_news_api_contract_baseline.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/1/2/0 |
@@ -447,9 +457,9 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_prepared_news_import_batch.py](../tests/unit/test_prepared_news_import_batch.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/5/0/0/0 |
 | [test_process_control.py](../tests/unit/test_process_control.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/3/0/2/0 |
 | [test_program_trade_service.py](../tests/unit/test_program_trade_service.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
-| [test_project_historical_minute_exclusions.py](../tests/unit/test_project_historical_minute_exclusions.py) | 미등록 | 일반 후보; 현재 unittest 0건, 발견 방식 보완 후 단독 검증 | 0/0/0/0/0/0 |
+| [test_project_historical_minute_exclusions.py](../tests/unit/test_project_historical_minute_exclusions.py) | 미등록 | 일반 후보; 3건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
 | [test_publish_historical_daishin_raw_to_nas.py](../tests/unit/test_publish_historical_daishin_raw_to_nas.py) | 미등록 | 별도 환경; Windows skip 방지, Linux 격리 실행 전 보류 | 0/0/0/0/3/1 |
-| [test_publish_historical_market_context_to_nas.py](../tests/unit/test_publish_historical_market_context_to_nas.py) | 미등록 | 일반 후보; 현재 unittest 0건, 발견 방식 보완 후 단독 검증 | 0/0/0/0/2/0 |
+| [test_publish_historical_market_context_to_nas.py](../tests/unit/test_publish_historical_market_context_to_nas.py) | 미등록 | 일반 후보; 3건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/2/0 |
 | [test_query_store_source.py](../tests/unit/test_query_store_source.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/3/0 |
 | [test_ranking_execution.py](../tests/unit/test_ranking_execution.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_ranking_schedule.py](../tests/unit/test_ranking_schedule.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
@@ -500,7 +510,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_research_final_execution.py](../tests/unit/test_research_final_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/3/21/0/1/0 |
 | [test_research_final_exposure_cli.py](../tests/unit/test_research_final_exposure_cli.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/1/3/0/1/0 |
 | [test_research_final_holdout_ledger.py](../tests/unit/test_research_final_holdout_ledger.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/8/0 |
-| [test_research_final_preparation.py](../tests/unit/test_research_final_preparation.py) | 미등록 | 계약/fixture 검토; 원인별 재현·기존 assertion 대조 후 편입 | 1/1/11/0/1/0 |
+| [test_research_final_preparation.py](../tests/unit/test_research_final_preparation.py) | 기준선 미등록 → P0 계약/fixture 등록 | legacy/current candidate identity와 descriptor 검증; 28건 통과, all-local 포함 | 1/1/11/0/1/0 |
 | [test_research_hypotheses.py](../tests/unit/test_research_hypotheses.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_research_hypothesis_campaign.py](../tests/unit/test_research_hypothesis_campaign.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/0/0/0/0 |
 | [test_research_hypothesis_repository.py](../tests/unit/test_research_hypothesis_repository.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |

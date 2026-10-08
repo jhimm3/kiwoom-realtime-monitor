@@ -1,13 +1,24 @@
 # 남은 작업과 보류 사항
 
+**2026-10-09 테스트 계약 검토 6개 해결:**
+[재현·수정·한정된 기준선 조정](TEST_CONTRACT_RECONCILIATION_20261009.md).
+수정 후 단독 81건 통과, 실패/오류/skip/미실행 0, worker tree 종료 6/6, 자손 누수 0이다.
+기존 연구 후보 hash를 유지하고 일봉 invalidation 누락 대조군의 실패도 확인했다.
+현재 manifest 178개 등록/231개 미등록(Windows 후보 226개/Linux 5개)이다. 해결한 6개는 전용
+격리 profile로 편입했다. 1,868건/38 worker의 현재 `all-local`과 새 테스트 모듈 누락 검사는
+통과했다. 17개 수정 테스트 중 등록된 6개는 현재 all-local에 포함됐고, 나머지 함수형 변환 11개는
+별도 45건 통과 결과가 있다. Linux 5개, 실제 PostgreSQL, 최신 hosted CI,
+`test_central_server_app` closure P2 판단은 아직 남았다.
+기존 409개 조사나 NAS 배포/main 병합을 다시 시작하지 않는다.
+
 **2026-10-08 전체 409개 테스트 의존성 조사:**
 [149개/260개 기준선과 현재 편입 상태](TEST_DEPENDENCY_AUDIT.md),
 [260개 보호 근거](REGRESSION_COVERAGE_AUDIT.md),
 [변경 영향별 검증 절차](DEPENDENCY_REFACTOR_VERIFICATION_PLAN.md). 최초 149개 CI 범위는 보존했고, 상세 검토한
 P0 실행 소유권 1개, P1 우선 테스트 20개, 자격증명 UI/API 통합 테스트 2개를 단독 통과 뒤 추가했다.
 현재 172개 등록/237개 미등록이다. 남은 미등록 분류는 일반 226, Linux 별도 5,
-계약/fixture 검토 6이다. 11개 함수형 모듈/45건은
-unittest 발견 공백이다. 전체 404개 일괄 제안 검증은 8개 모듈이 실패했으며 성공으로 세지 않는다.
+계약/fixture 검토 6이다. 11개 함수형 모듈/45건은 unittest TestCase로 변환해 단독 45/45 통과했지만,
+해당 11개 파일은 여전히 CI 미등록이다. 전체 404개 일괄 제안 검증은 8개 모듈이 실패했으며 성공으로 세지 않는다.
 별도 Linux 5개와 PostgreSQL live/NAS 검증은 미실행이다. 기존 170개 등록 범위는 1,774건/30 worker로 통과했다.
 자격증명 UI 통합 테스트는 연결 해제 계좌 표시 계약과 SQLite sidecar를 바로잡고, 전역 자격증명 테스트는
 같은 SQLite sidecar를 허용하면서 DB/secrets 외 파일 제한을 유지했다. 두 모듈의 test-to-test helper/fake

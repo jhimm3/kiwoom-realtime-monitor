@@ -7,6 +7,7 @@ import threading
 import unittest
 import uuid
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -420,6 +421,29 @@ class DartCredentialAPITests(unittest.TestCase):
                 self.assertEqual(1, len(service._dart_client.calls))
                 self.assertFalse((root / "corp.json").exists())
                 (root / "corp.json").write_text('{"005930": "00126380"}', encoding="utf-8")
-                result = client.portal.call(service.search, "005930", "삼성전자", None)
+                fixed_now = datetime(2026, 9, 15, 12, tzinfo=timezone.utc)
+
+                class FixedDateTime(datetime):
+                    @classmethod
+                    def now(cls, tz=None):
+                        return fixed_now.astimezone(tz) if tz else fixed_now.replace(tzinfo=None)
+
+                with patch("kiwoom_monitor.central_server.news_service.datetime", FixedDateTime), \
+                        patch("kiwoom_monitor.infrastructure.dart_disclosures.datetime", FixedDateTime):
+                    self.assertEqual([], client.portal.call(service.search, "005930", "삼성전자", None))
+                    self.assertEqual(1, len(service._dart_client.calls))
+                    self.assertEqual([], service._store.load_documents("news_watchlist", "", 20))
+                    service._store.save_dataset_snapshot("top20_membership", "", fixed_now.isoformat(),
+                        {"items": [{"stk_cd": "005930", "stk_nm": "삼성전자"}]})
+                    self.assertEqual(1, client.portal.call(service.refresh_once))
+                    saved = service._store.load_documents("news_article", "005930", 20)
+                    calls_after_refresh = len(service._dart_client.calls)
+                    result = client.portal.call(service.search, "005930", "삼성전자", None)
+                    self.assertEqual(calls_after_refresh, len(service._dart_client.calls))
+                    self.assertEqual(saved, service._store.load_documents("news_article", "005930", 20))
+                    self.assertEqual([], service._store.load_documents("news_watchlist", "", 20))
                 self.assertEqual(enabled, bool(result))
                 self.assertEqual(2 if enabled else 1, len(service._dart_client.calls))
+                if enabled:
+                    self.assertEqual(["new"], service._dart_client.calls[-1]["crtfc_key"])
+                    self.assertEqual(["00126380"], service._dart_client.calls[-1]["corp_code"])

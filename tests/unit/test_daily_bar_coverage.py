@@ -286,14 +286,17 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
         await self.service._ensure_entry_daily_history("005930", "2026-09-30")
         ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
 
-        def calculate(_code):
+        def calculate(code, *, as_of):
+            self.assertEqual("005930", code)
+            self.assertEqual(date(2026, 9, 30), as_of)
             changed = {**source_rows(1, end=date(2026, 9, 29))[0], "high_pric": "999"}
             ingestor.ingest("ka10081", {"stk_cd": "005930"}, {"stk_dt_pole_chart_qry": [changed]})
             return HistoricalHighTarget(400, 2020, 2026, "2026-09", ())
 
-        with patch("kiwoom_monitor.central_server.autonomous_top20.HistoricalHighService.load", side_effect=calculate):
+        with patch("kiwoom_monitor.central_server.autonomous_top20.HistoricalHighService.load", side_effect=calculate) as calculation:
             with self.assertRaisesRegex(RuntimeError, "計算|계산 중 일봉"):
                 await self.service._ensure_historical_high("005930", "2026-09-30")
+        calculation.assert_called_once_with("005930", as_of=date(2026, 9, 30))
         self.assertEqual([], self.store.load_documents("historical_highs", "005930", 1))
         self.assertFalse(self.service._entry_stage_is_ready("005930", "daily:KRX", "2026-09-30"))
 

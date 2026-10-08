@@ -6,19 +6,23 @@
 아래 원장은 변경 전 미등록 260개 분류와 파일별 보호 동작·근거를 보존한다. 후속 단계에서
 `test_mock_account_drain` 1개, P1 우선 20개, 계좌 UI/API와 전역 자격증명 UI 2개를 단독 검증 후 CI
 manifest에 등록했다. 초기 246개 일반 후보 중 20개를 추가했고, 9개 계약/fixture 검토 중 실행 소유권 문제와
-UI 계약 2개를 정리했다. 현재 미등록은 일반 226개, Linux 5개, 계약/fixture 검토 6개다.
+UI 계약 2개를 정리했다. 그 시점 미등록은 일반 226개, Linux 5개, 계약/fixture 검토 6개였다.
+2026-10-09 남은 6개의 원인 검토·수정을 완료해 단독 81건이 통과했고 전용 profile에 편입했다.
+현재 178개 등록/231개 미등록(Windows 226, Linux 5)이다. 현재 `all-local`은 1,868건/38 worker
+모두 통과했다. [한정된 기준선 조정과 최종 로컬 결과](TEST_CONTRACT_RECONCILIATION_20261009.md)를 따른다.
 완전히 대체된 중복이나 용도가 불명확하다고 확정한 파일은 없다. 주제 중복을 삭제 근거로 삼지 않는다.
 
 일반 후보를 모두 즉시 CI에 넣지 않는다. 첫 12개와 다음 8개는 격리 검증 후 편입했다.
 나머지 226개는 관련 변경의 모듈별 격리 검증/후속 정기 프로필 후보다.
-남은 계약 검토 6개는 실패 원인과 의미 검토 후 편입,
+해결한 계약 검토 6개는 전용 profile로 편입했으며,
 5개는 Linux 권한/symlink/shell/fcntl 검증으로 분리한다. 미편입 이유·검증 방법·fixture 의존성·
 실제 수정 대상·우선순위는 전체 조사 문서의 409개 행과 상세 표에 있다.
 
 아래 Windows/Linux 표시는 **검증에 적합한 환경**이며 등록되거나 통과했다는 뜻이 아니다.
 정적 test_* 선언 수는 2,205개다. 중첩 fixture, 상속과 발견 방식 때문에 runtime 건수와 다르다.
-11개 파일의 최상위 함수 45개는 현재 unittest에서 발견되지 않는다. 기능을 삭제하지 않고 선택
-편입 시 발견 경계를 보완할 대상이다. 초기 table 근거 줄은 위 기준 커밋의 원본에 대응한다.
+11개 파일의 최상위 함수 45개는 unittest TestCase 메서드로 옮겼고, 현재 소스에서 45/45
+단독 실행을 확인했다. tmp_path는 테스트마다 임시 디렉터리를 만들고 정리한다. 이 11개 파일은
+CI manifest에 등록하지 않았으며, 초기 table 근거 줄은 위 기준 커밋의 원본에 대응한다.
 
 보존된 제안안의 Windows 전수 실행은 404개 고유 파일/264개 worker/3,612건으로 완료됐지만
 8개 모듈에서 7 failure/2 error가 있었다. skip·expected failure·미실행 0, 모든 process tree 종료 확인,
@@ -100,7 +104,7 @@ PostgreSQL live 및 Linux 5개는 실행하지 않았다.
 |---|---:|---|---|---|
 | `test_analyze_db_trace` | 2 | Windows | Bounded trace-window inventory reports workload counts, rejection counts, and payload prefixes without widening by default. | [L13](../tests/unit/test_analyze_db_trace.py#L13), [L76](../tests/unit/test_analyze_db_trace.py#L76) |
 | `test_audit_postgres_access` | 5 | Windows | Static direct PostgreSQL connection inventory requires reviewed ownership and follows lower-level helper call chains. | [L11](../tests/unit/test_audit_postgres_access.py#L11), [L58](../tests/unit/test_audit_postgres_access.py#L58) |
-| `test_audit_query_store_consumers` | 3 | Windows | Static QueryStore consumer inventory detects connection/signature drift while preserving callsite multiplicity. | [L22](../tests/unit/test_audit_query_store_consumers.py#L22), [L158](../tests/unit/test_audit_query_store_consumers.py#L158) |
+| `test_audit_query_store_consumers` | 4 | Windows | Static QueryStore consumer inventory detects connection/signature drift while preserving callsite multiplicity. | [L22](../tests/unit/test_audit_query_store_consumers.py#L22), [L158](../tests/unit/test_audit_query_store_consumers.py#L158) |
 | `test_candidate_daily_nas_scripts` | 6 | Windows | Candidate daily NAS command logic guards transient file locks, outage continuation, empty bars, dates, and archive eligibility using local fixtures. | [L26](../tests/unit/test_candidate_daily_nas_scripts.py#L26), [L142](../tests/unit/test_candidate_daily_nas_scripts.py#L142) |
 | `test_catalog_capture_profile` | 10 | Windows | Large catalog capture enforces named profile, secret and byte bounds, copy reservations, off/on native result equivalence, and stop races. | [L45](../tests/unit/test_catalog_capture_profile.py#L45), [L221](../tests/unit/test_catalog_capture_profile.py#L221), [L32](../scripts/check_causal_capture_candidate.sh#L32) |
 | `test_causal_capture_api` | 1 | Windows | Authenticated API forwards all causal capture flags and deferred deadline to the recorder on a temporary SQLite-backed app. | [L16](../tests/unit/test_causal_capture_api.py#L16) |
@@ -230,7 +234,7 @@ PostgreSQL live 및 Linux 5개는 실행하지 않았다.
 | `test_research_final_execution` | 26 | Windows | Final execution uses single-owner claims, fresh engines, terminal/audited recovery and immutable candidate publication with overlap/exposure gates. | [L49](../tests/unit/test_research_final_execution.py#L49), [L59](../tests/unit/test_research_final_execution.py#L59), [L71](../tests/unit/test_research_final_execution.py#L71) |
 | `test_research_final_exposure_cli` | 6 | Windows | Final exposure CLI requires exact batch identity and irreversible ledger transition while preserving reserved window on cancellation. | [L40](../tests/unit/test_research_final_exposure_cli.py#L40), [L42](../tests/unit/test_research_final_exposure_cli.py#L42), [L52](../tests/unit/test_research_final_exposure_cli.py#L52) |
 | `test_research_final_holdout_ledger` | 16 | Windows | Final holdout ledger prevents overlap/relabel, records immutable access/exposure with atomic concurrency and read-only migration checks. | [L35](../tests/unit/test_research_final_holdout_ledger.py#L35), [L36](../tests/unit/test_research_final_holdout_ledger.py#L36), [L44](../tests/unit/test_research_final_holdout_ledger.py#L44) |
-| `test_research_final_preparation` | 26 | Windows | Final preparation proves source/cost/history bounds before access ledger, excludes future data and rejects corrupted/legacy/overlapping evidence. | [L47](../tests/unit/test_research_final_preparation.py#L47), [L51](../tests/unit/test_research_final_preparation.py#L51), [L61](../tests/unit/test_research_final_preparation.py#L61) |
+| `test_research_final_preparation` | 28 | Windows | Final preparation proves source/cost/history bounds before access ledger, excludes future data and rejects corrupted/legacy/overlapping evidence. | [L47](../tests/unit/test_research_final_preparation.py#L47), [L51](../tests/unit/test_research_final_preparation.py#L51), [L61](../tests/unit/test_research_final_preparation.py#L61) |
 | `test_research_hypotheses` | 12 | Windows | Hypothesis generation is deterministic and bounded by registered family, single-parameter lineage and content-addressed development evidence. | [L47](../tests/unit/test_research_hypotheses.py#L47), [L50](../tests/unit/test_research_hypotheses.py#L50), [L63](../tests/unit/test_research_hypotheses.py#L63) |
 | `test_research_hypothesis_campaign` | 9 | Windows | Hypothesis campaign rotates registered families, creates exact jobs once, requires owner and preserves migration/follow-up lineage. | [L135](../tests/unit/test_research_hypothesis_campaign.py#L135), [L142](../tests/unit/test_research_hypothesis_campaign.py#L142), [L164](../tests/unit/test_research_hypothesis_campaign.py#L164) |
 | `test_research_hypothesis_repository` | 5 | Windows | Hypothesis repository preserves migrated rows, ordered parent lineage, idempotent batches and bounded reads. | [L38](../tests/unit/test_research_hypothesis_repository.py#L38), [L52](../tests/unit/test_research_hypothesis_repository.py#L52), [L61](../tests/unit/test_research_hypothesis_repository.py#L61) |

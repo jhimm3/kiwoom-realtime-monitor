@@ -2,6 +2,9 @@ from contextlib import closing
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
+import hashlib
+import json
+from pathlib import Path
 import sqlite3
 import unittest
 from unittest.mock import patch
@@ -9,6 +12,7 @@ from unittest.mock import patch
 import test_research_development_validation as fixtures
 from kiwoom_monitor import research_process as rp
 from kiwoom_monitor.application.research_splits import FinalHoldoutBatchSpec
+from kiwoom_monitor.application.mock_automation_candidate import _validate_candidate_spec
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.research_data_source import (
     FINAL_INPUT_VERSION, FrozenResearchDataset, development_partition_start,
@@ -63,15 +67,40 @@ class FinalPreparationTests(unittest.TestCase):
             runs_dir=self.root/'other-runs', resource_limits=replace(self.request.resource_limits, memory_mb=1024),
             evaluation=self.fixture.batch.request.evaluation)
         expected = rp.final_candidate_spec_hash(self.request, self.code_hash)
-        self.assertEqual(
-            'b3b3b2343b53cf880dad7e8191a98bdf572bacf6a0c74679e9594d4a5217613e',
-            rp.final_candidate_spec_hash(self.request, 'a' * 64),
-        )
         self.assertEqual(expected, rp.final_candidate_spec_hash(changed, self.code_hash))
         for request, code in ((replace(self.request, strategy=replace(self.request.strategy, buffer_bps=self.request.strategy.buffer_bps+1)), self.code_hash),
                              (replace(self.request, execution=replace(self.request.execution, cost_model=replace(self.request.execution.cost_model, slippage_bps=12))), self.code_hash),
                              (self.request, 'a'*64)):
             self.assertNotEqual(expected, rp.final_candidate_spec_hash(request, code))
+
+    def test_fixed_legacy_candidate_document_retains_its_hash_and_reader_contract(self):
+        fixture = json.loads((Path(__file__).resolve().parents[1] / 'fixtures/research/final_candidate_identity_v1.json').read_text(encoding='utf-8'))
+        legacy = fixture['legacy_document']
+        before = json.dumps(legacy, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        self.assertEqual('b3b3b2343b53cf880dad7e8191a98bdf572bacf6a0c74679e9594d4a5217613e',
+                         fixture['legacy_sha256'])
+        self.assertEqual(fixture['legacy_sha256'], hashlib.sha256(before.encode()).hexdigest())
+        _validate_candidate_spec(legacy, fixture['legacy_sha256'])
+        self.assertEqual(before, json.dumps(legacy, sort_keys=True, ensure_ascii=False, separators=(',', ':')))
+        with self.assertRaisesRegex(ValueError, 'content does not match'):
+            _validate_candidate_spec(legacy, fixture['current_sha256'])
+
+    def test_current_candidate_document_binds_the_fixed_dated_hours_extension(self):
+        fixture = json.loads((Path(__file__).resolve().parents[1] / 'fixtures/research/final_candidate_identity_v1.json').read_text(encoding='utf-8'))
+        current = deepcopy(fixture['legacy_document'])
+        current['session_profile'].update(fixture['dated_hours_extension'])
+        self.assertEqual(current, rp.final_candidate_spec_document(self.request, 'a' * 64))
+        self.assertEqual(fixture['current_sha256'], rp.final_candidate_spec_hash(self.request, 'a' * 64))
+        self.assertNotEqual(fixture['legacy_sha256'], fixture['current_sha256'])
+        _validate_candidate_spec(current, fixture['current_sha256'])
+        for field in fixture['dated_hours_extension']:
+            with self.subTest(field=field):
+                tampered = deepcopy(current)
+                tampered['session_profile'][field] = [] if isinstance(tampered['session_profile'][field], list) else 'unknown'
+                tampered_hash = hashlib.sha256(json.dumps(tampered, sort_keys=True, ensure_ascii=False,
+                    separators=(',', ':')).encode()).hexdigest()
+                with self.assertRaisesRegex(ValueError, 'session profile is not canonical'):
+                    _validate_candidate_spec(tampered, tampered_hash)
 
     def test_multiple_candidates_sorted_and_no_missing_extra_duplicate_allowed(self):
         other = replace(self.request, strategy=replace(self.request.strategy, buffer_bps=self.request.strategy.buffer_bps+1))
