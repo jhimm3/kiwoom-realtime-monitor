@@ -64,6 +64,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
+      PYTHONPATH: src
       KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/kiwoom_monitor_diagnostic_test
     steps:
       - name: Check out source
