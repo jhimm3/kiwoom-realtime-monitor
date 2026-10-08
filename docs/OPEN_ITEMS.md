@@ -14,7 +14,8 @@
 `test_central_server_app`의 closure 주입은 요청 중 gateway snapshot을 검증하므로 유지하기로 했고 계좌 경계 변경 시 재검토한다.
 기존 409개 조사나 NAS 배포/main 병합을 다시 시작하지 않는다.
 
-**2026-10-08 전체 409개 테스트 의존성 조사:**
+**2026-10-08 전체 409개 테스트 의존성 조사 중간 기록:** 아래 수치와 미완료 표시는 당시 스냅샷이며,
+후속 결과는 위의 2026-10-09 계약 검토 항목과 현재 [테스트 조사 문서](TEST_DEPENDENCY_AUDIT.md)를 따른다.
 [149개/260개 기준선과 현재 편입 상태](TEST_DEPENDENCY_AUDIT.md),
 [260개 보호 근거](REGRESSION_COVERAGE_AUDIT.md),
 [변경 영향별 검증 절차](DEPENDENCY_REFACTOR_VERIFICATION_PLAN.md). 최초 149개 CI 범위는 보존했고, 상세 검토한
