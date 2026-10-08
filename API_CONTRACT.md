@@ -1,14 +1,13 @@
 # NAS API 계약
 
-2026-10-06 recorded input trace candidate (`2026.10.06-recorded-capture-api-v1`):
-authenticated `GET /api/v1/diagnostics/capabilities` advertises `trace_input_capture`
-(schema 2, collector event type `0B`, `observed_paths_only`, `overhead_verified=false`).
-`POST /api/v1/diagnostics/trace` accepts `seconds`, `expected_session`, and strict boolean
-`store_inputs` / `collector_inputs`, both defaulting to false. Enabling either produces a
-schema-2 trace; enabling both records allowlisted native store inputs and observed 0B collector
-inputs. Other event types and sensitive account fields are excluded by the collector capture
-boundary. This is a local candidate API contract; NAS staging/deployment and the scheduled
-capture remain separate acceptance steps. Capture overhead has not been measured.
+2026-10-09 recorded input trace source (`2026.10.09-trace-ram-main-v1`): authenticated
+`GET /api/v1/diagnostics/capabilities` advertises `trace_input_capture` schema 3, observed-path-only
+coverage, causal REST/catalog/ranking/subscription/lifecycle/delivery-receipt boundaries, and
+collector event types `0B`, `0w`, `0J`, `0U`. `POST /api/v1/diagnostics/trace` keeps strict boolean
+`store_inputs`, `collector_inputs`, and `top20_inputs` opt-ins defaulting to false. Deferred persistence
+reports 8 GiB, 5,000,000 events, and 1 MiB/s; it retains inputs in bounded raw staging and framed RAM
+blocks before paced persistence. These are configured logical limits, not an RSS guarantee or proof of
+whole-market capture coverage. NAS active release has not yet been switched to this PC main source.
 
 2026-09-29 NAS 진단 API v4(`2026.09.29-diagnostic-api-v4`)가 NAS에 배포됐다. 기존 Bearer 인증 아래 `GET /api/v1/diagnostics/capabilities`, `PUT /api/v1/diagnostics/control`, `GET /api/v1/diagnostics/snapshot`, `POST /api/v1/diagnostics/runs`, `GET /api/v1/diagnostics/runs/{run_id}`, `POST /api/v1/diagnostics/runs/{run_id}/cancel`, `GET /api/v1/diagnostics/reports`, `GET /api/v1/diagnostics/reports/{report_id}`, `GET /api/v1/diagnostics/history`를 제공한다. control은 `target=master|capture|workload`, `expected_revision` 필수, 기존 session/TTL/owner 규칙을 따른다. PostgreSQL snapshot은 고정 read-only query만 실행하며 `sections=postgres,activity,news_jobs,host,storage`에서 선택한다. query text·parameter·DSN은 반환하지 않는다. run은 `kind=measure|compare`, `seconds`와 선택 label/workload/request_id를 받아 202와 run ID를 반환하고, 동일 session/request_id의 같은 요청은 기존 run을 반환한다. 한 번에 한 run만 허용하며 409 충돌은 큐잉하지 않는다. 보고서는 기존 diagnostic-results JSON도 조회한다. 실제 검증은 [설계·검증 문서](docs/NAS_DIAGNOSTIC_API_DESIGN.md)에 기록하며, 관측 범위는 `opt_in_observed_calls_only`와 각 section의 scope에 한정된다.
 

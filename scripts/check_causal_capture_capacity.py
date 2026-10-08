@@ -286,7 +286,7 @@ async def run(args):
         if args.mode == 'on':
             session = _set_tool(control, True, 7200)['diagnostic_tool']['session_id']
             _set_trace(control, True, 7000, expected_session=session)
-            trace.start(seconds=3900, store_inputs=True, collector_inputs=True, top20_inputs=True,
+            trace.start(seconds=args.capture_seconds, store_inputs=True, collector_inputs=True, top20_inputs=True,
                         persist_at=time.time()+7200)
         bars = [{'cntr_tm': '20261008090000', 'cur_prc': str(70000+i), 'open_pric': '70000',
                  'high_pric': '71000', 'low_pric': '69000', 'trde_qty': '100000',
@@ -364,14 +364,17 @@ async def run(args):
             group_charge = Counter()
             rejected_inputs = []
             if args.mode == 'on':
-                with trace._LOCK:
-                    for event in trace._QUEUE:
-                        group = event['event_type']
-                        event_types[group] += 1
-                        group_charge[group] += event['_memory_charge']
-                        if group == 'input_rejected':
-                            rejected_inputs.append({key: value for key, value in event.items()
-                                if not key.startswith('_')})
+                trace.stop(timeout=0)
+                seal_deadline = time.monotonic() + 30
+                while time.monotonic() < seal_deadline:
+                    state = trace.status()
+                    if state['state'] in ('failed', 'interrupted') or (
+                            state['state'] == 'awaiting_persistence' and not state.get('raw_charged_bytes', 0)
+                            and not state.get('packing_events', 0)):
+                        break
+                    await asyncio.sleep(.01)
+                event_types.update(state.get('event_counts', {}))
+                group_charge.update(state.get('admitted_raw_bytes_by_event', {}))
                 if state.get('written') != 0:
                     raise RuntimeError('deferred_probe_wrote_events_early')
             # Upper-shape payload accounting for response/catalog fan-out, before
@@ -382,7 +385,7 @@ async def run(args):
             per_message_events = state.get('accepted', 0)/max(1, counts['trade_messages'])
             retained_memory = memory()
             persistence = await durable_check(trace, state['trace_id'], args.persist_timeout) if args.persist else None
-            result = {'mode': args.mode, 'memory_gib': args.memory_gib, 'event_capacity': args.event_capacity,
+            result = {'capture_seconds': args.capture_seconds, 'synthetic_input_span_seconds': args.messages / 10, 'mode': args.mode, 'memory_gib': args.memory_gib, 'event_capacity': args.event_capacity,
                 'stop_reason': stop_reason, 'mixed_every_messages': args.mixed_every, 'catalog_rows': args.catalog_rows,
                 'messages_completed': len(latencies), 'rows_per_message': args.rows, 'native_counts': dict(counts),
                 'latency_ms': distribution(latencies), 'mixed_latency_ms': distribution(mixed_latencies) if mixed_latencies else None,
@@ -394,8 +397,13 @@ async def run(args):
                 'memory_samples': samples, 'rejected_input_details': rejected_inputs,
                 'trace': {k: state.get(k) for k in ('state','schema_version','accepted','written','known_dropped',
                     'input_rejected','drop_reasons','input_rejected_reasons','charged_bytes','memory_high_water','copy_ms_max')},
-                'event_types': dict(event_types), 'charged_bytes_by_event': dict(group_charge),
+                'event_types': dict(event_types), 'admitted_raw_bytes_by_event': dict(group_charge),
+                'accounting_note': 'admitted raw bytes are cumulative admissions, not retained packed RAM bytes',
+                'ram_packing': {key: state.get(key) for key in ('raw_charged_bytes', 'raw_high_water_bytes',
+                    'packed_events', 'packed_bytes', 'packed_segments', 'pack_ms_max', 'pack_ms_total', 'worker_reserved_bytes')},
                 'response_payload_shapes': shapes, 'charge_per_message_including_delivery': per_message_charge,
+                'estimated_tick_rate_at_memory_limit_for_capture': ((args.memory_gib*1024**3-24*1024**2)/max(1,per_message_charge)*args.rows/args.capture_seconds if args.mode == 'on' else None),
+                'estimated_tick_rate_at_event_limit_for_capture': (args.event_capacity/max(1,per_message_events)*args.rows/args.capture_seconds if args.mode == 'on' else None),
                 'estimated_tick_rate_at_memory_limit_65m': ((args.memory_gib*1024**3-24*1024**2)/max(1,per_message_charge)*args.rows/3900
                     if args.mode == 'on' else None),
                 'estimated_tick_rate_at_event_limit_65m': (args.event_capacity/max(1,per_message_events)*args.rows/3900
@@ -425,11 +433,12 @@ async def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', choices=('off','on'), required=True)
+    parser.add_argument('--capture-seconds', type=int, default=3900, help='Requested recorder duration; synthetic timestamps advance 100ms per message')
     parser.add_argument('--messages', type=int, default=1000)
     parser.add_argument('--rows', type=int, default=20)
-    parser.add_argument('--memory-gib', type=int, choices=(4,8,12), default=4,
+    parser.add_argument('--memory-gib', type=int, choices=(4,8,12,15,16), default=8,
                         help='Private probe budget only; never changes operational recorder defaults')
-    parser.add_argument('--event-capacity', type=int, choices=(1000000,5000000), default=1000000)
+    parser.add_argument('--event-capacity', type=int, choices=(1000000,5000000), default=5000000)
     parser.add_argument('--scratch', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--mixed-every', type=int, default=0, help='Add catalog once and native REST/subscription/store round every N messages')
@@ -440,6 +449,8 @@ def main():
     parser.add_argument('--persist', action='store_true', help='Small lossless mixed probe only; use real paced writes and verify all chunks/payloads')
     parser.add_argument('--persist-timeout', type=int, default=180)
     args = parser.parse_args()
+    if not 60 <= args.capture_seconds <= 7200:
+        parser.error('capture duration must be from 60 to 7200 seconds')
     if not 1 <= args.messages <= 250000 or not 1 <= args.rows <= 100:
         parser.error('controlled capacity bounds exceeded')
     if args.mixed_every < 0 or not 1 <= args.catalog_rows <= 5000 or not 1 <= args.reserve_gib <= 8 or args.persist_timeout < 1:

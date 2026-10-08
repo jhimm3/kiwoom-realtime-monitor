@@ -1,3 +1,8 @@
+## 2026-10-09 Recorded trace deferred RAM integration (PC main)
+
+- Integrated the NAS-validated deferred trace recorder's framed RAM blocks and bounded packing into PC main, with schema-3 capability fields and the 8 GiB / 5,000,000 event limits. Existing main changes and legacy capability fields are preserved. This updates source only; it does not switch the active NAS release.
+- The NAS restricted operator installation and passwordless status check are confirmed. An actual NAS `test`/`replay` invocation is still pending, and the prior trace is incomplete due to rejected inputs.
+
 # Changelog
 
 ## 2026-10-05 DB trace chunk bounds (로컬 검증 후보)

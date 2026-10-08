@@ -13,6 +13,7 @@ import time
 from collections import deque
 from pathlib import Path
 from uuid import uuid4
+from .diagnostic_trace_ram import PackedRow, pack_records
 from .diagnostic_delivery_record import (
     Context, DeliveryIdentity, DeliveryStage, SOURCE_NAMES, CONTROL_SOURCE_NAMES,
     SUBSCRIBER_NAMES, IDENTITY_NAMES, UNTRACKED_NAMES, MISSING, additional_charge, retain, release,
@@ -24,7 +25,11 @@ from .diagnostic_workloads import (
 
 _LOCK = threading.Lock()
 _QUEUE: deque[dict | DeliveryStage] = deque()
-_CAPACITY = 1_000_000
+_PACKED = deque()
+_RAW_LIMIT = 64 * 1024 * 1024
+_RAW_CAPACITY = 32_768
+_PACK_WORKER_RESERVE = 128 * 1024 * 1024
+_CAPACITY = 5_000_000
 _MAX_TOP20_WINDOW_ROWS = 50_000
 _SESSION: dict | None = None
 _THREAD: threading.Thread | None = None
@@ -34,7 +39,7 @@ _WAKE = threading.Event()
 _COPY_GATE = threading.BoundedSemaphore(2)
 _COPY_RESERVATION = 8 * 1024 * 1024
 _MEMORY_LIMIT = 256 * 1024 * 1024
-_DEFERRED_MEMORY_LIMIT = 4 * 1024 * 1024 * 1024
+_DEFERRED_MEMORY_LIMIT = 8 * 1024 * 1024 * 1024
 _DEFERRED_WRITE_BYTES_PER_SECOND = 1024 * 1024
 _DEFERRED_WRITE_BLOCK_BYTES = 64 * 1024
 _SCALAR_RESERVE = 8 * 1024 * 1024
@@ -48,7 +53,7 @@ _MAX_WINDOW_PAYLOAD_BYTES = 32 * 1024 * 1024
 _MAX_COLLECTOR_PREFIX_SECONDS = 900
 _MAX_BYTES = 1_073_741_824
 _MAX_SESSIONS = 8
-_MAX_STORED_BYTES = 4 * _MAX_BYTES
+_MAX_STORED_BYTES = 8 * _MAX_BYTES
 
 
 def _directory() -> Path:
@@ -130,6 +135,7 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
             _discard_queue(_SESSION)
         else:
             _QUEUE.clear()
+            _PACKED.clear()
         _STOP.clear()
         _ABORT.clear()
         _WAKE.clear()
@@ -156,14 +162,18 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
                     "memory_limit_bytes": _DEFERRED_MEMORY_LIMIT if persist_at is not None else _MEMORY_LIMIT,
                     "event_capacity": _CAPACITY,
                     "persistence_mode": 'deferred_ram' if persist_at is not None else 'streaming',
-                    "delivery_retention": 'shared_receipt_v1' if persist_at is not None else 'legacy_dictionary',
+                    "delivery_retention": 'framed_ram_v1' if persist_at is not None else 'legacy_dictionary',
                     "persist_at": persist_at, "memory_preflight": memory_preflight,
                     "write_bytes_per_second": _DEFERRED_WRITE_BYTES_PER_SECOND if persist_at is not None else None,
                     "persistence_throttle_seconds": 0.0,
                     "payload_storage": "chunk_bundle_v1",
                     "payload_batch_limit_bytes": _MAX_PAYLOAD_BATCH_BYTES,
                     "payload_fsync_count": 0,
-                    "worker_reserved_bytes": _WORKER_RESERVE,
+                    "worker_reserved_bytes": _PACK_WORKER_RESERVE if persist_at is not None else _WORKER_RESERVE,
+                    "raw_charged_bytes": 0, "packing_events": 0,
+                    "packed_events": 0, "packed_bytes": 0, "packed_segments": 0,
+                    "raw_high_water_bytes": 0, "pack_ms_total": 0.0, "pack_ms_max": 0.0,
+                    "event_counts": {}, "admitted_raw_bytes_by_event": {},
                     "input_rejected": 0, "input_rejected_reasons": {}, "input_coverage": {}}
         _SESSION["input_capture_censored"] = False
         _SESSION["storage_limit_bytes"] = min(
@@ -192,7 +202,26 @@ def _public(session: dict) -> dict:
             "input_rejected_reasons": dict(session.get("input_rejected_reasons", {})),
             "drop_reasons": dict(session.get('drop_reasons', {})),
             "blobs": {key: dict(value) for key, value in session.get("blobs", {}).items()},
-            "queued": len(_QUEUE) + session.get("pending_events", 0)}
+            "event_counts": dict(session.get('event_counts', {})),
+            "admitted_raw_bytes_by_event": dict(session.get('admitted_raw_bytes_by_event', {})),
+            "queued": _retained_events(session)}
+
+
+def _retained_events(session):
+    if session.get('persist_at') is not None:
+        return len(_QUEUE) + session.get('packing_events', 0) + session.get('packed_events', 0)
+    return len(_QUEUE) + session.get('pending_events', 0)
+
+
+def _worker_reserve(session):
+    return session.get('worker_reserved_bytes', _WORKER_RESERVE)
+
+
+def _close_admission(session, reason):
+    if session.get('persist_at') is not None and session['state'] == 'running':
+        session.update(state='stopping', reason=reason, input_capture_censored=True)
+        _STOP.set()
+        _WAKE.set()
 
 
 def status(trace_id: str | None = None) -> dict:
@@ -319,16 +348,21 @@ def _enqueue(session: dict, event: dict | DeliveryStage, charge: int, *, payload
     scalar = 0 if payload else charge
     payload_bytes = session["charged_bytes"] - session["scalar_charged_bytes"]
     reason = None
-    if len(_QUEUE) + session["pending_events"] >= _CAPACITY:
+    if _retained_events(session) >= _CAPACITY:
         reason = 'event_capacity'
-    elif session["charged_bytes"] + session["copy_reserved_bytes"] + charge > session["memory_limit_bytes"] - _WORKER_RESERVE:
+    elif session["charged_bytes"] + session["copy_reserved_bytes"] + charge > session["memory_limit_bytes"] - _worker_reserve(session):
         reason = 'memory_budget'
     elif payload and payload_bytes + session["copy_reserved_bytes"] + charge > session["memory_limit_bytes"] - _SCALAR_RESERVE:
         reason = 'payload_memory_budget'
+    elif session.get('persist_at') is not None and (
+            len(_QUEUE) + session['packing_events'] >= _RAW_CAPACITY
+            or session['raw_charged_bytes'] + session['copy_reserved_bytes'] + charge > _RAW_LIMIT):
+        reason = 'raw_staging_budget'
     if reason is not None:
         session["known_dropped"] += 1
         reasons = session.setdefault('drop_reasons', {})
         reasons[reason] = reasons.get(reason, 0) + 1
+        _close_admission(session, reason)
         return False
     if isinstance(event, DeliveryStage):
         retain(event)
@@ -343,7 +377,17 @@ def _enqueue(session: dict, event: dict | DeliveryStage, charge: int, *, payload
     session["charged_bytes"] += charge
     session["scalar_charged_bytes"] += scalar
     session["accepted"] += 1
-    session["queue_high_water"] = max(session["queue_high_water"], len(_QUEUE) + session["pending_events"])
+    counts = session['event_counts']
+    kind = event['event_type']
+    counts[kind] = counts.get(kind, 0) + 1
+    charges = session['admitted_raw_bytes_by_event']
+    charges[kind] = charges.get(kind, 0) + charge
+    if session.get('persist_at') is not None:
+        session['raw_charged_bytes'] += charge
+        session['raw_high_water_bytes'] = max(session['raw_high_water_bytes'], session['raw_charged_bytes'])
+        if len(_QUEUE) >= 256 or session['raw_charged_bytes'] >= 1024 * 1024:
+            _WAKE.set()
+    session["queue_high_water"] = max(session["queue_high_water"], _retained_events(session))
     session["memory_high_water"] = max(session["memory_high_water"],
                                         session["charged_bytes"] + session["copy_reserved_bytes"])
     if session.get('persist_at') is None and (session["charged_bytes"] >= _FLUSH_HIGH_WATER_BYTES or len(_QUEUE) >= 4096):
@@ -387,6 +431,19 @@ def emit_delivery(trace_id, identity, stage, *, outcome=MISSING):
 
 
 def _release_record(session, record):
+    if isinstance(record, PackedRow):
+        segment = record.segment
+        segment.commit(record)
+        session['packed_events'] -= 1
+        if segment.committed == segment.count:
+            if not _PACKED or _PACKED[0] is not segment:
+                raise RuntimeError('trace_ram_segment_out_of_order')
+            _PACKED.popleft()
+            session['packed_segments'] -= 1
+            session['packed_bytes'] -= segment.charge
+            session['charged_bytes'] -= segment.charge
+            session['scalar_charged_bytes'] -= segment.scalar_charge
+        return
     if isinstance(record, DeliveryStage):
         charge = release(record)
         session['charged_bytes'] -= charge
@@ -394,11 +451,19 @@ def _release_record(session, record):
     else:
         session['charged_bytes'] -= record['_memory_charge']
         session['scalar_charged_bytes'] -= record['_scalar_charge']
+        charge = record['_memory_charge']
+    if session.get('persist_at') is not None:
+        session['raw_charged_bytes'] -= charge
 
 
 def _discard_queue(session):
     while _QUEUE:
         _release_record(session, _QUEUE.popleft())
+    while _PACKED:
+        segment = _PACKED.popleft()
+        session['charged_bytes'] -= segment.charge
+        session['scalar_charged_bytes'] -= segment.scalar_charge
+    session.update(packed_bytes=0, packed_events=0, packed_segments=0)
 
 
 def emit(trace_id: str | None, event_type: str, fields: dict) -> None:
@@ -449,7 +514,10 @@ def emit_payload(trace_id: str, event_type: str, fields: dict, value) -> bool:
                 if session is not None and session["trace_id"] == trace_id and session["state"] == "stopping":
                     session["input_capture_censored"] = True
                 return False
-            if session["charged_bytes"] + session["copy_reserved_bytes"] + reservation_bytes > session["memory_limit_bytes"] - _WORKER_RESERVE - _SCALAR_RESERVE:
+            if (session["charged_bytes"] + session["copy_reserved_bytes"] + reservation_bytes
+                    > session["memory_limit_bytes"] - _worker_reserve(session) - _SCALAR_RESERVE
+                    or session.get('persist_at') is not None and
+                    session['raw_charged_bytes'] + session['copy_reserved_bytes'] + reservation_bytes > _RAW_LIMIT):
                 budget_available = False
             else:
                 budget_available = True
@@ -459,6 +527,8 @@ def emit_payload(trace_id: str, event_type: str, fields: dict, value) -> bool:
                 reservation = True
         if not budget_available:
             reject_input(trace_id, {**fields, "reason": "capture_memory_full"})
+            with _LOCK:
+                _close_admission(session, 'capture_memory_full')
             return False
         copy_started = time.perf_counter()
         try:
@@ -972,6 +1042,94 @@ def _write(file, content, session: dict) -> None:
             session['persistence_throttle_seconds'] += delay
 
 
+def _release_credit(records):
+    """Preview shared-context release without mutating ownership before admission."""
+    refs = {}
+
+    def preview(node):
+        remaining = refs.get(id(node), node._refs) - 1
+        if remaining < 0:
+            raise RuntimeError('delivery_retention_underflow')
+        refs[id(node)] = remaining
+        return node.charge + sum(preview(child) for child in node.children) if remaining == 0 else 0
+
+    charge = scalar = 0
+    for record in records:
+        if isinstance(record, DeliveryStage):
+            freed = record.own_charge + preview(record.identity.node)
+            charge += freed
+            scalar += freed
+        else:
+            charge += record['_memory_charge']
+            scalar += record['_scalar_charge']
+    return charge, scalar
+
+
+def _pack_deferred(session):
+    """The existing worker alone transfers raw ownership into immutable byte blocks."""
+    records = []
+    raw_bytes = 0
+    with _LOCK:
+        while _QUEUE and len(records) < 128:
+            charge = _QUEUE[0]['_memory_charge']
+            if records and raw_bytes + charge > 4 * 1024 * 1024:
+                break
+            records.append(_QUEUE.popleft())
+            raw_bytes += charge
+        session['packing_events'] = len(records)
+    if not records:
+        return
+    started = time.perf_counter()
+    try:
+        processed = 0
+
+        def bounded_records():
+            nonlocal processed
+            for record in records:
+                if processed and time.perf_counter() - started >= .010:
+                    break
+                processed += 1
+                yield record
+
+        segments = pack_records(bounded_records(), max_metadata_bytes=_MAX_CHUNK_BYTES,
+                                max_payload_bytes=_MAX_BLOB_BYTES)
+        new_charge = sum(segment.charge for segment in segments)
+        new_scalar = sum(segment.scalar_charge for segment in segments)
+        with _LOCK:
+            credit, _ = _release_credit(records[:processed])
+            if (session['charged_bytes'] - credit + session['copy_reserved_bytes'] + new_charge
+                    > session['memory_limit_bytes'] - _worker_reserve(session)):
+                raise RuntimeError('trace_ram_transfer_budget')
+            old_blocks = len(_PACKED)
+            try:
+                _PACKED.extend(segments)
+            except BaseException:
+                while len(_PACKED) > old_blocks:
+                    _PACKED.pop()
+                raise
+            for record in records[:processed]:
+                _release_record(session, record)
+            _QUEUE.extendleft(reversed(records[processed:]))
+            session['charged_bytes'] += new_charge
+            session['scalar_charged_bytes'] += new_scalar
+            session['packed_bytes'] += new_charge
+            session['packed_segments'] += len(segments)
+            session['packed_events'] += processed
+            session['packing_events'] = 0
+            session['memory_high_water'] = max(session['memory_high_water'],
+                                               session['charged_bytes'] + session['copy_reserved_bytes'])
+            elapsed = (time.perf_counter() - started) * 1000
+            session['pack_ms_total'] += elapsed
+            session['pack_ms_max'] = max(session['pack_ms_max'], elapsed)
+    except BaseException:
+        with _LOCK:
+            _QUEUE.extendleft(reversed(records))
+            session['packing_events'] = 0
+        raise
+    finally:
+        records.clear()
+
+
 def _hold_deferred(session: dict) -> bool:
     """Seal the 65-minute input window; master expiry cannot force early I/O."""
     if session['state'] == 'stopping':
@@ -992,6 +1150,11 @@ def _hold_deferred(session: dict) -> bool:
         return False
     if session['state'] == 'running':
         return False
+    with _LOCK:
+        if _QUEUE or session['packing_events'] or session['copy_reserved_bytes']:
+            if _QUEUE:
+                _WAKE.set()
+            return False
     if time.time() < session['persist_at']:
         _WAKE.wait(max(0, min(30, session['persist_at'] - time.time())))
         return False
@@ -1015,11 +1178,14 @@ def _drain(session: dict, run_lock) -> None:
         directory.mkdir(mode=0o700, exist_ok=False)
         _manifest(directory, session)
         next_flush = time.monotonic() + 5
+        next_control = 0.0
         while True:
-            _WAKE.wait(0.5)
+            packing = session.get('persist_at') is not None and session['state'] != 'persisting'
+            _WAKE.wait(0.01 if packing else 0.5)
             high_water = _WAKE.is_set()
             _WAKE.clear()
-            if not _STOP.is_set() and session['state'] == 'running':
+            if not _STOP.is_set() and session['state'] == 'running' and time.monotonic() >= next_control:
+                next_control = time.monotonic() + 0.5
                 master = diagnostic_tool_status()
                 child = trace_status()
                 if (not master["enabled"] or master["session_id"] != session["master_session"]
@@ -1029,6 +1195,12 @@ def _drain(session: dict, run_lock) -> None:
                         session["reason"] = "master_off_or_expired" if not master["enabled"] else "expired"
                     _STOP.set()
             if session.get('persist_at') is not None and session['state'] != 'persisting':
+                if not _ABORT.is_set():
+                    _pack_deferred(session)
+                    with _LOCK:
+                        if _QUEUE:
+                            _WAKE.set()
+                    time.sleep(0)  # Yield between bounded CPU batches without changing global GC.
                 if not _hold_deferred(session):
                     if session['state'] == 'interrupted':
                         _manifest(directory, session)
@@ -1037,10 +1209,24 @@ def _drain(session: dict, run_lock) -> None:
             if not _STOP.is_set() and not high_water and not pending and time.monotonic() < next_flush:
                 continue
             next_flush = time.monotonic() + 5
-            with _LOCK:
-                if not pending:
-                    while _QUEUE and len(pending) < 4096:
-                        pending.append(_QUEUE.popleft())
+            if not pending:
+                if session.get('persist_at') is not None:
+                    # Only this worker owns block cursors. Decode outside the admission lock.
+                    metadata_bytes = 0
+                    for segment in _PACKED:
+                        while len(pending) < 4096 and metadata_bytes < 8 * 1024 * 1024:
+                            row = segment.take()
+                            if row is None:
+                                break
+                            pending.append(row)
+                            metadata_bytes += row.payload_offset - row.offset
+                        if len(pending) >= 4096 or metadata_bytes >= 8 * 1024 * 1024:
+                            break
+                else:
+                    with _LOCK:
+                        while _QUEUE and len(pending) < 4096:
+                            pending.append(_QUEUE.popleft())
+                with _LOCK:
                     session["pending_events"] = len(pending)
             if pending:
                 flush_started = time.perf_counter()
@@ -1059,9 +1245,12 @@ def _drain(session: dict, run_lock) -> None:
                         encoded = {key: value for key, value in row.items()
                                    if key not in {"payload", "_memory_charge", "_scalar_charge"}}
                         digest, payload = None, None
-                        if "payload" in row:
+                        if isinstance(row, PackedRow):
+                            payload = row.payload_bytes()
+                        elif "payload" in row:
                             payload = json.dumps(row["payload"], ensure_ascii=False,
                                                  separators=(",", ":")).encode("utf-8")
+                        if payload is not None:
                             if len(payload) > _MAX_BLOB_BYTES:
                                 raise OSError("trace_event_too_large")
                             digest = hashlib.sha256(payload).hexdigest()
@@ -1148,11 +1337,11 @@ def _drain(session: dict, run_lock) -> None:
                     with _LOCK:
                         session['persistence_throttle_seconds'] += cooldown
                 # Drain a backlog immediately instead of waiting another five seconds per chunk.
-                if pending or _QUEUE:
+                if pending or _QUEUE or _PACKED:
                     _WAKE.set()
             if _STOP.is_set():
                 with _LOCK:
-                    if not pending and not _QUEUE and not session["copy_reserved_bytes"]:
+                    if not pending and not _QUEUE and not _PACKED and not session["copy_reserved_bytes"]:
                         break
         with _LOCK:
             finished = {
@@ -1172,8 +1361,13 @@ def _drain(session: dict, run_lock) -> None:
         with _LOCK:
             # The failed suffix still owns its shared contexts until explicit
             # discard/new capture; do not leave invisible retained references.
-            while pending:
-                _QUEUE.appendleft(pending.pop())
+            if session.get('persist_at') is not None:
+                for segment in _PACKED:
+                    segment.rewind()
+                pending.clear()
+            else:
+                while pending:
+                    _QUEUE.appendleft(pending.pop())
             session['pending_events'] = 0
             session["state"] = "failed"
             session["reason"] = (str(error) if str(error) in {

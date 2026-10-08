@@ -1,3 +1,6 @@
+2026-10-09 NAS deferred trace recorder source integration (PC main):
+NAS candidate `2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9` is selectively integrated into PC main while preserving later main changes. The deferred recorder now uses framed RAM blocks, bounded raw staging/packing and the validated 8 GiB / 5,000,000 event limits; schema-3 capability metadata remains additive to the existing TOP20 capability fields. PC `server_logging.py` formats application log timestamps in KST, but the running NAS release above has not received this main source update. The installed restricted NAS operator supports fixed `test`/`replay` commands without an interactive password during development; installation and passwordless `status` are verified, while an actual operator replay invocation is not yet recorded. The existing October 8 trace is `incomplete` (1,188 rejected inputs), so it is not an eligible complete replay input. This source integration has not yet been regression-tested or deployed; publishing to Git does not activate it on NAS.
+
 2026-10-08 NAS restricted operator installation complete:
 The native-policy-v3 offline NAS gate passed all 45 tests and the installer completed. Its actual
 target-user probe confirmed `k379` can run the fixed `status` command with passwordless sudo.
