@@ -181,8 +181,119 @@ class NasOperatorLinuxTests(unittest.TestCase):
             self.assertFalse((root / 'added').exists())
             self.assertEqual('rolled_back', private.json('install-backup-index.json')['state'])
 
+    def test_passwordless_probe_drops_all_ids_ignores_cached_auth_and_checks_native_ack(self):
+        from scripts import nas_operator_install as installer
+        import pwd
+        account = pwd.getpwnam('nobody')
+        config = {'allowed_user': account.pw_name, 'allowed_uid': account.pw_uid,
+                  'sudo': '/verified/sudo', 'initial_release': 'original'}
+        actions = []
+        ack = json.dumps({'state': 'ok', 'command': 'status',
+                          'result': {'installed': True, 'active_release': 'original'}}).encode()
+        def run(args, **kwargs):
+            self.assertEqual(['/verified/sudo', '-k', '-n', op.ROOT_LAUNCHER, 'status'], args)
+            self.assertEqual(op.CLEAN_ENV, kwargs['env'])
+            kwargs['preexec_fn']()
+            return subprocess.CompletedProcess(args, 0, ack, b'')
+        with patch.object(installer.os, 'initgroups', side_effect=lambda *x: actions.append(('groups', x))), \
+                patch.object(installer.os, 'setgid', side_effect=lambda x: actions.append(('gid', x))), \
+                patch.object(installer.os, 'setuid', side_effect=lambda x: actions.append(('uid', x))), \
+                patch.object(installer.os, 'getresuid', return_value=(account.pw_uid,) * 3), \
+                patch.object(installer.os, 'getresgid', return_value=(account.pw_gid,) * 3):
+            installer.verify_passwordless_status(config, run)
+        self.assertEqual([('groups', (account.pw_name, account.pw_gid)),
+                          ('gid', account.pw_gid), ('uid', account.pw_uid)], actions)
+        for ack in (b'{}', b'{"state":"ok","command":"status","result":{"installed":true,"active_release":"changed"}}'):
+            with self.subTest(ack=ack), self.assertRaises(op.Rejected):
+                installer.verify_passwordless_status(config, lambda *a, **k: subprocess.CompletedProcess([], 0, ack, b''))
+        with self.assertRaisesRegex(op.Rejected, 'passwordless_status_failed'):
+            installer.verify_passwordless_status(config, lambda *a, **k: subprocess.CompletedProcess([], 1, b'', b'password required'))
+        with patch.object(installer.os, 'initgroups'), patch.object(installer.os, 'setgid'), \
+                patch.object(installer.os, 'setuid'), \
+                patch.object(installer.os, 'getresuid', return_value=(account.pw_uid, account.pw_uid, 0)), \
+                patch.object(installer.os, '_exit', side_effect=SystemExit(126)), self.assertRaises(SystemExit):
+            installer.verify_passwordless_status(config, run)
+
+    def test_missing_visudo_is_optional_but_other_missing_tools_still_reject(self):
+        from scripts import nas_operator_install as installer
+        with patch.object(installer.shutil, 'which', return_value=None):
+            self.assertIsNone(installer.executable('visudo', required=False))
+            with self.assertRaisesRegex(op.Rejected, 'required_tool_unavailable:docker'):
+                installer.executable('docker')
+
+    def test_native_install_validates_before_grant_and_rolls_back_rule_first_on_failure(self):
+        from scripts import nas_operator_install as installer
+        import pwd
+        account = pwd.getpwnam('nobody')
+        for failure in (None, 'baseline', 'parse_warning', 'passwordless', 'rollback_policy'):
+            with self.subTest(failure=failure), contextlib.ExitStack() as stack:
+                root = Path(tempfile.mkdtemp(prefix='install-', dir=self.directory))
+                paths = {'HELPER': str(root / 'helper'), 'CONFIG': str(root / 'config' / 'operator.json'),
+                         'ROOT_LAUNCHER': str(root / 'sbin' / 'kiwoom-nas-root'),
+                         'CLIENT': str(root / 'bin' / 'kiwoom-nas'),
+                         'SUDOERS': str(root / 'sudoers' / 'kiwoom-nas-operator')}
+                for folder in ('helper', 'config', 'sbin', 'bin', 'sudoers', 'private'):
+                    (root / folder).mkdir(mode=0o700)
+                stack.enter_context(patch.multiple(op, **paths))
+                stack.enter_context(patch.multiple(installer, **{k: v for k, v in paths.items() if k != 'CONFIG'},
+                                                   PRIVATE=str(root / 'private')))
+                stack.enter_context(patch.object(installer, 'check_acl'))
+                originals = {op.CLIENT: (b'previous client', 0o750),
+                             op.ROOT_LAUNCHER: (b'previous launcher', 0o700)}
+                for path, (data, mode) in originals.items():
+                    with op.Tree(str(Path(path).parent), owners=(0,), protected=True) as tree:
+                        tree.write(Path(path).name, data, mode)
+                config = {'allowed_user': account.pw_name, 'allowed_uid': account.pw_uid,
+                          'sudo': '/verified/sudo', 'sudoers_validation': 'native_fixed_rule',
+                          'python': '/verified/python', 'initial_release': 'original', 'private': str(root / 'private')}
+                listing_calls = []
+                saw_grant = False
+                def run(args, **kwargs):
+                    nonlocal saw_grant
+                    present = Path(op.SUDOERS).exists()
+                    if '-l' in args:
+                        listing_calls.append(present)
+                        baseline = b'User nobody may run the following commands:\n    (ALL) ALL\n'
+                        if present:
+                            self.assertEqual(op.sudoers_rule('nobody'), Path(op.SUDOERS).read_bytes())
+                            saw_grant = True
+                            baseline += ('    (root) NOPASSWD: ' + op.ROOT_LAUNCHER + '\n').encode()
+                        warning = (failure == 'baseline' or failure == 'parse_warning' and present or
+                                   failure == 'rollback_policy' and saw_grant and not present)
+                        return subprocess.CompletedProcess(args, 0, baseline, b'parser warning' if warning else b'')
+                    if 'preexec_fn' in kwargs:
+                        if failure in ('passwordless', 'rollback_policy'):
+                            return subprocess.CompletedProcess(args, 1, b'', b'password required')
+                        ack = json.dumps({'state': 'ok', 'command': 'status',
+                                          'result': {'installed': True, 'active_release': 'original'}}).encode()
+                        return subprocess.CompletedProcess(args, 0, ack, b'')
+                    self.assertFalse(present)  # Root status runs before sudoers activation.
+                    return subprocess.CompletedProcess(args, 0, b'', b'')
+                stack.enter_context(patch.object(installer.subprocess, 'run', side_effect=run))
+                source = Path(__file__).resolve().parents[2]
+                if failure:
+                    with self.assertRaises(op.Rejected):
+                        installer.install_files(source, config, None, '/acl')
+                    self.assertFalse(Path(op.SUDOERS).exists())
+                    for path, expected in originals.items():
+                        self.assertEqual(expected, op.access_file(path))
+                    if failure != 'baseline':
+                        with op.Tree(str(root / 'private'), owners=(0,), protected=True) as private:
+                            self.assertEqual('prepared' if failure == 'rollback_policy' else 'rolled_back',
+                                             private.json('install-backup-index.json')['state'])
+                        self.assertEqual([False, True, False], listing_calls)
+                else:
+                    result = installer.install_files(source, config, None, '/acl')
+                    self.assertTrue(result['installed'])
+                    self.assertTrue(result['passwordless_status_verified'])
+                    self.assertEqual([False, True], listing_calls)
+                    with op.Tree(str(root / 'private'), owners=(0,), protected=True) as private:
+                        self.assertEqual('complete', private.json('install-backup-index.json')['state'])
+                        self.assertEqual('nobody', private.json('installation.json')['passwordless_user_verified'])
+                self.assertEqual([], list((root / 'sudoers').glob('.kiwoom-operator-candidate-*')))
+
     @contextlib.contextmanager
-    def revocation_fixture(self):
+    def revocation_fixture(self, native=False):
         root = Path(tempfile.mkdtemp(prefix='revoke-', dir=self.directory))
         paths = {'HELPER': str(root / 'helper'), 'CONFIG': str(root / 'config' / 'operator.json'),
                  'ROOT_LAUNCHER': str(root / 'sbin' / 'kiwoom-nas-root'),
@@ -210,8 +321,21 @@ class NasOperatorLinuxTests(unittest.TestCase):
             runs = []
             def run(args, **kwargs):
                 runs.append((args, kwargs))
-                return subprocess.CompletedProcess(args, 0, b'', b'')
-            yield op.Operator({'visudo': '/verified/visudo'}, private, run=run), runs
+                return subprocess.CompletedProcess(args, 0, b'User k379 may run:\n    (ALL) ALL\n' if native else b'', b'')
+            config = {'sudoers_validation': 'native_fixed_rule', 'sudo': '/verified/sudo', 'allowed_user': 'k379'} if native else {'visudo': '/verified/visudo'}
+            yield op.Operator(config, private, run=run), runs
+
+    def test_native_revoke_verifies_rule_absence_and_parser_warning_leaves_access_removed(self):
+        with self.revocation_fixture(native=True) as (operator, runs):
+            with patch.object(operator, 'run_process', return_value=subprocess.CompletedProcess([], 0, b'allowed', b'parse warning')):
+                with self.assertRaisesRegex(op.Rejected, 'sudoers_validation_failed_after_revocation'):
+                    operator.revoke_access()
+            self.assertFalse(Path(op.SUDOERS).exists())
+            self.assertTrue(Path(op.CLIENT).exists())
+            self.assertEqual('prepared', operator.access_state()['state'])
+            self.assertTrue(operator.revoke_access()['temporary_access_revoked'])
+            self.assertEqual(['/verified/sudo', '-n', '-l', '-U', 'k379'], runs[0][0])
+            self.assertEqual('revoked', operator.access_state()['state'])
 
     def test_revoke_restores_original_commands_preserves_inputs_and_is_repeatable(self):
         with self.revocation_fixture() as (operator, runs):

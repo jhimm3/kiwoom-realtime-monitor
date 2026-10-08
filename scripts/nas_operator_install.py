@@ -30,9 +30,11 @@ CLIENT = op.CLIENT
 SUDOERS = op.SUDOERS
 
 
-def executable(name):
+def executable(name, required=True):
     path = shutil.which(name, path=op.CLEAN_ENV['PATH'] + ':/usr/syno/bin:/usr/sbin')
-    op.require(path is not None, 'required_tool_unavailable')
+    if path is None and not required:
+        return None
+    op.require(path is not None, 'required_tool_unavailable:' + name)
     resolved = str(Path(path).resolve(strict=True))
     with op.Tree(str(Path(resolved).parent), owners=(0,), protected=True) as tree:
         with tree.parent(Path(resolved).name) as (parent, leaf):
@@ -107,18 +109,52 @@ def probe_cpu_limits(supervisor):
     return results
 
 
+def verify_passwordless_status(config, run=None):
+    """Administrator's single-threaded installer probes the actual target UID.
+
+    -k with a command ignores cached authentication for this invocation, and -n
+    forbids a prompt. Never let root's own sudo policy stand in for the user's.
+    """
+    account = pwd.getpwnam(config['allowed_user'])
+    op.require(account.pw_uid == config['allowed_uid'] and account.pw_uid != 0,
+               'operator_account_changed')
+    def drop_identity():
+        os.initgroups(account.pw_name, account.pw_gid)
+        os.setgid(account.pw_gid)
+        os.setuid(account.pw_uid)
+        if os.getresuid() != (account.pw_uid,) * 3 or os.getresgid() != (account.pw_gid,) * 3:
+            os._exit(126)
+    command = [config['sudo'], '-k', '-n', ROOT_LAUNCHER, 'status']
+    try:
+        checked = (run or subprocess.run)(command, preexec_fn=drop_identity,
+                    env=op.CLEAN_ENV, cwd='/', stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise op.Rejected('passwordless_status_timeout')
+    op.require(checked.returncode == 0 and not checked.stderr and
+               len(checked.stdout) <= 256 * 1024, 'passwordless_status_failed')
+    result = op.decode(checked.stdout)
+    op.require(result.get('state') == 'ok' and result.get('command') == 'status' and
+               result.get('result', {}).get('installed') is True and
+               result['result'].get('active_release') == config['initial_release'],
+               'passwordless_status_not_verified')
+
+
 def install(user):
     op.require(os.name == 'posix' and os.geteuid() == 0, 'administrator_install_required')
     op.require(re.fullmatch('[a-z_][a-z0-9_-]{0,31}', user), 'invalid_operator_user')
     account = pwd.getpwnam(user)
     op.require(account.pw_uid != 0, 'nonroot_operator_required')
     os.umask(0o077)
-    docker, python, visudo, acltool, sudo = (executable(x) for x in ('docker', 'python3', 'visudo', 'synoacltool', 'sudo'))
+    docker, python, acltool, sudo = (executable(x) for x in ('docker', 'python3', 'synoacltool', 'sudo'))
+    visudo = executable('visudo', required=False)
     root = Path(__file__).resolve().parents[1]
     store = PROJECT + '/source-runtime'
     control = PROJECT + '/deploy/synology/server-data/maintenance'
-    config = {'format': 1, 'allowed_uid': account.pw_uid, 'docker': docker, 'python': python, 'sudo': sudo,
-              'visudo': visudo, 'installation_mode': 'development_only',
+    config = {'format': 1, 'allowed_uid': account.pw_uid, 'allowed_user': user,
+              'docker': docker, 'python': python, 'sudo': sudo, 'visudo': visudo,
+              'sudoers_validation': 'visudo' if visudo else 'native_fixed_rule',
+              'installation_mode': 'development_only',
               'helper_dir': HELPER, 'private': PRIVATE, 'project': PROJECT, 'store': store,
               'control_dir': control, 'artifacts': PROJECT + '/artifacts',
               'trace_dir': control + '/diagnostic-traces', 'worker_memory': 4 * 1024 ** 3,
@@ -169,7 +205,8 @@ def install(user):
 
 def install_files(root, config, visudo, acltool):
     # This transaction begins only after capture/scheduler fences and idle checks.
-    for name in (HELPER, PRIVATE, '/etc/kiwoom-nas', '/usr/local/sbin', '/usr/local/bin', '/etc/sudoers.d'):
+    for name in (HELPER, PRIVATE, str(Path(op.CONFIG).parent), str(Path(ROOT_LAUNCHER).parent),
+                 str(Path(CLIENT).parent), str(Path(SUDOERS).parent)):
         protected_directory(name, acltool)
     launcher = ('#!/bin/sh\nset -eu\numask 077\ncd /\nexec ' + config['python'] +
                 ' -I -S ' + HELPER + '/nas_operator.py "$@"\n').encode()
@@ -181,7 +218,8 @@ def install_files(root, config, visudo, acltool):
                   config['sudo'] + ' -n ' + ROOT_LAUNCHER + ' "$@"\n').encode(), 0o755),
         op.CONFIG: ((json.dumps(config, sort_keys=True) + '\n').encode(), 0o600),
     }
-    rule = (pwd.getpwuid(config['allowed_uid']).pw_name + ' ALL=(root) NOPASSWD: ' + ROOT_LAUNCHER + '\n').encode()
+    rule = op.sudoers_rule(config['allowed_user'])
+    op.require(pwd.getpwuid(config['allowed_uid']).pw_name == config['allowed_user'], 'operator_account_changed')
     backups = {}
     with op.Tree(PRIVATE, owners=(0,), protected=True) as private:
         if Path(PRIVATE + '/deployment.json').exists():
@@ -199,14 +237,15 @@ def install_files(root, config, visudo, acltool):
             except FileNotFoundError:
                 existing = {}
             op.require(existing.get('state') != 'complete', 'operator_already_installed')
-            with op.Tree('/etc/sudoers.d', owners=(0,), protected=True) as tree:
+            with op.Tree(str(Path(SUDOERS).parent), owners=(0,), protected=True) as tree:
                 try:
                     tree.read(Path(SUDOERS).name)
                 except FileNotFoundError:
                     pass
                 else:
                     raise op.Rejected('sudoers_path_already_exists')
-            candidate = '/etc/sudoers.d/.kiwoom-operator-candidate-' + os.urandom(8).hex()
+            op.validate_sudo_policy(config, False)
+            candidate = str(Path(SUDOERS).parent / ('.kiwoom-operator-candidate-' + os.urandom(8).hex()))
             try:
                 for path in list(files) + [SUDOERS]:
                     with op.Tree(str(Path(path).parent), owners=(0,), protected=True) as tree:
@@ -231,16 +270,22 @@ def install_files(root, config, visudo, acltool):
                     with op.Tree(str(Path(path).parent), owners=(0,), protected=True) as tree:
                         tree.write(Path(path).name, data, mode)
                     check_acl(path, acltool)
-                with op.Tree('/etc/sudoers.d', owners=(0,), protected=True) as tree:
-                    tree.write(Path(candidate).name, rule, 0o440)
-                subprocess.run([visudo, '-cf', candidate], env=op.CLEAN_ENV, cwd='/', check=True, timeout=15)
+                if visudo:
+                    with op.Tree(str(Path(SUDOERS).parent), owners=(0,), protected=True) as tree:
+                        tree.write(Path(candidate).name, rule, 0o440)
+                    subprocess.run([visudo, '-cf', candidate], env=op.CLEAN_ENV, cwd='/', check=True, timeout=15)
                 subprocess.run([config['python'], '-I', '-S', HELPER + '/nas_operator.py', 'status'],
                                env=op.CLEAN_ENV, cwd='/', check=True, timeout=60)
-                with op.Tree('/etc/sudoers.d', owners=(0,), protected=True) as tree:
+                with op.Tree(str(Path(SUDOERS).parent), owners=(0,), protected=True) as tree:
                     tree.write(Path(SUDOERS).name, rule, 0o440)
-                subprocess.run([visudo, '-c'], env=op.CLEAN_ENV, cwd='/', check=True, timeout=15)
+                op.validate_sudo_policy(config, True)
+                with op.Tree(str(Path(SUDOERS).parent), owners=(0,), protected=True) as tree:
+                    op.require(tree.read(Path(SUDOERS).name) == rule, 'installed_sudoers_rule_changed')
+                verify_passwordless_status(config)
                 private.put_json('installation.json', {'installed': True, 'allowed_uid': config['allowed_uid'],
-                                                       'initial_release': config['initial_release']})
+                                                       'initial_release': config['initial_release'],
+                                                       'sudoers_validation': config['sudoers_validation'],
+                                                       'passwordless_user_verified': config['allowed_user']})
                 index = private.json('install-backup-index.json')
                 index['state'] = 'complete'
                 private.put_json('install-backup-index.json', index)
@@ -257,6 +302,7 @@ def install_files(root, config, visudo, acltool):
                                 except FileNotFoundError:
                                     pass
                 if backups:
+                    op.validate_sudo_policy(config, False, suffix='_after_install_rollback')
                     try:
                         index = private.json('install-backup-index.json')
                     except FileNotFoundError:
@@ -266,13 +312,14 @@ def install_files(root, config, visudo, acltool):
                         private.put_json('install-backup-index.json', index)
                 raise
             finally:
-                with op.Tree('/etc/sudoers.d', owners=(0,), protected=True) as tree:
+                with op.Tree(str(Path(SUDOERS).parent), owners=(0,), protected=True) as tree:
                     with tree.parent(Path(candidate).name) as (parent, leaf):
                         try:
                             os.unlink(leaf, dir_fd=parent)
                         except FileNotFoundError:
                             pass
     return {'installed': True, 'operator_user': pwd.getpwuid(config['allowed_uid']).pw_name,
+            'sudoers_validation': config['sudoers_validation'], 'passwordless_status_verified': True,
             'server_restarted': False, 'database_container_unchanged': True}
 
 

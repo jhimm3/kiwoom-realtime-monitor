@@ -44,6 +44,47 @@ def require(condition, code):
         raise Rejected(code)
 
 
+def sudoers_rule(user):
+    # Only this literal rule is accepted; no general sudoers parser is invented.
+    require(type(user) is str and re.fullmatch('[a-z_][a-z0-9_-]{0,31}', user),
+            'invalid_operator_user')
+    return (user + ' ALL=(root) NOPASSWD: ' + ROOT_LAUNCHER + '\n').encode()
+
+
+def validate_sudo_policy(config, rule_present, run=None, suffix=''):
+    """Use visudo, or check the native policy for our one fixed generated rule.
+
+    The latter is not a general replacement for visudo. A listing's exit code
+    alone is insufficient: reject parser warnings, ambiguous output and a rule
+    that is not loaded as exactly our NOPASSWD root command. Installation also
+    proves a real cache-independent passwordless status call as the target UID.
+    """
+    method = config.get('sudoers_validation', 'visudo')
+    require(method in ('visudo', 'native_fixed_rule'), 'invalid_sudoers_validator')
+    if method == 'visudo':
+        command = [config['visudo'], '-c']
+    else:
+        user = config['allowed_user']
+        sudoers_rule(user)
+        command = [config['sudo'], '-n', '-l', '-U', user]
+    try:
+        checked = (run or subprocess.run)(command, env=CLEAN_ENV, cwd='/',
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, timeout=15)
+    except subprocess.TimeoutExpired:
+        raise Rejected('sudoers_validation_timeout' + suffix)
+    require(checked.returncode == 0 and not checked.stderr and
+            len(checked.stdout) <= 256 * 1024, 'sudoers_validation_failed' + suffix)
+    if method == 'native_fixed_rule':
+        output = checked.stdout.decode('utf-8', errors='strict')
+        require(bool(output.strip()), 'sudoers_validation_failed' + suffix)
+        exact = re.findall(r'^[ \t]*\(root\)[ \t]+NOPASSWD:[ \t]+' +
+                           re.escape(ROOT_LAUNCHER) + r'[ \t]*$', output, re.MULTILINE)
+        require((len(exact) == 1 and output.count(ROOT_LAUNCHER) == 1) if rule_present
+                else ROOT_LAUNCHER not in output, 'sudoers_rule_not_verified' + suffix)
+    return method
+
+
 def installed_paths():
     return {HELPER + '/nas_operator.py', HELPER + '/nas_operator_worker.py',
             ROOT_LAUNCHER, CLIENT, CONFIG, SUDOERS}
@@ -512,13 +553,7 @@ class Operator:
                 self.private.put_json('revocation.json', {'state': 'prepared', 'index_hash': digest})
                 # Do not reinstate NOPASSWD on cleanup or validation failure.
                 restore_access_file(SUDOERS, None)
-                try:
-                    checked = self.run_process([self.config['visudo'], '-c'], env=CLEAN_ENV, cwd='/',
-                                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                               stderr=subprocess.PIPE, timeout=15)
-                except subprocess.TimeoutExpired:
-                    raise Rejected('sudoers_validation_timeout_after_revocation')
-                require(checked.returncode == 0, 'sudoers_validation_failed_after_revocation')
+                validate_sudo_policy(self.config, False, run=self.run_process, suffix='_after_revocation')
                 for path in (CLIENT, ROOT_LAUNCHER):
                     restore_access_file(path, previous[path])
                 self.private.verify_identity()
@@ -975,11 +1010,14 @@ def load_config(revoking=False):
     with Tree('/etc/kiwoom-nas', owners=(0,), protected=True) as tree:
         config = tree.json('operator.json')
     require(config.get('format') == 1, 'invalid_operator_config')
+    require(config.get('sudoers_validation', 'visudo') in ('visudo', 'native_fixed_rule'),
+            'invalid_sudoers_validator')
     if not revoking:
         validate_cpu_limits(config, set(os.sched_getaffinity(0)))
     sudo_uid = os.environ.get('SUDO_UID')
     require(sudo_uid is None or sudo_uid == str(config['allowed_uid']), 'operator_uid_not_allowed')
-    paths = (config['visudo'], HELPER + '/nas_operator.py') if revoking else (
+    validator = config['visudo'] if config.get('sudoers_validation', 'visudo') == 'visudo' else config['sudo']
+    paths = (validator, HELPER + '/nas_operator.py') if revoking else (
         config['docker'], config['python'], config['helper_dir'] + '/nas_operator.py',
         config['helper_dir'] + '/nas_operator_worker.py')
     for path in paths:

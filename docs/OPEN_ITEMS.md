@@ -1,12 +1,22 @@
 # 남은 작업과 보류 사항
 
+**2026-10-08 NAS native sudo validation candidate:** The previous NAS offline gate passed 36 tests,
+but installer tool preflight rejected missing visudo. Live read-only inspection found sudo 1.9.5p2;
+no operator access was installed. The native_fixed_rule candidate adds fixed-rule/effective-policy
+checks and an actual target-UID passwordless status probe, plus grant-first rollback and revocation
+checks. PC 25 tests and Python 3.8 syntax pass. Updated NAS Linux gate and installation/live command
+acceptance remain open; do not present native listing alone as a general visudo replacement.
+The checksum-verified native-policy-v1 bundle is on NAS; its 43-test offline gate must pass before
+the bootstrap installs the fixed rule and proves target-account passwordless status. Read-only
+host Python/shell syntax checks passed, but do not close installation acceptance from those checks.
+
 **2026-10-08 NAS restricted operator local implementation:**
 The fixed client/supervisor/installer and isolated worker are implemented in the PC workspace;
 `tests.unit.test_nas_operator` passed 22 tests. cpuset replaces unsupported NAS CFS quota;
 actual CPU/memory enforcement is checked at installation and job execution. The development-only
 `revoke` command removes NOPASSWD first and restores public entry files without regranting on failure.
 The offline Linux filesystem/ACL/resource/revocation acceptance in
-`deploy/synology/check-nas-operator.sh` is prepared but has not been run. NAS install, sudoers
+`deploy/synology/check-nas-operator.sh` passed 36 tests on the prior cpuset bundle. NAS install, sudoers
 validation, isolated NAS acceptance, and first command execution remain open. Do not treat this
 as available on NAS until those gates pass. The user has authorized installation after capture
 and deferred persistence complete; recheck live state before installation. No production credentials are

@@ -51,7 +51,7 @@ shell을 root가 실행하는 방식은 사용하지 않는다.
 | `scripts/nas_operator.py` | Python 3.8 stdlib, 인자 검증·잠금·검사·고정 Docker 실행·정리·배포 복구 |
 | `deploy/synology/install-nas-operator.sh` | 최초 관리자 설치, 보호 경로/설정/sudoers 검증·백업·복구 |
 | `deploy/synology/kiwoom-nas` | 사용자가 호출하는 작은 client; 절대 경로의 helper에 `sudo -n` 전달 |
-| `tests/unit/test_nas_operator.py` | portable argv/manifest/state machine/recovery/실패 주입 검증; 22개 통과 |
+| `tests/unit/test_nas_operator.py` | portable argv/manifest/state machine/recovery/실패 주입 검증; 25개 통과 |
 | `tests/integration/test_nas_operator_linux.py` | Linux directory-fd, 권한, symlink/hardlink, atomic write, lock 검증 |
 | `deploy/synology/check-nas-operator.sh` | 고정 로컬 image ID를 쓰는 network-none 임시 컨테이너 acceptance |
 
@@ -60,18 +60,35 @@ host helper/launcher는 `/usr/local/libexec/kiwoom-nas/`와 `/usr/local/sbin/kiw
 모두 root 소유로 설치하며 non-root 쓰기를 금지한다. parent 경로와 Synology ACL까지 검사한다.
 보호되지 않는 경로나 실행기면 설치 실패로 처리하고 권한 검사를 생략하지 않는다.
 
-설정에는 허용 UID, 검증한 Python/Docker 절대 경로, runtime/PG image **ID**, 서버·DB container
+설정에는 허용 UID/계정명, 검증한 Python/Docker/sudo 절대 경로와 권한 검증 방식,
+runtime/PG image **ID**, 서버·DB container
 ID 및 허용 mount/network fingerprint, NAS project/진단 경로, test profile, resource/timeout
 상한을 저장한다. token/DSN 전체를 출력하지 않는다. `.env`를 shell source하지 않는다.
 설정·supervisor·image·container 신원 갱신은 최초 설치와 같은 관리자 작업이다.
 
 설치기는 reviewed bundle을 보호 위치로 복사·재검증한 뒤 sudoers를 마지막에 적용한다.
-기존 파일 백업, candidate sudoers에 `visudo -cf`, 적용 후 전체 `visudo -c`, 실패 시 정확한
-이전 파일 복원을 수행한다. installer/self-update는 NOPASSWD 범위에 넣지 않는다.
+기존 파일 백업과 실패 시 정확한 이전 파일 복원을 수행한다. `visudo`가 있으면
+candidate에 `visudo -cf`, 적용 후 전체 `visudo -c`를 실행한다. 실제 NAS sudo 1.9.5p2에는
+`visudo`가 없으므로 `native_fixed_rule` 방식도 지원한다. installer/self-update는 NOPASSWD
+범위에 넣지 않는다.
 대상 계정은 설치 때 확정한 한 계정이며, Docker 그룹 가입이나 전체 Docker 권한은 추가하지 않는다.
 이미 설치 완료된 operator의 백업을 재설치로 덮어쓰지 않는다. 같은 sudoers 파일이 기존에
 있으면 설치를 거부하고 관리자 판단을 요구한다. 설치 snapshot format 2는 원래 파일과
 새 설치 파일의 hash·mode를 함께 보존한다.
+
+`native_fixed_rule`은 일반 sudoers 문법 검사기를 대신하지 않는다. 검증된 소문자 계정명과
+고정 launcher 경로로 생성한 한 줄의 규칙만 허용한다. 적용 전 native `sudo -n -l -U USER`가
+경고 없이 읽히고 기존 launcher 규칙이 없음을 확인한다. 적용 뒤에는 동일 검사에서
+`(root) NOPASSWD: <고정 launcher>`가 정확히 한 번 나타나야 한다. 종료코드 0이어도 stderr,
+누락·중복·다른 권한 태그·모호한 목록은 실패다. 저장된 규칙 bytes도 재확인한다.
+
+두 방식 모두 마지막에는 installer의 자식 프로세스에서 대상 계정의 supplementary groups와
+real/effective/saved UID/GID를 완전히 적용하고 `sudo -k -n <고정 launcher> status`를 실행한다.
+캐시된 인증을 무시하고 대화식 비밀번호를 금지한 실제 실행의 성공 JSON과 active release까지
+확인해야 설치 완료다. root 자신의 권한 목록만으로 NOPASSWD를 승인하지 않는다. 설치 중
+operator lock은 유지된다. 실패하면 새 sudoers 규칙부터 제거하고 이전 파일·mode를 복구하며,
+복구 뒤 정책 검사도 실패하면 prepared journal을 보존해 관리자 복구가 필요함을 표시한다.
+인증과 정책 검사 출력 원문은 공개 보고서에 넣지 않는다.
 
 sudoers에는 고정 root launcher 한 경로만 등록한다. 인자 생략은 '인자 금지'가 아니라 모든
 인자 허용이므로 **helper의 엄격한 인자 검사**가 필수다. NAS sudo 버전에 의존하는 정규식
@@ -107,8 +124,10 @@ worker이며 운영 서버/운영 DB 환경변수를 전달하지 않는다.
 `/usr/local/bin/kiwoom-nas`, `/usr/local/sbin/kiwoom-nas-root` 세 경로다.
 기존 client/launcher가 있었다면 원래 bytes·mode를 복구한다.
 
-prepared journal을 durable하게 기록한 다음 sudoers 규칙을 먼저 삭제·fsync하고 전체
-`visudo -c`를 검사한다. 그 뒤 client/launcher를 복구하고 revoked를 기록한다. 정리 실패나
+prepared journal을 durable하게 기록한 다음 sudoers 규칙을 먼저 삭제·fsync하고 설치 때
+고정한 정책 검사를 실행한다. `visudo` 방식은 `visudo -c`, native 방식은 경고 없는 사용자
+정책 목록에서 고정 launcher가 사라졌음을 확인한다. 그 뒤 client/launcher를 복구하고
+revoked를 기록한다. 정리 실패나
 취소 뒤에도 NOPASSWD 규칙을 다시 설치하지 않는다. prepared/revoked 상태는 일반 변경
 명령을 차단한다. 중단 후 재시도는 이미 복구된 파일도 검증하여 같은 결과로 수렴한다.
 

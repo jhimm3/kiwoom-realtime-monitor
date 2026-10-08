@@ -1,3 +1,17 @@
+2026-10-08 NAS restricted operator native sudo validation candidate:
+The previous cpuset/revoke bundle passed all 36 offline NAS tests. Installation then stopped
+at tool preflight with no operator files/sudoers changes: this NAS has sudo 1.9.5p2 but no visudo.
+The new native_fixed_rule candidate checks only its literal rule, rejects parser warnings even
+with exit 0, confirms the effective NOPASSWD entry, and proves real passwordless status as the
+target UID with cached authentication ignored. Failure removes the grant before restoring files;
+revocation uses the same pinned policy check and never regrants on failure. PC 25 portable tests
+and Python 3.8 syntax passed. Updated Linux transaction/identity/rollback tests and actual NAS
+installation acceptance remain pending. See [the operator contract](NAS_OPERATOR_COMMANDS.md).
+The new `artifacts/nas-operator-install-20261008-native-policy-v1.sh` bootstrap and six-file
+bundle are published to the NAS artifacts directory and checksum-verified. NAS Python 3.8 and
+shell syntax checks passed read-only. The bootstrap requires all 43 portable/Linux tests to pass
+before installing; that new gate and the actual target-account sudo probe are not yet executed.
+
 2026-10-08 NAS restricted operator implementation prepared locally:
 [NAS operator contract](NAS_OPERATOR_COMMANDS.md) now has a PC implementation for the fixed
 `kiwoom-nas` client, root-owned restricted supervisor/installer, candidate admission, isolated test/replay,
@@ -5,7 +19,7 @@ capture/persistence fences, and deployment rollback/recovery. Its portable unit 
 The NAS CFS quota failure is addressed with a bounded cpuset and actual CPU/memory probes.
 Development-only access now has a fixed `revoke` command: remove its NOPASSWD rule first,
 restore public entry files, preserve private inputs/reports, and never regrant on cleanup failure.
-The updated Linux directory-fd/ACL/revocation gate has not run; NAS installation/sudoers changes have not run.
+The cpuset Linux directory-fd/ACL/revocation gate passed 36 tests; NAS installation stopped before writes.
 No operator command is available on NAS yet; local implementation is not deployment acceptance.
 
 2026-10-08 opening capture live check at 09:18 KST:

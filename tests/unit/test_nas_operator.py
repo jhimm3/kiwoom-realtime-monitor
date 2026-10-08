@@ -101,6 +101,45 @@ def idle_snapshot(state='off'):
 
 
 class NasOperatorTests(unittest.TestCase):
+    def test_fixed_sudoers_rule_rejects_arbitrary_users_and_policy_text(self):
+        self.assertEqual(b'k379 ALL=(root) NOPASSWD: /usr/local/sbin/kiwoom-nas-root\n',
+                         op.sudoers_rule('k379'))
+        for user in ('root ALL', 'k379\nroot', 'ALL', 'k379:other', '*', None):
+            with self.subTest(user=user), self.assertRaises(op.Rejected):
+                op.sudoers_rule(user)
+
+    def test_native_policy_requires_exact_loaded_rule_and_no_parser_warnings(self):
+        config = {'sudoers_validation': 'native_fixed_rule', 'sudo': '/verified/sudo', 'allowed_user': 'k379'}
+        baseline = b'User k379 may run the following commands:\n    (ALL) ALL\n'
+        installed = baseline + b'    (root) NOPASSWD: /usr/local/sbin/kiwoom-nas-root\n'
+        cases = [(baseline, b'', 0, False, True), (installed, b'', 0, True, True),
+                 (installed, b'', 0, False, False), (baseline, b'', 0, True, False),
+                 (installed, b'sudoers: syntax error', 0, True, False),
+                 (installed, b'', 1, True, False), (b'', b'', 0, False, False),
+                 (installed.replace(b'NOPASSWD:', b'PASSWD:'), b'', 0, True, False),
+                 (installed.replace(b'(root)', b'(ALL)'), b'', 0, True, False),
+                 (installed.rstrip() + b', /bin/sh\n', b'', 0, True, False),
+                 (installed + installed, b'', 0, True, False)]
+        for output, stderr, code, present, allowed in cases:
+            with self.subTest(output=output, stderr=stderr, code=code, present=present), \
+                    patch.object(op.subprocess, 'run', return_value=subprocess.CompletedProcess([], code, output, stderr)) as run:
+                if allowed:
+                    self.assertEqual('native_fixed_rule', op.validate_sudo_policy(config, present))
+                else:
+                    with self.assertRaises(op.Rejected):
+                        op.validate_sudo_policy(config, present)
+                self.assertEqual(['/verified/sudo', '-n', '-l', '-U', 'k379'], run.call_args.args[0])
+                self.assertEqual(op.CLEAN_ENV, run.call_args.kwargs['env'])
+                self.assertEqual(subprocess.DEVNULL, run.call_args.kwargs['stdin'])
+
+    def test_policy_timeout_or_unknown_validator_never_passes(self):
+        config = {'sudoers_validation': 'native_fixed_rule', 'sudo': '/verified/sudo', 'allowed_user': 'k379'}
+        with patch.object(op.subprocess, 'run', side_effect=subprocess.TimeoutExpired('sudo', 15)), \
+                self.assertRaisesRegex(op.Rejected, 'sudoers_validation_timeout_after_revocation'):
+            op.validate_sudo_policy(config, False, suffix='_after_revocation')
+        with self.assertRaisesRegex(op.Rejected, 'invalid_sudoers_validator'):
+            op.validate_sudo_policy({'sudoers_validation': 'skip'}, False)
+
     def test_revoke_has_no_path_or_shell_arguments_and_cannot_restore_sudo_access(self):
         self.assertEqual('revoke', op.parser().parse_args(['revoke']).command)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
