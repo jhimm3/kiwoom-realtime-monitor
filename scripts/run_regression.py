@@ -329,6 +329,87 @@ def _valid_module(value: object) -> bool:
     return all(part.isidentifier() for part in value.split("."))
 
 
+def _unit_test_modules(paths: Sequence[str | Path]) -> set[str]:
+    modules = set()
+    for value in paths:
+        normalized = str(value).replace("\\", "/").strip("/")
+        parts = normalized.split("/")
+        if (len(parts) != 3 or parts[:2] != ["tests", "unit"]
+                or not parts[2].startswith("test_") or not parts[2].endswith(".py")):
+            continue
+        module = f"tests.unit.{parts[2][:-3]}"
+        if _valid_module(module):
+            modules.add(module)
+    return modules
+
+
+def _unregistered_new_test_modules(
+    base_paths: Sequence[str | Path], current_paths: Sequence[str | Path],
+    manifest: dict[str, Any],
+) -> list[str]:
+    base_modules = _unit_test_modules(base_paths)
+    current_modules = _unit_test_modules(current_paths)
+    registered = {
+        module
+        for batch in manifest["core_batches"]
+        for module in batch["modules"]
+    }
+    registered.update(
+        module for modules in manifest["profiles"].values() for module in modules
+    )
+    return sorted((current_modules - base_modules) - registered)
+
+
+def _git_unit_test_modules(revision: str) -> list[str]:
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", revision, "--", "tests/unit"],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"git exited with {result.returncode}"
+        raise ValueError(f"Could not inspect regression base {revision!r}: {detail}")
+    return result.stdout.splitlines()
+
+
+def _check_new_test_module_coverage(base_ref: str, fallback_ref: str = "") -> int:
+    base_ref = base_ref.strip()
+    if not base_ref or (set(base_ref) == {"0"}):
+        base_ref = fallback_ref.strip()
+    if not base_ref:
+        raise ValueError("A valid base ref or fallback ref is required for module coverage")
+    manifest = _load_manifest()
+    try:
+        base_paths = _git_unit_test_modules(base_ref)
+    except ValueError:
+        if not fallback_ref.strip() or fallback_ref.strip() == base_ref:
+            raise
+        print(
+            f"Regression base {base_ref!r} is unavailable; using {fallback_ref.strip()!r}.",
+            file=sys.stderr,
+        )
+        base_paths = _git_unit_test_modules(fallback_ref.strip())
+    current_paths = [
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "tests" / "unit").glob("test_*.py")
+    ]
+    added_modules = sorted(
+        _unit_test_modules(current_paths) - _unit_test_modules(base_paths)
+    )
+    unregistered = _unregistered_new_test_modules(base_paths, current_paths, manifest)
+    if unregistered:
+        print(
+            "New unit test modules missing from tests/regression_profiles.json:\n"
+            + "\n".join(f"  - {module}" for module in unregistered),
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"Regression module coverage passed: {len(added_modules)} new unit test module(s); "
+        "all are registered."
+    )
+    return 0
+
+
 def _available_profiles(manifest: dict[str, Any]) -> list[str]:
     return ["core", *manifest["profiles"], "all-local"]
 
@@ -477,6 +558,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--list", dest="list_only", action="store_true",
                         help="print a profile plan without running tests")
+    parser.add_argument("--check-new-test-modules", action="store_true",
+                        help="fail when a new tests/unit/test_*.py module is not registered")
+    parser.add_argument("--base-ref", default=os.environ.get("REGRESSION_BASE_REF", ""),
+                        help="revision whose tests/unit inventory is the comparison baseline")
+    parser.add_argument("--fallback-ref", default=os.environ.get("REGRESSION_FALLBACK_REF", ""),
+                        help="fallback comparison revision for a new branch or manual run")
     parser.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--_result-path", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--_modules", nargs="*", default=[], help=argparse.SUPPRESS)
@@ -729,6 +816,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _worker(args._result_path.resolve(), args._modules)
     if args._result_path is not None or args._modules:
         parser.error("worker-only options are not available in normal mode")
+    if args.check_new_test_modules:
+        if args.profile is not None or args.list_only or args.output is not None:
+            parser.error("module coverage check cannot be combined with profile/list/output options")
+        try:
+            return _check_new_test_module_coverage(args.base_ref, args.fallback_ref)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            print(f"Regression runner: {type(error).__name__}: {error}", file=sys.stderr)
+            return 2
+    if args.base_ref or args.fallback_ref:
+        parser.error("base-ref options require --check-new-test-modules")
     if args.list_only == (args.profile is not None):
         parser.error("choose exactly one of --list or --profile")
     try:

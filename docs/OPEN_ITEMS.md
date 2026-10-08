@@ -45,6 +45,15 @@ commit `b46150ce76f74640d1401c4707db711692e4e5f7`에서 Windows `all-local` 1,46
 저장소 ruleset도 비어 있어 CI가 병합을 차단하지 않는다. required check 적용 전까지 3단계는
 미완료다. NAS 배포는 진행하지 않았다.
 
+추가 범위 확인: `tests/unit/test_*.py` 409개 가운데 149개만 core/profile에 등록돼 있고
+260개(정적 AST 집계 `test_*` 메서드 2,205개)는 등록되지 않았다. 매매 진입 분류 39건,
+자격증명 저장 22건, 종목 저장소 13건, 일봉 저장소 6건 등 현재 제품 동작을 검증하는 파일도
+포함된다. 이 항목들은 불필요하다고 판정된 목록이 아니며, 14개는 별도 점검 스크립트에서 정확한 모듈 이름이
+참조되지만 상시 CI 실행 여부는 확인되지 않았다. 새 파일 등록 guard는 향후 새 모듈만 감지하므로
+기존 미등록 파일과 그 안에 추가되는 테스트는 잡지 못한다. **남음:** 260개를 기능 중요도,
+중복 커버리지, 실행 환경/시간을 기준으로 분류하고 필요한 모듈을 적절한 회귀 프로필 또는
+전용 자동 검사에 연결한다. 전체 일괄 등록은 분류와 실행 검증 전에는 하지 않는다.
+
 **2026-10-08 NAS restricted operator local implementation:**
 The fixed client/supervisor/installer and isolated worker are implemented in the PC workspace;
 `tests.unit.test_nas_operator` passed 19 tests. The offline Linux filesystem/ACL acceptance in

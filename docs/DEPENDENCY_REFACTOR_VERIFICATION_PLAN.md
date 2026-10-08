@@ -99,6 +99,9 @@ controller를 이름이나 크기 때문에 재분리하지 않는다. Protocol�
 출력 경로 기본값은 무시되는 `tmp/regression/<unique-run-id>`이며 기존 결과를 덮어쓰지 않는다.
 `--list`는 선택 batch와 모듈만 보여주고 앱 import나 테스트 실행을 하지 않는다.
 v1은 명시적 프로필 선택을 사용한다. 변경 파일 자동 추론과 전역 import 그래프는 만들지 않는다.
+CI의 새 모듈 검사는 기준 revision과 비교해 새 `tests/unit/test_*.py`가 manifest의
+core batch 또는 프로필에 등록됐는지만 검사한다. 등록을 대신하거나 해당 모듈을 실행하지 않는다.
+기존에 등록되지 않은 테스트 파일의 실행 여부도 이 검사로 바뀌지 않는다.
 
 ### 실행과 결과 판정
 
@@ -210,6 +213,13 @@ Linux job은 PostgreSQL 17 disposable service를 띄우고, 전용 `kiwoom_monit
 DB에서 기존 스키마 경계 검사 후 PostgreSQL access integration suite를 실행한다. 둘 다 실패
 상태에서도 결과와 로그를 14일 보관한다. 로컬에서 workflow YAML을 parse하고 두 job 및 runner
 구성을 확인했으며 manifest 목록 명령도 성공했다. 위 hosted run에서 두 job이 통과했다.
+새 테스트 파일 등록 검사는 위 실행 단계와 별도로 기준 revision의 unit 모듈 목록을 비교한다.
+현재 전체 409개 `tests/unit/test_*.py` 중 149개가 core/profile에 등록돼 있고 260개는 등록되지
+않았다. 정적 AST 집계상 미등록 파일에는 `test_*` 메서드 2,205개가 있으며 테스트 메서드가
+없는 파일은 없다. 매매 진입 분류, 자격증명 저장, 종목/일봉 저장소 같은 제품 경계 테스트도
+포함된다. 14개는 별도 점검 스크립트에서 정확한 모듈 이름으로 참조되지만, 이를 상시 CI에서 실행된다고 볼 근거는
+없다. 새 파일 검사는 기존 260개나 기존 미등록 파일에 추가되는 테스트 함수를 탐지하지 않으므로,
+이 목록의 실행 필요성·중복·환경 의존성을 분류하는 별도 감사가 남아 있다. 일괄 등록은 하지 않는다.
 GitHub 확인 결과 기본 브랜치는 `main`이고 branch protection 응답은 `Branch not protected`,
 저장소 rulesets는 빈 목록이었다. 따라서 workflow는 실행되지만 현재 required check로 병합을
 차단하지 않는다.

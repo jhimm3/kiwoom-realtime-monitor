@@ -116,6 +116,44 @@ class RunRegressionTests(unittest.TestCase):
     def test_invalid_manifest_module_is_rejected(self) -> None:
         self.assertFalse(run_regression._valid_module("tests.unit..bad"))
 
+    def test_new_test_modules_must_be_registered_but_existing_exclusions_are_unchanged(self) -> None:
+        base_paths = [
+            "tests/unit/test_existing_registered.py",
+            "tests/unit/test_existing_unprofiled.py",
+        ]
+        current_paths = [*base_paths, "tests/unit/test_new_feature.py"]
+        manifest = {
+            "core_batches": [{"modules": ["tests.unit.test_existing_registered"]}],
+            "profiles": {"all-local": ["tests.unit.test_existing_registered"]},
+        }
+
+        self.assertEqual(
+            ["tests.unit.test_new_feature"],
+            run_regression._unregistered_new_test_modules(
+                base_paths, current_paths, manifest,
+            ),
+        )
+
+    def test_registered_new_module_and_non_unit_files_pass_coverage(self) -> None:
+        base_paths = ["tests/unit/test_existing.py"]
+        current_paths = [
+            *base_paths,
+            "tests/unit/test_new_feature.py",
+            "tests/unit/helper.py",
+            "tests/integration/test_database.py",
+        ]
+        manifest = {
+            "core_batches": [],
+            "profiles": {"trading": ["tests.unit.test_new_feature"]},
+        }
+
+        self.assertEqual(
+            [],
+            run_regression._unregistered_new_test_modules(
+                base_paths, current_paths, manifest,
+            ),
+        )
+
     def test_source_identity_flags_a_module_outside_this_worktree(self) -> None:
         foreign = type("Spec", (), {"origin": "C:/elsewhere/kiwoom_monitor.py",
                                      "submodule_search_locations": None})()
