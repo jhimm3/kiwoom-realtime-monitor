@@ -17,7 +17,7 @@ from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeColl
 from kiwoom_monitor.presentation.api_settings_dialog import ApiSettingsDialog
 from qt_settings_test_support import dispose_dialogs
 from test_market_events import _Broker, _Socket
-from test_mock_credential_owner import FakeClient
+from credential_owner_test_support import FakeClient
 
 
 PAIRS = [["7", "상승 15%"], ["8", "새조건"], ["9", "다음조건"]]

@@ -241,3 +241,99 @@ import 금지와 네 조회 계약부터 검사하고, 이후 실제로 분리�
 1단계 검증 진입점과 2단계 뉴스 조회 분리는 완료됐다. 3단계 workflow의 hosted Windows와
 PostgreSQL job은 모두 통과했다. 기본 브랜치 보호와 required check 설정이 없어 3단계는 아직
 완료로 표시하지 않는다. 이 계획만으로 NAS 배포를 시작하지 않는다.
+
+## 2026-10-08 전체 테스트 의존성 조사 결과
+
+[409개 파일별 원장과 수정 대상](TEST_DEPENDENCY_AUDIT.md),
+[미등록 260개 보호 동작 근거](REGRESSION_COVERAGE_AUDIT.md)를 작성했다.
+기준선 당시 기존 CI 149개와 미등록 260개를 동일 기준으로 조사했다. 기준선 분류는 일반 후보 246,
+별도 환경 5, 계약/fixture 검토 9이며 함수형 11개/45건 발견 공백이 있었다. 전체 일괄 확대안은
+보류하고 추가 21개만 단독 검증 뒤 manifest에 반영했다. 현재 170개 등록/239개 미등록이며
+남은 일반 후보는 226개다. 상세 상태와 검증 결과는 아래 후속 기록을 따른다.
+전체 제안안 실행의 8개 실패 모듈을 성공으로 세지 않으며 Linux 5개는 미검증이다.
+기대 해시/DB 감사 기준선은 현재 값으로 무조건 덮어쓰지 않는다. 제품 변경과 테스트 의존성 개선은 별도 작업이다.
+
+### 2026-10-08 의존성 감사 후속
+
+실행 소유권 동시성 테스트는 `database._execution_intent_values` patch를 SQLite authorizer gate로
+바꿨다. helper 위치가 이동해도 실제 transaction 경계에서 owner 경쟁을 검증한다. `test_mock_account_drain`
+14건과 결함 주입 대조 3건이 통과했다. P1 첫 12개도 115건 단독 통과 후 `all-local`에 추가했다.
+manifest는 기존 149개 기준을 유지하며 추가 21개를 포함한다. P1 두 번째 8개는 178건 단독 통과 후
+추가했다. 편입 후 `all-local` 1,774건/30 worker가 실패·오류·skip·미실행 없이 통과했고 모든 process
+tree 종료를 확인했다. 세부 결과와 SHA256은 [409개 의존성 조사 후속 기록](TEST_DEPENDENCY_AUDIT.md)
+및 최종 산출물 `tmp/regression/dependency-audit-ci170-fixture-refactor-verified/run.json`에 있다.
+P1 두 번째 묶음에서 발견한 test-to-test fixture 결합은 `credential_owner_test_support.py`로 옮겼다.
+연관 테스트 120건 격리 통과와 최종 `all-local` 1,774건/30 worker를 다시 확인했다. 미등록 UI 통합 테스트
+2건은 이후 별도 조사에서 테스트 기대가 기존 UI 계약과 다르고 열린 SQLite WAL을 오탐한다는 점을 확인했다.
+
+### 2026-10-08 계좌 UI/API 회귀 후속
+
+`test_nas_credentials_ui_integration`은 실제 동작을 바꾸지 않고, 연결 해제 profile의 기본 숨김과
+“연결 해제 계좌도 보기” 선택 후 표시를 각각 검사하도록 수정했다. 비활성 적용 뒤 API의
+`active_profile_id=None`·주문 OFF, apply 횟수, 암호화 vault 파일 구성과 평문 키 비노출 검사는 유지했다.
+SQLite `-wal`/`-shm`은 열린 DB에서 허용되는 root 산출물로 한정했다. 다른 테스트 모듈의 Response helper
+import도 해당 통합 테스트 내부 helper로 옮겼다. 단독/P0 profile 2건 통과 후 manifest에 등록했으며,
+현재는 171개 등록/238개 미등록(일반 226, Linux 별도 5, 계약/fixture 검토 7)이다.
+
+최종 `all-local`은 1,776건/31 worker, 실패·오류·skip·expected failure·미실행 0으로 통과했다.
+모든 worker process tree 종료를 확인했고 잔류 자손은 0이다. 결과는
+`tmp/regression/dependency-audit-ci171-final/run.json`, manifest SHA256은
+`d30785e869fce85bf60a3d8007aa3e67b22ac3ed34bd5e5cc7e69db35a931254`다. PostgreSQL live, Linux 5개,
+호스티드 CI, 운영 NAS 배포와 main 병합은 이 단계에서 검증·수행하지 않았다.
+
+### 2026-10-08 전역 자격증명 UI 검사 추가
+
+`test_global_credentials_ui`에서 SQLite가 열린 동안 생성되는 `central.sqlite-wal`과
+`central.sqlite-shm`을 정상 DB sidecar로 확인했다. root 산출물 제한은 유지하고 이 두 파일만 허용했다.
+테스트 간 provider/HTTP fake import는 중립 support 모듈 또는 해당 테스트 내부 helper로 옮겼다.
+단독 및 P0 profile 11건 통과 뒤 172번째 CI 모듈로 등록했다. 전체 `all-local`은
+1,787건/32 worker, 실패·오류·skip·expected failure·미실행 0, worker/process tree 종료 32/32,
+잔류 자손 0으로 통과했다. 결과는
+`tmp/regression/dependency-audit-ci172-global-credentials-final/run.json`, manifest SHA256은
+`c4bad473533024fcdc7ae6a6be2db17f1becba6c236e6a06a6b268e3cbc728bd`다.
+GitHub hosted CI 및 실제 PostgreSQL/NAS 검증은 이 172개 manifest에서 확인하지 않았다.
+미등록 `test_dart_credential_owner`는 단독 18건 중 1건이 read-only search 계약과 어긋난 fixture 기대에서
+실패해 성공으로 계산하지 않고 보류 원장에 남겼다.
+
+### 테스트 변경의 단계별 검증 절차
+
+테스트를 수정할 때마다 전체 `all-local`을 반복하지 않는다. 변경 영향에 따라 좁은 검증부터 쌓고,
+관련 작업 묶음이 끝났거나 공통 실행 기반을 바꿨거나 최종 완료를 판정할 때 전체 회귀를 실행한다.
+
+1. 단일 테스트 모듈만 바뀌면 해당 모듈을 unittest로 실행한다. 고위험 동작은 관련 테스트 메서드의
+   실패·복구 경로도 바로 실행한다.
+2. 공용 fixture/support/helper가 바뀌면 저장소에서 실제 import 소비자를 모두 찾고, 소비 모듈들을
+   한 invocation으로 실행한다. 알려진 실패·skip도 그대로 드러내고 성공으로 합산하지 않는다.
+3. 관련된 수정들을 한 작업 단위로 끝낸 뒤 계좌·DB·뉴스·Qt 수명 등 해당 영역의 기존 regression
+   profile을 실행한다. failure injection은 patch 적용 확인에서 끝내지 말고, 실패 발생과 rollback·retry·
+   recovery assertion까지 도달하는지 확인한다.
+4. 실행기, manifest 처리, 공통 초기 상태, 프로세스 종료 감시를 바꿨거나 영역 경계를 넘는 영향을
+   발견했거나 완료를 판정할 때 `all-local`을 실행한다. 반복 수정 중에는 관련 모듈부터 다시 돌린다.
+5. Windows 단독 실행은 저장소의 실행 Python, 워크트리 `src`, workspace temporary directory와
+   Qt offscreen 설정을 사용한다. 명령은 저장소 루트에서 다음 형태로 실행하고, 프로세스 종료 코드와
+   unittest의 failure/error/skip을 직접 확인한다.
+
+   ```powershell
+   $taskTempPath = Join-Path $PWD 'tmp\test-temp'
+   New-Item -ItemType Directory -Force -Path $taskTempPath | Out-Null
+   $env:PYTHONPATH = "$PWD\src;$PWD\tests\unit"
+   $env:TEMP = $taskTempPath
+   $env:TMP = $env:TEMP
+   $env:QT_QPA_PLATFORM = 'offscreen'
+   & '<검증된 Python 실행기>' -m unittest tests.unit.test_<module>
+   ```
+
+   여러 소비자 모듈은 같은 호출에 공백으로 나열한다. Qt·비동기 종료가 걸린 영역에는 직접
+   `unittest` 결과 외에 소유 작업 종료/자손 정리가 확인되는 기존 전용 회귀 profile을 함께 사용한다.
+6. 최종 `all-local` 직전 변경 파일 목록을 저장하고, `run.json`의 `planned_batches`가 현재 manifest의
+   승인된 172개 고유 모듈과 일치하며 `test_file_sha256`가 모두 덮는지 대조한다. 미등록 변경 테스트는
+   CI 범위를 암묵적으로 넓히지 말고 모듈별 결과·실행 건수·파일 hash를 별도 기록한다. 테스트 발견 0건이나
+   기존 실패는 통과로 세지 않고 사유를 남긴다. 실행기가 자동 해시하지 않는 공용 fixture/support,
+   fixture data, runner, manifest는 실행 전후 SHA256을 별도 기록한다. 실행 중 파일이 바뀌거나 manifest·
+   test set이 달라지면 해당 run은 최종 증거가 아니므로 다시 실행한다.
+7. 통과는 모든 계획된 검사 종료, failure/error/skip/expected failure/unrun 0, worker와 process tree
+   종료 확인을 뜻한다. Linux 전용, hosted CI, 실제 PostgreSQL/NAS 검증은 실행 결과와 별도로 표시한다.
+   검증된 브랜치가 게시된 다음 GitHub CI를 독립 환경의 마지막 확인으로 사용한다.
+
+이 절차는 검사 강도를 줄이지 않는다. 대상 모듈과 직접 소비자 검사 후 관련 영역을 확인하고,
+필요한 단계에서만 전체 회귀를 반복해 수정 원인을 더 빨리 찾는다.

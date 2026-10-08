@@ -29,7 +29,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import (
 )
 from kiwoom_monitor.presentation.main_window import MainWindow
 from test_failover_kiwoom_client import _Client
-from test_mock_credential_owner import FakeClient
+from credential_owner_test_support import FakeClient
 
 
 def status(generation=1, remaining=30, **extra):

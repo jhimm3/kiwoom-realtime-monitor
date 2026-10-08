@@ -1,3 +1,4 @@
+import io
 import json
 import tempfile
 import unittest
@@ -14,8 +15,17 @@ from kiwoom_monitor.infrastructure.central_credentials_client import CentralCred
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
 from kiwoom_monitor.presentation.api_settings_dialog import ApiSettingsDialog
 from kiwoom_monitor.presentation.nas_credentials_dialog import NasCredentialsDialog, PROVIDER_LABELS
+from credential_owner_test_support import FakeAI, FakeDart, FakeNaver
 from qt_settings_test_support import dispose_dialogs, wait_until
-from test_central_credentials_client import Response
+
+
+class _HTTPResponse(io.BytesIO):
+    def __init__(self, result, url):
+        super().__init__(json.dumps(result).encode())
+        self.url = url
+
+    def geturl(self):
+        return self.url
 
 
 def operation(provider, **changes):
@@ -36,7 +46,7 @@ class GlobalCredentialsClientTests(unittest.TestCase):
         self.requests.append(request)
         response = self.responses.pop(0)
         if isinstance(response, Exception): raise response
-        return Response(response, request.full_url)
+        return _HTTPResponse(response, request.full_url)
 
     def client(self, provider="gemini"):
         return CentralCredentialsClient(DataSourceSettings("personal_server", "https://nas.test", "token"), provider=provider)
@@ -214,10 +224,6 @@ class GlobalCredentialsRouteTests(unittest.TestCase):
         from fastapi.testclient import TestClient
         from kiwoom_monitor.central_server.app import create_app
         from kiwoom_monitor.central_server.config import CentralServerSettings
-        from test_ai_credential_owner import FakeAI
-        from test_naver_credential_owner import FakeNaver
-        from test_dart_credential_owner import FakeDart
-
         with tempfile.TemporaryDirectory() as directory, patch(
                 "kiwoom_monitor.central_server.news_credentials.NaverNewsClient", FakeNaver), patch(
                 "kiwoom_monitor.central_server.news_credentials.DartDisclosureClient", FakeDart), patch(
@@ -233,7 +239,7 @@ class GlobalCredentialsRouteTests(unittest.TestCase):
                         headers=dict(request.header_items()))
                     if response.status_code >= 400:
                         raise HTTPError(request.full_url, response.status_code, "fake error", {}, None)
-                    return Response(response.json(), request.full_url)
+                    return _HTTPResponse(response.json(), request.full_url)
                 with patch("kiwoom_monitor.infrastructure.central_credentials_client.build_opener") as factory:
                     factory.return_value.open.side_effect = send
                     for provider in PROVIDER_LABELS:
@@ -268,4 +274,8 @@ class GlobalCredentialsRouteTests(unittest.TestCase):
                     self.assertFalse(any("/settings/accounts/" in r.full_url for r in requests))
                     self.assertEqual(10, sum(r.method == "POST" and r.full_url.endswith("/apply") for r in requests))
                     self.assertEqual([], ai.calls)
-                    self.assertEqual({"central.sqlite", "secrets"}, {p.name for p in root.iterdir()})
+                    root_entries = {p.name for p in root.iterdir()}
+                    self.assertIn("central.sqlite", root_entries)
+                    self.assertIn("secrets", root_entries)
+                    self.assertLessEqual(root_entries, {
+                        "central.sqlite", "central.sqlite-wal", "central.sqlite-shm", "secrets"})

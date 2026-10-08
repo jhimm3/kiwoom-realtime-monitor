@@ -43,7 +43,6 @@ from kiwoom_monitor.central_server.database import (
     _append_postgres_observation_revision,
     _insert_postgres_observation_revision,
     _insert_postgres_observation_revisions_batch,
-    _insert_sqlite_observation_revisions_batch,
     _load_postgres_latest_revisions,
     _execute_multirow_upsert,
     _uses_async_dataset_commit,
@@ -1015,7 +1014,8 @@ class CentralServerDatabaseTests(unittest.TestCase):
 
     def test_sqlite_minute_revision_batch_rolls_back_bar_and_metadata_together(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            path = Path(directory) / "monitor.sqlite3"
+            store = SQLiteQueryStore(path)
             store.initialize()
             value = {
                 "trading_date": "2026-09-08", "minute": "09:31", "code": "005930",
@@ -1029,22 +1029,22 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 source="kiwoom-ka10080;trade_value=ohlcv_estimate",
                 value_kind=DataValueKind.ESTIMATED,
             )
-            original_batch = _insert_sqlite_observation_revisions_batch
+            # FAIL leaves the inserted revision in the current transaction. Closing
+            # the failed store connection must roll it back with the bar and metadata.
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "CREATE TRIGGER fail_minute_revision AFTER INSERT "
+                    "ON central_observation_revisions WHEN NEW.kind='minute_bar' "
+                    "BEGIN SELECT RAISE(FAIL, 'revision batch failed'); END"
+                )
 
-            def fail_after_revision_insert(connection, sources, latest_by_key):
-                original_batch(connection, sources, latest_by_key)
-                raise RuntimeError("revision batch failed")
-
-            with patch(
-                "kiwoom_monitor.central_server.database_market_bars._insert_sqlite_observation_revisions_batch",
-                side_effect=fail_after_revision_insert,
-            ), self.assertRaisesRegex(RuntimeError, "revision batch failed"):
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "revision batch failed"):
                 store.replace_minute_bars(
                     [value], observations=[(bar_observation_key(observation), observation)],
                 )
 
             self.assertEqual([], store.load_minute_bars("005930", "2026-09-08", "KRX"))
-            with store._lock, store._connection() as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 metadata_count = connection.execute(
                     "SELECT count(*) FROM central_market_data_observation_meta "
                     "WHERE dataset_kind='minute_bar' AND subject=?",
@@ -1925,10 +1925,13 @@ class CentralServerDatabaseTests(unittest.TestCase):
         class Cursor:
             def __init__(self) -> None:
                 self.statements: list[str] = []
+                self.metadata_parameters: list[tuple] = []
 
             def execute(self, sql, _parameters=()):
                 self.statements.append(sql)
                 self.last_parameters = tuple(_parameters or ())
+                if "INSERT INTO central_market_data_observation_meta" in sql:
+                    self.metadata_parameters.append(self.last_parameters)
                 return self
 
             def fetchall(self):
@@ -1944,6 +1947,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.query = Cursor()
                 self.commits = 0
+                self.closed = False
 
             def cursor(self):
                 return self.query
@@ -1955,9 +1959,9 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 raise AssertionError("unexpected rollback")
 
             def close(self) -> None:
-                pass
+                self.closed = True
 
-        store = PostgresQueryStore("postgresql://unused")
+        store = PostgresQueryStore("postgresql://unused", observation_history_enabled=False)
         connections: list[Connection] = []
 
         def connect():
@@ -1966,7 +1970,6 @@ class CentralServerDatabaseTests(unittest.TestCase):
             return connection
 
         store._connect = connect  # type: ignore[method-assign]
-        store._observation_history_enabled = False
         value = {
             "trading_date": "2026-09-25", "minute": "09:30", "code": "005930",
             "market": "KRX", "open": 1, "high": 2, "low": 1, "close": 2,
@@ -1980,15 +1983,19 @@ class CentralServerDatabaseTests(unittest.TestCase):
         rows = [(bar_observation_key(observation), observation)]
         with patch("kiwoom_monitor.central_server.diagnostic_workloads.is_paused",
                    side_effect=[False, True, False]), \
-                patch("kiwoom_monitor.central_server.database_market_bars._save_postgres_metadata") as save_metadata, \
                 patch("kiwoom_monitor.central_server.diagnostic_metrics.record_market_bar_save") as record:
             for _ in range(3):
                 store.replace_minute_bars([value], observations=rows)
 
-        self.assertEqual(2, save_metadata.call_count)
+        self.assertEqual([1, 0, 1], [len(connection.query.metadata_parameters)
+                                    for connection in connections])
+        metadata_parameters = connections[0].query.metadata_parameters[0]
+        self.assertEqual(("minute_bar", observation.subject, rows[0][0]), metadata_parameters[:3])
+        self.assertEqual(metadata_parameters, connections[2].query.metadata_parameters[0])
         self.assertEqual([0, 1, 0], [call.kwargs["metadata_suppressed_rows"]
                                     for call in record.call_args_list])
         self.assertEqual([1, 1, 1], [connection.commits for connection in connections])
+        self.assertTrue(all(connection.closed for connection in connections))
         self.assertTrue(all(any("INSERT INTO central_minute_bars" in sql
                                 for sql in connection.query.statements)
                             for connection in connections))

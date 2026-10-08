@@ -18,37 +18,8 @@ from kiwoom_monitor.central_server.credential_store import CredentialStore, comp
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.news_credentials import NaverCredentialOwner
 from kiwoom_monitor.central_server.news_service import CentralNewsService
-from kiwoom_monitor.infrastructure.naver_news import NaverNewsClient, NaverNewsCredentials, NaverNewsPage
-import test_news_source_collection as news_fixture
-
-
-class FakeNaver(NaverNewsClient):
-    def __init__(self, credentials):
-        super().__init__(credentials)
-        self.marker = credentials.client_id
-        self.calls = []
-        self.entered = threading.Event()
-        self.release = threading.Event()
-        self.block = False
-        self.fail = False
-        self.pages = 1
-
-    def search_page(self, query, *, display=100, start=1, request_claim=None):
-        if request_claim is not None and not request_claim():
-            raise RuntimeError("budget exhausted")
-        self.calls.append((query, start, display))
-        if display != 1 and self.block:
-            self.entered.set()
-            if not self.release.wait(3):
-                raise RuntimeError("fake gate timed out")
-        if self.fail or self.marker == "invalid":
-            raise RuntimeError("fake-sensitive-secret")
-        item = news_fixture._item(f"{self.marker}-{query}-{start}")
-        return NaverNewsPage((item,), 101 if self.pages == 2 else 1, start,
-                             100 if self.pages == 2 and start == 1 else 1)
-
-    def search(self, name, *, since=None, request_claim=None):
-        return self.search_page(name, request_claim=request_claim).items
+from kiwoom_monitor.infrastructure.naver_news import NaverNewsCredentials
+from credential_owner_test_support import FakeNaver
 
 
 class NaverCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):

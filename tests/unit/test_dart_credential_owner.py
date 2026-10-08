@@ -18,28 +18,7 @@ from kiwoom_monitor.central_server.news_credentials import DartCredentialOwner, 
 from kiwoom_monitor.central_server.news_service import CentralNewsService
 from kiwoom_monitor.infrastructure.dart_disclosures import DartDisclosureClient, DartCredentialValidationError
 from kiwoom_monitor.infrastructure.naver_news import NaverNewsCredentials
-from test_naver_credential_owner import FakeNaver
-
-
-class FakeDart(DartDisclosureClient):
-    def __init__(self, key, cache_path):
-        super().__init__(key, cache_path)
-        self.calls = []
-        self.entered = threading.Event()
-        self.release = threading.Event()
-        self.block = False
-
-    def _json(self, url):
-        query = parse_qs(urlsplit(url).query)
-        self.calls.append(query)
-        if "corp_code" in query and self.block:
-            self.entered.set()
-            if not self.release.wait(3):
-                raise RuntimeError("fake gate timeout")
-        if self._api_key in {"invalid", "quota"}:
-            return {"status": "010" if self._api_key == "invalid" else "020", "message": self._api_key}
-        return {"status": "000", "list": [{"rcept_no": "2026091500" + self._api_key,
-            "report_nm": "삼성전자 공급계약 체결", "flr_nm": "삼성전자", "rcept_dt": "20260915"}]}
+from credential_owner_test_support import FakeDart, FakeNaver
 
 
 class DartCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):

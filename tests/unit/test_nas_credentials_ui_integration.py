@@ -1,4 +1,6 @@
 import os
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,8 +17,16 @@ from kiwoom_monitor.infrastructure.central_credentials_client import CentralCred
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
 from kiwoom_monitor.presentation.nas_credentials_dialog import NasCredentialsDialog
 from qt_settings_test_support import dispose_dialogs, wait_until
-from test_central_credentials_client import Response
-from test_mock_credential_owner import FakeClient
+from credential_owner_test_support import FakeClient
+
+
+class _HTTPResponse(io.BytesIO):
+    def __init__(self, result, url):
+        super().__init__(json.dumps(result).encode())
+        self.url = url
+
+    def geturl(self):
+        return self.url
 
 
 class NasCredentialsUIIntegrationTests(unittest.TestCase):
@@ -48,7 +58,7 @@ class NasCredentialsUIIntegrationTests(unittest.TestCase):
                         headers=dict(request.header_items()))
                     if response.status_code >= 400:
                         raise HTTPError(request.full_url, response.status_code, "fake error", {}, None)
-                    return Response(response.json(), request.full_url)
+                    return _HTTPResponse(response.json(), request.full_url)
                 with patch("kiwoom_monitor.infrastructure.central_credentials_client.build_opener") as factory:
                     factory.return_value.open.side_effect = open_request
                     client = CentralCredentialsClient(DataSourceSettings("personal_server", "https://nas.test", "private-token"), provider=provider)
@@ -85,13 +95,40 @@ class NasCredentialsUIIntegrationTests(unittest.TestCase):
                         wait_until(lambda: dialog._worker is None and dialog._apply_button.isEnabled(), timeout=5)
                         self.assertTrue(dialog._operation["disabled"])
                         dialog._apply_button.click()
-                        wait_until(lambda: dialog._worker is None and dialog._operation.get("state") == "ACTIVE"
-                            and dialog._profile().get("disabled") is True, timeout=8)
+                        wait_until(lambda: dialog._worker is None
+                            and dialog._operation.get("state") == "ACTIVE", timeout=8)
+                        visible_profile_ids = {
+                            item.get("profile_id") for index in range(dialog._profiles.count())
+                            if isinstance((item := dialog._profiles.itemData(index)), dict)
+                        }
+                        self.assertNotIn(profile, visible_profile_ids)
+                        dialog._show_disconnected.setChecked(True)
+                        wait_until(lambda: dialog._worker is None and any(
+                            isinstance(dialog._profiles.itemData(index), dict)
+                            and dialog._profiles.itemData(index).get("profile_id") == profile
+                            for index in range(dialog._profiles.count())), timeout=8)
+                        disconnected = next(
+                            (dialog._profiles.itemData(index), dialog._profiles.itemText(index))
+                            for index in range(dialog._profiles.count())
+                            if isinstance(dialog._profiles.itemData(index), dict)
+                            and dialog._profiles.itemData(index).get("profile_id") == profile)
+                        self.assertTrue(disconnected[0]["disabled"])
+                        self.assertIn("연결 해제됨", disconnected[1])
                         document = client.account_settings(ref)["settings"]
                         self.assertIsNone(document["active_profile_id"])
                         self.assertFalse(document["mock_order_enabled"])
                         self.assertEqual(sum(r.method == "POST" and r.full_url.endswith("/apply") for r in requests), 2)
-                        self.assertEqual({p.name for p in root.iterdir()}, {"central.sqlite", "secrets"})
+                        root_entries = {p.name for p in root.iterdir()}
+                        self.assertIn("central.sqlite", root_entries)
+                        self.assertIn("secrets", root_entries)
+                        self.assertLessEqual(root_entries, {
+                            "central.sqlite", "central.sqlite-wal", "central.sqlite-shm", "secrets"})
+                        secret_files = {p.name for p in (root / "secrets").iterdir()}
+                        self.assertEqual(secret_files, {
+                            "vault.lock", "master.key", f"{provider}--{profile}.json"})
+                        encrypted_credentials = (root / "secrets" / f"{provider}--{profile}.json").read_bytes()
+                        self.assertNotIn(b"a-integration", encrypted_credentials)
+                        self.assertNotIn(b"fake-secret", encrypted_credentials)
                     finally:
                         dialog.reject()
                         if dialog._worker is not None: dialog._worker.wait(5000)

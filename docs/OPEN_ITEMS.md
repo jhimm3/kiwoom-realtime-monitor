@@ -1,5 +1,32 @@
 # 남은 작업과 보류 사항
 
+**2026-10-08 전체 409개 테스트 의존성 조사:**
+[149개/260개 기준선과 현재 편입 상태](TEST_DEPENDENCY_AUDIT.md),
+[260개 보호 근거](REGRESSION_COVERAGE_AUDIT.md),
+[변경 영향별 검증 절차](DEPENDENCY_REFACTOR_VERIFICATION_PLAN.md). 최초 149개 CI 범위는 보존했고, 상세 검토한
+P0 실행 소유권 1개, P1 우선 테스트 20개, 자격증명 UI/API 통합 테스트 2개를 단독 통과 뒤 추가했다.
+현재 172개 등록/237개 미등록이다. 남은 미등록 분류는 일반 226, Linux 별도 5,
+계약/fixture 검토 6이다. 11개 함수형 모듈/45건은
+unittest 발견 공백이다. 전체 404개 일괄 제안 검증은 8개 모듈이 실패했으며 성공으로 세지 않는다.
+별도 Linux 5개와 PostgreSQL live/NAS 검증은 미실행이다. 기존 170개 등록 범위는 1,774건/30 worker로 통과했다.
+자격증명 UI 통합 테스트는 연결 해제 계좌 표시 계약과 SQLite sidecar를 바로잡고, 전역 자격증명 테스트는
+같은 SQLite sidecar를 허용하면서 DB/secrets 외 파일 제한을 유지했다. 두 모듈의 test-to-test helper/fake
+import를 제거했고 두 P0 profile은 각각 2건과 11건 통과했다. 172개 manifest 전체 `all-local`은
+1,787건/32 worker 통과, 실패·오류·skip·expected failure·미실행 0, process tree 종료 32/32,
+잔류 자손 0이다. 산출물은 `tmp/regression/dependency-audit-ci172-global-credentials-final/run.json`,
+manifest SHA256은 `c4bad473533024fcdc7ae6a6be2db17f1becba6c236e6a06a6b268e3cbc728bd`다.
+최종 파일 대조에서는 계획·해시 목록 172개가 manifest와 일치했고, 변경된 등록 테스트 9개도 run hash와
+현재 hash가 같았다. 변경된 미등록 테스트 파일 19개는 이 `all-local` 범위 밖이다. 그중 자격증명 owner
+세 모듈은 별도 검사 17/17, 15/15, 18건 중 1건 실패가 기록돼 있고, 나머지 16개는 모듈별 실행 근거를
+추가로 남겨야 한다. 공용 support 파일은 실행기가 자동 해시하지 않으므로 다음 최종 run에 전후 hash를
+보존한다. 이를 확인할 때까지 409개 변경 파일 전체의 검증 완료로 판정하지 않는다.
+현재 등록 기준의 hosted CI는 아직 실행 확인되지 않았다. GitHub workflow 조회에서 기준 commit
+`641a821e45e4a5302fc985eeec6236accabed7cf`에 연결된 run/status가 없으며, 기존 hosted CI 통과
+증거는 과거 1,465건 기준선에만 해당한다. 이전 170개 기준선 산출물은
+`tmp/regression/dependency-audit-ci170-fixture-refactor-verified/run.json`이다.
+해시 호환성과 남은 감사 기준선은 별도 검토하며 운영 NAS 배포나 main 병합은 하지 않았다.
+
+
 **2026-10-08 의존성 축소와 기능 보존 검증:**
 [실행 계획](DEPENDENCY_REFACTOR_VERIFICATION_PLAN.md). 기존 143회 회귀 호출(142개 고유 모듈)
 및 batch 목록을 같은 순서로 새 manifest에 옮겼다. Windows Job Object로 worker를 프로세스
