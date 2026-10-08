@@ -384,14 +384,18 @@ def idle(snapshot):
         require(type(snapshot.get(key)) is dict and snapshot[key].get('enabled') is False, 'diagnostics_enabled')
     require(snapshot.get('paused_workloads') == [] and snapshot.get('active_runs') == [], 'workload_or_run_active')
     trace = snapshot.get('trace')
-    require(type(trace) is dict and trace.get('state') in ('off', 'complete'), 'trace_not_durably_idle')
+    require(type(trace) is dict and trace.get('state') in ('off', 'complete', 'incomplete'),
+            'trace_not_durably_idle')
     if trace['state'] != 'off':
         for key in ('queued', 'pending_events', 'copy_reserved_bytes', 'charged_bytes',
                     'packing_events', 'packed_events'):
             require(type(trace.get(key)) is int and trace[key] == 0, 'trace_retains_memory_or_state_unknown')
-        # Replay eligibility is checked on registration. A durably finished trace
-        # with rejected inputs must not permanently disable maintenance commands.
-        require(trace.get('accepted') == trace.get('written') and type(trace.get('accepted')) is int,
+        # Both complete and incomplete are published after final manifest sync.
+        # Replay eligibility is checked separately on registration; rejected
+        # inputs must not permanently disable maintenance after every accepted
+        # event is written and all retained memory is drained.
+        require(type(trace.get('accepted')) is int and type(trace.get('written')) is int and
+                trace['accepted'] >= 0 and trace['accepted'] == trace['written'],
                 'trace_incomplete')
 
 

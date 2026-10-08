@@ -1,5 +1,13 @@
 # 남은 작업과 보류 사항
 
+**2026-10-08 operator maintenance fence:** native-policy-v1 passed 43 NAS tests, but installation
+correctly reached and rejected the trace-state fence before granting access. Investigation confirmed
+the retained trace is durably terminal `incomplete` due to 1,188 rejected inputs, with all 2,033,667
+accepted events written and no retained RAM. The maintenance predicate now permits this terminal
+state only under the same full-drain and counter checks as complete; replay admission is unchanged.
+PC 26 tests passed; native-policy-v2's updated 44-test NAS gate and real passwordless install probe
+remain pending. No operational release or trace control was changed.
+
 **2026-10-08 NAS native sudo validation candidate:** The previous NAS offline gate passed 36 tests,
 but installer tool preflight rejected missing visudo. Live read-only inspection found sudo 1.9.5p2;
 no operator access was installed. The native_fixed_rule candidate adds fixed-rule/effective-policy

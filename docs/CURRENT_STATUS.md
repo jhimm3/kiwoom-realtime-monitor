@@ -1,3 +1,16 @@
+2026-10-08 NAS restricted operator durable-incomplete fence correction:
+The native-policy-v1 NAS gate passed all 43 tests without skips. Installation then stopped
+before access-file writes at `trace_not_durably_idle`. A live authenticated API check at
+2026-10-08 23:30 KST found trace `20261007T235957Z-e8cb574bf964` in `incomplete` state:
+accepted=written=2,033,667, known_dropped=0, input_rejected=1,188; all six retained/pending
+counters are 0 and diagnostics/pauses/runs are off. The exact active recorder publishes
+`complete` and `incomplete` only after its final manifest file fsync/replace; the latter denotes
+coverage rejection, not remaining RAM. Maintenance now accepts either terminal state only
+with every retained counter known and zero and nonnegative integer accepted=written. Failed,
+interrupted, active or unknown states still block; replay trace admission remains lossless-only.
+PC 26 tests passed. The native-policy-v2 bootstrap will run the updated 44-test gate before
+installation; real native sudo policy and target-account passwordless acceptance remain pending.
+
 2026-10-08 NAS restricted operator native sudo validation candidate:
 The previous cpuset/revoke bundle passed all 36 offline NAS tests. Installation then stopped
 at tool preflight with no operator files/sudoers changes: this NAS has sudo 1.9.5p2 but no visudo.

@@ -92,7 +92,7 @@ def manifest():
 
 def idle_snapshot(state='off'):
     trace = {'state': state}
-    if state == 'complete':
+    if state in ('complete', 'incomplete'):
         trace.update({key: 0 for key in ('queued', 'pending_events', 'copy_reserved_bytes', 'charged_bytes',
                                         'packing_events', 'packed_events')})
         trace.update(accepted=10, written=10, known_dropped=0, input_rejected=0, input_capture_censored=False)
@@ -210,7 +210,7 @@ class NasOperatorTests(unittest.TestCase):
     def test_capture_fence_distinguishes_durable_idle_from_retained_ram(self):
         op.idle(idle_snapshot())
         op.idle(idle_snapshot('complete'))
-        for state in ('running', 'awaiting_persistence', 'persisting', 'failed'):
+        for state in ('running', 'stopping', 'awaiting_persistence', 'persisting', 'interrupted', 'failed'):
             with self.subTest(state=state), self.assertRaises(op.Rejected):
                 op.idle(idle_snapshot(state))
         for key in ('queued', 'pending_events', 'charged_bytes', 'copy_reserved_bytes', 'packing_events', 'packed_events'):
@@ -226,6 +226,27 @@ class NasOperatorTests(unittest.TestCase):
         completed = idle_snapshot('complete')
         completed['trace'].update(input_rejected=217, known_dropped=3, input_capture_censored=True)
         op.idle(completed)
+
+    def test_durable_incomplete_trace_allows_maintenance_only_after_full_drain(self):
+        snapshot = idle_snapshot('incomplete')
+        snapshot['trace'].update(input_rejected=1188, known_dropped=0,
+                                 accepted=2033667, written=2033667)
+        op.idle(snapshot)
+        for key in ('queued', 'pending_events', 'charged_bytes', 'copy_reserved_bytes',
+                    'packing_events', 'packed_events'):
+            for missing in (False, True):
+                value = copy.deepcopy(snapshot)
+                if missing:
+                    del value['trace'][key]
+                else:
+                    value['trace'][key] = 1
+                with self.subTest(key=key, missing=missing), self.assertRaises(op.Rejected):
+                    op.idle(value)
+        for accepted, written in ((10, 9), (10, None), (1, True), (-1, -1)):
+            value = copy.deepcopy(snapshot)
+            value['trace'].update(accepted=accepted, written=written)
+            with self.subTest(accepted=accepted, written=written), self.assertRaises(op.Rejected):
+                op.idle(value)
 
     def test_master_pause_or_run_each_blocks_mutation(self):
         for key, value in (('diagnostic_tool', {'enabled': True}), ('trace_capture', {'enabled': True}),

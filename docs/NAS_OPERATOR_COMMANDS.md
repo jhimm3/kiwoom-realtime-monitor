@@ -41,6 +41,11 @@ shell을 root가 실행하는 방식은 사용하지 않는다.
   잠금을 해제한다. diagnostic run도 동일 잠금을 사용한다.
 - **잠금 해제만으로 안전 판정하지 않는다.** trace 저장 실패 시 RAM이 남아 있어도 finally에서
   잠금을 해제할 수 있다. API 상태와 retained/pending 카운터를 함께 확인해야 한다.
+- 유지보수의 저장 완료 판정은 `off` 또는 최종 manifest 동기화 뒤 공개되는
+  `complete`/`incomplete` 상태다. 종료 상태에서는 모든 retained/pending 카운터가 알려진 0이고
+  비음수 정수 `accepted == written`이어야 한다. 입력 거부로 replay coverage가 부족한
+  `incomplete`도 이 조건을 충족하면 설치를 허용한다. `failed`/`interrupted`는 허용하지 않는다.
+  이 판정은 replay 자격을 부여하지 않으며 trace 등록의 무손실·무거부 검사는 유지한다.
 
 ## 설치와 신뢰 경계
 
@@ -51,7 +56,7 @@ shell을 root가 실행하는 방식은 사용하지 않는다.
 | `scripts/nas_operator.py` | Python 3.8 stdlib, 인자 검증·잠금·검사·고정 Docker 실행·정리·배포 복구 |
 | `deploy/synology/install-nas-operator.sh` | 최초 관리자 설치, 보호 경로/설정/sudoers 검증·백업·복구 |
 | `deploy/synology/kiwoom-nas` | 사용자가 호출하는 작은 client; 절대 경로의 helper에 `sudo -n` 전달 |
-| `tests/unit/test_nas_operator.py` | portable argv/manifest/state machine/recovery/실패 주입 검증; 25개 통과 |
+| `tests/unit/test_nas_operator.py` | portable argv/manifest/state machine/recovery/실패 주입 검증; 26개 통과 |
 | `tests/integration/test_nas_operator_linux.py` | Linux directory-fd, 권한, symlink/hardlink, atomic write, lock 검증 |
 | `deploy/synology/check-nas-operator.sh` | 고정 로컬 image ID를 쓰는 network-none 임시 컨테이너 acceptance |
 
