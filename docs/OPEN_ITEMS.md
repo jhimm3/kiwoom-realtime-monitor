@@ -2,11 +2,14 @@
 
 **2026-10-08 NAS restricted operator local implementation:**
 The fixed client/supervisor/installer and isolated worker are implemented in the PC workspace;
-`tests.unit.test_nas_operator` passed 19 tests. The offline Linux filesystem/ACL acceptance in
+`tests.unit.test_nas_operator` passed 22 tests. cpuset replaces unsupported NAS CFS quota;
+actual CPU/memory enforcement is checked at installation and job execution. The development-only
+`revoke` command removes NOPASSWD first and restores public entry files without regranting on failure.
+The offline Linux filesystem/ACL/resource/revocation acceptance in
 `deploy/synology/check-nas-operator.sh` is prepared but has not been run. NAS install, sudoers
 validation, isolated NAS acceptance, and first command execution remain open. Do not treat this
-as available on NAS until those gates pass. The current 8GiB capture must finish and its deferred
-trace must persist before any NAS installation or server change. No production credentials are
+as available on NAS until those gates pass. The user has authorized installation after capture
+and deferred persistence complete; recheck live state before installation. No production credentials are
 included in the prepared operator reports.
 
 **2026-10-08 opening capture partial input coverage:**

@@ -20,6 +20,10 @@ import sys
 import time
 
 CONFIG = '/etc/kiwoom-nas/operator.json'
+HELPER = '/usr/local/libexec/kiwoom-nas'
+ROOT_LAUNCHER = '/usr/local/sbin/kiwoom-nas-root'
+CLIENT = '/usr/local/bin/kiwoom-nas'
+SUDOERS = '/etc/sudoers.d/kiwoom-nas-operator'
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}\Z')
 HEX = re.compile(r'[a-f0-9]{64}\Z')
 TEST = re.compile(r'tests\.(?:unit|integration)\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*\Z')
@@ -38,6 +42,72 @@ class Rejected(RuntimeError):
 def require(condition, code):
     if not condition:
         raise Rejected(code)
+
+
+def installed_paths():
+    return {HELPER + '/nas_operator.py', HELPER + '/nas_operator_worker.py',
+            ROOT_LAUNCHER, CLIENT, CONFIG, SUDOERS}
+
+
+def access_file(path):
+    require(path in (SUDOERS, CLIENT, ROOT_LAUNCHER), 'access_path_outside_scope')
+    with Tree(str(Path(path).parent), owners=(0,), protected=True) as tree:
+        try:
+            data = tree.read(Path(path).name, 8 * 1024 ** 2)
+        except FileNotFoundError:
+            return None
+        with tree.parent(Path(path).name) as (parent, leaf):
+            mode = stat.S_IMODE(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode)
+        return data, mode
+
+
+def restore_access_file(path, previous):
+    require(path in (SUDOERS, CLIENT, ROOT_LAUNCHER), 'access_path_outside_scope')
+    require(path != SUDOERS or previous is None, 'sudo_access_must_not_be_restored')
+    with Tree(str(Path(path).parent), owners=(0,), protected=True) as tree:
+        if previous is not None:
+            tree.write(Path(path).name, previous[0], previous[1])
+        else:
+            with tree.parent(Path(path).name) as (parent, leaf):
+                try:
+                    os.unlink(leaf, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+                os.fsync(parent)
+
+
+def cpu_set(value):
+    """Parse bounded Linux cpulists without accepting Docker option text."""
+    require(type(value) is str and 0 < len(value) <= 256, 'invalid_cpu_set')
+    result = set()
+    for part in value.split(','):
+        require(re.fullmatch(r'[0-9]{1,4}(?:-[0-9]{1,4})?', part), 'invalid_cpu_set')
+        bounds = [int(x) for x in part.split('-')]
+        low, high = bounds[0], bounds[-1]
+        require(0 <= low <= high <= 4095, 'invalid_cpu_set')
+        values = set(range(low, high + 1))
+        require(not result & values, 'invalid_cpu_set')
+        result.update(values)
+    return result
+
+
+def cpu_limits(available):
+    require(type(available) is set and len(available) >= 2 and
+            all(type(x) is int and 0 <= x <= 4095 for x in available), 'cpu_affinity_unavailable')
+    selected = sorted(available)[:2]
+    # Both jobs share a two-core ceiling; cpuset is not an exclusive CPU reservation.
+    return {'worker_cpuset': ','.join(str(x) for x in selected), 'pg_cpuset': str(selected[0])}
+
+
+def validate_cpu_limits(config, available):
+    worker, postgres = cpu_set(config.get('worker_cpuset')), cpu_set(config.get('pg_cpuset'))
+    require(len(worker) <= 2 and len(postgres) <= 1 and postgres <= worker <= available,
+            'cpu_affinity_unavailable')
+    return worker, postgres
+
+
+def verify_cpu_affinity(actual, expected):
+    require(cpu_set(actual) == cpu_set(expected), 'cpu_limit_not_enforced')
 
 
 def identifier(value):
@@ -345,6 +415,7 @@ class Operator:
     @contextlib.contextmanager
     def fence(self, recovery=False):
         with self.private.lock('operator.lock'), contextlib.ExitStack() as stack:
+            require(self.access_state().get('state') == 'enabled', 'operator_access_revoked')
             self.identities(running=not recovery)
             journal = self.journal()
             if not recovery:
@@ -388,6 +459,73 @@ class Operator:
         except FileNotFoundError:
             return {'state': 'idle'}
 
+    def access_state(self):
+        try:
+            return self.private.json('revocation.json')
+        except FileNotFoundError:
+            return {'state': 'enabled'}
+
+    def revoke_access(self):
+        # This changes only this installation's access files, so no live API is needed.
+        # A running operator retains this lock until its actual work has drained.
+        with self.private.lock('operator.lock'):
+            require(self.journal().get('state') in ('idle', 'complete', 'rolled_back'), 'deployment_recovery_required')
+            require(self.job_journal().get('state') in ('idle', 'complete'), 'job_recovery_required')
+            index = self.private.json('install-backup-index.json')
+            entries = index.get('entries', [])
+            require(index.get('format') == 2 and index.get('state') == 'complete' and
+                    len(entries) == len(installed_paths()) and
+                    {x.get('path') for x in entries} == installed_paths(), 'revocation_snapshot_invalid')
+            digest = hashlib.sha256(json.dumps(index, sort_keys=True).encode()).hexdigest()
+            state = self.access_state()
+            require(state.get('state') in ('enabled', 'prepared', 'revoked') and
+                    (state['state'] == 'enabled' or state.get('index_hash') == digest), 'revocation_snapshot_changed')
+            previous = {}
+            for entry in entries:
+                path = entry['path']
+                if path not in (SUDOERS, CLIENT, ROOT_LAUNCHER):
+                    continue
+                require(type(entry.get('index')) is int and 0 <= entry['index'] < len(entries) and
+                        type(entry.get('existed')) is bool and
+                        type(entry.get('installed_sha256')) is str and HEX.fullmatch(entry['installed_sha256']) and
+                        type(entry.get('installed_mode')) is int and 0 <= entry['installed_mode'] <= 0o777,
+                        'revocation_snapshot_invalid')
+                require(path != SUDOERS or not entry['existed'], 'previous_sudoers_rule_requires_administrator')
+                old = None
+                if entry['existed']:
+                    data = self.private.read('install-backups/' + str(entry['index']), 8 * 1024 ** 2)
+                    require(hashlib.sha256(data).hexdigest() == entry.get('sha256') and
+                            type(entry.get('mode')) is int and 0 <= entry['mode'] <= 0o777 and
+                            not entry['mode'] & 0o022, 'install_backup_changed')
+                    old = data, entry['mode']
+                current = access_file(path)
+                matches_installed = current is not None and (
+                    hashlib.sha256(current[0]).hexdigest(), current[1]) == (
+                        entry['installed_sha256'], entry['installed_mode'])
+                # A prepared journal allows a retry after unlink/restore or fsync failure.
+                matches_previous = current == old and (state['state'] != 'enabled' or path == SUDOERS)
+                require(matches_installed or matches_previous, 'installed_access_file_changed')
+                if state['state'] == 'revoked':
+                    require(current == old, 'revoked_access_file_reappeared')
+                previous[path] = old
+            if state['state'] != 'revoked':
+                self.private.put_json('revocation.json', {'state': 'prepared', 'index_hash': digest})
+                # Do not reinstate NOPASSWD on cleanup or validation failure.
+                restore_access_file(SUDOERS, None)
+                try:
+                    checked = self.run_process([self.config['visudo'], '-c'], env=CLEAN_ENV, cwd='/',
+                                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                               stderr=subprocess.PIPE, timeout=15)
+                except subprocess.TimeoutExpired:
+                    raise Rejected('sudoers_validation_timeout_after_revocation')
+                require(checked.returncode == 0, 'sudoers_validation_failed_after_revocation')
+                for path in (CLIENT, ROOT_LAUNCHER):
+                    restore_access_file(path, previous[path])
+                self.private.verify_identity()
+                self.private.put_json('revocation.json', {'state': 'revoked', 'index_hash': digest})
+            return {'temporary_access_revoked': True, 'access_files_restored': True,
+                    'private_reports_and_inputs_preserved': True, 'server_restarted': False}
+
     def source(self, release_id):
         with Tree(self.config['store'] + '/releases/' + identifier(release_id),
                   owners=(0, self.config['allowed_uid'])) as incoming:
@@ -397,7 +535,8 @@ class Operator:
         self.identities(running=False)
         journal = self.journal()
         result = {'journal': {k: journal.get(k) for k in ('state', 'target', 'previous')},
-                  'job': self.job_journal(), 'installed': True, 'active_release': None}
+                  'job': self.job_journal(), 'installed': True, 'active_release': None,
+                  'temporary_access': self.access_state()['state']}
         with Tree(self.config['store'], owners=(0, self.config['allowed_uid'])) as tree:
             result['active_release'] = tree.json('active.json')['release_id']
         if self.inspect(self.config['server_id'])['State']['Running']:
@@ -418,7 +557,7 @@ class Operator:
                 '--network', 'container:' + pg_name, '--user', '65534:65534', '--read-only',
                 '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL',
                 '--memory', str(self.config['worker_memory']), '--memory-swap', str(self.config['worker_memory']),
-                '--cpus', str(self.config['worker_cpus']), '--pids-limit', '256',
+                '--cpuset-cpus', self.config['worker_cpuset'], '--pids-limit', '256',
                 '--tmpfs', '/tmp:rw,nosuid,nodev,size=256m,mode=1777',
                 '--mount', 'type=bind,src=' + root + '/releases/' + release_id + ',dst=/app/candidate,readonly',
                 '--mount', 'type=bind,src=' + self.config['helper_dir'] + ',dst=/opt/kiwoom-operator,readonly',
@@ -468,6 +607,7 @@ class Operator:
                 pass
 
     def run_job(self, args, manifest, content):
+        validate_cpu_limits(self.config, set(os.sched_getaffinity(0)))
         require(shutil.disk_usage(self.private.path).free >= self.config['minimum_disk_free'], 'insufficient_disk_headroom')
         available = next(int(line.split()[1]) * 1024 for line in Path('/proc/meminfo').read_text().splitlines()
                          if line.startswith('MemAvailable:'))
@@ -487,7 +627,7 @@ class Operator:
         storage = args.storage if args.command == 'replay' else 'ram'
         pg = ['create', '--name', pg_name, '--label', LABEL + '=' + job,
               '--network', 'none', '--memory', str(self.config['pg_memory']),
-              '--memory-swap', str(self.config['pg_memory']), '--cpus', str(self.config['pg_cpus']),
+              '--memory-swap', str(self.config['pg_memory']), '--cpuset-cpus', self.config['pg_cpuset'],
               '--pids-limit', '256', '--security-opt', 'no-new-privileges',
               '--env', 'POSTGRES_USER=' + ('kiwoom_replay_fixture_admin' if args.command == 'test' and args.profile == 'replay-cache' else 'kiwoom_operator_admin'),
               '--env', 'POSTGRES_DB=postgres',
@@ -504,6 +644,7 @@ class Operator:
         report = {'job_id': job, 'command': args.command, 'release_id': args.release,
                   'source_hash': content, 'storage': storage, 'source_state_equivalent': source_state_equivalent,
                   'runtime_image_id': self.config['runtime_image_id'], 'pg_image_id': self.config['pg_image_id'],
+                  'worker_cpuset': self.config['worker_cpuset'], 'pg_cpuset': self.config['pg_cpuset'],
                   'pids_support': 'not_yet_verified', 'state': 'failed'}
         self.private.put_json('job.json', {'state': 'running', 'job_id': job, 'command': args.command})
         try:
@@ -534,11 +675,17 @@ class Operator:
             actual_limit = self.docker(['exec', pg_name, '/bin/sh', '-c',
                 'if [ -f /sys/fs/cgroup/memory.max ]; then cat /sys/fs/cgroup/memory.max; else cat /sys/fs/cgroup/memory/memory.limit_in_bytes; fi']).decode().strip()
             require(actual_limit.isdigit() and 0 < int(actual_limit) <= self.config['pg_memory'], 'pg_memory_limit_not_enforced')
+            actual_cpu = self.docker(['exec', pg_name, '/bin/sh', '-c',
+                'while IFS=: read -r key value; do if [ "$key" = Cpus_allowed_list ]; then printf "%s\\n" "$value"; fi; done < /proc/self/status']).decode().strip()
+            verify_cpu_affinity(actual_cpu, self.config['pg_cpuset'])
+            report['pg_cpu_affinity'] = actual_cpu
             self.docker(self.worker_argv(job, pg_name, args.release, extra_mounts))
-            for name in (pg_name, 'kiwoom-op-worker-' + job):
+            for name, cpus in ((pg_name, self.config['pg_cpuset']),
+                               ('kiwoom-op-worker-' + job, self.config['worker_cpuset'])):
                 value = self.inspect(name)
                 require(value['HostConfig']['Memory'] > 0 and not value['HostConfig']['Privileged'] and
                         value['Config']['Labels'][LABEL] == job, 'job_isolation_invalid')
+                verify_cpu_affinity(value['HostConfig'].get('CpusetCpus'), cpus)
             with open(str(Path(self.private.path) / base / 'process.log'), 'xb') as log:
                 self.docker(['start', '-a', 'kiwoom-op-worker-' + job], timeout=self.config['job_timeout'], log=log)
             value = self.inspect('kiwoom-op-worker-' + job)
@@ -548,6 +695,7 @@ class Operator:
             require(outcome.get('state') == 'passed', 'worker_gate_failed')
             require(type(outcome.get('memory_limit_bytes')) is int and
                     0 < outcome['memory_limit_bytes'] <= self.config['worker_memory'], 'worker_memory_limit_not_enforced')
+            verify_cpu_affinity(outcome.get('cpu_affinity'), self.config['worker_cpuset'])
             self.identities()
             with Tree(self.config['store'], owners=(0, self.config['allowed_uid'])) as store:
                 require(store.read('active.json') == active_before, 'active_release_changed_during_job')
@@ -777,6 +925,7 @@ def parser():
     commands.add_parser('status', allow_abbrev=False)
     commands.add_parser('rollback', allow_abbrev=False)
     commands.add_parser('recover', allow_abbrev=False)
+    commands.add_parser('revoke', allow_abbrev=False)
     report = commands.add_parser('report', allow_abbrev=False)
     report.add_argument('job_id', type=identifier)
     deploy = commands.add_parser('deploy', allow_abbrev=False)
@@ -821,15 +970,19 @@ def validate_args(args, config):
         require(not set(args.include_workload) & set(args.exclude_workload), 'conflicting_workload_selection')
 
 
-def load_config():
+def load_config(revoking=False):
     require(os.name == 'posix' and os.geteuid() == 0, 'installed_root_launcher_required')
     with Tree('/etc/kiwoom-nas', owners=(0,), protected=True) as tree:
         config = tree.json('operator.json')
     require(config.get('format') == 1, 'invalid_operator_config')
+    if not revoking:
+        validate_cpu_limits(config, set(os.sched_getaffinity(0)))
     sudo_uid = os.environ.get('SUDO_UID')
     require(sudo_uid is None or sudo_uid == str(config['allowed_uid']), 'operator_uid_not_allowed')
-    for path in (config['docker'], config['python'], config['helper_dir'] + '/nas_operator.py',
-                 config['helper_dir'] + '/nas_operator_worker.py'):
+    paths = (config['visudo'], HELPER + '/nas_operator.py') if revoking else (
+        config['docker'], config['python'], config['helper_dir'] + '/nas_operator.py',
+        config['helper_dir'] + '/nas_operator_worker.py')
+    for path in paths:
         with Tree(str(Path(path).parent), owners=(0,), protected=True) as tree:
             with tree.parent(Path(path).name) as (parent, leaf):
                 fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
@@ -850,7 +1003,7 @@ def main(argv=None):
     args = None
     try:
         args = parser().parse_args(argv)
-        config = load_config()
+        config = load_config(revoking=args.command == 'revoke')
         validate_args(args, config)
         with Tree(config['private'], owners=(0,), protected=True) as private:
             operator = Operator(config, private)
@@ -858,6 +1011,8 @@ def main(argv=None):
                 result = operator.status()
             elif args.command == 'report':
                 result = private.json('reports/' + args.job_id + '.json')
+            elif args.command == 'revoke':
+                result = operator.revoke_access()
             else:
                 with operator.fence(recovery=args.command == 'recover') as store:
                     if args.command == 'deploy':

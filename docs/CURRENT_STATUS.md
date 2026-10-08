@@ -1,8 +1,11 @@
 2026-10-08 NAS restricted operator implementation prepared locally:
 [NAS operator contract](NAS_OPERATOR_COMMANDS.md) now has a PC implementation for the fixed
 `kiwoom-nas` client, root-owned restricted supervisor/installer, candidate admission, isolated test/replay,
-capture/persistence fences, and deployment rollback/recovery. Its portable unit suite passed 19 tests.
-The separate Linux directory-fd/ACL gate has not run, and NAS installation/sudoers changes have not run.
+capture/persistence fences, and deployment rollback/recovery. Its portable unit suite passed 22 tests.
+The NAS CFS quota failure is addressed with a bounded cpuset and actual CPU/memory probes.
+Development-only access now has a fixed `revoke` command: remove its NOPASSWD rule first,
+restore public entry files, preserve private inputs/reports, and never regrant on cleanup failure.
+The updated Linux directory-fd/ACL/revocation gate has not run; NAS installation/sudoers changes have not run.
 No operator command is available on NAS yet; local implementation is not deployment acceptance.
 
 2026-10-08 opening capture live check at 09:18 KST:

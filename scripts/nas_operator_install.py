@@ -7,22 +7,27 @@ import os
 from pathlib import Path
 import pwd
 import re
+import secrets
 import shutil
 import signal
 import stat
 import subprocess
 import sys
 
-# This installer is explicitly invoked by an administrator from a reviewed bundle.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import nas_operator as op
+# Keep one exception/IO implementation when the offline gate imports this package.
+# Direct administrator execution imports only from its reviewed bundle directory.
+if __package__:
+    from . import nas_operator as op
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import nas_operator as op
 
-HELPER = '/usr/local/libexec/kiwoom-nas'
+HELPER = op.HELPER
 PRIVATE = '/volume1/@kiwoom-nas-operator'
 PROJECT = '/volume1/docker/kiwoom-monitor'
-ROOT_LAUNCHER = '/usr/local/sbin/kiwoom-nas-root'
-CLIENT = '/usr/local/bin/kiwoom-nas'
-SUDOERS = '/etc/sudoers.d/kiwoom-nas-operator'
+ROOT_LAUNCHER = op.ROOT_LAUNCHER
+CLIENT = op.CLIENT
+SUDOERS = op.SUDOERS
 
 
 def executable(name):
@@ -73,6 +78,35 @@ def protected_directory(path, acltool):
             check_acl(parent, acltool)
 
 
+def probe_cpu_limits(supervisor):
+    """Fail before installing privileges if Docker cannot enforce the pinned masks."""
+    job = secrets.token_hex(16)
+    code = ('import json,os; from pathlib import Path; '
+            'p=Path("/sys/fs/cgroup/memory.max"); '
+            'p=p if p.exists() else Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"); '
+            'print(json.dumps({"cpu_affinity":",".join(str(x) for x in sorted(os.sched_getaffinity(0))),'
+            '"memory_limit":int(p.read_text())}))')
+    results = {}
+    try:
+        for kind in ('worker', 'pg'):
+            name = 'kiwoom-op-' + kind + '-' + job
+            mask = supervisor.config[kind + '_cpuset']
+            supervisor.docker(['create', '--name', name, '--label', op.LABEL + '=' + job,
+                               '--network', 'none', '--user', '65534:65534', '--read-only',
+                               '--memory', '268435456', '--memory-swap', '268435456',
+                               '--cpuset-cpus', mask, '--security-opt', 'no-new-privileges',
+                               '--cap-drop', 'ALL', '--entrypoint', 'python',
+                               supervisor.config['runtime_image_id'], '-I', '-S', '-c', code])
+            result = op.decode(supervisor.docker(['start', '-a', name], timeout=60))
+            op.verify_cpu_affinity(result.get('cpu_affinity'), mask)
+            op.require(type(result.get('memory_limit')) is int and
+                       0 < result['memory_limit'] <= 268435456, 'probe_memory_limit_not_enforced')
+            results[kind] = result
+    finally:
+        supervisor.cleanup_containers(job)
+    return results
+
+
 def install(user):
     op.require(os.name == 'posix' and os.geteuid() == 0, 'administrator_install_required')
     op.require(re.fullmatch('[a-z_][a-z0-9_-]{0,31}', user), 'invalid_operator_user')
@@ -84,14 +118,16 @@ def install(user):
     store = PROJECT + '/source-runtime'
     control = PROJECT + '/deploy/synology/server-data/maintenance'
     config = {'format': 1, 'allowed_uid': account.pw_uid, 'docker': docker, 'python': python, 'sudo': sudo,
+              'visudo': visudo, 'installation_mode': 'development_only',
               'helper_dir': HELPER, 'private': PRIVATE, 'project': PROJECT, 'store': store,
               'control_dir': control, 'artifacts': PROJECT + '/artifacts',
               'trace_dir': control + '/diagnostic-traces', 'worker_memory': 4 * 1024 ** 3,
-              'pg_memory': 768 * 1024 ** 2, 'worker_cpus': 2, 'pg_cpus': 1,
+              'pg_memory': 768 * 1024 ** 2,
               'job_timeout': 7200, 'ready_timeout': 90, 'max_concurrency': 16,
               'input_file_limit': 64 * 1024 ** 2, 'input_total_limit': 64 * 1024 ** 3,
               'minimum_disk_free': 4 * 1024 ** 3,
               'profiles': ['replay-cache', 'storage', 'selected'], 'deploy_profiles': ['storage', 'replay-cache']}
+    config.update(op.cpu_limits(set(os.sched_getaffinity(0))))
     supervisor = op.Operator(config, None)
     server = supervisor.inspect('kiwoom-monitor-server-1')
     database = supervisor.inspect('kiwoom-monitor-database-1')
@@ -127,6 +163,7 @@ def install(user):
                 if re.fullmatch(r'nas-trace-start-[0-9]{8}\.status\.json\.lock', name):
                     locks.enter_context(artifacts.lock(name))
             op.idle(supervisor.snapshot())
+            config['resource_probe'] = probe_cpu_limits(supervisor)
             return install_files(root, config, visudo, acltool)
 
 
@@ -157,6 +194,18 @@ def install_files(root, config, visudo, acltool):
                 job = {'state': 'idle'}
             op.require(job.get('state') in ('idle', 'complete'), 'unfinished_operator_job')
             recover_install(private, set(files) | {SUDOERS})
+            try:
+                existing = private.json('install-backup-index.json')
+            except FileNotFoundError:
+                existing = {}
+            op.require(existing.get('state') != 'complete', 'operator_already_installed')
+            with op.Tree('/etc/sudoers.d', owners=(0,), protected=True) as tree:
+                try:
+                    tree.read(Path(SUDOERS).name)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise op.Rejected('sudoers_path_already_exists')
             candidate = '/etc/sudoers.d/.kiwoom-operator-candidate-' + os.urandom(8).hex()
             try:
                 for path in list(files) + [SUDOERS]:
@@ -170,9 +219,13 @@ def install_files(root, config, visudo, acltool):
                 for index, (path, old) in enumerate(backups.items()):
                     if old is not None:
                         private.write('install-backups/' + str(index), old[0])
-                private.put_json('install-backup-index.json', {'state': 'prepared', 'entries': [
+                installed = dict(files)
+                installed[SUDOERS] = rule, 0o440
+                private.put_json('install-backup-index.json', {'format': 2, 'state': 'prepared', 'entries': [
                     {'path': path, 'index': index, 'existed': old is not None,
-                     'mode': old[1] if old else None, 'sha256': hashlib.sha256(old[0]).hexdigest() if old else None}
+                     'mode': old[1] if old else None, 'sha256': hashlib.sha256(old[0]).hexdigest() if old else None,
+                     'installed_sha256': hashlib.sha256(installed[path][0]).hexdigest(),
+                     'installed_mode': installed[path][1]}
                     for index, (path, old) in enumerate(backups.items())]})
                 for path, (data, mode) in files.items():
                     with op.Tree(str(Path(path).parent), owners=(0,), protected=True) as tree:

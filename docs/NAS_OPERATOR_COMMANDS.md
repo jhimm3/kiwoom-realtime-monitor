@@ -2,15 +2,16 @@
 
 2026-10-08 · PC 구현 및 단위 검증 완료, Linux/NAS gate 및 설치 전.
 
-사용자 승인 범위는 **PC에서 구현·검증하여 준비**하는 것이다. 오늘 capture와 지연 저장이
-끝나기 전에 NAS 권한, sudoers, 실행 소스, 컨테이너, 예약을 변경하지 않는다.
-설치 및 실제 사용은 별도 NAS acceptance를 거친다. 이 문서는 설치 완료 보고가 아니다.
+사용자가 capture 저장 후 NAS 설치 진행을 승인했다. 설치 및 실제 사용은 별도 NAS
+acceptance를 거친다. 현재는 PC 수정 단계이며 설치 완료 보고가 아니다.
+이번 무암호 명령은 반복 개발 기간에만 사용하고, 개발 종료 때 권한을 회수한다.
 
 ## 목적과 선택
 
 반복 개발에서 SSH로 `kiwoom-nas test`, `replay`, `deploy`, `rollback`을 호출할 수 있도록
 한다. 최초 설치만 관리자가 수행하고, 이후 고정 명령은 `sudo -n`으로 호출한다.
 Docker 전체, shell, Python 전체를 NOPASSWD로 열지 않는다.
+개발 종료에는 `kiwoom-nas revoke`를 실행한다. 새 상시 서비스나 만료 timer를 추가하지 않는다.
 
 **root가 실행하는 코드는 설치 시 검토한 supervisor뿐이다.** 새 release의 Python·shell은
 host root에서 실행하지 않는다. release 코드는 테스트/replay 컨테이너 또는 명시적으로
@@ -50,7 +51,7 @@ shell을 root가 실행하는 방식은 사용하지 않는다.
 | `scripts/nas_operator.py` | Python 3.8 stdlib, 인자 검증·잠금·검사·고정 Docker 실행·정리·배포 복구 |
 | `deploy/synology/install-nas-operator.sh` | 최초 관리자 설치, 보호 경로/설정/sudoers 검증·백업·복구 |
 | `deploy/synology/kiwoom-nas` | 사용자가 호출하는 작은 client; 절대 경로의 helper에 `sudo -n` 전달 |
-| `tests/unit/test_nas_operator.py` | portable argv/manifest/state machine/recovery/실패 주입 검증; 19개 통과 |
+| `tests/unit/test_nas_operator.py` | portable argv/manifest/state machine/recovery/실패 주입 검증; 22개 통과 |
 | `tests/integration/test_nas_operator_linux.py` | Linux directory-fd, 권한, symlink/hardlink, atomic write, lock 검증 |
 | `deploy/synology/check-nas-operator.sh` | 고정 로컬 image ID를 쓰는 network-none 임시 컨테이너 acceptance |
 
@@ -68,6 +69,9 @@ ID 및 허용 mount/network fingerprint, NAS project/진단 경로, test profile
 기존 파일 백업, candidate sudoers에 `visudo -cf`, 적용 후 전체 `visudo -c`, 실패 시 정확한
 이전 파일 복원을 수행한다. installer/self-update는 NOPASSWD 범위에 넣지 않는다.
 대상 계정은 설치 때 확정한 한 계정이며, Docker 그룹 가입이나 전체 Docker 권한은 추가하지 않는다.
+이미 설치 완료된 operator의 백업을 재설치로 덮어쓰지 않는다. 같은 sudoers 파일이 기존에
+있으면 설치를 거부하고 관리자 판단을 요구한다. 설치 snapshot format 2는 원래 파일과
+새 설치 파일의 hash·mode를 함께 보존한다.
 
 sudoers에는 고정 root launcher 한 경로만 등록한다. 인자 생략은 '인자 금지'가 아니라 모든
 인자 허용이므로 **helper의 엄격한 인자 검사**가 필수다. NAS sudo 버전에 의존하는 정규식
@@ -84,6 +88,7 @@ argv 배열과 제한 환경을 사용하고 shell 실행, Docker context/env ov
 | `replay RELEASE TRACE --baseline ID ...` | 등록된 고정 입력/기준 상태와 선택 옵션으로 전용 실험 실행 |
 | `deploy RELEASE` | 검증된 동일 runtime/schema 계약의 release 선택 후 기존 server만 재시작 |
 | `rollback` | 사설 journal에 기록된 검증된 직전 release로 같은 배포 절차 수행 |
+| `revoke` | 개발 종료 시 무암호 sudoers 규칙 회수 및 사용자 client/root launcher의 설치 전 상태 복구 |
 
 `test`에는 arbitrary shell 대신 설치된 profile 또는 검증한 `tests.*` dotted test 이름만 허용한다.
 추가 test 인자와 resource 상한은 supervisor가 결정한다. 입력이 코드로 실행되는 곳은 격리된
@@ -93,6 +98,28 @@ worker이며 운영 서버/운영 DB 환경변수를 전달하지 않는다.
 미지원 workload·잘못된 baseline·window·coverage는 실행 전에 명시적으로 실패한다.
 전체/단독/제외/조합과 descendant 제외는 기존 recorded executor가 소유한다.
 결과를 맞추기 위해 제외한 workload의 과거 결과를 주입하지 않는다.
+
+## 개발 종료와 권한 회수
+
+`kiwoom-nas revoke`에는 path·shell·resource 인자를 받지 않는다. operator flock을 획득해
+진행 중인 job/deploy와 충돌하지 않게 하고, 설치 snapshot의 고정 대상·hash·mode 및
+백업을 먼저 검증한다. 삭제/복구 대상은 `/etc/sudoers.d/kiwoom-nas-operator`,
+`/usr/local/bin/kiwoom-nas`, `/usr/local/sbin/kiwoom-nas-root` 세 경로다.
+기존 client/launcher가 있었다면 원래 bytes·mode를 복구한다.
+
+prepared journal을 durable하게 기록한 다음 sudoers 규칙을 먼저 삭제·fsync하고 전체
+`visudo -c`를 검사한다. 그 뒤 client/launcher를 복구하고 revoked를 기록한다. 정리 실패나
+취소 뒤에도 NOPASSWD 규칙을 다시 설치하지 않는다. prepared/revoked 상태는 일반 변경
+명령을 차단한다. 중단 후 재시도는 이미 복구된 파일도 검증하여 같은 결과로 수렴한다.
+
+권한 회수는 운영 API의 정상 응답이나 CPU controller 지원에 의존하지 않는다. 운영
+서비스와 데이터에 접근하지 않는 고정 파일 정리이므로 capture를 중단하거나 서버를
+재시작하지 않는다. 실행 중인 operator와 미완료 job/deploy는 먼저 drain/복구해야 한다.
+
+관리자 복구용 root-owned supervisor/config/백업과 사설 reports·trace·baseline은 보존한다.
+이는 무암호 실행 경로가 아니다. 회수 후 실패한 정리를 재시도하려면 관리자가 기존
+일반 sudo 인증으로 검증된 설치 Python과 보호 경로의 `nas_operator.py revoke`를 호출한다.
+재설치와 사설 진단 자료 삭제는 별도 관리자 작업이며 자동 수행하지 않는다.
 
 ## 입력 수입과 경로 안전
 
@@ -138,6 +165,11 @@ master/trace/run 활성, workload pause, `running/stopping/awaiting_persistence/
 운영 network, socket, host PID/IPC, 장치, 운영 secrets/data, Docker socket을 mount하지 않는다.
 candidate source/trace/baseline은 read-only, workspace/report/tmp만 작업별 writable이다.
 worker는 non-root, no-new-privileges/cap-drop 및 memory/CPU/timeout 상한을 적용한다.
+이 NAS에서는 CFS quota가 지원되지 않아 `--cpuset-cpus`를 사용한다. 설치 시 허용 CPU 중
+최대 2개를 worker에 지정하고 PG는 그중 1개만 사용한다. 두 job의 합계도 같은 2개 코어
+안에 머무른다. 이는 코어 독점이나 CPU 사용시간 quota를 뜻하지 않는다. 설치 전 별도
+컨테이너 probe, 실제 PG의 Cpus_allowed_list, worker affinity 및 Docker 설정을 검증하며
+메모리 제한도 컨테이너 내부에서 확인한다.
 PG 초기화에 필요한 권한은 별도 고정 profile로 두고 worker 권한과 혼합하지 않는다.
 지원 안 되는 필수 격리/메모리 제한은 gate 실패로 처리한다. NAS의 pids 제한 미지원은 별도
 표시하고, timeout/메모리 한도를 실제 확인하며 이를 지원됨으로 출력하지 않는다.
@@ -183,14 +215,17 @@ pointer를 대조하여 복구하고, 모호하면 자동 진행하지 않는다
 3. 같은 container를 사용하는 deploy/rollback journal과 실패 복구를 구현한다.
 4. 설치기·client·실행 안내와 root-protection/visudo 복구 검증을 완성한다.
 5. PC에서 가능한 회귀를 실행하고 Linux/NAS 전용 미검증 항목을 정확히 남긴다.
-6. **후속 승인 후**, 녹화 및 durable persistence 완료를 확인하고 NAS 격리 acceptance,
-   최초 설치, 실제 최소 명령 검증을 수행한다. 지금은 1~5 구현 준비까지만 승인되어 있다.
+6. 녹화 및 durable persistence 완료를 재확인하고 NAS 격리 acceptance,
+   최초 설치, 실제 최소 명령 검증을 수행한다. 사용자의 설치 진행 승인은 확보됐다.
+7. 개발 종료 시 `revoke`로 임시 무암호 실행 규칙을 회수한다.
 
 필수 공격/회귀 사례: shell metacharacter/option injection, inherited DOCKER_HOST/PYTHONPATH,
 symlink/hardlink/parent 교체, manifest 중도 변경, 임의 mount/DSN, 다른 UID, 부족한 memory/disk,
 동시 명령, capture start-vs-deploy, failed trace retained RAM, 예약 대기, 권한/ACL 이상,
 DB container 불변, commit-ack loss, child timeout, label mismatch, stop/start/health/rollback 실패,
 active pointer/journal fsync 실패, interrupted install/visudo 실패와 이전 상태 복원.
+권한 회수에는 unlink/restore/final journal 취소·실패, visudo 오류·timeout, 변경된 파일·백업,
+기존 sudoers 충돌, active operator 잠금 및 회수 후 일반 변경 명령 차단을 검증한다.
 skip만 있는 suite 및 테스트 로딩 오류를 성공으로 처리하지 않는다. `httpx2`를 추가하지 않는다.
 
 구현 파일과 portable 테스트는 준비됐다. Linux gate와 NAS 설치 acceptance는 별도이며,

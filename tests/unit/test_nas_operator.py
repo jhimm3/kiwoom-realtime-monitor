@@ -4,6 +4,7 @@ import ast
 import contextlib
 import copy
 import hashlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -100,6 +101,15 @@ def idle_snapshot(state='off'):
 
 
 class NasOperatorTests(unittest.TestCase):
+    def test_revoke_has_no_path_or_shell_arguments_and_cannot_restore_sudo_access(self):
+        self.assertEqual('revoke', op.parser().parse_args(['revoke']).command)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            op.parser().parse_args(['revoke', '--path', '/etc/other'])
+        with self.assertRaisesRegex(op.Rejected, 'sudo_access_must_not_be_restored'):
+            op.restore_access_file(op.SUDOERS, (b'old sudo rule', 0o440))
+        with self.assertRaisesRegex(op.Rejected, 'access_path_outside_scope'):
+            op.restore_access_file('/etc/other', None)
+
     def test_identifiers_and_file_paths_reject_traversal_options_and_shell_text(self):
         for value in ('../other', '/etc/passwd', '-v', 'x;id', 'x\ny', 'x\\y', '', 'x' * 161):
             with self.subTest(value=value), self.assertRaises(op.Rejected):
@@ -211,7 +221,7 @@ class NasOperatorTests(unittest.TestCase):
             operator.docker(['inspect', 'server-id'])
 
     def test_worker_has_no_live_mount_socket_secrets_or_host_network(self):
-        config = {'worker_memory': 4 * 1024 ** 3, 'worker_cpus': 2, 'helper_dir': '/root/helper',
+        config = {'worker_memory': 4 * 1024 ** 3, 'worker_cpuset': '0,1', 'helper_dir': '/root/helper',
                   'runtime_image_id': 'sha256:fixed'}
         operator = op.Operator(config, MemoryTree())
         args = operator.worker_argv('a' * 32, 'pg', 'release')
@@ -224,6 +234,32 @@ class NasOperatorTests(unittest.TestCase):
         self.assertNotIn('--privileged', args)
         self.assertEqual(['-I', '/opt/kiwoom-operator/nas_operator_worker.py'], args[-2:])
         self.assertEqual(str(config['worker_memory']), args[args.index('--memory') + 1])
+        self.assertEqual('0,1', args[args.index('--cpuset-cpus') + 1])
+        self.assertNotIn('--cpus', args)
+
+    def test_cpu_lists_are_bounded_and_invalid_or_duplicate_ranges_fail(self):
+        self.assertEqual({0, 1, 4}, op.cpu_set('0-1,4'))
+        for value in (None, '', '0,0', '0-1,1', '2-1', '-1', '0;echo', '4096', '0-9999', ' 0', '0,'):
+            with self.subTest(value=value), self.assertRaises(op.Rejected):
+                op.cpu_set(value)
+
+    def test_cpu_pool_preserves_sparse_host_affinity_and_caps_both_jobs(self):
+        config = op.cpu_limits({2, 4, 6, 8})
+        self.assertEqual({'worker_cpuset': '2,4', 'pg_cpuset': '2'}, config)
+        self.assertEqual(({2, 4}, {2}), op.validate_cpu_limits(config, {2, 4, 6, 8}))
+        op.verify_cpu_affinity('2,4', '2,4')
+        op.verify_cpu_affinity('0-1', '0,1')
+        for invalid in ({'worker_cpuset': '0-2', 'pg_cpuset': '0'},
+                        {'worker_cpuset': '0-1', 'pg_cpuset': '0-1'},
+                        {'worker_cpuset': '0-1', 'pg_cpuset': '2'},
+                        {'worker_cpuset': '0-1', 'pg_cpuset': '0'}):
+            with self.subTest(config=invalid), self.assertRaises(op.Rejected):
+                op.validate_cpu_limits(invalid, {2, 4, 6, 8})
+        with self.assertRaisesRegex(op.Rejected, 'cpu_limit_not_enforced'):
+            op.verify_cpu_affinity('0-3', '0-1')
+        for unavailable in ({0}, set(), {0, True}, {0, 5000}):
+            with self.subTest(available=unavailable), self.assertRaises(op.Rejected):
+                op.cpu_limits(unavailable)
 
     def test_cleanup_refuses_another_container_with_matching_name_but_wrong_label(self):
         operator = op.Operator({}, None)

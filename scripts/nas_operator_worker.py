@@ -150,6 +150,7 @@ def main():
         require(os.getuid() != 0 and Path('/app/candidate/src').is_dir() and
                 not Path('/var/run/docker.sock').exists(), 'worker_isolation_required')
         limit = memory_limit()
+        affinity = ','.join(str(x) for x in sorted(os.sched_getaffinity(0)))
         request = json.loads((WORK / 'request.json').read_text())
         # Only temporary fixture input is visible. No inherited operational configuration.
         sys.path[:0] = [str(ROOT / 'src'), str(ROOT)]
@@ -159,6 +160,7 @@ def main():
             diagnostic_url, replay_url = database_setup(request)
             outcome = test(request, diagnostic_url, replay_url) if request['command'] == 'test' else replay(request, replay_url)
         outcome['memory_limit_bytes'] = limit
+        outcome['cpu_affinity'] = affinity
         return 0 if outcome['state'] == 'passed' else 1
     except Exception as error:
         outcome.update(error_type=type(error).__name__)

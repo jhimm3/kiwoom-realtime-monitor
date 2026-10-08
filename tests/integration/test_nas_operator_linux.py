@@ -1,5 +1,6 @@
 """Linux fd/permission tests. Run only in a disposable, offline container."""
 import hashlib
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import stat
 import tempfile
 import unittest
 from unittest.mock import patch
+import subprocess
 
 from scripts import nas_operator as op
 
@@ -129,6 +131,40 @@ class NasOperatorLinuxTests(unittest.TestCase):
                     with self.assertRaises(op.Rejected):
                         installer.check_acl('/protected', '/acl')
 
+    def test_resource_probe_cleans_up_on_success_bad_affinity_memory_and_start_failure(self):
+        from scripts import nas_operator_install as installer
+        from unittest.mock import Mock
+        for failure in (None, 'affinity', 'memory', 'start'):
+            supervisor = Mock()
+            supervisor.config = {'runtime_image_id': 'sha256:pinned', 'worker_cpuset': '0,1', 'pg_cpuset': '0'}
+            masks = iter(('0,1', '0'))
+            commands = []
+            def docker(args, **kwargs):
+                commands.append(args)
+                if args[0] == 'start':
+                    if failure == 'start':
+                        raise op.Rejected('docker_command_timeout')
+                    return json.dumps({'cpu_affinity': '0-3' if failure == 'affinity' else next(masks),
+                                       'memory_limit': 0 if failure == 'memory' else 268435456}).encode()
+                return b'created'
+            supervisor.docker.side_effect = docker
+            with self.subTest(failure=failure):
+                if failure:
+                    with self.assertRaises(op.Rejected):
+                        installer.probe_cpu_limits(supervisor)
+                else:
+                    result = installer.probe_cpu_limits(supervisor)
+                    self.assertEqual({'worker', 'pg'}, set(result))
+                    self.assertEqual('0', result['pg']['cpu_affinity'])
+                supervisor.cleanup_containers.assert_called_once()
+                for args in commands:
+                    if args[0] == 'create':
+                        self.assertEqual('none', args[args.index('--network') + 1])
+                        self.assertEqual('65534:65534', args[args.index('--user') + 1])
+                        self.assertIn('--cpuset-cpus', args)
+                        self.assertNotIn('--mount', args)
+                        self.assertNotIn('--cpus', args)
+
     def test_interrupted_install_restores_exact_bytes_and_removes_new_file(self):
         from scripts import nas_operator_install as installer
         with self.tree('private', protected=True) as private, self.tree('installed', protected=True) as installed:
@@ -144,6 +180,133 @@ class NasOperatorLinuxTests(unittest.TestCase):
             self.assertEqual(b'old', installed.read('existing'))
             self.assertFalse((root / 'added').exists())
             self.assertEqual('rolled_back', private.json('install-backup-index.json')['state'])
+
+    @contextlib.contextmanager
+    def revocation_fixture(self):
+        root = Path(tempfile.mkdtemp(prefix='revoke-', dir=self.directory))
+        paths = {'HELPER': str(root / 'helper'), 'CONFIG': str(root / 'config' / 'operator.json'),
+                 'ROOT_LAUNCHER': str(root / 'sbin' / 'kiwoom-nas-root'),
+                 'CLIENT': str(root / 'bin' / 'kiwoom-nas'),
+                 'SUDOERS': str(root / 'sudoers' / 'kiwoom-nas-operator')}
+        for directory in ('helper', 'config', 'sbin', 'bin', 'sudoers', 'private'):
+            (root / directory).mkdir(mode=0o700)
+        with patch.multiple(op, **paths), op.Tree(str(root / 'private'), owners=(0,), protected=True) as private:
+            entries = []
+            for number, path in enumerate(sorted(op.installed_paths())):
+                data = ('installed:' + path).encode()
+                mode = 0o440 if path == op.SUDOERS else 0o755
+                with op.Tree(str(Path(path).parent), owners=(0,), protected=True) as tree:
+                    tree.write(Path(path).name, data, mode)
+                old = b'previous client' if path == op.CLIENT else None
+                if old is not None:
+                    private.write('install-backups/' + str(number), old)
+                entries.append({'path': path, 'index': number, 'existed': old is not None,
+                                'mode': 0o750 if old else None,
+                                'sha256': hashlib.sha256(old).hexdigest() if old else None,
+                                'installed_sha256': hashlib.sha256(data).hexdigest(), 'installed_mode': mode})
+            private.put_json('install-backup-index.json', {'format': 2, 'state': 'complete', 'entries': entries})
+            private.write('reports/preserved.json', b'report')
+            private.write('traces/preserved/input', b'input')
+            runs = []
+            def run(args, **kwargs):
+                runs.append((args, kwargs))
+                return subprocess.CompletedProcess(args, 0, b'', b'')
+            yield op.Operator({'visudo': '/verified/visudo'}, private, run=run), runs
+
+    def test_revoke_restores_original_commands_preserves_inputs_and_is_repeatable(self):
+        with self.revocation_fixture() as (operator, runs):
+            result = operator.revoke_access()
+            self.assertTrue(result['temporary_access_revoked'])
+            self.assertFalse(Path(op.SUDOERS).exists())
+            self.assertFalse(Path(op.ROOT_LAUNCHER).exists())
+            self.assertEqual((b'previous client', 0o750), op.access_file(op.CLIENT))
+            self.assertEqual(b'report', operator.private.read('reports/preserved.json'))
+            self.assertEqual(b'input', operator.private.read('traces/preserved/input'))
+            self.assertTrue(Path(op.CONFIG).exists())
+            self.assertTrue(Path(op.HELPER + '/nas_operator.py').exists())
+            self.assertEqual('revoked', operator.access_state()['state'])
+            self.assertEqual(result, operator.revoke_access())
+            self.assertEqual(1, len(runs))
+            self.assertEqual(['/verified/visudo', '-c'], runs[0][0])
+
+    def test_interrupted_revoke_never_regrants_access_and_retry_finishes_cleanup(self):
+        for failure in ('rule_unlink', 'client_restore', 'final_journal'):
+            with self.subTest(failure=failure), self.revocation_fixture() as (operator, runs):
+                original_restore = op.restore_access_file
+                original_put = operator.private.put_json
+                def restore(path, value):
+                    original_restore(path, value)
+                    if (failure == 'rule_unlink' and path == op.SUDOERS or
+                            failure == 'client_restore' and path == op.CLIENT):
+                        raise KeyboardInterrupt('injected interruption after mutation')
+                def put(name, value):
+                    if failure == 'final_journal' and name == 'revocation.json' and value['state'] == 'revoked':
+                        raise OSError('injected final fsync failure')
+                    original_put(name, value)
+                with patch.object(op, 'restore_access_file', side_effect=restore), \
+                        patch.object(operator.private, 'put_json', side_effect=put), \
+                        self.assertRaises((KeyboardInterrupt, OSError)):
+                    operator.revoke_access()
+                self.assertFalse(Path(op.SUDOERS).exists())
+                self.assertEqual('prepared', operator.access_state()['state'])
+                with patch.object(operator, 'identities') as inspect, self.assertRaisesRegex(op.Rejected, 'operator_access_revoked'):
+                    with operator.fence():
+                        self.fail('revoked operator entered the deployment fence')
+                inspect.assert_not_called()
+                self.assertTrue(operator.revoke_access()['temporary_access_revoked'])
+                self.assertEqual((b'previous client', 0o750), op.access_file(op.CLIENT))
+                self.assertFalse(Path(op.ROOT_LAUNCHER).exists())
+
+    def test_failed_sudoers_validation_keeps_access_revoked_until_admin_retry(self):
+        with self.revocation_fixture() as (operator, runs):
+            for failure in ('nonzero', 'timeout'):
+                with self.subTest(failure=failure):
+                    def run(args, **kwargs):
+                        if failure == 'timeout':
+                            raise subprocess.TimeoutExpired(args, 15)
+                        return subprocess.CompletedProcess(args, 1, b'', b'sensitive error')
+                    with patch.object(operator, 'run_process', side_effect=run), self.assertRaises(op.Rejected):
+                        operator.revoke_access()
+                    self.assertFalse(Path(op.SUDOERS).exists())
+                    self.assertEqual('prepared', operator.access_state()['state'])
+            self.assertTrue(operator.revoke_access()['temporary_access_revoked'])
+
+    def test_revoke_rejects_changed_backups_files_and_previous_sudo_rule_before_mutation(self):
+        for failure in ('backup', 'file', 'previous_rule', 'scope', 'journal_hash'):
+            with self.subTest(failure=failure), self.revocation_fixture() as (operator, runs):
+                index = operator.private.json('install-backup-index.json')
+                client = next(entry for entry in index['entries'] if entry['path'] == op.CLIENT)
+                if failure == 'backup':
+                    operator.private.write('install-backups/' + str(client['index']), b'changed backup')
+                elif failure == 'file':
+                    with op.Tree(str(Path(op.CLIENT).parent), owners=(0,), protected=True) as tree:
+                        tree.write(Path(op.CLIENT).name, b'changed command', 0o755)
+                elif failure == 'previous_rule':
+                    next(entry for entry in index['entries'] if entry['path'] == op.SUDOERS)['existed'] = True
+                    operator.private.put_json('install-backup-index.json', index)
+                elif failure == 'scope':
+                    index['entries'][0]['path'] = '/etc/other-file'
+                    operator.private.put_json('install-backup-index.json', index)
+                else:
+                    operator.private.put_json('revocation.json', {'state': 'prepared', 'index_hash': 'wrong'})
+                with self.assertRaises(op.Rejected):
+                    operator.revoke_access()
+                self.assertTrue(Path(op.SUDOERS).exists())
+                self.assertEqual([], runs)
+
+    def test_revoke_refuses_active_lock_job_or_unfinished_deployment(self):
+        with self.revocation_fixture() as (operator, runs):
+            with operator.private.lock('operator.lock'), self.assertRaisesRegex(op.Rejected, 'operation_busy'):
+                operator.revoke_access()
+            operator.private.put_json('job.json', {'state': 'running'})
+            with self.assertRaisesRegex(op.Rejected, 'job_recovery_required'):
+                operator.revoke_access()
+            operator.private.put_json('job.json', {'state': 'complete'})
+            operator.private.put_json('deployment.json', {'state': 'needs_admin'})
+            with self.assertRaisesRegex(op.Rejected, 'deployment_recovery_required'):
+                operator.revoke_access()
+            self.assertTrue(Path(op.SUDOERS).exists())
+            self.assertEqual([], runs)
 
 
 if __name__ == '__main__':
