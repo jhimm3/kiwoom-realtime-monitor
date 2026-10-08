@@ -91,7 +91,7 @@
 | 파일/검사 | 확인한 유지보수 부담 | 개선 방향 | 우선순위 |
 |---|---|---|---|
 | [test_central_server_database.py:1015](../tests/unit/test_central_server_database.py#L1015), [1924](../tests/unit/test_central_server_database.py#L1924) | revision 실패/metadata 중단 검사가 `database_market_bars`의 private helper 위치를 patch해 DB 구현을 옮길 때 함께 수정해야 했음 | **완료:** SQLite는 임시 DB trigger로 실제 revision insert 뒤 실패시켜 bar/revision/metadata rollback을 확인한다. PostgreSQL fake cursor는 metadata UPSERT SQL/parameters와 commit/close를 직접 확인한다. 검사 57건 통과, 기존 test ID 유지. |
-| [test_central_server_app.py:649](../tests/unit/test_central_server_app.py#L649) | 요청 중 gateway 교체 검사가 `__code__.co_freevars`, `__closure__`와 `mock_order_gateway` 지역 변수 이름에 의존 | 기존 계좌 runtime/자격증명 교체 경계와 test fake gateway로 같은 요청 중 교체를 재현. 응답·events가 원래 gateway에 속한다는 assertion 유지. 테스트용 생산 setter 추가 금지 | P2, 계좌 경계 수정 시 |
+| [test_central_server_app.py:649](../tests/unit/test_central_server_app.py#L649) | 요청 중 fallback gateway 비활성화를 주입하려 closure의 freevar 이름/셀을 조사 | **유지 결정:** 이 검사는 await 중 계좌·gateway 전환이 발생해도 시작 시 선택한 gateway로 응답을 완성하는 동시성 계약이다. 현재 public test seam으로 같은 시점을 재현할 수 없고, 테스트 전용 생산 setter는 경계를 넓힌다. closure/route 구조를 옮길 때 이 한 검사를 다시 대조한다 | P2, 계좌 경계 수정 시 |
 
 테스트 간 결합은 기존 149개에서도 별도 확인했다. `test_central_server_app` → 미등록
 `test_daily_bar_coverage.window_with`, `test_entry_thesis` → `test_theme_leadership`의 고정 데이터,
@@ -254,7 +254,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_central_rest_broker.py](../tests/unit/test_central_rest_broker.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/3/3/0/0 |
 | [test_central_schema.py](../tests/unit/test_central_schema.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_central_schema_migrations.py](../tests/unit/test_central_schema_migrations.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_central_server_app.py](../tests/unit/test_central_server_app.py) | 149 등록 | 유지; P2 closure/공유 fixture 검토 | 1/0/15/0/0/0 |
+| [test_central_server_app.py](../tests/unit/test_central_server_app.py) | 149 등록 | 유지; closure 검사는 의도된 동시성 주입으로 상세 검토 후 유지 결정 | 1/0/15/0/0/0 |
 | [test_central_server_config.py](../tests/unit/test_central_server_config.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/3/0 |
 | [test_central_server_database.py](../tests/unit/test_central_server_database.py) | 기준선 149 등록 | 유지; DB 실패 주입 위치 의존 개선 완료 | 0/0/23/9/0/0 |
 | [test_central_server_db_api_connection.py](../tests/unit/test_central_server_db_api_connection.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/1/0/0/0 |

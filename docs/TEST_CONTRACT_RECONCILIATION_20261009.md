@@ -93,7 +93,8 @@ runner SHA256은 `659c4c11fd3546dec156b77d5fb24b37245f7ddd48cb8ee8c8f9741b672c93
 
 저장 invalidation, 공급자
 자격증명/조회 분리, 진단 지원 범위, DB 연결/소비자 guard, 영속 후보 identity를 자동 보호한다.
-현재 로컬 검증 단계는 완료했다. hosted GitHub CI와 disposable PostgreSQL 독립 환경 검증, Linux 5개,
-`test_central_server_app`의 closure P2 개선 필요성 판단은 남아 있다. 검증 공백·제외 이유와 방법을
+현재 로컬 검증 단계는 완료했다. `test_central_server_app`의 closure 주입은 요청 중 gateway snapshot을
+검증할 공개 대체 경계가 없어 유지하기로 했고 계좌 경계 변경 시 재검토한다. hosted GitHub CI와
+disposable PostgreSQL 독립 환경 검증, Linux 5개는 남아 있다. 검증 공백·제외 이유와 방법을
 원장에 기록하고 이 고위험 계약들의 별도 환경 검증 결과를 확인하면 이번 감사를 종료한다.
 409개 전체의 무기한 개선으로 확대하지 않는다. NAS 배포와 main 병합은 별도다.

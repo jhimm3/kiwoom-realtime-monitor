@@ -8,7 +8,7 @@
 격리 profile로 편입했다. 1,868건/38 worker의 현재 `all-local`과 새 테스트 모듈 누락 검사는
 통과했다. 17개 수정 테스트 중 등록된 6개는 현재 all-local에 포함됐고, 나머지 함수형 변환 11개는
 별도 45건 통과 결과가 있다. Linux 5개, 실제 PostgreSQL, 최신 hosted CI,
-`test_central_server_app` closure P2 판단은 아직 남았다.
+`test_central_server_app`의 closure 주입은 요청 중 gateway snapshot을 검증하므로 유지하기로 했고 계좌 경계 변경 시 재검토한다.
 기존 409개 조사나 NAS 배포/main 병합을 다시 시작하지 않는다.
 
 **2026-10-08 전체 409개 테스트 의존성 조사:**
