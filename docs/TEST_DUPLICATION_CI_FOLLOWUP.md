@@ -31,6 +31,7 @@
 | 미등록 선택 묶음 1·2 등록 후 | 290 | 5 | 118 | 413 |
 | 미등록 선택 묶음 1·2·3 등록 후 | 314 | 5 | 94 | 413 |
 | 미등록 선택 묶음 1·2·3·4 등록 후 | 338 | 5 | 70 | 413 |
+| 미등록 선택 묶음 1·2·3·4·5 등록 후 | 366 | 5 | 42 | 413 |
 
 기존 문서의 'manifest 미등록 226개' 중 5개는 CI 제외가 아니다. 다음 모듈은
 `.github/workflows/dependency-regression.yml`의 Ubuntu job에서 이미 실행한다.
@@ -749,3 +750,36 @@ unverified/leaked descendant 0이다. 최초 rename 오류 원인은 직접 증�
 실행 기록은 `tmp/regression/batch04-targeted/run.json`, `tmp/regression/batch04-all-local/run.json`,
 `tmp/regression/batch04-all-local-retry/run.json`이다. 이 묶음의 hosted CI는 feature branch 게시 후
 추가한다. 현재 Windows 미등록 후보는 70개이며 main 병합과 NAS 배포는 수행하지 않았다.
+
+## 2026-10-09 미등록 CI 선택 묶음 5
+
+다음 정렬 구간 24개 모듈을 검토하고, 공유 연구 fixture를 사용하는 4개 후속 모듈을 함께 확인했다.
+28개 신규 모듈/398건을 `dependency-audit-batch-05-research-campaign-and-recovery`에 선택 등록했다.
+연구 campaign 입력·예산·등록·실행, 개발 검증과 final holdout 복구, process/queue 종료, DB 상태 저장과
+failure recovery 계약을 보호한다. 기존 `test_research_process`와 `test_research_queue`도 fixture 결합
+영향 검증을 위해 같은 targeted profile에 포함했지만 이미 core에서 실행되므로 all-local 집계에는 중복되지 않는다.
+
+테스트 모듈끼리 request document, campaign request, queue spec helper를 import하던 결합을
+`tests/unit/research_test_support.py`로 옮겼다. 영향을 받은 13개 모듈의 assertion 목록은 이동 전후
+같다. `test_research_final_execution`에는 중첩되지 않은 fixture 속성 접근 오류가 있어, 준비된 평가의
+`warmup_seconds`를 변경하는 실제 policy drift 입력으로 바로잡고 기존 거부 assertion을 유지했다.
+이 변경은 제품 코드나 기대 동작을 바꾸지 않는다. transient Windows rename `PermissionError`가
+`test_research_campaign_nas`에서 한 번 발생했으나 재실행과 전체 targeted run은 통과했다. 원인은 미확정이며
+최초 실패 기록은 보존한다.
+
+선택 profile은 기존 core 두 모듈을 포함해 30개 모듈/415건 통과했다. 최종 fixture import 정리 후
+`test_research_campaign_inputs`도 23/23 통과했다. 최종 전체 `all-local`은 Windows 366개 모듈/3,334건/
+225 worker 통과, failure/error/skip/unexpected success/unrun/timeout/missing module/leaked descendant
+0이며 worker process tree 종료는 225/225다. 신규 test module 누락 검사도 통과했다. 제한된 sandbox에서
+Windows Proactor loopback socketpair 내부 accept가 멈춰 실행을 중단했지만, 동일 unchanged test는
+사용자 Windows 실행 권한에서 통과했고 전체 검증도 그 권한에서 완료했다. 이는 테스트 실패로 계산하지 않는다.
+실행 기록은 `tmp/regression/batch05-targeted-retry/run.json`,
+`tmp/regression/batch05-focused-recheck/run.json`, `tmp/regression/batch05-all-local-elevated/run.json`이다.
+
+B4 hosted run [37931617482](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37931617482)은
+Windows 338개 모듈/2,964건/198 worker, Linux 전용 65건/5개 모듈, disposable PostgreSQL 87건과 schema 21
+저장 경계 63개 및 rollback 검사를 통과했다. local/hosted manifest와 runner hash가 일치했다. 테스트 파일
+13개의 raw hash 차이는 Windows CRLF와 hosted LF checkout 차이였고 CRLF 정규화 후 모두 같았다.
+
+현재 Windows 등록 범위는 366개, Linux 전용은 5개, Windows 후보는 42개다. B5 hosted 검증은 게시 뒤
+확인하며, main 병합·NAS 검증 및 배포는 별도다.

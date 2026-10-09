@@ -1,5 +1,15 @@
 # 남은 작업과 보류 사항
 
+**2026-10-09 미등록 CI 5차 묶음:** 28개 신규 연구·campaign·복구 모듈/398건을 선택 등록했다.
+공유 fixture를 `research_test_support.py`로 분리했고, 영향을 받은 13개 모듈의 assertion AST 목록이
+유지됨을 확인했다. 깨져 있던 policy drift 입력만 실제 prepared evaluation 값 변경으로 수정했으며 거부
+assertion은 보존했다. 선택 profile 30개 모듈/415건 통과, 최종 전체 `all-local` 366개 모듈/3,334건/
+225 worker 통과, 실패·오류·skip·미실행·timeout·누락·잔류 자손 0, worker tree 종료 225/225다.
+제한 sandbox의 Proactor loopback 멈춤은 사용자 Windows 권한에서 재검증했고 전체 run도 완료했다.
+test discovery guard도 통과했다. B5 GitHub hosted 검증은 branch 게시 후 확인한다. Windows 등록 366개,
+Linux 별도 5개, 미등록 후보 42개다. 상세 실행 기록과 선택 이유는
+[테스트 후속 보고](TEST_DUPLICATION_CI_FOLLOWUP.md)를 따른다. main 병합과 NAS 배포는 별도다.
+
 **2026-10-09 미등록 CI 2차 묶음:** 다음 정렬 구간 24개 모듈을 검토해 24개/160건을
 `dependency-audit-batch-02-historical-runtime-contracts`에 편입했다. 공유 테스트 fixture를
 테스트 모듈 간 import에서 `historical_news_test_support.py`로 옮겼고 기존 7개 테스트 파일의
@@ -37,7 +47,10 @@ Windows `PermissionError` 1건으로 실패했고 worker tree는 종료됐다. �
 8건을 다시 실행해 통과했고, 새 전체 실행 338개 모듈/2,964건/198 worker도 통과했다. 이 두 번째
 전체 실행에서 실패·오류·skip·기대 실패·예상 밖 성공·미실행·timeout·미검증 source·잔류 자손·누락
 모듈은 0이다. 첫 오류의 원인은 확정되지 않아 실패 기록은 그대로 보존한다.
-이 묶음의 GitHub CI는 branch 게시 후 실행한다. Windows 등록 범위는 338개, 미등록 후보는 70개다.
+이 묶음의 [GitHub CI 37931617482](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37931617482)은
+Windows 338개 모듈/2,964건/198 worker, Linux 65건/5개 모듈, disposable PostgreSQL 87건과 schema 21
+저장 경계 63개 및 rollback 검사를 통과했다. manifest·runner hash는 local과 일치했고 13개 테스트 파일의
+raw hash 차이는 CRLF/LF checkout 차이로 정규화 후 일치했다. Windows 등록 범위는 338개, 미등록 후보는 70개다.
 실행 기록은 `tmp/regression/batch04-targeted/run.json`,
 `tmp/regression/batch04-all-local/run.json`, `tmp/regression/batch04-all-local-retry/run.json`이다.
 

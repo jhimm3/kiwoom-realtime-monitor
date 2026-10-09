@@ -14,7 +14,7 @@ from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy, ca
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository, _MIGRATIONS
 from kiwoom_monitor.infrastructure.persistence.schema_migrations import SQLiteMigrationRunner
 from kiwoom_monitor.research_process import execute_campaign_cycle, execute_research, run_campaign_worker
-from test_research_campaign_execution import write_campaign_request
+from research_test_support import write_campaign_request
 
 
 class CampaignWorkerTests(unittest.TestCase):

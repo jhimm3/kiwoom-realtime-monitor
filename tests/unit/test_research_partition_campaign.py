@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import test_research_partition_search as search_fixture
-from test_research_campaign_execution import write_campaign_request
+from research_test_support import write_campaign_request
 from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy
 from kiwoom_monitor.application.research_search import ExperimentSpec
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository, _MIGRATIONS
