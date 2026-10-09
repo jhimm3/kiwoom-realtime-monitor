@@ -25,7 +25,8 @@
 | replay admission 안전 4개 등록 시점 | 221 | 5 | 187 | 413 |
 | causal replay lifecycle 5개 등록 시점 | 226 | 5 | 182 | 413 |
 | TOP20 replay boundaries 4개 등록 시점 | 230 | 5 | 178 | 413 |
-| TOP20 input contracts 5개 등록 후 현재 | 235 | 5 | 173 | 413 |
+| TOP20 input contracts 5개 등록 시점 | 235 | 5 | 173 | 413 |
+| trace persistence 5개 등록 후 현재 | 240 | 5 | 168 | 413 |
 
 기존 문서의 'manifest 미등록 226개' 중 5개는 CI 제외가 아니다. 다음 모듈은
 `.github/workflows/dependency-regression.yml`의 Ubuntu job에서 이미 실행한다.
@@ -446,3 +447,59 @@ REG ACK/epoch/owner 및 fixture seed의 금지 상태가 실제 검증 경계이
 검증으로 대체하지 않는다. 미등록 실행 계획은 기존 coverage audit을 유지하며 장시간
 `top20_replay_execution`(이전 약 94초), `top20_session_plan`(약 62초)은 이번 묶음에 넣지 않았다.
 timeout·sleep·assertion을 줄여 실행 비용을 숨기지 않았다. 운영 배포·main 병합은 별도다.
+
+## 2026-10-09 trace persistence 후속
+
+직전 `ba835728381a9dc4039f1a0d9894358c46a94235`의
+[hosted run 37913894768](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37913894768)은
+Windows 2,413건/95 worker/235개 모듈, Linux 65건, disposable PostgreSQL 87건과 63개 저장
+경계 검사를 통과했다. 실제 계획·발견/실행 수·게시 commit·파일 hash·소스 및 worker/process tree
+종료를 대조했다. 비정상 결과/skip/미실행/잔류 자손은 0이다.
+
+이번에는 기존 조사에서 미등록이었던 trace 자체와 durable/deferred 저장, commit 지표와 control
+lease 5개를 선택했다. replay 소비 검사를 추가하는 것과 달리 입력 증거의 영속화·실패의 가시성·
+진단 수명·측정 의미를 보호한다. RAM compression만 검사하는 기존 trace RAM이나 workload API와
+일부 영역은 겹치지만 입력·assertion·실패 주입·실행 경계가 달라 삭제할 완전 중복은 아니다.
+
+| 모듈 (`tests.unit.test_` 이후) | 보호하는 계약 | 현재 실제 실행 | 로컬 worker 비용 |
+|---|---|---:|---:|
+| `diagnostic_trace` | 실제 chunk 순서·checksum·overflow·65분 envelope의 bounded burst·run lock·중단 복구 7건 | 7 | 2.35초 |
+| `diagnostic_trace_batches` | payload fsync·chunk publication·최종 manifest 완료·실패·stop 중 도착 보존 8건; fixture writer 종료 확인 | 8 | 1.78초 |
+| `diagnostic_trace_deferred` | 33,001행 RAM→디스크 순서·deadline·중단·메모리/event 한도·host/container headroom 9건; fixture writer 종료 확인 | 9 | 3.91초 |
+| `diagnostic_flush_metrics` | commit window와 wait 표본 정렬·불완전 probe·성공 cycle 집계·thread 간 flush ID 6건 | 6 | 0.37초 |
+| `diagnostic_workloads` | master/child lease·독립 만료·pause 복구·capture off 초기화·측정 불가와 0 구분 9건 | 9 | 0.48초 |
+
+`dependency-audit-p2-trace-persistence`를 manifest 끝에 추가했다. 기존 235개와 모든 core/profile
+항목·순서는 그대로다. 전후 39/39의 모듈별 발견·실행 수가 같고 모든 비정상 집계/미실행/
+잔류 자손 0, worker/process tree 종료 5/5다. 추가 worker 비용은 로컬 약
+8.88초다. 65분 envelope와 33,001행은 통제 burst/fixture 검사이며
+실제 65분 운영 부하나 8GiB 장중 수용을 검증했다는 뜻이 아니다.
+기록: `tmp/regression/trace-persistence-before/run.json`, `trace-persistence-after/run.json`.
+
+확인된 수정 대상은 `held_capture`/`deferred_capture`의 fixture 종료 판정이다. stop은 제한 시간
+join 뒤 상태를 반환할 수 있는데 helper는 실제 writer가 살아 있는지 검사하지 않았다.
+별도 프로세스에서 실제 final manifest 경계를 gate로 막고 stop의 join 시간을 0으로 줄이는 결함을
+주입했다. 변경 전 두 helper는 writer가 살아 있는데도 정상 반환했다. 변경 후 두 helper 모두
+AssertionError로 실패한다. probe는 외부 temporary directory를 유지하고 gate를 해제한 뒤 실제
+writer 종료를 확인해 원본 데이터·제품 소스·잔류 작업을 남기지 않았다.
+기록: `tmp/regression/trace-fixture-exit-before.json`, `trace-fixture-exit-after.json`.
+
+helper는 start 직후 실제 소유 thread 참조를 보존하고 stop 뒤 is_alive를 검사한다. global 현재 thread
+교체나 terminal 상태만으로 종료를 추정하지 않는다. master off는 finally에서 유지한다. 기존
+본문의 assertion을 AST로 대조해 모두 동일하고 새 공용 계층·제품 수명 변경은 없다.
+공유 helper 소비자인 trace RAM·catalog capture profile·delivery record 3개도 별도 격리 실행해
+26/26 통과, 실제 발견/worker/process tree 종료·비정상 집계 0을 확인했다.
+기록: `tmp/regression/trace-persistence-helper-consumers/run.json`.
+
+실패 주입 검토: final manifest fsync 실패는 stopping→failed와 디스크 failed 상태를 검사한다.
+payload fsync/chunk rename 실패는 written=0·queued=1·blobs/chunks 미공개·다운로드 거부까지
+도달한다. durable sync gate는 새 도착 11행의 순서까지 확인한다. patch 적용 여부만 검사하거나
+동일 내용을 검사하지 않는 성공 mock으로 바꾸지 않았다. 내부 fsync·manifest·queue·LOCK·quota는
+실제 검증 대상이므로 유지했다. commit 지표의 private 함수도 wait-window 계산 경계가 검증 대상이다.
+절대 운영 경로를 읽는 대신 temporary control/trace 파일과 통제 /proc/cgroup 표본을 사용한다.
+
+현재 전체 413개 중 Windows 240개, 별도 Linux 5개, 미등록 후보 168개다. 168개는 기존 조사 원장의
+관련 변경 시 모듈별 격리 실행/후속 선택 profile 후보이며 이 단계에서 일괄 편입하지 않았다.
+장시간 native TOP20 execution/session 후보의 약 94초/62초 비용·선택 보류 근거도 유지한다.
+이번 stage의 전체 회귀는 검증된 변경을 게시한 뒤 hosted artifact로 판정하며 NAS 운영 검증·배포·
+main 병합은 별도다. 로컬 pass로 hosted나 운영 DB 검증을 대신하지 않는다.

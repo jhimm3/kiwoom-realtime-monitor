@@ -35,14 +35,19 @@ def held_capture():
             master = _set_tool(control, True, 300)["diagnostic_tool"]["session_id"]
             _set_trace(control, True, 120, expected_session=master)
             active = trace.start(seconds=60, store_inputs=True, collector_inputs=True)
+            worker = trace._THREAD
             try:
                 if not entered.wait(5):
                     raise TimeoutError("test disk worker did not start")
                 yield active["trace_id"], release
             finally:
                 release.set()
-                trace.stop(timeout=15)
-                _set_tool(control, False)
+                try:
+                    trace.stop(timeout=15)
+                    if worker.is_alive():
+                        raise AssertionError("capture writer did not exit before fixture cleanup")
+                finally:
+                    _set_tool(control, False)
 
 
 class DiagnosticTraceBatchTests(unittest.TestCase):

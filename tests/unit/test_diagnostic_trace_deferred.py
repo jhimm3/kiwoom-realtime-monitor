@@ -26,11 +26,16 @@ def deferred_capture():
             _set_trace(control, True, 120, expected_session=master)
             active = trace.start(seconds=60, store_inputs=True, collector_inputs=True,
                                  persist_at=time.time() + 3600)
+            worker = trace._THREAD
             try:
                 yield active['trace_id'], control
             finally:
-                trace.stop('server_shutdown', timeout=15)
-                _set_tool(control, False)
+                try:
+                    trace.stop('server_shutdown', timeout=15)
+                    if worker.is_alive():
+                        raise AssertionError('capture writer did not exit before fixture cleanup')
+                finally:
+                    _set_tool(control, False)
 
 
 def wait_state(state, timeout=5):
