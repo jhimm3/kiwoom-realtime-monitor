@@ -27,14 +27,16 @@ class FakeClient(FullChartClient):
 class DailyHighServiceTests(unittest.TestCase):
     def test_nas_wrappers_preserve_verified_highs_without_local_tr(self) -> None:
         import tempfile
-        from datetime import date, timedelta
+        from datetime import timedelta
         from pathlib import Path
         from kiwoom_monitor.infrastructure.kiwoom_rest.failover_client import FailoverKiwoomRestClient
         from kiwoom_monitor.infrastructure.kiwoom_rest.validation_client import ParallelValidationClient
         from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import CentralServerUnavailable
+        from kiwoom_monitor.application.daily_bar_coverage import daily_query_date
 
-        basis = date.today().isoformat()
-        rows = tuple({"trading_date": (date.today() - timedelta(days=i)).isoformat(),
+        query_date = daily_query_date()
+        basis = query_date.isoformat()
+        rows = tuple({"trading_date": (query_date - timedelta(days=i)).isoformat(),
                       "high": 2000 + i, "open": 1000, "low": 900, "close": 1500,
                       "volume": 10, "trade_value_million_won": 1} for i in range(250))
         coverage = {"query_basis_date": basis, "window_end": basis, "expected_count": 250,

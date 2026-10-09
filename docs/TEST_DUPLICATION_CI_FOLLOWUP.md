@@ -824,5 +824,17 @@ dataset을 처음부터 감시 폴더 밖에 생성하도록 바꿨다. 기본 �
   기록은 `tmp/regression/batch06-all-local/run.json`과
   `tmp/regression/batch06-all-local-final/run.json`이다.
 
-이번 묶음의 GitHub hosted 전체 CI는 아직 실행하지 않았다. 로컬의 두 파일 교체 오류 원인과 hosted 결과를
-구분해 후속 검증한다. main 병합, NAS 운영 DB 검증·배포는 수행하지 않았다.
+게시 commit `0da3339f93c96f339ff7bec7cfe6898079576f5d`의 B6 hosted run
+[37951316477](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37951316477)은
+Windows all-local에서 `test_daily_high_service` 한 모듈이 실패했다. GitHub Windows runner의 UTC 날짜와
+제품의 KST `daily_query_date()`가 날짜 경계에서 다를 수 있는데, fixture가 `date.today()`를 사용해
+coverage basis와 저장 행 날짜가 제품 query date와 달라졌다. 제품 동작은 수정하지 않고 테스트 입력을
+`daily_query_date()` 기준으로 맞췄다. 동일 모듈 9건과 B6 선택 profile 24개 모듈/222건이 통과했다.
+
+날짜 fixture 수정까지 포함한 최종 Windows `all-local`은
+`tmp/regression/batch06-all-local-post-ci-fix/run.json`에서 3,556건/249 worker 통과다. failure/error/skip/
+unrun/timeout/missing module/source unverified/leaked descendant는 모두 0이고, worker process tree 종료는
+249/249다. 수정된 `test_daily_high_service`도 최종 manifest에 포함됐다. 앞서 두 historical 모듈에서
+관측한 일시적 `WinError 5`는 이 최종 실행에서 재발하지 않았다. B6 hosted 전체 CI는 수정 commit을 게시한
+뒤 재실행해야 하며, 그 결과 전까지 hosted 검증은 미완료다. main 병합, NAS 운영 DB 검증·배포는 수행하지
+않았다.
