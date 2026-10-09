@@ -106,6 +106,14 @@ revision 일치·재시작·결정 재계산 금지의 최종 검증 강도를 �
 보존한다. 성공 수에 포함하지 않는다. 중단 후 해당 실행 경로를 가진 Python 부모·자식
 프로세스가 없음을 확인했다. DB gate 통과 뒤 최종 소스로 전체 회귀를 다시 판정한다.
 
+`a376176`의 PostgreSQL 151건은 통과했지만, 로컬 `main-merge-final-a376176`에서는
+직접 접속 감사 1건이 실패했다. 새 `isolated_observation_schema`의 관리 접속이 승인 원장에
+누락되어 `current=54 / approved=53`을 올바르게 거부했다. 이 실행은 중단 상태로 보존하며
+전체 통과로 집계하지 않는다. URL·실제 DB 확인, 고유 schema 소유권, finally 정리와 오류 전파를
+검토한 뒤 해당 함수의 접속 1개만 원장에 추가했다. 감사의 unapproved/stale 검증은 유지하며,
+현재 callsite 수 assertion만 실제 검토된 54개로 재계수한다. 관련 감사·fixture 검사부터 재실행하고,
+이 보완을 포함한 최종 commit에서 로컬 전체 및 hosted CI를 다시 확인한다.
+
 [409개 의존성 원장](TEST_DEPENDENCY_AUDIT.md), [260개 보호 계약](REGRESSION_COVERAGE_AUDIT.md),
 [후속 선택 편입·실패·개선 기록](TEST_DUPLICATION_CI_FOLLOWUP.md)을 재사용했다.
 기존 149개도 동일 기준으로 감사했던 결과를 유지하며, 현재 통과한다는 이유로 구조가 적절하다고 추정하지 않았다.
