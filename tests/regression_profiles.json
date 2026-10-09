@@ -351,6 +351,32 @@
       "tests.unit.test_historical_news_archive_dialog",
       "tests.unit.test_historical_news_archive_reader",
       "tests.unit.test_historical_news_blind_validation"
+    ],
+    "dependency-audit-batch-03-historical-and-runtime-contracts": [
+      "tests.unit.test_analyze_db_trace",
+      "tests.unit.test_central_resource_usage",
+      "tests.unit.test_historical_news_collector_heartbeat",
+      "tests.unit.test_historical_news_concurrent_preparation",
+      "tests.unit.test_historical_news_deferred_pipeline",
+      "tests.unit.test_historical_news_development_inputs",
+      "tests.unit.test_historical_news_event_split",
+      "tests.unit.test_historical_news_method_evaluation",
+      "tests.unit.test_historical_news_parallel_fetch",
+      "tests.unit.test_historical_news_pc_jobs",
+      "tests.unit.test_historical_news_purge_reset",
+      "tests.unit.test_historical_news_review_decisions",
+      "tests.unit.test_historical_news_review_dialog",
+      "tests.unit.test_historical_news_review_queue",
+      "tests.unit.test_historical_news_timing",
+      "tests.unit.test_historical_reconstruction",
+      "tests.unit.test_historical_research_readiness",
+      "tests.unit.test_historical_research_split",
+      "tests.unit.test_import_historical_market_news_to_nas",
+      "tests.unit.test_inspect_research_operation_receipts",
+      "tests.unit.test_investor_flow_service",
+      "tests.unit.test_journal_backup",
+      "tests.unit.test_journal_execution_projection",
+      "tests.unit.test_kiwoom_storage_audit"
     ]
   },
   "core_order_sha256": "36DAE599F514EC9356B7DC3EAB9C7B4F1033C4A27076EB8A7FCD931FBEB1810A"

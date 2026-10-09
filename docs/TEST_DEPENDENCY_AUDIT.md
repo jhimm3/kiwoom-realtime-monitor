@@ -6,9 +6,9 @@
 
 2026-10-09 중복/상시 CI 후속 분석 및 구현 진행: [판정·수정·검증 상태](TEST_DUPLICATION_CI_FOLLOWUP.md).
 최신 main 통합과 NAS/capture·replay·causal 종료·TOP20·trace 저장·진단 제어 선택 편입 뒤 1·2차
-선택 묶음 46개를 추가해 현재 전체 413개 중 Windows `all-local` 등록 290개, 별도 Linux CI 5개,
-미등록 후보 118개다. 기존 core 실행 순서는 보존했다. 2차 전체 로컬·선택 profile 결과와 hosted CI
-진행 상태는 [후속 보고](TEST_DUPLICATION_CI_FOLLOWUP.md)를 따른다.
+선택 묶음 70개를 추가해 현재 전체 413개 중 Windows `all-local` 등록 314개, 별도 Linux CI 5개,
+미등록 후보 94개다. 기존 core 실행 순서는 보존했다. 최신 전체 로컬 결과와 hosted CI 진행 상태는
+[후속 보고](TEST_DUPLICATION_CI_FOLLOWUP.md)를 따른다.
 409개 조사 대상의 중복 선별에서 삭제할 완전 중복은 확정되지 않았다. 실행기의 빈 모듈 false-green을
 차단했고, 검증된 선택 profile 26개를 추가했다. 관련 선택 profile 218건과 모듈 간 setup 결합 수정은
 통과했다. 전체 `all-local`과 hosted CI 결과는 후속 문서의 최신 상태를 따른다. 아래의 당시 manifest,

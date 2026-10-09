@@ -28,6 +28,8 @@
 | TOP20 input contracts 5개 등록 시점 | 235 | 5 | 173 | 413 |
 | trace persistence 5개 등록 시점 | 240 | 5 | 168 | 413 |
 | diagnostic controls 4개 등록 후 현재 | 244 | 5 | 164 | 413 |
+| 미등록 선택 묶음 1·2 등록 후 | 290 | 5 | 118 | 413 |
+| 미등록 선택 묶음 1·2·3 등록 후 | 314 | 5 | 94 | 413 |
 
 기존 문서의 'manifest 미등록 226개' 중 5개는 CI 제외가 아니다. 다음 모듈은
 `.github/workflows/dependency-regression.yml`의 Ubuntu job에서 이미 실행한다.
@@ -667,5 +669,31 @@ Windows 290개 모듈·2,713건·150 worker 통과, 실패·오류·skip·expect
 미실행·timeout·missing module·미검증 source·잔류 자손 0이다. 기록은
 `tmp/regression/batch02-targeted/run.json`, `tmp/regression/batch02-fixture-targeted/run.json`,
 `tmp/regression/batch02-all-local/run.json`이다. 두 번째 묶음의 GitHub hosted Windows/Linux/
-disposable PostgreSQL 결과는 현재 branch 게시 후 별도로 기록한다. NAS 운영 PostgreSQL은 이 결과에
+disposable PostgreSQL 결과도 [hosted run 37925187185](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37925187185)에서
+통과했다. Windows artifact는 2,713건/150 worker/290개 모듈이며 local과 manifest hash가 같다.
+Linux 65건/5개 모듈, disposable PostgreSQL 87건, schema 21의 저장 경계 63개와 rollback도 통과했다.
+hosted worker failure/error/skip/unrun/leaked descendant는 0이다. NAS 운영 PostgreSQL은 이 결과에
 포함하지 않으며 main 병합·NAS 배포도 하지 않는다.
+
+## 2026-10-09 미등록 CI 선택 묶음 3
+
+다음 정렬 구간 24개 모듈/113건을 순차 검토해 `dependency-audit-batch-03-historical-and-runtime-contracts`
+profile에 편입했다. 이 묶음에는 historical news 수집·복구·사람 검토·누수 방지 평가, 연구 readiness와
+reconstruction, investor flow, journal backup/projection, storage audit, DB trace/resource diagnostics가
+포함된다. 파일별 이름과 검증 목적은 manifest profile에서 확인할 수 있다. 기존 CI 순서는 유지했고
+선택 profile은 24 worker·113건 통과, failure/error/skip/unrun/worker 종료 이상 0이다.
+
+의존성 검토에서 `test_historical_news_pc_jobs`가 CI 등록 뉴스 이력 테스트의 private `_article`
+fixture를 import하는 결합을 확인했다. 입력 모양은 유지하면서 fixture를 해당 기능 테스트 안에 두었다.
+같은 파일의 인증 API 검사는 이전에 `TestClient` 선택 의존성 오류를 skip으로 허용하는 형태였다.
+기존 HTTPX `ASGITransport`와 앱의 lifespan을 사용해 요청 검증을 실행하도록 바꾸고, 인증 실패·제외 종목·
+422 입력·claim·complete 결과 assertion을 보존했다. 같은 transport로
+`test_import_historical_market_news_to_nas` API 검사도 실행한다. `httpx2`나 dependency 변경은 없으며,
+직접 관련된 세 모듈 20건이 통과했다. 테스트를 HTTPX async 경로로 옮긴 뒤 deprecated TestClient
+경고와 skip 조건이 없어졌다. 계약된 수신·DB 처리에 필요한 구현 경계 테스트는 유지했다.
+
+최종 local `all-local`은 Windows 314개 모듈·2,826건·174 worker 통과, 실패·오류·skip·expected
+failure·unexpected success·미실행·timeout·missing module·미검증 source·잔류 자손 0이다. 신규 테스트
+모듈 누락 검사도 통과했다. 기록은 `tmp/regression/batch03-targeted/run.json`과
+`tmp/regression/batch03-all-local/run.json`이다. 이 세 번째 묶음의 hosted CI 결과는 feature branch에
+게시한 뒤 갱신한다. 현재 미등록 Windows 후보는 94개다. NAS 운영 검증·배포와 main 병합은 수행하지 않는다.

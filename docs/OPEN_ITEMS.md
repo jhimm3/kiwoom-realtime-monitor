@@ -5,11 +5,24 @@
 테스트 모듈 간 import에서 `historical_news_test_support.py`로 옮겼고 기존 7개 테스트 파일의
 assertion AST가 모두 동일함을 확인했다. 직접 관련된 7개 모듈 27건과 선택 profile 160건,
 전체 `all-local` 290개 모듈/2,713건/150 worker가 통과했다. 실패·오류·skip·기대 실패·예상 밖 성공·
-미실행·timeout·잔류 자손·미등록 모듈은 0이다. 새 테스트 모듈 누락 검사도 통과했다. 이 묶음의
-GitHub hosted CI는 현재 branch에 게시 후 실행할 예정이다. Windows 등록 범위는 290개, 미등록 후보는
+미실행·timeout·잔류 자손·미등록 모듈은 0이다. 새 테스트 모듈 누락 검사도 통과했다. [GitHub CI
+37925187185](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37925187185)은 Windows
+전체 2,713건/150 worker/290개 모듈, Linux 65건/5개 모듈, disposable PostgreSQL 87건과 schema 21
+저장 경계 63개 및 rollback 검사를 모두 통과했다. Windows artifact manifest hash는 local과 같으며
+hosted worker failure/error/skip/unrun/leak은 0이다. Windows 등록 범위는 290개, 미등록 후보는
 118개다. 실행 기록은 `tmp/regression/batch02-targeted/run.json`,
 `tmp/regression/batch02-all-local/run.json`, `tmp/regression/batch02-fixture-targeted/run.json`이다.
 main 병합과 NAS 배포는 별도다.
+
+**2026-10-09 미등록 CI 3차 묶음:** 다음 정렬 구간 24개 모듈/113건을
+`dependency-audit-batch-03-historical-and-runtime-contracts`에 선택 등록했다. 뉴스 작업 테스트의
+테스트 모듈 fixture import를 로컬 도메인 fixture로 분리했고, 선택 의존성과 skip을 가진 API 테스트를
+기존 HTTPX ASGI transport와 앱 lifespan 검증으로 전환했다. 기존 응답 assertion은 유지했고 `httpx2`는
+추가하지 않았다. 관련 모듈 20건, 선택 profile 113건, 전체 `all-local` 314개 모듈/2,826건/174 worker가
+통과했다. 실패·오류·skip·기대 실패·예상 밖 성공·미실행·timeout·잔류 자손·미등록 모듈은 0이다.
+이 묶음의 GitHub CI는 현재 branch에 게시 후 실행한다. Windows 등록 범위는 314개, 미등록 후보는
+94개다. 실행 기록은 `tmp/regression/batch03-targeted/run.json`,
+`tmp/regression/batch03-all-local/run.json`이다.
 
 **2026-10-09 미등록 CI 1차 묶음:** 정렬 순서상 후보 24개를 검토해 22개 모듈/83건을 선택 profile에
 등록했다. 현재 Windows `all-local` 범위는 266개 모듈이고 미등록 후보는 142개다. 선택 profile

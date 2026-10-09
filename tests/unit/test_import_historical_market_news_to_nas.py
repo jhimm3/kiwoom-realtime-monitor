@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+
+import httpx
 
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from scripts.import_historical_market_news_to_nas import (
@@ -15,7 +18,6 @@ from scripts.preprocess_historical_news_to_nas import prepare_job
 
 class HistoricalMarketNewsImportTests(unittest.TestCase):
     def test_import_api_requires_authentication_and_accepts_market_batch(self) -> None:
-        from fastapi.testclient import TestClient
         from kiwoom_monitor.central_server.app import create_app
         from kiwoom_monitor.central_server.config import CentralServerSettings
         with tempfile.TemporaryDirectory() as directory:
@@ -25,25 +27,43 @@ class HistoricalMarketNewsImportTests(unittest.TestCase):
                          "title": "해외시장", "description": "해외 뉴스", "link": "https://example.com/1",
                          "published_at": "2020-01-01T15:00:01+00:00"},
                          "targets": [], "processing_excluded": False}]}
-            with TestClient(create_app(CentralServerSettings(
-                    f"sqlite:///{database}", "private-token"))) as client:
-                endpoint = "/api/v1/news/historical-market-articles"
-                self.assertEqual(401, client.post(endpoint, json=batch).status_code)
-                headers = {"Authorization": "Bearer private-token"}
-                self.assertEqual(200, client.post(endpoint, json=batch, headers=headers).status_code)
-                self.assertEqual(1, len(client.get(
-                    "/api/v1/news/market-feed?source=world", headers=headers).json()["items"]))
-                pc_batch = {**batch, "batch_id": "c" * 64, "processing_owner": "pc",
+
+            async def verify_requests() -> None:
+                app = create_app(CentralServerSettings(
+                    f"sqlite:///{database}", "private-token",
+                ))
+                async with app.router.lifespan_context(app):
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app),
+                        base_url="http://historical-market.test",
+                        timeout=5,
+                    ) as client:
+                        endpoint = "/api/v1/news/historical-market-articles"
+                        self.assertEqual(401, (await client.post(endpoint, json=batch)).status_code)
+                        headers = {"Authorization": "Bearer private-token"}
+                        imported = await client.post(endpoint, json=batch, headers=headers)
+                        self.assertEqual(200, imported.status_code)
+                        feed = await client.get("/api/v1/news/market-feed?source=world", headers=headers)
+                        self.assertEqual(1, len(feed.json()["items"]))
+                        pc_batch = {
+                            **batch, "batch_id": "c" * 64, "processing_owner": "pc",
                             "items": [{**batch["items"][0], "identity": "world-2",
                                        "document": {**batch["items"][0]["document"],
-                                                    "link": "https://example.com/2"}}]}
-                self.assertEqual(200, client.post(endpoint, json=pc_batch, headers=headers).status_code)
-                claimed = client.post(
-                    "/api/v1/news/historical-jobs/claim?stage=BODY&scope=pc_market",
-                    headers=headers).json()
-                self.assertEqual("world-2", claimed["article"]["identity"])
-                self.assertEqual("historical_market_pc_backfill",
-                                 claimed["article"]["collection_scope"])
+                                                    "link": "https://example.com/2"}}],
+                        }
+                        imported_pc = await client.post(endpoint, json=pc_batch, headers=headers)
+                        self.assertEqual(200, imported_pc.status_code)
+                        claimed = await client.post(
+                            "/api/v1/news/historical-jobs/claim?stage=BODY&scope=pc_market",
+                            headers=headers,
+                        )
+                        self.assertEqual("world-2", claimed.json()["article"]["identity"])
+                        self.assertEqual(
+                            "historical_market_pc_backfill",
+                            claimed.json()["article"]["collection_scope"],
+                        )
+
+            asyncio.run(verify_requests())
 
     def test_archived_market_articles_stay_in_feed_with_or_without_stock_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
