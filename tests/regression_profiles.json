@@ -377,6 +377,32 @@
       "tests.unit.test_journal_backup",
       "tests.unit.test_journal_execution_projection",
       "tests.unit.test_kiwoom_storage_audit"
+    ],
+    "dependency-audit-batch-04-market-news-and-storage-contracts": [
+      "tests.unit.test_krx_stock_catalog",
+      "tests.unit.test_local_api_config",
+      "tests.unit.test_local_storage_diagnostics",
+      "tests.unit.test_market_index_chart_service",
+      "tests.unit.test_market_news_sources",
+      "tests.unit.test_market_news_window",
+      "tests.unit.test_market_profile_settings",
+      "tests.unit.test_market_research_features",
+      "tests.unit.test_market_session",
+      "tests.unit.test_materialize_historical_news_seed",
+      "tests.unit.test_minute_chart_service",
+      "tests.unit.test_nas_source_runtime",
+      "tests.unit.test_nas_storage_mapping",
+      "tests.unit.test_naver_news_config",
+      "tests.unit.test_naver_stock_market_news",
+      "tests.unit.test_naver_stock_news",
+      "tests.unit.test_news_classification_benchmark",
+      "tests.unit.test_news_grouping",
+      "tests.unit.test_news_process",
+      "tests.unit.test_news_settings_dialog",
+      "tests.unit.test_news_window_coordinator",
+      "tests.unit.test_paddle_theme_ocr",
+      "tests.unit.test_parse_historical_news_page_versions",
+      "tests.unit.test_plan_historical_monthly_case_selection"
     ]
   },
   "core_order_sha256": "36DAE599F514EC9356B7DC3EAB9C7B4F1033C4A27076EB8A7FCD931FBEB1810A"

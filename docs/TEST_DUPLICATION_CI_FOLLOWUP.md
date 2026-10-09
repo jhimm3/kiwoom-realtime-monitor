@@ -30,6 +30,7 @@
 | diagnostic controls 4개 등록 후 현재 | 244 | 5 | 164 | 413 |
 | 미등록 선택 묶음 1·2 등록 후 | 290 | 5 | 118 | 413 |
 | 미등록 선택 묶음 1·2·3 등록 후 | 314 | 5 | 94 | 413 |
+| 미등록 선택 묶음 1·2·3·4 등록 후 | 338 | 5 | 70 | 413 |
 
 기존 문서의 'manifest 미등록 226개' 중 5개는 CI 제외가 아니다. 다음 모듈은
 `.github/workflows/dependency-regression.yml`의 Ubuntu job에서 이미 실행한다.
@@ -695,5 +696,56 @@ fixture를 import하는 결합을 확인했다. 입력 모양은 유지하면서
 최종 local `all-local`은 Windows 314개 모듈·2,826건·174 worker 통과, 실패·오류·skip·expected
 failure·unexpected success·미실행·timeout·missing module·미검증 source·잔류 자손 0이다. 신규 테스트
 모듈 누락 검사도 통과했다. 기록은 `tmp/regression/batch03-targeted/run.json`과
-`tmp/regression/batch03-all-local/run.json`이다. 이 세 번째 묶음의 hosted CI 결과는 feature branch에
-게시한 뒤 갱신한다. 현재 미등록 Windows 후보는 94개다. NAS 운영 검증·배포와 main 병합은 수행하지 않는다.
+`tmp/regression/batch03-all-local/run.json`이다. [GitHub hosted run 37927654479](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37927654479)도
+Windows 2,826건/174 worker/314개 모듈, Linux 65건/5개 모듈, disposable PostgreSQL 87건 및 schema
+21 저장 경계 63개와 rollback으로 통과했다. Windows artifact manifest hash는 local과 일치하고
+hosted failure/error/skip/unrun/leaked descendant는 0이다. 현재 미등록 Windows 후보는 94개다.
+NAS 운영 검증·배포와 main 병합은 수행하지 않는다.
+
+## 2026-10-09 미등록 CI 선택 묶음 4
+
+다음 파일명 정렬 구간 24개/138건을 `dependency-audit-batch-04-market-news-and-storage-contracts`에
+등록했다. 시장/종목 뉴스, API 설정·인증, DB 역할·revision·rollback, 프로세스 수명, OCR layout,
+저장 진단, 데이터 계보·selection tests다. 이번 선택은 기존 consumer와의 기능 차이 및 로컬 전용
+입력/DB fixture를 확인해 결정했다.
+
+| 모듈 | 건수 |
+|---|---:|
+| `test_krx_stock_catalog` | 2 |
+| `test_local_api_config` | 3 |
+| `test_local_storage_diagnostics` | 1 |
+| `test_market_index_chart_service` | 3 |
+| `test_market_news_sources` | 2 |
+| `test_market_news_window` | 3 |
+| `test_market_profile_settings` | 17 |
+| `test_market_research_features` | 7 |
+| `test_market_session` | 6 |
+| `test_materialize_historical_news_seed` | 2 |
+| `test_minute_chart_service` | 9 |
+| `test_nas_source_runtime` | 10 |
+| `test_nas_storage_mapping` | 2 |
+| `test_naver_news_config` | 2 |
+| `test_naver_stock_market_news` | 9 |
+| `test_naver_stock_news` | 3 |
+| `test_news_classification_benchmark` | 10 |
+| `test_news_grouping` | 10 |
+| `test_news_process` | 6 |
+| `test_news_settings_dialog` | 5 |
+| `test_news_window_coordinator` | 4 |
+| `test_paddle_theme_ocr` | 18 |
+| `test_parse_historical_news_page_versions` | 2 |
+| `test_plan_historical_monthly_case_selection` | 2 |
+
+`test_market_profile_settings`의 인증 API 회귀는 `TestClient` 대신 HTTPX `ASGITransport`와 app lifespan
+컨텍스트로 실행하도록 수정했다. 인증·요청 검증·읽기 응답·revision fail-closed assertion을 유지했다.
+직접 관련된 17건과 24개 선택 profile 138건이 통과했다.
+
+최초 local `all-local`은 2,964건 중 `test_historical_reconstruction`의 임시 경로
+`.export-*/`를 `export`로 rename할 때 Windows `PermissionError` 한 건을 기록했다. worker exit와
+process tree 종료는 확인했고 미실행은 없었다. 테스트 코드를 수정하지 않은 채 오류난 테스트 한 건과
+모듈 8건을 다시 실행해 통과했다. 새로운 `all-local`도 Windows 338개 모듈·2,964건·198 worker
+통과, failure/error/skip/expected failure/unexpected success/unrun/timeout/missing module/source
+unverified/leaked descendant 0이다. 최초 rename 오류 원인은 직접 증거가 없어 확정하지 않았다.
+실행 기록은 `tmp/regression/batch04-targeted/run.json`, `tmp/regression/batch04-all-local/run.json`,
+`tmp/regression/batch04-all-local-retry/run.json`이다. 이 묶음의 hosted CI는 feature branch 게시 후
+추가한다. 현재 Windows 미등록 후보는 70개이며 main 병합과 NAS 배포는 수행하지 않았다.

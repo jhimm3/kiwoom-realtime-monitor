@@ -20,9 +20,26 @@ main 병합과 NAS 배포는 별도다.
 기존 HTTPX ASGI transport와 앱 lifespan 검증으로 전환했다. 기존 응답 assertion은 유지했고 `httpx2`는
 추가하지 않았다. 관련 모듈 20건, 선택 profile 113건, 전체 `all-local` 314개 모듈/2,826건/174 worker가
 통과했다. 실패·오류·skip·기대 실패·예상 밖 성공·미실행·timeout·잔류 자손·미등록 모듈은 0이다.
-이 묶음의 GitHub CI는 현재 branch에 게시 후 실행한다. Windows 등록 범위는 314개, 미등록 후보는
-94개다. 실행 기록은 `tmp/regression/batch03-targeted/run.json`,
+이 묶음의 [GitHub CI 37927654479](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37927654479)도
+통과했다. Windows 2,826건/174 worker/314개 모듈, Linux 65건/5개 모듈, disposable PostgreSQL 87건과
+schema 21 저장 경계 63개 및 rollback이 통과했고 Windows manifest hash는 local과 같다. hosted
+실패·오류·skip·미실행·worker 누수는 0이다. Windows 등록 범위는 314개, 미등록 후보는 94개다.
+실행 기록은 `tmp/regression/batch03-targeted/run.json`,
 `tmp/regression/batch03-all-local/run.json`이다.
+
+**2026-10-09 미등록 CI 4차 묶음:** 다음 정렬 구간 24개 모듈/138건을
+`dependency-audit-batch-04-market-news-and-storage-contracts`에 선택 등록했다. 계좌 역할/CAS·rollback,
+뉴스 수집·화면·프로세스 수명, 개인 API 설정, 로컬/NAS 저장 진단, OCR 레이아웃, 역사 페이지 parser와
+월별 selection 계약을 포함한다. `test_market_profile_settings` API 검사는 기존 HTTPX ASGI/lifespan
+경로로 옮겼으며 요청·응답 assertion을 유지했다. 선택 profile 24 worker/138건 통과.
+첫 전체 `all-local`은 2,964건 중 `test_historical_reconstruction`의 임시 디렉터리 rename에서
+Windows `PermissionError` 1건으로 실패했고 worker tree는 종료됐다. 실패 테스트 단독 1건과 전체 모듈
+8건을 다시 실행해 통과했고, 새 전체 실행 338개 모듈/2,964건/198 worker도 통과했다. 이 두 번째
+전체 실행에서 실패·오류·skip·기대 실패·예상 밖 성공·미실행·timeout·미검증 source·잔류 자손·누락
+모듈은 0이다. 첫 오류의 원인은 확정되지 않아 실패 기록은 그대로 보존한다.
+이 묶음의 GitHub CI는 branch 게시 후 실행한다. Windows 등록 범위는 338개, 미등록 후보는 70개다.
+실행 기록은 `tmp/regression/batch04-targeted/run.json`,
+`tmp/regression/batch04-all-local/run.json`, `tmp/regression/batch04-all-local-retry/run.json`이다.
 
 **2026-10-09 미등록 CI 1차 묶음:** 정렬 순서상 후보 24개를 검토해 22개 모듈/83건을 선택 profile에
 등록했다. 현재 Windows `all-local` 범위는 266개 모듈이고 미등록 후보는 142개다. 선택 profile
