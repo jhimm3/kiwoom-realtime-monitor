@@ -251,6 +251,11 @@
       "tests.unit.test_kind_name_history",
       "tests.unit.test_project_historical_minute_exclusions",
       "tests.unit.test_dart_disclosure_filter"
+    ],
+    "source-integration-registration": [
+      "tests.unit.test_diagnostic_scoped_window",
+      "tests.unit.test_prepare_nas_operator_update",
+      "tests.unit.test_prepare_nas_scoped_replay"
     ]
   },
   "core_order_sha256": "36DAE599F514EC9356B7DC3EAB9C7B4F1033C4A27076EB8A7FCD931FBEB1810A"

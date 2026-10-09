@@ -5,11 +5,17 @@
 ## 현재 결정
 
 2026-10-09 중복/상시 CI 후속 분석 및 구현 진행: [판정·수정·검증 상태](TEST_DUPLICATION_CI_FOLLOWUP.md).
-현재 전체 410개 중 Windows `all-local` 등록 210개, 별도 Linux CI 5개, 미등록 195개다.
+최신 main 통합 뒤 현재 전체 413개 중 Windows `all-local` 등록 213개, 별도 Linux CI 5개, 미등록 195개다.
 409개 조사 대상의 중복 선별에서 삭제할 완전 중복은 확정되지 않았다. 실행기의 빈 모듈 false-green을
 차단했고, 검증된 선택 profile 26개를 추가했다. 관련 선택 profile 218건과 모듈 간 setup 결합 수정은
 통과했다. 전체 `all-local`과 hosted CI 결과는 후속 문서의 최신 상태를 따른다. 아래의 당시 manifest,
 '미커밋/hosted 미실행' 표현은 각 이전 검증 시점의 기록이다.
+
+2026-10-09 최신 main의 CI 누락 검토: `3c42285fc490cba4faffad46c7ad307453930780`의 Windows CI는
+새 unit module 3개의 미등록 때문에 전체 회귀 전에 실패했다. 해당 3개를 끝의 독립 profile로 등록했다.
+원래 409개와 이후 RAM module의 조사·분류를 다시 시작하거나 남은 195개를 일괄 편입하지 않았다.
+새 main module 15/15와 직접 관련된 DB·진단·실행기 243/243, 실제 이전 base를 지정한 새 모듈
+등록 guard가 통과했다. 최신 전체 회귀는 작업 전용 branch의 hosted CI와 이전 로컬 기록을 구분해 판정한다.
 
 ### 2026-10-09 최종 후속 회귀
 

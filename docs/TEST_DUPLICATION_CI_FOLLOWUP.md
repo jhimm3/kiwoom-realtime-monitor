@@ -1,22 +1,26 @@
 # 테스트 중복과 상시 CI 후속 판단
 
-2026-10-09 · 분석 기준 `914635ca1c3b939761b6a43b38db403cf9d419f1`
+2026-10-09 · 중복 분석 기준 `914635ca1c3b939761b6a43b38db403cf9d419f1`
+· 후속 소스 통합 기준 `3c42285fc490cba4faffad46c7ad307453930780`
 
 ## 범위와 현재 상태
 
 기존 [409개 의존성 조사](TEST_DEPENDENCY_AUDIT.md)를 재사용해 중복 후보와 CI 편입 우선순위를
 추가 검토했다. 제품 코드·기능 계약·기존 assertion·core 실행 순서는 변경하지 않았다.
 이 후속 작업에서는 실행기 발견 증거를 강화하고 선정한 26개 테스트 모듈을 격리 profile로 등록했다.
-최종 `all-local` 로컬 회귀는 통과했다. hosted GitHub CI는 아직 실행 전이다.
+분석 기준 소스의 `all-local` 로컬 회귀는 통과했다. 최신 main 위의 독립 회귀는 별도 GitHub CI에서 판정한다.
 
-GitHub에서 위 commit과 `main`을 비교한 결과 `main`이 merge commit 2개 앞서 있고 파일 차이는
-0개였다. 현재 `c32b`의 소스 내용으로 분석할 수 있다. 다른 작업 트리의 변경은 사용하지 않았다.
+정적 분석 시작 시점에는 위 commit과 `main`의 파일 차이가 0개였다. 이후 원격을 다시 갱신하니
+다른 작업의 DB·진단 소스 통합이 main에 추가돼 있었다. 기존 작업 branch는 이미 병합·삭제된 상태여서
+`codex/test-discovery-ci-followup`에서 기존 개선을 보존한 채 최신 main 위로 rebase했다.
+제품 코드에 이번 작업 자체의 변경을 추가하지 않았다. 이전 소스의 pass를 최신 소스의 pass로 승계하지 않는다.
 
 | 범위 | Windows all-local | 별도 Linux CI | 실제 CI 미편입 | 합계 |
 |---|---:|---:|---:|---:|
 | 원래 감사한 파일 | 183 | 5 | 221 | 409 |
 | 이후 추가된 `test_diagnostic_trace_ram` | 1 | 0 | 0 | 1 |
-| 후속 profile 적용 후 현재 파일 전체 | 210 | 5 | 195 | 410 |
+| 26개 후속 profile 적용 시점 | 210 | 5 | 195 | 410 |
+| 최신 main 신규 3개 등록 후 현재 파일 전체 | 213 | 5 | 195 | 413 |
 
 기존 문서의 'manifest 미등록 226개' 중 5개는 CI 제외가 아니다. 다음 모듈은
 `.github/workflows/dependency-regression.yml`의 Ubuntu job에서 이미 실행한다.
@@ -35,7 +39,8 @@ GitHub에서 위 commit과 `main`을 비교한 결과 `main`이 merge commit 2�
 
 ## 전체 중복 선별 결과
 
-현재 410개 파일 모두를 AST로 선별했다. 원래 409개는 전부 포함한다.
+중복 분석 기준의 410개 파일 모두를 AST로 선별했다. 원래 409개는 전부 포함한다.
+후속 main에서 추가된 3개는 아래 CI 누락 원인과 보호 계약을 별도로 검토했으며 이 정적 선별 수치에는 포함하지 않는다.
 
 - 완전히 동일한 파일 AST: 0쌍.
 - 함수 이름·문서 문자열을 제외하고 동일한 test 본문 AST: 0쌍.
@@ -127,9 +132,32 @@ reported_tests=1
 초기화에서 멈췄다. 프로젝트 임시 경로와 허용된 로컬 테스트 환경에서 해당 모듈을 다시 실행해
 통과와 process-tree 종료를 확인했다. `httpx2` 설치나 테스트 의존성 변경은 하지 않았다.
 
-26개가 검증·편입된 현재 기준 Windows all-local은 210개 고유 모듈, 별도 Linux 5개를 포함한
+26개를 검증·편입한 시점의 Windows all-local은 210개 고유 모듈, 별도 Linux 5개를 포함한
 상시 CI 모듈은 215개다. 원래 409개 조사 대상 가운데 Windows와 별도 Linux CI를 제외한
 미등록 테스트 모듈은 195개다. 이 수치의 미등록은 영구 제외 판정이 아니다.
+
+## 최신 main의 새 모듈 등록 누락 해결
+
+main commit `3c42285fc490cba4faffad46c7ad307453930780`의
+[hosted run 37884968601](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37884968601)은
+새 모듈 등록 guard에서 실패했고 Windows 전체 회귀는 실행되지 않았다. 별도 Linux/PostgreSQL job은 성공했다.
+로그에 표시된 누락 3개만 `source-integration-registration` 격리 profile로 추가했다.
+
+- `test_diagnostic_scoped_window`: 선택 범위·입력 누락 증거·payload 무결성·원본 manifest 보존.
+- `test_prepare_nas_operator_update`: shell 정규화와 bundle identity·경로 이탈 차단.
+- `test_prepare_nas_scoped_replay`: 원본 운영 소스·계약·manifest 보존과 후보 충돌/경로 이탈 거부.
+
+3개는 임시 파일·fake store만 사용하는 15건으로 실제 NAS나 운영 DB를 변경하지 않는다.
+최신 소스에서 15/15 및 관련 DB·진단·실행기 9개 모듈 243/243이 통과했다.
+기존 계좌 안전 19개/206건과 함수형 7개/12건도 최신 소스에서 다시 통과했다.
+이 변경 영향 검사 합계는 38개 worker/476건이며, failure/error/skip/expected failure/
+unexpected success/미실행 0, worker·process tree 종료 38/38, 잔류 자손 0이다.
+기록은 `tmp/regression/source-integration-registration/run.json`,
+`tmp/regression/source-followup-targets/run.json`, `tmp/regression/account-order-on-current-main/run.json`,
+`tmp/regression/functional-discovery-on-current-main/run.json`이다.
+main CI와 같은 이전 base `f2ba98cba75600089a076e2b6b5a7f3b490ba2b0`를 지정한 등록 guard도
+새 모듈 3개 모두 등록으로 통과했다. guard나 실패 판정을 완화하지 않았다.
+기존 core 순서와 26개 후속 profile은 그대로 두고 새 profile만 끝에 추가했다.
 
 ## 보류를 해석하는 기준과 나머지 195개
 
@@ -159,10 +187,10 @@ reported_tests=1
   잔류 자손 0이다. 최종 `run.json`에서 Windows 210개 모듈과 신규 26개 전부의 실행,
   모듈별 발견 수 및 실행 수를 대조했다. 전체 기록은
   `tmp/regression/test-dedup-ci-all-local-stable-final/run.json`이다.
-- 실행기 변경을 검증하기 위해 빈 테스트 모듈 누락 guard도 실행했다.
+- 새 테스트 파일 등록 guard도 실행했다.
   `--check-new-test-modules --base-ref HEAD --fallback-ref HEAD`는 새 테스트 모듈 0개로 통과했다.
   이는 현재 작업 트리의 모듈 목록 확인이며 PR base 대비 GitHub 검증 결과를 뜻하지 않는다.
-- 현재 `regression_profiles.json` manifest SHA256은
+- 위 2,136건 로컬 실행 당시 `regression_profiles.json` manifest SHA256은
   `f8de91fa502e6933b9fc097cd1835223750ae833f6845e2b8bdf018ef1c7057e`, 실행기 SHA256은
   `bbc7c5dfa8bcf36f4e60a62d0ccfb26787e47eb570bd4b032a61fd613db3c7b4`다. 기존 core 실행 순서 hash는
   `36DAE599F514EC9356B7DC3EAB9C7B4F1033C4A27076EB8A7FCD931FBEB1810A`로 보존됐다.
@@ -173,5 +201,6 @@ reported_tests=1
 완료된 후속 작업: 전체 정적 선별, 12쌍 수동 판정, 삭제할 완전 중복 0개 확인, 실행기 false-green
 공백 수정, 26개 선택 profile 등록, 관련 fixture 결합 수정, 선택 profile 218건 통과, 전체
 `all-local` 2,136건/70 worker 통과, 누락 guard 통과, 변경 목록과 CI 목록 대조다.
-남은 195개를 모두 CI에 편입한 것으로 표시하지 않는다. GitHub hosted CI는 아직 실행되지 않았으며,
-독립 환경 검증과 실제 PostgreSQL 검증은 완료 조건으로 남아 있다.
+남은 195개를 모두 CI에 편입한 것으로 표시하지 않는다. 최신 main 위의 전체 회귀·Linux·disposable
+PostgreSQL 검증은 이 작업 branch의 hosted CI 결과와 artifact를 기준으로 별도 판정한다.
+운영 NAS PostgreSQL 검증·배포·main 병합은 이번 후속 작업의 완료 조건에 포함하지 않는다.
