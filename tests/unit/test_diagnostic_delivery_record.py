@@ -173,6 +173,7 @@ class DeliveryRecordTests(unittest.TestCase):
                 trace._WAKE.set()
                 failed = wait_state('failed', 10)
                 trace._THREAD.join(5)
+                self.assertFalse(trace._THREAD.is_alive(), 'failed trace writer did not terminate')
             self.assertEqual(0, old.node._refs)  # The packed bytes, rather than native receipt, own the suffix.
             self.assertGreater(failed['packed_bytes'], 0)
             self.assertEqual((1, 0), (failed['queued'], failed['pending_events']))

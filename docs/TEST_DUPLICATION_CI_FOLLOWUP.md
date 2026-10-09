@@ -22,7 +22,8 @@
 | 26개 후속 profile 적용 시점 | 210 | 5 | 195 | 410 |
 | 최신 main 신규 3개 등록 시점 | 213 | 5 | 195 | 413 |
 | NAS/capture 안전 4개 등록 시점 | 217 | 5 | 191 | 413 |
-| replay admission 안전 4개 등록 후 현재 | 221 | 5 | 187 | 413 |
+| replay admission 안전 4개 등록 시점 | 221 | 5 | 187 | 413 |
+| causal replay lifecycle 5개 등록 후 현재 | 226 | 5 | 182 | 413 |
 
 기존 문서의 'manifest 미등록 226개' 중 5개는 CI 제외가 아니다. 다음 모듈은
 `.github/workflows/dependency-regression.yml`의 Ubuntu job에서 이미 실행한다.
@@ -294,3 +295,56 @@ Windows 비정상 결과/미실행/잔류 자손은 0이다. NAS/capture 묶음�
 현재 전체 413개 중 Windows 221개, 별도 Linux 5개, 단계적 미등록 후보 187개다.
 mock 기반 소유권 검사를 실제 PostgreSQL rollback/sequence 또는 NAS 운영 검증으로 보고하지 않는다.
 마지막 전체 검증은 이 변경을 게시한 commit의 hosted artifact로 판정한다.
+
+## 2026-10-09 causal replay lifecycle 후속
+
+직전 `a413b808cc600d54935caebb1be06848a1a4ed9b`의
+[hosted run 37908128544](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37908128544)은
+Windows 2,273건/81 worker/221개 모듈, Linux 65건, disposable PostgreSQL 87건과 63개 저장
+경계 검사를 통과했다. 전체 계획·발견/실행 수·게시 commit·파일 hash·worker/process tree 종료를
+대조했다. 비정상 결과/skip/미실행/잔류 자손은 0이다. replay admission 묶음의 최종 독립 검증은 완료됐다.
+
+다음 묶음은 녹화된 입력이 실제 실행·저장·종료로 이어지는 경계를 보호하는 기존 미등록 5개다.
+이미 등록된 payload/shape/lease 검사와 함께 유지한다. 전달 retention, REST tape 인과 관계,
+collector parser/checkpoint, actor 실행 순서, executor의 실제 종료가 각각 검증 대상이므로
+파일 이름이나 일부 입력이 비슷하다는 이유로 삭제·통합하지 않았다.
+
+| 모듈 (`tests.unit.test_` 이후) | 보호하는 계약 | 현재 실제 실행 | 로컬 worker 비용 |
+|---|---|---:|---:|
+| `diagnostic_collector_replay` | 실제 parser·checkpoint 단계·취소 후 native 저장과 final flush·continuity·운영 URL 차단 | 6 | 2.75초 |
+| `diagnostic_delivery_record` | 공유 retention·null/부재·순서·durable chunk·실패 suffix·새 epoch·거부의 incomplete 판정 | 7 | 1.99초 |
+| `diagnostic_rest_input` | 논리 요청/transport/cache/ingest 인과 입력·immutable tape·공유 소유권 불명확성·누락/오류 차단 | 14 | 1.99초 |
+| `recorded_execution` | 실제 SQLite natural key 저장·actor 순서/peer overlap·입력 선검증·실패/stop/cancel의 native drain | 15 | 2.93초 |
+| `top20_replay_runtime` | 실제 executor queue 소유·취소 후 thread drain·timeout quarantine·late native cache 완료·종료 순서 | 8 | 1.03초 |
+
+`dependency-audit-p2-causal-replay-lifecycle`를 manifest 끝에 추가했다. 기존 221개 등록 모듈,
+모든 profile·core 목록과 순서를 유지했다. 변경 전 50/50과 변경 후 50/50의 모듈별 발견 수·실행 수가
+같고, 두 실행 모두 모든 비정상 집계/미실행/잔류 자손 0, worker/process tree 종료 5/5다.
+합계 추가 worker 비용은 이번 로컬 측정 약 10.69초이며 과거 실행 비용만으로 현재 pass를 승계하지 않았다.
+
+확인된 수정 대상: `test_recorded_execution`의 stop/cancel·collector shutdown 취소 두 곳은
+assertion이 gate 해제 전에 실패하면 `release.set()`과 작업 회수를 건너뛰었다.
+별도 테스트 프로세스에서 기존 `assertFalse`에 의도한 assertion 실패를 주입했다.
+변경 전 release 미전송으로 native fixture의 자체 2초 timeout까지 기다렸다(2.008초).
+변경 후 동일 assertion 실패를 유지하면서 release 전송·native 작업 종료·active worker 0을
+확인했다(0.038초, native 호출 1회). 이 비교는 테스트 cleanup 검증이며 제품 성능 개선 수치가 아니다.
+기록: `tmp/regression/recorded-cleanup-before.json`, `recorded-cleanup-after.json`.
+
+두 검사는 기존 stop/cancel·not-done·not-finished·CancelledError·완료·호출 수 assertion을 유지했다.
+시작 대기는 bounded timeout과 조기 task 종료 확인으로 바꾸고, finally에서 gate를 항상 해제한 뒤
+실제 task 종료를 기다린다. cleanup의 `gather(return_exceptions=True)`는 본문의 예외 assertion을
+대체하지 않는다. assertion 실패는 그대로 실패로 기록된다. 제품 source와 기대값은 변경하지 않았다.
+`test_diagnostic_delivery_record`에는 기존 실패 writer join 뒤 실제 thread 종료 assertion 1개를 추가했다.
+
+의존성 판단: `_SESSION`/lock/refcount/queue/worker는 delivery 보존과 quota·실제 종료 구현 경계가
+검증 대상이므로 유지했다. 실제 parser/ingestor 및 SQLite를 이용한 결과 검증을 mock으로 바꾸지 않았다.
+deferred trace lifecycle fixture, 순수 입력 `events`/`identity`와 native test store의 공유는 유지했다.
+공용 계층을 추가하거나 모듈 경로를 숨기는 래퍼는 필요하지 않았다. 이 helper를 직접 사용하는
+trace RAM·baseline lease·cache clock·shared execution 4개도 별도 실행해 39/39 통과했고
+각 worker와 process tree 종료를 확인했다. helper 구현은 변경하지 않았다.
+
+기록: `tmp/regression/causal-replay-lifecycle-before/run.json`,
+`causal-replay-lifecycle-after/run.json`, `causal-replay-helper-consumers/run.json`.
+현재 전체 413개 중 Windows 226개, 별도 Linux 5개, 단계적 미등록 후보 182개다.
+로컬 before/after와 helper 검사 합계는 각각 50건/50건/39건이며 마지막 전체 검증은 게시 commit의
+hosted artifact로 판정한다. 운영 NAS PostgreSQL 검증·배포·main 병합은 별도로 유지한다.

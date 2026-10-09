@@ -5,8 +5,8 @@
 ## 현재 결정
 
 2026-10-09 중복/상시 CI 후속 분석 및 구현 진행: [판정·수정·검증 상태](TEST_DUPLICATION_CI_FOLLOWUP.md).
-최신 main 통합과 NAS/capture·replay 안전 선택 편입 뒤 현재 전체 413개 중 Windows `all-local` 등록 221개,
-별도 Linux CI 5개, 미등록 187개다. 기존 217개와 core 실행 순서는 보존했다.
+최신 main 통합과 NAS/capture·replay·causal 종료 안전 선택 편입 뒤 현재 전체 413개 중 Windows `all-local` 등록 226개,
+별도 Linux CI 5개, 미등록 182개다. 기존 221개와 core 실행 순서는 보존했다.
 409개 조사 대상의 중복 선별에서 삭제할 완전 중복은 확정되지 않았다. 실행기의 빈 모듈 false-green을
 차단했고, 검증된 선택 profile 26개를 추가했다. 관련 선택 profile 218건과 모듈 간 setup 결합 수정은
 통과했다. 전체 `all-local`과 hosted CI 결과는 후속 문서의 최신 상태를 따른다. 아래의 당시 manifest,
@@ -363,12 +363,12 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_dart_disclosure_filter.py](../tests/unit/test_dart_disclosure_filter.py) | 미등록 유지 | 단일 DART 필터 옵션 검사; 직접 관련 기능 변경 시 선택 실행 | 0/0/0/0/0/0 |
 | [test_detached_chart_window.py](../tests/unit/test_detached_chart_window.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/3/2/0/0 |
 | [test_diagnostic_cli_controls.py](../tests/unit/test_diagnostic_cli_controls.py) | 미등록 | 별도 환경; Windows skip 방지, Linux 격리 실행 전 보류 | 0/0/30/58/0/0 |
-| [test_diagnostic_collector_replay.py](../tests/unit/test_diagnostic_collector_replay.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/0/0/0 |
-| [test_diagnostic_delivery_record.py](../tests/unit/test_diagnostic_delivery_record.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 2/0/7/3/0/0 |
+| [test_diagnostic_collector_replay.py](../tests/unit/test_diagnostic_collector_replay.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; 실제 parser·checkpoint·취소 후 저장 drain·연속성·운영 URL 차단 6건 | 0/0/2/0/0/0 |
+| [test_diagnostic_delivery_record.py](../tests/unit/test_diagnostic_delivery_record.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; durable delivery·공유 retention·실패 suffix·실제 writer 종료 7건 | 2/0/7/3/0/0 |
 | [test_diagnostic_flush_metrics.py](../tests/unit/test_diagnostic_flush_metrics.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/0/0/0 |
 | [test_diagnostic_replay.py](../tests/unit/test_diagnostic_replay.py) | 기준 미등록 → P2 등록 | P2 replay admission 편입; 입력 shape·운영 DB 차단·lane 순서/완료/누락 방지 11건 | 0/0/12/0/0/0 |
 | [test_diagnostic_replay_database_cli.py](../tests/unit/test_diagnostic_replay_database_cli.py) | 기준 미등록 → P2 등록 | P2 NAS/capture profile 편입; DB 접근 전 입력 검증·lease/seal/restore·redaction 11건 | 0/0/17/0/0/0 |
-| [test_diagnostic_rest_input.py](../tests/unit/test_diagnostic_rest_input.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/11/4/0/0 |
+| [test_diagnostic_rest_input.py](../tests/unit/test_diagnostic_rest_input.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; 논리/transport/cache/ingest 인과 입력·소유권·tape 오류 차단 14건 | 0/0/11/4/0/0 |
 | [test_diagnostic_runs.py](../tests/unit/test_diagnostic_runs.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/21/1/0/0 |
 | [test_diagnostic_sampling_api.py](../tests/unit/test_diagnostic_sampling_api.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/1/0/0/0 |
 | [test_diagnostic_top20_flow_input.py](../tests/unit/test_diagnostic_top20_flow_input.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/19/7/0/0 |
@@ -555,7 +555,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_realtime_parser.py](../tests/unit/test_realtime_parser.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_realtime_subscription.py](../tests/unit/test_realtime_subscription.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_realtime_worker_controller.py](../tests/unit/test_realtime_worker_controller.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_recorded_execution.py](../tests/unit/test_recorded_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/0/0/0 |
+| [test_recorded_execution.py](../tests/unit/test_recorded_execution.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; actor 순서·실제 SQLite 저장·취소 drain·입력 거부 15건; 실패 시 gate 해제와 task 종료 보강 | 0/0/3/0/0/0 |
 | [test_recorded_replay_baseline.py](../tests/unit/test_recorded_replay_baseline.py) | 기준 미등록 → P2 등록 | P2 replay admission 편입; lease 소유권·실제 connection drain·commit 오류 close 14건; 소유 스레드 종료 assertion 보강 | 2/0/19/9/0/0 |
 | [test_recorded_replay_operator.py](../tests/unit/test_recorded_replay_operator.py) | 기준 미등록 → P2 등록 | P2 replay admission 편입; 외부 DB·특권 role DDL 사전 거부와 secret redaction 4건 | 0/0/3/4/0/0 |
 | [test_recorded_workload_capture.py](../tests/unit/test_recorded_workload_capture.py) | 기준 미등록 → P2 등록 | P2 NAS/capture profile 편입; payload 무결성·복사 drain·저장 실패 격리 18건 | 0/0/11/12/0/0 |
@@ -667,7 +667,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_top20_program_shutdown.py](../tests/unit/test_top20_program_shutdown.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/11/0/0 |
 | [test_top20_replay_execution.py](../tests/unit/test_top20_replay_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/0/0/0 |
 | [test_top20_replay_outbox.py](../tests/unit/test_top20_replay_outbox.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/1/2/0/2/2 |
-| [test_top20_replay_runtime.py](../tests/unit/test_top20_replay_runtime.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/1/4/0/0 |
+| [test_top20_replay_runtime.py](../tests/unit/test_top20_replay_runtime.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; 실제 executor pending·취소 drain·timeout quarantine·native broker late 완료 8건 | 1/0/1/4/0/0 |
 | [test_top20_replay_transport.py](../tests/unit/test_top20_replay_transport.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 2/0/15/2/0/0 |
 | [test_top20_session_plan.py](../tests/unit/test_top20_session_plan.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/7/0/0/0 |
 | [test_top20_shared_execution.py](../tests/unit/test_top20_shared_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/2/3/0/0 |
