@@ -17,7 +17,10 @@ from kiwoom_monitor.infrastructure.research_data_source import research_observat
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.research_process import execute_process_request, load_research_process_request
 from test_research_bundle_execution import rows_for, PROFILE
-from test_research_process import _request_document, _write_empty_dataset
+from research_test_support import (
+    research_request_document as _request_document,
+    write_empty_dataset as _write_empty_dataset,
+)
 
 
 class ResearchResourcesTests(unittest.TestCase):

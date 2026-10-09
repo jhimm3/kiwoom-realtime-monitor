@@ -219,13 +219,17 @@ class FlowInputTests(unittest.IsolatedAsyncioTestCase):
                 return native(*args, **kwargs)
             with patch.object(replay, "save_dataset_snapshot", side_effect=blocked):
                 task = asyncio.create_task(_replay_candidate_flow(replay, events, identifier(events)))
-                await asyncio.to_thread(entered.wait, 2)
-                task.cancel()
-                await asyncio.sleep(.01)
-                self.assertFalse(task.done())
-                release.set()
-                with self.assertRaises(asyncio.CancelledError):
-                    await task
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                    task.cancel()
+                    await asyncio.sleep(.01)
+                    self.assertFalse(task.done())
+                    release.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                finally:
+                    release.set()
+                    await asyncio.gather(task, return_exceptions=True)
             self.assertTrue(replay.load_dataset_snapshots("investor_flow", CODE, 1))
             self.assertTrue(replay.load_documents("candidate_flow_capture", DAY + ":" + CODE, 1))
 
@@ -289,13 +293,17 @@ class FlowInputTests(unittest.IsolatedAsyncioTestCase):
                 return native(*args, **kwargs)
             with patch.object(replay, "load_documents", side_effect=blocked):
                 task = asyncio.create_task(_replay_candidate_flow(replay, events, identifier(events)))
-                await asyncio.to_thread(entered.wait, 2)
-                task.cancel()
-                await asyncio.sleep(.01)
-                self.assertFalse(task.done())
-                release.set()
-                with self.assertRaises(asyncio.CancelledError):
-                    await task
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                    task.cancel()
+                    await asyncio.sleep(.01)
+                    self.assertFalse(task.done())
+                    release.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                finally:
+                    release.set()
+                    await asyncio.gather(task, return_exceptions=True)
             self.assertTrue(replay.load_documents("candidate_flow_capture", DAY + ":" + CODE, 1))
 
     async def test_cancelled_source_rejected_even_when_native_broker_write_later_completes(self):

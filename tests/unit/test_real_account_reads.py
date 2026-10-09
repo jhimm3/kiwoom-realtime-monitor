@@ -35,7 +35,7 @@ class AccountClient(support.RealFakeClient):
 class RealAccountReadsTests(support.RealCredentialOwnerTestSupport):
     async def asyncSetUp(self):
         with patch.object(support, "RealFakeClient", AccountClient):
-            await super().asyncSetUp()
+            await support.RealCredentialOwnerTestSupport.asyncSetUp(self)
 
     async def admitted(self):
         return await self.active(profile="nas-real-default"), await self.active(key="b1")

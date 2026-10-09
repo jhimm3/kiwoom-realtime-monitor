@@ -14,7 +14,7 @@ from kiwoom_monitor.domain.order_contract import (
     AccountSnapshot, BrokerFill, BrokerOrderSnapshot, BrokerSubmission,
     OrderIntent, OrderSide, OrderState, OrderType,
 )
-from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionUnknown
+from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionRejected, SubmissionUnknown
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
 
 
@@ -22,8 +22,10 @@ NOW = datetime(2026, 9, 14, 0, 0, tzinfo=timezone.utc)
 
 
 class _Transport:
-    def __init__(self, submit_error: Exception | None = None) -> None:
+    def __init__(self, submit_error: Exception | None = None,
+                 cancel_error: Exception | None = None) -> None:
         self.submit_error = submit_error
+        self.cancel_error = cancel_error
         self.submit_calls = 0
         self.cancel_calls = 0
 
@@ -35,6 +37,8 @@ class _Transport:
 
     def cancel(self, _intent, _broker_order_id, _quantity=0):
         self.cancel_calls += 1
+        if self.cancel_error:
+            raise self.cancel_error
         return BrokerSubmission("cancel-1", NOW)
 
 
@@ -75,6 +79,90 @@ class OrderLifecycleTests(unittest.TestCase):
         record = restarted.submit("intent-1", _account())
         self.assertEqual(OrderState.SUBMISSION_UNKNOWN, record.state)
         self.assertEqual(0, replacement.submit_calls)
+
+    def test_ambiguous_cancel_stays_pending_after_restart_until_broker_reconciliation(self) -> None:
+        transport = _Transport(cancel_error=SubmissionUnknown("cancel timed out"))
+        lifecycle = OrderLifecycle(self.repository, transport, now_provider=lambda: NOW)
+        lifecycle.queue(_intent())
+        self.assertEqual(OrderState.ACCEPTED, lifecycle.submit("intent-1", _account()).state)
+
+        pending = lifecycle.cancel("intent-1")
+        self.assertEqual(OrderState.CANCEL_PENDING, pending.state)
+        self.assertEqual(1, transport.cancel_calls)
+        self.assertEqual(
+            ["CANCEL_STARTED", "CANCEL_RESPONSE_UNKNOWN"],
+            [event["event_type"] for event in self.repository.events("intent-1")][-2:],
+        )
+
+        replacement = _Transport()
+        repository = ExecutionRepository(SQLiteQueryStore(Path(self.directory.name) / "central.sqlite3"))
+        restarted = OrderLifecycle(repository, replacement, now_provider=lambda: NOW)
+        with self.assertRaisesRegex(ValueError, "reconciled and accepted"):
+            restarted.cancel("intent-1")
+        self.assertEqual(0, replacement.cancel_calls)
+        resolved = restarted.reconcile("intent-1", BrokerOrderSnapshot(
+            "broker-1", "account-1", "005930", OrderState.CANCELLED, 0, 3,
+            NOW + timedelta(seconds=2), (),
+        ))
+        self.assertEqual(OrderState.CANCELLED, resolved.state)
+        self.assertEqual("BROKER_RECONCILED", repository.events("intent-1")[-1]["event_type"])
+
+    def test_rejected_cancel_without_fills_restores_accepted_and_allows_explicit_retry(self) -> None:
+        transport = _Transport(cancel_error=SubmissionRejected("broker rejected cancel"))
+        lifecycle = OrderLifecycle(self.repository, transport, now_provider=lambda: NOW)
+        lifecycle.queue(_intent())
+        lifecycle.submit("intent-1", _account())
+        rejected = lifecycle.cancel("intent-1")
+        self.assertEqual(OrderState.ACCEPTED, rejected.state)
+        self.assertEqual(1, transport.cancel_calls)
+        self.assertEqual(
+            ["CANCEL_STARTED", "CANCEL_REJECTED"],
+            [event["event_type"] for event in self.repository.events("intent-1")][-2:],
+        )
+
+        replacement = _Transport()
+        repository = ExecutionRepository(SQLiteQueryStore(Path(self.directory.name) / "central.sqlite3"))
+        restarted = OrderLifecycle(repository, replacement, now_provider=lambda: NOW)
+        self.assertEqual(OrderState.CANCEL_PENDING, restarted.cancel("intent-1").state)
+        self.assertEqual(1, replacement.cancel_calls)
+        self.assertEqual("CANCEL_ACCEPTED", repository.events("intent-1")[-1]["event_type"])
+        filled = restarted.reconcile("intent-1", BrokerOrderSnapshot(
+            "broker-1", "account-1", "005930", OrderState.FILLED, 3, 0,
+            NOW + timedelta(seconds=2), (BrokerFill("fill-all", 3, 70_000, NOW + timedelta(seconds=1)),),
+        ))
+        self.assertEqual(OrderState.FILLED, filled.state)
+        self.assertEqual(3, filled.filled_quantity)
+
+    def test_rejected_partial_cancel_preserves_fill_and_retry_reconciliation_deduplicates_it(self) -> None:
+        transport = _Transport(cancel_error=SubmissionRejected("broker rejected partial cancel"))
+        lifecycle = OrderLifecycle(self.repository, transport, now_provider=lambda: NOW)
+        lifecycle.queue(_intent())
+        lifecycle.submit("intent-1", _account())
+        first_fill = BrokerFill("fill-1", 1, 70_000, NOW + timedelta(seconds=1))
+        partial = lifecycle.reconcile("intent-1", BrokerOrderSnapshot(
+            "broker-1", "account-1", "005930", OrderState.PARTIALLY_FILLED, 1, 2,
+            NOW + timedelta(seconds=2), (first_fill,),
+        ))
+        self.assertEqual(OrderState.PARTIALLY_FILLED, partial.state)
+        rejected = lifecycle.cancel("intent-1")
+        self.assertEqual(OrderState.PARTIALLY_FILLED, rejected.state)
+        self.assertEqual(1, rejected.filled_quantity)
+        self.assertEqual("CANCEL_REJECTED", self.repository.events("intent-1")[-1]["event_type"])
+
+        replacement = _Transport()
+        repository = ExecutionRepository(SQLiteQueryStore(Path(self.directory.name) / "central.sqlite3"))
+        restarted = OrderLifecycle(repository, replacement, now_provider=lambda: NOW)
+        self.assertEqual(OrderState.CANCEL_PENDING, restarted.cancel("intent-1").state)
+        self.assertEqual(1, replacement.cancel_calls)
+        completed = restarted.reconcile("intent-1", BrokerOrderSnapshot(
+            "broker-1", "account-1", "005930", OrderState.FILLED, 3, 0,
+            NOW + timedelta(seconds=3),
+            (first_fill, BrokerFill("fill-2", 2, 70_100, NOW + timedelta(seconds=3))),
+        ))
+        self.assertEqual(OrderState.FILLED, completed.state)
+        self.assertEqual(3, completed.filled_quantity)
+        self.assertEqual(("fill-1", "fill-2"), completed.fill_ids)
+        self.assertEqual(2, sum(event["event_type"] == "FILL" for event in repository.events("intent-1")))
 
     def test_preflight_rejects_expired_or_wrong_account_before_transport(self) -> None:
         transport = _Transport()

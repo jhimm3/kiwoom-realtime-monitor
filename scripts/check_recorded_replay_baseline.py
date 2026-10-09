@@ -206,7 +206,9 @@ def main(argv=None):
                 suite = unittest.defaultTestLoader.loadTestsFromName(suite_name)
                 expected_tests = 5 if args.execution_gates else 4
             result = unittest.TextTestRunner(verbosity=2).run(suite)
-            success = result.wasSuccessful() and result.testsRun == expected_tests and not result.skipped
+            success = (result.wasSuccessful() and result.testsRun == expected_tests
+                       and not result.skipped and not result.expectedFailures
+                       and not result.unexpectedSuccesses)
             print(json.dumps({'state': 'passed' if success else 'failed',
                               'database': baseline.DATABASE_NAME, 'source': str(ROOT),
                               'baseline_id': baseline_id, 'tests': result.testsRun,

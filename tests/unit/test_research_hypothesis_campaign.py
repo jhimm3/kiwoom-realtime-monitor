@@ -34,7 +34,7 @@ from kiwoom_monitor.research_process import (
     generate_next_campaign_hypotheses,
     schedule_next_campaign_hypothesis,
 )
-from test_research_campaign_execution import write_campaign_request
+from research_test_support import write_campaign_request
 
 
 def _template() -> ExperimentSpec:

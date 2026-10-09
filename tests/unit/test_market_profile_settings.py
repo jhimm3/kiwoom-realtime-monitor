@@ -10,6 +10,8 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import httpx
+
 from kiwoom_monitor.central_server.database import SQLiteQueryStore, _load_market_profile_settings, _save_market_profile_settings
 
 
@@ -273,30 +275,49 @@ class MarketProfileSettingsTests(unittest.TestCase):
         self.assertEqual(before, self.store.load_documents("server_market_profile_settings"))
 
     def test_authenticated_read_has_no_runtime_claim_or_content_write_bypass(self):
-        from fastapi.testclient import TestClient
         from kiwoom_monitor.central_server.app import create_app
         from kiwoom_monitor.central_server.config import CentralServerSettings
         account = self.account()
         selected = self.choose(account["profile_id"])
         app = create_app(CentralServerSettings(f"sqlite:///{self.path}", "private-token",
             autonomous_top20_enabled=False, market_event_collection_enabled=False))
-        with TestClient(app) as client:
-            url = "/api/v1/settings/market-profile"
-            headers = {"Authorization": "Bearer private-token"}
-            self.assertEqual(401, client.get(url).status_code)
-            response = client.get(url, headers=headers)
-            self.assertEqual(200, response.status_code)
-            self.assertEqual(selected, response.json()["settings"])
-            self.assertIsNone(response.json()["applied_revision"])
-            self.assertEqual(422, client.put(url, headers=headers, json={}).status_code)
-            self.assertEqual(503, client.put(url, headers=headers, json={"market_profile_id": "nas-real-default",
-                "expected_revision": 0, "expected_binding_revision": 1}).status_code)
-            self.assertEqual(404, client.post("/api/v1/content/server_market_profile_settings", headers=headers,
-                json={"documents": [{"owner": "global", "key": "settings", "document": {"revision": 99}}]}).status_code)
-            self.assertEqual(selected, self.store.load_market_profile_settings())
-            with self.store._connection() as connection:
-                connection.execute("UPDATE central_documents SET document_json=? WHERE collection='server_market_profile_settings'",
-                                   (json.dumps({"revision": 0}),))
-            error = client.get(url, headers=headers)
-            self.assertEqual(409, error.status_code)
-            self.assertEqual("MARKET_PROFILE_SETTINGS_RECOVERY_REQUIRED", error.json()["detail"])
+
+        async def verify_requests():
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://market-profile.test",
+                    timeout=5,
+                ) as client:
+                    url = "/api/v1/settings/market-profile"
+                    headers = {"Authorization": "Bearer private-token"}
+                    self.assertEqual(401, (await client.get(url)).status_code)
+                    response = await client.get(url, headers=headers)
+                    self.assertEqual(200, response.status_code)
+                    self.assertEqual(selected, response.json()["settings"])
+                    self.assertIsNone(response.json()["applied_revision"])
+                    self.assertEqual(422, (await client.put(url, headers=headers, json={})).status_code)
+                    self.assertEqual(503, (await client.put(url, headers=headers, json={
+                        "market_profile_id": "nas-real-default",
+                        "expected_revision": 0,
+                        "expected_binding_revision": 1,
+                    })).status_code)
+                    self.assertEqual(404, (await client.post(
+                        "/api/v1/content/server_market_profile_settings", headers=headers,
+                        json={"documents": [{"owner": "global", "key": "settings",
+                                              "document": {"revision": 99}}]},
+                    )).status_code)
+                    self.assertEqual(selected, self.store.load_market_profile_settings())
+                    with self.store._connection() as connection:
+                        connection.execute(
+                            "UPDATE central_documents SET document_json=? "
+                            "WHERE collection='server_market_profile_settings'",
+                            (json.dumps({"revision": 0}),),
+                        )
+                    error = await client.get(url, headers=headers)
+                    self.assertEqual(409, error.status_code)
+                    self.assertEqual(
+                        "MARKET_PROFILE_SETTINGS_RECOVERY_REQUIRED", error.json()["detail"],
+                    )
+
+        asyncio.run(verify_requests())

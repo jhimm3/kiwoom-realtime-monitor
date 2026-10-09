@@ -30,7 +30,7 @@ class QueryStoreConsumerAuditTests(unittest.TestCase):
         self.assertEqual([], result["all_candidate_delta"]["removed"])
         self.assertGreater(result["counts"]["reviewed_store_sites"], 0)
         self.assertGreater(result["counts"]["forwarding_edges"], 0)
-        self.assertEqual(4, result["counts"]["store_internal_delegate_sites"])
+        self.assertEqual(6, result["counts"]["store_internal_delegate_sites"])
         # Similar method names are retained for review rather than asserted as DB calls.
         self.assertGreater(result["counts"]["unresolved_same_name_candidates"], 0)
         self.assertTrue(all(

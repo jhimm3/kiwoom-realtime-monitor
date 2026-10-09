@@ -3,6 +3,14 @@
   "reviewed_on": "2026-10-05",
   "approved_sites": [
     {
+      "file": "tests/integration/postgres_test_support.py",
+      "owner": "isolated_observation_schema",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "Owned fixture administration connection: verifies the diagnostic-only URL and actual database identity, creates one UUID schema, sets a bounded lock timeout, and drops only that schema in finally. Fixture unit tests reject non-diagnostic targets and propagate cleanup failures."
+    },
+    {
       "file": "scripts/check_replay_cache_baseline.py",
       "owner": "run",
       "call": "psycopg.connect",

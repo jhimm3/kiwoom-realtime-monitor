@@ -352,24 +352,30 @@ class RecordedExecutionTests(unittest.TestCase):
             task = asyncio.create_task(execute(store, events([
                 read('a1', 'a', code='held'), read('a2', 'a', 2, .01),
             ]), stop=stop))
-            while not store.started.is_set():
-                await asyncio.sleep(.001)
-            if cancel:
-                task.cancel()
-            else:
-                stop.set()
-            await asyncio.sleep(.03)
-            self.assertFalse(task.done())
-            self.assertFalse(store.finished.is_set())
-            store.release.set()
-            if cancel:
-                with self.assertRaises(asyncio.CancelledError):
-                    await task
-            else:
-                result = await task
-                self.assertEqual('incomplete', result['state'])
-            self.assertTrue(store.finished.is_set())
-            self.assertEqual(1, len(store.calls))
+            try:
+                async with asyncio.timeout(2):
+                    while not store.started.is_set() and not task.done():
+                        await asyncio.sleep(.001)
+                self.assertTrue(store.started.is_set())
+                if cancel:
+                    task.cancel()
+                else:
+                    stop.set()
+                await asyncio.sleep(.03)
+                self.assertFalse(task.done())
+                self.assertFalse(store.finished.is_set())
+                store.release.set()
+                if cancel:
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                else:
+                    result = await task
+                    self.assertEqual('incomplete', result['state'])
+                self.assertTrue(store.finished.is_set())
+                self.assertEqual(1, len(store.calls))
+            finally:
+                store.release.set()
+                await asyncio.gather(task, return_exceptions=True)
         for cancel in (False, True):
             asyncio.run(exercise(cancel))
 
@@ -439,16 +445,22 @@ class RecordedExecutionTests(unittest.TestCase):
                     'payload': freeze_payload(value).value})
             task = asyncio.create_task(execute(store, rows, mode='collector_with_background',
                                                 collector_components=('collector',)))
-            while not store.started.is_set():
-                await asyncio.sleep(.001)
-            task.cancel()
-            await asyncio.sleep(.02)
-            self.assertFalse(task.done())
-            self.assertFalse(store.finished.is_set())
-            store.release.set()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
-            self.assertTrue(store.finished.is_set())
+            try:
+                async with asyncio.timeout(2):
+                    while not store.started.is_set() and not task.done():
+                        await asyncio.sleep(.001)
+                self.assertTrue(store.started.is_set())
+                task.cancel()
+                await asyncio.sleep(.02)
+                self.assertFalse(task.done())
+                self.assertFalse(store.finished.is_set())
+                store.release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertTrue(store.finished.is_set())
+            finally:
+                store.release.set()
+                await asyncio.gather(task, return_exceptions=True)
         asyncio.run(exercise())
 
     def test_invalid_collector_payload_prevents_valid_peer_db_invocation(self):

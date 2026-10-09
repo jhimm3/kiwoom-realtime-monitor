@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "required_windows_profiles": [
+    "pc-lifecycle",
+    "top20-lifecycle",
+    "runner",
+    "news-api-contract",
+    "dependency-audit-p0-execution-fence",
+    "dependency-audit-p1-first-12",
+    "dependency-audit-p1-second-8",
+    "dependency-audit-p0-nas-credentials-ui-integration",
+    "dependency-audit-p0-global-credentials-ui",
+    "dependency-audit-p0-contract-fixtures",
+    "dependency-audit-news-contracts",
+    "dependency-audit-p2-account-order-safety",
+    "dependency-audit-p2-functional-discovery",
+    "source-integration-registration",
+    "dependency-audit-p2-nas-capture-safety",
+    "dependency-audit-p2-replay-admission-safety",
+    "dependency-audit-p2-causal-replay-lifecycle",
+    "dependency-audit-p2-top20-replay-boundaries",
+    "dependency-audit-p2-top20-input-contracts",
+    "dependency-audit-p2-trace-persistence",
+    "dependency-audit-p2-diagnostic-controls",
+    "main-observation-delivery-contracts"
+  ],
+  "required_windows_additions": [
+    "tests.unit.test_central_operational_settings",
+    "tests.unit.test_central_server_db_api_connection",
+    "tests.unit.test_central_server_process",
+    "tests.unit.test_external_market_runtime",
+    "tests.unit.test_journal_execution_projection",
+    "tests.unit.test_market_profile_settings",
+    "tests.unit.test_query_store_source",
+    "tests.unit.test_realtime_parser",
+    "tests.unit.test_rest_request_lane_capacity",
+    "tests.unit.test_run_postgres_access_integration",
+    "tests.unit.test_settings_api_hub",
+    "tests.unit.test_shadow_checkpoint",
+    "tests.unit.test_central_news_client",
+    "tests.unit.test_historical_learning_cases",
+    "tests.unit.test_historical_news_blind_validation",
+    "tests.unit.test_historical_news_deferred_pipeline",
+    "tests.unit.test_historical_news_pc_jobs",
+    "tests.unit.test_historical_news_event_split",
+    "tests.unit.test_historical_news_development_inputs",
+    "tests.unit.test_historical_research_split",
+    "tests.unit.test_historical_reconstruction",
+    "tests.unit.test_research_development_partitions",
+    "tests.unit.test_research_development_validation",
+    "tests.unit.test_research_final_execution",
+    "tests.unit.test_research_completed_input_recovery",
+    "tests.unit.test_research_final_holdout_ledger",
+    "tests.unit.test_research_partition_search",
+    "tests.unit.test_research_symbol_partitions",
+    "tests.unit.test_research_staging_cleanup",
+    "tests.unit.test_verify_prepared_historical_news_rules"
+  ],
+  "long_windows_modules": [
+    "tests.unit.test_top20_replay_execution",
+    "tests.unit.test_top20_session_plan"
+  ],
+  "linux_required": [
+    "tests.unit.test_credential_store",
+    "tests.unit.test_diagnostic_cli_controls",
+    "tests.unit.test_nas_diagnostic_commit_correlation",
+    "tests.unit.test_publish_historical_daishin_raw_to_nas",
+    "tests.unit.test_source_runtime_deploy"
+  ],
+  "postgres_required": [
+    "tests.integration.test_postgres_access_postgres",
+    "tests.integration.test_storage_boundary_postgres",
+    "tests.integration.test_market_events_postgres",
+    "tests.integration.test_observation_bootstrap_postgres",
+    "tests.integration.test_observation_cursor_commit_order_postgres",
+    "tests.integration.test_observation_sequence_fence_postgres",
+    "tests.integration.test_replay_content_comparison_postgres",
+    "tests.integration.test_top20_program_postgres"
+  ],
+  "postgres_extended": [
+    "tests.integration.test_diagnostic_collector_replay_postgres",
+    "tests.integration.test_diagnostic_replay_postgres",
+    "tests.integration.test_historical_news_seed_postgres",
+    "tests.integration.test_prepared_news_import_postgres",
+    "tests.integration.test_recorded_workload_capture_postgres",
+    "tests.integration.test_shadow_checkpoint_postgres"
+  ],
+  "sealed_extended": [
+    "tests.integration.test_recorded_replay_baseline_postgres",
+    "tests.integration.test_recorded_execution_postgres",
+    "tests.integration.test_replay_cache_baseline_postgres",
+    "tests.integration.test_replay_cache_execution_postgres",
+    "tests.integration.test_top20_replay_runtime_postgres",
+    "tests.integration.test_top20_session_postgres"
+  ],
+  "operator_extended": [
+    "tests.integration.test_nas_operator_linux"
+  ]
+}

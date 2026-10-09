@@ -4,6 +4,55 @@
 
 ## 현재 결정
 
+2026-10-10 [최종 품질 감사와 CI 전환 설계](TEST_FINAL_QUALITY_AUDIT.md): 아래 413개는 unit 수이며,
+별도 integration 17개를 합한 실제 브랜치 대상은 430개다. `8caf622`의 기존 Windows/Linux/PG CI는 통과했다.
+이후 main `4efd672`의 438개 파일과는 소스/등록 상태를 구분한다. 0건·skip 성공 판정 공백, 취소 실패
+검증과 integration 자동 경로를 브랜치에 구현했고, 로컬 전체 회귀 3,682건/268 worker가 통과했다.
+최신 hosted 결과는 아직 확인하지 않았다.
+
+2026-10-09 중복/상시 CI 후속 분석 및 구현 진행: [판정·수정·검증 상태](TEST_DUPLICATION_CI_FOLLOWUP.md).
+최신 main 통합과 NAS/capture·replay·causal 종료·TOP20·trace 저장·진단 제어 및 1~7차
+선택 편입 뒤 현재 전체 413개 중 Windows `all-local` 등록 408개, 별도 Linux CI 5개,
+미등록 후보 0개다. 기존 core 실행 순서는 보존했다. 최신 전체 로컬 결과와 hosted CI 진행 상태는
+[후속 보고](TEST_DUPLICATION_CI_FOLLOWUP.md)를 따른다.
+409개 조사 대상의 중복 선별에서 삭제할 완전 중복은 확정되지 않았다. 실행기의 빈 모듈 false-green을
+차단했고, 검증된 선택 profile 26개를 추가했다. 관련 선택 profile 218건과 모듈 간 setup 결합 수정은
+통과했다. 전체 `all-local`과 hosted CI 결과는 후속 문서의 최신 상태를 따른다. 아래의 당시 manifest,
+'미커밋/hosted 미실행' 표현은 각 이전 검증 시점의 기록이다.
+
+2026-10-09 최신 main의 CI 누락 검토: `3c42285fc490cba4faffad46c7ad307453930780`의 Windows CI는
+새 unit module 3개의 미등록 때문에 전체 회귀 전에 실패했다. 해당 3개를 끝의 독립 profile로 등록했다.
+원래 409개와 이후 RAM module의 조사·분류를 다시 시작하거나 남은 195개를 일괄 편입하지 않았다.
+새 main module 15/15와 직접 관련된 DB·진단·실행기 243/243, 실제 이전 base를 지정한 새 모듈
+등록 guard가 통과했다. 최신 전체 회귀는 작업 전용 branch의 hosted CI와 이전 로컬 기록을 구분해 판정한다.
+
+2026-10-09 선택 편입 후속: catalog capture, replay DB CLI, recorded workload capture,
+portable NAS operator 4개를 `dependency-audit-p2-nas-capture-safety`에 등록했다.
+원래 미등록 260개에 속한 4개이며 기존 CI 149개나 assertion은 변경하지 않았다.
+선택 검사 83/83, failure/error/skip/미실행/잔류 자손 0, worker와 process tree 종료 4/4다.
+직전 commit `10e9080`의 hosted 전체 회귀는 Windows 2,154건/73 worker, Linux 65건,
+disposable PostgreSQL 87건 및 저장 경계 검사 통과로 별도 확인했다.
+새 4개를 포함한 최종 hosted 결과는 [후속 문서](TEST_DUPLICATION_CI_FOLLOWUP.md)와 해당 branch CI를 따른다.
+
+### 2026-10-09 최종 후속 회귀
+
+`test_real_account_monitor`의 주기 검사는 이벤트 수신 시 safety deadline이 재설정되는 동작을
+실제 작업 시작 시간과 비교했다. 기존 고정 대기 검사는 테스트 프로세스 부하에 따라 cycle 사이에
+간헐적으로 실패했다. 테스트에서만 asyncio loop clock/wait를 제어해 시간 조건을 결정적으로 만들고,
+실제 DB 저장과 요청 경로는 유지했다. 모듈은 20/20 통과했으며 이벤트 deadline 재설정을 제거한
+결함 주입 대조군은 의도한 assertion에서 실패했다.
+
+이 수정과 실행기·26개 profile 변경을 포함한 Windows `all-local`은 2,136건/70 worker 통과했다.
+failure, error, skip, expected failure, unexpected success, 미실행 worker는 모두 0이고,
+process tree 종료는 70/70, 잔류 자손은 0이다. 실행 기록은
+`tmp/regression/test-dedup-ci-all-local-stable-final/run.json`이다. Windows 210개 모듈과 신규
+profile 26개 전체가 기록에 있고, 모듈별 발견 수와 총 실행 수가 일치한다. 기존 core 순서 hash는
+`36DAE599F514EC9356B7DC3EAB9C7B4F1033C4A27076EB8A7FCD931FBEB1810A`로 유지됐다.
+
+새 테스트 모듈 누락 검사도 현재 작업 트리 기준 통과했다(신규 파일 0개). 이 검사는 PR base 비교나
+hosted CI 결과를 대신하지 않는다. GitHub hosted CI와 실제 NAS PostgreSQL 실행은 아직 검증하지
+않았으며, 로컬 `all-local` 성공과 별도로 남겨 둔다.
+
 2026-10-09 fixture follow-up: `test_research_final_preparation` no longer constructs
 `DevelopmentValidationTests` or reaches through its nested partition fixture. The test now owns its
 temporary directory and builds its request/source directly from the existing pure row, child-export,
@@ -269,9 +318,9 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_candidate_daily_nas_scripts.py](../tests/unit/test_candidate_daily_nas_scripts.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/7/5/2/1 |
 | [test_candidate_exchange_effective_dates.py](../tests/unit/test_candidate_exchange_effective_dates.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_candidate_monitor.py](../tests/unit/test_candidate_monitor.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_catalog_capture_profile.py](../tests/unit/test_catalog_capture_profile.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/3/4/0/0 |
-| [test_causal_capture_api.py](../tests/unit/test_causal_capture_api.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/0/0/0 |
-| [test_causal_capture_capacity.py](../tests/unit/test_causal_capture_capacity.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
+| [test_catalog_capture_profile.py](../tests/unit/test_catalog_capture_profile.py) | 기준 미등록 → P2 등록 | P2 NAS/capture profile 편입; catalog budget·native 결과·durable 복원 10건 | 1/0/3/4/0/0 |
+| [test_causal_capture_api.py](../tests/unit/test_causal_capture_api.py) | 기준 미등록 → P2 등록 | P2 diagnostic controls 편입; HTTP의 store/collector/TOP20 flags·deadline이 동일 recorder에 정확히 전달 1건; 실패 시 client cleanup 보강 | 0/0/2/0/0/0 |
+| [test_causal_capture_capacity.py](../tests/unit/test_causal_capture_capacity.py) | 기준 미등록 → P2 등록 | P2 diagnostic controls 편입; 정상 memory/event 포화와 잘못된 입력 구분·peak/headroom·측정 불가 유지 3건 | 0/0/0/0/0/0 |
 | [test_central_account_query.py](../tests/unit/test_central_account_query.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_central_ai_client.py](../tests/unit/test_central_ai_client.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_central_ai_service.py](../tests/unit/test_central_ai_service.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/5/0/0/0 |
@@ -322,21 +371,21 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_dart_disclosure_filter.py](../tests/unit/test_dart_disclosure_filter.py) | 미등록 유지 | 단일 DART 필터 옵션 검사; 직접 관련 기능 변경 시 선택 실행 | 0/0/0/0/0/0 |
 | [test_detached_chart_window.py](../tests/unit/test_detached_chart_window.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/3/2/0/0 |
 | [test_diagnostic_cli_controls.py](../tests/unit/test_diagnostic_cli_controls.py) | 미등록 | 별도 환경; Windows skip 방지, Linux 격리 실행 전 보류 | 0/0/30/58/0/0 |
-| [test_diagnostic_collector_replay.py](../tests/unit/test_diagnostic_collector_replay.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/0/0/0 |
-| [test_diagnostic_delivery_record.py](../tests/unit/test_diagnostic_delivery_record.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 2/0/7/3/0/0 |
-| [test_diagnostic_flush_metrics.py](../tests/unit/test_diagnostic_flush_metrics.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/0/0/0 |
-| [test_diagnostic_replay.py](../tests/unit/test_diagnostic_replay.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/12/0/0/0 |
-| [test_diagnostic_replay_database_cli.py](../tests/unit/test_diagnostic_replay_database_cli.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/17/0/0/0 |
-| [test_diagnostic_rest_input.py](../tests/unit/test_diagnostic_rest_input.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/11/4/0/0 |
-| [test_diagnostic_runs.py](../tests/unit/test_diagnostic_runs.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/21/1/0/0 |
-| [test_diagnostic_sampling_api.py](../tests/unit/test_diagnostic_sampling_api.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/1/0/0/0 |
-| [test_diagnostic_top20_flow_input.py](../tests/unit/test_diagnostic_top20_flow_input.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/19/7/0/0 |
-| [test_diagnostic_top20_input.py](../tests/unit/test_diagnostic_top20_input.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/13/0/0/0 |
-| [test_diagnostic_trace.py](../tests/unit/test_diagnostic_trace.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/17/2/4/0 |
+| [test_diagnostic_collector_replay.py](../tests/unit/test_diagnostic_collector_replay.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; 실제 parser·checkpoint·취소 후 저장 drain·연속성·운영 URL 차단 6건 | 0/0/2/0/0/0 |
+| [test_diagnostic_delivery_record.py](../tests/unit/test_diagnostic_delivery_record.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; durable delivery·공유 retention·실패 suffix·실제 writer 종료 7건 | 2/0/7/3/0/0 |
+| [test_diagnostic_flush_metrics.py](../tests/unit/test_diagnostic_flush_metrics.py) | 기준 미등록 → P2 등록 | P2 trace persistence 편입; commit window와 wait 표본 정렬·불완전 probe·성공 cycle 집계·thread 간 flush ID 6건 | 0/0/3/0/0/0 |
+| [test_diagnostic_replay.py](../tests/unit/test_diagnostic_replay.py) | 기준 미등록 → P2 등록 | P2 replay admission 편입; 입력 shape·운영 DB 차단·lane 순서/완료/누락 방지 11건 | 0/0/12/0/0/0 |
+| [test_diagnostic_replay_database_cli.py](../tests/unit/test_diagnostic_replay_database_cli.py) | 기준 미등록 → P2 등록 | P2 NAS/capture profile 편입; DB 접근 전 입력 검증·lease/seal/restore·redaction 11건 | 0/0/17/0/0/0 |
+| [test_diagnostic_rest_input.py](../tests/unit/test_diagnostic_rest_input.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; 논리/transport/cache/ingest 인과 입력·소유권·tape 오류 차단 14건 | 0/0/11/4/0/0 |
+| [test_diagnostic_runs.py](../tests/unit/test_diagnostic_runs.py) | 기준 미등록 → P2 등록 | P2 diagnostic controls 편입; 인증·revision/session·run 소유/취소·전용 DB·보고서 완료·shape 불일치 거부 11건; main의 8GiB/5M 계약 기대 갱신 | 1/0/21/1/0/0 |
+| [test_diagnostic_sampling_api.py](../tests/unit/test_diagnostic_sampling_api.py) | 기준 미등록 → P2 등록 | P2 diagnostic controls 편입; device elapsed/rate·고정 read-only SQL·민감 query 제거·news table/index scope 3건 | 0/0/1/0/0/0 |
+| [test_diagnostic_top20_flow_input.py](../tests/unit/test_diagnostic_top20_flow_input.py) | 기준 미등록 → P2 등록 | P2 TOP20 input contracts 편입; 실제 SQLite 수급 저장·완료 marker·baseline·취소 drain 12건; assertion 실패 시 task 회수 2곳 보강 | 0/0/19/7/0/0 |
+| [test_diagnostic_top20_input.py](../tests/unit/test_diagnostic_top20_input.py) | 기준 미등록 → P2 등록 | P2 TOP20 input contracts 편입; 순위 freshness·20 slots·retry/error tape·OFF/ON 결과 동일·취소 incomplete 8건 | 0/0/13/0/0/0 |
+| [test_diagnostic_trace.py](../tests/unit/test_diagnostic_trace.py) | 기준 미등록 → P2 등록 | P2 trace persistence 편입; 실제 chunk 순서·checksum·overflow·65분 envelope의 bounded burst·run lock·중단 복구 7건 | 0/0/17/2/4/0 |
 | [test_diagnostic_trace_api.py](../tests/unit/test_diagnostic_trace_api.py) | 기준선 미등록 → P0 계약/fixture 등록 | capability/auth 응답 계약; 4건 통과, all-local 포함 | 0/0/3/1/4/0 |
-| [test_diagnostic_trace_batches.py](../tests/unit/test_diagnostic_trace_batches.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/11/7/4/2 |
-| [test_diagnostic_trace_deferred.py](../tests/unit/test_diagnostic_trace_deferred.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/8/6/1/2 |
-| [test_diagnostic_workloads.py](../tests/unit/test_diagnostic_workloads.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/1/7/0/0 |
+| [test_diagnostic_trace_batches.py](../tests/unit/test_diagnostic_trace_batches.py) | 기준 미등록 → P2 등록 | P2 trace persistence 편입; payload fsync·chunk publication·최종 manifest 완료·실패·stop 중 도착 보존 8건; fixture writer 종료 확인 | 0/0/11/7/4/2 |
+| [test_diagnostic_trace_deferred.py](../tests/unit/test_diagnostic_trace_deferred.py) | 기준 미등록 → P2 등록 | P2 trace persistence 편입; 33,001행 RAM→디스크 순서·deadline·중단·메모리/event 한도·host/container headroom 9건; fixture writer 종료 확인 | 0/0/8/6/1/2 |
+| [test_diagnostic_workloads.py](../tests/unit/test_diagnostic_workloads.py) | 기준 미등록 → P2 등록 | P2 trace persistence 편입; master/child lease·독립 만료·pause 복구·capture off 초기화·측정 불가와 0 구분 9건 | 0/0/1/7/0/0 |
 | [test_entry_snapshot_writer.py](../tests/unit/test_entry_snapshot_writer.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_entry_thesis.py](../tests/unit/test_entry_thesis.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 1/0/0/0/0/0 |
 | [test_exchange_effective_dates.py](../tests/unit/test_exchange_effective_dates.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
@@ -454,8 +503,8 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_nas_credentials_dialog.py](../tests/unit/test_nas_credentials_dialog.py) | 기준선 미등록 → P1-2 등록 | 단독 17건·all-local 통합 통과; Qt 응답성·인증 비밀 표시·중복 적용 확인 | 0/0/19/13/4/4 |
 | [test_nas_credentials_ui_integration.py](../tests/unit/test_nas_credentials_ui_integration.py) | 기준선 미등록 → P0 등록 | 단독 2/2 통과 후 별도 P0 profile 편입. 숨김/표시 UX, API의 disable 저장, SQLite sidecar, 암호화 파일의 평문 비노출 검증 | 2/0/4/6/0/1 |
 | [test_nas_diagnostic_commit_correlation.py](../tests/unit/test_nas_diagnostic_commit_correlation.py) | 미등록 | 별도 환경; Windows skip 방지, Linux 격리 실행 전 보류 | 0/0/9/20/0/0 |
-| [test_nas_operator.py](../tests/unit/test_nas_operator.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/9/0/1/0 |
-| [test_nas_scheduled_trace.py](../tests/unit/test_nas_scheduled_trace.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
+| [test_nas_operator.py](../tests/unit/test_nas_operator.py) | 기준 미등록 → P2 등록 | P2 NAS/capture profile 편입; portable 운영 정책·rollback·readiness·skip 거부 44건; 실제 Linux ACL 검사는 별도 | 0/0/9/0/1/0 |
+| [test_nas_scheduled_trace.py](../tests/unit/test_nas_scheduled_trace.py) | 기준 미등록 → P2 등록 | P2 replay admission 편입; release/revision/deadline 검증·불확실한 ACK 재시도 금지 7건 | 0/0/0/0/0/0 |
 | [test_nas_source_runtime.py](../tests/unit/test_nas_source_runtime.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/7/0/6/3 |
 | [test_nas_storage_mapping.py](../tests/unit/test_nas_storage_mapping.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_naver_credential_owner.py](../tests/unit/test_naver_credential_owner.py) | 기준선 미등록 → P1-2 등록 | 단독 15건·all-local 통합 통과; cancelled worker drain·revision 교체·저장 실패 복구 계약 | 2/0/5/2/0/0 |
@@ -514,14 +563,14 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_realtime_parser.py](../tests/unit/test_realtime_parser.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_realtime_subscription.py](../tests/unit/test_realtime_subscription.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_realtime_worker_controller.py](../tests/unit/test_realtime_worker_controller.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_recorded_execution.py](../tests/unit/test_recorded_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/0/0/0 |
-| [test_recorded_replay_baseline.py](../tests/unit/test_recorded_replay_baseline.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 2/0/19/9/0/0 |
-| [test_recorded_replay_operator.py](../tests/unit/test_recorded_replay_operator.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/4/0/0 |
-| [test_recorded_workload_capture.py](../tests/unit/test_recorded_workload_capture.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/11/12/0/0 |
+| [test_recorded_execution.py](../tests/unit/test_recorded_execution.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; actor 순서·실제 SQLite 저장·취소 drain·입력 거부 15건; 실패 시 gate 해제와 task 종료 보강 | 0/0/3/0/0/0 |
+| [test_recorded_replay_baseline.py](../tests/unit/test_recorded_replay_baseline.py) | 기준 미등록 → P2 등록 | P2 replay admission 편입; lease 소유권·실제 connection drain·commit 오류 close 14건; 소유 스레드 종료 assertion 보강 | 2/0/19/9/0/0 |
+| [test_recorded_replay_operator.py](../tests/unit/test_recorded_replay_operator.py) | 기준 미등록 → P2 등록 | P2 replay admission 편입; 외부 DB·특권 role DDL 사전 거부와 secret redaction 4건 | 0/0/3/4/0/0 |
+| [test_recorded_workload_capture.py](../tests/unit/test_recorded_workload_capture.py) | 기준 미등록 → P2 등록 | P2 NAS/capture profile 편입; payload 무결성·복사 drain·저장 실패 격리 18건 | 0/0/11/12/0/0 |
 | [test_recover_development_validation_orphan.py](../tests/unit/test_recover_development_validation_orphan.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/1/3/0/0/0 |
 | [test_recover_final_holdout_orphan.py](../tests/unit/test_recover_final_holdout_orphan.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/1/2/1/0/0 |
 | [test_remote_kiwoom_rest_client.py](../tests/unit/test_remote_kiwoom_rest_client.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_replay_cache_clock.py](../tests/unit/test_replay_cache_clock.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 3/0/13/6/0/0 |
+| [test_replay_cache_clock.py](../tests/unit/test_replay_cache_clock.py) | 기준 미등록 → P2 등록 | P2 TOP20 replay boundaries 편입; 실제 SQLite cache TTL·source clock·lease/version/dirty baseline 거부 9건 | 3/0/13/6/0/0 |
 | [test_report_historical_collection_status.py](../tests/unit/test_report_historical_collection_status.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/1/0/0 |
 | [test_research_bundle.py](../tests/unit/test_research_bundle.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/8/0 |
 | [test_research_bundle_execution.py](../tests/unit/test_research_bundle_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 3/0/2/0/3/0 |
@@ -618,18 +667,18 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_theme_ranking.py](../tests/unit/test_theme_ranking.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_theme_suggestions.py](../tests/unit/test_theme_suggestions.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_theme_text_import.py](../tests/unit/test_theme_text_import.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
-| [test_top20_delivery_provenance.py](../tests/unit/test_top20_delivery_provenance.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/14/24/1/0 |
+| [test_top20_delivery_provenance.py](../tests/unit/test_top20_delivery_provenance.py) | 기준 미등록 → P2 등록 | P2 TOP20 input contracts 편입; 실제 hub/parser 전달 원인·subscriber coverage·minute batch·chunk/tail/disk frontier 21건 | 0/0/14/24/1/0 |
 | [test_top20_execution_boundaries.py](../tests/unit/test_top20_execution_boundaries.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_top20_fixture_seed.py](../tests/unit/test_top20_fixture_seed.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/1/3/0/0 |
-| [test_top20_lifecycle_inputs.py](../tests/unit/test_top20_lifecycle_inputs.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/7/8/0/0 |
+| [test_top20_fixture_seed.py](../tests/unit/test_top20_fixture_seed.py) | 기준 미등록 → P2 등록 | P2 TOP20 input contracts 편입; cold seed의 warm marker/cache/task/lock/outbox 거부·shared clock/frontier·금지 IO 10건 | 1/0/1/3/0/0 |
+| [test_top20_lifecycle_inputs.py](../tests/unit/test_top20_lifecycle_inputs.py) | 기준 미등록 → P2 등록 | P2 TOP20 input contracts 편입; native 구독의 REG ACK·fresh READY·gap/epoch·0초 소비·shared effect owner 거부 11건 | 0/0/7/8/0/0 |
 | [test_top20_market_repair_worker_controller.py](../tests/unit/test_top20_market_repair_worker_controller.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_top20_program_shutdown.py](../tests/unit/test_top20_program_shutdown.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/11/0/0 |
 | [test_top20_replay_execution.py](../tests/unit/test_top20_replay_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/0/0/0 |
-| [test_top20_replay_outbox.py](../tests/unit/test_top20_replay_outbox.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/1/2/0/2/2 |
-| [test_top20_replay_runtime.py](../tests/unit/test_top20_replay_runtime.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/1/4/0/0 |
-| [test_top20_replay_transport.py](../tests/unit/test_top20_replay_transport.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 2/0/15/2/0/0 |
+| [test_top20_replay_outbox.py](../tests/unit/test_top20_replay_outbox.py) | 기준 미등록 → P2 등록 | P2 TOP20 replay boundaries 편입; 실제 파일 seed 복원·foreign/corrupt 거부·ACK loss restart 7건 | 1/1/2/0/2/2 |
+| [test_top20_replay_runtime.py](../tests/unit/test_top20_replay_runtime.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; 실제 executor pending·취소 drain·timeout quarantine·native broker late 완료 8건 | 1/0/1/4/0/0 |
+| [test_top20_replay_transport.py](../tests/unit/test_top20_replay_transport.py) | 기준 미등록 → P2 등록 | P2 TOP20 replay boundaries 편입; lane/spawn identity·fresh ACK·gap/registration 거부 5건; peer 오류 시 task 종료 보강 | 2/0/15/2/0/0 |
 | [test_top20_session_plan.py](../tests/unit/test_top20_session_plan.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/7/0/0/0 |
-| [test_top20_shared_execution.py](../tests/unit/test_top20_shared_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/2/3/0/0 |
+| [test_top20_shared_execution.py](../tests/unit/test_top20_shared_execution.py) | 기준 미등록 → P2 등록 | P2 TOP20 replay boundaries 편입; 같은 clock/runtime/lease 소유·native peer overlap·반복 취소 drain 7건 | 1/0/2/3/0/0 |
 | [test_top20_trade_value_collector.py](../tests/unit/test_top20_trade_value_collector.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_trade_analysis_preparation_service.py](../tests/unit/test_trade_analysis_preparation_service.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_trade_chart.py](../tests/unit/test_trade_chart.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |

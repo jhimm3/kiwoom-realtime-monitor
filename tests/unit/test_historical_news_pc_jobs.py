@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 from kiwoom_monitor.central_server.database import PostgresQueryStore, SQLiteQueryStore
 from kiwoom_monitor.central_server.news_jobs import NewsJobRunner
 from kiwoom_monitor.infrastructure.historical_backfill import (
@@ -15,12 +17,15 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
 )
 from scripts.import_historical_news_to_nas import _require_pc_search_scope
 from scripts.preprocess_historical_news_to_nas import prepare_job, require_pc_processing_scope
-from tests.unit.test_news_observation_history import _article
 
-try:
-    from fastapi.testclient import TestClient
-except ImportError:
-    TestClient = None
+def _article(title: str = "첫 제목") -> list[dict[str, object]]:
+    document = {
+        "stock_code": "005930", "identity": "article-1", "title": title,
+        "description": "검색 요약", "link": "https://news/1",
+        "original_link": "https://origin/1", "published_at": "2026-09-12T00:00:00+00:00",
+    }
+    return [{"owner": "005930", "key": "article-1", "document": document,
+             "collector_id": "naver", "collection_scope": "watchlist"}]
 
 
 class HistoricalNewsPcJobsTests(unittest.TestCase):
@@ -265,7 +270,6 @@ class HistoricalNewsPcJobsTests(unittest.TestCase):
             self.assertEqual(1, len(store.load_market_news_feed("world")))
             store.close()
 
-    @unittest.skipIf(TestClient is None, "FastAPI server test dependencies are not installed")
     def test_authenticated_api_claim_and_complete(self) -> None:
         from kiwoom_monitor.central_server.app import create_app
         from kiwoom_monitor.central_server.config import CentralServerSettings
@@ -277,21 +281,38 @@ class HistoricalNewsPcJobsTests(unittest.TestCase):
             item["collection_scope"] = "historical_backfill"
             store.upsert_documents("news_article", [item])
             store.close()
-            with TestClient(create_app(CentralServerSettings(f"sqlite:///{path}", "private-token"))) as client:
-                url = "/api/v1/news/historical-jobs/claim?stage=BODY"
-                self.assertEqual(401, client.post(url).status_code)
-                headers = {"Authorization": "Bearer private-token"}
-                self.assertIsNone(client.post(url + "&excluded_codes=005930", headers=headers).json()["job"])
-                self.assertEqual(422, client.post(url + "&excluded_codes=bad", headers=headers).status_code)
-                claimed = client.post(url, headers=headers)
-                self.assertEqual(200, claimed.status_code)
-                job = claimed.json()["job"]
-                self.assertEqual("BODY", job["stage"])
-                completed = client.post("/api/v1/news/historical-jobs/complete", headers=headers,
-                    json={"job_key": job["job_key"], "attempts": job["attempts"], "stage": "BODY",
-                          "body_text": "원문 본문", "body_status": "fulltext"})
-                self.assertEqual(200, completed.status_code)
-                self.assertEqual("completed", completed.json()["state"])
+
+            async def verify_requests() -> None:
+                app = create_app(CentralServerSettings(f"sqlite:///{path}", "private-token"))
+                async with app.router.lifespan_context(app):
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app),
+                        base_url="http://historical-news.test",
+                        timeout=5,
+                    ) as client:
+                        url = "/api/v1/news/historical-jobs/claim?stage=BODY"
+                        self.assertEqual(401, (await client.post(url)).status_code)
+                        headers = {"Authorization": "Bearer private-token"}
+                        excluded = await client.post(
+                            url + "&excluded_codes=005930", headers=headers,
+                        )
+                        self.assertIsNone(excluded.json()["job"])
+                        invalid = await client.post(url + "&excluded_codes=bad", headers=headers)
+                        self.assertEqual(422, invalid.status_code)
+                        claimed = await client.post(url, headers=headers)
+                        self.assertEqual(200, claimed.status_code)
+                        job = claimed.json()["job"]
+                        self.assertEqual("BODY", job["stage"])
+                        completed = await client.post(
+                            "/api/v1/news/historical-jobs/complete", headers=headers,
+                            json={"job_key": job["job_key"], "attempts": job["attempts"],
+                                  "stage": "BODY", "body_text": "원문 본문",
+                                  "body_status": "fulltext"},
+                        )
+                        self.assertEqual(200, completed.status_code)
+                        self.assertEqual("completed", completed.json()["state"])
+
+            asyncio.run(verify_requests())
 
     def test_body_rule_and_replay_use_existing_revisions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

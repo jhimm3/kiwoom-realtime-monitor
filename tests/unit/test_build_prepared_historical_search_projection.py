@@ -10,7 +10,7 @@ import unittest
 from scripts.build_prepared_historical_search_projection import _publication, build
 from scripts.finalize_prepared_historical_news_events import finalize
 from scripts.verify_prepared_historical_news_rules import verify
-from tests.unit.test_verify_prepared_historical_news_rules import _fixture
+from tests.unit.historical_news_test_support import prepared_news_rules_fixture
 
 
 class PreparedHistoricalSearchProjectionTests(unittest.TestCase):
@@ -39,7 +39,7 @@ class PreparedHistoricalSearchProjectionTests(unittest.TestCase):
 
     def test_incomplete_events_cannot_create_projection(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            prepared, archive, _, digest = _fixture(Path(root), mismatch=False)
+            prepared, archive, _, digest = prepared_news_rules_fixture(Path(root), mismatch=False)
             verify(prepared, archive, digest)
             with self.assertRaisesRegex(ValueError, "frozen event/RULE"):
                 build(archive)
@@ -50,7 +50,7 @@ class PreparedHistoricalSearchProjectionTests(unittest.TestCase):
 
     def test_projection_is_pc_computed_resumable_and_does_not_seal(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            prepared, archive, _, digest = _fixture(Path(root), mismatch=False)
+            prepared, archive, _, digest = prepared_news_rules_fixture(Path(root), mismatch=False)
             with closing(sqlite3.connect(archive)) as db:
                 db.execute("CREATE TABLE archive_seed_roles (table_name TEXT,row_key TEXT,"
                            "payload_hash TEXT,role TEXT,PRIMARY KEY(table_name,row_key))")
@@ -82,7 +82,7 @@ class PreparedHistoricalSearchProjectionTests(unittest.TestCase):
 
     def test_seed_historical_is_listed_but_support_only_is_not(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            prepared, archive, _, digest = _fixture(Path(root), mismatch=False)
+            prepared, archive, _, digest = prepared_news_rules_fixture(Path(root), mismatch=False)
             with closing(sqlite3.connect(archive)) as db:
                 db.execute("CREATE TABLE archive_seed_roles (table_name TEXT,row_key TEXT,"
                            "payload_hash TEXT,role TEXT,PRIMARY KEY(table_name,row_key))")
@@ -123,7 +123,7 @@ class PreparedHistoricalSearchProjectionTests(unittest.TestCase):
         }
         for phase, injection in injections.items():
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as root:
-                prepared, archive, _, digest = _fixture(Path(root), mismatch=False)
+                prepared, archive, _, digest = prepared_news_rules_fixture(Path(root), mismatch=False)
                 with closing(sqlite3.connect(archive)) as db:
                     db.execute("CREATE TABLE archive_seed_roles (table_name TEXT,row_key TEXT,"
                                "payload_hash TEXT,role TEXT,PRIMARY KEY(table_name,row_key))")

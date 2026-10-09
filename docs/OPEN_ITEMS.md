@@ -1,5 +1,94 @@
 # 남은 작업과 보류 사항
 
+**2026-10-10 테스트 최종 품질 감사:** [결과·실제 수정 대상·CI 전환 설계](TEST_FINAL_QUALITY_AUDIT.md).
+브랜치 `8caf622`의 430개(unit 413/integration 17) 중 unit 413개와 PG access/smoke hosted는 통과했다.
+runner 0건/skip 판정, 전체 실행 경로 guard, 취소 실패 테스트, integration 자동화와 3단계 CI를 브랜치에 구현했다.
+별도 main `4efd672`의 Windows는 새 unit 4개 미등록으로 실패했으므로 해당 main 전체 성공으로 보고하지 않는다.
+제품 후속 정책: historical news 사건 첫 기사 기준 분할에서 늦은 기사의 구간 교차를 허용할지 결정 필요.
+실제 데이터 누수는 미확인이다. 과거 두 historical 테스트의 WinError 5 원인도 미확정으로 유지한다.
+변경된 로컬 전체 회귀는 3,682건/268 worker 통과했고 실패·skip·미실행·잔류 자손은 0이다.
+hosted 검증과 보호 check 전환은 아직 남았다.
+main 병합과 NAS 배포는 별도다.
+
+**2026-10-09 미등록 CI 5차 묶음:** 28개 모듈/398건을 검토 profile에 넣었고, 이미 CI에 등록된
+`test_research_final_preparation`을 제외한 27개 신규 모듈/370건을 편입했다.
+공유 fixture를 `research_test_support.py`로 분리했고, 영향을 받은 13개 모듈의 assertion AST 목록이
+유지됨을 확인했다. 깨져 있던 policy drift 입력만 실제 prepared evaluation 값 변경으로 수정했으며 거부
+assertion은 보존했다. 선택 profile 30개 모듈/415건 통과, 최종 전체 `all-local` 365개 모듈/3,334건/
+225 worker 통과, 실패·오류·skip·미실행·timeout·누락·잔류 자손 0, worker tree 종료 225/225다.
+제한 sandbox의 Proactor loopback 멈춤은 사용자 Windows 권한에서 재검증했고 전체 run도 완료했다.
+test discovery guard도 통과했다. [GitHub CI 37939207498](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37939207498)은
+Windows 365개 모듈/3,334건/225 worker, Linux 65건/5개 모듈, disposable PostgreSQL 87건 및 schema 21
+저장 경계 63개와 rollback 검사 모두 성공했다. manifest·runner hash와 모듈·테스트·worker 수가 local과
+일치하고, raw file hash 차이 13개는 CRLF/LF 차이로 정규화 후 일치했다. Windows 등록 365개, Linux 별도
+5개, 미등록 후보 43개다. 상세 실행 기록과 선택 이유는
+[테스트 후속 보고](TEST_DUPLICATION_CI_FOLLOWUP.md)를 따른다. main 병합과 NAS 배포는 별도다.
+
+**2026-10-09 미등록 CI 2차 묶음:** 다음 정렬 구간 24개 모듈을 검토해 24개/160건을
+`dependency-audit-batch-02-historical-runtime-contracts`에 편입했다. 공유 테스트 fixture를
+테스트 모듈 간 import에서 `historical_news_test_support.py`로 옮겼고 기존 7개 테스트 파일의
+assertion AST가 모두 동일함을 확인했다. 직접 관련된 7개 모듈 27건과 선택 profile 160건,
+전체 `all-local` 290개 모듈/2,713건/150 worker가 통과했다. 실패·오류·skip·기대 실패·예상 밖 성공·
+미실행·timeout·잔류 자손·미등록 모듈은 0이다. 새 테스트 모듈 누락 검사도 통과했다. [GitHub CI
+37925187185](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37925187185)은 Windows
+전체 2,713건/150 worker/290개 모듈, Linux 65건/5개 모듈, disposable PostgreSQL 87건과 schema 21
+저장 경계 63개 및 rollback 검사를 모두 통과했다. Windows artifact manifest hash는 local과 같으며
+hosted worker failure/error/skip/unrun/leak은 0이다. Windows 등록 범위는 290개, 미등록 후보는
+118개다. 실행 기록은 `tmp/regression/batch02-targeted/run.json`,
+`tmp/regression/batch02-all-local/run.json`, `tmp/regression/batch02-fixture-targeted/run.json`이다.
+main 병합과 NAS 배포는 별도다.
+
+**2026-10-09 미등록 CI 3차 묶음:** 다음 정렬 구간 24개 모듈/113건을
+`dependency-audit-batch-03-historical-and-runtime-contracts`에 선택 등록했다. 뉴스 작업 테스트의
+테스트 모듈 fixture import를 로컬 도메인 fixture로 분리했고, 선택 의존성과 skip을 가진 API 테스트를
+기존 HTTPX ASGI transport와 앱 lifespan 검증으로 전환했다. 기존 응답 assertion은 유지했고 `httpx2`는
+추가하지 않았다. 관련 모듈 20건, 선택 profile 113건, 전체 `all-local` 314개 모듈/2,826건/174 worker가
+통과했다. 실패·오류·skip·기대 실패·예상 밖 성공·미실행·timeout·잔류 자손·미등록 모듈은 0이다.
+이 묶음의 [GitHub CI 37927654479](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37927654479)도
+통과했다. Windows 2,826건/174 worker/314개 모듈, Linux 65건/5개 모듈, disposable PostgreSQL 87건과
+schema 21 저장 경계 63개 및 rollback이 통과했고 Windows manifest hash는 local과 같다. hosted
+실패·오류·skip·미실행·worker 누수는 0이다. Windows 등록 범위는 314개, 미등록 후보는 94개다.
+실행 기록은 `tmp/regression/batch03-targeted/run.json`,
+`tmp/regression/batch03-all-local/run.json`이다.
+
+**2026-10-09 미등록 CI 4차 묶음:** 다음 정렬 구간 24개 모듈/138건을
+`dependency-audit-batch-04-market-news-and-storage-contracts`에 선택 등록했다. 계좌 역할/CAS·rollback,
+뉴스 수집·화면·프로세스 수명, 개인 API 설정, 로컬/NAS 저장 진단, OCR 레이아웃, 역사 페이지 parser와
+월별 selection 계약을 포함한다. `test_market_profile_settings` API 검사는 기존 HTTPX ASGI/lifespan
+경로로 옮겼으며 요청·응답 assertion을 유지했다. 선택 profile 24 worker/138건 통과.
+첫 전체 `all-local`은 2,964건 중 `test_historical_reconstruction`의 임시 디렉터리 rename에서
+Windows `PermissionError` 1건으로 실패했고 worker tree는 종료됐다. 실패 테스트 단독 1건과 전체 모듈
+8건을 다시 실행해 통과했고, 새 전체 실행 338개 모듈/2,964건/198 worker도 통과했다. 이 두 번째
+전체 실행에서 실패·오류·skip·기대 실패·예상 밖 성공·미실행·timeout·미검증 source·잔류 자손·누락
+모듈은 0이다. 첫 오류의 원인은 확정되지 않아 실패 기록은 그대로 보존한다.
+이 묶음의 [GitHub CI 37931617482](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37931617482)은
+Windows 338개 모듈/2,964건/198 worker, Linux 65건/5개 모듈, disposable PostgreSQL 87건과 schema 21
+저장 경계 63개 및 rollback 검사를 통과했다. manifest·runner hash는 local과 일치했고 13개 테스트 파일의
+raw hash 차이는 CRLF/LF checkout 차이로 정규화 후 일치했다. Windows 등록 범위는 338개, 미등록 후보는 70개다.
+실행 기록은 `tmp/regression/batch04-targeted/run.json`,
+`tmp/regression/batch04-all-local/run.json`, `tmp/regression/batch04-all-local-retry/run.json`이다.
+
+**2026-10-09 미등록 CI 1차 묶음:** 정렬 순서상 후보 24개를 검토해 22개 모듈/83건을 선택 profile에
+등록했다. 현재 Windows `all-local` 범위는 266개 모듈이고 미등록 후보는 142개다. 선택 profile
+83/83 통과, 이어진 전체 `all-local`은 2,553건/126 worker 통과, 실패·오류·skip·기대 실패·예상 밖
+성공·미실행 0, worker process tree 종료 126/126, 새 테스트 파일 누락 0이다. 180초 제한의 첫 전체
+시도는 첫 프로필이 끝나기 전에 timeout되어 성공으로 세지 않았고, worker와 자손 종료를 확인한 뒤
+600초 제한으로 전체 검사를 다시 완료했다. [GitHub run 37921972310](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37921972310)은 Windows 2,553건/126 worker/266개 모듈, Linux 전용 65건/5개 모듈, disposable PostgreSQL 87건과 저장 경계 63개를 통과했다. 실패·오류·skip·미실행·worker 누수는 모두 0이다.
+
+**2026-10-09 테스트 중복·상시 CI 후속:** [분석·등록·실행 근거](TEST_DUPLICATION_CI_FOLLOWUP.md).
+원래 409개를 포함한 410개 정적 선별에서 삭제 가능한 완전 중복은 확정되지 않았다. 발견 증거와
+실제 worker/process tree 종료 판정을 강화하고 확인된 실패 주입·fixture 종료 결합을 보강했다.
+기존 core와 모든 등록 profile의 검증 범위·순서는 유지한다. 현재 unit 파일 413개 중 Windows 244개,
+별도 Linux 5개, 단계적 미등록 후보 164개다. 최근 진단 실행·API·조회·용량 4개는 초기 18건 중
+1 failure(구 4GiB 기대)였다. 이미 main에 통합된 8GiB/5M 공개 계약의 기대 2곳만 갱신한 최종 18건은
+통과했다. 두 capability를 각각 잘못된 값으로 바꾼 실제 HTTP 대조군은 각각 1 failure로 거부됐다.
+capture API assertion 실패 후 client가 닫히지 않는 경로도 재현해 unittest cleanup으로 보강했다.
+그 외 assertion·기대값·제품 코드는 유지했다.
+직전 `4eec494` hosted CI는 Windows 2,452건/100 worker, Linux 65건, disposable PostgreSQL 87건과
+63개 저장 경계 검사 통과다. 새 제어 4개 포함 전체 회귀는 게시 branch의 CI artifact로 별도 판정한다.
+남은 164개를 모두 실행했거나 제외 확정한 것으로 보고하지 않는다. 이전 단계별 실행과 판단은 후속
+문서를 따른다. NAS 운영 검증·배포·main 병합은 별도로 유지한다.
+**2026-10-09 main 후속 기록:**
 **2026-10-09 전체 앱 최적화 P0/P1 진행:** 사용자가 지정한 P0 정합성·복구 → P1 공통
 장기 지연 → P2 중복 → P3 개별 → P4 확대 부하 순서를 따른다. 10/8 불완전 capture는
 부분 비교만 허용하며 저장 주기/batch/concurrency 변경이나 전체 완료 근거로 쓰지 않는다.
@@ -224,7 +313,6 @@ canonical minute/metadata의 전체 hash는 같았다. 같은 후보의 반복�
 남은 것: 같은 비교 경계를 pre-batch reference에도 적용해 동일 recorded 입력으로 후보/기준선
 내용·revision 연결을 대조한다. `functional_equivalence_verified`, `timing_equivalence_verified`,
 `source_state_equivalent`는 아직 false이며 전체 앱 부하 개선으로 일반화하지 않는다.
-
 **2026-10-09 녹화 입력 거부 원인과 복사 경합 감사:** 원본 trace `20261007T235957Z-e8cb574bf964`의
 1,490 chunks/2,033,667 events를 checksum·sequence와 함께 재검증했다. 거부 692건은 모두 호출별
 immutable-copy 8MiB byte budget 초과이며 object-node 120,000 한도 초과는 0건이다:
