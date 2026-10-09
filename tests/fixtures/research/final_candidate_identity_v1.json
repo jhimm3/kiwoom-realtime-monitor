@@ -1,0 +1,60 @@
+{
+  "legacy_sha256": "b3b3b2343b53cf880dad7e8191a98bdf572bacf6a0c74679e9594d4a5217613e",
+  "current_sha256": "8b800c54c29d05f128a70248757052bacbd1129693e22f7fc1178ccd6bf6cba6",
+  "legacy_document": {
+    "version": "final_candidate/v1",
+    "family": "krx_bar_close_breakout/v1",
+    "parameters": {
+      "strategy_version": "v1",
+      "rolling_factor_version": "v1",
+      "rank_factor_version": "v1",
+      "lookback_bars": 2,
+      "buffer_bps": 0,
+      "rank_persistence_enabled": true,
+      "rank_persistence_required": true,
+      "rank_top_k": 20,
+      "rank_window_seconds": 60,
+      "rank_max_gap_seconds": 30,
+      "rank_min_residency_seconds": 10,
+      "stop_loss_bps": 300,
+      "target_bps": 500,
+      "max_hold_minutes": 10,
+      "quantity": 1,
+      "capital_won": 1000000,
+      "signal_valid_seconds": 60,
+      "cooldown_seconds": 30
+    },
+    "execution_model": {
+      "version": "next_tradable_bar_open/v1",
+      "same_bar_path_version": "conservative_with_optimistic_bound/v1",
+      "initial_cash_won": 1000000,
+      "cost_model": {
+        "version": "fixed_bps/v1",
+        "commission_bps": 1,
+        "sell_tax_bps": 18,
+        "slippage_bps": 5,
+        "rate_basis": "model_estimate",
+        "source": "locked fixture",
+        "valid_from": "2026-09-14T00:00:00+09:00",
+        "valid_to": "2026-09-15T00:00:00+09:00"
+      }
+    },
+    "session_profile": {
+      "profile": "krx-regular/v1",
+      "venue": "KRX",
+      "schedule_version_policy": "by_trading_date/v1",
+      "windows_kst": ["09:00-15:30"],
+      "excluded_windows_kst": ["15:30-16:00"],
+      "factor_session_policy": "reset_at_each_window/v1",
+      "next_bar_policy": "continuous_next_minute_same_window/v1",
+      "auction_execution_policy": "unsupported_without_orderbook/v1",
+      "horizon_policy": "wall_clock_continuous_coverage/v1"
+    },
+    "implementation_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "dated_hours_extension": {
+    "verified_delayed_session_dates_kst": ["2021-11-18", "2022-11-17", "2023-11-16", "2024-11-14", "2025-11-13"],
+    "verified_delayed_regular_window_kst": "10:00-16:30",
+    "verified_delayed_excluded_window_kst": "16:30-17:00"
+  }
+}

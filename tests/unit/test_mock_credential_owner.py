@@ -17,52 +17,7 @@ from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.mock_runtime import MockCredentialOwner
 from kiwoom_monitor.domain.order_contract import AccountEnvironment
 from kiwoom_monitor.infrastructure.kiwoom_rest.account_identity import VerifiedAccountIdentity
-from kiwoom_monitor.infrastructure.kiwoom_rest.client import KiwoomRestClient, PreparedKiwoomCredentials
-
-
-class FakeClient(KiwoomRestClient):
-    fail_read = False
-    read_entered = None
-    read_release = None
-    validate_entered = None
-    validate_release = None
-    counter_lock = threading.Lock()
-    active_reads = 0
-    max_reads = 0
-
-    def prepare_credential_token(self, settings):
-        with self._request_lock:
-            self._ensure_credential_accepting()
-            if settings.app_key == "bad": raise RuntimeError("fake-sensitive-error")
-            self._last_request_at = time.monotonic()
-            return PreparedKiwoomCredentials(settings, "token:" + settings.app_key,
-                datetime.now(timezone.utc) + timedelta(hours=1), {}, self._credential_generation)
-
-    def verify_prepared_credentials(self, prepared):
-        with self._request_lock:
-            if self.validate_entered is not None:
-                self.validate_entered.set(); self.validate_release.wait(timeout=5)
-            self._last_request_at = time.monotonic()
-            return PreparedKiwoomCredentials(prepared.settings, prepared.token, prepared.expires_at,
-                {"acctNo": ("1234567890" if prepared.settings.app_key.startswith("a") else
-                            "3456789012" if prepared.settings.app_key.startswith("c") else "2345678901")},
-                self._credential_generation, True)
-
-    def request_with_continuation(self, api_id, path, body, **kwargs):
-        with self._request_lock:
-            self._ensure_credential_accepting()
-            if api_id == "ka10075" and self.read_entered is not None:
-                with FakeClient.counter_lock:
-                    FakeClient.active_reads += 1
-                    FakeClient.max_reads = max(FakeClient.max_reads, FakeClient.active_reads)
-                try:
-                    self.read_entered.set(); self.read_release.wait(timeout=5)
-                finally:
-                    with FakeClient.counter_lock: FakeClient.active_reads -= 1
-            if self.fail_read: raise RuntimeError("fake-sensitive-read-error")
-            return {"ka10075": {"oso": []}, "ka10076": {"cntr": []},
-                "kt00018": {"acnt_evlt_remn_indv_tot": []}, "kt00001": {"ord_alow_amt": "1000000"},
-            }[api_id], False, ""
+from credential_owner_test_support import FakeClient
 
 
 class MockCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):

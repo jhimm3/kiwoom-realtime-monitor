@@ -100,32 +100,71 @@ class PreparedHistoricalSearchProjectionTests(unittest.TestCase):
                               ("mismatch", "prepared", "verified")], rows)
 
     def test_failed_projection_batch_rolls_back_rows_and_manifest(self) -> None:
-        with tempfile.TemporaryDirectory() as root:
-            prepared, archive, _, digest = _fixture(Path(root), mismatch=False)
-            with closing(sqlite3.connect(archive)) as db:
-                db.execute("CREATE TABLE archive_seed_roles (table_name TEXT,row_key TEXT,"
-                           "payload_hash TEXT,role TEXT,PRIMARY KEY(table_name,row_key))")
-                db.commit()
-            verify(prepared, archive, digest)
-            finalize(prepared, archive, digest)
-            self.assertEqual(1, build(archive, max_rows=1)["projected"])
-            with closing(sqlite3.connect(archive)) as db:
-                db.execute("CREATE TRIGGER reject_projection BEFORE INSERT ON "
-                           "archive_search_projection WHEN NEW.identity='mismatch' BEGIN "
-                           "SELECT RAISE(ABORT,'injected projection failure'); END")
-                db.commit()
-            with self.assertRaisesRegex(sqlite3.IntegrityError, "injected projection failure"):
-                build(archive)
-            with closing(sqlite3.connect(archive)) as db:
-                self.assertEqual(1, db.execute(
-                    "SELECT COUNT(*) FROM archive_search_projection").fetchone()[0])
-                state = json.loads(db.execute(
-                    "SELECT value_json FROM archive_build_manifest WHERE key='prepared_search_projection'"
-                ).fetchone()[0])
-                self.assertEqual(1, state["projected"])
-                db.execute("DROP TRIGGER reject_projection")
-                db.commit()
-            self.assertEqual(2, build(archive)["projected"])
+        def snapshot(db: sqlite3.Connection) -> tuple[list, list, list]:
+            return (
+                db.execute("SELECT * FROM archive_search_projection "
+                           "ORDER BY stock_code,identity").fetchall(),
+                db.execute("SELECT key,value_json FROM archive_build_manifest ORDER BY key").fetchall(),
+                db.execute("SELECT * FROM archive_search_projection_sources "
+                           "ORDER BY stock_code,identity").fetchall(),
+            )
+
+        injections = {
+            "second_insert": (
+                "BEFORE INSERT ON archive_search_projection "
+                "WHEN NEW.identity='mismatch' AND "
+                "(SELECT COUNT(*) FROM archive_search_projection)=2"
+            ),
+            "progress_update": (
+                "BEFORE UPDATE ON archive_build_manifest "
+                "WHEN NEW.key='prepared_search_projection' AND "
+                "(SELECT COUNT(*) FROM archive_search_projection)=3"
+            ),
+        }
+        for phase, injection in injections.items():
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as root:
+                prepared, archive, _, digest = _fixture(Path(root), mismatch=False)
+                with closing(sqlite3.connect(archive)) as db:
+                    db.execute("CREATE TABLE archive_seed_roles (table_name TEXT,row_key TEXT,"
+                               "payload_hash TEXT,role TEXT,PRIMARY KEY(table_name,row_key))")
+                    # This row sorts between the two prepared rows, so the failing
+                    # batch must have inserted a new row before either failure.
+                    self._seed_article(db, "middle", "historical")
+                    db.commit()
+                verify(prepared, archive, digest)
+                finalize(prepared, archive, digest)
+                self.assertEqual(1, build(archive, max_rows=1)["projected"])
+                with closing(sqlite3.connect(archive)) as db:
+                    before = snapshot(db)
+                    self.assertEqual(["match"], [row[1] for row in before[0]])
+                    self.assertEqual(["match", "middle", "mismatch"],
+                                     [row[1] for row in before[2]])
+                    db.execute(f"CREATE TRIGGER reject_projection {injection} BEGIN "
+                               "SELECT RAISE(ABORT,'injected projection failure'); END")
+                    db.commit()
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "injected projection failure"):
+                    build(archive)
+                with closing(sqlite3.connect(archive)) as db:
+                    self.assertEqual(before, snapshot(db))
+                    state = json.loads(dict(before[1])["prepared_search_projection"])
+                    self.assertEqual(1, state["projected"])
+                    self.assertEqual([], db.execute(
+                        "SELECT * FROM archive_search_projection_lease").fetchall())
+                    db.execute("DROP TRIGGER reject_projection")
+                    db.commit()
+                recovered = build(archive)
+                self.assertEqual(("complete", 3, 3, 2),
+                                 (recovered["state"], recovered["sources"],
+                                  recovered["projected"], recovered["processed_now"]))
+                self.assertEqual(0, build(archive)["processed_now"])
+                with closing(sqlite3.connect(archive)) as db:
+                    after = snapshot(db)
+                    self.assertEqual(before[0][0], after[0][0])
+                    self.assertEqual(["match", "middle", "mismatch"],
+                                     [row[1] for row in after[0]])
+                    self.assertEqual(before[2], after[2])
+                    self.assertEqual([], db.execute(
+                        "SELECT * FROM archive_search_projection_lease").fetchall())
 
 
 if __name__ == "__main__":

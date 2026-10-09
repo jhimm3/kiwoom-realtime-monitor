@@ -15,27 +15,8 @@ from kiwoom_monitor.central_server.config import CentralServerSettings
 from kiwoom_monitor.central_server.credential_runtime import CredentialRuntime
 from kiwoom_monitor.central_server.credential_store import CredentialStore, compose_credential_settings
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
-from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis, AIRequestUsage, NewsAIProviderError
-
-
-class FakeAI:
-    def __init__(self):
-        self.calls = []
-        self.entered = threading.Event()
-        self.release = threading.Event()
-        self.block_first = False
-        self.failure = None
-
-    def __call__(self, settings, stock_name, articles):
-        self.calls.append((settings.provider, settings.api_key, settings.model, articles))
-        if len(self.calls) == 1 and self.block_first:
-            self.entered.set()
-            if not self.release.wait(5):
-                raise RuntimeError("fake gate timed out")
-        if self.failure is not None:
-            error, self.failure = self.failure, None
-            raise error
-        return tuple(AINewsAnalysis("가짜 요약", "긍정", 80, "가짜 근거") for _ in articles), AIRequestUsage(3, 2, 5)
+from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
+from credential_owner_test_support import FakeAI
 
 
 class AICredentialOwnerTests(unittest.IsolatedAsyncioTestCase):

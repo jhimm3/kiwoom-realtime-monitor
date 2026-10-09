@@ -1,23 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-import unittest
 import threading
 import uuid
 from unittest.mock import patch
 
-import test_real_credential_owner as support
+from credential_owner_test_support import RealCredentialOwnerTestSupport, RealFakeClient
 from kiwoom_monitor.central_server.credential_runtime import CredentialOperationError
 from kiwoom_monitor.central_server.real_runtime import RealCredentialOwner
+from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
+from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomSettings
 
 
-class MarketRoleChangeTests(unittest.IsolatedAsyncioTestCase):
-    asyncSetUp = support.RealCredentialOwnerTests.asyncSetUp
-    asyncTearDown = support.RealCredentialOwnerTests.asyncTearDown
-    ready = support.RealCredentialOwnerTests.ready
-    apply = support.RealCredentialOwnerTests.apply
-    active = support.RealCredentialOwnerTests.active
-    query = support.RealCredentialOwnerTests.query
+class MarketRoleChangeTests(RealCredentialOwnerTestSupport):
 
     async def admitted(self):
         return await self.active(profile="nas-real-default"), await self.active(key="b1")
@@ -137,8 +132,8 @@ class MarketRoleChangeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.close()
         await self.owner.close()
         await self.market_broker.close()
-        self.market_client = support.RealFakeClient(support.KiwoomSettings("", "", "real"))
-        self.market_broker = support.CentralRestBroker(self.market_client)
+        self.market_client = RealFakeClient(KiwoomSettings("", "", "real"))
+        self.market_broker = CentralRestBroker(self.market_client)
         self.owner = RealCredentialOwner(self.store, self.vault, hmac_key=b"x" * 32,
             market_client=self.market_client, market_broker=self.market_broker, market_collector=self.collector)
         await self.owner.start()
@@ -152,7 +147,7 @@ class MarketRoleChangeTests(unittest.IsolatedAsyncioTestCase):
     async def test_role_waits_for_physical_query_before_exchanging_transports(self):
         source, _ = await self.admitted()
         entered, unblock = threading.Event(), threading.Event()
-        support.RealFakeClient.query_entered, support.RealFakeClient.query_release = entered, unblock
+        RealFakeClient.query_entered, RealFakeClient.query_release = entered, unblock
         query = asyncio.create_task(self.query(source))
         try:
             self.assertTrue(await asyncio.to_thread(entered.wait, 3))

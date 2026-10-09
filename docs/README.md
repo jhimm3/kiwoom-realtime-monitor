@@ -19,6 +19,7 @@
 | PostgreSQL 공통 접근·관측 계층 검토와 이관 기준 | [공통 DB 경계 검토](COMMON_DB_ACCESS_OBSERVABILITY_REVIEW.md) |
 | 장중 trace를 고정 입력으로 재생·비교 | [반복 부하 실험 계약](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md) |
 | DB 변경 전 연결 기준선과 동작 보존 절차 | [DB 리팩터링 연결 기준선](db_refactoring/README.md) |
+| 기능 의존성 축소와 변경 전후 자동 검증 | [기능 보존 검증 계획](DEPENDENCY_REFACTOR_VERIFICATION_PLAN.md) — Windows 회귀·disposable PostgreSQL CI 구성 완료, 첫 hosted 실행과 required check 확인 대기 |
 | 시스템 책임과 데이터 흐름 | [현재 아키텍처](../ARCHITECTURE_CURRENT.md) · [모듈 지도](../MODULE_MAP.md) |
 | MainWindow의 AppController 도입과 기능 연결 보존 | [책임 이전·검증 계약](MAIN_WINDOW_APP_CONTROLLER_PLAN.md) · [변경 전 정적 연결 목록](MAIN_WINDOW_CONNECTION_BASELINE.json) · [변경 후 대조](MAIN_WINDOW_CONNECTION_COMPARISON.json) |
 | 키움 시장 데이터 요청·저장·사용 흐름 | [시장 데이터 관계도](MARKET_DATA_FLOW.md) |

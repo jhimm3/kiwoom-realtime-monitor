@@ -389,7 +389,7 @@ def main() -> int:
         }
         minute_observation_key = f"{minute_bar['trading_date']}T{minute_bar['minute']}"
         metadata = MarketDataObservation(
-            MarketDatasetKind.MINUTE_BAR, marker, minute_bar,
+            MarketDatasetKind.MINUTE_BAR, f"{marker}:KRX", minute_bar,
             MarketDataMetadata(
                 observed_at, observed_at, TradingVenue.KRX, DataUnit.MILLION_WON,
                 DataValueKind.ACTUAL, DataCompleteness.COMPLETE,
@@ -409,7 +409,7 @@ def main() -> int:
             "operation_id": f"{marker}-minute-delta",
         }
         delta_metadata = MarketDataObservation(
-            MarketDatasetKind.MINUTE_BAR, marker, delta,
+            MarketDatasetKind.MINUTE_BAR, f"{marker}:KRX", delta,
             MarketDataMetadata(
                 observed_at, observed_at, TradingVenue.KRX, DataUnit.UNKNOWN,
                 DataValueKind.ACTUAL, DataCompleteness.IN_PROGRESS,
@@ -444,7 +444,7 @@ def main() -> int:
             second_row = cursor.fetchone()
         checks["second_trade_bars"] = second_row == (10, 1_020, 3)
         loaded_metadata = store.load_market_data_metadata(
-            MarketDatasetKind.MINUTE_BAR, marker, minute_observation_key,
+            MarketDatasetKind.MINUTE_BAR, f"{marker}:KRX", minute_observation_key,
         )
         checks["metadata"] = bool(
             loaded_metadata and loaded_metadata.source == "kiwoom-websocket-0B"
@@ -1057,7 +1057,7 @@ def main() -> int:
                     )
                 cursor.execute(
                     "DELETE FROM central_market_data_observation_meta WHERE subject=%s",
-                    (marker,),
+                    (f"{marker}:KRX",),
                 )
                 cursor.execute("DELETE FROM central_external_bars WHERE instrument=%s", (marker,))
                 cursor.execute("DELETE FROM central_shadow_candidate_events WHERE monitor_id=%s", (marker,))

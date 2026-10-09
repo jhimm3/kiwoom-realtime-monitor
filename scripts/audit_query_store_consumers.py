@@ -27,6 +27,7 @@ OPTIONAL_METHODS = {
     "explain_news_job_claim_plan",
     "set_news_job_wakeup",
 }
+OWNED_THREAD_MODULE = "kiwoom_monitor.central_server.diagnostic_replay_runtime"
 
 
 def _dotted(node: ast.AST) -> str:
@@ -107,8 +108,53 @@ def _binding_for(
     return matches[0] if len(matches) == 1 else None
 
 
+def _owned_thread_imports(tree: ast.Module, relative: str) -> dict[str, str]:
+    imports: dict[str, str] = {}
+    central = relative.startswith("src/kiwoom_monitor/central_server/")
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            direct = (module == OWNED_THREAD_MODULE and node.level == 0) or (
+                central and node.level == 1 and module == "diagnostic_replay_runtime")
+            package = (module == "kiwoom_monitor.central_server" and node.level == 0) or (
+                central and node.level == 1 and not module)
+            for item in node.names:
+                bound = item.asname or item.name
+                imports = {key: value for key, value in imports.items() if key.split(".", 1)[0] != bound}
+                if direct and item.name == "owned_to_thread":
+                    imports[item.asname or item.name] = OWNED_THREAD_MODULE + ".owned_to_thread"
+                elif package and item.name == "diagnostic_replay_runtime":
+                    imports[(item.asname or item.name) + ".owned_to_thread"] = OWNED_THREAD_MODULE + ".owned_to_thread"
+        elif isinstance(node, ast.Import):
+            for item in node.names:
+                bound = item.asname or item.name.split(".", 1)[0]
+                imports = {key: value for key, value in imports.items() if key.split(".", 1)[0] != bound}
+                if item.name == OWNED_THREAD_MODULE:
+                    imports[(item.asname or item.name) + ".owned_to_thread"] = OWNED_THREAD_MODULE + ".owned_to_thread"
+    return imports
+
+
+def _thread_dispatch(
+    call: ast.AST | None, parents: dict[ast.AST, ast.AST], imports: dict[str, str],
+    shadowed_names: dict[tuple[str, ...], set[str]],
+) -> str:
+    if not isinstance(call, ast.Call):
+        return ""
+    if isinstance(call.func, ast.Attribute) and call.func.attr == "to_thread":
+        return "asyncio.to_thread"
+    expression = _dotted(call.func)
+    dispatch = imports.get(expression, "")
+    root_name = expression.split(".", 1)[0]
+    owners = _owners(call, parents)
+    if any(root_name in shadowed_names.get(owners[:length], set())
+           for length in range(len(owners) + 1)):
+        return ""
+    return dispatch
+
+
 def _reference_kind(
     node: ast.AST, parent: ast.AST | None, parents: dict[ast.AST, ast.AST],
+    imports: dict[str, str], shadowed_names: dict[tuple[str, ...], set[str]],
 ) -> tuple[str, str]:
     if isinstance(parent, ast.Call) and parent.func is node:
         return "direct_call", _dotted(parent.func)
@@ -120,9 +166,9 @@ def _reference_kind(
         if isinstance(caller, ast.Call) and caller.func is parent:
             label = "getattr_invocation" if parent.func.id == "getattr" else label
         return label, parent.func.id
-    if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Attribute):
-        if parent.func.attr == "to_thread" and node in parent.args:
-            return "callable_argument", "asyncio.to_thread"
+    dispatch = _thread_dispatch(parent, parents, imports, shadowed_names)
+    if dispatch and isinstance(parent, ast.Call) and parent.args and node is parent.args[0]:
+        return "callable_argument", dispatch
     return "bound_reference", ""
 
 
@@ -135,6 +181,18 @@ def _collect_source(
     internal_owners: set[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    imports = _owned_thread_imports(tree, relative)
+    shadowed_names: dict[tuple[str, ...], set[str]] = {}
+    for node in ast.walk(tree):
+        name = (node.id if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+                else node.arg if isinstance(node, ast.arg)
+                else node.name if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                else "")
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and parents.get(node) is not tree:
+            for item in node.names:
+                shadowed_names.setdefault(_owners(node, parents), set()).add(item.asname or item.name.split(".")[0])
+        if name:
+            shadowed_names.setdefault(_owners(node, parents), set()).add(name)
     sites: list[dict[str, Any]] = []
     forwards: list[dict[str, Any]] = []
 
@@ -147,7 +205,7 @@ def _collect_source(
             if node.attr in {"close", "initialize"} and binding is None:
                 continue
             parent = parents.get(node)
-            kind, dispatch = _reference_kind(node, parent, parents)
+            kind, dispatch = _reference_kind(node, parent, parents, imports, shadowed_names)
             site = {
                 "file": relative, "owner": owner, "receiver": receiver,
                 "method": node.attr, "reference_kind": kind, "dispatch": dispatch,
@@ -195,7 +253,8 @@ def _collect_source(
         # Record only explicit local helper calls where a reviewed store receiver is
         # passed as an argument. The helper body is separately inventoried at its own
         # location; this edge does not silently attribute its DB methods to every route.
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and not _thread_dispatch(node, parents, imports, shadowed_names)):
             receiver_args = []
             for index, arg in enumerate(node.args):
                 receiver = _dotted(arg)
@@ -208,12 +267,7 @@ def _collect_source(
                 if binding:
                     receiver_args.append((f"keyword:{keyword.arg or '**'}", receiver, binding))
             if receiver_args:
-                dispatch = "asyncio.to_thread" if (
-                    isinstance(parents.get(node), ast.Call)
-                    and isinstance(parents[node].func, ast.Attribute)
-                    and parents[node].func.attr == "to_thread"
-                    and node in parents[node].args
-                ) else "direct_call"
+                dispatch = _thread_dispatch(parents.get(node), parents, imports, shadowed_names) or "direct_call"
                 for index, receiver, binding in receiver_args:
                     forwards.append({
                         "file": relative, "owner": owner, "helper": node.func.id,
@@ -225,8 +279,8 @@ def _collect_source(
 
         # asyncio.to_thread(helper, store, ...) passes the callable separately from
         # its arguments. Record that edge without treating the helper name as a DB call.
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "to_thread" and node.args
+        thread_dispatch = _thread_dispatch(node, parents, imports, shadowed_names)
+        if (thread_dispatch and isinstance(node, ast.Call) and node.args
                 and isinstance(node.args[0], ast.Name)):
             helper = node.args[0].id
             for index, arg in enumerate(node.args[1:], start=1):
@@ -236,7 +290,7 @@ def _collect_source(
                     forwards.append({
                         "file": relative, "owner": owner, "helper": helper,
                         "receiver": receiver, "argument_index": index,
-                        "dispatch": "asyncio.to_thread", "line": node.lineno,
+                        "dispatch": thread_dispatch, "line": node.lineno,
                         "route": _route_for_node(node, parents),
                         "binding_id": binding["id"],
                     })
@@ -248,7 +302,7 @@ def _collect_source(
                         "file": relative, "owner": owner, "helper": helper,
                         "receiver": receiver,
                         "argument_index": f"keyword:{keyword.arg or '**'}",
-                        "dispatch": "asyncio.to_thread", "line": node.lineno,
+                        "dispatch": thread_dispatch, "line": node.lineno,
                         "route": _route_for_node(node, parents),
                         "binding_id": binding["id"],
                     })

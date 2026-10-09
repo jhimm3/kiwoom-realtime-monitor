@@ -2,21 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import unittest
 import uuid
 from dataclasses import replace
 from unittest.mock import patch
 
-import test_real_credential_owner as support
+from credential_owner_test_support import RealCredentialOwnerTestSupport
 from kiwoom_monitor.central_server.credential_runtime import CredentialOperationError
 
 
-class MarketRoleBarrierTests(unittest.IsolatedAsyncioTestCase):
-    asyncSetUp = support.RealCredentialOwnerTests.asyncSetUp
-    asyncTearDown = support.RealCredentialOwnerTests.asyncTearDown
-    ready = support.RealCredentialOwnerTests.ready
-    apply = support.RealCredentialOwnerTests.apply
-    active = support.RealCredentialOwnerTests.active
+class MarketRoleBarrierTests(RealCredentialOwnerTestSupport):
 
     async def admitted(self):
         source = await self.active(profile="nas-real-default")

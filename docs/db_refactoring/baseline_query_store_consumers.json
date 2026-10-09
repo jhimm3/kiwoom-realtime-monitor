@@ -36,6 +36,105 @@
       "reviewed_store_binding"
     ],
     [
+      "src/kiwoom_monitor/application/mock_automation_admission.py",
+      "admit_mock_automation",
+      "repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_admission.py",
+      "admit_mock_automation",
+      "repository",
+      "save_mock_automation_control",
+      "direct_call",
+      "repository.save_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_execution.py",
+      "_load_context",
+      "repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_execution.py",
+      "dispatch_mock_automation_decision",
+      "repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_execution.py",
+      "emergency_stop_mock_automation",
+      "repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_execution.py",
+      "emergency_stop_mock_automation",
+      "repository",
+      "save_mock_automation_control",
+      "direct_call",
+      "repository.save_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_execution.py",
+      "resume_mock_automation",
+      "repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_execution.py",
+      "resume_mock_automation",
+      "repository",
+      "save_mock_automation_control",
+      "direct_call",
+      "repository.save_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/trade_analysis_preparation_service.py",
+      "TradeAnalysisPreparationService.prepare",
+      "self._repository",
+      "load_daily_bars",
+      "direct_call",
+      "self._repository.load_daily_bars",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
       "src/kiwoom_monitor/central_server/ai_credentials.py",
       "AICredentialOwner.__init__",
       "service._store",
@@ -532,6 +631,17 @@
     ],
     [
       "src/kiwoom_monitor/central_server/app.py",
+      "create_app.load_display_minute_bars",
+      "store",
+      "load_minute_bars",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
       "create_app.market_coverage",
       "store",
       "load_market_data_metadata_range",
@@ -576,17 +686,6 @@
     ],
     [
       "src/kiwoom_monitor/central_server/app.py",
-      "create_app.market_news_feed",
-      "store",
-      "load_market_news_feed",
-      "callable_argument",
-      "asyncio.to_thread",
-      "GET",
-      "/api/v1/news/market-feed",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/app.py",
       "create_app.market_profile_settings",
       "store",
       "load_market_profile_settings",
@@ -609,50 +708,6 @@
     ],
     [
       "src/kiwoom_monitor/central_server/app.py",
-      "create_app.minute_bars",
-      "store",
-      "load_minute_bars",
-      "callable_argument",
-      "asyncio.to_thread",
-      "GET",
-      "/api/v1/market/minute-bars",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/app.py",
-      "create_app.news_history",
-      "store",
-      "load_document",
-      "callable_argument",
-      "asyncio.to_thread",
-      "GET",
-      "/api/v1/news/history/{kind}",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/app.py",
-      "create_app.news_history",
-      "store",
-      "load_news_history",
-      "callable_argument",
-      "asyncio.to_thread",
-      "GET",
-      "/api/v1/news/history/{kind}",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/app.py",
-      "create_app.news_sources",
-      "store",
-      "load_news_source_diagnostics",
-      "callable_argument",
-      "asyncio.to_thread",
-      "GET",
-      "/api/v1/news/sources",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/app.py",
       "create_app.put_operational_settings",
       "store",
       "upsert_documents",
@@ -671,17 +726,6 @@
       "asyncio.to_thread",
       "WEBSOCKET",
       "/api/v1/realtime",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/app.py",
-      "create_app.recent_minute_bars",
-      "store",
-      "load_minute_bars",
-      "callable_argument",
-      "asyncio.to_thread",
-      "GET",
-      "/api/v1/market/recent-minute-bars",
       "reviewed_store_binding"
     ],
     [
@@ -822,7 +866,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -833,7 +877,7 @@
       "self._store",
       "upsert_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -844,7 +888,7 @@
       "self._store",
       "load_daily_bars",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -855,7 +899,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -866,7 +910,7 @@
       "self._store",
       "upsert_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -877,7 +921,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -888,7 +932,7 @@
       "self._store",
       "upsert_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -899,7 +943,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -910,7 +954,7 @@
       "self._store",
       "save_dataset_snapshot",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -921,7 +965,7 @@
       "self._store",
       "upsert_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -932,7 +976,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -943,7 +987,7 @@
       "self._store",
       "load_minute_bars",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -954,7 +998,7 @@
       "self._store",
       "upsert_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -965,7 +1009,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -976,7 +1020,7 @@
       "self._store",
       "upsert_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -987,7 +1031,7 @@
       "self._store",
       "load_daily_bars",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -998,7 +1042,7 @@
       "self._store",
       "load_daily_bars",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1009,7 +1053,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1020,7 +1064,7 @@
       "self._store",
       "upsert_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1031,7 +1075,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1042,7 +1086,18 @@
       "self._store",
       "load_daily_bars",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "AutonomousTop20Service._ensure_historical_high",
+      "self._store",
+      "load_daily_bars",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1053,7 +1108,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1064,7 +1119,18 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "AutonomousTop20Service._ensure_historical_high",
+      "self._store",
+      "load_documents",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1075,7 +1141,7 @@
       "self._store",
       "upsert_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1086,7 +1152,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1097,7 +1163,7 @@
       "self._store",
       "replace_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1108,7 +1174,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1119,7 +1185,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1130,7 +1196,7 @@
       "self._store",
       "load_dataset_snapshots",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1141,7 +1207,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1152,7 +1218,7 @@
       "self._store",
       "load_observation_revisions",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1163,7 +1229,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1174,7 +1240,7 @@
       "self._store",
       "upsert_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1196,7 +1262,7 @@
       "self._store",
       "load_minute_bars",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1207,7 +1273,7 @@
       "self._store",
       "save_dataset_snapshot",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1229,7 +1295,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1240,7 +1306,7 @@
       "self._store",
       "load_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1251,7 +1317,7 @@
       "self._store",
       "load_hot_cohort",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1262,7 +1328,7 @@
       "self._store",
       "save_dataset_snapshot",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -1554,6 +1620,61 @@
       "reviewed_store_binding"
     ],
     [
+      "src/kiwoom_monitor/central_server/database_datasets.py",
+      "PostgresDatasetStoreMixin.save_dataset_snapshot",
+      "self",
+      "save_dataset_snapshots",
+      "direct_call",
+      "self.save_dataset_snapshots",
+      "",
+      "",
+      "store_internal_delegate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_datasets.py",
+      "SQLiteDatasetStoreMixin.save_dataset_snapshot",
+      "self",
+      "save_dataset_snapshots",
+      "direct_call",
+      "self.save_dataset_snapshots",
+      "",
+      "",
+      "store_internal_delegate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_news_revisions.py",
+      "PostgresNewsRevisionStoreMixin.load_latest_news_body",
+      "self",
+      "load_news_history",
+      "direct_call",
+      "self.load_news_history",
+      "",
+      "",
+      "store_internal_delegate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_news_revisions.py",
+      "SQLiteNewsRevisionStoreMixin.load_latest_news_body",
+      "self",
+      "load_news_history",
+      "direct_call",
+      "self.load_news_history",
+      "",
+      "",
+      "store_internal_delegate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/diagnostic_collector_replay.py",
+      "_verify_fixture",
+      "store",
+      "load_minute_bars",
+      "direct_call",
+      "store.load_minute_bars",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
       "src/kiwoom_monitor/central_server/diagnostic_replay.py",
       "run_replay",
       "no_history_store",
@@ -1651,6 +1772,28 @@
       "",
       "",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/diagnostic_top20_flow_input.py",
+      "_execute_candidate_flow",
+      "store",
+      "load_dataset_snapshots",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/diagnostic_top20_flow_input.py",
+      "_execute_candidate_flow",
+      "store",
+      "load_documents",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "unresolved_candidate"
     ],
     [
       "src/kiwoom_monitor/central_server/external_market_collector.py",
@@ -2095,6 +2238,17 @@
     [
       "src/kiwoom_monitor/central_server/mock_automation_runner.py",
       "MockAutomationRunner.run_once",
+      "self._repository",
+      "load_mock_automation_control",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_runner.py",
+      "MockAutomationRunner.run_once",
       "self._store",
       "load_observation_revisions_after",
       "callable_argument",
@@ -2106,6 +2260,17 @@
     [
       "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
       "MockAutomationSupervisor._restore_once",
+      "self._repository",
+      "load_mock_automation_control",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor._restore_once",
       "self._store",
       "load_account_settings",
       "callable_argument",
@@ -2113,6 +2278,50 @@
       "",
       "",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.activate",
+      "self._repository",
+      "load_mock_automation_control",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.resume",
+      "self._repository",
+      "load_mock_automation_control",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.status",
+      "self._repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "self._repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.stop",
+      "self._repository",
+      "load_mock_automation_control",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "unresolved_candidate"
     ],
     [
       "src/kiwoom_monitor/central_server/mock_runtime.py",
@@ -2577,6 +2786,50 @@
       "reviewed_store_binding"
     ],
     [
+      "src/kiwoom_monitor/central_server/news_read_routes.py",
+      "create_news_read_router.market_news_feed",
+      "store",
+      "load_market_news_feed",
+      "callable_argument",
+      "asyncio.to_thread",
+      "GET",
+      "/api/v1/news/market-feed",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/news_read_routes.py",
+      "create_news_read_router.news_history",
+      "store",
+      "load_document",
+      "callable_argument",
+      "asyncio.to_thread",
+      "GET",
+      "/api/v1/news/history/{kind}",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/news_read_routes.py",
+      "create_news_read_router.news_history",
+      "store",
+      "load_news_history",
+      "callable_argument",
+      "asyncio.to_thread",
+      "GET",
+      "/api/v1/news/history/{kind}",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/news_read_routes.py",
+      "create_news_read_router.news_sources",
+      "store",
+      "load_news_source_diagnostics",
+      "callable_argument",
+      "asyncio.to_thread",
+      "GET",
+      "/api/v1/news/sources",
+      "reviewed_store_binding"
+    ],
+    [
       "src/kiwoom_monitor/central_server/news_service.py",
       "CentralNewsService._auto_analyze",
       "self._store",
@@ -2839,6 +3092,17 @@
       "",
       "",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/news_sources.py",
+      "QuerySetNewsCollector._record_error",
+      "error",
+      "news_request_count",
+      "getattr_reference",
+      "getattr",
+      "",
+      "",
+      "unresolved_candidate"
     ],
     [
       "src/kiwoom_monitor/central_server/news_sources.py",
@@ -3165,7 +3429,7 @@
       "self._store",
       "finalize_minute_bars",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -3176,7 +3440,7 @@
       "self._store",
       "save_dataset_snapshots",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -3187,7 +3451,7 @@
       "self._store",
       "save_minute_bars",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -3198,7 +3462,7 @@
       "self._store",
       "save_realtime_snapshots",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -3209,7 +3473,7 @@
       "self._store",
       "save_second_trade_bars",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -3220,7 +3484,7 @@
       "self._store",
       "upsert_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -3231,7 +3495,29 @@
       "self._store",
       "upsert_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/realtime_collector.py",
+      "CentralRealtimeCollector.load_live_minute_bars",
+      "self._store",
+      "load_minute_bars",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/realtime_collector.py",
+      "CentralRealtimeCollector.load_live_minute_bars",
+      "self._store",
+      "load_minute_bars",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -3242,7 +3528,7 @@
       "self._store",
       "load_query",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -3253,7 +3539,7 @@
       "self._store",
       "save_query",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -3721,182 +4007,6 @@
       "reviewed_store_binding"
     ],
     [
-      "src/kiwoom_monitor/application/mock_automation_admission.py",
-      "admit_mock_automation",
-      "repository",
-      "load_mock_automation_control",
-      "direct_call",
-      "repository.load_mock_automation_control",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/application/mock_automation_admission.py",
-      "admit_mock_automation",
-      "repository",
-      "save_mock_automation_control",
-      "direct_call",
-      "repository.save_mock_automation_control",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/application/mock_automation_execution.py",
-      "_load_context",
-      "repository",
-      "load_mock_automation_control",
-      "direct_call",
-      "repository.load_mock_automation_control",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/application/mock_automation_execution.py",
-      "dispatch_mock_automation_decision",
-      "repository",
-      "load_mock_automation_control",
-      "direct_call",
-      "repository.load_mock_automation_control",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/application/mock_automation_execution.py",
-      "emergency_stop_mock_automation",
-      "repository",
-      "load_mock_automation_control",
-      "direct_call",
-      "repository.load_mock_automation_control",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/application/mock_automation_execution.py",
-      "emergency_stop_mock_automation",
-      "repository",
-      "save_mock_automation_control",
-      "direct_call",
-      "repository.save_mock_automation_control",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/application/mock_automation_execution.py",
-      "resume_mock_automation",
-      "repository",
-      "load_mock_automation_control",
-      "direct_call",
-      "repository.load_mock_automation_control",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/application/mock_automation_execution.py",
-      "resume_mock_automation",
-      "repository",
-      "save_mock_automation_control",
-      "direct_call",
-      "repository.save_mock_automation_control",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/application/trade_analysis_preparation_service.py",
-      "TradeAnalysisPreparationService.prepare",
-      "self._repository",
-      "load_daily_bars",
-      "direct_call",
-      "self._repository.load_daily_bars",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_runner.py",
-      "MockAutomationRunner.run_once",
-      "self._repository",
-      "load_mock_automation_control",
-      "callable_argument",
-      "asyncio.to_thread",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
-      "MockAutomationSupervisor._restore_once",
-      "self._repository",
-      "load_mock_automation_control",
-      "callable_argument",
-      "asyncio.to_thread",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
-      "MockAutomationSupervisor.activate",
-      "self._repository",
-      "load_mock_automation_control",
-      "callable_argument",
-      "asyncio.to_thread",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
-      "MockAutomationSupervisor.resume",
-      "self._repository",
-      "load_mock_automation_control",
-      "callable_argument",
-      "asyncio.to_thread",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
-      "MockAutomationSupervisor.status",
-      "self._repository",
-      "load_mock_automation_control",
-      "direct_call",
-      "self._repository.load_mock_automation_control",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
-      "MockAutomationSupervisor.stop",
-      "self._repository",
-      "load_mock_automation_control",
-      "callable_argument",
-      "asyncio.to_thread",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/news_sources.py",
-      "QuerySetNewsCollector._record_error",
-      "error",
-      "news_request_count",
-      "getattr_reference",
-      "getattr",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
       "src/kiwoom_monitor/journal_process.py",
       "JournalWindow._start_daily_chart",
       "self._repo",
@@ -3972,50 +4082,6 @@
       "",
       "",
       "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/database_news_revisions.py",
-      "PostgresNewsRevisionStoreMixin.load_latest_news_body",
-      "self",
-      "load_news_history",
-      "direct_call",
-      "self.load_news_history",
-      "",
-      "",
-      "store_internal_delegate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/database_datasets.py",
-      "PostgresDatasetStoreMixin.save_dataset_snapshot",
-      "self",
-      "save_dataset_snapshots",
-      "direct_call",
-      "self.save_dataset_snapshots",
-      "",
-      "",
-      "store_internal_delegate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/database_news_revisions.py",
-      "SQLiteNewsRevisionStoreMixin.load_latest_news_body",
-      "self",
-      "load_news_history",
-      "direct_call",
-      "self.load_news_history",
-      "",
-      "",
-      "store_internal_delegate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/database_datasets.py",
-      "SQLiteDatasetStoreMixin.save_dataset_snapshot",
-      "self",
-      "save_dataset_snapshots",
-      "direct_call",
-      "self.save_dataset_snapshots",
-      "",
-      "",
-      "store_internal_delegate"
     ]
   ],
   "forwarding_identities": [
@@ -4088,7 +4154,18 @@
     [
       "src/kiwoom_monitor/central_server/app.py",
       "create_app",
-      "CredentialStore",
+      "AutonomousTop20Service",
+      "store",
+      "2",
+      "direct_call",
+      "",
+      "",
+      "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "CentralAIService",
       "store",
       "1",
       "direct_call",
@@ -4099,9 +4176,31 @@
     [
       "src/kiwoom_monitor/central_server/app.py",
       "create_app",
-      "compose_credential_settings",
+      "CentralNewsService",
       "store",
-      "2",
+      "1",
+      "direct_call",
+      "",
+      "",
+      "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "CentralRealtimeCollector",
+      "store",
+      "4",
+      "direct_call",
+      "",
+      "",
+      "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "CentralRestBroker",
+      "store",
+      "1",
       "direct_call",
       "",
       "",
@@ -4121,7 +4220,7 @@
     [
       "src/kiwoom_monitor/central_server/app.py",
       "create_app",
-      "CentralRestBroker",
+      "CredentialStore",
       "store",
       "1",
       "direct_call",
@@ -4154,29 +4253,18 @@
     [
       "src/kiwoom_monitor/central_server/app.py",
       "create_app",
-      "CentralRealtimeCollector",
-      "store",
-      "4",
-      "direct_call",
-      "",
-      "",
-      "central-app-store-closure"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/app.py",
-      "create_app",
-      "AutonomousTop20Service",
-      "store",
-      "2",
-      "direct_call",
-      "",
-      "",
-      "central-app-store-closure"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/app.py",
-      "create_app",
       "MockAccountBundle",
+      "store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "MockAutomationSupervisor",
       "store",
       "0",
       "direct_call",
@@ -4209,17 +4297,6 @@
     [
       "src/kiwoom_monitor/central_server/app.py",
       "create_app",
-      "CentralNewsService",
-      "store",
-      "1",
-      "direct_call",
-      "",
-      "",
-      "central-app-store-closure"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/app.py",
-      "create_app",
       "YahooDelayedMarketCollector",
       "store",
       "0",
@@ -4231,9 +4308,9 @@
     [
       "src/kiwoom_monitor/central_server/app.py",
       "create_app",
-      "CentralAIService",
+      "compose_credential_settings",
       "store",
-      "1",
+      "2",
       "direct_call",
       "",
       "",
@@ -4242,7 +4319,7 @@
     [
       "src/kiwoom_monitor/central_server/app.py",
       "create_app",
-      "MockAutomationSupervisor",
+      "create_news_read_router",
       "store",
       "0",
       "direct_call",
@@ -4374,7 +4451,7 @@
     [
       "src/kiwoom_monitor/central_server/mock_runtime.py",
       "MockAccountBundle._start",
-      "prepare_verified_account_identity",
+      "bind_verified_account_identity",
       "self._store",
       "2",
       "asyncio.to_thread",
@@ -4385,7 +4462,7 @@
     [
       "src/kiwoom_monitor/central_server/mock_runtime.py",
       "MockAccountBundle._start",
-      "bind_verified_account_identity",
+      "prepare_verified_account_identity",
       "self._store",
       "2",
       "asyncio.to_thread",
@@ -4529,7 +4606,7 @@
   "contracts": {
     "PostgresQueryStore": {
       "_connect": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
-      "_replace_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='table', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='minute', annotation=Name(id='bool', ctx=Load())), arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None, Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "_replace_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='table', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='minute', annotation=Name(id='bool', ctx=Load())), arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None, Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "analyze_news_job_claim_read_only": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='stage', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "append_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -4577,7 +4654,7 @@
       "load_market_event_history": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='kind', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='code', annotation=Name(id='str', ctx=Load())), arg(arg='limit', annotation=Name(id='int', ctx=Load()))], kw_defaults=[Constant(value=''), Constant(value=100)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "load_market_news_feed": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='limit', annotation=Name(id='int', ctx=Load()))], kw_defaults=[Constant(value=200)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "load_market_profile_settings": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "load_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='code', annotation=Name(id='str', ctx=Load())), arg(arg='trading_date', annotation=Name(id='str', ctx=Load())), arg(arg='market', annotation=Name(id='str', ctx=Load()))], defaults=[Constant(value='')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='code', annotation=Name(id='str', ctx=Load())), arg(arg='trading_date', annotation=Name(id='str', ctx=Load())), arg(arg='market', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='realtime_deltas', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)], defaults=[Constant(value='')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "load_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
       "load_news_article_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='article_revision_id', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
       "load_news_body_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='body_revision_id', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
@@ -4601,7 +4678,7 @@
       "register_credential_profile": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='provider', annotation=Name(id='str', ctx=Load())), arg(arg='profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='created_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "release_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "rename_credential_profile": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='provider', annotation=Name(id='str', ctx=Load())), arg(arg='profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='label', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "replace_daily_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "replace_daily_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='str', ctx=Load()), Name(id='str', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "replace_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "replace_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "resolve_account_scope": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='broker', annotation=Name(id='str', ctx=Load())), arg(arg='environment', annotation=Name(id='str', ctx=Load())), arg(arg='account_ref', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -4679,7 +4756,7 @@
       "load_market_event_history": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='kind', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='code', annotation=Name(id='str', ctx=Load())), arg(arg='limit', annotation=Name(id='int', ctx=Load()))], kw_defaults=[Constant(value=''), Constant(value=100)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "load_market_news_feed": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='limit', annotation=Name(id='int', ctx=Load()))], kw_defaults=[Constant(value=200)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "load_market_profile_settings": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "load_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='code', annotation=Name(id='str', ctx=Load())), arg(arg='trading_date', annotation=Name(id='str', ctx=Load())), arg(arg='market', annotation=Name(id='str', ctx=Load()))], defaults=[Constant(value='')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='code', annotation=Name(id='str', ctx=Load())), arg(arg='trading_date', annotation=Name(id='str', ctx=Load())), arg(arg='market', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='realtime_deltas', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)], defaults=[Constant(value='')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "load_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
       "load_news_article_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='article_revision_id', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
       "load_news_body_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='body_revision_id', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
@@ -4703,7 +4780,7 @@
       "register_credential_profile": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='provider', annotation=Name(id='str', ctx=Load())), arg(arg='profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='created_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "release_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "rename_credential_profile": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='provider', annotation=Name(id='str', ctx=Load())), arg(arg='profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='label', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "replace_daily_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "replace_daily_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='str', ctx=Load()), Name(id='str', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "replace_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "replace_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "resolve_account_scope": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='broker', annotation=Name(id='str', ctx=Load())), arg(arg='environment', annotation=Name(id='str', ctx=Load())), arg(arg='account_ref', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -4737,7 +4814,7 @@
     "SQLiteQueryStore": {
       "_connect": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Attribute(value=Name(id='sqlite3', ctx=Load()), attr='Connection', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "_connection": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
-      "_replace_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='table', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='minute', annotation=Name(id='bool', ctx=Load())), arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None, Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "_replace_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='table', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='minute', annotation=Name(id='bool', ctx=Load())), arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None, Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "append_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "append_execution_event": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='intent', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())), arg(arg='event', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='ownership', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='str', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -4783,7 +4860,7 @@
       "load_market_event_history": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='kind', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='code', annotation=Name(id='str', ctx=Load())), arg(arg='limit', annotation=Name(id='int', ctx=Load()))], kw_defaults=[Constant(value=''), Constant(value=100)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "load_market_news_feed": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='limit', annotation=Name(id='int', ctx=Load()))], kw_defaults=[Constant(value=200)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "load_market_profile_settings": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "load_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='code', annotation=Name(id='str', ctx=Load())), arg(arg='trading_date', annotation=Name(id='str', ctx=Load())), arg(arg='market', annotation=Name(id='str', ctx=Load()))], defaults=[Constant(value='')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='code', annotation=Name(id='str', ctx=Load())), arg(arg='trading_date', annotation=Name(id='str', ctx=Load())), arg(arg='market', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='realtime_deltas', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)], defaults=[Constant(value='')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "load_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
       "load_news_article_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='article_revision_id', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
       "load_news_body_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='body_revision_id', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
@@ -4807,7 +4884,7 @@
       "register_credential_profile": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='provider', annotation=Name(id='str', ctx=Load())), arg(arg='profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='created_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "release_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "rename_credential_profile": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='provider', annotation=Name(id='str', ctx=Load())), arg(arg='profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='label', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "replace_daily_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "replace_daily_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='str', ctx=Load()), Name(id='str', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "replace_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "replace_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "resolve_account_scope": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='broker', annotation=Name(id='str', ctx=Load())), arg(arg='environment', annotation=Name(id='str', ctx=Load())), arg(arg='account_ref', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",

@@ -201,8 +201,12 @@ class DiagnosticTraceApiTests(unittest.TestCase):
             self.assertEqual(200, response.status_code)
             capture = response.json()["trace_input_capture"]
             self.assertEqual(3, capture["schema_version"])
-            self.assertEqual({"store_inputs": False, "collector_inputs": False, "top20_inputs": False}, capture["options"])
+            self.assertEqual({"store_inputs": False, "collector_inputs": False, "top20_inputs": False},
+                             capture["options"])
             self.assertEqual(["0B", "0w", "0J", "0U"], capture["collector_event_types"])
+            self.assertEqual("collector-input/v2", capture["collector_input_version"])
+            self.assertEqual("ranking_validation_only", capture["top20_input_capture"]["scope"])
+            self.assertFalse(capture["top20_input_capture"]["downstream_replay_supported"])
             self.assertEqual("observed_paths_only", capture["coverage"])
             self.assertFalse(capture["overhead_verified"])
             self.assertEqual(before, control.read_bytes())

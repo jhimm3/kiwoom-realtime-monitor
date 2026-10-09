@@ -14,7 +14,7 @@ from kiwoom_monitor.central_server.config import CentralServerSettings
 from kiwoom_monitor.domain.order_contract import BrokerSubmission, AccountEnvironment
 from kiwoom_monitor.infrastructure.kiwoom_rest.account_identity import VerifiedAccountIdentity
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionUnknown
-from test_mock_credential_owner import FakeClient
+from credential_owner_test_support import FakeClient
 
 NOW = datetime(2026, 9, 15, 1, 0, tzinfo=timezone.utc)
 

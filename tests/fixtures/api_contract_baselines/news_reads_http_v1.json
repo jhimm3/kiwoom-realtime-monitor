@@ -1,0 +1,387 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "database": "disposable-seeded-sqlite",
+  "cases": [
+    {
+      "name": "history-article-200",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/history/article?target=005930&identity=fixture-article&as_of=250&limit=5",
+        "headers": {
+          "authorization": "Bearer <fixture-token>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "524"
+        },
+        "body": {
+          "kind": "article",
+          "target": "005930",
+          "as_of": 250.0,
+          "known": true,
+          "revisions": [
+            {
+              "article_revision_id": "news-contract-article-001",
+              "stock_code": "005930",
+              "identity": "fixture-article",
+              "content_hash": "fixture-article-hash",
+              "collector_id": "fixture-collector",
+              "published_at": "2026-10-08T09:00:00+09:00",
+              "received_at": 100.0,
+              "available_at": 100.0,
+              "collection_scope": "watchlist",
+              "revision_of": null,
+              "document": {
+                "title": "계약 기준 기사",
+                "stock_code": "005930",
+                "stock_name": "삼성전자",
+                "link": "https://example.invalid/article-1"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "history-body-assessment-200",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/history/body?target=news-contract-article-001&stock_code=005930&limit=5",
+        "headers": {
+          "authorization": "Bearer <fixture-token>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "486"
+        },
+        "body": {
+          "kind": "body",
+          "target": "news-contract-article-001",
+          "as_of": null,
+          "known": true,
+          "revisions": [
+            {
+              "body_revision_id": "news-contract-body-001",
+              "article_revision_id": "news-contract-article-001",
+              "content_hash": "fixture-body-hash",
+              "extractor_version": "fixture-extractor-v1",
+              "fetched_at": 200.0,
+              "available_at": 200.0,
+              "status": "fulltext",
+              "body_text": "기준선용 고정 본문입니다.",
+              "error": ""
+            }
+          ],
+          "assessment": {
+            "category": "supply_contract",
+            "confidence": 0.91,
+            "summary": "고정된 본문 평가"
+          }
+        }
+      }
+    },
+    {
+      "name": "sources-200",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/sources?source_id=missing-fixture-source&days=31&limit=20",
+        "headers": {
+          "authorization": "Bearer <fixture-token>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "444"
+        },
+        "body": {
+          "scope": "query_set",
+          "coverage": "configured_query_set",
+          "sources": [],
+          "summary": {
+            "raw_count": 0,
+            "unique_count": 0,
+            "duplicate_count": 0,
+            "request_count": 0,
+            "truncation_count": 0,
+            "error_count": 0,
+            "max_gap_seconds": 0.0,
+            "distinct_identity_count": 0,
+            "duplicate_rate": 0.0,
+            "budget": {},
+            "budget_scope": "today_kst_all_news_sources",
+            "job_queue": {},
+            "job_queue_scope": "all_news_jobs",
+            "body_status": {},
+            "rule_results": {},
+            "target_status": {}
+          },
+          "runs": [],
+          "observations": []
+        }
+      }
+    },
+    {
+      "name": "market-feed-200",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/market-feed?source=flash&limit=20",
+        "headers": {
+          "authorization": "Bearer <fixture-token>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "266"
+        },
+        "body": {
+          "source": "flash",
+          "items": [
+            {
+              "title": "고정 속보",
+              "description": "기준선 저장 뉴스",
+              "link": "https://example.invalid/flash-1",
+              "original_link": "https://example.invalid/original-1",
+              "published_at": "2026-10-08T09:00:00+09:00",
+              "query_membership": "fixture-query"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "history-article-401",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/history/article?target=005930&identity=fixture-article&as_of=250&limit=5",
+        "headers": {}
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      }
+    },
+    {
+      "name": "history-body-401",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/history/body?target=news-contract-article-001&stock_code=005930&limit=5",
+        "headers": {}
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      }
+    },
+    {
+      "name": "sources-401",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/sources?source_id=missing-fixture-source&days=31&limit=20",
+        "headers": {}
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      }
+    },
+    {
+      "name": "market-feed-401",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/market-feed?source=flash&limit=20",
+        "headers": {}
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      }
+    },
+    {
+      "name": "unsupported-history-kind-404",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/history/unsupported?limit=5",
+        "headers": {
+          "authorization": "Bearer <fixture-token>"
+        }
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "지원하지 않는 뉴스 이력 종류입니다."
+        }
+      }
+    },
+    {
+      "name": "history-target-too-long-422",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/history/article?target=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "headers": {
+          "authorization": "Bearer <fixture-token>"
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "351"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_too_long",
+              "loc": [
+                "query",
+                "target"
+              ],
+              "msg": "String should have at most 200 characters",
+              "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "ctx": {
+                "max_length": 200
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "history-negative-as-of-422",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/history/article?as_of=-1",
+        "headers": {
+          "authorization": "Bearer <fixture-token>"
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "147"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "query",
+                "as_of"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": "-1",
+              "ctx": {
+                "ge": 0.0
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "source-days-too-large-422",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/sources?days=32",
+        "headers": {
+          "authorization": "Bearer <fixture-token>"
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "140"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "less_than_equal",
+              "loc": [
+                "query",
+                "days"
+              ],
+              "msg": "Input should be less than or equal to 31",
+              "input": "32",
+              "ctx": {
+                "le": 31
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "market-feed-limit-too-large-422",
+      "request": {
+        "method": "GET",
+        "url": "/api/v1/news/market-feed?source=flash&limit=1001",
+        "headers": {
+          "authorization": "Bearer <fixture-token>"
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "147"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "less_than_equal",
+              "loc": [
+                "query",
+                "limit"
+              ],
+              "msg": "Input should be less than or equal to 1000",
+              "input": "1001",
+              "ctx": {
+                "le": 1000
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

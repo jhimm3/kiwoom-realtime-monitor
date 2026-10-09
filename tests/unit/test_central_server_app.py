@@ -873,12 +873,20 @@ class CentralServerAppTests(unittest.TestCase):
                 f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
             )
             app = create_app(settings)
+        # OpenAPI enumerates effective HTTP routes, including nested APIRouters.
         actual = {
-            (method, route.path)
-            for route in app.routes
-            for method in (getattr(route, "methods", None) or {"WEBSOCKET"})
-            if route.path == "/health" or route.path.startswith("/api/v1/")
+            (method.upper(), path)
+            for path, operations in app.openapi()["paths"].items()
+            for method in operations
+            if method in {"get", "post", "put", "patch", "delete", "head", "options", "trace"}
+            and (path == "/health" or path.startswith("/api/v1/"))
         }
+        actual.update(
+            ("WEBSOCKET", route.path)
+            for route in app.routes
+            if getattr(route, "path", "").startswith("/api/v1/")
+            and getattr(route, "methods", None) is None
+        )
         expected = {
             ("GET", "/health"),
             ("GET", "/api/v1/capabilities"),
@@ -905,6 +913,11 @@ class CentralServerAppTests(unittest.TestCase):
             ("GET", "/api/v1/diagnostics/db-calls"),
             ("GET", "/api/v1/diagnostics/news-job-claim-plan"),
             ("GET", "/api/v1/diagnostics/news-job-claim-readonly-analyze"),
+            ("POST", "/api/v1/diagnostics/trace"),
+            ("GET", "/api/v1/diagnostics/trace"),
+            ("POST", "/api/v1/diagnostics/trace/stop"),
+            ("GET", "/api/v1/diagnostics/trace/{trace_id}"),
+            ("GET", "/api/v1/diagnostics/trace/{trace_id}/chunks/{chunk_name}"),
             ("GET", "/api/v1/diagnostics/capabilities"),
             ("PUT", "/api/v1/diagnostics/control"),
             ("GET", "/api/v1/diagnostics/snapshot"),
@@ -1053,29 +1066,33 @@ class CentralServerAppTests(unittest.TestCase):
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
 
         with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.sqlite3"
             settings = CentralServerSettings(
-                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
+                f"sqlite:///{database_path}", "private-token",
             )
             headers = {"Authorization": "Bearer private-token"}
-            with TestClient(create_app(settings)) as client:
-                original = client.get("/api/v1/settings/operations", headers=headers).json()
-                saved = client.put("/api/v1/settings/operations", headers=headers, json={
-                    "expected_revision": original["revision"], "ai_daily_limit": 123,
-                })
-                self.assertEqual(200, saved.status_code)
-                self.assertEqual(original["revision"] + 1, saved.json()["revision"])
-                stale = client.put("/api/v1/settings/operations", headers=headers, json={
-                    "expected_revision": original["revision"], "dart_enabled": True,
-                })
-                self.assertEqual(409, stale.status_code)
-                with patch.object(SQLiteQueryStore, "upsert_documents", side_effect=OSError("write failed")):
-                    failed = client.put("/api/v1/settings/operations", headers=headers, json={
-                        "ai_daily_limit": 321,
+            store = SQLiteQueryStore(database_path)
+            with patch("kiwoom_monitor.central_server.app.create_query_store", return_value=store):
+                with TestClient(create_app(settings)) as client:
+                    original = client.get("/api/v1/settings/operations", headers=headers).json()
+                    saved = client.put("/api/v1/settings/operations", headers=headers, json={
+                        "expected_revision": original["revision"], "ai_daily_limit": 123,
                     })
-                self.assertEqual(503, failed.status_code)
-                latest = client.get("/api/v1/settings/operations", headers=headers).json()
-                self.assertEqual(saved.json(), latest)
-                self.assertEqual(latest["revision"], latest["applied_revision"])
+                    self.assertEqual(200, saved.status_code)
+                    self.assertEqual(original["revision"] + 1, saved.json()["revision"])
+                    stale = client.put("/api/v1/settings/operations", headers=headers, json={
+                        "expected_revision": original["revision"], "dart_enabled": True,
+                    })
+                    self.assertEqual(409, stale.status_code)
+                    with patch.object(store, "upsert_documents", side_effect=OSError("write failed")) as failed_write:
+                        failed = client.put("/api/v1/settings/operations", headers=headers, json={
+                            "ai_daily_limit": 321,
+                        })
+                    failed_write.assert_called_once()
+                    self.assertEqual(503, failed.status_code)
+                    latest = client.get("/api/v1/settings/operations", headers=headers).json()
+                    self.assertEqual(saved.json(), latest)
+                    self.assertEqual(latest["revision"], latest["applied_revision"])
             with TestClient(create_app(settings)) as client:
                 self.assertEqual(latest, client.get("/api/v1/settings/operations", headers=headers).json())
 

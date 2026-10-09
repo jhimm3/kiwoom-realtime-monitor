@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -263,24 +264,47 @@ class ExecutionWriteFenceTests(unittest.TestCase):
             repository.claim_runtime("mock", "account-1", "run-1", "owner-1", self.current)
             repository.bind_runtime_owner("account-1", "run-1", "owner-1")
             entered, release, claimed = threading.Event(), threading.Event(), threading.Event()
-            from kiwoom_monitor.central_server.database import _execution_intent_values
-            def values(*args):
-                entered.set()
-                if not release.wait(3): raise RuntimeError("test transaction was not released")
-                return _execution_intent_values(*args)
+            attempting = threading.Event()
+            gate_results = []
+            original_connect = first._connect
+
+            def connect():
+                connection = original_connect()
+
+                def before_write(action, table, _column, _database, _trigger):
+                    if action == sqlite3.SQLITE_INSERT and table == "central_execution_intents":
+                        # Observe the database boundary after the ownership check;
+                        # the values helper can move without changing this contract.
+                        in_transaction = connection.in_transaction
+                        entered.set()
+                        gate_results.append((in_transaction, release.wait(3)))
+                    return sqlite3.SQLITE_OK
+
+                connection.set_authorizer(before_write)
+                return connection
+
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=2) as pool:
-                with patch("kiwoom_monitor.central_server.database._execution_intent_values", side_effect=values):
+                with patch.object(first, "_connect", side_effect=connect):
                     writing = pool.submit(repository.create, self.intent)
-                    self.assertTrue(entered.wait(2))
-                    def replace_owner():
-                        result = second.acquire_execution_runtime("mock:account-1", "run-2:owner-2",
-                            (self.current + timedelta(seconds=61)).isoformat(), (self.current + timedelta(seconds=121)).isoformat())
-                        claimed.set(); return result
-                    replacement = pool.submit(replace_owner)
-                    try: self.assertFalse(claimed.wait(0.02))
-                    finally: release.set()
-                    writing.result(2); self.assertTrue(replacement.result(2))
+                    try:
+                        self.assertTrue(entered.wait(2))
+
+                        def replace_owner():
+                            attempting.set()
+                            result = second.acquire_execution_runtime("mock:account-1", "run-2:owner-2",
+                                (self.current + timedelta(seconds=61)).isoformat(), (self.current + timedelta(seconds=121)).isoformat())
+                            claimed.set(); return result
+
+                        replacement = pool.submit(replace_owner)
+                        self.assertTrue(attempting.wait(2))
+                        self.assertFalse(claimed.wait(0.02))
+                    finally:
+                        release.set()
+                    writing.result(2)
+                    self.assertTrue(replacement.result(2))
+            self.assertEqual([(True, True)], gate_results)
+            self.assertEqual(self.intent, repository.load(self.intent.intent_id).intent)
             with self.assertRaisesRegex(RuntimeError, "OWNERSHIP_LOST"):
                 repository.save_account_snapshot("mock", self.account, NOW)
             first.close(); second.close()

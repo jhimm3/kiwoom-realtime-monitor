@@ -3,6 +3,30 @@
   "reviewed_on": "2026-10-05",
   "approved_sites": [
     {
+      "file": "scripts/check_replay_cache_baseline.py",
+      "owner": "run",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_fixture",
+      "reason": "Network-isolated disposable cluster at loopback only; checks postgres/admin/fixture-id and exactly three pristine databases before provisioning replay roles. Context managers close cursor and connection; no operational DSN is accepted."
+    },
+    {
+      "file": "scripts/nas_operator_worker.py",
+      "owner": "database_setup",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_fixture",
+      "reason": "Restricted supervisor creates a fresh network-none PostgreSQL container and supplies random temporary admin credentials. Worker uses fixed loopback/admin database, bounded connection timeout and pristine-cluster check; connection context closes before test URLs are returned."
+    },
+    {
+      "file": "scripts/nas_operator_worker.py",
+      "owner": "replay",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_fixture",
+      "reason": "Replay URL is supplied only by database_setup for the fresh isolated cluster. Hash-checked bounded baseline statements run under the non-superuser replay role; cursor and connection contexts commit or roll back and close before replay starts."
+    },
+    {
       "file": "scripts/check_recorded_replay_baseline.py",
       "owner": "_provision_role_database",
       "call": "psycopg.connect",

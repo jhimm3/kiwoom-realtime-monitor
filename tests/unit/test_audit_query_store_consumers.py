@@ -38,6 +38,51 @@ class QueryStoreConsumerAuditTests(unittest.TestCase):
             for site in result["reviewed_store_sites"]
         ))
 
+    def test_owned_thread_dispatch_requires_its_import_and_respects_shadowing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            central = root / "src/kiwoom_monitor/central_server"
+            central.mkdir(parents=True)
+            (central / "database.py").write_text(
+                "class QueryStore:\n def load_documents(self, key): ...\n"
+                "class SQLiteQueryStore(QueryStore): pass\n"
+                "class PostgresQueryStore(QueryStore): pass\n", encoding="utf-8")
+            (central / "app.py").write_text(
+                "from .diagnostic_replay_runtime import owned_to_thread as dispatch\n"
+                "from . import diagnostic_replay_runtime as runtime\n"
+                "from other import owned_to_thread\n"
+                "from .diagnostic_replay_runtime import owned_to_thread as rebound\n"
+                "from other import owned_to_thread as rebound\n"
+                "async def alias(): await dispatch(store.load_documents, 'one')\n"
+                "async def module_alias(): await runtime.owned_to_thread(store.load_documents, 'two')\n"
+                "async def unrelated(): await owned_to_thread(store.load_documents, 'three')\n"
+                "async def parameter_shadow(dispatch): await dispatch(store.load_documents, 'four')\n"
+                "async def local_shadow():\n dispatch = other\n await dispatch(store.load_documents, 'five')\n"
+                "async def import_shadow(): await rebound(store.load_documents, 'six')\n"
+                "def helper(store): return store.load_documents('helper')\n"
+                "async def forward(): await dispatch(helper, store=store)\n", encoding="utf-8")
+            approvals = root / "approvals.json"
+            approvals.write_text(json.dumps({"reviewed_bindings": [{
+                "id": "forward", "file": "src/kiwoom_monitor/central_server/app.py",
+                "owner": "forward", "receiver": "store", "backend_scope": "fixture",
+            }]}), encoding="utf-8")
+            result = inventory(root, approvals)
+            sites = {row["owner"]: row for row in result["unresolved_same_name_candidates"]}
+            canonical = "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread"
+            for owner in ("alias", "module_alias"):
+                with self.subTest(owner=owner):
+                    self.assertEqual("callable_argument", sites[owner]["reference_kind"])
+                    self.assertEqual(canonical, sites[owner]["dispatch"])
+            for owner in ("unrelated", "parameter_shadow", "local_shadow", "import_shadow"):
+                with self.subTest(owner=owner):
+                    self.assertEqual("bound_reference", sites[owner]["reference_kind"])
+                    self.assertEqual("", sites[owner]["dispatch"])
+            forwards = result["store_forwarding_edges"]
+            self.assertEqual(1, len(forwards))
+            self.assertEqual("helper", forwards[0]["helper"])
+            self.assertEqual("keyword:store", forwards[0]["argument_index"])
+            self.assertEqual(canonical, forwards[0]["dispatch"])
+
     def test_synthetic_routes_dispatches_and_signature_drift_are_distinguished(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temp:
             root = Path(temp)
