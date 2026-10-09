@@ -717,7 +717,7 @@ def _code_tree_identity() -> dict[str, Any]:
         name = path.relative_to(ROOT).as_posix().encode("utf-8")
         data = path.read_bytes()
         canonical = (data.replace(b"\r\n", b"\n")
-                     if path.suffix.lower() in text_suffixes else data)
+                     if path.name == ".gitkeep" or path.suffix.lower() in text_suffixes else data)
         normalized.update(name + b"\0" + hashlib.sha256(canonical).digest())
         raw.update(name + b"\0" + hashlib.sha256(data).digest())
         count += 1

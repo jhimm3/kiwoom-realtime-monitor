@@ -34,6 +34,8 @@ PostgreSQL 저장 의미가 전혀 검증되지 않았다고 해석하지 않는
 | 같은 run PostgreSQL | **87건** 통과 + DB smoke 성공 | 임시 PostgreSQL 17; NAS 운영 DB 결과 아님 |
 | 직전 최종 로컬 `batch07-all-local-final-ci-fix/run.json` | **3,670건, 268 worker** 통과 | fixture 수정이 포함된 로컬 소스. 깨끗한 hosted commit 검증과 구분 |
 | 이번 구현 로컬 `final-quality-implementation-local-verified/run.json` | **3,682/3,682건, 268/268 worker** 통과 | Windows 사용자 환경; 실패·오류·skip·미실행·timeout·잔류 자손 0, 작업자와 하위 프로세스 종료 확인. 시작·종료 LF 소스 지문 동일. 미커밋 수정본이므로 hosted 검증과 구분 |
+| [첫 구현 CI run 37987257844](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37987257844) | **종합 실패** | `24aad5c`: Windows 전체 3,682건, Linux 65건, 필수 PG 119건, 확장 PG 24건, 확장 Windows 925건, 긴 Windows 및 Linux operator는 성공. 봉인 replay v1 9건 성공 후 v2 secret 접근 PermissionError로 중단. 종합 job은 이 실패를 거부 |
+| 수정 후 로컬 `final-quality-ci-fix-local/run.json` | **3,682/3,682건, 268/268 worker** 통과 | `.gitkeep` 줄바꿈 지문 및 봉인 replay 임시 secret 소유자 수정 포함. 실패·오류·skip·미실행·timeout·잔류 자손 0, 시작·종료 LF 지문 동일. 수정 후 hosted 결과는 별도 확인 필요 |
 | [main run 37954769147](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37954769147) | **Windows 실패 / PostgreSQL 성공** | Windows는 신규 모듈 guard에서 중단. main 전체 회귀 통과가 아님 |
 
 main에서 누락된 unit은 `test_market_event_fact_delivery`, `test_observation_delivery`,
@@ -46,6 +48,14 @@ Windows artifact `11636533684`의 ZIP SHA256은
 로컬 대조에서 408개 테스트 중 395개는 raw hash가 같고 13개는 CRLF/LF만 달랐다.
 runner와 manifest raw hash는 같았다. 줄바꿈 이외 불일치는 없었다.
 이 대조는 제품 전체 dirty 파일의 동일성을 증명하는 기능을 현재 runner가 갖췄다는 뜻은 아니다.
+
+첫 구현 CI의 Windows와 Linux는 같은 976개 파일인데도 LF 소스 지문이 달랐다. Windows의
+`tests/{contract,integration,unit}/.gitkeep` 세 파일은 checkout에서 CRLF이고 Linux에서는 LF였다.
+`Path.suffix`가 `.gitkeep`에 대해 빈 문자열이어서 처음 지문 계산이 이 파일을 정규화하지 않았다.
+수정은 해당 파일명만 텍스트 줄바꿈 정규화 대상으로 추가했다. 단위 검사에서 `.gitkeep`/Python/
+Dockerfile의 LF↔CRLF는 같은 지문, 내용 변경은 다른 지문임을 확인했다. 봉인 replay v2는
+0700/0600 임시 비밀 경계를 유지하면서 생성·검사 Python container를 host 임시 디렉터리 소유 UID/GID로
+실행하도록 바꿨다. 로컬 Docker가 없어 이 권한 수정의 실제 통합 결과는 후속 hosted CI에서 판정한다.
 
 ## 2. 유지·중복·구조 판정
 

@@ -44,7 +44,8 @@ trap 'code=$?; trap - EXIT; if ! cleanup; then code=1; fi; exit "$code"' EXIT
 trap 'exit 130' HUP INT TERM
 TEMP_DIR=$(mktemp -d "$ROOT/tmp/regression/replay-ci/secret.XXXXXX")
 chmod 700 "$TEMP_DIR"
-FIXTURE_ID=$(docker run --rm --network none --entrypoint python \
+OWNER="$(id -u):$(id -g)"
+FIXTURE_ID=$(docker run --rm --network none --user "$OWNER" --entrypoint python \
     --mount "type=bind,src=$ROOT,dst=/app/candidate,readonly" \
     --mount "type=bind,src=$TEMP_DIR,dst=/run/replay-fixture" \
     -e PYTHONDONTWRITEBYTECODE=1 "$IMAGE" \
@@ -74,6 +75,7 @@ done
 
 docker run --rm --name "$PY_NAME" --network "container:$PG_NAME" \
     --label "com.kiwoom.replay-fixture=$FIXTURE_ID" \
+    --user "$OWNER" \
     --memory 512m --pids-limit 128 --read-only --tmpfs /tmp:rw,nosuid,nodev,size=64m \
     --security-opt no-new-privileges --cap-drop ALL --entrypoint python \
     --mount "type=bind,src=$ROOT,dst=/app/candidate,readonly" \

@@ -187,10 +187,14 @@ class RunRegressionTests(unittest.TestCase):
         dockerfile = self.directory / "tests" / "ci_runtime.Dockerfile"
         dockerfile.parent.mkdir()
         dockerfile.write_bytes(b"FROM python:3.13-slim\n")
+        gitkeep = self.directory / "tests" / "unit" / ".gitkeep"
+        gitkeep.parent.mkdir()
+        gitkeep.write_bytes(b"\n")
         with patch.object(run_regression, "ROOT", self.directory):
             before = run_regression._code_tree_identity()
             source.write_bytes(b"value = 1\r\n")
             dockerfile.write_bytes(b"FROM python:3.13-slim\r\n")
+            gitkeep.write_bytes(b"\r\n")
             newline_only = run_regression._code_tree_identity()
             source.write_bytes(b"value = 2\r\n")
             changed = run_regression._code_tree_identity()
