@@ -27,7 +27,8 @@ class PostgresDirectConnectionAuditTests(unittest.TestCase):
         result = inventory(root)
 
         self.assertEqual("pass", result["direct_connection_guard"]["status"])
-        self.assertEqual(50, result["direct_connection_guard"]["current_callsite_count"])
+        # Three additional connections were reviewed as disposable-fixture owners.
+        self.assertEqual(53, result["direct_connection_guard"]["current_callsite_count"])
         self.assertEqual([], result["direct_connection_guard"]["unapproved_sites"])
         self.assertEqual([], result["direct_connection_guard"]["stale_approvals"])
 

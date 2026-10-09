@@ -1,90 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import tempfile
 import threading
 import unittest
 import uuid
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from kiwoom_monitor.central_server.credential_runtime import CredentialRuntime
-from kiwoom_monitor.central_server.credential_store import CredentialStore
-from kiwoom_monitor.central_server.database import SQLiteQueryStore
-from kiwoom_monitor.central_server.real_runtime import RealCredentialOwner
-from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
 from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomSettings
-from test_mock_credential_owner import FakeClient
+from credential_owner_test_support import RealCredentialOwnerTestSupport, RealFakeClient
 
 
-class RealFakeClient(FakeClient):
-    query_entered = query_release = None
-
-    def request_with_continuation(self, api_id, path, body, **kwargs):
-        with self._request_lock:
-            self._ensure_credential_accepting()
-            if self.query_entered is not None:
-                self.query_entered.set()
-                self.query_release.wait(timeout=5)
-            return {"credential_marker": self._settings.app_key}, bool(body.get("paged")), "cursor"
-
-
-class RealCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
-        self.store = SQLiteQueryStore(self.root / "central.sqlite")
-        self.store.initialize()
-        self.vault = CredentialStore(self.root / "secrets", self.store)
-        self.client_patch = patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient", RealFakeClient)
-        self.client_patch.start()
-        self.realtime_patch = patch("kiwoom_monitor.central_server.mock_account_monitor.RealAccountRealtimeCollector",
-                                    side_effect=lambda **kwargs: AsyncMock(ready=False, error_code=None))
-        self.realtime_patch.start()
-        self.market_client = RealFakeClient(KiwoomSettings("", "", "real"))
-        self.market_broker = CentralRestBroker(self.market_client)
-        self.collector = AsyncMock()
-        self.owner = RealCredentialOwner(self.store, self.vault, hmac_key=b"x" * 32,
-            market_client=self.market_client, market_broker=self.market_broker, market_collector=self.collector)
-        self.runtime = CredentialRuntime(self.vault, self.store)
-        self.runtime.register("kiwoom_real", self.owner.hooks())
-        self.profile = (await self.runtime.create_profile("kiwoom_real", str(uuid.uuid4()), "one"))["profile_id"]
-
-    async def asyncTearDown(self):
-        if RealFakeClient.query_release is not None:
-            RealFakeClient.query_release.set()
-        await self.runtime.close()
-        await self.owner.close()
-        await self.market_broker.close()
-        self.vault.close()
-        self.store.close()
-        self.client_patch.stop()
-        self.realtime_patch.stop()
-        self.temp.cleanup()
-        RealFakeClient.query_entered = RealFakeClient.query_release = None
-
-    async def ready(self, key="a1", *, profile=None, revision=0, disabled=False):
-        document = await self.runtime.prepare("kiwoom_real", profile or self.profile,
-            str(uuid.uuid4()), revision, {} if disabled else {"app_key": key, "secret_key": uuid.uuid4().hex},
-            disabled=disabled)
-        operation = self.runtime._operations[document["operation_id"]]
-        await asyncio.wait_for(asyncio.shield(operation.task), 5)
-        return operation
-
-    async def apply(self, operation):
-        self.assertEqual("READY", operation.state, operation.error_code)
-        await self.runtime.apply(operation.operation_id, operation.expected_revision, operation.candidate.account_ref)
-        await asyncio.wait_for(asyncio.shield(operation.task), 5)
-        return operation
-
-    async def active(self, **kwargs):
-        operation = await self.apply(await self.ready(**kwargs))
-        self.assertEqual("ACTIVE", operation.state, operation.error_code)
-        return self.owner.bundle(kwargs.get("profile", self.profile))
-
-    async def query(self, context, **kwargs):
-        return await context.account_queries.query(api_id="kt00007", path="/api/dostk/acnt",
-            body={"paged": True}, **kwargs)
+class RealCredentialOwnerTests(RealCredentialOwnerTestSupport):
 
     async def test_market_rotation_reuses_transport_and_old_cursors_are_rejected(self):
         context = await self.active(profile="nas-real-default")

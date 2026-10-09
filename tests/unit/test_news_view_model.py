@@ -66,6 +66,7 @@ class NewsViewModelTests(unittest.TestCase):
         evidence = StoredNewsEvidence(
             identity="article-1", article_revision_id="article-r1", body_revision_id="body-r1",
             body_status="fulltext", body_text="본문 <script>alert(1)</script>",
+            core_sentences=("핵심 문장 <script>alert(1)</script>",),
             event={
                 "certainty": "CONFIRMED", "novelty": "NEW", "amount_won": 50_000_000_000,
                 "counterparty": "고객사<1>", "scope": "TARGET_COMPANY", "role": "FACT",
@@ -90,7 +91,10 @@ class NewsViewModelTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", rendered)
         self.assertIn("&lt;계약&gt;", rendered)
         self.assertNotIn("AI 없이 뽑은 핵심 문장", rendered)
-        self.assertIn("AI 없이 뽑은 핵심 문장", stored_news_core_sentences_html(evidence))
+        core_sentences = stored_news_core_sentences_html(evidence)
+        self.assertIn("AI 없이 뽑은 핵심 문장", core_sentences)
+        self.assertIn("핵심 문장 &lt;script&gt;alert(1)&lt;/script&gt;", core_sentences)
+        self.assertNotIn("<script>", core_sentences)
 
     def test_non_contract_evidence_does_not_show_empty_contract_rule(self) -> None:
         rendered = stored_news_evidence_html(StoredNewsEvidence(

@@ -4060,7 +4060,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         service = object.__new__(AutonomousTop20Service)
         service._store = self.store
         service._minute_backfill_enabled = True
-        with patch.object(PostgresQueryStore, "load_minute_bars", return_value=[{"minute": "09:00"}]) as load_bars:
+        with patch.object(self.store, "load_minute_bars", return_value=[{"minute": "09:00"}]) as load_bars:
             asyncio.run(service._backfill_minutes(code, day, market))
         load_bars.assert_called_once_with(code, day, market)
 
@@ -4749,8 +4749,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             "payload": {"link": "https://example.test/article", "description": "summary"},
         }
         started = time.time() - 1
-        with patch.object(PostgresQueryStore, "load_latest_news_body", return_value=None), \
-                patch.object(PostgresQueryStore, "save_news_body_revision", return_value="diagnostic-body-revision"):
+        with patch.object(self.store, "load_latest_news_body", return_value=None), \
+                patch.object(self.store, "save_news_body_revision", return_value="diagnostic-body-revision"):
             body_revision_id = asyncio.run(runner._run_body(job))
         self.assertEqual("diagnostic-body-revision", body_revision_id)
 
@@ -4845,8 +4845,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             "payload": {"body_revision_id": body_revision_id, "stock_code": "GLOBAL"},
         }
         started = time.time() - 1
-        with patch.object(PostgresQueryStore, "load_news_article_revision", return_value=article), \
-                patch.object(PostgresQueryStore, "load_news_body_revision", return_value=body):
+        with patch.object(self.store, "load_news_article_revision", return_value=article), \
+                patch.object(self.store, "load_news_body_revision", return_value=body):
             result = asyncio.run(runner._run_rule(job))
         self.assertEqual(f"ignored:{body_revision_id}", result)
 

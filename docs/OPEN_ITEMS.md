@@ -102,6 +102,129 @@ database_container_unchanged=true였다. `replay --help`에서 `--pause-operatio
 별도 replay DB로 첫 scoped replay를 실행한다. trace 전체는 input_rejected=1,188이므로 전체 무손실
 coverage로 취급하지 않는다. 개발 종료 시 임시 sudo 규칙을 회수한다.
 
+**2026-10-09 projection rollback 검증 보완:** 이전 테스트는 실패가 현재 batch의 첫 INSERT에서 발생해
+rollback 없는 `commit()` 결함도 통과했다. 새 검사는 batch 안의 일부 row INSERT 뒤 발생하는 실패와,
+모든 row INSERT 뒤 progress manifest 갱신에서 발생하는 실패를 각각 주입한다. 두 경우 모두 projection row,
+전체 manifest, frozen source 목록이 실패 전 상태로 복원되고 lease가 해제되며, 재시도는 전체 완료 후
+다시 실행해도 중복 행을 만들지 않는 것을 확인했다. 이전 테스트는 결함 주입에서 통과했고 새 테스트는 두 경로
+모두 실패해 rollback 회귀를 탐지한다. 직접 연관된 검증·확정·reader 회귀 20/20, 격리 profile 38/38,
+현재 전체 `all-local`은 manifest 183개·1,906건·43 worker 통과, failure/error/skip/expected failure/
+unexpected success/미실행 0, worker process tree 종료 43/43, 자손 누수 0이다. 기록은
+`tmp/regression/projection-rollback-all-local-20261009/run.json`이다. `origin/main` 기준 새 unit test module
+coverage gate에서 새 모듈 3개가 모두 profile에 등록된 것을 확인했다. 테스트와 profile 변경은 현재 로컬 미커밋 상태다.
+
+**2026-10-09 함수형 테스트 우선 편입 후 현재 상태:** 발견 경로를 복구한 11개 파일/45건 중
+뉴스 본문·AI, 역사 context 수집 rollback, context 게시 완료 조건을 검증하는 4개 파일/33건을
+격리 CI profile에 선택 등록했다. 현재 manifest는 182개 등록/227개 미등록(Windows 222, Linux 5)이다.
+최종 `all-local`은 1,901건/42 worker 통과, 실패·오류·skip·미실행 0, process tree 종료 42/42,
+잔류 자손 0이다. 실행 기록은 `tmp/regression/final-selected-ci182-20261009/run.json`이며 새 테스트
+모듈 누락 검사도 통과했다. 나머지 7개 보조 역사 데이터·수집 테스트 파일/12건은 용도를 확인해
+각 스크립트를 변경할 때 선택 실행하도록 기록했다. 이 변경에 대한 GitHub hosted CI는 아직 실행하지 않았다.
+
+2026-10-09 후속 assertion 검토: 게시 테스트가 실제로 인접한 큰 원본 DB를 게시하지 않는지 검사하지 않아
+4 MiB `main.sqlite3`를 만들고 결과 run에 포함되지 않는 assertion을 추가했다. 게시 모듈을 포함한 계약 profile은
+33/33 통과, skip·실패·오류·미실행 0, worker tree 4/4 종료, 잔류 자손 0이다.
+기록은 `tmp/regression/publish-claim-review-20261009/run.json`이다. 제한 실행 환경에서 새 assertion 이후 `all-local`을
+시작했을 때는 비어 있는 worker에서 멈춰 중단했고, 이는 성공 결과로 세지 않았다. 빈 `asyncio` 루프도 같은
+환경에서 Windows `socketpair`의 `accept` 단계에서 멈췄으며, 사용자 Windows 실행 환경에서는 빈 루프와 동일 테스트가
+정상 종료했다. 최종 사용자 Windows `all-local`은 1,901건/42 worker 통과, 실패·오류·skip·expected failure·unexpected
+success·미실행 0, process tree 종료 42/42, 잔류 자손 0이다. 결과는
+`tmp/regression/final-audit-authorized-20261009/run.json`이며, 현재 수정된 테스트 파일과 manifest hash가 run 기록과 일치한다.
+
+**2026-10-09 테스트 계약 검토 6개 해결:**
+[재현·수정·한정된 기준선 조정](TEST_CONTRACT_RECONCILIATION_20261009.md).
+수정 후 단독 81건 통과, 실패/오류/skip/미실행 0, worker tree 종료 6/6, 자손 누수 0이다.
+기존 연구 후보 hash를 유지하고 일봉 invalidation 누락 대조군의 실패도 확인했다.
+그 당시 manifest는 178개 등록/231개 미등록(Windows 후보 226개/Linux 5개)이었다. 해결한 6개는 전용
+격리 profile로 편입했다. 당시 1,868건/38 worker의 `all-local`과 새 테스트 모듈 누락 검사가
+통과했다. Linux 5개는 Ubuntu에서 65건 모두 통과했다. hosted run
+[37805647697](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37805647697), commit
+`fe62396df07477e6e6fad81d5a69a2b3df96caa5`의 Windows all-local은 1,868건/38 worker, disposable PostgreSQL
+검사는 87건 통과했다. 최초 Linux 시도에서 발견한 fake Docker 실행권한 fixture 결함을 고친 뒤의 결과다.
+`test_central_server_app`의 closure 주입은 요청 중 gateway snapshot을 검증하므로 유지하기로 했고 계좌 경계 변경 시 재검토한다.
+기존 409개 조사나 NAS 배포/main 병합을 다시 시작하지 않는다.
+
+**2026-10-08 전체 409개 테스트 의존성 조사 중간 기록:** 아래 수치와 미완료 표시는 당시 스냅샷이며,
+후속 결과는 위의 2026-10-09 계약 검토 항목과 현재 [테스트 조사 문서](TEST_DEPENDENCY_AUDIT.md)를 따른다.
+[149개/260개 기준선과 현재 편입 상태](TEST_DEPENDENCY_AUDIT.md),
+[260개 보호 근거](REGRESSION_COVERAGE_AUDIT.md),
+[변경 영향별 검증 절차](DEPENDENCY_REFACTOR_VERIFICATION_PLAN.md). 최초 149개 CI 범위는 보존했고, 상세 검토한
+P0 실행 소유권 1개, P1 우선 테스트 20개, 자격증명 UI/API 통합 테스트 2개를 단독 통과 뒤 추가했다.
+현재 172개 등록/237개 미등록이다. 남은 미등록 분류는 일반 226, Linux 별도 5,
+계약/fixture 검토 6이다. 11개 함수형 모듈/45건은 unittest TestCase로 변환해 단독 45/45 통과했지만,
+해당 11개 파일은 여전히 CI 미등록이다. 전체 404개 일괄 제안 검증은 8개 모듈이 실패했으며 성공으로 세지 않는다.
+별도 Linux 5개와 PostgreSQL live/NAS 검증은 미실행이다. 기존 170개 등록 범위는 1,774건/30 worker로 통과했다.
+자격증명 UI 통합 테스트는 연결 해제 계좌 표시 계약과 SQLite sidecar를 바로잡고, 전역 자격증명 테스트는
+같은 SQLite sidecar를 허용하면서 DB/secrets 외 파일 제한을 유지했다. 두 모듈의 test-to-test helper/fake
+import를 제거했고 두 P0 profile은 각각 2건과 11건 통과했다. 172개 manifest 전체 `all-local`은
+1,787건/32 worker 통과, 실패·오류·skip·expected failure·미실행 0, process tree 종료 32/32,
+잔류 자손 0이다. 산출물은 `tmp/regression/dependency-audit-ci172-global-credentials-final/run.json`,
+manifest SHA256은 `c4bad473533024fcdc7ae6a6be2db17f1becba6c236e6a06a6b268e3cbc728bd`다.
+최종 파일 대조에서는 계획·해시 목록 172개가 manifest와 일치했고, 변경된 등록 테스트 9개도 run hash와
+현재 hash가 같았다. 변경된 미등록 테스트 파일 19개는 이 `all-local` 범위 밖이다. 그중 자격증명 owner
+세 모듈은 별도 검사 17/17, 15/15, 18건 중 1건 실패가 기록돼 있고, 나머지 16개는 모듈별 실행 근거를
+추가로 남겨야 한다. 공용 support 파일은 실행기가 자동 해시하지 않으므로 다음 최종 run에 전후 hash를
+보존한다. 이를 확인할 때까지 409개 변경 파일 전체의 검증 완료로 판정하지 않는다.
+현재 등록 기준의 hosted CI는 아직 실행 확인되지 않았다. GitHub workflow 조회에서 기준 commit
+`641a821e45e4a5302fc985eeec6236accabed7cf`에 연결된 run/status가 없으며, 기존 hosted CI 통과
+증거는 과거 1,465건 기준선에만 해당한다. 이전 170개 기준선 산출물은
+`tmp/regression/dependency-audit-ci170-fixture-refactor-verified/run.json`이다.
+해시 호환성과 남은 감사 기준선은 별도 검토하며 운영 NAS 배포나 main 병합은 하지 않았다.
+
+
+**2026-10-08 의존성 축소와 기능 보존 검증:**
+[실행 계획](DEPENDENCY_REFACTOR_VERIFICATION_PLAN.md). 기존 143회 회귀 호출(142개 고유 모듈)
+및 batch 목록을 같은 순서로 새 manifest에 옮겼다. Windows Job Object로 worker를 프로세스
+시작 시점부터 묶고, timeout/중단/부모 종료 때 자손을 종료한 뒤 각 PID의 종료 신호를 확인한다.
+실행기 검사 17건, PC 수명 검사 69건, 뉴스 기준선 비교 2건, TOP20 수명 검사 10건과
+기존 core 1,365건을 포함한 `all-local` 1,465건이 사용자 Windows 환경에서 모두 통과했다.
+9개 worker 모두 종료됐고 process tree 종료도 확인됐다. 잔류 자손은 없었다. 첫 실행에서 드러난 다섯 테스트
+fixture/기대값 문제는 원인을 확인해 테스트만 보정했다. 앱 동작 코드는 바꾸지 않았다.
+기존 ASGI 기준선 12건은 유지했고,
+`tests/fixtures/api_contract_baselines/news_reads_http_v1.json`에 Uvicorn loopback 실제 HTTP
+기준선 13건을 추가했다. 200 네 건, 인증 실패 401 네 건, 404 한 건, 422 네 건의 전체 JSON
+본문과 content-type/content-length를 보존한다. 이전 기준선은 덮어쓰지 않았다.
+
+제한 실행 환경에서 TOP20과 broker 테스트가 멈춘 원인은 Windows Proactor 이벤트 루프의
+socketpair 내부 accept 단계였다. 같은 두 테스트는 사용자 Windows 실행 환경에서 각각
+0.032초와 0.281초에 통과했다.
+
+후속 hosted CI에서 Windows가 `monitor.sqlite3` 파일 잠금으로 실패했다. 느린 카탈로그/NXT
+보완을 검사하는 TOP20 테스트가 release event만 보내고 비동기 보완 작업이 DB 저장을 마치기 전에
+임시 디렉터리를 닫고 있었다. 테스트는 release 후 소유한 보완 task들을 drain한 다음 service와
+store를 닫도록 수정했다. 해당 테스트 5회와 TOP20 67건, 전체 `all-local` 1,465건이 사용자
+Windows 실행 환경에서 통과했다. 제품 동작 코드는 바꾸지 않았다.
+
+첫 core 실행에서 운영 설정 실패 주입이 store 인스턴스에 닿지 않았고, trace 경로 5개가
+명시 기대 목록에서 빠졌으며, 일봉·통계·뉴스 fixture 조건이 각 테스트 기대와 맞지 않는
+문제가 확인됐다. 각각의 조건을 테스트에서 수정한 뒤 1,365건 core와 전체 1,463건
+`all-local`이 실패·오류·skip 없이 통과했다. 상세 원인과 실행 결과는 계획 문서에 기록했다.
+
+새 사용자 요구: Windows worker의 timeout/중단 때 worker 자손까지 종료됐는지 확인하고,
+뉴스 API 이동 전후 같은 HTTP 요청의 상태·헤더·본문을 비교한다. 자손 종료 검사는 구현·검증했고
+뉴스 조회 세 경로를 독립 라우트 모듈로 옮긴 뒤 ASGI 12건과 loopback HTTP 13건의 기준선,
+SQLite 무변경 검사, 전체 `all-local` 1,465건을 통과했다. 정적 QueryStore 감사는 이동 전후
+모두 `review_required`로 남았으며 parse 오류나 stale binding은 없다. 네 조회 binding은
+새 모듈로 승인 기록했고 app router 등록 forwarding edge 하나가 추가됐다. 기존 감사의
+계약 변경 및 미해결 항목이 있으므로 전체 감사 통과로 보지 않는다.
+`.github/workflows/dependency-regression.yml`에 PR·push·수동 실행 workflow를 추가했다.
+Windows `all-local`과 격리 PostgreSQL 17 integration job이 각각 실행 결과·로그를 보관한다.
+로컬 YAML parsing과 두 job/runner 구성, regression profile 목록 확인은 통과했다. GitHub hosted
+run [37760150253](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37760150253),
+commit `b46150ce76f74640d1401c4707db711692e4e5f7`에서 Windows `all-local` 1,465건(실패·오류·skip
+0, 9/9 worker와 프로세스 트리 종료 확인) 및 PostgreSQL 경계 검사와 87개 통합 테스트가 통과했다.
+각 job 로그/report는 14일 artifact로 보관된다. 기본 브랜치 `main`은 branch protection이 없고
+저장소 ruleset도 비어 있어 CI가 병합을 차단하지 않는다. required check 적용 전까지 3단계는
+미완료다. NAS 배포는 진행하지 않았다.
+
+추가 범위 확인: `tests/unit/test_*.py` 409개 가운데 149개만 core/profile에 등록돼 있고
+260개(정적 AST 집계 `test_*` 메서드 2,205개)는 등록되지 않았다. 매매 진입 분류 39건,
+자격증명 저장 22건, 종목 저장소 13건, 일봉 저장소 6건 등 현재 제품 동작을 검증하는 파일도
+포함된다. 이 항목들은 불필요하다고 판정된 목록이 아니며, 14개는 별도 점검 스크립트에서 정확한 모듈 이름이
+참조되지만 상시 CI 실행 여부는 확인되지 않았다. 새 파일 등록 guard는 향후 새 모듈만 감지하므로
+기존 미등록 파일과 그 안에 추가되는 테스트는 잡지 못한다. **남음:** 260개를 기능 중요도,
+중복 커버리지, 실행 환경/시간을 기준으로 분류하고 필요한 모듈을 적절한 회귀 프로필 또는
+전용 자동 검사에 연결한다. 전체 일괄 등록은 분류와 실행 검증 전에는 하지 않는다.
 **2026-10-08 NAS restricted operator:** Installation and acceptance are complete. The native-policy-v3
 NAS gate passed 45 tests, installer verified actual passwordless `status` as `k379`, and a separate
 SSH `kiwoom-nas status` succeeded. Temporary development access is enabled; after development ends,

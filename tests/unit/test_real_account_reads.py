@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import unittest
 from unittest.mock import patch
 
-import test_real_credential_owner as support
+import credential_owner_test_support as support
 from kiwoom_monitor.central_server.credential_runtime import CredentialOperationError
 from kiwoom_monitor.central_server.rest_broker import ACCOUNT_RECOVERY_ENDPOINTS
 
@@ -33,14 +32,10 @@ class AccountClient(support.RealFakeClient):
         return account_request(self, api_id, path, body, **kwargs)
 
 
-class RealAccountReadsTests(unittest.IsolatedAsyncioTestCase):
+class RealAccountReadsTests(support.RealCredentialOwnerTestSupport):
     async def asyncSetUp(self):
         with patch.object(support, "RealFakeClient", AccountClient):
-            await support.RealCredentialOwnerTests.asyncSetUp(self)
-    asyncTearDown = support.RealCredentialOwnerTests.asyncTearDown
-    ready = support.RealCredentialOwnerTests.ready
-    apply = support.RealCredentialOwnerTests.apply
-    active = support.RealCredentialOwnerTests.active
+            await super().asyncSetUp()
 
     async def admitted(self):
         return await self.active(profile="nas-real-default"), await self.active(key="b1")

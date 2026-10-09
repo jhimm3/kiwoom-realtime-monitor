@@ -16,7 +16,7 @@ RUN grep -q '/api/v1/settings/operations' /app/src/kiwoom_monitor/central_server
     && grep -q '/api/v1/diagnostics/capabilities' /app/src/kiwoom_monitor/central_server/app.py \
     && grep -q '/api/v1/diagnostics/db-calls' /app/src/kiwoom_monitor/central_server/app.py \
     && grep -q 'def update_operational_settings' /app/src/kiwoom_monitor/central_server/news_service.py \
-    && grep -q '2026.10.01-db-writer-candidate-fixes-v1' /app/src/kiwoom_monitor/central_server/app.py \
+    && grep -q '2026.10.08-news-read-routes-v1' /app/src/kiwoom_monitor/central_server/app.py \
     && test -f /app/src/kiwoom_monitor/central_server/credential_store.py \
     && test -f /app/src/kiwoom_monitor/central_server/credential_runtime.py \
     && test -f /app/src/kiwoom_monitor/central_server/schema_migrations.py \

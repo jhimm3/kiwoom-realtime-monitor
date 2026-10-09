@@ -7,6 +7,7 @@ import threading
 import unittest
 import uuid
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -18,28 +19,7 @@ from kiwoom_monitor.central_server.news_credentials import DartCredentialOwner, 
 from kiwoom_monitor.central_server.news_service import CentralNewsService
 from kiwoom_monitor.infrastructure.dart_disclosures import DartDisclosureClient, DartCredentialValidationError
 from kiwoom_monitor.infrastructure.naver_news import NaverNewsCredentials
-from test_naver_credential_owner import FakeNaver
-
-
-class FakeDart(DartDisclosureClient):
-    def __init__(self, key, cache_path):
-        super().__init__(key, cache_path)
-        self.calls = []
-        self.entered = threading.Event()
-        self.release = threading.Event()
-        self.block = False
-
-    def _json(self, url):
-        query = parse_qs(urlsplit(url).query)
-        self.calls.append(query)
-        if "corp_code" in query and self.block:
-            self.entered.set()
-            if not self.release.wait(3):
-                raise RuntimeError("fake gate timeout")
-        if self._api_key in {"invalid", "quota"}:
-            return {"status": "010" if self._api_key == "invalid" else "020", "message": self._api_key}
-        return {"status": "000", "list": [{"rcept_no": "2026091500" + self._api_key,
-            "report_nm": "삼성전자 공급계약 체결", "flr_nm": "삼성전자", "rcept_dt": "20260915"}]}
+from credential_owner_test_support import FakeDart, FakeNaver
 
 
 class DartCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
@@ -441,6 +421,29 @@ class DartCredentialAPITests(unittest.TestCase):
                 self.assertEqual(1, len(service._dart_client.calls))
                 self.assertFalse((root / "corp.json").exists())
                 (root / "corp.json").write_text('{"005930": "00126380"}', encoding="utf-8")
-                result = client.portal.call(service.search, "005930", "삼성전자", None)
+                fixed_now = datetime(2026, 9, 15, 12, tzinfo=timezone.utc)
+
+                class FixedDateTime(datetime):
+                    @classmethod
+                    def now(cls, tz=None):
+                        return fixed_now.astimezone(tz) if tz else fixed_now.replace(tzinfo=None)
+
+                with patch("kiwoom_monitor.central_server.news_service.datetime", FixedDateTime), \
+                        patch("kiwoom_monitor.infrastructure.dart_disclosures.datetime", FixedDateTime):
+                    self.assertEqual([], client.portal.call(service.search, "005930", "삼성전자", None))
+                    self.assertEqual(1, len(service._dart_client.calls))
+                    self.assertEqual([], service._store.load_documents("news_watchlist", "", 20))
+                    service._store.save_dataset_snapshot("top20_membership", "", fixed_now.isoformat(),
+                        {"items": [{"stk_cd": "005930", "stk_nm": "삼성전자"}]})
+                    self.assertEqual(1, client.portal.call(service.refresh_once))
+                    saved = service._store.load_documents("news_article", "005930", 20)
+                    calls_after_refresh = len(service._dart_client.calls)
+                    result = client.portal.call(service.search, "005930", "삼성전자", None)
+                    self.assertEqual(calls_after_refresh, len(service._dart_client.calls))
+                    self.assertEqual(saved, service._store.load_documents("news_article", "005930", 20))
+                    self.assertEqual([], service._store.load_documents("news_watchlist", "", 20))
                 self.assertEqual(enabled, bool(result))
                 self.assertEqual(2 if enabled else 1, len(service._dart_client.calls))
+                if enabled:
+                    self.assertEqual(["new"], service._dart_client.calls[-1]["crtfc_key"])
+                    self.assertEqual(["00126380"], service._dart_client.calls[-1]["corp_code"])
