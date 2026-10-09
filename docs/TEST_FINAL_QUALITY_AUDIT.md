@@ -114,6 +114,20 @@ revision 일치·재시작·결정 재계산 금지의 최종 검증 강도를 �
 현재 callsite 수 assertion만 실제 검토된 54개로 재계수한다. 관련 감사·fixture 검사부터 재실행하고,
 이 보완을 포함한 최종 commit에서 로컬 전체 및 hosted CI를 다시 확인한다.
 
+[run 38001326253](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38001326253)의
+Windows 전체 3,725건/272 worker는 누락·skip 없이 실행됐으나 시장 fact cadence 검사 1건이 실패했다.
+해당 worker 로그에 `held_save`의 10초 만료 `TimeoutError`와 정상 재시도 후 native 호출 4회가
+확인됐다. 1,001번의 1ms yield가 느린 Windows 타이머에서는 10초를 넘길 수 있다.
+같은 입력에서 15.625ms yield를 주입하자 19.238초 실행 중 동일한 fixture 만료를 재현했고,
+retry 완료 시점 차이로 pending 3개 assertion도 실패했다. 제품 재시도 결함으로 해석하지 않는다.
+해당 cadence 검사만 hold timeout을 60초로 조정하고, release 전 실패 0회·native 호출 1회
+assertion을 추가한다. 원본 입력·해시·drop 0·pending 3·최종 native 호출 3·두 status 저장
+검증은 그대로 유지한다. 다른 failure/ACK-loss fixture의 10초 한도는 변경하지 않는다.
+수정 후 동일한 15.625ms cadence 주입은 **19.447초에 통과**했고 native 호출 3회·drop 0이었다.
+시장 fact·관측 전달·프레임 복구의 관련 세 모듈 **26건도 30.503초에 통과**했다.
+`main-merge-final-0795231` 로컬 전체는 수정 전에 중단해 `incomplete`로 보존한다.
+전후 동일 cadence 재현과 관련 검사부터 확인하고, 최종 변경 전체가 포함된 로컬·hosted 결과로 판정한다.
+
 [409개 의존성 원장](TEST_DEPENDENCY_AUDIT.md), [260개 보호 계약](REGRESSION_COVERAGE_AUDIT.md),
 [후속 선택 편입·실패·개선 기록](TEST_DUPLICATION_CI_FOLLOWUP.md)을 재사용했다.
 기존 149개도 동일 기준으로 감사했던 결과를 유지하며, 현재 통과한다는 이유로 구조가 적절하다고 추정하지 않았다.
