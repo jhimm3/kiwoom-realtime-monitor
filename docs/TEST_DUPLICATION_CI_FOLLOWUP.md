@@ -204,3 +204,48 @@ main CI와 같은 이전 base `f2ba98cba75600089a076e2b6b5a7f3b490ba2b0`를 지�
 남은 195개를 모두 CI에 편입한 것으로 표시하지 않는다. 최신 main 위의 전체 회귀·Linux·disposable
 PostgreSQL 검증은 이 작업 branch의 hosted CI 결과와 artifact를 기준으로 별도 판정한다.
 운영 NAS PostgreSQL 검증·배포·main 병합은 이번 후속 작업의 완료 조건에 포함하지 않는다.
+
+## 2026-10-09 hosted 기준선과 NAS/capture 안전 4개 선택 편입
+
+직전 commit `10e9080b278e7ae84fe11bd4b1285c7104419090`의
+[hosted CI 37887792801](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37887792801)은
+두 job 모두 성공했다. Windows 전체 2,154건/73 worker/213개 모듈, 별도 Linux 5개 모듈 65건,
+disposable PostgreSQL 87건 및 schema 21·rollback 저장 경계 검사가 통과했다.
+Windows artifact의 게시 commit, 깨끗한 checkout, 전체 계획·모듈별 발견 수·실행 수,
+manifest/실행기/테스트 파일 hash, 모든 worker·process tree 종료를 대조했다.
+failure/error/skip/expected failure/unexpected success/미실행/잔류 자손은 0이다.
+13개 파일의 로컬/hosted hash 차이는 committed blob의 LF/CRLF checkout 차이로 확인했다.
+이 결과는 운영 NAS 검증이나 배포 완료를 뜻하지 않는다.
+
+최근 main의 녹화·재생·운영 안전 경계와 직접 관련된 기존 미등록 4개만 다음으로 편입했다.
+
+| 모듈 (`tests.unit.test_` 이후) | 검증 목적 | 실제 발견/실행 | 로컬 worker 비용 |
+|---|---|---:|---:|
+| `catalog_capture_profile` | catalog 전용 복사 예산·비밀값 차단·중지 시 reservation 해제·native 결과와 durable payload 복원 | 10 | 1.54초 |
+| `diagnostic_replay_database_cli` | DB 접근 전 원본/입력 검증·lease/seal/status/restore·비밀값 redaction | 11 | 0.93초 |
+| `recorded_workload_capture` | typed payload·checksum·원본 저장 결과 유지·복사 lane 종료 경합·disk 실패 격리 | 18 | 2.71초 |
+| `nas_operator` | portable 경로/정책 차단·rollback/readiness·정확한 server pause/resume·worker 실패 및 skip-only 거부 | 44 | 0.47초 |
+
+기존 trace API/RAM 검사는 API·수명·전체 메모리 경계를 보호하므로 함께 유지한다.
+새 묶음의 catalog별 예산·durable 원본 복원·DB 이전 거부·operator 상태 전이는 같은 assertion의
+완전 중복이 아니다. fake store, 임시 trace/control 경로, MemoryTree/fake Docker를 사용하며
+운영 NAS·운영 DB를 실행하거나 변경하지 않는다. Linux fd/ACL 실환경 5개는 별도 CI에 유지한다.
+
+의존성 판단: catalog가 재사용하는 `deferred_capture`/`wait_state`는 실제 trace 시작·종료와
+임시 control 경로를 소유하는 같은 영역의 lifecycle fixture다. 현재의 공통 helper를 그대로
+사용한다. `_SESSION`·lock·reservation·wake 확인은 실제 quota/종료 구현 경계가 검증 대상이므로
+제거하지 않는다. DB CLI의 lease mock과 operator의 fake 경계도 의도된 실패 경로 검증에 필요하다.
+disk 실패 주입은 실제 payload 파일 교체에서 OSError를 발생시키고 failed 상태·blob 부재·재생 거부와
+성공한 native 저장 보존까지 확인한다. patch 적용 여부만으로 통과하는 검사가 아니다.
+이번 단계에서 불필요한 구현 의존성 수정이나 fixture 계층 추가는 필요하지 않았다.
+
+`dependency-audit-p2-nas-capture-safety`를 manifest 끝에 추가해 기존 모든 profile·core 목록과
+순서를 보존했다. 선택 실행은 83/83, worker/process tree 종료 4/4이며 모든 비정상 결과와
+잔류 자손은 0이다. 기록: `tmp/regression/nas-capture-safety-selected/run.json`.
+테스트·제품 source·assertion·기대값은 변경하지 않았다. 현재 413개 중 Windows 217개,
+별도 Linux 5개, 미등록 단계적 후보 191개다. 미등록 후보가 실행됐거나 불필요하다는 판정은 아니다.
+
+완료 판정은 이 4개를 포함한 게시 commit의 hosted 전체 회귀로 확인한다. manifest 편입 뒤
+각 수정마다 로컬 전체 회귀를 반복하지 않고 선택 검사와 최종 독립 환경 전체 검사를 구분한다.
+남은 191개는 기존 보호 근거에 따른 선택 후보로 유지하며, 이번 단계의 완료 조건을 모두의 편입이나
+중복 삭제로 확대하지 않는다.

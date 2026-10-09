@@ -5,7 +5,8 @@
 ## 현재 결정
 
 2026-10-09 중복/상시 CI 후속 분석 및 구현 진행: [판정·수정·검증 상태](TEST_DUPLICATION_CI_FOLLOWUP.md).
-최신 main 통합 뒤 현재 전체 413개 중 Windows `all-local` 등록 213개, 별도 Linux CI 5개, 미등록 195개다.
+최신 main 통합과 NAS/capture 안전 4개 선택 편입 뒤 현재 전체 413개 중 Windows `all-local` 등록 217개,
+별도 Linux CI 5개, 미등록 191개다. 기존 213개와 core 실행 순서는 보존했다.
 409개 조사 대상의 중복 선별에서 삭제할 완전 중복은 확정되지 않았다. 실행기의 빈 모듈 false-green을
 차단했고, 검증된 선택 profile 26개를 추가했다. 관련 선택 profile 218건과 모듈 간 setup 결합 수정은
 통과했다. 전체 `all-local`과 hosted CI 결과는 후속 문서의 최신 상태를 따른다. 아래의 당시 manifest,
@@ -16,6 +17,14 @@
 원래 409개와 이후 RAM module의 조사·분류를 다시 시작하거나 남은 195개를 일괄 편입하지 않았다.
 새 main module 15/15와 직접 관련된 DB·진단·실행기 243/243, 실제 이전 base를 지정한 새 모듈
 등록 guard가 통과했다. 최신 전체 회귀는 작업 전용 branch의 hosted CI와 이전 로컬 기록을 구분해 판정한다.
+
+2026-10-09 선택 편입 후속: catalog capture, replay DB CLI, recorded workload capture,
+portable NAS operator 4개를 `dependency-audit-p2-nas-capture-safety`에 등록했다.
+원래 미등록 260개에 속한 4개이며 기존 CI 149개나 assertion은 변경하지 않았다.
+선택 검사 83/83, failure/error/skip/미실행/잔류 자손 0, worker와 process tree 종료 4/4다.
+직전 commit `10e9080`의 hosted 전체 회귀는 Windows 2,154건/73 worker, Linux 65건,
+disposable PostgreSQL 87건 및 저장 경계 검사 통과로 별도 확인했다.
+새 4개를 포함한 최종 hosted 결과는 [후속 문서](TEST_DUPLICATION_CI_FOLLOWUP.md)와 해당 branch CI를 따른다.
 
 ### 2026-10-09 최종 후속 회귀
 
@@ -301,7 +310,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_candidate_daily_nas_scripts.py](../tests/unit/test_candidate_daily_nas_scripts.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/7/5/2/1 |
 | [test_candidate_exchange_effective_dates.py](../tests/unit/test_candidate_exchange_effective_dates.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_candidate_monitor.py](../tests/unit/test_candidate_monitor.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_catalog_capture_profile.py](../tests/unit/test_catalog_capture_profile.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/3/4/0/0 |
+| [test_catalog_capture_profile.py](../tests/unit/test_catalog_capture_profile.py) | 기준 미등록 → P2 등록 | P2 NAS/capture profile 편입; catalog budget·native 결과·durable 복원 10건 | 1/0/3/4/0/0 |
 | [test_causal_capture_api.py](../tests/unit/test_causal_capture_api.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/0/0/0 |
 | [test_causal_capture_capacity.py](../tests/unit/test_causal_capture_capacity.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_central_account_query.py](../tests/unit/test_central_account_query.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
@@ -358,7 +367,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_diagnostic_delivery_record.py](../tests/unit/test_diagnostic_delivery_record.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 2/0/7/3/0/0 |
 | [test_diagnostic_flush_metrics.py](../tests/unit/test_diagnostic_flush_metrics.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/0/0/0 |
 | [test_diagnostic_replay.py](../tests/unit/test_diagnostic_replay.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/12/0/0/0 |
-| [test_diagnostic_replay_database_cli.py](../tests/unit/test_diagnostic_replay_database_cli.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/17/0/0/0 |
+| [test_diagnostic_replay_database_cli.py](../tests/unit/test_diagnostic_replay_database_cli.py) | 기준 미등록 → P2 등록 | P2 NAS/capture profile 편입; DB 접근 전 입력 검증·lease/seal/restore·redaction 11건 | 0/0/17/0/0/0 |
 | [test_diagnostic_rest_input.py](../tests/unit/test_diagnostic_rest_input.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/11/4/0/0 |
 | [test_diagnostic_runs.py](../tests/unit/test_diagnostic_runs.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/21/1/0/0 |
 | [test_diagnostic_sampling_api.py](../tests/unit/test_diagnostic_sampling_api.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/1/0/0/0 |
@@ -486,7 +495,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_nas_credentials_dialog.py](../tests/unit/test_nas_credentials_dialog.py) | 기준선 미등록 → P1-2 등록 | 단독 17건·all-local 통합 통과; Qt 응답성·인증 비밀 표시·중복 적용 확인 | 0/0/19/13/4/4 |
 | [test_nas_credentials_ui_integration.py](../tests/unit/test_nas_credentials_ui_integration.py) | 기준선 미등록 → P0 등록 | 단독 2/2 통과 후 별도 P0 profile 편입. 숨김/표시 UX, API의 disable 저장, SQLite sidecar, 암호화 파일의 평문 비노출 검증 | 2/0/4/6/0/1 |
 | [test_nas_diagnostic_commit_correlation.py](../tests/unit/test_nas_diagnostic_commit_correlation.py) | 미등록 | 별도 환경; Windows skip 방지, Linux 격리 실행 전 보류 | 0/0/9/20/0/0 |
-| [test_nas_operator.py](../tests/unit/test_nas_operator.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/9/0/1/0 |
+| [test_nas_operator.py](../tests/unit/test_nas_operator.py) | 기준 미등록 → P2 등록 | P2 NAS/capture profile 편입; portable 운영 정책·rollback·readiness·skip 거부 44건; 실제 Linux ACL 검사는 별도 | 0/0/9/0/1/0 |
 | [test_nas_scheduled_trace.py](../tests/unit/test_nas_scheduled_trace.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_nas_source_runtime.py](../tests/unit/test_nas_source_runtime.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/7/0/6/3 |
 | [test_nas_storage_mapping.py](../tests/unit/test_nas_storage_mapping.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
@@ -549,7 +558,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_recorded_execution.py](../tests/unit/test_recorded_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/0/0/0 |
 | [test_recorded_replay_baseline.py](../tests/unit/test_recorded_replay_baseline.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 2/0/19/9/0/0 |
 | [test_recorded_replay_operator.py](../tests/unit/test_recorded_replay_operator.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/4/0/0 |
-| [test_recorded_workload_capture.py](../tests/unit/test_recorded_workload_capture.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/11/12/0/0 |
+| [test_recorded_workload_capture.py](../tests/unit/test_recorded_workload_capture.py) | 기준 미등록 → P2 등록 | P2 NAS/capture profile 편입; payload 무결성·복사 drain·저장 실패 격리 18건 | 0/0/11/12/0/0 |
 | [test_recover_development_validation_orphan.py](../tests/unit/test_recover_development_validation_orphan.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/1/3/0/0/0 |
 | [test_recover_final_holdout_orphan.py](../tests/unit/test_recover_final_holdout_orphan.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/1/2/1/0/0 |
 | [test_remote_kiwoom_rest_client.py](../tests/unit/test_remote_kiwoom_rest_client.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
