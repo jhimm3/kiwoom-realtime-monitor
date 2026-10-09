@@ -4,6 +4,12 @@
 
 ## 현재 결정
 
+2026-10-10 [최종 품질 감사와 CI 전환 설계](TEST_FINAL_QUALITY_AUDIT.md): 아래 413개는 unit 수이며,
+별도 integration 17개를 합한 실제 브랜치 대상은 430개다. `8caf622`의 기존 Windows/Linux/PG CI는 통과했다.
+이후 main `4efd672`의 438개 파일과는 소스/등록 상태를 구분한다. 0건·skip 성공 판정 공백, 취소 실패
+검증과 integration 자동 경로를 브랜치에 구현했고, 로컬 전체 회귀 3,682건/268 worker가 통과했다.
+최신 hosted 결과는 아직 확인하지 않았다.
+
 2026-10-09 중복/상시 CI 후속 분석 및 구현 진행: [판정·수정·검증 상태](TEST_DUPLICATION_CI_FOLLOWUP.md).
 최신 main 통합과 NAS/capture·replay·causal 종료·TOP20·trace 저장·진단 제어 및 1~7차
 선택 편입 뒤 현재 전체 413개 중 Windows `all-local` 등록 408개, 별도 Linux CI 5개,

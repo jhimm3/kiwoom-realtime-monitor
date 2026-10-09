@@ -1,5 +1,15 @@
 # 남은 작업과 보류 사항
 
+**2026-10-10 테스트 최종 품질 감사:** [결과·실제 수정 대상·CI 전환 설계](TEST_FINAL_QUALITY_AUDIT.md).
+브랜치 `8caf622`의 430개(unit 413/integration 17) 중 unit 413개와 PG access/smoke hosted는 통과했다.
+runner 0건/skip 판정, 전체 실행 경로 guard, 취소 실패 테스트, integration 자동화와 3단계 CI를 브랜치에 구현했다.
+별도 main `4efd672`의 Windows는 새 unit 4개 미등록으로 실패했으므로 해당 main 전체 성공으로 보고하지 않는다.
+제품 후속 정책: historical news 사건 첫 기사 기준 분할에서 늦은 기사의 구간 교차를 허용할지 결정 필요.
+실제 데이터 누수는 미확인이다. 과거 두 historical 테스트의 WinError 5 원인도 미확정으로 유지한다.
+변경된 로컬 전체 회귀는 3,682건/268 worker 통과했고 실패·skip·미실행·잔류 자손은 0이다.
+hosted 검증과 보호 check 전환은 아직 남았다.
+main 병합과 NAS 배포는 별도다.
+
 **2026-10-09 미등록 CI 5차 묶음:** 28개 모듈/398건을 검토 profile에 넣었고, 이미 CI에 등록된
 `test_research_final_preparation`을 제외한 27개 신규 모듈/370건을 편입했다.
 공유 fixture를 `research_test_support.py`로 분리했고, 영향을 받은 13개 모듈의 assertion AST 목록이

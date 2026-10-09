@@ -20,6 +20,7 @@ from typing import Any, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = ROOT / "src"
 MANIFEST = ROOT / "tests" / "regression_profiles.json"
+CI_GROUPS = ROOT / "tests" / "ci_groups.json"
 DEFAULT_TIMEOUT_SECONDS = 1800
 
 
@@ -311,7 +312,7 @@ def _load_manifest() -> dict[str, Any]:
     if not isinstance(profiles, dict):
         raise ValueError("Regression profiles are missing")
     for name, modules in profiles.items():
-        if not isinstance(name, str) or not name or not isinstance(modules, list):
+        if not isinstance(name, str) or not name or not isinstance(modules, list) or not modules:
             raise ValueError("Invalid named regression profile")
         if any(not _valid_module(item) for item in modules):
             raise ValueError(f"Profile {name!r} contains an invalid test module")
@@ -327,6 +328,119 @@ def _valid_module(value: object) -> bool:
     if not isinstance(value, str) or not value.startswith("tests.unit."):
         return False
     return all(part.isidentifier() for part in value.split("."))
+
+
+CI_WINDOWS_PROFILES = ("ci-required-windows", "ci-extended-windows", "ci-long-windows")
+CI_MODULE_GROUPS = (
+    "required_windows_additions", "long_windows_modules", "linux_required",
+    "postgres_required", "postgres_extended", "sealed_extended", "operator_extended",
+)
+
+
+def _load_ci_groups() -> dict[str, Any]:
+    value = json.loads(CI_GROUPS.read_text(encoding="utf-8-sig"))
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise ValueError("Unsupported CI test catalog")
+    keys = {"version", "required_windows_profiles", *CI_MODULE_GROUPS}
+    if set(value) != keys:
+        raise ValueError("CI test catalog has missing or unknown groups")
+    for name in keys - {"version"}:
+        items = value[name]
+        if (not isinstance(items, list) or not items
+                or any(not isinstance(item, str) for item in items)
+                or len(items) != len(set(items))):
+            raise ValueError(f"CI group {name!r} must contain distinct entries")
+        if name == "required_windows_profiles":
+            if any(not isinstance(item, str) or not item for item in items):
+                raise ValueError("Invalid CI Windows profile name")
+        else:
+            prefix = "tests.integration." if name in {
+                "postgres_required", "postgres_extended", "sealed_extended", "operator_extended"
+            } else "tests.unit."
+            if any(not isinstance(item, str) or not item.startswith(prefix)
+                   or not all(part.isidentifier() for part in item.split(".")) for item in items):
+                raise ValueError(f"Invalid test module in CI group {name!r}")
+    return value
+
+
+def _ci_membership(manifest: dict[str, Any], catalog: dict[str, Any]) -> dict[str, set[str]]:
+    unknown_profiles = set(catalog["required_windows_profiles"]) - set(manifest["profiles"])
+    if unknown_profiles:
+        raise ValueError(f"Unknown required Windows profiles: {sorted(unknown_profiles)}")
+    full_plan = _planned_batches(manifest, "all-local")
+    all_windows = {module for batch in full_plan for module in batch["modules"]}
+    core = {module for batch in manifest["core_batches"] for module in batch["modules"]}
+    required = core | {
+        module for name in catalog["required_windows_profiles"]
+        for module in manifest["profiles"][name]
+    } | set(catalog["required_windows_additions"])
+    long = set(catalog["long_windows_modules"])
+    if not required <= all_windows or not long <= all_windows or required & long:
+        raise ValueError("Required/long Windows modules must be distinct registered modules")
+    if not all_windows - required - long:
+        raise ValueError("Extended Windows group is empty")
+    if set(catalog["linux_required"]) & all_windows:
+        raise ValueError("A Linux unit module is already routed through Windows")
+    integration_groups = [
+        set(catalog[name]) for name in (
+            "postgres_required", "postgres_extended", "sealed_extended", "operator_extended"
+        )
+    ]
+    integration = set().union(*integration_groups)
+    if sum(map(len, integration_groups)) != len(integration):
+        raise ValueError("An integration module is assigned to multiple CI groups")
+    return {
+        "ci-required-windows": required,
+        "ci-extended-windows": all_windows - required - long,
+        "ci-long-windows": long,
+        "ci-required-linux": set(catalog["linux_required"]),
+        "ci-required-postgres": integration_groups[0],
+        "ci-extended-postgres": integration_groups[1],
+        "ci-sealed-replay": integration_groups[2],
+        "ci-linux-operator": integration_groups[3],
+    }
+
+
+def _test_modules_under(directory: str) -> set[str]:
+    root = ROOT / "tests" / directory
+    return {
+        ".".join(path.relative_to(ROOT).with_suffix("").parts)
+        for path in root.rglob("test_*.py")
+    }
+
+
+def _catalog_errors(
+    manifest: dict[str, Any], catalog: dict[str, Any],
+    actual_unit: set[str], actual_integration: set[str],
+) -> list[str]:
+    membership = _ci_membership(manifest, catalog)
+    assigned_unit = set().union(*(modules for name, modules in membership.items()
+                                  if name.endswith("windows") or name == "ci-required-linux"))
+    assigned_integration = set().union(*(modules for name, modules in membership.items()
+                                         if name not in CI_WINDOWS_PROFILES and name != "ci-required-linux"))
+    errors = []
+    for label, actual, assigned in (
+        ("unit", actual_unit, assigned_unit),
+        ("integration", actual_integration, assigned_integration),
+    ):
+        if actual - assigned:
+            errors.append(f"Unrouted {label} modules: {sorted(actual - assigned)}")
+        if assigned - actual:
+            errors.append(f"Missing {label} files named by CI: {sorted(assigned - actual)}")
+    return errors
+
+
+def _check_test_catalog() -> int:
+    manifest = _load_manifest()
+    catalog = _load_ci_groups()
+    unit = _test_modules_under("unit")
+    integration = _test_modules_under("integration")
+    errors = _catalog_errors(manifest, catalog, unit, integration)
+    if errors:
+        print("\n".join(errors), file=sys.stderr)
+        return 1
+    print(f"CI test catalog passed: unit={len(unit)} integration={len(integration)}")
+    return 0
 
 
 def _unit_test_modules(paths: Sequence[str | Path]) -> set[str]:
@@ -372,6 +486,9 @@ def _git_unit_test_modules(revision: str) -> list[str]:
 
 
 def _check_new_test_module_coverage(base_ref: str, fallback_ref: str = "") -> int:
+    catalog_status = _check_test_catalog()
+    if catalog_status:
+        return catalog_status
     base_ref = base_ref.strip()
     if not base_ref or (set(base_ref) == {"0"}):
         base_ref = fallback_ref.strip()
@@ -411,13 +528,24 @@ def _check_new_test_module_coverage(base_ref: str, fallback_ref: str = "") -> in
 
 
 def _available_profiles(manifest: dict[str, Any]) -> list[str]:
-    return ["core", *manifest["profiles"], "all-local"]
+    return ["core", *manifest["profiles"], "all-local", *CI_WINDOWS_PROFILES]
 
 
 def _planned_batches(manifest: dict[str, Any], profile: str) -> list[dict[str, Any]]:
     available = _available_profiles(manifest)
     if profile not in available:
         raise ValueError(f"Unknown profile {profile!r}; choose from {', '.join(available)}")
+
+    if profile in CI_WINDOWS_PROFILES:
+        members = _ci_membership(manifest, _load_ci_groups())[profile]
+        selected = []
+        for batch in _planned_batches(manifest, "all-local"):
+            modules = [module for module in batch["modules"] if module in members]
+            if modules:
+                selected.append({**batch, "modules": modules})
+        if not selected:
+            raise ValueError(f"CI profile {profile!r} has no runnable tests")
+        return selected
 
     batches = [
         {"name": str(batch.get("name", f"core-{index + 1}")),
@@ -570,6 +698,32 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _code_tree_identity() -> dict[str, Any]:
+    """Fingerprint the actual executable/test tree, normalizing text newlines only."""
+    normalized = hashlib.sha256()
+    raw = hashlib.sha256()
+    count = 0
+    text_suffixes = {
+        ".py", ".json", ".jsonl", ".yml", ".yaml", ".sh", ".ps1",
+        ".bat", ".cmd", ".txt", ".md", ".lock", ".toml", ".cfg",
+        ".ini", ".dockerfile", ".sql", ".html", ".css", ".svg",
+        ".csv", ".tsv", ".xml",
+    }
+    paths = [p for relative in ("src", "scripts", "tests", ".github/workflows")
+             for p in (ROOT / relative).rglob("*") if p.is_file() and "__pycache__" not in p.parts]
+    paths.extend(ROOT / name for name in ("requirements.lock.txt", "pyproject.toml")
+                 if (ROOT / name).is_file())
+    for path in sorted(paths):
+        name = path.relative_to(ROOT).as_posix().encode("utf-8")
+        data = path.read_bytes()
+        canonical = (data.replace(b"\r\n", b"\n")
+                     if path.suffix.lower() in text_suffixes else data)
+        normalized.update(name + b"\0" + hashlib.sha256(canonical).digest())
+        raw.update(name + b"\0" + hashlib.sha256(data).digest())
+        count += 1
+    return {"files": count, "lf_sha256": normalized.hexdigest(), "raw_sha256": raw.hexdigest()}
+
+
 def _git_metadata() -> dict[str, Any]:
     def git(*args: str) -> str | None:
         try:
@@ -594,7 +748,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list", dest="list_only", action="store_true",
                         help="print a profile plan without running tests")
     parser.add_argument("--check-new-test-modules", action="store_true",
-                        help="fail when a new tests/unit/test_*.py module is not registered")
+                        help="check all test routes, then compare new unit modules to a base ref")
+    parser.add_argument("--check-test-catalog", action="store_true",
+                        help="fail on any unrouted or nonexistent unit/integration test module")
     parser.add_argument("--base-ref", default=os.environ.get("REGRESSION_BASE_REF", ""),
                         help="revision whose tests/unit inventory is the comparison baseline")
     parser.add_argument("--fallback-ref", default=os.environ.get("REGRESSION_FALLBACK_REF", ""),
@@ -757,6 +913,8 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path) -> i
 
     manifest = _load_manifest()
     batches = _planned_batches(manifest, profile)
+    if not batches or any(not batch["modules"] for batch in batches):
+        raise ValueError(f"Regression profile {profile!r} has no runnable tests")
     output_path.mkdir(parents=True)
     test_paths = {
         module: ROOT / (module.replace(".", "/") + ".py")
@@ -770,6 +928,8 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path) -> i
         "python_version": sys.version, "source_root": str(SOURCE_ROOT),
         "git": _git_metadata(),
         "profile_manifest_sha256": _sha256(MANIFEST),
+        "ci_catalog_sha256": _sha256(CI_GROUPS),
+        "code_tree_start": _code_tree_identity(),
         "runner_sha256": _sha256(Path(__file__).resolve()),
         "test_file_sha256": {module: _sha256(path) for module, path in test_paths.items()
                              if path.is_file()},
@@ -835,6 +995,12 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path) -> i
     else:
         summary["status"] = "incomplete"
     summary["interrupted"] = interrupted
+    summary["code_tree_end"] = _code_tree_identity()
+    summary["source_modified_during_run"] = (
+        summary["code_tree_start"]["lf_sha256"] != summary["code_tree_end"]["lf_sha256"]
+    )
+    if summary["source_modified_during_run"]:
+        summary["status"] = "incomplete"
     summary["finished_at"] = _utc_now()
     (output_path / "run.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
@@ -858,6 +1024,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _worker(args._result_path.resolve(), args._modules)
     if args._result_path is not None or args._modules:
         parser.error("worker-only options are not available in normal mode")
+    if args.check_test_catalog:
+        if args.check_new_test_modules or args.profile is not None or args.list_only or args.output is not None:
+            parser.error("catalog check cannot be combined with execution or another check")
+        try:
+            return _check_test_catalog()
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            print(f"Regression runner: {type(error).__name__}: {error}", file=sys.stderr)
+            return 2
     if args.check_new_test_modules:
         if args.profile is not None or args.list_only or args.output is not None:
             parser.error("module coverage check cannot be combined with profile/list/output options")

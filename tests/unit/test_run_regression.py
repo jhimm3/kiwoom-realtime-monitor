@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import os
 import sys
 import subprocess
@@ -12,7 +13,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts import run_regression
+from scripts import check_required_ci_results, run_regression, select_ci_groups
 
 
 class ProcessProbe:
@@ -119,6 +120,171 @@ class RunRegressionTests(unittest.TestCase):
 
     def test_invalid_manifest_module_is_rejected(self) -> None:
         self.assertFalse(run_regression._valid_module("tests.unit..bad"))
+
+    def test_empty_named_profile_is_rejected_before_any_worker_starts(self) -> None:
+        manifest = run_regression._load_manifest()
+        manifest["profiles"]["empty-for-test"] = []
+        path = self.directory / "manifest.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        with patch.object(run_regression, "MANIFEST", path):
+            with self.assertRaisesRegex(ValueError, "Invalid named regression profile"):
+                run_regression._load_manifest()
+
+        output = self.directory / "empty-result"
+        with patch.object(run_regression, "_load_manifest", return_value=manifest):
+            with self.assertRaisesRegex(ValueError, "no runnable tests"):
+                run_regression._execute_profile("empty-for-test", 5, output)
+        self.assertFalse(output.exists())
+
+    def test_ci_routes_preserve_core_and_cover_each_current_test_file(self) -> None:
+        manifest = run_regression._load_manifest()
+        groups = run_regression._load_ci_groups()
+        unit = run_regression._test_modules_under("unit")
+        integration = run_regression._test_modules_under("integration")
+        self.assertEqual([], run_regression._catalog_errors(manifest, groups, unit, integration))
+        membership = run_regression._ci_membership(manifest, groups)
+        self.assertEqual((274, 132, 2), tuple(len(membership[name]) for name in
+                         run_regression.CI_WINDOWS_PROFILES))
+        required = run_regression._planned_batches(manifest, "ci-required-windows")
+        self.assertEqual(
+            [batch["modules"] for batch in run_regression._planned_batches(manifest, "core")],
+            [batch["modules"] for batch in required[:2]],
+        )
+        all_local = run_regression._planned_batches(manifest, "all-local")
+        combined = set().union(*(membership[name] for name in run_regression.CI_WINDOWS_PROFILES))
+        self.assertEqual({module for batch in all_local for module in batch["modules"]}, combined)
+
+    def test_catalog_rejects_missing_old_registration_new_integration_and_removed_files(self) -> None:
+        manifest = run_regression._load_manifest()
+        groups = run_regression._load_ci_groups()
+        unit = run_regression._test_modules_under("unit")
+        integration = run_regression._test_modules_under("integration")
+        cases = (
+            (unit | {"tests.unit.test_new_contract"}, integration, "Unrouted unit"),
+            (unit, integration | {"tests.integration.test_new_contract"}, "Unrouted integration"),
+            (unit - {"tests.unit.test_order_lifecycle"}, integration, "Missing unit files"),
+            (unit, integration - {"tests.integration.test_postgres_access_postgres"},
+             "Missing integration files"),
+        )
+        for current_unit, current_integration, message in cases:
+            with self.subTest(message=message):
+                self.assertIn(message, "\n".join(run_regression._catalog_errors(
+                    manifest, groups, current_unit, current_integration,
+                )))
+
+    def test_catalog_rejects_duplicate_integration_route(self) -> None:
+        manifest = run_regression._load_manifest()
+        groups = run_regression._load_ci_groups()
+        groups["postgres_extended"] = [*groups["postgres_extended"],
+                                        groups["postgres_required"][0]]
+        with self.assertRaisesRegex(ValueError, "multiple CI groups"):
+            run_regression._ci_membership(manifest, groups)
+
+    def test_code_tree_identity_distinguishes_line_endings_from_source_changes(self) -> None:
+        source = self.directory / "src" / "example.py"
+        source.parent.mkdir()
+        source.write_bytes(b"value = 1\n")
+        dockerfile = self.directory / "tests" / "ci_runtime.Dockerfile"
+        dockerfile.parent.mkdir()
+        dockerfile.write_bytes(b"FROM python:3.13-slim\n")
+        with patch.object(run_regression, "ROOT", self.directory):
+            before = run_regression._code_tree_identity()
+            source.write_bytes(b"value = 1\r\n")
+            dockerfile.write_bytes(b"FROM python:3.13-slim\r\n")
+            newline_only = run_regression._code_tree_identity()
+            source.write_bytes(b"value = 2\r\n")
+            changed = run_regression._code_tree_identity()
+        self.assertEqual(before["lf_sha256"], newline_only["lf_sha256"])
+        self.assertNotEqual(before["raw_sha256"], newline_only["raw_sha256"])
+        self.assertNotEqual(before["lf_sha256"], changed["lf_sha256"])
+
+    def test_source_change_during_run_cannot_report_success(self) -> None:
+        output = self.directory / "source-changed"
+        passed = {"status": "passed", "worker_exit_confirmed": True,
+                  "process_tree_exit_confirmed": True, "test_count": 1}
+        identity = lambda name: {"files": 1, "lf_sha256": name, "raw_sha256": name}
+        with patch.object(run_regression, "_run_process", return_value=passed), \
+                patch.object(run_regression, "_code_tree_identity",
+                             side_effect=(identity("before"), identity("after"))), \
+                redirect_stdout(StringIO()):
+            exit_code = run_regression._execute_profile("core", 5, output)
+        result = json.loads((output / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, exit_code)
+        self.assertEqual("incomplete", result["status"])
+        self.assertTrue(result["source_modified_during_run"])
+
+    def test_required_gate_rejects_skips_missing_modules_and_unclosed_descendants(self) -> None:
+        manifest = run_regression._load_manifest()
+        catalog = run_regression._load_ci_groups()
+        planned = run_regression._planned_batches(manifest, "all-local")
+        code = {"files": 1, "lf_sha256": "f" * 64, "raw_sha256": "f" * 64}
+        workers = []
+        for batch in planned:
+            module_sets = ([batch["modules"]] if not batch["isolate_modules"]
+                           else [[module] for module in batch["modules"]])
+            for modules in module_sets:
+                workers.append({
+                    "name": batch["name"], "modules": modules, "status": "passed",
+                    "exit_code": 0, "worker_exit_confirmed": True,
+                    "process_tree_exit_confirmed": True, "source": {"verified": True},
+                    "test_count": len(modules), "planned_test_count": len(modules),
+                })
+        windows = {
+            "status": "passed", "profile": "all-local",
+            "git": {"commit": "test-commit", "working_tree_dirty": False},
+            "planned_batches": planned, "batch_results": workers,
+            "unrun_batches": [], "missing_test_files": [],
+            "code_tree_start": code, "code_tree_end": code,
+            "source_modified_during_run": False,
+        }
+        linux = {
+            "status": "passed", "modules": catalog["linux_required"],
+            "planned": 5, "ran": 5, "failures": 0, "errors": 0,
+            "skipped": 0, "expected_failures": 0, "unexpected_successes": 0,
+            "source_start": code, "source_end": code,
+        }
+        postgres = {
+            **linux, "modules": catalog["postgres_required"],
+            "git_commit": "test-commit",
+        }
+        check_required_ci_results.validate(windows, linux, postgres, "test-commit")
+        for target, field, value in (
+            ("linux", "skipped", 1),
+            ("postgres", "modules", catalog["postgres_required"][:-1]),
+            ("windows", "process_tree_exit_confirmed", False),
+        ):
+            with self.subTest(target=target, field=field):
+                w, l, p = copy.deepcopy((windows, linux, postgres))
+                if target == "windows":
+                    w["batch_results"][0][field] = value
+                elif target == "linux":
+                    l[field] = value
+                else:
+                    p[field] = value
+                with self.assertRaises(ValueError):
+                    check_required_ci_results.validate(w, l, p, "test-commit")
+
+    def test_extended_selection_is_conservative_for_unmapped_changes(self) -> None:
+        docs = select_ci_groups.select(["docs/OPEN_ITEMS.md"], "auto")["groups"]
+        self.assertFalse(any(docs.values()))
+        ui = select_ci_groups.select([
+            "src/kiwoom_monitor/presentation/market_news_window.py",
+        ], "auto")["groups"]
+        self.assertTrue(ui["windows_fast"])
+        self.assertFalse(any(value for name, value in ui.items() if name != "windows_fast"))
+        database = select_ci_groups.select([
+            "src/kiwoom_monitor/central_server/database_market_bars.py",
+        ], "auto")["groups"]
+        self.assertTrue(all(database[name] for name in (
+            "windows_fast", "windows_long", "postgres", "sealed",
+        )))
+        unknown = select_ci_groups.select(["scripts/new_shared_runner.py"], "auto")["groups"]
+        self.assertTrue(all(unknown.values()))
+        self.assertEqual(
+            {"windows_fast", "postgres"},
+            {name for name, value in select_ci_groups.select([], "nightly")["groups"].items() if value},
+        )
+        self.assertTrue(all(select_ci_groups.select([], "weekly")["groups"].values()))
 
     def test_new_test_modules_must_be_registered_but_existing_exclusions_are_unchanged(self) -> None:
         base_paths = [

@@ -3,7 +3,20 @@ name: 기능 보존 회귀
 on:
   pull_request:
   push:
+  schedule:
+    - cron: '15 18 * * 1-6'
+    - cron: '15 18 * * 0'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: CI validation scope
+        type: choice
+        required: true
+        default: comprehensive
+        options:
+          - comprehensive
+          - nightly
+          - auto
 
 permissions:
   contents: read
@@ -13,6 +26,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  select-extended:
+    name: Select extended regression
+    runs-on: ubuntu-latest
+    outputs:
+      windows_fast: ${{ steps.route.outputs.windows_fast }}
+      windows_long: ${{ steps.route.outputs.windows_long }}
+      postgres: ${{ steps.route.outputs.postgres }}
+      sealed: ${{ steps.route.outputs.sealed }}
+      operator: ${{ steps.route.outputs.operator }}
+    steps:
+      - name: Check out source and comparison history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Select safe validation groups
+        id: route
+        shell: bash
+        env:
+          CI_MODE: ${{ github.event_name == 'schedule' && (github.event.schedule == '15 18 * * 0' && 'weekly' || 'nightly') || github.event_name == 'workflow_dispatch' && inputs.mode || 'auto' }}
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: >-
+          python scripts/select_ci_groups.py --mode "$CI_MODE" --base-ref "$BASE_REF"
+          --report tmp/regression/ci-selection.json --github-output "$GITHUB_OUTPUT"
+
+      - name: Preserve selected and omitted group reasons
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-selection-${{ github.run_id }}
+          path: tmp/regression/ci-selection.json
+          if-no-files-found: error
+          retention-days: 14
+
   all-local:
     name: Windows all-local regression
     runs-on: windows-latest
@@ -30,7 +81,7 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.lock.txt
 
-      - name: Check new unit test modules are registered
+      - name: Check complete unit and integration test routes
         env:
           REGRESSION_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
           REGRESSION_FALLBACK_REF: ${{ format('origin/{0}', github.event.repository.default_branch) }}
@@ -93,15 +144,13 @@ jobs:
         run: |
           python - <<'PY'
           import sys
+          import json
           import unittest
+          from pathlib import Path
+          from scripts.run_regression import _code_tree_identity
 
-          modules = (
-              "tests.unit.test_credential_store",
-              "tests.unit.test_diagnostic_cli_controls",
-              "tests.unit.test_nas_diagnostic_commit_correlation",
-              "tests.unit.test_source_runtime_deploy",
-              "tests.unit.test_publish_historical_daishin_raw_to_nas",
-          )
+          modules = json.loads(Path("tests/ci_groups.json").read_text(encoding="utf-8"))["linux_required"]
+          source_start = _code_tree_identity()
           loader = unittest.defaultTestLoader
           runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2)
           planned = 0
@@ -124,6 +173,7 @@ jobs:
               expected_failures += len(result.expectedFailures)
               unexpected_successes += len(result.unexpectedSuccesses)
 
+          source_end = _code_tree_identity()
           print(
               "\nLinux platform regression: "
               f"modules={len(modules)} planned={planned} ran={ran} "
@@ -131,8 +181,18 @@ jobs:
               f"expected_failures={expected_failures} "
               f"unexpected_successes={unexpected_successes}"
           )
-          if (ran != planned or failures or errors or skipped or expected_failures
-                  or unexpected_successes):
+          passed = bool(planned) and ran == planned and not any((
+              failures, errors, skipped, expected_failures, unexpected_successes,
+          )) and source_start["lf_sha256"] == source_end["lf_sha256"]
+          Path("tmp/regression/postgres").mkdir(parents=True, exist_ok=True)
+          Path("tmp/regression/postgres/linux-unit.json").write_text(json.dumps({
+              "status": "passed" if passed else "failed", "modules": modules,
+              "planned": planned, "ran": ran, "failures": failures, "errors": errors,
+              "skipped": skipped, "expected_failures": expected_failures,
+              "unexpected_successes": unexpected_successes,
+              "source_start": source_start, "source_end": source_end,
+          }, indent=2) + "\n", encoding="utf-8")
+          if not passed:
               raise SystemExit(1)
           PY
 
@@ -145,12 +205,14 @@ jobs:
           set -o pipefail
           python scripts/check_postgres_integration.py 2>&1 | tee tmp/regression/postgres/check-postgres-integration.log
 
-      - name: Run PostgreSQL access integration suite
+      - name: Run required PostgreSQL integration suites
         shell: bash
         run: |
           mkdir -p tmp/regression/postgres
           set -o pipefail
-          python scripts/run_postgres_access_integration.py 2>&1 | tee tmp/regression/postgres/postgres-access-integration.log
+          python scripts/run_postgres_access_integration.py \
+            --ci-group postgres_required --report tmp/regression/postgres/required.json \
+            2>&1 | tee tmp/regression/postgres/postgres-access-integration.log
 
       - name: Preserve PostgreSQL integration logs
         if: always()
@@ -160,3 +222,306 @@ jobs:
           path: tmp/regression/postgres/
           if-no-files-found: warn
           retention-days: 14
+
+  windows-extended:
+    name: Extended Windows regression
+    needs: [select-extended]
+    if: ${{ needs['select-extended'].outputs.windows_fast == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements.lock.txt
+      - run: python -m pip install -r requirements.lock.txt
+      - run: >-
+          python scripts/run_regression.py --profile ci-extended-windows
+          --timeout-seconds 1800 --output tmp/regression/ci-extended-windows
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: extended-windows-${{ github.run_id }}
+          path: tmp/regression/ci-extended-windows/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-long:
+    name: Long Windows replay regression
+    needs: [select-extended]
+    if: ${{ needs['select-extended'].outputs.windows_long == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements.lock.txt
+      - run: python -m pip install -r requirements.lock.txt
+      - run: >-
+          python scripts/run_regression.py --profile ci-long-windows
+          --timeout-seconds 1800 --output tmp/regression/ci-long-windows
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: long-windows-${{ github.run_id }}
+          path: tmp/regression/ci-long-windows/
+          if-no-files-found: error
+          retention-days: 14
+
+  postgres-extended:
+    name: Extended PostgreSQL integration
+    needs: [select-extended]
+    if: ${{ needs['select-extended'].outputs.postgres == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: kiwoom_monitor_diagnostic_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d kiwoom_monitor_diagnostic_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PYTHONPATH: src
+      KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/kiwoom_monitor_diagnostic_test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements.lock.txt
+      - run: python -m pip install -r requirements.lock.txt
+      - name: Prepare fresh diagnostic schema
+        shell: bash
+        env:
+          KIWOOM_SERVER_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/kiwoom_monitor_diagnostic_test
+        run: |
+          mkdir -p tmp/regression/postgres-extended
+          set -o pipefail
+          python scripts/check_postgres_integration.py 2>&1 | tee tmp/regression/postgres-extended/schema.log
+      - name: Run extended storage and replay suites
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/run_postgres_access_integration.py \
+            --ci-group postgres_extended --report tmp/regression/postgres-extended/run.json \
+            2>&1 | tee tmp/regression/postgres-extended/tests.log
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: extended-postgres-${{ github.run_id }}
+          path: tmp/regression/postgres-extended/
+          if-no-files-found: error
+          retention-days: 14
+
+  sealed-replay:
+    name: Sealed replay integration
+    needs: [select-extended]
+    if: ${{ needs['select-extended'].outputs.sealed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PYTHONPATH: src
+      KIWOOM_SERVER_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements.lock.txt
+      - run: python -m pip install -r requirements.lock.txt
+      - name: Provision owned v1 replay DB and verify baseline
+        shell: bash
+        run: |
+          mkdir -p tmp/regression/ci-sealed/secrets
+          chmod 700 tmp/regression/ci-sealed/secrets
+          set -o pipefail
+          python scripts/check_recorded_replay_baseline.py --provision \
+            --secrets-directory tmp/regression/ci-sealed/secrets \
+            2>&1 | tee tmp/regression/ci-sealed/v1-baseline.log
+      - name: Check v1 recorded execution on sealed DB
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/check_recorded_replay_baseline.py --execution-gates \
+            --secrets-directory tmp/regression/ci-sealed/secrets \
+            2>&1 | tee tmp/regression/ci-sealed/v1-execution.log
+      - name: Build exact checkout runtime image for isolated v2
+        shell: bash
+        run: |
+          docker build --label "com.kiwoom.ci-source=$GITHUB_SHA" \
+            -f tests/ci_runtime.Dockerfile -t kiwoom-ci-runtime:local .
+          docker pull postgres:17-alpine
+          docker image inspect kiwoom-ci-runtime:local --format '{{.Id}}' > tmp/regression/ci-sealed/image-id
+          docker image inspect postgres:17-alpine --format '{{.Id}}' > tmp/regression/ci-sealed/postgres-image-id
+      - name: Confirm installed package matches the copied checkout source
+        shell: bash
+        run: |
+          test "$(docker image inspect kiwoom-ci-runtime:local --format '{{index .Config.Labels "com.kiwoom.ci-source"}}')" = "$GITHUB_SHA"
+          docker run --rm --network none --entrypoint python kiwoom-ci-runtime:local -I -c '
+          from pathlib import Path
+          import kiwoom_monitor
+          source = Path("/app/src/kiwoom_monitor")
+          installed = Path(kiwoom_monitor.__file__).parent
+          files = list(source.rglob("*.py"))
+          different = [str(path.relative_to(source)) for path in files
+                       if not (installed / path.relative_to(source)).is_file()
+                       or path.read_bytes() != (installed / path.relative_to(source)).read_bytes()]
+          assert files and not different, different[:5]
+          print(f"installed_source_parity=true python_files={len(files)}")'
+      - name: Run empty-cluster v2 cache and TOP20 gates
+        shell: bash
+        run: |
+          set -o pipefail
+          sh scripts/run_ci_replay_cache.sh \
+            "$(cat tmp/regression/ci-sealed/image-id)" \
+            "$(cat tmp/regression/ci-sealed/postgres-image-id)" \
+            2>&1 | tee tmp/regression/ci-sealed/v2-cache.log
+      - name: Remove disposable replay secrets
+        if: always()
+        shell: bash
+        run: |
+          if [ -d tmp/regression/ci-sealed/secrets ]; then
+            rm -f tmp/regression/ci-sealed/secrets/recorded-replay-database.json \
+              tmp/regression/ci-sealed/secrets/recorded-replay-setup.lock
+            rmdir tmp/regression/ci-sealed/secrets
+          fi
+      - name: Preserve replay outcomes without secret files
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sealed-replay-${{ github.run_id }}
+          path: tmp/regression/ci-sealed/*.log
+          if-no-files-found: error
+          retention-days: 14
+
+  linux-operator:
+    name: Offline Linux operator integration
+    needs: [select-extended]
+    if: ${{ needs['select-extended'].outputs.operator == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build pinned test runtime from this checkout
+        shell: bash
+        run: |
+          mkdir -p tmp/regression/ci-operator
+          docker build --label "com.kiwoom.ci-source=$GITHUB_SHA" \
+            -f tests/ci_runtime.Dockerfile -t kiwoom-ci-runtime:local .
+          docker image inspect kiwoom-ci-runtime:local --format '{{.Id}}' > tmp/regression/ci-operator/image-id
+      - name: Verify image source and run offline filesystem gate
+        shell: bash
+        run: |
+          set -o pipefail
+          test "$(docker image inspect kiwoom-ci-runtime:local --format '{{index .Config.Labels "com.kiwoom.ci-source"}}')" = "$GITHUB_SHA"
+          docker run --rm --network none --entrypoint python kiwoom-ci-runtime:local -I -c '
+          from pathlib import Path
+          import kiwoom_monitor
+          source = Path("/app/src/kiwoom_monitor")
+          installed = Path(kiwoom_monitor.__file__).parent
+          files = list(source.rglob("*.py"))
+          different = [str(path.relative_to(source)) for path in files
+                       if not (installed / path.relative_to(source)).is_file()
+                       or path.read_bytes() != (installed / path.relative_to(source)).read_bytes()]
+          assert files and not different, different[:5]
+          print(f"installed_source_parity=true python_files={len(files)}")'
+          sh deploy/synology/check-nas-operator.sh \
+            "$(cat tmp/regression/ci-operator/image-id)" \
+            2>&1 | tee tmp/regression/ci-operator/tests.log
+      - name: Preserve operator result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-operator-${{ github.run_id }}
+          path: tmp/regression/ci-operator/*.log
+          if-no-files-found: error
+          retention-days: 14
+
+  required-regression:
+    name: Required regression
+    runs-on: ubuntu-latest
+    needs: [select-extended, all-local, postgres-integration, windows-extended, windows-long, postgres-extended, sealed-replay, linux-operator]
+    if: ${{ always() }}
+    timeout-minutes: 10
+    env:
+      WINDOWS_JOB: ${{ needs['all-local'].result }}
+      POSTGRES_JOB: ${{ needs['postgres-integration'].result }}
+      SELECTION_JOB: ${{ needs['select-extended'].result }}
+      FAST_SELECTED: ${{ needs['select-extended'].outputs.windows_fast }}
+      LONG_SELECTED: ${{ needs['select-extended'].outputs.windows_long }}
+      PG_SELECTED: ${{ needs['select-extended'].outputs.postgres }}
+      FAST_JOB: ${{ needs['windows-extended'].result }}
+      LONG_JOB: ${{ needs['windows-long'].result }}
+      PG_EXTENDED_JOB: ${{ needs['postgres-extended'].result }}
+      SEALED_SELECTED: ${{ needs['select-extended'].outputs.sealed }}
+      OPERATOR_SELECTED: ${{ needs['select-extended'].outputs.operator }}
+      SEALED_JOB: ${{ needs['sealed-replay'].result }}
+      OPERATOR_JOB: ${{ needs['linux-operator'].result }}
+    steps:
+      - name: Check upstream job outcomes
+        shell: bash
+        run: |
+          test "$WINDOWS_JOB" = success
+          test "$POSTGRES_JOB" = success
+          test "$SELECTION_JOB" = success
+          if [ "$FAST_SELECTED" = true ]; then test "$FAST_JOB" = success; else test "$FAST_JOB" = skipped; fi
+          if [ "$LONG_SELECTED" = true ]; then test "$LONG_JOB" = success; else test "$LONG_JOB" = skipped; fi
+          if [ "$PG_SELECTED" = true ]; then test "$PG_EXTENDED_JOB" = success; else test "$PG_EXTENDED_JOB" = skipped; fi
+          if [ "$SEALED_SELECTED" = true ]; then test "$SEALED_JOB" = success; else test "$SEALED_JOB" = skipped; fi
+          if [ "$OPERATOR_SELECTED" = true ]; then test "$OPERATOR_JOB" = success; else test "$OPERATOR_JOB" = skipped; fi
+
+      - name: Check out report validator
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Download Windows result
+        uses: actions/download-artifact@v7
+        with:
+          name: all-local-regression-${{ github.run_id }}
+          path: tmp/ci-required/windows
+
+      - name: Download Linux and PostgreSQL results
+        uses: actions/download-artifact@v7
+        with:
+          name: postgres-integration-${{ github.run_id }}
+          path: tmp/ci-required/postgres
+
+      - name: Confirm all required contracts ran on matching source
+        run: >-
+          python -m scripts.check_required_ci_results
+          --windows tmp/ci-required/windows/run.json
+          --linux tmp/ci-required/postgres/linux-unit.json
+          --postgres tmp/ci-required/postgres/required.json
