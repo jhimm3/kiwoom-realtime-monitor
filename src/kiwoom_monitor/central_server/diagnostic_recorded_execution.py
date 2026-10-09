@@ -101,6 +101,11 @@ def run_owned_recorded_experiment(database_url, owner_token, baseline_id, events
             with lease.connection.cursor() as cursor:
                 result['final_tables'] = lease._tables_digest(cursor, 'public')
                 result['final_sequences'] = lease._sequences(cursor)
+                from .diagnostic_replay_baseline import MAX_BASELINE_BYTES, MAX_BASELINE_ROWS
+                from .diagnostic_replay_comparison import collect_final_content_comparison
+                result['final_content_comparison'] = collect_final_content_comparison(
+                    cursor, max_bytes=MAX_BASELINE_BYTES, max_rows=MAX_BASELINE_ROWS,
+                )
             result.update(baseline_managed=True, baseline=baseline,
                           baseline_version=baseline_version,
                           database_ownership_verified=True,

@@ -12,6 +12,7 @@ from unittest.mock import patch
 from kiwoom_monitor.central_server import diagnostic_trace as trace
 from kiwoom_monitor.central_server.diagnostic_replay_contract import thaw_payload
 from kiwoom_monitor.central_server.diagnostic_workloads import _set_tool, _set_trace
+from tests.unit.test_diagnostic_trace_deferred import recorder_storage_headroom
 
 
 @contextmanager
@@ -29,7 +30,7 @@ def held_capture():
                 if not release.wait(15):
                     raise TimeoutError("test disk gate timed out")
 
-        with patch.object(trace, "control_path", return_value=control), patch(
+        with recorder_storage_headroom(), patch.object(trace, "control_path", return_value=control), patch(
                 "kiwoom_monitor.central_server.diagnostic_workloads.control_path", return_value=control), \
                 patch.object(trace, "_manifest", side_effect=initial_manifest):
             master = _set_tool(control, True, 300)["diagnostic_tool"]["session_id"]

@@ -7,6 +7,9 @@ from pathlib import Path
 from kiwoom_monitor.application.breakout_strategy import BreakoutStrategyConfig
 from kiwoom_monitor.central_server.candidate_monitor import CandidateMonitor
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
+from kiwoom_monitor.central_server.database_observation_readers import (
+    OBSERVATION_DELIVERY_PROTOCOL, ObservationRevisionPage,
+)
 from kiwoom_monitor.central_server.postgres_access import DBWriterContext
 
 
@@ -59,6 +62,9 @@ class FakeStore:
     def load_observation_revisions(self, *_args, **_kwargs):
         return []
 
+    def load_observation_bootstrap(self, kinds, *, per_kind_limit):
+        return ObservationRevisionPage()
+
     def load_observation_revisions_after(self, cursor, kinds, limit):
         return [row for row in self.observations if row["accepted_sequence"] > cursor and row["kind"] in kinds][:limit]
 
@@ -76,6 +82,68 @@ class FakeStore:
 
 
 class CandidateMonitorTests(unittest.TestCase):
+    def test_pending_bootstrap_retries_without_checkpoint_or_historical_decisions(self):
+        class PendingStore(FakeStore):
+            page = ObservationRevisionPage(ready=False, reason="pending_sequence_commit")
+
+            def load_observation_bootstrap(self, kinds, *, per_kind_limit):
+                self.asserted_kinds = tuple(kinds)
+                return self.page
+
+            def load_observation_revisions(self, *_args, **_kwargs):
+                raise AssertionError("separate raw history must not seed bootstrap")
+
+        store = PendingStore()
+        monitor = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)
+        self.assertEqual("WARMUP", monitor.quality["status"])
+        self.assertFalse(store.checkpoints)
+        monitor._save_checkpoint(reason="error")
+        self.assertEqual(0, monitor.run_once())
+        self.assertFalse(store.checkpoints)
+        # Restart while pending must retry the same initial seed, not restore cursor zero as ready.
+        monitor = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)
+        store.page = ObservationRevisionPage(rows=(_rank(1), _bar(2, 0, 1000, 1010)), safe_through=99)
+        self.assertEqual(0, monitor.run_once())
+        saved = store.checkpoints[monitor.monitor_id]
+        self.assertEqual(2, saved["cursor"])
+        self.assertEqual(1, len(saved["bars"]))
+        self.assertEqual(OBSERVATION_DELIVERY_PROTOCOL, saved["delivery_protocol"])
+        self.assertEqual([], store.decisions)
+        restarted = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)
+        self.assertEqual(0, restarted.run_once())
+        self.assertEqual(saved, store.checkpoints[monitor.monitor_id])
+
+    def test_failed_bootstrap_checkpoint_cannot_begin_incremental_processing(self):
+        class Store(FakeStore):
+            ready = False
+            fail = True
+            def load_observation_bootstrap(self, kinds, *, per_kind_limit):
+                return ObservationRevisionPage(rows=(_rank(1),), ready=self.ready)
+            def save_shadow_monitor_state(self, monitor_id, document):
+                if self.fail:
+                    raise OSError("seed COMMIT failed")
+                super().save_shadow_monitor_state(monitor_id, document)
+
+        store = Store()
+        monitor = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)
+        store.ready = True
+        with self.assertRaisesRegex(OSError, "seed COMMIT failed"):
+            monitor.run_once()
+        self.assertTrue(monitor._bootstrap_pending)
+        self.assertFalse(store.checkpoints)
+        store.fail = False
+        self.assertEqual(0, monitor.run_once())
+        self.assertFalse(monitor._bootstrap_pending)
+        self.assertEqual(1, store.checkpoints[monitor.monitor_id]["cursor"])
+
+    def test_legacy_checkpoint_is_not_relabelled_as_safe_delivery(self):
+        store = FakeStore()
+        monitor = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)
+        store.checkpoints[monitor.monitor_id].pop("delivery_protocol")
+        restarted = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)
+        restarted._save_checkpoint()
+        self.assertNotIn("delivery_protocol", store.checkpoints[monitor.monitor_id])
+
     def test_checkpoint_sources_distinguish_bootstrap_and_processed_batches(self) -> None:
         class SourceStore(FakeStore):
             def __init__(self, observations=()):
@@ -239,8 +307,8 @@ class CandidateMonitorTests(unittest.TestCase):
                    _bar(4, 2, 1030, 1040))
 
         class HistoricalStore(FakeStore):
-            def load_observation_revisions(self, kind, limit=5000):
-                return [row for row in self.observations if row["kind"] == kind][-limit:]
+            def load_observation_bootstrap(self, kinds, *, per_kind_limit):
+                return ObservationRevisionPage(rows=tuple(self.observations), safe_through=100)
 
         store = HistoricalStore(history)
         monitor = CandidateMonitor(
@@ -251,6 +319,8 @@ class CandidateMonitorTests(unittest.TestCase):
         self.assertEqual(0, monitor.run_once())
         self.assertEqual([], store.candidates)
         self.assertEqual("bootstrapped_without_historical_alerts", monitor.quality["reason"])
+        self.assertEqual(OBSERVATION_DELIVERY_PROTOCOL,
+                         store.checkpoints[monitor.monitor_id]["delivery_protocol"])
 
 
 if __name__ == "__main__":

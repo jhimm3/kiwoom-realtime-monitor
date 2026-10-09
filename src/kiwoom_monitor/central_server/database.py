@@ -194,6 +194,7 @@ from kiwoom_monitor.central_server.database_market_metadata import (
     _metadata_from_range_row,
 )
 from kiwoom_monitor.central_server.database_observation_readers import (
+    ObservationDeliveryState, ObservationRevisionPage,
     PostgresObservationReaderStoreMixin,
     SQLiteObservationReaderStoreMixin,
 )
@@ -347,6 +348,13 @@ class QueryStore(QueryCacheStore, Protocol):
     def load_observation_revisions_after(
         self, after_sequence: int, kinds: tuple[str, ...], limit: int = 1000,
     ) -> list[dict[str, Any]]: ...
+    def load_observation_revision_page(
+        self, after_sequence: int, kinds: tuple[str, ...], limit: int = 1000,
+        *, through_sequence: int | None = None,
+    ) -> ObservationRevisionPage: ...
+    def load_observation_bootstrap(
+        self, kinds: tuple[str, ...], per_kind_limit: int = 5000,
+    ) -> ObservationRevisionPage: ...
     def load_shadow_monitor_state(self, monitor_id: str) -> dict[str, Any] | None: ...
     def save_shadow_monitor_state(self, monitor_id: str, document: dict[str, Any]) -> None: ...
     def save_shadow_evaluation(
@@ -602,6 +610,7 @@ class PostgresQueryStore(
     def __init__(self, database_url: str, *, observation_history_enabled: bool = True,
                  shadow_checkpoint_frames_enabled: bool = False) -> None:
         self._database_url = database_url
+        self._observation_delivery = ObservationDeliveryState()
         self._observation_history_enabled = observation_history_enabled
         # Opt in only after storage/rollback and dedicated-PG gates pass.
         self._shadow_checkpoint_frames_enabled = shadow_checkpoint_frames_enabled

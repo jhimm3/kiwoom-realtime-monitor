@@ -21,13 +21,14 @@ from kiwoom_monitor.central_server.diagnostic_workloads import _set_tool, _set_t
 from kiwoom_monitor.central_server.postgres_access import DBWriterContext, _trace_start
 from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+from tests.unit.test_diagnostic_trace_deferred import recorder_storage_headroom
 
 
 @contextmanager
 def capture(*, store_inputs=True, collector_inputs=True):
     with tempfile.TemporaryDirectory() as root:
         control = Path(root) / 'control.json'
-        with patch.object(trace, 'control_path', return_value=control), patch(
+        with recorder_storage_headroom(), patch.object(trace, 'control_path', return_value=control), patch(
                 'kiwoom_monitor.central_server.diagnostic_workloads.control_path', return_value=control):
             master = _set_tool(control, True, 300)['diagnostic_tool']['session_id']
             _set_trace(control, True, 120, expected_session=master)

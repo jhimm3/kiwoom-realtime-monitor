@@ -18,11 +18,23 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
 )
 
 from .database import QueryStore
+from .diagnostic_replay_contract import capture_owner, operation_identity
+from .diagnostic_replay_runtime import owned_create_task, owned_to_thread
+from .diagnostic_trace import input_token
 from .realtime_hub import RealtimeHub, RealtimeSubscriber
 from .rest_broker import CentralRestBroker
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingLimitFact:
+    key: tuple[str, str, str]
+    payload: bytes
+    completion: asyncio.Future[None]
+    origin: tuple[str, str, str, str]
+    trace_token: str | None
 
 
 @dataclass
@@ -86,12 +98,35 @@ class MarketEventService:
         self._last_ticks: dict[tuple[str, str], TradeTick] = {}
         self._last_tick_sessions: dict[tuple[str, str], str] = {}
         self._facts: set[tuple[str, str, str]] = set()
+        # Safety envelope, not an RSS budget or a throughput guarantee.
+        self._fact_capacity = 20_000
+        self._fact_payload_limit = 64 * 1024 * 1024
+        self._fact_retry_seconds = 1.0
+        self._pending_facts: dict[tuple[str, str, str], _PendingLimitFact] = {}
+        self._fact_payload_bytes = 0
+        self._fact_wake = asyncio.Event()
+        self._fact_space = asyncio.Event()
+        self._fact_admission_lock = asyncio.Lock()
+        self._fact_worker: asyncio.Task[None] | None = None
+        self._fact_native: asyncio.Task[Any] | None = None
+        self._fact_stop_requested = False
+        self._fact_admission_closed = False
+        self._event_draining = False
+        self._close_task: asyncio.Task[None] | None = None
+        self._fact_failures = 0
+        self._fact_last_error: str | None = None
+        self._fact_saturations = 0
+        self._fact_high_water = 0
+        self._fact_bytes_high_water = 0
+        self._fact_dropped_events = 0
         self._selected: tuple[str, str] | None = None
         self._observed_sessions: set[str] = set()
 
     async def start(self) -> None:
         if self._tasks:
             return
+        if self._close_task is not None:
+            raise RuntimeError("closed_market_event_service_requires_new_instance")
         rows = await asyncio.to_thread(self._store.load_hot_cohort, active_only=True)
         self._cohort = {str(row["stock_code"]): row for row in rows}
         self._subscriber = self._hub.connect()
@@ -105,27 +140,73 @@ class MarketEventService:
             self._queue_metadata(code)
 
     async def close(self) -> None:
-        if self._tasks:
+        if self._close_task is None:
+            self._close_task = owned_create_task(self._close(), name="hot-cohort-close", shutdown=True)
+        cancelled = False
+        while True:
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(self._metadata_queue.join(), self._signal_queue.join()), timeout=10,
-                )
-            except TimeoutError:
-                logger.warning("hot cohort 메타데이터 종료 대기가 시간 제한을 넘었습니다")
-        for task in self._tasks:
-            task.cancel()
-        for task in self._tasks:
-            try:
-                await task
+                await asyncio.shield(self._close_task)
+                break
             except asyncio.CancelledError:
-                pass
-        self._tasks.clear()
-        if self._background:
-            await asyncio.gather(*self._background, return_exceptions=True)
-        self._background.clear()
-        if self._subscriber is not None:
-            self._hub.disconnect(self._subscriber)
-            self._subscriber = None
+                if self._close_task.cancelled():
+                    raise
+                # A cancelled caller does not abandon an actual COMMIT or RAM facts.
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _close(self) -> None:
+        errors: list[BaseException] = []
+        subscriber = self._subscriber
+        self._event_draining = True
+        if subscriber is not None:
+            self._remember_fact_drops(subscriber)
+            self._hub.disconnect(subscriber)
+            # Wake an empty consumer without changing shared hub join semantics.
+            if subscriber.queue.empty():
+                subscriber.queue.put_nowait({"type": "hot-cohort-close"})
+        event_tasks = [task for task in self._tasks
+                       if getattr(task.get_coro(), "__name__", "") == "_event_loop"]
+        try:
+            for task in event_tasks:
+                outcome = await asyncio.gather(task, return_exceptions=True)
+                errors.extend(value for value in outcome if isinstance(value, Exception))
+            if subscriber is not None:
+                while not subscriber.queue.empty():
+                    try:
+                        await self._process_event(subscriber.queue.get_nowait())
+                    except Exception as error:
+                        errors.append(error)
+            if self._tasks:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(self._metadata_queue.join(), self._signal_queue.join()), timeout=10,
+                    )
+                except TimeoutError:
+                    logger.warning("hot cohort 메타데이터 종료 대기가 시간 제한을 넘었습니다")
+        finally:
+            for task in self._tasks:
+                if task not in event_tasks:
+                    task.cancel()
+            outcomes = await asyncio.gather(*self._tasks, return_exceptions=True)
+            errors.extend(value for value in outcomes if isinstance(value, Exception) and value not in errors)
+            self._tasks.clear()
+            while self._background:
+                await asyncio.gather(*tuple(self._background), return_exceptions=True)
+            self._background.clear()
+            async with self._fact_admission_lock:
+                self._fact_admission_closed = True
+            self._fact_stop_requested = True
+            self._fact_wake.set()
+            try:
+                if self._fact_worker is not None:
+                    await asyncio.shield(self._fact_worker)
+                if self._pending_facts or self._fact_native is not None:
+                    raise RuntimeError("market_event_facts_not_drained")
+            finally:
+                self._subscriber = None
+        if errors:
+            raise errors[0]
 
     async def on_ws_connected(self, websocket: Any) -> None:
         """연결마다 목록부터 다시 받아 seq 변경을 안전하게 반영한다."""
@@ -148,7 +229,27 @@ class MarketEventService:
             "enabled": self._condition_enabled, "active": list(self._selected) if self._selected else None,
             "active_policy_revision": self._active_condition_revision,
             "configured_exact_name": self._exact_name, "configured_substring": self._substring,
-            "coverage": "KRX"}
+            "coverage": "KRX", "fact_collection": self._fact_collection_status()}
+
+    def _remember_fact_drops(self, subscriber: RealtimeSubscriber) -> None:
+        self._fact_dropped_events = max(self._fact_dropped_events, subscriber.dropped_events)
+
+    def _fact_collection_status(self) -> dict[str, Any]:
+        if self._subscriber is not None:
+            self._remember_fact_drops(self._subscriber)
+        return {"scope": "current_process_observed_cohort_only",
+            "durability": "database_ack_only", "restart_coverage": "unverified",
+            "recovery_required": bool(self._fact_dropped_events or self._fact_last_error or self._fact_saturations),
+            "coverage": "partial" if self._fact_dropped_events else
+                        "verification_required" if self._fact_last_error or self._fact_saturations else "observed_only",
+            "state": "retrying" if self._fact_last_error else
+                     "pending" if self._pending_facts else "idle",
+            "pending": len(self._pending_facts), "payload_bytes": self._fact_payload_bytes,
+            "capacity": self._fact_capacity, "payload_limit_bytes": self._fact_payload_limit,
+            "high_water": self._fact_high_water, "payload_high_water_bytes": self._fact_bytes_high_water,
+            "saturation_count": self._fact_saturations, "save_failures": self._fact_failures,
+            "last_error_type": self._fact_last_error, "dropped_events": self._fact_dropped_events,
+            "native_inflight": self._fact_native is not None}
 
     async def poll_condition_updates(self, websocket: Any) -> None:
         now = asyncio.get_running_loop().time()
@@ -265,29 +366,34 @@ class MarketEventService:
 
     async def record_condition_signal(self, code: str, signal: str, *, source: str,
                                       stock_name: str = "", condition: tuple[str, str] | None = None) -> None:
+        # Preserve the original invocation time/condition before any lock wait.
         now = self._now()
         timestamp = now.timestamp()
         session_id = now.date().isoformat()
         selected_seq, selected_name = condition or self._selected or ("", "")
-        previous = self._cohort.get(code)
-        is_new = previous is None or not bool(previous.get("active"))
-        first_seen = timestamp if is_new else float(previous["first_seen_at"])
-        entry_session = session_id if is_new else str(previous["entry_session"])
-        current = {
-            "stock_code": code, "stock_name": stock_name or str((previous or {}).get("stock_name", "")),
-            "condition_name": selected_name, "first_seen_at": first_seen,
-            "entry_session": entry_session, "last_signal": signal, "last_signal_at": timestamp,
-            # D는 조건식 현재 결과에서 빠졌다는 사실일 뿐 cohort 만료가 아니다.
-            "active": True, "nxt_eligible": (previous or {}).get("nxt_eligible"), "expired_at": None,
-            "coverage": "KRX_CONDITION; KRX_AND_NXT_AFTER_ELIGIBILITY",
-        }
-        revision = self._revision(code, "ENTERED" if is_new else signal, selected_name, selected_seq,
-                                  session_id, timestamp, {"source": source, "signal": signal})
-        await asyncio.to_thread(self._store.record_hot_cohort_revision, revision, current)
-        self._cohort[code] = current
-        await self._update_subscription()
-        if is_new:
-            self._queue_metadata(code)
+        # Eligibility/expiry writers already own this lock. Keep the snapshot,
+        # native ACK and RAM publication under the same owner so an older
+        # metadata snapshot cannot restore the previous signal after this write.
+        async with self._state_lock:
+            previous = self._cohort.get(code)
+            is_new = previous is None or not bool(previous.get("active"))
+            first_seen = timestamp if is_new else float(previous["first_seen_at"])
+            entry_session = session_id if is_new else str(previous["entry_session"])
+            current = {
+                "stock_code": code, "stock_name": stock_name or str((previous or {}).get("stock_name", "")),
+                "condition_name": selected_name, "first_seen_at": first_seen,
+                "entry_session": entry_session, "last_signal": signal, "last_signal_at": timestamp,
+                # D는 조건식 현재 결과에서 빠졌다는 사실일 뿐 cohort 만료가 아니다.
+                "active": True, "nxt_eligible": (previous or {}).get("nxt_eligible"), "expired_at": None,
+                "coverage": "KRX_CONDITION; KRX_AND_NXT_AFTER_ELIGIBILITY",
+            }
+            revision = self._revision(code, "ENTERED" if is_new else signal, selected_name, selected_seq,
+                                      session_id, timestamp, {"source": source, "signal": signal})
+            await asyncio.to_thread(self._store.record_hot_cohort_revision, revision, current)
+            self._cohort[code] = current
+            await self._update_subscription()
+            if is_new:
+                self._queue_metadata(code)
 
     def mark_krx_session_observed(self, session_id: str) -> None:
         if session_id in self._observed_sessions:
@@ -538,60 +644,87 @@ class MarketEventService:
         while True:
             subscriber = self._subscriber
             if subscriber is None:
+                if self._event_draining:
+                    return
                 await asyncio.sleep(0.1)
                 continue
+            self._remember_fact_drops(subscriber)
+            if self._event_draining and subscriber.queue.empty():
+                return
             event = await subscriber.queue.get()
-            if event.get("type") == "stock_reference" and isinstance(event.get("payload"), dict):
-                allowed = StockPriceReference.__dataclass_fields__.keys()
-                try:
-                    reference = StockPriceReference(**{
-                        key: value for key, value in event["payload"].items() if key in allowed
-                    })
-                except TypeError:
-                    continue
-                if reference.code in self._cohort and reference.upper_limit_price is not None:
-                    self._upper_limits[reference.code] = reference.upper_limit_price
-                continue
-            if event.get("type") != "trade" or not isinstance(event.get("payload"), dict):
-                continue
-            allowed = TradeTick.__dataclass_fields__.keys()
+            await self._process_event(event)
+
+    async def _process_event(self, event: dict[str, Any]) -> None:
+        if event.get("type") == "stock_reference" and isinstance(event.get("payload"), dict):
+            allowed = StockPriceReference.__dataclass_fields__.keys()
             try:
-                tick = TradeTick(**{key: value for key, value in event["payload"].items() if key in allowed})
+                reference = StockPriceReference(**{
+                    key: value for key, value in event["payload"].items() if key in allowed
+                })
             except TypeError:
-                continue
-            if tick.code not in self._cohort:
-                continue
-            self._last_ticks[(tick.code, str(tick.market or "KRX").upper())] = tick
-            self._last_tick_sessions[(tick.code, str(tick.market or "KRX").upper())] = self._now().date().isoformat()
-            await self.observe_trade(tick)
+                return
+            if reference.code in self._cohort and reference.upper_limit_price is not None:
+                self._upper_limits[reference.code] = reference.upper_limit_price
+            return
+        if event.get("type") != "trade" or not isinstance(event.get("payload"), dict):
+            return
+        allowed = TradeTick.__dataclass_fields__.keys()
+        try:
+            tick = TradeTick(**{key: value for key, value in event["payload"].items() if key in allowed})
+        except TypeError:
+            return
+        if tick.code not in self._cohort:
+            return
+        self._last_ticks[(tick.code, str(tick.market or "KRX").upper())] = tick
+        self._last_tick_sessions[(tick.code, str(tick.market or "KRX").upper())] = self._now().date().isoformat()
+        await self._admit_trade(tick)
 
     async def observe_trade(self, tick: TradeTick) -> None:
-        session = self._now().date().isoformat()
-        upper = self._upper_limits.get(tick.code)
-        if upper is None:
-            return
-        # 가격제한가는 약 +30%인데 현재 등락률 기준이 이미 0% 부근으로
-        # 전환됐다면 서로 다른 기준 세션의 값이다. 이 조합으로 상한가 사실을
-        # 만들지 않는다. 0g 또는 이후 기본정보가 새 기준을 공급할 때 재개한다.
-        if not _price_basis_matches_limit(tick, upper):
-            return
-        if (tick.code, session, "TOUCHED") not in self._facts and (
-            (tick.high_price or 0) >= upper or (tick.current_price or 0) >= upper
-        ):
-            await self._append_limit_fact(tick.code, session, "TOUCHED", tick, "0B-high-or-current")
-        elif (tick.code, session, "UNKNOWN") not in self._facts and (
-            (tick.high_price or 0) < upper and (tick.current_price or 0) < upper
-        ):
-            await self._append_limit_fact(tick.code, session, "UNKNOWN", tick,
-                                          "tracking-started-after-session-open")
-        if tick.current_price == upper:
-            await self._append_limit_fact(tick.code, session, "CURRENT", tick, "0B-current")
+        for completion in await self._admit_trade(tick):
+            await asyncio.shield(completion)
+
+    async def _admit_trade(self, tick: TradeTick) -> list[asyncio.Future[None]]:
+        async with self._fact_admission_lock:
+            session = self._now().date().isoformat()
+            upper = self._upper_limits.get(tick.code)
+            # Do not mix a new price basis with an old session's upper limit.
+            if upper is None or not _price_basis_matches_limit(tick, upper):
+                return []
+            statuses = []
+            if (tick.high_price or 0) >= upper or (tick.current_price or 0) >= upper:
+                statuses.append(("TOUCHED", "0B-high-or-current"))
+            elif (tick.high_price or 0) < upper and (tick.current_price or 0) < upper:
+                statuses.append(("UNKNOWN", "tracking-started-after-session-open"))
+            if tick.current_price == upper:
+                statuses.append(("CURRENT", "0B-current"))
+            # Freeze the entire decision before capacity waits can cross midnight
+            # or before another task changes reference prices.
+            plans = [self._prepare_limit_fact(tick.code, session, status, tick, evidence)
+                     for status, evidence in statuses]
+            completions = []
+            for plan in plans:
+                if plan is not None:
+                    completions.append(await self._admit_limit_fact(plan))
+            return completions
 
     async def _append_limit_fact(self, code: str, session: str, status: str,
                                  tick: TradeTick, evidence: str) -> None:
+        async with self._fact_admission_lock:
+            plan = self._prepare_limit_fact(code, session, status, tick, evidence)
+            completion = await self._admit_limit_fact(plan) if plan is not None else None
+        if completion is not None:
+            await asyncio.shield(completion)
+
+    def _prepare_limit_fact(self, code: str, session: str, status: str,
+                            tick: TradeTick, evidence: str) -> _PendingLimitFact | None:
+        if self._fact_admission_closed:
+            raise RuntimeError("market_event_fact_admission_closed")
         fact_tuple = (code, session, status)
         if fact_tuple in self._facts:
-            return
+            return None
+        pending = self._pending_facts.get(fact_tuple)
+        if pending is not None:
+            return pending
         now = self._now().timestamp()
         document = {
             "stock_code": code, "session_id": session, "status": status,
@@ -601,8 +734,88 @@ class MarketEventService:
         }
         key = _hash([code, session, status, document["upper_limit_price"]])
         document.update({"fact_key": key, "fact_id": str(uuid.uuid5(uuid.NAMESPACE_URL, key))})
-        await asyncio.to_thread(self._store.append_upper_limit_facts, [dict(document, document=document)])
-        self._facts.add(fact_tuple)
+        identity = operation_identity()
+        origin = tuple(identity[name] for name in
+                       ("workload_id", "producer_component", "actor_id", "cause_input_id"))
+        if any(type(value) is not str or len(value) > 160 for value in origin):
+            origin = ("", "", "", "")
+        return _PendingLimitFact(fact_tuple,
+            json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+            asyncio.get_running_loop().create_future(), origin, input_token("store_inputs"))
+
+    async def _admit_limit_fact(self, plan: _PendingLimitFact) -> asyncio.Future[None]:
+        if len(plan.payload) > self._fact_payload_limit:
+            raise RuntimeError("upper_limit_fact_exceeds_pending_payload_limit")
+        while True:
+            if plan.key in self._facts:
+                if not plan.completion.done():
+                    plan.completion.set_result(None)
+                return plan.completion
+            existing = self._pending_facts.get(plan.key)
+            if existing is not None:
+                return existing.completion
+            if (len(self._pending_facts) < self._fact_capacity and
+                    self._fact_payload_bytes + len(plan.payload) <= self._fact_payload_limit):
+                break
+            self._fact_saturations += 1
+            self._fact_space.clear()
+            await self._fact_space.wait()
+        if self._fact_worker is None or self._fact_worker.done():
+            self._fact_worker = owned_create_task(self._save_limit_facts(), name="hot-cohort-facts",
+                                                   shutdown=self._event_draining)
+        self._pending_facts[plan.key] = plan
+        self._fact_payload_bytes += len(plan.payload)
+        self._fact_high_water = max(self._fact_high_water, len(self._pending_facts))
+        self._fact_bytes_high_water = max(self._fact_bytes_high_water, self._fact_payload_bytes)
+        self._fact_wake.set()
+        return plan.completion
+
+    async def _save_limit_facts(self) -> None:
+        while True:
+            if not self._pending_facts:
+                if self._fact_stop_requested:
+                    return
+                self._fact_wake.clear()
+                await self._fact_wake.wait()
+                continue
+            plan = next(iter(self._pending_facts.values()))
+            document = json.loads(plan.payload)
+            workload, component, actor, cause = plan.origin
+            if not all((workload, component, actor)):
+                workload, component = "market_events", f"hot-cohort:{id(self):x}"
+                actor = component + ":facts"
+                cause = ""
+            if plan.trace_token != input_token("store_inputs"):
+                cause = ""
+            try:
+                with capture_owner(workload, component, actor, cause_input_id=cause):
+                    self._fact_native = owned_create_task(owned_to_thread(
+                        self._store.append_upper_limit_facts, [dict(document, document=document)]),
+                        name="hot-cohort-fact-commit", shutdown=self._event_draining or self._fact_stop_requested)
+                try:
+                    while True:
+                        try:
+                            await asyncio.shield(self._fact_native)
+                            break
+                        except asyncio.CancelledError:
+                            if self._fact_native.cancelled():
+                                raise
+                            # Only our real executor completion releases this fact.
+                            self._fact_stop_requested = True
+                finally:
+                    self._fact_native = None
+                self._pending_facts.pop(plan.key)
+                self._fact_payload_bytes -= len(plan.payload)
+                self._facts.add(plan.key)
+                plan.completion.set_result(None)
+                self._fact_space.set()
+                self._fact_last_error = None
+            except Exception as error:
+                self._fact_failures += 1
+                if self._fact_last_error != type(error).__name__:
+                    logger.warning("상한가 사실 저장 실패(입력 보존, 재시도): %s", type(error).__name__)
+                self._fact_last_error = type(error).__name__
+                await asyncio.sleep(self._fact_retry_seconds)
 
     async def _backfill_vi(self) -> None:
         body = {
