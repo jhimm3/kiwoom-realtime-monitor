@@ -501,6 +501,123 @@ class RecordedCaptureTests(unittest.TestCase):
                 compile_recorded_plan(events, started_mono_ns=manifest['started_mono_ns'],
                     window_start_seconds=0, window_end_seconds=59)
 
+    def test_collector_input_is_captured_while_two_store_copies_are_busy(self):
+        release = threading.Event()
+        condition = threading.Condition()
+        active = 0
+        original = freeze_payload
+
+        def held(value):
+            nonlocal active
+            if 'code' in value:
+                with condition:
+                    active += 1
+                    condition.notify_all()
+                if not release.wait(5):
+                    raise TimeoutError('store copies did not release')
+            return original(value)
+
+        store = NativeStore()
+        collector = CentralRealtimeCollector(lambda: '', 'real', RealtimeHub(),
+                                             lambda: datetime(2026, 10, 8, tzinfo=timezone.utc))
+        message = {'trnm': 'REAL', 'data': [
+            {'type': '0B', 'item': '005930_AL', 'values': {'10': '100', '20': '092320'}}]}
+        with capture() as session:
+            with patch('kiwoom_monitor.central_server.diagnostic_replay_contract.freeze_payload', side_effect=held):
+                threads = [threading.Thread(target=store.load_daily_bars, args=('busy',)) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                try:
+                    with condition:
+                        self.assertTrue(condition.wait_for(lambda: active == 2, timeout=2))
+                    collector._record_upstream_message(message)
+                    state = trace.status()
+                    self.assertEqual(0, state['input_rejected'])
+                    self.assertEqual(2, state['payload_accepted'])  # initial state and actual message
+                    self.assertEqual({'store': 2, 'collector': 0}, state['copy_inflight'])
+                    self.assertEqual(2 * trace._COPY_RESERVATION, state['copy_reserved_bytes'])
+                    # API/status callers must not be able to mutate session accounting.
+                    state['copy_inflight']['store'] = 99
+                    self.assertEqual(2, trace.status()['copy_inflight']['store'])
+                finally:
+                    release.set()
+                    for thread in threads:
+                        thread.join(3)
+                        self.assertFalse(thread.is_alive())
+            final = trace.stop()
+            self.assertEqual('complete', final['state'])
+            self.assertEqual({'store': 0, 'collector': 0}, final['copy_inflight'])
+            manifest, rows = trace.recorded_events(session['trace_id'])
+            recorded = [thaw_payload(row['payload'])['message'] for row in rows
+                        if row.get('event_type') == 'collector_input' and row.get('input_kind') == 'message']
+            self.assertEqual([message], recorded)
+            self.assertEqual(4, manifest['payload_accepted'])
+
+    def test_both_copy_lanes_drain_on_stop_and_busy_detail_is_visible(self):
+        release = threading.Event()
+        condition = threading.Condition()
+        active = 0
+        original = freeze_payload
+
+        def held(value):
+            nonlocal active
+            with condition:
+                active += 1
+                condition.notify_all()
+            if not release.wait(5):
+                raise TimeoutError('copies did not release')
+            return original(value)
+
+        with capture() as session:
+            with patch('kiwoom_monitor.central_server.diagnostic_replay_contract.freeze_payload', side_effect=held):
+                threads = [threading.Thread(target=trace.emit_payload,
+                    args=(session['trace_id'], kind, {'workload_id': owner}, {'value': 1}))
+                    for kind, owner in [('operation_start', 'shadow'), ('collector_input', 'realtime')]]
+                for thread in threads:
+                    thread.start()
+                try:
+                    with condition:
+                        self.assertTrue(condition.wait_for(lambda: active == 2, timeout=2))
+                    self.assertEqual({'store': 1, 'collector': 1}, trace.status()['copy_inflight'])
+                    self.assertFalse(trace.emit_payload(session['trace_id'], 'collector_input',
+                                                       {'workload_id': 'realtime'}, {'value': 2}))
+                    self.assertEqual('stopping', trace.stop(timeout=.02)['state'])
+                    self.assertEqual(2 * trace._COPY_RESERVATION, trace.status()['copy_reserved_bytes'])
+                finally:
+                    release.set()
+                    for thread in threads:
+                        thread.join(3)
+                        self.assertFalse(thread.is_alive())
+            final = trace.stop()
+            self.assertEqual(0, final['copy_reserved_bytes'])
+            self.assertEqual({'store': 0, 'collector': 0}, final['copy_inflight'])
+            self.assertTrue(final['input_capture_censored'])
+            _, rows = rejected_evidence(session['trace_id'])
+            detail = next(row['rejection_detail'] for row in rows if row['event_type'] == 'input_rejected')
+            self.assertEqual({'copy_lane': 'collector', 'lane_capacity': 1,
+                'store_reserved_copies': 1, 'collector_reserved_copies': 1,
+                'copy_reserved_bytes': 2 * trace._COPY_RESERVATION}, detail)
+        # Censored copies must still release the collector slot for the next session.
+        with capture() as session:
+            self.assertTrue(trace.emit_payload(session['trace_id'], 'collector_input', {}, {'value': 3}))
+
+    def test_unsupported_document_write_records_collection_and_keeps_native_result(self):
+        class WritingStore(NativeStore):
+            def upsert_documents(self, collection, values):
+                self.calls.append((collection, values))
+                return len(values)
+
+        store = WritingStore()
+        values = [{'owner': 'day', 'key': 'code', 'document': {'value': 1}}]
+        with capture() as session:
+            self.assertEqual(1, store.upsert_documents('not_allowlisted', values))
+            trace.stop()
+            _, rows = rejected_evidence(session['trace_id'])
+            rejected = next(row for row in rows if row['event_type'] == 'input_rejected')
+            self.assertEqual('not_allowlisted', rejected['collection'])
+            self.assertNotIn('payload', rejected)
+            self.assertIs(values, store.calls[0][1])
+
     def test_disk_failure_is_visible_without_changing_successful_native_write(self):
         store = NativeStore()
         original = trace.os.replace

@@ -8,18 +8,20 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from kiwoom_monitor.central_server.database import (
-    PostgresQueryStore, _insert_postgres_observation_revisions_batch,
+    PostgresQueryStore, SQLiteQueryStore, _insert_postgres_observation_revisions_batch,
     _execute_multirow_upsert,
 )
 from kiwoom_monitor.central_server.diagnostic_metrics import refresh_capture_state
@@ -34,6 +36,35 @@ from kiwoom_monitor.domain.research_contract import ObservationRevisionSource
 
 
 TEST_DATABASE_NAME = "kiwoom_monitor_diagnostic_test"
+
+
+@contextmanager
+def _second_trade_fixture(store, count=1):
+    code = "S" + uuid.uuid4().hex[:9]
+    origin = datetime(2099, 1, 14, 10)
+    values = [{
+        "trading_date": "2099-01-14", "trade_second": (origin + timedelta(seconds=index)).strftime("%H:%M:%S"),
+        "code": code, "market": ("KRX", "NXT", "SOR")[index % 3],
+        "open": 100, "high": 110, "low": 90, "close": 105,
+        "volume": index + 1, "trade_value_won": 105 * (index + 1),
+        "trade_count": 3, "available_at": 1000.0 + index,
+    } for index in range(count)]
+    try:
+        yield values
+    finally:
+        with store._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("DELETE FROM central_second_trade_bars WHERE code=%s AND trading_date=%s",
+                           (code, "2099-01-14"))
+
+
+def _second_trade_rows(store, code):
+    with store._connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT trading_date::text,trade_second::text,code,market,open,high,low,close,"
+            "volume,trade_value_won,trade_count,available_at FROM central_second_trade_bars "
+            "WHERE code=%s AND trading_date='2099-01-14' ORDER BY trade_second,market", (code,),
+        )
+        return cursor.fetchall()
 
 
 @contextmanager
@@ -69,7 +100,169 @@ def _writer_metrics_capture():
                 environment.stop()
 
 
+@contextmanager
+def _seeded_finalization_fixture(store):
+    token = uuid.uuid4().hex
+    code = f"F{token[:9]}"
+    seed_at = datetime(2099, 1, 14, 10, 1, 10, tzinfo=timezone(timedelta(hours=9)))
+    values = [{
+        "trading_date": "2099-01-14", "minute": f"10:0{index + 1}", "code": code,
+        "market": "KRX", "open": 100, "high": 110, "low": 90, "close": 101 + index,
+        "volume": 10 + index, "trade_value_million_won": 2 + index,
+        "updated_at": seed_at.timestamp() + 60 * index,
+        "operation_id": f"final-seed-{token}-{index}",
+    } for index in range(2)]
+    closures = [{
+        **{key: value[key] for key in ("trading_date", "minute", "code", "market")},
+        "available_at": value["updated_at"] + 60, "capture_quality": "complete",
+        "finalization_source": "timer", "operation_id": f"final-close-{token}-{index}",
+    } for index, value in enumerate(values)]
+    observations = []
+    for value in values:
+        observation = minute_bar_observation(
+            value, origin=ObservationOrigin.REALTIME,
+            completeness=DataCompleteness.IN_PROGRESS,
+            source="kiwoom-websocket-0B", value_kind=DataValueKind.ACTUAL,
+        )
+        observations.append((bar_observation_key(observation), observation))
+    try:
+        store.save_minute_bars(values, observations=observations)
+        yield values, closures
+    finally:
+        with store._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("DELETE FROM central_observation_revisions WHERE kind='minute_bar' AND subject=%s",
+                           (f"{code}:KRX",))
+            cursor.execute("DELETE FROM central_market_data_observation_meta WHERE dataset_kind='minute_bar' AND subject=%s",
+                           (f"{code}:KRX",))
+            cursor.execute("DELETE FROM central_minute_bar_operations WHERE operation_id=ANY(%s)",
+                           ([value["operation_id"] for value in values + closures],))
+            cursor.execute("DELETE FROM central_minute_bars WHERE code=%s AND trading_date=%s",
+                           (code, "2099-01-14"))
+
+
 class PostgresStorageBoundaryTests(unittest.TestCase):
+    def test_second_trade_batch_matches_sequential_reference_after_lost_ack_and_corrections(self) -> None:
+        import psycopg
+        from kiwoom_monitor.central_server.diagnostic_metrics import summarize_db_calls
+
+        class LostAckConnection(psycopg.Connection):
+            def commit(self):
+                super().commit()
+                raise OSError("injected second-bar COMMIT acknowledgement loss")
+
+        with _second_trade_fixture(self.store, 1001) as values, tempfile.TemporaryDirectory() as directory:
+            code = values[0]["code"]
+            reference_path = Path(directory) / "reference.sqlite3"
+            reference = SQLiteQueryStore(reference_path)
+            reference.initialize()
+            reference.save_second_trade_bars(values)
+            with _writer_metrics_capture():
+                started = time.time() - 1
+                lost_ack = LostAckConnection.connect(self.store._database_url)
+                try:
+                    with patch.object(self.store, "_connect", return_value=lost_ack):
+                        with self.assertRaisesRegex(OSError, "COMMIT acknowledgement loss"):
+                            self.store.save_second_trade_bars(values)
+                finally:
+                    # The native psycopg context skips close when commit raises.
+                    # The injected acknowledgement failure needs fixture cleanup.
+                    lost_ack.close()
+                self.assertEqual(1001, len(_second_trade_rows(self.store, code)))
+                self.store.save_second_trade_bars(values)
+                late = [dict(row, close=120, volume=row["volume"] + 2, trade_count=4,
+                             available_at=row["available_at"] + 10) for row in values[:3]]
+                stale = [dict(row, close=1, volume=1, trade_count=2) for row in late]
+                ties = [dict(row, close=121) for row in late]
+                for batch in (late, stale, ties):
+                    reference.save_second_trade_bars(batch)
+                    self.store.save_second_trade_bars(batch)
+                calls = [call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+                         if call["writer_kind"] == "realtime_second_bar"]
+                self.assertEqual([2, 2, 1, 1, 1], [call["sql_calls"] for call in calls])
+                self.assertEqual(["unknown", *(["committed"] * 4)], [call["outcome"] for call in calls])
+                self.assertEqual(4, sum(call["commits"] for call in calls))
+            with sqlite3.connect(reference_path) as connection:
+                expected = connection.execute(
+                    "SELECT * FROM central_second_trade_bars WHERE code=? ORDER BY trade_second,market", (code,),
+                ).fetchall()
+            self.assertEqual(expected, _second_trade_rows(self.store, code))
+
+    def test_second_trade_duplicate_keys_and_date_time_aliases_keep_sequential_ties(self) -> None:
+        from datetime import date
+        from kiwoom_monitor.central_server.diagnostic_metrics import summarize_db_calls
+
+        with _second_trade_fixture(self.store) as values, _writer_metrics_capture():
+            [first] = values
+            sequence = [first,
+                        dict(first, available_at=1001.0, trade_count=4, close=120),
+                        dict(first, available_at=1000.0, trade_count=99, close=1),
+                        dict(first, available_at=1001.0, trade_count=2, close=2),
+                        dict(first, available_at=1001.0, trade_count=4, close=121),
+                        dict(first, available_at=1002.0, trade_count=1, close=125)]
+            started = time.time() - 1
+            self.store.save_second_trade_bars(sequence)
+            self.assertEqual((125, 1, 1002.0),
+                             tuple(_second_trade_rows(self.store, first["code"])[0][index] for index in (7, 10, 11)))
+            alias = dict(sequence[-1], trading_date=date(2099, 1, 14),
+                         trade_second="10:00:00.000000", close=126)
+            self.store.save_second_trade_bars([alias, dict(first, close=1)])
+            self.store.save_second_trade_bars([alias])
+            self.assertEqual((126, 1, 1002.0),
+                             tuple(_second_trade_rows(self.store, first["code"])[0][index] for index in (7, 10, 11)))
+            calls = [call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+                     if call["writer_kind"] == "realtime_second_bar"]
+            self.assertEqual(3, len(calls))
+            self.assertTrue(all(call["execute_windows"][0]["method"] == "executemany" for call in calls))
+            self.assertTrue(all(call["commits"] == 1 for call in calls))
+
+    def test_second_trade_later_chunk_rollback_preserves_concurrent_peer_and_retry(self) -> None:
+        import psycopg
+        from threading import Event
+        from kiwoom_monitor.central_server.diagnostic_metrics import summarize_db_calls
+
+        entered, release = Event(), Event()
+        with _second_trade_fixture(self.store, 1001) as values, _second_trade_fixture(self.store) as peer:
+            code = values[0]["code"]
+            invalid = [*values[:-1], dict(values[-1], volume=None)]
+
+            def pause_after_first(executor, prefix, rows, suffix, **kwargs):
+                if rows[0][2] != code:
+                    return _execute_multirow_upsert(executor, prefix, rows, suffix, **kwargs)
+
+                class PausedExecutor:
+                    def execute(self, sql, params):
+                        result = executor.execute(sql, params)
+                        if not entered.is_set():
+                            entered.set()
+                            if not release.wait(15):
+                                raise TimeoutError("peer commit was not released")
+                        return result
+
+                return _execute_multirow_upsert(PausedExecutor(), prefix, rows, suffix, **kwargs)
+
+            with _writer_metrics_capture():
+                started = time.time() - 1
+                with patch("kiwoom_monitor.central_server.database_market_bars._execute_multirow_upsert",
+                           side_effect=pause_after_first), ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(self.store.save_second_trade_bars, invalid)
+                    try:
+                        self.assertTrue(entered.wait(15))
+                        self.store.save_second_trade_bars(peer)
+                        self.assertEqual(1, len(_second_trade_rows(self.store, peer[0]["code"])))
+                    finally:
+                        release.set()
+                    with self.assertRaises(psycopg.errors.NotNullViolation):
+                        future.result(timeout=20)
+                self.assertEqual([], _second_trade_rows(self.store, code))
+                self.store.save_second_trade_bars(values)
+                self.assertEqual(1001, len(_second_trade_rows(self.store, code)))
+                self.assertEqual(1, len(_second_trade_rows(self.store, peer[0]["code"])))
+                calls = [call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+                         if call["writer_kind"] == "realtime_second_bar"]
+                failed = next(call for call in calls if call["outcome"] == "rolled_back")
+                self.assertEqual((2, 0, 1), (failed["sql_calls"], failed["commits"], failed["rollbacks"]))
+                self.assertEqual(2, sum(call["commits"] for call in calls))
+
     def test_live_minute_read_uses_one_snapshot_across_concurrent_commit(self) -> None:
         from threading import Event
         from kiwoom_monitor.central_server import database_market_bars
@@ -198,6 +391,144 @@ class PostgresStorageBoundaryTests(unittest.TestCase):
                         (code, "2099-01-09"),
                     )
 
+    def test_realtime_minute_distinct_batch_preserves_mixed_authority_and_revision_order(self) -> None:
+        from kiwoom_monitor.central_server.diagnostic_metrics import copy_db_call_samples
+
+        token = uuid.uuid4().hex
+        codes = [f"B{token[:6]}{index:03d}" for index in range(12)]
+        values = [{
+            "trading_date": "2099-01-15", "minute": "10:01", "code": code,
+            "market": "KRX", "open": 100, "high": 110, "low": 90, "close": 105,
+            "volume": 5, "trade_value_million_won": 2, "updated_at": 4_072_046_500.0,
+            "operation_id": f"mixed-{token}-{index}",
+        } for index, code in enumerate(codes)]
+
+        def observations(rows, origin=ObservationOrigin.REALTIME,
+                         completeness=DataCompleteness.IN_PROGRESS):
+            result = []
+            for row in rows:
+                observation = minute_bar_observation(
+                    row, origin=origin, completeness=completeness,
+                    source="kiwoom-ka10080" if origin == ObservationOrigin.QUERY else "kiwoom-websocket-0B",
+                    value_kind=DataValueKind.ACTUAL,
+                )
+                result.append((bar_observation_key(observation), observation))
+            return result
+
+        seed = {**values[2], "volume": 10, "operation_id": f"seed-{token}"}
+        subjects = [f"{code}:KRX" for code in codes]
+
+        def snapshot():
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                result = []
+                for table, predicate in (
+                    ("central_minute_bars", "code=ANY(%s)"),
+                    ("central_market_data_observation_meta", "subject=ANY(%s)"),
+                    ("central_observation_revisions", "subject=ANY(%s)"),
+                ):
+                    cursor.execute(f"SELECT to_jsonb(t) FROM {table} t WHERE {predicate} ORDER BY to_jsonb(t)::text",
+                                   (codes if table == "central_minute_bars" else subjects,))
+                    result.append(cursor.fetchall())
+                return result
+
+        try:
+            for index, completeness in enumerate((DataCompleteness.COMPLETE, DataCompleteness.IN_PROGRESS)):
+                query = {**values[index], "volume": 100, "close": 102}
+                self.store.replace_minute_bars([query], observations=observations(
+                    [query], ObservationOrigin.QUERY, completeness))
+            self.store.save_minute_bars([seed], observations=observations([seed]))
+            with _writer_metrics_capture():
+                started = time.time() - 0.01
+                self.store.save_minute_bars(values, observations=observations(values))
+                [call] = [call for call in copy_db_call_samples(started, time.time() + 1)["calls"]
+                          if call["operation"] == "save_minute_bars"]
+                self.assertEqual("committed", call["outcome"])
+                self.assertLessEqual(call["sql_calls"], len(codes) + 9)
+            for index, code in enumerate(codes):
+                [bar] = self.store.load_minute_bars(code, "2099-01-15", "KRX")
+                self.assertEqual([100, 5, 15][index] if index < 3 else 5, bar["volume"])
+                self.assertEqual(102 if index == 0 else 105, bar["close"])
+                metadata = self.store.load_market_data_metadata(
+                    MarketDatasetKind.MINUTE_BAR, subjects[index], "2099-01-15T10:01")
+                self.assertEqual(ObservationOrigin.QUERY if index == 0 else ObservationOrigin.REALTIME,
+                                 metadata.origin)
+                self.assertEqual(DataCompleteness.COMPLETE if index == 0 else DataCompleteness.IN_PROGRESS,
+                                 metadata.completeness)
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute("SELECT subject,revision_id,revision_of,payload_json FROM central_observation_revisions "
+                               "WHERE subject=ANY(%s) AND origin=%s ORDER BY accepted_sequence",
+                               (subjects, ObservationOrigin.REALTIME.value))
+                rows = cursor.fetchall()
+                self.assertEqual([subjects[2], *subjects[1:]], [row[0] for row in rows])
+                self.assertEqual(rows[0][1], rows[2][2])
+                self.assertEqual([10, 5, 15, *([5] * 9)],
+                                 [(row[3] if isinstance(row[3], dict) else json.loads(row[3]))["volume"]
+                                  for row in rows])
+            before = snapshot()
+            self.store.save_minute_bars(values, observations=observations(values))
+            self.assertEqual(before, snapshot())
+        finally:
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute("DELETE FROM central_observation_revisions WHERE subject=ANY(%s)", (subjects,))
+                cursor.execute("DELETE FROM central_market_data_observation_meta WHERE subject=ANY(%s)", (subjects,))
+                cursor.execute("DELETE FROM central_minute_bars WHERE code=ANY(%s)", (codes,))
+                cursor.execute("DELETE FROM central_minute_bar_operations WHERE operation_id=ANY(%s)",
+                               ([row["operation_id"] for row in [*values, seed]],))
+
+    def test_realtime_minute_batch_failure_rolls_back_and_parallel_retry_keeps_one_delta(self) -> None:
+        import psycopg
+
+        with _seeded_finalization_fixture(self.store) as (values, _):
+            seeds = list(values)
+            code = seeds[0]["code"]
+            deltas = [{**row, "volume": 5, "updated_at": row["updated_at"] + 1,
+                       "operation_id": f"delta-{uuid.uuid4().hex}"} for row in seeds]
+            values.extend(deltas)  # Include new markers in fixture cleanup.
+            observations = []
+            for delta in deltas:
+                observation = minute_bar_observation(
+                    delta, origin=ObservationOrigin.REALTIME, completeness=DataCompleteness.IN_PROGRESS,
+                    source="kiwoom-websocket-0B", value_kind=DataValueKind.ACTUAL)
+                observations.append((bar_observation_key(observation), observation))
+            before_bars = self.store.load_minute_bars(code, seeds[0]["trading_date"], "KRX")
+            before_meta = [self.store.load_market_data_metadata(
+                MarketDatasetKind.MINUTE_BAR, f"{code}:KRX", f"{row['trading_date']}T{row['minute']}")
+                for row in seeds]
+
+            def fail(cursor, *args, **kwargs):
+                cursor.execute("SELECT 1/0")
+
+            with patch("kiwoom_monitor.central_server.database_market_bars._insert_postgres_observation_revisions_batch",
+                       side_effect=fail):
+                with self.assertRaises(psycopg.errors.DivisionByZero):
+                    self.store.save_minute_bars(deltas, observations=observations)
+            self.assertEqual(before_bars, self.store.load_minute_bars(code, seeds[0]["trading_date"], "KRX"))
+            self.assertEqual(before_meta, [self.store.load_market_data_metadata(
+                MarketDatasetKind.MINUTE_BAR, f"{code}:KRX", f"{row['trading_date']}T{row['minute']}")
+                for row in seeds])
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM central_minute_bar_operations WHERE operation_id=ANY(%s)",
+                               ([row["operation_id"] for row in deltas],))
+                self.assertEqual(0, cursor.fetchone()[0])
+                cursor.execute("SELECT count(*) FROM central_observation_revisions WHERE subject=%s", (f"{code}:KRX",))
+                self.assertEqual(2, cursor.fetchone()[0])
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(self.store.save_minute_bars, deltas, observations=observations)
+                           for _ in range(2)]
+                for future in futures:
+                    future.result(timeout=30)
+            self.assertEqual([15, 16], [row["volume"] for row in self.store.load_minute_bars(
+                code, seeds[0]["trading_date"], "KRX")])
+            fresh = {**deltas[0], "minute": "10:03", "operation_id": f"fresh-{uuid.uuid4().hex}"}
+            values.append(fresh)
+            with self.assertRaisesRegex(ValueError, "operation_id payload changed"):
+                self.store.save_minute_bars([fresh, {**deltas[1], "volume": 99}])
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM central_observation_revisions WHERE subject=%s", (f"{code}:KRX",))
+                self.assertEqual(4, cursor.fetchone()[0])
+                cursor.execute("SELECT count(*) FROM central_minute_bar_operations WHERE operation_id=%s", (fresh["operation_id"],))
+                self.assertEqual(0, cursor.fetchone()[0])
+
     def test_realtime_minute_metadata_is_scoped_by_subject_for_same_minute(self) -> None:
         token = uuid.uuid4().hex
         codes = [f"D{token[:8]}A", f"D{token[:8]}B"]
@@ -275,6 +606,15 @@ class PostgresStorageBoundaryTests(unittest.TestCase):
                 self.assertEqual((15, 2, 10051), (
                     saved["volume"], saved["trade_value_million_won"], saved["close"],
                 ))
+                self.store.save_minute_bars(values, observations=observations)
+                with self.store._connect() as connection, connection.cursor() as cursor:
+                    cursor.execute("SELECT revision_id,revision_of,payload_json FROM central_observation_revisions "
+                                   "WHERE subject=%s ORDER BY accepted_sequence", (f"{code}:KRX",))
+                    history = cursor.fetchall()
+                    self.assertEqual([7, 15], [
+                        (row[2] if isinstance(row[2], dict) else json.loads(row[2]))["volume"]
+                        for row in history])
+                    self.assertEqual(history[0][0], history[1][1])
             finally:
                 with self.store._connect() as connection, connection.cursor() as cursor:
                     cursor.execute(
@@ -618,6 +958,177 @@ class PostgresStorageBoundaryTests(unittest.TestCase):
                 ("query", "kiwoom-ka10080;trade_value=ohlcv_estimate", "complete"),
                 tuple(cursor.fetchone()),
             )
+
+    def test_distinct_minute_finalizations_batch_idempotency_and_state_reads(self) -> None:
+        from kiwoom_monitor.central_server.diagnostic_metrics import copy_db_call_samples
+
+        token = uuid.uuid4().hex
+        codes = [f"D{token[:6]}{index:03d}" for index in range(12)]
+        operation_ids = [f"finalize-batch-{token}-{index}" for index in range(len(codes))]
+        seed_at = datetime(2099, 1, 13, 10, 1, 10, tzinfo=timezone(timedelta(hours=9)))
+        values = [{
+            "trading_date": "2099-01-13", "minute": "10:01", "code": code,
+            "market": "KRX", "open": 10000, "high": 10100, "low": 9900,
+            "close": 10050 + index, "volume": 10 + index,
+            "trade_value_million_won": 2 + index,
+            "updated_at": seed_at.timestamp(),
+            "operation_id": f"seed-{token}-{index}",
+        } for index, code in enumerate(codes)]
+        closures = [{
+            "trading_date": value["trading_date"], "minute": value["minute"],
+            "code": value["code"], "market": value["market"],
+            "available_at": seed_at.timestamp() + 60, "capture_quality": "complete",
+            "finalization_source": "timer", "operation_id": operation_ids[index],
+        } for index, value in enumerate(values)]
+        observations = []
+        for value in values:
+            observation = minute_bar_observation(
+                value, origin=ObservationOrigin.REALTIME,
+                completeness=DataCompleteness.IN_PROGRESS,
+                source="kiwoom-websocket-0B", value_kind=DataValueKind.ACTUAL,
+            )
+            observations.append((bar_observation_key(observation), observation))
+        self.store.save_minute_bars(values, observations=observations)
+        try:
+            with _writer_metrics_capture():
+                started = time.time() - 0.01
+                self.store.finalize_minute_bars(closures)
+                samples = copy_db_call_samples(started, time.time() + 1)["calls"]
+                [sample] = [sample for sample in samples
+                            if sample.get("operation") == "finalize_minute_bars"]
+                self.assertEqual("committed", sample["outcome"])
+                # Preserve every stock/day lock; the remaining lookups and
+                # metadata/history/operation writes must scale by batch.
+                self.assertLessEqual(sample["sql_calls"], 2 * len(codes) + 7)
+
+            # Retrying a committed closure (including lost acknowledgement)
+            # must not append another final revision or change metadata.
+            self.store.finalize_minute_bars(closures)
+
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT subject,completeness,available_at "
+                    "FROM central_market_data_observation_meta "
+                    "WHERE dataset_kind='minute_bar' AND subject=ANY(%s) AND observation_key=%s",
+                    ([f"{code}:KRX" for code in codes], "2099-01-13T10:01"),
+                )
+                metadata = {subject: (completeness, available_at)
+                            for subject, completeness, available_at in cursor.fetchall()}
+                self.assertEqual(len(codes), len(metadata))
+                for code in codes:
+                    self.assertEqual(
+                        (DataCompleteness.COMPLETE.value, seed_at + timedelta(seconds=60)),
+                        metadata[f"{code}:KRX"],
+                    )
+                cursor.execute(
+                    "SELECT subject,revision_id,revision_of,payload_json FROM central_observation_revisions "
+                    "WHERE kind='minute_bar' AND subject=ANY(%s) ORDER BY accepted_sequence",
+                    ([f"{code}:KRX" for code in codes],),
+                )
+                chains = {f"{code}:KRX": [] for code in codes}
+                for subject, revision_id, revision_of, payload in cursor.fetchall():
+                    payload_value = payload if isinstance(payload, dict) else json.loads(payload)
+                    chains[subject].append((revision_id, revision_of, payload_value))
+                for chain in chains.values():
+                    self.assertEqual(2, len(chain))
+                    self.assertEqual(chain[0][0], chain[1][1])
+                    self.assertFalse(chain[0][2]["window_closed"])
+                    self.assertTrue(chain[1][2]["window_closed"])
+                cursor.execute(
+                    "SELECT count(*) FROM central_minute_bar_operations WHERE operation_id=ANY(%s)",
+                    (operation_ids,),
+                )
+                self.assertEqual(len(codes), cursor.fetchone()[0])
+        finally:
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM central_observation_revisions WHERE kind='minute_bar' AND subject=ANY(%s)",
+                    ([f"{code}:KRX" for code in codes],),
+                )
+                cursor.execute(
+                    "DELETE FROM central_market_data_observation_meta WHERE dataset_kind='minute_bar' AND subject=ANY(%s)",
+                    ([f"{code}:KRX" for code in codes],),
+                )
+                cursor.execute(
+                    "DELETE FROM central_minute_bar_operations WHERE operation_id=ANY(%s)",
+                    (operation_ids + [value["operation_id"] for value in values],),
+                )
+                cursor.execute(
+                    "DELETE FROM central_minute_bars WHERE code=ANY(%s) AND trading_date=%s",
+                    (codes, "2099-01-13"),
+                )
+
+    def test_finalization_batch_revision_failure_rolls_back_then_parallel_retry_is_idempotent(self) -> None:
+        import psycopg
+
+        with _seeded_finalization_fixture(self.store) as (values, closures):
+            code = values[0]["code"]
+            before = [self.store.load_market_data_metadata(
+                MarketDatasetKind.MINUTE_BAR, f"{code}:KRX",
+                f"{value['trading_date']}T{value['minute']}",
+            ) for value in values]
+
+            def fail_revision_insert(cursor, *args, **kwargs):
+                # Fail on the real DB after metadata has been upserted.
+                cursor.execute("SELECT 1/0")
+
+            with patch("kiwoom_monitor.central_server.database_market_bars._insert_postgres_observation_revisions_batch",
+                       side_effect=fail_revision_insert):
+                with self.assertRaises(psycopg.errors.DivisionByZero):
+                    self.store.finalize_minute_bars(closures)
+            after = [self.store.load_market_data_metadata(
+                MarketDatasetKind.MINUTE_BAR, f"{code}:KRX",
+                f"{value['trading_date']}T{value['minute']}",
+            ) for value in values]
+            self.assertEqual(before, after)
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM central_minute_bar_operations WHERE operation_id=ANY(%s)",
+                               ([closure["operation_id"] for closure in closures],))
+                self.assertEqual(0, cursor.fetchone()[0])
+                cursor.execute("SELECT count(*) FROM central_observation_revisions WHERE kind='minute_bar' AND subject=%s",
+                               (f"{code}:KRX",))
+                self.assertEqual(len(values), cursor.fetchone()[0])
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(self.store.finalize_minute_bars, closures) for _ in range(2)]
+                for future in futures:
+                    future.result(timeout=30)
+            revisions = self.store.load_observation_revisions("minute_bar", f"{code}:KRX")
+            self.assertEqual(2 * len(values), len(revisions))
+            for value in values:
+                chain = sorted((row for row in revisions if row["observation_key"] ==
+                                f"{value['trading_date']}T{value['minute']}"),
+                               key=lambda row: row["accepted_sequence"])
+                self.assertEqual(chain[0]["revision_id"], chain[1]["revision_of"])
+                self.assertTrue(chain[1]["payload"]["window_closed"])
+
+    def test_duplicate_finalizations_keep_sequential_chain_and_payload_mismatch_rolls_back(self) -> None:
+        with _seeded_finalization_fixture(self.store) as (values, closures):
+            partial = {**closures[0], "capture_quality": "partial",
+                       "operation_id": closures[0]["operation_id"] + "-partial"}
+            closures.append(partial)
+            self.store.finalize_minute_bars([partial, closures[0], dict(closures[0])])
+            subject = f"{values[0]['code']}:KRX"
+            revisions = self.store.load_observation_revisions("minute_bar", subject)
+            key = f"{values[0]['trading_date']}T{values[0]['minute']}"
+            chain = sorted((row for row in revisions if row["observation_key"] == key),
+                           key=lambda row: row["accepted_sequence"])
+            self.assertEqual(3, len(chain))
+            self.assertEqual(["in_progress", "partial", "complete"],
+                             [row["completeness"] for row in chain])
+            self.assertEqual([chain[0]["revision_id"], chain[1]["revision_id"]],
+                             [chain[1]["revision_of"], chain[2]["revision_of"]])
+
+            retry = {**closures[0], "operation_id": closures[0]["operation_id"] + "-retry"}
+            closures.append(retry)
+            changed = {**closures[0], "available_at": closures[0]["available_at"] + 1}
+            with self.assertRaisesRegex(ValueError, "payload changed"):
+                self.store.finalize_minute_bars([retry, changed])
+            self.assertEqual(revisions, self.store.load_observation_revisions("minute_bar", subject))
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM central_minute_bar_operations WHERE operation_id=%s",
+                               (retry["operation_id"],))
+                self.assertEqual(0, cursor.fetchone()[0])
 
     def test_parallel_closed_query_and_realtime_write_keep_query_values(self) -> None:
         code = str(900000 + uuid.uuid4().int % 99999)

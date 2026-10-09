@@ -6,7 +6,9 @@ not an executable run: dedicated baseline/clock/ID adapters remain separate gate
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -476,7 +478,7 @@ def install_store_capture(store: Any) -> None:
                 bound = __signature.bind(*args, **kwargs)
                 bound.apply_defaults()
                 arguments = dict(bound.arguments)
-                if __name == "load_documents":
+                if __name in {"load_documents", "load_document", "upsert_documents", "replace_documents"}:
                     collection = arguments.get("collection")
                     if type(collection) is str:
                         fields["collection"] = collection[:160]
@@ -545,11 +547,60 @@ def replay_operation_identity(operation_id: str):
         _OPERATION.reset(token)
 
 
+_STORE_WINDOW_SEAL = object()
+
+
+def _store_window_selection(started_mono_ns, window_start_seconds, window_end_seconds,
+                            include_workloads, exclude_workloads, mode, collector_components):
+    return (started_mono_ns, window_start_seconds, window_end_seconds,
+            tuple(include_workloads), tuple(exclude_workloads), mode, tuple(collector_components))
+
+
+def _store_window_digest(events):
+    digest = hashlib.sha256()
+    # Do not allocate a second serialization of the full hydrated frontier.
+    for part in json.JSONEncoder(sort_keys=True, ensure_ascii=False, separators=(',', ':'),
+                                 allow_nan=False).iterencode(events):
+        digest.update(part.encode('utf-8'))
+    return digest.hexdigest()
+
+
+class _VerifiedStoreWindow(list):
+    """Process-local proof from the checksummed reader, never a JSON admission flag."""
+
+    def __init__(self, rows, *, seal, manifest_hash, selection):
+        if seal is not _STORE_WINDOW_SEAL:
+            raise ValueError('recorded_window_proof_invalid')
+        super().__init__(rows)
+        self._seal = seal
+        self._manifest_hash = manifest_hash
+        self._selection = selection
+        self._digest = _store_window_digest([manifest_hash, selection, self])
+
+    def _verify(self, selection):
+        if (self._seal is not _STORE_WINDOW_SEAL or self._selection != selection
+                or self._digest != _store_window_digest([self._manifest_hash, self._selection, self])):
+            raise ValueError('recorded_window_proof_mismatch')
+
+
+def _seal_store_window(rows, *, manifest_hash, **selection):
+    """Only the file reader calls this after complete source integrity validation."""
+    if (type(manifest_hash) is not str or len(manifest_hash) != 64
+            or any(value not in '0123456789abcdef' for value in manifest_hash)):
+        raise ValueError('recorded_window_proof_invalid')
+    return _VerifiedStoreWindow(rows, seal=_STORE_WINDOW_SEAL, manifest_hash=manifest_hash,
+                                selection=_store_window_selection(**selection))
+
+
 def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
                           window_start_seconds: float, window_end_seconds: float,
                           include_workloads: tuple[str, ...] = (), exclude_workloads: tuple[str, ...] = (),
                           mode: str = "recorded_operations", collector_components: tuple[str, ...] = (),
                           _source_sequences_verified: bool = False) -> RecordedPlan:
+    if type(events) is _VerifiedStoreWindow:
+        events._verify(_store_window_selection(started_mono_ns, window_start_seconds,
+            window_end_seconds, include_workloads, exclude_workloads, mode, collector_components))
+        _source_sequences_verified = True
     if (mode not in {"recorded_operations", "collector_with_background"}
             or not all(math.isfinite(value) for value in (window_start_seconds, window_end_seconds))
             or not 0 <= window_start_seconds < window_end_seconds <= 7200

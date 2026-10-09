@@ -16,6 +16,59 @@ ENV = {cli._URL_ENV: URL, cli._TOKEN_ENV: TOKEN}
 
 
 class RecordedReplayDatabaseCliTests(unittest.TestCase):
+    def test_empty_profile_checks_inputs_and_baseline_before_any_recorded_execution(self):
+        from kiwoom_monitor.central_server import diagnostic_trace as trace
+        from kiwoom_monitor.central_server import diagnostic_recorded_execution as execution
+        from kiwoom_monitor.central_server.diagnostic_replay_contract import compile_recorded_plan
+        from tests.unit.test_diagnostic_scoped_window import TRACE, SELECTION, write_fixture
+        from pathlib import Path
+        import tempfile
+        arguments = ['run', '--trace-id', TRACE, '--baseline-profile', 'empty-v1',
+            '--window-start', '0', '--window-end', '.05', '--include-workload', 'realtime',
+            '--capture-policy', 'scoped-operations']
+        with tempfile.TemporaryDirectory() as root, patch.object(trace, '_directory', return_value=Path(root)):
+            write_fixture(root)
+            with patch.object(cli, 'provision_existing_empty_database') as provision, \
+                 patch.object(cli, 'ReplayDatabaseLease') as factory, \
+                 patch.object(execution, 'run_owned_recorded_experiment') as run:
+                lease = factory.return_value.__enter__.return_value
+                lease.seal.return_value = {'baseline_id': 'b' * 64}
+                lease.restore.return_value = {'baseline_id': 'b' * 64}
+                code, result = self.invoke(arguments + ['--preflight-only'], ENV)
+                self.assertEqual(0, code)
+                self.assertEqual('preflight_passed', result['result']['state'])
+                self.assertEqual(0, result['result']['recorded_operations_executed'])
+                self.assertFalse(result['result']['source_state_equivalent'])
+                provision.assert_called_once_with(URL, TOKEN)
+                run.assert_not_called()
+                provision.reset_mock()
+                code, _ = self.invoke(arguments, ENV)
+                self.assertEqual(1, code)
+                provision.assert_not_called()
+                code, result = self.invoke(arguments + ['--expected-baseline-id', 'a' * 64], ENV)
+                self.assertEqual(1, code)
+                self.assertEqual('replay_expected_baseline_mismatch', result['reason'])
+                run.assert_not_called()
+        self.assertNotIn(TOKEN, json.dumps(result))
+
+    def test_empty_profile_preflight_rejects_selected_rejection_before_provision(self):
+        from kiwoom_monitor.central_server import diagnostic_trace as trace
+        from tests.unit.test_diagnostic_scoped_window import TRACE, write_fixture, fixture_rows
+        from pathlib import Path
+        import tempfile
+        arguments = ['run', '--trace-id', TRACE, '--baseline-profile', 'empty-v1', '--preflight-only',
+            '--window-start', '0', '--window-end', '.05', '--include-workload', 'realtime',
+            '--capture-policy', 'scoped-operations']
+        with tempfile.TemporaryDirectory() as root, patch.object(trace, '_directory', return_value=Path(root)):
+            rows = fixture_rows()
+            rows[3]['workload_id'] = 'realtime'
+            write_fixture(root, rows)
+            with patch.object(cli, 'provision_existing_empty_database') as provision:
+                code, result = self.invoke(arguments, ENV)
+                self.assertEqual(1, code)
+                self.assertEqual('recorded_selected_input_unsupported', result['reason'])
+                provision.assert_not_called()
+
     def test_v2_run_origin_errors_fail_before_observer_or_database(self):
         from kiwoom_monitor.central_server import diagnostic_trace as trace
         from kiwoom_monitor.central_server import diagnostic_workloads as controls

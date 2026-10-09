@@ -1,5 +1,173 @@
 # 장중 사건 기록을 이용한 반복 부하 실험
 
+## 2026-10-09 실제 녹화본의 부분 native-store replay 설계
+
+**상태: 선택된 realtime 부분 입력의 v6 기준 replay와 realtime.minute batch v2 비교를 완료했다. 전체 장초 replay는 미완료.**
+사용자 지시에 따른 `partial-operations` 정책을 사용한다. 선택된 realtime 18 operation에 대해
+empty-v1 baseline과 분봉 batch v2를 각각 replay했다. 입력 hash는 두 번 동일하고 timing preserved,
+선택 입력 생략 0, native DB call 18건이다. 분봉 SQL 242→48, 총 writer 시간 126.836→56.568ms였으며
+canonical minute bars/metadata의 전체 hash는 같았다. revision/operation 등 네 표는 전체 hash가 달라
+의미 동등성은 확인되지 않았다. 비활성 후보 `2026.10.09-realtime-minute-batch-v2-c5d8a54aa816e05c`
+NAS gate 12건과 관련 로컬 회귀 62건은 모두 통과했다. 운영 source·DB·control은 변경하지 않았다.
+이 범위는 전체 앱 기준선이나 운영 저장장치 병목 재현이 아니다. 원본 capture는 incomplete이며
+`source_state_equivalent=false`를 유지한다. 이전 문단의 미실행·gate 미완료 상태는 역사적 기록이다.
+
+### 확인된 실행 경로와 원본 증거
+
+현재 NAS operator는 `nas_operator.py → nas_operator_worker.py:replay →
+diagnostic_replay_database_cli.py:_run_trace → diagnostic_trace.recorded_window_events →
+diagnostic_recorded_execution.run_owned_recorded_experiment`를 호출한다.
+이는 실제 저장 함수 인자의 native replay다. 별도 `diagnostic_replay.py`의 합성 shape/news
+adapter 지원을 이 경로의 지원으로 해석하지 않는다.
+
+원본은 `20261007T235957Z-e8cb574bf964`, source release는
+`2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9`다. manifest SHA-256은
+`4142345fdc585125be9513cbef2cdaddfedc545dc4be9545e6d3936ba11afc9e`다.
+1,490개 chunk의 checksum/sequence와 accepted=written=last_seq=2,033,667,
+known_dropped=0을 읽기 전용으로 확인했다. input_rejected=1,188 때문에 원본 상태는
+`incomplete`다. 상태를 complete로 바꾸거나 거부 사건을 삭제하지 않는다.
+
+상세 결과는 `artifacts/oct8-scoped-replay-preflight-20261009.json`, 재현 조사기는
+`artifacts/inspect_oct8_replay_scope.py`다. 이 조사기는 선택 payload checksum/codec/native
+signature와 plan을 확인했지만 DB 연결이나 저장 함수 실행은 하지 않았다. sparse sequence
+검증용 내부 옵션을 조사 과정에서 사용한 결과는 실행 승인서가 아니다.
+
+정확한 09:00~09:10 KST는 capture offset 2.8988919258117676~602.8988919258118초다.
+capture 시작은 08:59:57.101108 KST이며, 종료 범위는 monotonic duration으로 판정한다.
+장후 persistence의 wall-clock finished_at을 capture 길이로 사용하지 않는다.
+
+| 해당 10분의 owner/workload | 기록된 operation start | 거부 | 현재 native 실행 제약 |
+| --- | ---: | ---: | --- |
+| external_market | 12 | 0 | save_external_bars 지원 |
+| rest_market | 171 | 0 | document read/upsert 지원; REST 분봉 저장 전체를 뜻하지 않음 |
+| top20_candidate_flow | 23 | 0 | document/dataset 경계 지원 |
+| realtime | 101 | 1 | second-bar 입력 거부를 포함하는 전체 구간은 불가 |
+| top20 | 1,853 | 99 | replace_minute_bars 52, replace_daily_bars 47 인자 거부 |
+| shadow | 383 | 63 | checkpoint 인자 거부와 evaluation/observation adapter 미지원 |
+| news | 336 | 0 | claim_news_jobs native adapter 미지원 |
+| market_events | 215 | 0 | VI/upper-limit/hot-cohort native adapter 미지원 |
+| readers | 659 | 0 | 일부 control/shadow reader adapter 미지원 |
+| documents | 30 | 40 | unsupported_document_collection 거부 |
+| unsupported | 39 | 별도 | 계좌 recovery/runtime lease 등 의도적 실행 제외 |
+
+거부된 분봉 52건·일봉 47건·shadow checkpoint 63건·초봉 1건은 operation_id와 DB span의
+input_operation_id를 연결한 결과 **163건 모두 native operation 반환 및 DB COMMIT 완료**였다.
+이들은 녹화 인자 복사 accounting의 8 MiB 제한 초과이며 운영 저장 실패 증거가 아니다.
+accounting bytes를 DB payload·네트워크 크기·RSS와 동일시하지 않는다. 같은 연결 기록의 COMMIT
+최댓값은 분봉 18,071.270ms, 일봉 7,309.933ms, shadow 20,892.525ms, 초봉 6,819.736ms다.
+지연 자체는 관측됐지만 이 수치만으로 대기 원인이나 writer 간 인과관계를 확정할 수 없다.
+
+### 선택한 첫 실행 범위
+
+1. **09:00~09:02 KST, realtime만:** 18 operations, 알려진 actor 1개,
+   payload 18개/447,397 bytes. latest·minute·finalize·second·dataset/document 경계 포함.
+2. 첫 범위가 실행/복구 gate를 통과하면 **09:04~09:06 KST, realtime만:** 23 operations,
+   알려진 actor 1개, payload 23개/1,172,848 bytes. 원본 지연 시간대의 해당 writer 부분 비교다.
+3. 09:00~09:01 혼합 범위는 binding은 통과했지만 42 actors 중 원인 actor 불명 항목이 있어
+   동시성 충실도 판단을 보류한다. 10분 external_market/rest_market/top20_candidate_flow 조합은
+   기존 64 actor cap에 걸린다. 이를 통과시키려고 cap을 올리거나 actor를 임의로 합치지 않는다.
+
+이 범위는 입력 누락 없는 **선택된 저장 경계**의 재현 후보다. upstream collector/timer 변경이나
+전체 장초 부하를 검증하지 않으며, 다른 writer를 제외했으므로 원본 경합이 사라질 수도 있다.
+
+### 구현 결정: 명시적 부분 허용, 기존 strict 경로 보존
+
+- operator trace 등록에 `--capture-policy scoped-operations`를 추가한다. 기본은 기존 complete
+  정책이다. 원본 manifest/chunk/blob을 그대로 root 소유 등록 영역에 고정하고 policy와 원본
+  manifest hash를 registration에 기록한다. 등록 성공과 선택 범위 실행 가능 여부를 분리한다.
+- host 등록은 schema 2/3의 durable terminal metadata와 원본 파일 hash를 검사한다. 전체 event
+  sequence/rejection accounting 및 선택 입력 자격은 격리 worker의 reader가 실행 전에 검사한다.
+  등록 성공 자체를 실제 replay 성공이나 전체 coverage로 해석하지 않는다.
+- scoped reader는 schema 2/3의 durable terminal complete/incomplete만 허용한다. accepted/written/
+  last_seq, 전체 chunk/sequence/hash, rejection accounting, capture clock을 검사한다. dropped,
+  censored, retained/pending/queued/packing/copy 예약 상태, persistence 실패, 불명확한 종료나
+  불일치는 거부한다. incomplete는 기록된 input rejection으로 설명되는 경우에만 허용한다.
+- 실행에서도 scoped policy와 명시적 include-workload가 필요하다. 첫 구현은
+  `recorded_operations`만 허용한다. incomplete collector/전체 TOP20 causal 실행은 확장하지 않는다.
+- `scoped-operations`는 선택 owner의 window 내 input rejection이 하나라도 있으면 실패한다. attribution/time을 해석할
+  수 없는 rejection도 실패한다. 미지원 method는 기존대로 실패하며 임의의 입력·결과로 대체하지
+  않는다. 제외 workload 목록과 해당 rejection 수를 결과에 표시한다.
+- 기존 complete trace, raw in-memory fixture, collector descendant suppression, strict TOP20
+  frontier, 합성 replay 계약은 유지한다. 원인 replay에 과거 descendant writer를 추가하지 않는다.
+
+### 병목 탐색용 partial-operations
+
+완전 재현 확인과 누락이 있는 부분 부하 실험을 구분한다. 사용자는 녹화 인자 거부가 발생한
+구간에서도 확보된 호출을 실행하여 병목을 찾는 것이 우선이라고 명시했다. 이에 명시적
+`partial-operations` 등록/실행 정책을 추가한다. 기존 complete/scoped 기본 검증을 바꾸지 않는다.
+
+- 선택 workload의 알려진 rejection은 원본 seq/time/operation/workload/method/reason/detail을
+  `omitted_inputs`에 보존한다. projection에도 `original_event_type=input_rejected`를 남긴다.
+- 인자가 없는 호출은 실행하지 않는다. 동일 operation ID의 start가 따로 있더라도 거부와 연결되면
+  payload와 native call spans를 재생에서 제외한다. 과거 결과나 가짜 입력으로 상태를 맞추지 않는다.
+- 원본 순번·체크섬·durable/drain·paired valid inputs·actor·isolated DB·실제 drain/restore 검사는 유지한다.
+- 보고서는 `omitted_input_count`, `selected_input_complete=false`,
+  `missing_load_reconstructed=false`, `fidelity=surviving_native_operations_only`를 명시한다.
+  동일 살아남은 입력/선택/hash/profile로 수정 전후를 비교한다. 누락 부하와 원본 DB 초기 상태의
+  차이 때문에 전체 장초 peak 또는 실제 운영 성능 개선으로 일반화하지 않는다.
+- 모든 선택 입력이 거부되어 실행할 호출이 없거나, 실제 남은 입력이 손상/미지원/짝 불일치이면
+  해당 실험은 실행하지 못한다고 표시한다. 일부 누락을 완전성 실패로 확대해 전체 녹화본을
+  버리지 않는다. collector 원인 사건의 causal frontier 완화는 이 store-only 변경에 포함하지 않는다.
+
+### bounded reader와 실행 증명 경계
+
+기존 strict `recorded_window_events`는 전체 scalar event를 보관하고 선택 전 payload를 hydrate하며,
+chunk/blob마다 큰 manifest를 다시 읽는 경로가 있다. scoped reader는 다음으로 제한한다.
+
+1. manifest를 한 번 고정하고 `_top20_source_rows`, `_chunk_bytes_from_manifest`,
+   `_payload_bytes_from_manifest`의 checksum 경로를 재사용한다. 전체 sequence/counter 검증은
+   streaming으로 하고 마지막에 원본 manifest hash 불변을 확인한다.
+2. 선택 window/owner의 operation과 matching end, 연결된 native call_start/call_end,
+   rejection/coverage 근거만 보관한다. window 밖에서 끝나는 선택 operation도 짝을 확인한다.
+   source seq, operation/call ID, 시각은 재번호화하지 않는다. 제외 payload는 hydrate하지 않는다.
+3. retained scalar에 50,000 rows/32 MiB 상한을 둔다. 기존 payload 32 MiB, operation 4,096,
+   actor 64 제한은 유지하고 초과를 명시적으로 보고한다. 전체 수백만 event list를 만들지 않는다.
+4. 검증된 sparse projection은 private proof에 manifest hash·선택 조건·event digest를 묶어서
+   runner에 전달한다. CLI/입력 JSON에 sequence 검사를 끄는 boolean을 노출하지 않는다.
+   `run_owned_recorded_experiment`와 `_execute_recorded_operations`의 두 plan compile 모두 같은
+   proof를 검사한다. raw list에는 기존 연속 sequence 검사를 그대로 적용한다.
+
+### 첫 기준 상태: 명시적 controlled empty fixture
+
+09:00 시점의 운영 DB snapshot은 없다. 이전 임시 fixture baseline ID를 현재 원본 상태와
+동일하다고 사용하지 않는다. 첫 실험은 fresh isolated PostgreSQL에서 고정된 empty-v1 baseline을
+만들고 `source_state_equivalent=false`를 끝까지 유지한다.
+
+- operator에 `--baseline-profile empty-v1`을 기존 `--baseline ID`와 상호 배타적으로 추가한다.
+  fresh dedicated DB에서 기존 provision/seal 함수를 이용한다. 등록 baseline 경로는 그대로 둔다.
+- `--preflight-only`는 원본 선택·native binding·baseline seal 결과 ID까지만 확인한다. 녹화 작업은
+  실행하지 않으며 `--pause-operational`과 함께 사용할 수 없다.
+- 실제 profile replay는 preflight가 반환한 `--expected-baseline-id`를 필수로 받는다. 새 격리 DB에
+  같은 profile을 seal한 ID가 일치해야 실행한다. 원본 결과/제외 workload의 과거 출력을 seed하지 않는다.
+- 같은 입력/선택/코드/profile로 최소 3회 비교한다. 매 실행 전후 restore와 sequence를 검증한다.
+  generated ID/실제 처리시각이 포함된 final hash의 바이트 동일성을 기능 회귀 조건으로 강요하지
+  않고 해당 저장 함수의 의미 있는 결과·revision·rollback·재시도 계약을 비교한다.
+- 이는 empty-state 부분 진단이다. 원본 UPDATE가 fixture INSERT로 바뀔 수 있으며 실제 운영
+  상태나 전체 앱 성능 개선으로 일반화하지 않는다. 이후 source-state baseline 확보는 별도 과제다.
+
+실제 성능 실험은 NAS `--storage disk --pause-operational`을 사용하되 기존 앱 정지→격리 job→
+drain/cleanup→동일 앱 복귀 순서를 보존한다. 운영 PostgreSQL은 정지하지 않는다. RAM PG는 기능
+gate용이며 디스크 병목 비교에 쓰지 않는다. 현재 worker 4 GiB, PG 768 MiB/shared_buffers 16 MiB,
+고정 CPU 제한 등 실험 자원 조건도 보고해 운영과의 차이를 숨기지 않는다.
+
+### 구현 순서와 통과 조건
+
+1. scoped reader/proof/plan 회귀: 선택 거부·불명 attribution·gap/hash/censored/미완료 실패,
+   제외 payload 미접근, 원본 seq/call 연결, window 이후 end 보존, sparse proof 변조 실패,
+   기존 strict/raw/collector 계약 유지. 대량 비선택 event에서 retained memory가 bounded인지 확인.
+2. operator 등록/worker/CLI additive 정책과 empty-v1 preflight를 구현한다. malformed source는 native
+   DB 실행 전 거부하고 baseline 불일치는 replay 전 차단한다. preflight가 앱을 정지할 수 없음을 검사한다.
+3. 임시 NAS PostgreSQL gate에서 첫 두 범위의 typed native 인자·결과·복구를 확인한다. 실패/취소/
+   COMMIT ack loss에도 실제 native drain 후 restore/cleanup, 이후에만 운영 앱 재시작을 검증한다.
+4. helper 업데이트와 비활성 실험 release 등록 후 첫 2분 scope를 preflight하고 실제 3회 실행한다.
+   운영 앱 release 교체는 필요 없다. helper 정책 변경은 기존 검증된 updater로 별도 적용한다.
+
+보고서는 원본 trace state/hash, 선택 window/owner, 제외/거부/미지원 수, payload hash/bytes,
+actor fidelity, source→replay operation/DB call 연결, baseline ID/profile, source_state_equivalent,
+실행 source hash와 자원 제한, SQL/COMMIT/전체 처리시간·schedule 지연을 포함한다. DB/cluster 구간
+전체 WAL 통계를 특정 writer가 만든 WAL로 표기하지 않는다. capture gate 개발이나 대규모 계측
+추가로 첫 부분 replay를 다시 미루지 않는다.
+
 2026-10-05 · O12 · 설계 확정, 원본 capture·window reader·내부 recorded executor를 로컬 구현
 
 ### 2026-10-07 collector 입력 확장 후속 상태

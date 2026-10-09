@@ -267,6 +267,45 @@ def _load_postgres_minute_operation_hashes(
     return {str(operation_id): str(operation_hash)
             for operation_id, operation_hash in cursor.fetchall()}
 
+def _load_postgres_minute_finalization_states(
+    cursor: Any, values: list[dict[str, Any]],
+) -> dict[tuple[str, str, str, str], tuple[dict[str, Any] | None, str]]:
+    """Load canonical bars and query ownership for distinct closures in one read."""
+    if not values:
+        return {}
+    trading_dates = [str(value["trading_date"]) for value in values]
+    minutes = [str(value["minute"]) for value in values]
+    codes = [str(value["code"]) for value in values]
+    markets = [str(value.get("market", "KRX")) for value in values]
+    cursor.execute(
+        "WITH requested AS MATERIALIZED ("
+        "SELECT * FROM unnest(%s::text[],%s::text[],%s::text[],%s::text[]) "
+        "AS request(trading_date,minute,code,market)) "
+        "SELECT request.trading_date,request.minute,request.code,request.market,"
+        "bar.trading_date::text,to_char(bar.minute,'HH24:MI'),bar.code,bar.market,"
+        "bar.open,bar.high,bar.low,bar.close,bar.volume,"
+        "bar.trade_value_million_won,bar.updated_at,"
+        "meta.origin,meta.source,meta.completeness "
+        "FROM requested AS request "
+        "LEFT JOIN central_minute_bars AS bar ON "
+        "bar.trading_date=request.trading_date::date AND "
+        "bar.minute=request.minute::time AND bar.code=request.code AND bar.market=request.market "
+        "LEFT JOIN central_market_data_observation_meta AS meta ON "
+        "meta.dataset_kind='minute_bar' AND meta.subject=request.code || ':' || request.market AND "
+        "meta.observation_key=request.trading_date || 'T' || request.minute",
+        (trading_dates, minutes, codes, markets),
+    )
+    states: dict[tuple[str, str, str, str], tuple[dict[str, Any] | None, str]] = {}
+    for row in cursor.fetchall():
+        key = (str(row[0]), str(row[1]), str(row[2]), str(row[3]))
+        merged = bar_result_rows((row[4:15],), minute=True)[0] if row[4] is not None else None
+        authority = ""
+        if (row[15] is not None and str(row[15]) == ObservationOrigin.QUERY.value
+                and str(row[16]).startswith("kiwoom-ka10080")):
+            authority = str(row[17])
+        states[key] = (merged, authority)
+    return states
+
 def _load_postgres_minute_query_authorities(
     cursor: Any, keys: list[tuple[str, str]],
 ) -> dict[tuple[str, str], str]:
@@ -298,6 +337,22 @@ def _lock_postgres_minute_day_scopes(cursor: Any, values: list[dict[str, Any]]) 
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,1))",
             (json.dumps(scope, ensure_ascii=False, separators=(",", ":")),),
         )
+
+def _postgres_realtime_minute_upsert_suffix(*, replace_query: bool) -> str:
+    if replace_query:
+        updates = ",".join(
+            f"{column}=EXCLUDED.{column}" for column in bar_columns(minute=True)
+            if column not in BAR_KEY_COLUMNS
+        )
+    else:
+        updates = (
+            "high=GREATEST(central_minute_bars.high,EXCLUDED.high),"
+            "low=LEAST(central_minute_bars.low,EXCLUDED.low),close=EXCLUDED.close,"
+            "volume=central_minute_bars.volume+EXCLUDED.volume,"
+            "trade_value_million_won=central_minute_bars.trade_value_million_won+EXCLUDED.trade_value_million_won,"
+            "updated_at=EXCLUDED.updated_at"
+        )
+    return "ON CONFLICT(trading_date,minute,code,market) DO UPDATE SET " + updates
 
 
 def _read_realtime_minute_overlay(
@@ -365,18 +420,22 @@ def _read_realtime_minute_overlay(
 def _load_postgres_latest_revisions(
     cursor: Any, sources: list[ObservationRevisionSource], *,
     timings: dict[str, float] | None = None,
+    lock_scopes: bool = True,
 ) -> dict[tuple[str, str, str], tuple[object, object] | None]:
     """Read one latest revision per logical key, holding each source/subject writer scope.
 
     Query-response pages for a stock use one scope. Sorting the scopes keeps
     overlapping multi-stock batches from taking transaction locks out of order.
     The realtime writer has a different source ID and remains independent.
+    Finalization already owns the stock/day locks used by all minute writers;
+    it can reuse the lookup without acquiring a new source/subject lock scope.
     """
     keys = sorted({(source.subject, source.observation_key, source.source_id)
                    for source in sources})
     lock_started = monotonic()
-    for kind, subject, source_id in sorted({(source.kind, source.subject, source.source_id)
-                                           for source in sources}):
+    scopes = sorted({(source.kind, source.subject, source.source_id)
+                     for source in sources}) if lock_scopes else ()
+    for kind, subject, source_id in scopes:
         cursor.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
             (json.dumps((kind, subject, source_id), ensure_ascii=False, separators=(",", ":")),),
@@ -533,6 +592,33 @@ def _execute_multirow_upsert(
             returned_rows.extend(result.fetchall())
         statements += 1
     return statements
+
+def _second_trade_rows_can_batch(rows: list[tuple[Any, ...]]) -> bool:
+    """Only batch keys whose Python identity is also their PostgreSQL identity.
+
+    Duplicate keys retain the original sequential freshness/tie behavior. Other
+    DATE/TIME spellings and adapted objects also stay sequential: different Python
+    values can refer to the same PostgreSQL conflict key.
+    """
+    keys: set[tuple[str, ...]] = set()
+    checked_clocks: set[tuple[str, str]] = set()
+    for row in rows:
+        key = row[:4]
+        if any(type(part) is not str for part in key) or key in keys:
+            return False
+        day, clock = key[:2]
+        if (day, clock) not in checked_clocks:
+            if len(day) != 10 or len(clock) != 8:
+                return False
+            try:
+                parsed = datetime.fromisoformat(f"{day}T{clock}")
+            except ValueError:
+                return False
+            if parsed.isoformat(timespec="seconds") != f"{day}T{clock}":
+                return False
+            checked_clocks.add((day, clock))
+        keys.add(key)
+    return True
 
 def _bar_metadata_key(row: tuple[Any, ...], *, minute: bool) -> tuple[str, str, str]:
     if minute:
@@ -909,22 +995,38 @@ class PostgresMarketBarStoreMixin:
             writer_family="realtime.second_bar", writer_kind="realtime_second_bar",
             operation="save_second_trade_bars", rows_attempted=len(values),
         )
+        batch_statements = 0
+        batched = False
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            cursor.executemany(
-                "INSERT INTO central_second_trade_bars VALUES("
-                "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            rows = second_trade_bar_value_rows(values)
+            suffix = (
                 "ON CONFLICT(trading_date,trade_second,code,market) DO UPDATE SET "
                 "open=EXCLUDED.open,high=EXCLUDED.high,low=EXCLUDED.low,close=EXCLUDED.close,"
                 "volume=EXCLUDED.volume,trade_value_won=EXCLUDED.trade_value_won,"
                 "trade_count=EXCLUDED.trade_count,available_at=EXCLUDED.available_at "
                 "WHERE EXCLUDED.available_at>central_second_trade_bars.available_at OR "
                 "(EXCLUDED.available_at=central_second_trade_bars.available_at AND "
-                "EXCLUDED.trade_count>=central_second_trade_bars.trade_count)",
-                second_trade_bar_value_rows(values),
+                "EXCLUDED.trade_count>=central_second_trade_bars.trade_count)"
             )
+            batched = _second_trade_rows_can_batch(rows)
+            if batched:
+                batch_statements = _execute_multirow_upsert(
+                    cursor, "INSERT INTO central_second_trade_bars VALUES ", rows, suffix,
+                    placeholder="%s", batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
+                )
+            else:
+                cursor.executemany(
+                    "INSERT INTO central_second_trade_bars VALUES("
+                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) " + suffix, rows,
+                )
         from .diagnostic_metrics import record_writer_transaction
         record_writer_transaction("realtime_second_bar", len(values),
                                   round((monotonic() - started_at) * 1000),
+                                  domain_counts={
+                                      "second_bar_batch_statements": batch_statements,
+                                      "second_bar_batched_rows": len(values) if batched else 0,
+                                      "second_bar_sequential_rows": 0 if batched else len(values),
+                                  },
                                   db_call_id=writer.call_id)
 
 
@@ -1009,26 +1111,90 @@ class PostgresMarketBarStoreMixin:
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             _lock_postgres_minute_day_scopes(cursor, values)
-            for closure in values:
-                operation_id, operation_hash = _minute_operation(closure, finalization=True)
-                cursor.execute(
-                    "SELECT operation_hash FROM central_minute_bar_operations WHERE operation_id=%s",
-                    (operation_id,),
-                )
-                processed = cursor.fetchone()
-                if processed is not None:
-                    if str(processed[0]) != operation_hash:
-                        raise ValueError("minute bar operation_id payload changed")
-                    continue
-                merged = _load_postgres_minute_bar(cursor, closure)
-                if merged is not None and _minute_query_authority(cursor, closure, postgres=True) != DataCompleteness.COMPLETE.value:
-                    _save_final_minute_revision_postgres(
-                        cursor, merged, closure, self._observation_history_enabled,
+            operations = [
+                (closure, *_minute_operation(closure, finalization=True))
+                for closure in values
+            ]
+            unique_operation_ids = len({operation_id for _, operation_id, _ in operations}) == len(operations)
+            unique_keys = len({
+                (str(closure["trading_date"]), str(closure["minute"]), str(closure["code"]),
+                 str(closure.get("market", "KRX")))
+                for closure, _, _ in operations
+            }) == len(operations)
+            if not unique_operation_ids or not unique_keys:
+                # Duplicate identities need the old read-after-write behavior so
+                # repeated closures preserve their sequential revision chain.
+                for closure, operation_id, operation_hash in operations:
+                    cursor.execute(
+                        "SELECT operation_hash FROM central_minute_bar_operations WHERE operation_id=%s",
+                        (operation_id,),
                     )
-                cursor.execute(
-                    "INSERT INTO central_minute_bar_operations(operation_id,operation_hash,processed_at) "
-                    "VALUES(%s,%s,%s)",
-                    (operation_id, operation_hash, datetime.now(timezone.utc)),
+                    processed = cursor.fetchone()
+                    if processed is not None:
+                        if str(processed[0]) != operation_hash:
+                            raise ValueError("minute bar operation_id payload changed")
+                        continue
+                    merged = _load_postgres_minute_bar(cursor, closure)
+                    if (merged is not None and _minute_query_authority(
+                            cursor, closure, postgres=True) != DataCompleteness.COMPLETE.value):
+                        _save_final_minute_revision_postgres(
+                            cursor, merged, closure, self._observation_history_enabled,
+                        )
+                    cursor.execute(
+                        "INSERT INTO central_minute_bar_operations(operation_id,operation_hash,processed_at) "
+                        "VALUES(%s,%s,%s)",
+                        (operation_id, operation_hash, datetime.now(timezone.utc)),
+                    )
+            else:
+                operation_hashes = _load_postgres_minute_operation_hashes(
+                    cursor, [operation_id for _, operation_id, _ in operations],
+                )
+                pending = []
+                for closure, operation_id, operation_hash in operations:
+                    processed_hash = operation_hashes.get(operation_id)
+                    if processed_hash is not None:
+                        if processed_hash != operation_hash:
+                            raise ValueError("minute bar operation_id payload changed")
+                        continue
+                    pending.append((closure, operation_id, operation_hash))
+                states = _load_postgres_minute_finalization_states(
+                    cursor, [closure for closure, _, _ in pending],
+                )
+                operation_rows = []
+                observations = []
+                revision_sources = []
+                for closure, operation_id, operation_hash in pending:
+                    key = (str(closure["trading_date"]), str(closure["minute"]),
+                           str(closure["code"]), str(closure.get("market", "KRX")))
+                    merged, authority = states[key]
+                    if merged is not None and authority != DataCompleteness.COMPLETE.value:
+                        observation = _final_minute_observation(merged, closure)
+                        observation_key = bar_observation_key(observation)
+                        observations.append((observation_key, observation))
+                        if self._observation_history_enabled:
+                            revision_sources.append(ObservationRevisionSource.from_observation(
+                                "minute_bar", observation.subject, observation_key,
+                                minute_bar_revision_payload(
+                                    merged, window_closed=True,
+                                    capture_quality=str(closure["capture_quality"]),
+                                    finalization_source=str(closure["finalization_source"]),
+                                    operation_id=operation_id,
+                                ), observation,
+                            ))
+                    operation_rows.append((operation_id, operation_hash, datetime.now(timezone.utc)))
+                _save_postgres_metadata(cursor, observations, multirow=True)
+                if revision_sources:
+                    latest_by_key = _load_postgres_latest_revisions(
+                        cursor, revision_sources, lock_scopes=False,
+                    )
+                    _insert_postgres_observation_revisions_batch(
+                        cursor, revision_sources, latest_by_key,
+                    )
+                _execute_multirow_upsert(
+                    cursor,
+                    "INSERT INTO central_minute_bar_operations(operation_id,operation_hash,processed_at) VALUES",
+                    operation_rows, "", placeholder="%s",
+                    batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
                 )
         from .diagnostic_metrics import record_writer_transaction
         record_writer_transaction("realtime_minute_finalize", len(values),
@@ -1125,91 +1291,164 @@ class PostgresMarketBarStoreMixin:
             domain_phase_ms["query_authority"] = round((monotonic() - phase_started) * 1000, 3)
             domain_counts["authority_lookup_statements"] = int(bool(authority_keys))
             domain_counts["authority_lookup_keys"] = len(authority_keys)
-            seen_operations: dict[str, str] = {}
-            for value, operation_id, operation_hash in operations:
-                processed_hash = operation_hashes.get(operation_id)
-                if processed_hash is not None:
-                    if str(processed_hash) != operation_hash:
-                        raise ValueError("minute bar operation_id payload changed")
-                    domain_counts["replayed"] += 1
-                    continue
-                earlier_hash = seen_operations.get(operation_id)
-                if earlier_hash is not None:
-                    if earlier_hash != operation_hash:
-                        raise ValueError("minute bar operation_id payload changed")
-                    domain_counts["replayed"] += 1
-                    continue
-                seen_operations[operation_id] = operation_hash
-                key = (f"{value['code']}:{value['market']}", _minute_key(value))
-                if key_counts.get(key, 0) > 1:
-                    phase_started = monotonic()
-                    query_authority = _minute_query_authority(cursor, value, postgres=True)
-                    domain_phase_ms["query_authority"] += (monotonic() - phase_started) * 1000
-                    domain_counts["authority_lookup_statements"] += 1
-                    domain_counts["authority_lookup_keys"] += 1
-                else:
-                    query_authority = authorities.get(key, "")
-                merged_bar: dict[str, Any] | None = None
-                if query_authority != DataCompleteness.COMPLETE.value:
-                    phase_started = monotonic()
-                    if query_authority == DataCompleteness.IN_PROGRESS.value:
-                        updates = ",".join(
-                            f"{column}=EXCLUDED.{column}" for column in bar_columns(minute=True)
-                            if column not in BAR_KEY_COLUMNS
-                        )
-                    else:
-                        updates = (
-                            "high=GREATEST(central_minute_bars.high,EXCLUDED.high),"
-                            "low=LEAST(central_minute_bars.low,EXCLUDED.low),close=EXCLUDED.close,"
-                            "volume=central_minute_bars.volume+EXCLUDED.volume,"
-                            "trade_value_million_won=central_minute_bars.trade_value_million_won+EXCLUDED.trade_value_million_won,"
-                            "updated_at=EXCLUDED.updated_at"
-                        )
-                    cursor.execute(
-                        "INSERT INTO central_minute_bars VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-                        "ON CONFLICT(trading_date,minute,code,market) DO UPDATE SET " + updates + " "
-                        "RETURNING trading_date::text,to_char(minute,'HH24:MI'),code,market,open,high,low,close,"
-                        "volume,trade_value_million_won,updated_at",
-                        bar_value_rows((value,), minute=True)[0],
+            distinct_keys = len({_minute_observation_key(value) for value, _, _ in operations}) == len(operations)
+            if distinct_keys and len(operation_ids) == len(operations):
+                pending = []
+                for value, operation_id, operation_hash in operations:
+                    processed_hash = operation_hashes.get(operation_id)
+                    if processed_hash is not None:
+                        if processed_hash != operation_hash:
+                            raise ValueError("minute bar operation_id payload changed")
+                        domain_counts["replayed"] += 1
+                        continue
+                    authority = authorities.get(_minute_observation_key(value), "")
+                    if authority == DataCompleteness.COMPLETE.value:
+                        domain_counts["query_complete"] += 1
+                    pending.append((value, operation_id, operation_hash, authority))
+
+                # Keys are distinct and all writers own the stock/day locks.
+                # Preserve query replacement vs cumulative-delta rules in two
+                # bounded UPSERTs and join RETURNING by key, never row order.
+                phase_started = monotonic()
+                merged_by_key = {}
+                for replace_query in (False, True):
+                    selected = [value for value, _, _, authority in pending
+                                if authority != DataCompleteness.COMPLETE.value
+                                and (authority == DataCompleteness.IN_PROGRESS.value) == replace_query]
+                    returned = []
+                    _execute_multirow_upsert(
+                        cursor, "INSERT INTO central_minute_bars VALUES",
+                        bar_value_rows(selected, minute=True),
+                        _postgres_realtime_minute_upsert_suffix(replace_query=replace_query),
+                        placeholder="%s", batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
+                        returning_columns="trading_date::text,to_char(minute,'HH24:MI'),code,market,"
+                                          "open,high,low,close,volume,trade_value_million_won,updated_at",
+                        returned_rows=returned,
                     )
-                    merged_bar = bar_result_rows((cursor.fetchone(),), minute=True)[0]
-                    domain_phase_ms["bar_upsert"] = domain_phase_ms.get("bar_upsert", 0) + (monotonic() - phase_started) * 1000
-                    domain_counts["bar_upserts"] += 1
-                else:
-                    domain_counts["query_complete"] += 1
-                key = _minute_key(value)
-                observation = observation_by_key.get(_minute_observation_key(value))
-                if observation is not None and query_authority != DataCompleteness.COMPLETE.value:
+                    merged_by_key.update({_minute_observation_key(bar): bar
+                                          for bar in bar_result_rows(returned, minute=True)})
+                    domain_counts["bar_upserts"] += len(selected)
+                domain_phase_ms["bar_upsert"] = (monotonic() - phase_started) * 1000
+
+                phase_started = monotonic()
+                merged_observations = []
+                revision_sources = []
+                for value, operation_id, _, authority in pending:
+                    observation = observation_by_key.get(_minute_observation_key(value))
+                    if observation is None or authority == DataCompleteness.COMPLETE.value:
+                        continue
+                    merged_bar = merged_by_key.get(_minute_observation_key(value))
                     if merged_bar is None:
                         raise RuntimeError("minute bar upsert did not return its saved row")
-                    phase_started = monotonic()
                     merged_observation = MarketDataObservation(
                         observation.kind, observation.subject, merged_bar, observation.metadata,
                     )
-                    cursor.execute(
-                        _market_metadata_upsert_sql("%s", "EXCLUDED"),
-                        market_metadata_storage_values(key, merged_observation),
-                    )
-                    domain_counts["metadata_upserts"] += 1
+                    key = _minute_key(value)
+                    merged_observations.append((key, merged_observation))
                     if self._observation_history_enabled:
-                        if _append_postgres_observation_revision(
-                            cursor, "minute_bar", observation.subject, key,
+                        revision_sources.append(ObservationRevisionSource.from_observation(
+                            "minute_bar", observation.subject, key,
                             minute_bar_revision_payload(
                                 merged_bar, window_closed=False, capture_quality="in_progress",
                                 finalization_source="realtime_flush", operation_id=operation_id,
-                            ),
-                            merged_observation,
-                        ):
-                            domain_counts["revision_inserts"] += 1
-                    domain_phase_ms["metadata_revision"] = domain_phase_ms.get("metadata_revision", 0) + (monotonic() - phase_started) * 1000
+                            ), merged_observation,
+                        ))
+                _save_postgres_metadata(cursor, merged_observations, multirow=True)
+                domain_counts["metadata_upserts"] = len(merged_observations)
+                if revision_sources:
+                    latest_by_key = _load_postgres_latest_revisions(
+                        cursor, revision_sources, lock_scopes=False,
+                    )
+                    _, domain_counts["revision_inserts"] = _insert_postgres_observation_revisions_batch(
+                        cursor, revision_sources, latest_by_key,
+                    )
+                if merged_observations:
+                    domain_phase_ms["metadata_revision"] = (monotonic() - phase_started) * 1000
                 phase_started = monotonic()
-                cursor.execute(
-                    "INSERT INTO central_minute_bar_operations(operation_id,operation_hash,processed_at) "
-                    "VALUES(%s,%s,%s)",
-                    (operation_id, operation_hash, datetime.now(timezone.utc)),
+                _execute_multirow_upsert(
+                    cursor,
+                    "INSERT INTO central_minute_bar_operations(operation_id,operation_hash,processed_at) VALUES",
+                    [(operation_id, operation_hash, datetime.now(timezone.utc))
+                     for _, operation_id, operation_hash, _ in pending],
+                    "", placeholder="%s", batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
                 )
-                domain_phase_ms["operation_insert"] = domain_phase_ms.get("operation_insert", 0) + (monotonic() - phase_started) * 1000
-                domain_counts["operation_inserts"] += 1
+                domain_counts["operation_inserts"] = len(pending)
+                domain_phase_ms["operation_insert"] = (monotonic() - phase_started) * 1000
+            else:
+                seen_operations: dict[str, str] = {}
+                for value, operation_id, operation_hash in operations:
+                    processed_hash = operation_hashes.get(operation_id)
+                    if processed_hash is not None:
+                        if str(processed_hash) != operation_hash:
+                            raise ValueError("minute bar operation_id payload changed")
+                        domain_counts["replayed"] += 1
+                        continue
+                    earlier_hash = seen_operations.get(operation_id)
+                    if earlier_hash is not None:
+                        if earlier_hash != operation_hash:
+                            raise ValueError("minute bar operation_id payload changed")
+                        domain_counts["replayed"] += 1
+                        continue
+                    seen_operations[operation_id] = operation_hash
+                    key = (f"{value['code']}:{value['market']}", _minute_key(value))
+                    if key_counts.get(key, 0) > 1:
+                        phase_started = monotonic()
+                        query_authority = _minute_query_authority(cursor, value, postgres=True)
+                        domain_phase_ms["query_authority"] += (monotonic() - phase_started) * 1000
+                        domain_counts["authority_lookup_statements"] += 1
+                        domain_counts["authority_lookup_keys"] += 1
+                    else:
+                        query_authority = authorities.get(key, "")
+                    merged_bar: dict[str, Any] | None = None
+                    if query_authority != DataCompleteness.COMPLETE.value:
+                        phase_started = monotonic()
+                        cursor.execute(
+                            "INSERT INTO central_minute_bars VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                            + _postgres_realtime_minute_upsert_suffix(
+                                replace_query=query_authority == DataCompleteness.IN_PROGRESS.value,
+                            ) + " "
+                            "RETURNING trading_date::text,to_char(minute,'HH24:MI'),code,market,open,high,low,close,"
+                            "volume,trade_value_million_won,updated_at",
+                            bar_value_rows((value,), minute=True)[0],
+                        )
+                        merged_bar = bar_result_rows((cursor.fetchone(),), minute=True)[0]
+                        domain_phase_ms["bar_upsert"] = domain_phase_ms.get("bar_upsert", 0) + (monotonic() - phase_started) * 1000
+                        domain_counts["bar_upserts"] += 1
+                    else:
+                        domain_counts["query_complete"] += 1
+                    key = _minute_key(value)
+                    observation = observation_by_key.get(_minute_observation_key(value))
+                    if observation is not None and query_authority != DataCompleteness.COMPLETE.value:
+                        if merged_bar is None:
+                            raise RuntimeError("minute bar upsert did not return its saved row")
+                        phase_started = monotonic()
+                        merged_observation = MarketDataObservation(
+                            observation.kind, observation.subject, merged_bar, observation.metadata,
+                        )
+                        cursor.execute(
+                            _market_metadata_upsert_sql("%s", "EXCLUDED"),
+                            market_metadata_storage_values(key, merged_observation),
+                        )
+                        domain_counts["metadata_upserts"] += 1
+                        if self._observation_history_enabled:
+                            if _append_postgres_observation_revision(
+                                cursor, "minute_bar", observation.subject, key,
+                                minute_bar_revision_payload(
+                                    merged_bar, window_closed=False, capture_quality="in_progress",
+                                    finalization_source="realtime_flush", operation_id=operation_id,
+                                ),
+                                merged_observation,
+                            ):
+                                domain_counts["revision_inserts"] += 1
+                        domain_phase_ms["metadata_revision"] = domain_phase_ms.get("metadata_revision", 0) + (monotonic() - phase_started) * 1000
+                    phase_started = monotonic()
+                    cursor.execute(
+                        "INSERT INTO central_minute_bar_operations(operation_id,operation_hash,processed_at) "
+                        "VALUES(%s,%s,%s)",
+                        (operation_id, operation_hash, datetime.now(timezone.utc)),
+                    )
+                    domain_phase_ms["operation_insert"] = domain_phase_ms.get("operation_insert", 0) + (monotonic() - phase_started) * 1000
+                    domain_counts["operation_inserts"] += 1
         from .diagnostic_metrics import record_writer_transaction
         record_writer_transaction("realtime_minute", len(values),
                                   round((monotonic() - started_at) * 1000),

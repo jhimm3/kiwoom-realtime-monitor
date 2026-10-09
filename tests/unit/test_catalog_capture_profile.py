@@ -193,7 +193,7 @@ class CatalogCaptureProfileTests(unittest.TestCase):
                         self.assertTrue(condition.wait_for(lambda: entered == 2, timeout=2))
                     expected = CATALOG_MAX_COPY_BYTES + (CATALOG_MAX_COPY_BYTES if both_catalog else MAX_COPY_BYTES)
                     self.assertEqual(expected, trace.status()['copy_reserved_bytes'])
-                    self.assertFalse(trace.emit_payload(identifier, 'collector_input', {}, {'ok': 2}))
+                    self.assertFalse(trace.emit_payload(identifier, 'operation_start', {}, {'ok': 2}))
                     self.assertEqual(1, trace.status()['input_rejected_reasons']['capture_copy_busy'])
                     if stop:
                         self.assertEqual('stopping', trace.stop(timeout=.01)['state'])

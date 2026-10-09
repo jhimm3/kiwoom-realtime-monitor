@@ -2,10 +2,43 @@
 
 2026-10-08 · NAS Linux gate 45개 통과, 최초 설치 및 실제 `k379` 무암호 status 검증 완료.
 
+2026-10-09 identity-fence 보완: Docker inspect의 `Mounts` 배열은 순서가 고정되지 않는다.
+새 fingerprint는 모든 mount 필드를 보존한 채 객체 순서를 정규화하고, 이미 설치된 root-owned
+legacy approval은 mount가 7개 이하일 때 순열을 제한 비교한다. container ID/image/config,
+mount source·destination·RW나 네트워크가 실제로 바뀌면 계속 거부한다. 이 보완은 기존 승인 설정을
+수정하지 않는다.
+
 `kiwoom-nas status`로 설치 상태를 확인했다. 운영 릴리즈와 두 컨테이너는 그대로다.
 이번 무암호 명령은 반복 개발 기간에만 사용하고, 개발 종료 때 권한을 회수한다.
 
 ## 목적과 선택
+
+### 2026-10-09 scoped store replay 후보 계약
+
+아래 옵션은 NAS 비활성 후보 `2026.10.09-partial-store-replay-v2-61eabc1096dd4940`에 게시되었으며
+설치된 helper에 아직 적용되지 않았다. 로컬 combined 회귀 98건은 통과했다.
+정확한 후보 gate와 관리자 helper update 이후에 사용한다. 기본 complete 정책은 유지된다.
+
+- `register-trace TRACE --capture-policy scoped-operations`: 원본 incomplete 상태를 유지한 채
+  durable 원본 파일과 manifest hash를 고정한다. 등록 성공은 실행 자격 확인과 별개다.
+- `replay RELEASE TRACE --capture-policy scoped-operations --include-workload realtime ...`:
+  명시적 선택 owner의 native store 인자만 재생한다. collector mode는 이 정책에서 지원하지 않는다.
+  선택 window의 거부/불명 귀속/미지원 method는 실행 전에 실패한다. 제외된 결과는 seed하지 않는다.
+- `--baseline-profile empty-v1 --preflight-only`: fresh 격리 DB에 empty baseline을 seal/restore하여
+  ID를 반환한다. 녹화 작업은 실행하지 않으며 `--pause-operational`과 함께 쓸 수 없다.
+- 실제 empty profile 실행에는 preflight ID를 `--expected-baseline-id ID`로 지정해야 한다.
+  기존 `--baseline ID` 등록 기준 상태와 상호 배타적이며 mismatch이면 replay 전에 실패한다.
+- 병목 탐색에는 등록과 실행 양쪽에서 `--capture-policy partial-operations`를 명시할 수 있다.
+  이 정책은 선택 workload에 인자 거부가 있어도 남은 실제 입력을 실행하고, 누락 위치·종류·이유를
+  보고한다. 거부 operation의 옛 저장 결과를 주입하지 않는다. 완전 재현을 주장하지 않으며
+  source-state/누락 부하의 한계는 결과에 남긴다. 손상된 파일이나 실제 남은 인자의 불일치는 여전히 실패한다.
+
+첫 후보는 09:00~09:02 KST realtime 저장 경계 18건이며 capture offset은
+`--window-start 2.8988919258117676 --window-end 122.89889192581177`이다.
+`source_state_equivalent=false`의 empty-state 부분 실험이므로 원본 DB 상태와 같거나 전체 앱의
+장초 부하를 재현했다고 보고하지 않는다. 디스크 실험은 `--storage disk --pause-operational`을
+사용하고 기존 앱 stop → 격리 replay drain/cleanup → 같은 앱 resume 순서를 유지한다.
+운영 PostgreSQL은 중단하지 않는다. 실제 원본 reader 검사·NAS gate·replay 결과는 CURRENT_STATUS에 기록한다.
 
 반복 개발에서 SSH로 `kiwoom-nas test`, `replay`, `deploy`, `rollback`을 호출할 수 있도록
 한다. 최초 설치만 관리자가 수행하고, 이후 고정 명령은 `sudo -n`으로 호출한다.
@@ -111,7 +144,7 @@ argv 배열과 제한 환경을 사용하고 shell 실행, Docker context/env ov
 |---|---|
 | `status` | release/build, capture 상태, 진행 작업, blocker를 비밀 없이 출력. 제어 변경 없음 |
 | `test RELEASE --profile NAME` | 허용된 검증 profile을 임시 DB/worker에서 실행. skip도 pass와 분리 |
-| `replay RELEASE TRACE --baseline ID ...` | 등록된 고정 입력/기준 상태와 선택 옵션으로 전용 실험 실행 |
+| `replay RELEASE TRACE --baseline ID ...` | 등록된 고정 입력/기준 상태와 선택 옵션으로 전용 실험 실행. 기본은 운영 서버를 유지하며, `--pause-operational`을 지정하면 replay 동안 운영 서버만 정지 |
 | `deploy RELEASE` | 검증된 동일 runtime/schema 계약의 release 선택 후 기존 server만 재시작 |
 | `rollback` | 사설 journal에 기록된 검증된 직전 release로 같은 배포 절차 수행 |
 | `revoke` | 개발 종료 시 무암호 sudoers 규칙 회수 및 사용자 client/root launcher의 설치 전 상태 복구 |
@@ -124,6 +157,42 @@ worker이며 운영 서버/운영 DB 환경변수를 전달하지 않는다.
 미지원 workload·잘못된 baseline·window·coverage는 실행 전에 명시적으로 실패한다.
 전체/단독/제외/조합과 descendant 제외는 기존 recorded executor가 소유한다.
 결과를 맞추기 위해 제외한 workload의 과거 결과를 주입하지 않는다.
+
+`--pause-operational`은 기본 동작이 아니다. 명시한 경우 supervisor가 시작 전에 운영 API의
+진단·trace·workload가 idle인지 확인하고, 고정 승인된 server container/release/source hash를
+사설 `replay-maintenance.json`에 기록한 다음 해당 server container만 graceful stop한다.
+PostgreSQL 운영 container는 stop/recreate하지 않는다. 운영 server가 실제로 멈춘 것을 확인한
+뒤 격리 replay worker를 시작한다. replay와 임시 DB/worker 정리가 끝난 다음 동일 container와
+기록된 active release를 확인하고 server를 시작해 health/build/source/DB identity를 검증한다.
+
+이 모드는 의도적인 수집 공백을 만든다. 재개 뒤 구독 복구와 모든 이벤트의 무손실은 보장하거나
+검증하지 않으며 report에 `collection_gap_expected=true`, `realtime_loss_verified=false`를 남긴다.
+임시 replay container 정리가 실패하면 운영 server를 재개하지 않고 `awaiting_job_cleanup`으로
+남겨, `recover`가 replay container 정리를 확인한 다음에만 server를 재개하게 한다. start/readiness,
+release/pointer 또는 container identity가 모호하면 journal을 남기고 일반 변경을 차단한다.
+`status`에서 `operational_pause`를 확인하고 `recover`로 복구를 수행한다. 이 절차는 현재
+후보 코드의 동작 계약이며, 실행은 exact-source gate와 NAS 검증이 끝난 뒤 별도로 해야 한다.
+
+### 관리 명령 자체의 갱신
+
+앱 소스 `deploy`와 root 소유 관리 명령의 갱신은 별개다. 설치된 무암호 명령은 임의 host
+코드 실행이나 자기 갱신을 허용하지 않는다. 관리 명령 갱신은 관리자 1회 실행으로만 수행한다.
+`scripts/prepare_nas_operator_update.py --nas-root X:\kiwoom-monitor`는 활성 NAS release의
+앱 소스·의존성·스키마를 그대로 복사하고 관리 코드·테스트만 교체한 비활성 검증 후보와
+checksum 고정 번들을 게시한다. PC main과 NAS runtime의 계약이 다를 때 이를 무시하지 않는다.
+후보의 앱 build와 src hash는 활성 NAS 버전이며 최신 PC 앱 배포를 의미하지 않는다.
+
+번들 스크립트는 root 소유 임시 경로로 검증 복사하고, 외부망·Docker socket·운영 data mount가
+없는 컨테이너에서 portable/Linux gate를 skip 없이 통과시킨 뒤 installer의 `--update`를 실행한다.
+갱신은 기존 operator/diagnostic/scheduler fence 안에서 고정 helper 두 파일만 교체한다.
+config·client·launcher·sudoers·운영 앱/DB는 변경하지 않고 원래 revoke 백업도 보존한다.
+실패하면 이전 helper와 설치 digest 원장을 복원한다. 중단된 prepared 갱신은 일반 변경 및
+revoke를 차단하고, 같은 관리자 갱신 절차를 다시 실행해야 복구한다. 설치 후 실제 대상 계정의
+cache-independent 무암호 status를 확인한다. 이후 일반 test/replay/deploy는 기존 전용 명령을 쓴다.
+
+테스트 내부 성공과 전체 명령 성공은 구분한다. 임시 작업 정리 및 최종 운영 신원 fence까지
+통과한 뒤에만 `post_job_fence_verified=true` gate를 게시한다. 마지막 fence 실패는 내부 테스트가
+통과했더라도 최종 보고서를 failed로 갱신한다. 이 표식이 없는 구형 gate는 배포 승인에 쓰지 않는다.
 
 ## 개발 종료와 권한 회수
 

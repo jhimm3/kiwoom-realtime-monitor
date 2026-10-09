@@ -48,7 +48,12 @@ def _parser():
     for command in (status, seal, restore, run):
         command.add_argument('--baseline-version', type=int, choices=(1, 2), default=1)
         command.add_argument('--source-origin', help='aware ISO trace-start time; required only for cache baseline v2')
-    run.add_argument('--baseline-id', required=True)
+    baseline = run.add_mutually_exclusive_group(required=True)
+    baseline.add_argument('--baseline-id')
+    baseline.add_argument('--baseline-profile', choices=('empty-v1',))
+    run.add_argument('--expected-baseline-id')
+    run.add_argument('--preflight-only', action='store_true')
+    run.add_argument('--capture-policy', choices=('complete', 'scoped-operations', 'partial-operations'), default='complete')
     run.add_argument('--trace-id', required=True)
     run.add_argument('--window-start', type=float, required=True)
     run.add_argument('--window-end', type=float, required=True)
@@ -81,10 +86,22 @@ def _run_trace(url, token, args):
     from .diagnostic_workloads import _set_capture, _set_tool
 
     baseline_options = _baseline_options(args)
+    profile = args.baseline_profile
+    if args.preflight_only and profile != 'empty-v1':
+        raise ValueError('recorded_preflight_requires_empty_profile')
+    if profile and (args.baseline_version != 1 or args.source_origin is not None):
+        raise ValueError('recorded_empty_profile_requires_v1')
+    if profile and not args.preflight_only and not args.expected_baseline_id:
+        raise ValueError('recorded_expected_baseline_required')
+    if not profile and args.expected_baseline_id:
+        raise ValueError('recorded_expected_baseline_requires_profile')
+    reader_options = {} if args.capture_policy == 'complete' else dict(
+        capture_policy=args.capture_policy, include_workloads=tuple(args.include_workload),
+        exclude_workloads=tuple(args.exclude_workload))
     manifest, events = trace.recorded_window_events(
         args.trace_id, window_start_seconds=args.window_start,
         window_end_seconds=args.window_end, mode=args.mode,
-        collector_components=tuple(args.collector_component))
+        collector_components=tuple(args.collector_component), **reader_options)
     if baseline_options:
         started_at = manifest.get('started_at')
         if (type(started_at) not in (int, float) or not math.isfinite(started_at)
@@ -95,6 +112,33 @@ def _run_trace(url, token, args):
                      include_workloads=tuple(args.include_workload),
                      exclude_workloads=tuple(args.exclude_workload), mode=args.mode,
                      collector_components=tuple(args.collector_component), concurrency=args.concurrency)
+    baseline_id = args.baseline_id
+    if profile:
+        # Reject payload/method/concurrency before even provisioning the empty
+        # dedicated fixture. The allowlist and native signatures are shared
+        # with the scheduler; no operation is invoked in this preflight.
+        from .database import PostgresQueryStore
+        from .diagnostic_recorded_execution import _prepare
+        from .diagnostic_replay_contract import compile_recorded_plan
+        if type(args.concurrency) is not int or not 1 <= args.concurrency <= 16:
+            raise ValueError('recorded_execution_concurrency_invalid')
+        plan = compile_recorded_plan(events, **{key: value for key, value in selection.items()
+                                               if key != 'concurrency'})
+        actors = _prepare(object.__new__(PostgresQueryStore), events, plan)
+        provision_existing_empty_database(url, token)
+        with ReplayDatabaseLease(url, token) as lease:
+            sealed = lease.seal()
+            baseline_id = sealed['baseline_id']
+            if args.expected_baseline_id and baseline_id != args.expected_baseline_id:
+                raise ValueError('replay_expected_baseline_mismatch')
+            if args.preflight_only:
+                restored = lease.restore(baseline_id)
+                return dict(state='preflight_passed', baseline_profile=profile, baseline_id=baseline_id,
+                    source_state_equivalent=False, trace_id=args.trace_id,
+                    capture_source_release=manifest.get('source_release'), window_read=manifest['window_read'],
+                    selection=selection, operations=len(plan.operation_ids), actors=len(actors),
+                    actor_known=plan.actor_known, warnings=list(plan.warnings),
+                    recorded_operations_executed=0, baseline_verified=restored)
     # Read the immutable source before switching the process's diagnostic path.
     # Native observer uses this private file; the running server's master/trace
     # and pause controls are never modified.
@@ -108,7 +152,7 @@ def _run_trace(url, token, args):
             _set_capture(control, True, 7200, expected_session=session)
             refresh_capture_state(force=True)
             started = time.time()
-            result = run_owned_recorded_experiment(url, token, args.baseline_id, events,
+            result = run_owned_recorded_experiment(url, token, baseline_id, events,
                                                   **baseline_options, **selection)
             observed = summarize_db_calls(started, time.time(), mode='raw', limit=10_000)
             by_operation = {}
@@ -142,6 +186,8 @@ def _run_trace(url, token, args):
                       separators=(',', ':'), ensure_ascii=False).encode('utf-8')).hexdigest(),
                   selection=selection, statistics_scope='observed_replay_connections_only',
                   wal_attribution_available=False)
+    if profile:
+        result.update(baseline_profile=profile, expected_baseline_id=args.expected_baseline_id)
     return result
 
 
@@ -151,7 +197,11 @@ def main(argv=None, *, environ=None, output=None):
     args = _parser().parse_args(argv)
     try:
         url, token = _settings(environ)
-        if args.command in {'restore', 'run'} and not re.fullmatch('[a-f0-9]{64}', args.baseline_id):
+        if (args.command in {'restore', 'run'} and args.baseline_id is not None
+                and not re.fullmatch('[a-f0-9]{64}', args.baseline_id)):
+            raise ValueError('baseline_id_must_be_64_lowercase_hex_characters')
+        if (args.command == 'run' and args.expected_baseline_id is not None
+                and not re.fullmatch('[a-f0-9]{64}', args.expected_baseline_id)):
             raise ValueError('baseline_id_must_be_64_lowercase_hex_characters')
         if args.command == 'provision':
             result = provision_existing_empty_database(url, token)
@@ -168,7 +218,7 @@ def main(argv=None, *, environ=None, output=None):
                     result = lease.restore(args.baseline_id)
         print(json.dumps({'state': 'ok', 'command': args.command, 'result': result},
                          ensure_ascii=False, sort_keys=True), file=output)
-        return 0 if args.command != 'run' or result['state'] == 'complete' else 1
+        return 0 if args.command != 'run' or result['state'] in {'complete', 'preflight_passed'} else 1
     except (OSError, ValueError, RuntimeError, KeyError, psycopg.Error) as error:
         # Do not print the DSN, password, connection options or owner token.
         reason = str(error) if isinstance(error, (ValueError, RuntimeError)) else type(error).__name__

@@ -360,6 +360,118 @@ def recover_install(private, allowed):
     private.put_json('install-backup-index.json', index)
 
 
+def recover_helper_update(private):
+    """Restore only the two fixed helpers after an interrupted admin update.
+
+    Caller owns operator.lock. Original revoke backups are never replaced.
+    """
+    try:
+        record = private.json('helper-update.json')
+    except FileNotFoundError:
+        return
+    if record.get('state') in ('complete', 'rolled_back'):
+        return
+    targets = {HELPER + '/nas_operator.py', HELPER + '/nas_operator_worker.py'}
+    op.require(record.get('state') == 'prepared' and
+               re.fullmatch('[a-f0-9]{32}', record.get('update_id', '')) and
+               type(record.get('entries')) is list and len(record['entries']) == 2 and
+               {x.get('path') for x in record['entries']} == targets,
+               'helper_update_journal_invalid')
+    index = record.get('previous_index', {})
+    op.require(index.get('state') == 'complete' and
+               {x.get('path') for x in index.get('entries', [])} == op.installed_paths(),
+               'helper_update_backup_index_invalid')
+    restore = []
+    for number, item in enumerate(record['entries']):
+        name = 'helper-update-backups/' + record['update_id'] + '/' + str(number)
+        old = private.read(name, 8 * 1024 ** 2)
+        op.require(hashlib.sha256(old).hexdigest() == item.get('previous_sha256') and
+                   item.get('mode') == 0o644, 'helper_update_backup_changed')
+        with op.Tree(HELPER, owners=(0,), protected=True) as tree:
+            current = tree.read(Path(item['path']).name, 8 * 1024 ** 2)
+            op.require(hashlib.sha256(current).hexdigest() in
+                       (item['previous_sha256'], item['new_sha256']), 'helper_changed_during_update')
+        restore.append((item['path'], old))
+    # Validate every backup and target before the first restore.
+    for path, old in restore:
+        with op.Tree(HELPER, owners=(0,), protected=True) as tree:
+            tree.write(Path(path).name, old, 0o644)
+    private.put_json('install-backup-index.json', index)
+    record['state'] = 'rolled_back'
+    private.put_json('helper-update.json', record)
+
+
+def update_helpers(root, config, acltool):
+    """Administrator-only helper refresh; no new sudoers surface or app release."""
+    op.require(os.name == 'posix' and os.geteuid() == 0, 'administrator_install_required')
+    op.require(config['helper_dir'] == HELPER and config['private'] == PRIVATE,
+               'helper_update_scope_mismatch')
+    protected_directory(HELPER, acltool)
+    with op.Tree(PRIVATE, owners=(0,), protected=True) as private:
+        with private.lock('operator.lock'):
+            recover_helper_update(private)
+            supervisor = op.Operator(config, private)
+            try:
+                with supervisor.fence(lock_held=True) as store:
+                    index = private.json('install-backup-index.json')
+                    op.require(index.get('state') == 'complete' and len(index.get('entries', [])) == 6 and
+                               {x.get('path') for x in index['entries']} == op.installed_paths(),
+                               'helper_update_backup_index_invalid')
+                    # Configuration, launcher, client and sudo rule must remain installed
+                    # byte-for-byte. Refuse to overwrite another administrator's changes.
+                    for item in index['entries']:
+                        path = Path(item['path'])
+                        with op.Tree(str(path.parent), owners=(0,), protected=True) as tree:
+                            data = tree.read(path.name, 8 * 1024 ** 2)
+                            info = os.stat(path, follow_symlinks=False)
+                            op.require(hashlib.sha256(data).hexdigest() == item['installed_sha256'] and
+                                       stat.S_IMODE(info.st_mode) == item['installed_mode'],
+                                       'installed_helper_update_target_changed')
+                        check_acl(path, acltool)
+                    op.validate_sudo_policy(config, True)
+                    active = store.json('active.json')['release_id']
+                    update_id = secrets.token_hex(16)
+                    changes, entries = [], []
+                    for number, name in enumerate(('nas_operator.py', 'nas_operator_worker.py')):
+                        data = root.joinpath('scripts', name).read_bytes()
+                        op.require(0 < len(data) <= 8 * 1024 ** 2, 'helper_update_size_invalid')
+                        with op.Tree(HELPER, owners=(0,), protected=True) as tree:
+                            old = tree.read(name, 8 * 1024 ** 2)
+                        private.write('helper-update-backups/' + update_id + '/' + str(number), old)
+                        entries.append({'path': HELPER + '/' + name, 'mode': 0o644,
+                                        'previous_sha256': hashlib.sha256(old).hexdigest(),
+                                        'new_sha256': hashlib.sha256(data).hexdigest()})
+                        changes.append((name, data))
+                    record = {'state': 'prepared', 'update_id': update_id, 'entries': entries,
+                              'previous_index': index}
+                    private.put_json('helper-update.json', record)
+                    for name, data in changes:
+                        with op.Tree(HELPER, owners=(0,), protected=True) as tree:
+                            tree.write(name, data, 0o644)
+                            op.require(tree.read(name) == data, 'helper_update_write_unverified')
+                        check_acl(HELPER + '/' + name, acltool)
+                    probe_config = dict(config, initial_release=active)
+                    verify_passwordless_status(probe_config)
+                    supervisor.identities()
+                    op.require(store.json('active.json')['release_id'] == active,
+                               'active_release_changed_during_helper_update')
+                    updated = json.loads(json.dumps(index))
+                    for item in updated['entries']:
+                        for change in entries:
+                            if item['path'] == change['path']:
+                                item['installed_sha256'] = change['new_sha256']
+                    private.put_json('install-backup-index.json', updated)
+                record['state'] = 'complete'
+                private.put_json('helper-update.json', record)
+            except BaseException:
+                recover_helper_update(private)
+                raise
+    return {'helpers_updated': True, 'passwordless_status_verified': True,
+            'active_release': active, 'server_restarted': False,
+            'database_container_unchanged': True, 'sudoers_unchanged': True,
+            'original_revoke_backups_preserved': True}
+
+
 def main():
     def interrupted(unused_number, unused_frame):
         raise KeyboardInterrupt()
@@ -368,9 +480,17 @@ def main():
             signal.signal(number, interrupted)
     args = argparse.ArgumentParser(description=__doc__)
     args.add_argument('--user', required=True)
+    args.add_argument('--update', action='store_true',
+                      help='administrator-only update of the installed fixed helpers')
     value = args.parse_args()
     try:
-        result = install(value.user)
+        if value.update:
+            config = op.load_config()
+            op.require(config['allowed_user'] == value.user, 'operator_account_changed')
+            result = update_helpers(Path(__file__).resolve().parents[1], config,
+                                    executable('synoacltool'))
+        else:
+            result = install(value.user)
         print(json.dumps({'state': 'passed', 'result': result}, sort_keys=True))
         return 0
     except Exception as error:

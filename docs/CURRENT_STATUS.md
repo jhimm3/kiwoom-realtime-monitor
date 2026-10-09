@@ -1,3 +1,99 @@
+2026-10-09 realtime minute batching experiment (current worktree 91b3):
+The verified inactive candidate `2026.10.09-realtime-minute-batch-v2-c5d8a54aa816e05c`
+passed 12/12 NAS PostgreSQL tests (skipped=0). Local related regressions passed 62/62.
+On the same trace `20261007T235957Z-e8cb574bf964`, KST 09:00-09:02, the same 18
+realtime operations, input SHA-256 `9f865571b48e05dc9a8f74b4940101aa5307c3a2650c4736b764e6130c964a1e`,
+and preserved timing, realtime.minute went from 40 rows / 242 SQL / 95.794ms execute /
+126.836ms total / 0.309ms commit to 40 rows / 48 SQL / 38.774ms execute /
+56.568ms total / 0.277ms commit in the isolated RAM PostgreSQL replay. SQL fell 80.2%;
+measured writer total fell 55.4%. The 40 canonical minute rows and 44 metadata rows
+had the same row counts and full table hashes. Source outcomes matched, no selected
+inputs were omitted, and the isolated job cleanup/fence passed.
+The total row counts and revision sequence next value matched across runs, but four
+other table hashes differed: dataset snapshots, documents, minute operation markers,
+and observation revisions. Their semantic equality is not established by this run.
+WAL attribution is unavailable; source_state_equivalent=false. This is a partial,
+single-actor RAM-PostgreSQL comparison, not a whole-app or operational disk contention
+baseline. The first candidate attempt failed one fixture-source assertion (11/12);
+v2 corrected the test's ka10080 source, and all 12 then passed.
+The active NAS app remains `2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9`.
+Replay report: `artifacts/replay-realtime-minute-batch-v2-20261009.json`.
+
+2026-10-09 NAS replay gate failure diagnostics (earlier stage):
+The selected test attempt reached temporary PostgreSQL readiness and verified its memory limit
+and CPU affinity (`pg_cpu_affinity=0`), then failed with the operator's intentionally generic
+`docker_command_failed`. The report did not prove whether worker creation or a later command failed;
+no tests ran, cleanup completed, and the active server/DB were unchanged. Updated the restricted
+helper to report a bounded `failure_stage`, Docker action, and a safe error class only (never raw
+stderr). Local `tests.unit.test_nas_operator` passed 42/42. New inactive helper overlay is
+`2026.10.08-trace-ram-8g-5m-v1-3754f59b6c5f6878`; helper bundle
+`nas-operator-update-replay-pause-9a0f0af8ec9e9781`, bootstrap SHA-256
+`91fde95ad137ce5cc4ed8e14bf5402a5dd59c29d9c3b0fbdd6793c0ab1fc180c`.
+The updated helper is not installed yet, so the partial replay candidate gate has not been rerun.
+The original capture, active release, operational database, and controls remain untouched.
+
+2026-10-09 partial replay policy correction (worktree 91b3):
+The user clarified that rejected recorder inputs must not prevent useful bottleneck experiments.
+Explicit `partial-operations` now retains rejected input evidence (source sequence/time/workload/
+operation/method/reason), skips only their absent operation inputs and associated old DB spans, and
+replays surviving verified native arguments. Reports expose omitted_input_count/omitted_inputs,
+selected_input_complete, missing_load_reconstructed=false and surviving-only fidelity. No missing
+payload or excluded historical output is synthesized. Strict complete and scoped-operations policies
+remain available. Combined local regression: 98 tests passed, no skips. One earlier existing capture
+test failed at terminal-state reading, then passed three isolated reruns and the combined rerun;
+its transient cause is not confirmed and no production recorder change was made for it.
+Published inactive experiment `2026.10.09-partial-store-replay-v2-61eabc1096dd4940` (937 files),
+preserving active source `2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9` and runtime contract.
+New helper bundle `328a07a09332b46f`; bootstrap SHA-256
+`d00fcc94ca80745d133f741085c73524b2c04811faf7bbfb9d5b819220852d97`.
+Helper update, exact NAS gate, PostgreSQL preflight and actual replay are pending. The earlier v1
+publication/reader jobs are still in progress on the PC share and are not the current release candidate.
+Publication receipt: artifacts/partial-replay-publication-20261009.log. No operational deployment,
+pause, DB replay or source-state equivalence is claimed.
+
+2026-10-09 scoped native-store replay local implementation (worktree 91b3):
+The explicit scoped-operations reader, manifest/selection/event proof, operator registration policy,
+and controlled empty-v1 preflight/expected-baseline fence are implemented locally. The strict complete
+reader remains the default. The new reader streams and verifies all chunks, hydrates only selected
+inputs, preserves original sequence and source/native call linkage, and rejects selected or ambiguous
+input rejections. Excluded historical outputs are not injected. Local regression: 91 tests passed,
+no skips; inactive-publication preservation/path/conflict gates: 5 tests passed. Host helper syntax
+was checked for Python 3.8. Real-source reader verification and inactive NAS publication are in progress.
+Exact-source NAS acceptance, helper update, fresh PostgreSQL profile verification and actual replay
+are not complete. The active NAS release, original capture and operational DB remain unchanged.
+
+2026-10-09 incomplete trace scoped replay design (worktree 91b3):
+Read-only verification of Oct 8 trace 20261007T235957Z-e8cb574bf964 checked all 1,490 chunks and
+2,033,667 source events. Original state remains incomplete (1,188 rejected inputs), unchanged.
+The actual operator route is recorded native store arguments, not the legacy synthetic replay module.
+Exact 09:00-09:02 KST realtime scope: 18 operations, one known actor, 18 checked payloads / 447,397 bytes;
+09:04-09:06 scope: 23 operations, one known actor, 23 payloads / 1,172,848 bytes. Both passed analysis-only
+plan/native signature checks; neither has run against a DB. In 09:00-09:10, 163 rejected bar/shadow input
+copies were linked to successful native DB commits; recorder rejection is not operational write loss.
+Design: explicit scoped-operations admission, bounded verified reader, unchanged strict causal gates,
+and an explicit empty-v1 controlled baseline with preflight/expected-ID fence. These additions are now
+implemented locally as described above. See RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md's Oct 9 section and
+artifacts/oct8-scoped-replay-preflight-20261009.json. No app deployment, pause or replay this step.
+
+2026-10-09 replay pause operator candidate (worktree 91b3):
+The first operator update stopped at the final identity fence. Read-only NAS diagnostics confirmed the
+server container ID, image, mounts and runtime profile were unchanged; Docker inspect returned the same
+three mounts in varying array order. The canonical mount fingerprint was stable and matched the approved
+identity in all 8 samples. The operator now sorts full mount objects when fingerprinting and accepts the
+legacy ordered fingerprint only across bounded permutations (maximum 7 mounts), preserving all mount
+fields and the existing root-owned approval. PC portable tests pass 41/41 with workspace-local TEMP/TMP.
+The disposable NAS Linux acceptance and one-time administrator helper update passed: 60 tests, no
+skips; `helpers_updated=true`, original revoke backups preserved, passwordless status verified,
+sudoers unchanged, server not restarted, and DB container unchanged. `replay --help` now exposes
+`--pause-operational`. A fresh status read reports `helper_update=complete`, the same active release,
+diagnostics idle and operational pause idle. New inactive overlay:
+`2026.10.08-trace-ram-8g-5m-v1-d64ef2100e754308`; bundle:
+`nas-operator-update-replay-pause-c0d2cfa889532da5`; bootstrap SHA-256
+`2ea920c02d87a3391dd8db2e13504fd689754696ff12f4b15644d682c223ddf8`. It is based on active release
+`2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9`; publisher reports `active_changed=false` and
+`application_source_changed=false`. Earlier bundle `935e3397ef7fc16e` is stale and should not be used.
+The operational server and database were not restarted. Partial October 8 replay eligibility is separate.
+
 2026-10-09 NAS deferred trace recorder source integration (PC main):
 NAS candidate `2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9` is selectively integrated into PC main while preserving later main changes. The deferred recorder now uses framed RAM blocks, bounded raw staging/packing and the validated 8 GiB / 5,000,000 event limits; schema-3 capability metadata remains additive to the existing TOP20 capability fields. PC `server_logging.py` formats application log timestamps in KST, but the running NAS release above has not received this main source update. The installed restricted NAS operator supports fixed `test`/`replay` commands without an interactive password during development; installation and passwordless `status` are verified, while an actual operator replay invocation is not yet recorded. The existing October 8 trace is `incomplete` (1,188 rejected inputs), so it is not an eligible complete replay input. This source integration has not yet been regression-tested or deployed; publishing to Git does not activate it on NAS.
 

@@ -1,9 +1,142 @@
 # 남은 작업과 보류 사항
 
+**2026-10-09 녹화 입력 거부 원인과 복사 경합 감사:** 원본 trace `20261007T235957Z-e8cb574bf964`의
+1,490 chunks/2,033,667 events를 checksum·sequence와 함께 재검증했다. 거부 692건은 모두 호출별
+immutable-copy 8MiB byte budget 초과이며 object-node 120,000 한도 초과는 0건이다:
+`replace_daily_bars` 386, `save_shadow_monitor_state` 220, `replace_minute_bars` 84,
+`save_second_trade_bars` 2. 거부 입력의 전체 payload 크기는 알 수 없고, 운영 저장 실패를 뜻하지 않는다.
+미지원 문서 241건은 `app_settings`/`app_column_settings`/`journal_news_link`/
+`journal_v2_news_links` 각각 60회 조회와 `account_entry_symbols_daily` 1회 저장이다.
+제외 작업 251건은 `save_real_account_recovery` 127, `acquire_execution_runtime` 116,
+`save_real_account_event` 7, `save_execution_account_snapshot` 1이며 native workload는 실행됐다.
+앞의 세 account/lease 경로는 전체 DB 경합 실험에 유의미하지만 원본 입력이 제외되어 이번 trace에서
+정확한 재생은 불가능하다. 회복 저장 `ValueError` 10건은 성능과 분리된 정합성 조사 항목이다.
+
+복사 경합 4건 중 collector message 3건과 `save_shadow_evaluation` 1건은 기존 store 복사 슬롯
+2개 공유로 인한 nonblocking 거부였다. 로컬 후보는 store 슬롯 2개를 유지하고 collector 전용 슬롯
+1개를 예약한다. 전체 RAM 예산과 운영 저장 경로는 그대로 두며 대기·재시도하지 않는다. 관련 회귀
+52건 통과. 상세 증거는 `artifacts/trace-input-rejection-audit-20261009.json`이다.
+
+**남음:** 이번 변경만 포함한 비활성 NAS 후보 gate는 아직 실행되지 않았다. 후보 작성은 active NAS
+source에서 시작했으나 source-runtime 게시가 요구하는 pinned Dockerfile hash
+`d9bf4426c5bcdbc2b410f71df37ef7a1c569a1346d849a8f6f2a2b8106bdbdf3`의 본문을 찾지 못했다.
+현재 worktree Dockerfile hash는 `eaa7398d2b19890bd5c3370977b524d56e064fdfe589a5be414479c82c7562ef`로 달라,
+계약 검사를 우회하지 않고 게시를 중단했다. 운영 active release는 변경하지 않았다. 정확한 pinned
+Dockerfile을 확보한 뒤 isolated NAS gate와 capture on/off 지연을 확인한다.
+
+**2026-10-09 realtime.minute batch 부분 비교 완료:** 비활성 NAS 후보
+`2026.10.09-realtime-minute-batch-v2-c5d8a54aa816e05c`의 NAS PostgreSQL gate 12건과
+로컬 관련 회귀 62건이 모두 통과했다(skipped=0). 같은 partial trace `20261007T235957Z-e8cb574bf964`,
+KST 09:00~09:02, 18개 realtime native operation, 같은 입력 hash
+`9f865571b48e05dc9a8f74b4940101aa5307c3a2650c4736b764e6130c964a1e`, timing preserved 기준으로
+`realtime.minute` 40행 호출은 SQL 242→48(−80.2%), execute 95.794→38.774ms,
+총 writer 시간 126.836→56.568ms(−55.4%), COMMIT 0.309→0.277ms였다.
+`central_minute_bars` 40행 및 `central_market_data_observation_meta` 44행의 전체 hash는
+기준선과 일치했다. source outcomes match, selected input omission 0, cleanup/post-job fence 통과.
+반면 `central_dataset_snapshots`, `central_documents`, `central_minute_bar_operations`,
+`central_observation_revisions`는 행 수와 revision sequence 다음 값이 같아도 전체 hash가 다르다.
+이 표들의 의미상 동등성은 아직 입증하지 않았다. RAM 기반 단일 actor·부분 입력 결과이고
+WAL 귀속도 없다. 전체 앱 성능이나 운영 디스크 병목 개선으로 일반화하지 않는다.
+후속: 남은 hash 차이의 재생별 변동 원인을 분리하고, 다음 비용 후보는 호출 내용/consumer를 추적한 뒤
+하나만 선정한다. 보고서 `artifacts/replay-realtime-minute-batch-v2-20261009.json`.
+운영 active release와 DB는 변경하지 않았다.
+
+**2026-10-09 분봉 확정 batch v6 부분 replay 검증:** 같은 recorded trace
+`20261007T235957Z-e8cb574bf964`의 KST 09:00~09:02에서 선택 가능한 native operation 18건
+(finalize row 40건, 입력 447,397 bytes)을 empty-v1 기준선·v1·v6 후보에서 실행했다.
+입력 SHA-256은 세 실행 모두 `9f865571b48e05dc9a8f74b4940101aa5307c3a2650c4736b764e6130c964a1e`이며,
+각 실행은 timing preserved/source outcomes match, 18 DB calls, 약 120초, baseline restored였다.
+`realtime.minute_finalize`는 SQL 320→163→47회, 총 writer 시간 110.553→71.957→59.442ms였다.
+v6은 v1 대비 SQL 71.2%, writer 총 시간 17.4% 감소했다. COMMIT은 약 0.3ms여서 이 부분 실행에서
+주 병목은 아니었다. v6 전용 PostgreSQL gate 3건 및 관련 로컬 48건이 통과했다(skipped=0).
+NAS 비활성 후보는 `2026.10.09-minute-finalize-batch-v6-13cb047145671dd8`; 운영 active release,
+서버와 운영 DB는 바꾸지 않았다. Trace 전체는 incomplete이고 `source_state_equivalent=false`이며
+4개 테이블의 content hash가 실행 간 동일하지 않아, 이 결과는 선택된 writer의 부분 비교이지 전체 앱
+장초 성능 기준선이나 bit-for-bit 결과 동등성 증명이 아니다. 다음은 이 같은 부분 입력에서 다음 비용 큰
+writer를 골라 한 변경씩 비교한다. 미지원/누락 workload를 생성하거나 과거 결과로 보충하지 않는다.
+
+**2026-10-09 사용자 지시에 따른 부분 실험 gate 완화:** 선택 workload의 거부 입력까지 허용하는
+명시적 `partial-operations`를 추가했다. 확보된 native 인자만 실행하고 누락 호출·시각·종류·이유를
+보고하며 빠진 부하나 과거 결과를 만들지 않는다. 원본 hash/sequence, 실행 격리, 짝/복구 검사는
+유지된다. combined regression 98건, skipped=0. 신규 비활성 NAS 후보는
+`2026.10.09-partial-store-replay-v2-61eabc1096dd4940`이다. 아래 strict scoped 정책은 선택 입력의
+완전성을 확인하는 별도 모드로 남는다. 다음: 정확한 NAS gate/helper update/PG preflight 후
+같은 surviving 입력을 고정해서 3회 부분 실행 비교. 부족한 원본 DB 상태와 omitted load는
+전체 앱 성능 결론의 한계이며 부분 병목 탐색을 중단할 사유로 사용하지 않는다.
+
+**2026-10-09 부분 replay 로컬 구현 완료·NAS gate 미완료:** scoped reader/proof, 명시적 등록 정책,
+empty-v1 preflight/expected-baseline fence를 구현했다. 기존 strict 기본 경로를 유지하며 선택 거부·
+불명 귀속·변조·미완료 pair는 실행 전에 차단한다. 로컬 회귀 91건, 게시 도구 검사 5건 통과,
+skipped=0. 실제 원본 reader 검사와 비활성 후보 게시가 진행 중이다. 다음 단계는 정확한 NAS 후보
+gate → helper 업데이트 → empty-v1 실제 PG preflight → 첫 2분 scope 3회 비교다. 실제 replay 미실행,
+source_state_equivalent=false. 원본 source-state baseline과 전체 workload 지원은 여전히 별도 과제다.
+
+**2026-10-09 부분 replay 설계:** 실제 NAS operator는 합성 shape가 아닌 native store
+인자 실행 경로다. 원본 1,490 chunks/2,033,667 events를 재검증했고, 정확한 09:00~09:02 realtime
+18건과 09:04~09:06 realtime 23건은 payload/signature/known actor 기준 첫 후보로 확인했다.
+실제 DB 실행은 아직 없다. `RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md` 최신 절에 따라
+명시적 scoped admission → bounded reader/내부 proof → empty-v1 preflight/expected baseline
+fence → NAS gate → 첫 2분 실제 3회 replay 순서로 진행한다. 원본 incomplete 상태를 바꾸거나
+거부 workload를 몰래 생략하지 않는다. source_state_equivalent=false이며 전체 앱 기준선이 아니다.
+09:00~09:10 거부 분봉/일봉/shadow/초봉 163건은 native COMMIT 완료와 연결됐다. 이는 녹화 인자
+복사 제한 증거이며 운영 입력 유실로 단정하지 않는다. 미지원 news/market_events/shadow adapter와
+큰 혼합 범위의 actor cap은 별도 보류한다. 현재 앱 source·운영 DB·원본·제어 상태 변경 없음.
+
+**2026-10-09 최신 상태 — 아래의 과거 operator 후보 기록을 대체:** 최종 fence 오류 원인은 Docker
+inspect가 동일한 `Mounts` 객체들을 배열 순서만 바꿔 반환한 것이었다. 8회 읽기 전용 확인에서
+container ID/image/profile은 고정되고 canonical mount fingerprint는 승인값과 일치했다. 새 코드는
+전체 mount 객체를 정렬해 fingerprint하며 기존 legacy approval은 최대 7개 mount 순열까지 비교한다;
+보호 설정을 바꾸지 않는다. PC portable tests 41/41 통과(TEMP/TMP는 workspace 지정).
+
+새 비활성 overlay `2026.10.08-trace-ram-8g-5m-v1-d64ef2100e754308`, 관리자 update bundle
+`nas-operator-update-replay-pause-c0d2cfa889532da5`, bootstrap SHA-256
+`2ea920c02d87a3391dd8db2e13504fd689754696ff12f4b15644d682c223ddf8`. 기반 active release는
+`2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9`이며 publisher 결과 `active_changed=false`,
+`application_source_changed=false`. 이전 `935e3397ef7fc16e` bundle은 사용하지 않는다.
+새 bundle의 NAS 격리 Linux gate와 1회 관리자 bootstrap 설치는 완료됐다. 결과는 60 tests,
+skipped=0, helpers_updated=true, original_revoke_backups_preserved=true,
+passwordless_status_verified=true, sudoers_unchanged=true, server_restarted=false,
+database_container_unchanged=true였다. `replay --help`에서 `--pause-operational`을 확인했고,
+후속 status에서도 helper update complete, active release 동일, diagnostics/operational pause idle다.
+남음: 저장된 incomplete trace에서 사용 가능한 window/workload와 검증된 baseline을 확인한 뒤,
+별도 replay DB로 첫 scoped replay를 실행한다. trace 전체는 input_rejected=1,188이므로 전체 무손실
+coverage로 취급하지 않는다. 개발 종료 시 임시 sudo 규칙을 회수한다.
+
 **2026-10-08 NAS restricted operator:** Installation and acceptance are complete. The native-policy-v3
 NAS gate passed 45 tests, installer verified actual passwordless `status` as `k379`, and a separate
 SSH `kiwoom-nas status` succeeded. Temporary development access is enabled; after development ends,
 revoke it with `kiwoom-nas revoke`. No operator test, replay, or deployment has been run yet.
+
+**2026-10-09 operator replay maintenance candidate:** The user explicitly accepts an operational
+collection gap during replay. An opt-in `replay --pause-operational` now journals the pinned server
+container/release, stops only that app container, keeps PostgreSQL running, and resumes only after
+isolated job cleanup plus health/build/source checks. Interrupted or ambiguous states remain fenced
+for `recover`; exact-source NAS acceptance and live operator execution are still pending. This
+candidate does not claim zero realtime loss or successful subscription recovery.
+
+The installed NAS CLI was checked on 2026-10-09: its replay help does not yet expose
+`--pause-operational`. Current status is idle and the original active capture source is unchanged.
+PC portable gates now pass 35 tests, including run_job success/worker failure/cleanup failure/resume
+failure and cleanup-before-resume ordering. The administrator-only helper updater preserves the
+existing permission surface, config, original revoke backups and both operational containers;
+two new disposable Linux gates cover update rollback and interrupted backup validation.
+Latest inactive operator-only overlay: `2026.10.08-trace-ram-8g-5m-v1-34d29e999ca49643`.
+The first administrator bundle failed before installation because its shell gate contained mixed CRLF/LF.
+The publisher now normalizes shell files, includes all bundle hashes in the bundle ID, safely reuses only an
+identical candidate, and supports NAS Python 3.8. Two packaging regression tests pass; NAS `sh -n`, LF-only,
+and bootstrap checksum checks pass. Replacement bundle `nas-operator-update-replay-pause-935e3397ef7fc16e`
+has bootstrap SHA-256 `e2fb9f71e549ef2da74edf0cdf6ed0d12fe0f0595066e66e5c7fdb28bee9a9be`.
+The NAS root gate and administrator helper update are still pending.
+The earlier `77764995436d9d83` overlay ran through the installed passwordless NAS test command:
+34 tests passed with skipped=0 and temporary cleanup complete, but the final outer fence returned
+`approved_container_changed`. Its private report still said passed; the following status was healthy
+with the original release and no active job. The mismatch's cause is not yet established. Candidate
+code now publishes a deploy gate only after the final fence, marks the overall report failed on an
+outer-fence error, and records only the mismatching container kind and fingerprints, never inspect
+environment values. Legacy gates without final-fence verification must be rerun before deployment.
+NAS 56-test root filesystem gate and actual helper update remain pending. App deployment alone
+does not install this helper option. The complete-trace admission rule is still unchanged; the
+October 8 incomplete capture requires a separately verified scoped replay path.
 
 **2026-10-08 NAS restricted operator local implementation:**
 The fixed client/supervisor/installer and isolated worker are implemented in the PC workspace;

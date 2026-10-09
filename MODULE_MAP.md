@@ -8,9 +8,16 @@
 
 `src/kiwoom_monitor/` 기준 경로다.
 
-2026-10-08 NAS operator PC preparation: `scripts/nas_operator.py` owns fixed command parsing,
-source/trace admission, capture fences, isolated jobs, and deploy recovery; the installer and
+2026-10-08 NAS operator: `scripts/nas_operator.py` owns fixed command parsing, source/trace admission,
+capture fences, isolated jobs, deploy recovery, and opt-in replay maintenance of the approved app
+container. `replay --pause-operational` journals and stops only the server, leaves PostgreSQL
+running, cleans the isolated job before resuming the same release, and supports explicit recovery;
+it reports the expected collection gap without claiming realtime-loss verification. This is a
+candidate change until the exact-source NAS gate is run. The installer and
 worker live in `scripts/nas_operator_install.py` and `scripts/nas_operator_worker.py`. The
+administrator-only `--update` replaces just the installed helper pair while retaining the original
+revoke backups and permission surface. `scripts/prepare_nas_operator_update.py` prepares an inactive
+operator-only overlay on the verified active NAS app plus an immutable checksum-pinned admin bundle.
 `deploy/synology/check-nas-operator.sh` gate tests Linux fd/ACL behavior in a disposable offline
 container. PC unit tests pass; the Linux gate and NAS install have not run. See
 [the operator contract](docs/NAS_OPERATOR_COMMANDS.md) before changing this boundary.

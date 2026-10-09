@@ -252,6 +252,103 @@ class NasOperatorLinuxTests(unittest.TestCase):
             with self.assertRaisesRegex(op.Rejected, 'required_tool_unavailable:docker'):
                 installer.executable('docker')
 
+    def test_helper_update_preserves_revoke_backups_and_rolls_back_failed_probe(self):
+        from scripts import nas_operator_install as installer
+        source = Path(__file__).resolve().parents[2]
+        for failed in (False, True, 'fence'):
+            with self.subTest(failed=failed), contextlib.ExitStack() as stack:
+                root = Path(tempfile.mkdtemp(prefix='refresh-', dir=self.directory))
+                helper = root / 'helper'
+                helper.mkdir(mode=0o755)
+                private_path = root / 'private'
+                private_path.mkdir(mode=0o700)
+                paths = {'HELPER': str(helper), 'CONFIG': str(root / 'operator.json'),
+                         'ROOT_LAUNCHER': str(root / 'launcher'), 'CLIENT': str(root / 'client'),
+                         'SUDOERS': str(root / 'sudoers')}
+                stack.enter_context(patch.multiple(op, **paths))
+                stack.enter_context(patch.multiple(installer, HELPER=str(helper), PRIVATE=str(private_path)))
+                stack.enter_context(patch.object(installer, 'protected_directory'))
+                stack.enter_context(patch.object(installer, 'check_acl'))
+                stack.enter_context(patch.object(op, 'validate_sudo_policy'))
+                store = unittest.mock.MagicMock()
+                store.json.return_value = {'release_id': 'active'}
+                fence = stack.enter_context(patch.object(op.Operator, 'fence'))
+                fence.return_value.__enter__.return_value = store
+                if failed == 'fence':
+                    fence.return_value.__exit__.side_effect = op.Rejected('injected_fence_failure')
+                stack.enter_context(patch.object(op.Operator, 'identities'))
+                probe = stack.enter_context(patch.object(installer, 'verify_passwordless_status'))
+                if failed is True:
+                    probe.side_effect = op.Rejected('injected_probe_failure')
+                originals, entries = {}, []
+                with op.Tree(str(private_path), owners=(0,), protected=True) as private:
+                    for number, path in enumerate(sorted(op.installed_paths())):
+                        value = ('installed:' + path).encode()
+                        Path(path).write_bytes(value)
+                        os.chmod(path, 0o644)
+                        originals[path] = value
+                        private.write('install-backups/' + str(number), b'original-before-install')
+                        entries.append({'path': path, 'index': number, 'existed': True, 'mode': 0o644,
+                                        'sha256': hashlib.sha256(b'original-before-install').hexdigest(),
+                                        'installed_sha256': hashlib.sha256(value).hexdigest(),
+                                        'installed_mode': 0o644})
+                    original_index = {'state': 'complete', 'format': 2, 'entries': entries}
+                    private.put_json('install-backup-index.json', original_index)
+                    config = {'helper_dir': str(helper), 'private': str(private_path)}
+                    if failed:
+                        with self.assertRaisesRegex(op.Rejected, 'injected_(probe|fence)_failure'):
+                            installer.update_helpers(source, config, '/acl')
+                        self.assertEqual(original_index, private.json('install-backup-index.json'))
+                        self.assertEqual('rolled_back', private.json('helper-update.json')['state'])
+                        for path, data in originals.items():
+                            self.assertEqual(data, Path(path).read_bytes())
+                    else:
+                        result = installer.update_helpers(source, config, '/acl')
+                        self.assertTrue(result['sudoers_unchanged'])
+                        self.assertFalse(result['server_restarted'])
+                        current = private.json('install-backup-index.json')
+                        for old, new in zip(entries, current['entries']):
+                            self.assertEqual(old['sha256'], new['sha256'])
+                            self.assertEqual(old['index'], new['index'])
+                            self.assertEqual(hashlib.sha256(Path(new['path']).read_bytes()).hexdigest(),
+                                             new['installed_sha256'])
+                        for name in ('nas_operator.py', 'nas_operator_worker.py'):
+                            self.assertEqual((source / 'scripts' / name).read_bytes(), (helper / name).read_bytes())
+                        for path, data in originals.items():
+                            if Path(path).parent != helper:
+                                self.assertEqual(data, Path(path).read_bytes())
+                    for number in range(len(entries)):
+                        self.assertEqual(b'original-before-install', private.read('install-backups/' + str(number)))
+
+    def test_interrupted_helper_update_validates_all_backups_before_restore(self):
+        from scripts import nas_operator_install as installer
+        with self.tree('private', protected=True) as private:
+            helper = self.directory / 'helper'
+            helper.mkdir()
+            with patch.object(installer, 'HELPER', str(helper)), patch.object(op, 'HELPER', str(helper)):
+                entries = []
+                for number, name in enumerate(('nas_operator.py', 'nas_operator_worker.py')):
+                    old, new = ('old:' + name).encode(), ('new:' + name).encode()
+                    (helper / name).write_bytes(new)
+                    private.write('helper-update-backups/' + 'a' * 32 + '/' + str(number), old)
+                    entries.append({'path': str(helper / name), 'mode': 0o644,
+                                    'previous_sha256': hashlib.sha256(old).hexdigest(),
+                                    'new_sha256': hashlib.sha256(new).hexdigest()})
+                index = {'state': 'complete', 'entries': [{'path': path} for path in op.installed_paths()]}
+                private.put_json('helper-update.json', {'state': 'prepared', 'update_id': 'a' * 32,
+                                                       'entries': entries, 'previous_index': index})
+                saved = private.read('helper-update-backups/' + 'a' * 32 + '/1')
+                private.write('helper-update-backups/' + 'a' * 32 + '/1', b'corrupt')
+                with self.assertRaisesRegex(op.Rejected, 'helper_update_backup_changed'):
+                    installer.recover_helper_update(private)
+                self.assertEqual(b'new:nas_operator.py', (helper / 'nas_operator.py').read_bytes())
+                private.write('helper-update-backups/' + 'a' * 32 + '/1', saved)
+                installer.recover_helper_update(private)
+                self.assertEqual(index, private.json('install-backup-index.json'))
+                self.assertEqual('rolled_back', private.json('helper-update.json')['state'])
+                for name in ('nas_operator.py', 'nas_operator_worker.py'):
+                    self.assertEqual(('old:' + name).encode(), (helper / name).read_bytes())
+
     def test_native_install_validates_before_grant_and_rolls_back_rule_first_on_failure(self):
         from scripts import nas_operator_install as installer
         import pwd

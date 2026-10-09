@@ -31,9 +31,29 @@ def memory_limit():
 def run_tests(names):
     suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromName(name) for name in names)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
+    failed_tests = []
+    for test, details in result.failures + result.errors:
+        rendered = str(details)
+        lines = rendered.strip().splitlines()
+        final_line = lines[-1].strip() if lines else ''
+        exception_type = final_line.split(':', 1)[0].rsplit('.', 1)[-1]
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', exception_type):
+            exception_type = 'unknown'
+        frames = []
+        for match in re.finditer(r'File "([^"\r\n]+)", line ([0-9]+), in ([A-Za-z_][A-Za-z0-9_]*)', rendered):
+            path = match.group(1).replace('\\', '/')
+            frames.append({'file': path.rsplit('/', 1)[-1][:128],
+                           'line': int(match.group(2)), 'function': match.group(3)[:128]})
+        try:
+            test_id = test.id()
+        except Exception:
+            test_id = 'unknown'
+        failed_tests.append({'test_id': test_id[:256], 'error_type': exception_type,
+                             'traceback_locations': frames[-8:]})
     return {'state': 'passed' if result.wasSuccessful() and result.testsRun > 0 and not result.skipped else 'failed',
             'tests': result.testsRun, 'skipped': len(result.skipped),
-            'failures': len(result.failures), 'errors': len(result.errors)}
+            'failures': len(result.failures), 'errors': len(result.errors),
+            'failed_tests': failed_tests[:20], 'failed_tests_truncated': len(failed_tests) > 20}
 
 
 def database_setup(request):
@@ -109,26 +129,42 @@ def test(request, diagnostic_url, replay_url):
 
 def replay(request, url):
     import psycopg
-    baseline = json.loads(Path('/run/baseline/baseline.json').read_text())
-    raw = Path('/run/baseline/statements.json').read_bytes()
-    require(hashlib.sha256(raw).hexdigest() == baseline['statements_sha256'], 'baseline_statement_hash_mismatch')
-    statements = json.loads(raw)
-    require(type(statements) is list and 0 < len(statements) <= 1000000 and
-            all(type(value) is str and value for value in statements), 'invalid_baseline_statements')
-    # Baseline statements execute as a non-superuser in this disposable cluster only.
-    with psycopg.connect(url) as connection:
-        with connection.cursor() as cursor:
-            for statement in statements:
-                cursor.execute(statement, prepare=False)
+    profile = request.get('baseline_profile')
+    require(profile in (None, 'empty-v1'), 'invalid_baseline_profile')
+    if profile:
+        require(not request.get('baseline'), 'conflicting_baseline')
+        baseline = dict(version=1, owner_token=os.urandom(16).hex(), source_state_equivalent=False)
+    else:
+        baseline = json.loads(Path('/run/baseline/baseline.json').read_text())
+        raw = Path('/run/baseline/statements.json').read_bytes()
+        require(hashlib.sha256(raw).hexdigest() == baseline['statements_sha256'], 'baseline_statement_hash_mismatch')
+        statements = json.loads(raw)
+        require(type(statements) is list and 0 < len(statements) <= 1000000 and
+                all(type(value) is str and value for value in statements), 'invalid_baseline_statements')
+        # Registered fixture SQL stays non-superuser in the disposable cluster.
+        with psycopg.connect(url) as connection:
+            with connection.cursor() as cursor:
+                for statement in statements:
+                    cursor.execute(statement, prepare=False)
     os.environ.update(KIWOOM_REPLAY_DATABASE_URL=url, KIWOOM_REPLAY_OWNER_TOKEN=baseline['owner_token'],
                       KIWOOM_DIAGNOSTIC_WORKLOAD_PATH='/tmp/replay-control.json')
     # Supervisor mounts the immutable trace at this reader's expected path.
     # No multi-gigabyte copy into the bounded /tmp filesystem is necessary.
     from kiwoom_monitor.central_server import diagnostic_replay_database_cli as cli
-    args = ['run', '--baseline-id', request['baseline'], '--trace-id', request['trace'],
+    args = ['run', '--trace-id', request['trace'],
             '--window-start', str(request['window_start']), '--window-end', str(request['window_end']),
             '--mode', request['mode'], '--concurrency', str(request['concurrency']),
             '--baseline-version', str(baseline['version'])]
+    if profile:
+        args += ['--baseline-profile', profile]
+    else:
+        args += ['--baseline-id', request['baseline']]
+    if request.get('preflight_only'):
+        require(profile == 'empty-v1' and not request.get('pause_operational'), 'invalid_preflight_request')
+        args += ['--preflight-only']
+    if request.get('expected_baseline_id'):
+        args += ['--expected-baseline-id', request['expected_baseline_id']]
+    args += ['--capture-policy', request.get('capture_policy', 'complete')]
     if baseline['version'] == 2:
         args += ['--source-origin', baseline['source_origin']]
     for key, flag in (('include_workload', '--include-workload'), ('exclude_workload', '--exclude-workload'),

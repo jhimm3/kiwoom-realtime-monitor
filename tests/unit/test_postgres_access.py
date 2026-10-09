@@ -83,6 +83,70 @@ class FakeConnection:
 
 
 class PostgresAccessTests(unittest.TestCase):
+    @staticmethod
+    def _second_trade_values(count: int = 1) -> list[dict[str, object]]:
+        return [{
+            "trading_date": "2099-01-09", "trade_second": f"10:{index // 60:02d}:{index % 60:02d}",
+            "code": "DIAG", "market": "KRX", "open": 100, "high": 110,
+            "low": 90, "close": 105, "volume": index + 1,
+            "trade_value_won": 105 * (index + 1), "trade_count": 3,
+            "available_at": 1000.0 + index,
+        } for index in range(count)]
+
+    def test_second_trade_unique_keys_batch_under_one_native_commit(self) -> None:
+        raw = self._native_context_connection()
+        store = PostgresQueryStore("unused")
+        values = self._second_trade_values(1001)
+        started = time.time() - 1
+        with patch.object(store, "_connect", return_value=raw):
+            store.save_second_trade_bars(values)
+        self.assertEqual([12000, 12], [len(params) for _, params in raw.statements])
+        self.assertEqual("10:00:00", raw.statements[0][1][1])
+        self.assertEqual("10:16:40", raw.statements[1][1][1])
+        self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
+        call = self._calls()[-1]
+        self.assertEqual(("realtime.second_bar", "committed", 2, 1001, 1),
+                         (call["writer_family"], call["outcome"], call["sql_calls"],
+                          call["rows_attempted"], call["commits"]))
+        legacy = summarize_market_bar_saves(started, time.time() + 1)
+        self.assertEqual({"second_bar_batch_statements": 2, "second_bar_batched_rows": 1001,
+                          "second_bar_sequential_rows": 0},
+                         legacy["writer_transactions"]["realtime_second_bar"]["domain_counts"])
+
+    def test_second_trade_duplicate_and_adapted_keys_keep_sequential_parameters(self) -> None:
+        from datetime import date
+
+        [first] = self._second_trade_values()
+        cases = (
+            [first, dict(first, close=107)],
+            [first, dict(first, trade_second="10:00:00.000000", close=107)],
+            [first, dict(first, trading_date=date(2099, 1, 9), close=107)],
+        )
+        for values in cases:
+            with self.subTest(second_key=values[1]["trade_second"], day=values[1]["trading_date"]):
+                raw = self._native_context_connection()
+                store = PostgresQueryStore("unused")
+                with patch.object(store, "_connect", return_value=raw):
+                    store.save_second_trade_bars(values)
+                self.assertEqual(1, len(raw.statements))
+                self.assertEqual(2, len(raw.statements[0][1]))
+                self.assertEqual([105, 107], [row[7] for row in raw.statements[0][1]])
+                self.assertEqual(values[1]["trading_date"], raw.statements[0][1][1][0])
+                self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
+
+    def test_second_trade_later_batch_error_rolls_back_same_native_transaction(self) -> None:
+        raw = self._native_context_connection()
+        raw.fail_execute = 2
+        store = PostgresQueryStore("unused")
+        with patch.object(store, "_connect", return_value=raw):
+            with self.assertRaisesRegex(ValueError, "statement failed"):
+                store.save_second_trade_bars(self._second_trade_values(1001))
+        self.assertEqual((0, 1, 1), (raw.commits, raw.rollbacks, raw.closes))
+        call = self._calls()[-1]
+        self.assertEqual(("rolled_back", 2, 1001, 0, 1),
+                         (call["outcome"], call["sql_calls"], call["rows_attempted"],
+                          call["commits"], call["rollbacks"]))
+
     def test_realtime_minute_phases_keep_one_native_transaction(self) -> None:
         class ReturningCursor(FakeCursor):
             def __init__(self, connection: FakeConnection) -> None:
@@ -100,6 +164,11 @@ class PostgresAccessTests(unittest.TestCase):
                         100, 100, 100, 100, 3, 3, 1790000000.0,
                     )
                 return super().fetchone()
+
+            def fetchall(self) -> list[tuple[object, ...]]:
+                if "RETURNING trading_date::text" in self.last_sql:
+                    return [self.fetchone()]
+                return super().fetchall()
 
         raw = self._native_context_connection()
         raw.cursor = lambda: ReturningCursor(raw)

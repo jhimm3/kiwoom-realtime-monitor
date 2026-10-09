@@ -6,6 +6,7 @@ All mutable source is admitted as data before being mounted in a container.
 import argparse
 import contextlib
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -371,11 +372,35 @@ def cleanup_directory(tree, name):
         shutil.rmtree(str(path))  # Private parent; candidate has no access to it.
 
 
-def fingerprint(value):
+def _fingerprint_with_mounts(value, mounts):
     profile = {key: value[key] for key in ('Id', 'Image', 'Config', 'HostConfig', 'Mounts')}
+    profile['Mounts'] = list(mounts)
     profile['networks'] = {name: item['NetworkID'] for name, item in
                            value['NetworkSettings']['Networks'].items()}
     return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
+
+
+def fingerprint(value):
+    # Docker inspect can enumerate final mounts in different orders. Preserve
+    # every mount field while giving new approvals a stable representation.
+    mounts = sorted(value['Mounts'], key=lambda item: json.dumps(item, sort_keys=True))
+    return _fingerprint_with_mounts(value, mounts)
+
+
+def fingerprint_matches(value, approved):
+    if fingerprint(value) == approved:
+        return True
+    mounts = value['Mounts']
+    if _fingerprint_with_mounts(value, mounts) == approved:
+        return True
+    # Format-1 installations pinned the unsorted inspect hash. Match that exact
+    # hash by changing only Mounts order; no configuration field is discarded and
+    # the protected config/revoke snapshot need not be rewritten. Bound the
+    # compatibility search rather than allowing factorial work for large lists.
+    if len(mounts) > 7:
+        return False
+    return any(_fingerprint_with_mounts(value, order) == approved
+               for order in itertools.permutations(mounts))
 
 
 def idle(snapshot):
@@ -415,15 +440,91 @@ print(json.dumps({'health':h.get('status'),'server_build':h.get('server_build'),
 '''
 
 
+def validate_scoped_trace_manifest(manifest, trace_id):
+    """Host-only durable admission; the isolated reader verifies the full source."""
+    require(type(manifest) is dict and manifest.get('trace_id') == trace_id and
+            type(manifest.get('schema_version')) is int and manifest['schema_version'] in (2, 3) and
+            manifest.get('state') in ('complete', 'incomplete') and
+            manifest.get('coverage') == 'observed_paths_only' and
+            manifest.get('input_capture_censored') is False and
+            manifest.get('unknown_tail_loss', False) is False and
+            type(manifest.get('payload_capture')) is dict and
+            manifest['payload_capture'].get('store_inputs') is True, 'scoped_trace_not_durable')
+    counters = ('accepted', 'written', 'last_seq', 'known_dropped', 'input_rejected',
+                'payload_accepted', 'queued', 'pending_events', 'copy_reserved_bytes', 'bytes_written')
+    require(all(type(manifest.get(key)) is int and manifest[key] >= 0 for key in counters) and
+            manifest['accepted'] == manifest['written'] == manifest['last_seq'] and
+            manifest['written'] <= 5000000 and
+            not any(manifest[key] for key in ('known_dropped', 'queued', 'pending_events', 'copy_reserved_bytes')),
+            'scoped_trace_not_drained')
+    require(all(type(manifest[key]) is int and manifest[key] == 0 for key in
+                ('charged_bytes', 'packed_events', 'packing_events', 'raw_charged_bytes',
+                 'scalar_charged_bytes', 'pending_bytes', 'packed_bytes', 'packing_bytes') if key in manifest),
+            'scoped_trace_not_drained')
+    require(manifest['state'] != 'incomplete' or manifest['input_rejected'] > 0 and
+            manifest.get('reason') in ('expired', 'manual', 'master_off_or_expired'), 'scoped_trace_terminal_reason_invalid')
+    require(type(manifest.get('started_mono_ns')) is int and type(manifest.get('finished_mono_ns')) is int and
+            0 <= manifest['started_mono_ns'] < manifest['finished_mono_ns'], 'scoped_trace_clock_invalid')
+    for key in ('drop_reasons', 'input_rejected_reasons'):
+        bucket = manifest.get(key)
+        require(type(bucket) is dict and all(type(name) is str and name and type(count) is int and count >= 0
+                for name, count in bucket.items()), 'scoped_trace_rejection_accounting_invalid')
+    require(not sum(manifest['drop_reasons'].values()) and
+            sum(manifest['input_rejected_reasons'].values()) == manifest['input_rejected'],
+            'scoped_trace_rejection_accounting_invalid')
+    require(type(manifest.get('chunks')) is list and type(manifest.get('blobs')) is dict,
+            'scoped_trace_chunks_invalid')
+    sequence, size = 1, 0
+    for number, part in enumerate(manifest['chunks'], 1):
+        require(type(part) is dict and part.get('name') == '%06d.jsonl' % number and
+                all(type(part.get(key)) is int for key in ('count', 'first_seq', 'last_seq', 'bytes')) and
+                part['count'] > 0 and part['bytes'] > 0 and part['first_seq'] == sequence and
+                part['last_seq'] == sequence + part['count'] - 1 and
+                type(part.get('sha256')) is str and HEX.fullmatch(part['sha256']), 'scoped_trace_chunks_invalid')
+        sequence += part['count']
+        size += part['bytes']
+    require(sequence - 1 == manifest['written'] and size <= manifest['bytes_written'], 'scoped_trace_chunks_invalid')
+
+
+def docker_failure_class(stderr):
+    """Map Docker stderr to a small safe enum; never publish raw diagnostics."""
+    if isinstance(stderr, bytes):
+        message = stderr[:4096].decode('utf-8', 'replace').lower()
+    elif isinstance(stderr, str):
+        message = stderr[:4096].lower()
+    else:
+        message = ''
+    if any(value in message for value in ('no such image', 'manifest unknown', 'pull access denied')):
+        return 'image_unavailable'
+    if any(value in message for value in ('invalid mount config', 'bind source path does not exist',
+                                         'mounts denied', 'no such file or directory')):
+        return 'mount_invalid'
+    if any(value in message for value in ('requested cpuset', 'cpuset', 'cpu cfs scheduler')):
+        return 'cpu_affinity_unavailable'
+    if any(value in message for value in ('pids limit', 'pidslimit', 'pids-limit')):
+        return 'pids_limit_unavailable'
+    if 'permission denied' in message or 'operation not permitted' in message:
+        return 'permission_denied'
+    if any(value in message for value in ('already in use', 'is already in use', 'container name')):
+        return 'name_conflict'
+    if any(value in message for value in ('memory limit', 'memory-swap', 'invalid memory')):
+        return 'memory_limit_unavailable'
+    return 'other'
+
+
 class Operator:
     def __init__(self, config, private, run=None):
         self.config = config
         self.private = private
         self.run_process = run or subprocess.run
+        self.last_docker_action = None
+        self.last_docker_failure_class = None
 
     def docker(self, args, timeout=30, log=None):
         command = [self.config['docker'], '--host', 'unix:///var/run/docker.sock'] + list(args)
         require(all(type(x) is str for x in command), 'non_string_argument')
+        self.last_docker_action = args[0] if args else 'unknown'
+        self.last_docker_failure_class = None
         try:
             if log is None:
                 result = self.run_process(command, env=CLEAN_ENV, cwd='/', stdin=subprocess.DEVNULL,
@@ -433,8 +534,11 @@ class Operator:
                 result = self.run_process(command, env=CLEAN_ENV, cwd='/', stdin=subprocess.DEVNULL,
                                           stdout=log, stderr=log, timeout=timeout)
         except subprocess.TimeoutExpired:
+            self.last_docker_failure_class = 'timeout'
             raise Rejected('docker_command_timeout')
-        require(result.returncode == 0, 'docker_command_failed')
+        if result.returncode != 0:
+            self.last_docker_failure_class = docker_failure_class(getattr(result, 'stderr', b''))
+            raise Rejected('docker_command_failed')
         return result.stdout if log is None else b''
 
     def inspect(self, container):
@@ -442,10 +546,76 @@ class Operator:
         require(type(result) is list and len(result) == 1, 'container_inspection_invalid')
         return result[0]
 
+    def worker_failure_diagnostics(self, report, job, worker):
+        """Capture bounded, non-sensitive worker outcome details before cleanup."""
+        name = 'kiwoom-op-worker-' + job
+        try:
+            value = self.inspect(name)
+            state = value.get('State', {}) if type(value) is dict else {}
+            exit_code = state.get('ExitCode')
+            if type(exit_code) is int:
+                report['worker_exit_code'] = exit_code
+            oom_killed = state.get('OOMKilled')
+            if type(oom_killed) is bool:
+                report['worker_oom_killed'] = oom_killed
+        except Exception as error:
+            report['worker_inspection_error_type'] = type(error).__name__
+
+        try:
+            with Tree(str(worker), owners=(65534,)) as output:
+                outcome = output.json('result.json')
+            if type(outcome) is not dict:
+                report['worker_result_available'] = False
+                return
+            summary = {}
+            for key in ('state', 'tests', 'skipped', 'failures', 'errors', 'error_type',
+                        'memory_limit_bytes', 'cpu_affinity', 'failed_tests',
+                        'failed_tests_truncated'):
+                value = outcome.get(key)
+                if key == 'failed_tests' and type(value) is list:
+                    entries = []
+                    for item in value[:20]:
+                        if type(item) is not dict:
+                            continue
+                        test_id = item.get('test_id')
+                        error_type = item.get('error_type')
+                        if (type(test_id) is str and len(test_id) <= 256 and
+                                type(error_type) is str and len(error_type) <= 128):
+                            locations = []
+                            raw_locations = item.get('traceback_locations')
+                            if type(raw_locations) is list:
+                                for location in raw_locations[-8:]:
+                                    if type(location) is not dict:
+                                        continue
+                                    file_name = location.get('file')
+                                    line = location.get('line')
+                                    function = location.get('function')
+                                    if (type(file_name) is str and len(file_name) <= 128 and
+                                            type(line) is int and line > 0 and
+                                            type(function) is str and len(function) <= 128):
+                                        locations.append({'file': file_name, 'line': line,
+                                                          'function': function})
+                            entries.append({'test_id': test_id, 'error_type': error_type,
+                                            'traceback_locations': locations})
+                    summary[key] = entries
+                elif type(value) in (str, int, bool) and (type(value) is not str or len(value) <= 128):
+                    summary[key] = value
+            report['worker_result_available'] = True
+            report['worker_result_summary'] = summary
+        except Exception as error:
+            report['worker_result_available'] = False
+            report['worker_result_read_error_type'] = type(error).__name__
+
     def identities(self, running=True):
         for kind in ('server', 'database'):
             value = self.inspect(self.config[kind + '_id'])
-            require(fingerprint(value) == self.config[kind + '_fingerprint'], 'approved_container_changed')
+            actual = fingerprint(value)
+            if not fingerprint_matches(value, self.config[kind + '_fingerprint']):
+                # Hashes identify the failing boundary without exposing inspect
+                # output, which includes operational credentials in Config.Env.
+                self.identity_mismatch = {'kind': kind, 'actual_fingerprint': actual,
+                                          'approved_fingerprint': self.config[kind + '_fingerprint']}
+                raise Rejected('approved_container_changed')
             if running or kind == 'database':
                 require(value['State']['Running'] is True, 'required_container_stopped')
 
@@ -458,14 +628,31 @@ class Operator:
         require(tuple(decode(raw)) == host.identity, 'bind_mount_inode_mismatch')
 
     @contextlib.contextmanager
-    def fence(self, recovery=False):
-        with self.private.lock('operator.lock'), contextlib.ExitStack() as stack:
+    def fence(self, recovery=False, lock_held=False):
+        # lock_held is internal to the administrator updater, which retains the
+        # same private lock through final verification and rollback. No CLI input
+        # can bypass locking.
+        with (contextlib.nullcontext() if lock_held else self.private.lock('operator.lock')), \
+                contextlib.ExitStack() as stack:
             require(self.access_state().get('state') == 'enabled', 'operator_access_revoked')
+            require(self.helper_update_journal().get('state') in ('idle', 'complete', 'rolled_back'),
+                    'administrator_helper_update_recovery_required')
             self.identities(running=not recovery)
             journal = self.journal()
+            maintenance = self.operational_journal()
+            job = self.job_journal()
+            deployment_recovery = (journal.get('state') in ('prepared', 'stopped', 'selected', 'needs_admin') and
+                                   journal.get('store_identity') is not None)
+            replay_recovery = (maintenance.get('state') in
+                               ('prepared', 'paused', 'resuming', 'awaiting_job_cleanup', 'resume_pending', 'needs_admin') and
+                               maintenance.get('job_id') == job.get('job_id') and
+                               job.get('command') == 'replay' and
+                               maintenance.get('server_id') == self.config['server_id'] and
+                               maintenance.get('server_fingerprint') == self.config['server_fingerprint'])
             if not recovery:
                 require(journal.get('state') in ('idle', 'complete', 'rolled_back'), 'deployment_recovery_required')
-                require(self.job_journal().get('state') in ('idle', 'complete'), 'job_recovery_required')
+                require(job.get('state') in ('idle', 'complete'), 'job_recovery_required')
+                require(maintenance.get('state') in ('idle', 'complete'), 'operational_resume_required')
             store = stack.enter_context(Tree(self.config['store'], owners=(0, self.config['allowed_uid'])))
             control = stack.enter_context(Tree(self.config['control_dir'], owners=(0, self.config['allowed_uid'])))
             self.assert_mount_inode(store, '/app/source-runtime')
@@ -479,11 +666,16 @@ class Operator:
             for name in os.listdir(artifacts.fd):
                 if re.fullmatch(r'nas-trace-start-[0-9]{8}\.status\.json\.lock', name):
                     stack.enter_context(artifacts.lock(name))
-            if self.inspect(self.config['server_id'])['State']['Running']:
-                idle(self.snapshot())
+            server_running = self.inspect(self.config['server_id'])['State']['Running']
+            if server_running:
+                # A replay recovery may find the container already started but
+                # not ready yet. Resume owns that state and verifies health itself.
+                if not (recovery and replay_recovery):
+                    idle(self.snapshot())
             else:
-                require(recovery and journal.get('state') in ('prepared', 'stopped', 'selected', 'needs_admin') and
-                        journal.get('store_identity') == list(store.identity), 'stopped_server_recovery_unknown')
+                deployment_recovery = deployment_recovery and journal.get('store_identity') == list(store.identity)
+                require(recovery and (deployment_recovery or replay_recovery),
+                        'stopped_server_recovery_unknown')
             store.verify_identity()
             control.verify_identity()
             self.identities(running=not recovery)
@@ -504,6 +696,18 @@ class Operator:
         except FileNotFoundError:
             return {'state': 'idle'}
 
+    def operational_journal(self):
+        try:
+            return self.private.json('replay-maintenance.json')
+        except FileNotFoundError:
+            return {'state': 'idle'}
+
+    def helper_update_journal(self):
+        try:
+            return self.private.json('helper-update.json')
+        except FileNotFoundError:
+            return {'state': 'idle'}
+
     def access_state(self):
         try:
             return self.private.json('revocation.json')
@@ -514,8 +718,12 @@ class Operator:
         # This changes only this installation's access files, so no live API is needed.
         # A running operator retains this lock until its actual work has drained.
         with self.private.lock('operator.lock'):
+            require(self.helper_update_journal().get('state') in ('idle', 'complete', 'rolled_back'),
+                    'administrator_helper_update_recovery_required')
             require(self.journal().get('state') in ('idle', 'complete', 'rolled_back'), 'deployment_recovery_required')
             require(self.job_journal().get('state') in ('idle', 'complete'), 'job_recovery_required')
+            require(self.operational_journal().get('state') in ('idle', 'complete'),
+                    'operational_resume_required')
             index = self.private.json('install-backup-index.json')
             entries = index.get('entries', [])
             require(index.get('format') == 2 and index.get('state') == 'complete' and
@@ -570,12 +778,20 @@ class Operator:
                   owners=(0, self.config['allowed_uid'])) as incoming:
             return admit_source(incoming, self.private, release_id, self.config['contract'])
 
+    def active_release(self):
+        with Tree(self.config['store'], owners=(0, self.config['allowed_uid'])) as store:
+            return identifier(store.json('active.json').get('release_id'))
+
     def status(self):
         self.identities(running=False)
         journal = self.journal()
+        operational = self.operational_journal()
         result = {'journal': {k: journal.get(k) for k in ('state', 'target', 'previous')},
                   'job': self.job_journal(), 'installed': True, 'active_release': None,
-                  'temporary_access': self.access_state()['state']}
+                  'temporary_access': self.access_state()['state'],
+                  'helper_update': {'state': self.helper_update_journal().get('state')},
+                  'operational_pause': {k: operational.get(k) for k in
+                      ('state', 'job_id', 'active_release', 'server_build', 'paused_at', 'resumed_at')}}
         with Tree(self.config['store'], owners=(0, self.config['allowed_uid'])) as tree:
             result['active_release'] = tree.json('active.json')['release_id']
         if self.inspect(self.config['server_id'])['State']['Running']:
@@ -589,6 +805,100 @@ class Operator:
         else:
             result.update(diagnostics_idle=False, blocker='server_stopped')
         return result
+
+    def pause_operational_server(self, job_id, active_release):
+        """Gracefully stop only the approved app container for one isolated replay."""
+        previous = self.operational_journal()
+        require(previous.get('state') in ('idle', 'complete'), 'operational_resume_required')
+        server = self.inspect(self.config['server_id'])
+        require(server['State']['Running'] is True and
+                fingerprint_matches(server, self.config['server_fingerprint']), 'approved_server_not_running')
+        manifest, content = self.source(active_release)
+        snapshot = self.snapshot()
+        require(snapshot.get('health') == 'ok' and
+                snapshot.get('server_build') == manifest['server_build'] and
+                snapshot.get('source_path') == '/app/source-runtime/releases/' + active_release + '/src',
+                'active_server_identity_mismatch')
+        idle(snapshot)
+        record = {'state': 'prepared', 'job_id': job_id, 'server_id': self.config['server_id'],
+                  'server_fingerprint': self.config['server_fingerprint'], 'active_release': active_release,
+                  'server_build': manifest['server_build'], 'source_hash': content,
+                  'was_running': True, 'collection_gap_expected': True,
+                  'database_container_unchanged': True, 'realtime_loss_verified': False}
+        self.private.put_json('replay-maintenance.json', record)
+        job = self.job_journal()
+        job.update(operational_pause='prepared', server_was_running=True)
+        self.private.put_json('job.json', job)
+        try:
+            self.docker(['stop', '--time', '60', self.config['server_id']], timeout=90)
+        except BaseException:
+            # A lost Docker acknowledgement is ambiguous. Persist enough state for
+            # `recover` to inspect and resume without issuing another stop blindly.
+            try:
+                stopped = self.inspect(self.config['server_id'])['State']['Running'] is False
+            except BaseException:
+                record['state'] = 'needs_admin'
+                self.private.put_json('replay-maintenance.json', record)
+                job.update(state='resume_pending', operational_pause='needs_admin')
+                self.private.put_json('job.json', job)
+                raise
+            if stopped:
+                record['state'] = 'paused'
+                record['paused_at'] = time.time()
+            else:
+                record['state'] = 'complete'
+                record['stop_not_confirmed'] = True
+            self.private.put_json('replay-maintenance.json', record)
+            job.update(operational_pause=record['state'])
+            self.private.put_json('job.json', job)
+            raise
+        require(self.inspect(self.config['server_id'])['State']['Running'] is False,
+                'server_stop_not_confirmed')
+        record['state'] = 'paused'
+        record['paused_at'] = time.time()
+        self.private.put_json('replay-maintenance.json', record)
+        job.update(operational_pause='paused')
+        self.private.put_json('job.json', job)
+        return record
+
+    def resume_operational_server(self):
+        """Restore the exact server container/release recorded before replay."""
+        record = self.operational_journal()
+        if record.get('state') in ('idle', 'complete'):
+            return {'state': record.get('state', 'idle'), 'server_restarted': False}
+        require(record.get('state') in
+                ('prepared', 'paused', 'resuming', 'awaiting_job_cleanup', 'resume_pending', 'needs_admin') and
+                record.get('was_running') is True and record.get('server_id') == self.config['server_id'] and
+                record.get('server_fingerprint') == self.config['server_fingerprint'],
+                'operational_resume_journal_invalid')
+        active_release = identifier(record.get('active_release'))
+        value = self.inspect(self.config['server_id'])
+        require(fingerprint_matches(value, record['server_fingerprint']), 'approved_server_changed_during_replay')
+        require(self.active_release() == active_release, 'active_release_changed_during_replay')
+        manifest, content = self.source(active_release)
+        require(content == record.get('source_hash') and manifest.get('server_build') == record.get('server_build'),
+                'active_server_source_changed_during_replay')
+        record['state'] = 'resuming'
+        self.private.put_json('replay-maintenance.json', record)
+        was_running = value['State']['Running'] is True
+        if not was_running:
+            self.docker(['start', self.config['server_id']])
+        require(self.inspect(self.config['server_id'])['State']['Running'] is True,
+                'server_start_not_confirmed')
+        self.wait_ready(active_release, manifest)
+        self.identities()
+        require(self.active_release() == active_release, 'active_release_changed_during_resume')
+        record.update(state='complete', resumed_at=time.time(), server_restarted=not was_running)
+        self.private.put_json('replay-maintenance.json', record)
+        job = self.job_journal()
+        if job.get('job_id') == record.get('job_id'):
+            job.update(operational_pause='complete', server_resumed=True)
+            self.private.put_json('job.json', job)
+        return {'state': 'complete', 'server_restarted': not was_running,
+                'active_release': active_release, 'server_build': manifest['server_build'],
+                'database_container_unchanged': True, 'collection_gap_expected': True,
+                'realtime_loss_verified': False, 'paused_at': record.get('paused_at'),
+                'resumed_at': record['resumed_at']}
 
     def worker_argv(self, job, pg_name, release_id, extra_mounts=()):
         root = self.private.path
@@ -646,6 +956,8 @@ class Operator:
                 pass
 
     def run_job(self, args, manifest, content):
+        self.last_docker_action = None
+        self.last_docker_failure_class = None
         validate_cpu_limits(self.config, set(os.sched_getaffinity(0)))
         require(shutil.disk_usage(self.private.path).free >= self.config['minimum_disk_free'], 'insufficient_disk_headroom')
         available = next(int(line.split()[1]) * 1024 for line in Path('/proc/meminfo').read_text().splitlines()
@@ -660,6 +972,8 @@ class Operator:
         password = secrets.token_hex(32)
         request = vars(args).copy()
         request.update(admin_password=password, job_id=job)
+        pause_operational = args.command == 'replay' and bool(getattr(args, 'pause_operational', False))
+        require(not (pause_operational and getattr(args, 'preflight_only', False)), 'preflight_cannot_pause_operational')
         pg_name = 'kiwoom-op-pg-' + job
         source_state_equivalent = False
         extra_mounts = []
@@ -685,7 +999,9 @@ class Operator:
                   'runtime_image_id': self.config['runtime_image_id'], 'pg_image_id': self.config['pg_image_id'],
                   'worker_cpuset': self.config['worker_cpuset'], 'pg_cpuset': self.config['pg_cpuset'],
                   'pids_support': 'not_yet_verified', 'state': 'failed'}
-        self.private.put_json('job.json', {'state': 'running', 'job_id': job, 'command': args.command})
+        stage = 'prepare_job'
+        self.private.put_json('job.json', {'state': 'running', 'job_id': job, 'command': args.command,
+                                           'operational_pause': 'not_requested' if not pause_operational else 'pending'})
         try:
             worker.mkdir(parents=True, mode=0o700)
             self.private.put_json(base + '/worker/request.json', request)
@@ -695,14 +1011,22 @@ class Operator:
             if storage == 'disk':
                 data.mkdir(mode=0o700)
             if args.command == 'replay':
-                self.registered_input('traces', args.trace)
-                baseline = self.registered_input('baselines', args.baseline)
-                report['source_state_equivalent'] = baseline['source_state_equivalent']
+                registered = self.registered_input('traces', args.trace)
+                policy = getattr(args, 'capture_policy', 'complete')
+                require(registered.get('capture_policy', 'complete') == policy, 'trace_registration_policy_mismatch')
+                report.update(capture_policy=policy, preflight_only=bool(getattr(args, 'preflight_only', False)),
+                              source_manifest_sha256=registered.get('files', {}).get('manifest.json'))
+                if not getattr(args, 'baseline_profile', None):
+                    baseline = self.registered_input('baselines', args.baseline)
+                    report['source_state_equivalent'] = baseline['source_state_equivalent']
+                    extra_mounts += ['--mount', 'type=bind,src=' + self.private.path + '/baselines/' + args.baseline + ',dst=/run/baseline,readonly']
                 extra_mounts += ['--mount', 'type=bind,src=' + self.private.path + '/traces/' + args.trace + ',dst=/run/trace,readonly',
-                                 '--mount', 'type=bind,src=' + self.private.path + '/baselines/' + args.baseline + ',dst=/run/baseline,readonly',
                                  '--mount', 'type=bind,src=' + self.private.path + '/traces/' + args.trace + ',dst=/tmp/diagnostic-traces/' + args.trace + ',readonly']
+            stage = 'postgres_create'
             self.docker(pg)
+            stage = 'postgres_start'
             self.docker(['start', pg_name])
+            stage = 'postgres_readiness'
             deadline = time.monotonic() + 60
             while True:
                 try:
@@ -711,54 +1035,102 @@ class Operator:
                 except Rejected:
                     require(time.monotonic() < deadline, 'temporary_postgres_not_ready')
                     time.sleep(.5)
+            stage = 'postgres_memory_probe'
             actual_limit = self.docker(['exec', pg_name, '/bin/sh', '-c',
                 'if [ -f /sys/fs/cgroup/memory.max ]; then cat /sys/fs/cgroup/memory.max; else cat /sys/fs/cgroup/memory/memory.limit_in_bytes; fi']).decode().strip()
             require(actual_limit.isdigit() and 0 < int(actual_limit) <= self.config['pg_memory'], 'pg_memory_limit_not_enforced')
+            stage = 'postgres_affinity_probe'
             actual_cpu = self.docker(['exec', pg_name, '/bin/sh', '-c',
                 'while IFS=: read -r key value; do if [ "$key" = Cpus_allowed_list ]; then printf "%s\\n" "$value"; fi; done < /proc/self/status']).decode().strip()
             verify_cpu_affinity(actual_cpu, self.config['pg_cpuset'])
             report['pg_cpu_affinity'] = actual_cpu
+            stage = 'worker_create'
             self.docker(self.worker_argv(job, pg_name, args.release, extra_mounts))
+            stage = 'container_isolation_inspection'
             for name, cpus in ((pg_name, self.config['pg_cpuset']),
                                ('kiwoom-op-worker-' + job, self.config['worker_cpuset'])):
                 value = self.inspect(name)
                 require(value['HostConfig']['Memory'] > 0 and not value['HostConfig']['Privileged'] and
                         value['Config']['Labels'][LABEL] == job, 'job_isolation_invalid')
                 verify_cpu_affinity(value['HostConfig'].get('CpusetCpus'), cpus)
+            if pause_operational:
+                stage = 'operational_pause'
+                active_release = identifier(decode(active_before).get('release_id'))
+                maintenance = self.pause_operational_server(job, active_release)
+                report['operational_pause'] = {'requested': True, 'state': maintenance['state'],
+                    'active_release': active_release, 'server_build': maintenance['server_build'],
+                    'collection_gap_expected': True, 'database_container_unchanged': True,
+                    'realtime_loss_verified': False}
             with open(str(Path(self.private.path) / base / 'process.log'), 'xb') as log:
+                stage = 'worker_start_and_run'
                 self.docker(['start', '-a', 'kiwoom-op-worker-' + job], timeout=self.config['job_timeout'], log=log)
+            stage = 'worker_result_inspection'
             value = self.inspect('kiwoom-op-worker-' + job)
             require(value['State']['ExitCode'] == 0 and not value['State'].get('OOMKilled'), 'worker_failed')
+            stage = 'worker_result_read'
             with Tree(str(worker), owners=(65534,)) as output:
                 outcome = output.json('result.json')
             require(outcome.get('state') == 'passed', 'worker_gate_failed')
             require(type(outcome.get('memory_limit_bytes')) is int and
                     0 < outcome['memory_limit_bytes'] <= self.config['worker_memory'], 'worker_memory_limit_not_enforced')
             verify_cpu_affinity(outcome.get('cpu_affinity'), self.config['worker_cpuset'])
-            self.identities()
+            stage = 'final_identity_fence'
+            self.identities(running=not pause_operational)
+            if pause_operational:
+                require(self.inspect(self.config['server_id'])['State']['Running'] is False,
+                        'operational_server_resumed_during_replay')
+            stage = 'active_release_fence'
             with Tree(self.config['store'], owners=(0, self.config['allowed_uid'])) as store:
                 require(store.read('active.json') == active_before, 'active_release_changed_during_job')
+            stage = 'pids_limit_probe'
             pids = decode(self.docker(['info', '--format', '{{json .PidsLimit}}']))
             report.update(state='passed', outcome=outcome, pids_support=pids is True,
                           active_release_and_containers_unchanged=True)
         except BaseException as error:
             report['error_type'] = type(error).__name__
+            report['failure_stage'] = stage
             if isinstance(error, Rejected):
                 report['reason'] = str(error)
+            if str(error) in ('docker_command_failed', 'docker_command_timeout'):
+                report['failed_docker_action'] = self.last_docker_action
+                report['docker_failure_class'] = self.last_docker_failure_class or 'unknown'
+            if stage == 'worker_start_and_run':
+                failed_action = self.last_docker_action
+                failed_class = self.last_docker_failure_class
+                self.worker_failure_diagnostics(report, job, worker)
+                self.last_docker_action = failed_action
+                self.last_docker_failure_class = failed_class
             raise
         finally:
+            cleanup_error = None
             try:
                 self.cleanup_job(job)
                 report['cleanup_complete'] = True
-                self.private.put_json('job.json', {'state': 'complete', 'job_id': job})
-            except BaseException:
+            except BaseException as error:
                 report.update(state='failed', cleanup_complete=False)
-                raise
-            finally:
-                self.private.put_json('reports/' + job + '.json', report)
-        if args.command == 'test':
-            self.private.put_json('gates/' + args.release + '.json',
-                                  {'source_hash': content, 'profile': args.profile, 'passed': True})
+                cleanup_error = error
+                if pause_operational:
+                    maintenance = self.operational_journal()
+                    if maintenance.get('state') not in ('idle', 'complete'):
+                        maintenance['state'] = 'awaiting_job_cleanup'
+                        self.private.put_json('replay-maintenance.json', maintenance)
+                        self.private.put_json('job.json', {'state': 'resume_pending', 'job_id': job,
+                                                           'command': args.command,
+                                                           'operational_pause': 'awaiting_job_cleanup'})
+            if cleanup_error is None and pause_operational:
+                try:
+                    report['operational_resume'] = self.resume_operational_server()
+                except BaseException as error:
+                    report.update(state='failed', operational_resume_failed=True)
+                    self.private.put_json('job.json', {'state': 'resume_pending', 'job_id': job,
+                                                       'command': args.command, 'operational_pause': 'resume_pending'})
+                    cleanup_error = error
+            if cleanup_error is None:
+                self.private.put_json('job.json', {'state': 'complete', 'job_id': job,
+                    'command': args.command, 'operational_pause': 'complete' if pause_operational else 'not_requested'})
+            self.private.put_json('reports/' + job + '.json', report)
+            if cleanup_error is not None:
+                raise cleanup_error
         return report
 
     def registered_input(self, kind, input_id):
@@ -769,23 +1141,29 @@ class Operator:
             require(hashlib.sha256(data).hexdigest() == digest, 'registered_input_changed')
         return catalog
 
-    def register(self, kind, input_id):
+    def register(self, kind, input_id, capture_policy='complete'):
         identifier(input_id)
+        require(capture_policy in ('complete', 'scoped-operations', 'partial-operations') and
+                (kind == 'traces' or capture_policy == 'complete'), 'invalid_capture_policy')
         incoming_path = self.config['trace_dir'] + '/' + input_id if kind == 'traces' else \
             self.config['project'] + '/operator-inputs/baselines/' + input_id
         with Tree(incoming_path, owners=(0, self.config['allowed_uid'])) as incoming:
             if kind == 'traces':
-                manifest = incoming.json('manifest.json')
-                require(manifest.get('trace_id') == input_id and manifest.get('state') == 'complete' and
-                        manifest.get('accepted') == manifest.get('written') and manifest.get('known_dropped') == 0 and
-                        manifest.get('input_rejected') == 0 and manifest.get('input_capture_censored') is False,
-                        'trace_not_complete')
+                manifest = decode(incoming.read('manifest.json', self.config['input_file_limit']))
+                if capture_policy in ('scoped-operations', 'partial-operations'):
+                    validate_scoped_trace_manifest(manifest, input_id)
+                else:
+                    require(manifest.get('trace_id') == input_id and manifest.get('state') == 'complete' and
+                            manifest.get('accepted') == manifest.get('written') and manifest.get('known_dropped') == 0 and
+                            manifest.get('input_rejected') == 0 and manifest.get('input_capture_censored') is False,
+                            'trace_not_complete')
                 names = {'manifest.json'}
                 names.update(x['name'] for x in manifest.get('chunks', []))
                 chunk_hashes = {item['name']: item['sha256'] for item in manifest.get('chunks', [])}
                 for key, blob in manifest.get('blobs', {}).items():
                     names.add(blob.get('name') or 'payload-' + key + '.json')
-                catalog = {'source_state_equivalent': False}
+                catalog = {'source_state_equivalent': False, 'capture_policy': capture_policy,
+                           'original_capture_state': manifest['state']}
             else:
                 manifest = incoming.json('baseline.json')
                 require(manifest.get('baseline_id') == input_id and HEX.fullmatch(input_id) and
@@ -816,10 +1194,13 @@ class Operator:
             if kind == 'baselines':
                 require(files['statements.json'] == manifest['statements_sha256'], 'baseline_hash_mismatch')
             if existing is not None:
-                require(existing['files'] == files, 'registered_input_conflict')
+                require(existing['files'] == files and (kind != 'traces' or
+                        existing.get('capture_policy', 'complete') == capture_policy), 'registered_input_conflict')
                 return existing
             incoming.verify_identity()
             catalog.update(files=files)
+            if kind == 'traces':
+                catalog['source_manifest_sha256'] = files['manifest.json']
             self.private.put_json(prefix + '/registration.json', catalog)
             return catalog
 
@@ -862,7 +1243,8 @@ class Operator:
                         'verified_previous_release_required')
             else:
                 gate = self.private.json('gates/' + target + '.json')
-                require(gate.get('passed') is True and gate.get('source_hash') == content and
+                require(gate.get('passed') is True and gate.get('post_job_fence_verified') is True and
+                        gate.get('source_hash') == content and
                         gate.get('profile') in self.config['deploy_profiles'], 'exact_source_gate_required')
         require(old_manifest['contract'] == manifest['contract'], 'schema_change_requires_admin')
         with store.parent('deploy.lock') as (parent, leaf):
@@ -917,10 +1299,15 @@ class Operator:
         job = self.job_journal()
         if job.get('state') not in ('idle', 'complete'):
             self.cleanup_job(job['job_id'])
+            maintenance = self.operational_journal()
+            if maintenance.get('state') not in ('idle', 'complete'):
+                self.resume_operational_server()
             self.private.put_json('reports/' + job['job_id'] + '.json',
                                   {'state': 'failed', 'job_id': job['job_id'],
                                    'reason': 'interrupted_job', 'cleanup_complete': True})
             self.private.put_json('job.json', {'state': 'complete', 'job_id': job['job_id']})
+        elif self.operational_journal().get('state') not in ('idle', 'complete'):
+            self.resume_operational_server()
         journal = self.journal()
         if journal.get('state') in ('idle', 'complete', 'rolled_back'):
             return {'state': 'recovered', 'deployment_changed': False}
@@ -976,10 +1363,17 @@ def parser():
     for name in ('register-trace', 'register-baseline'):
         command = commands.add_parser(name, allow_abbrev=False)
         command.add_argument('input_id', type=identifier)
+        if name == 'register-trace':
+            command.add_argument('--capture-policy', choices=('complete', 'scoped-operations', 'partial-operations'), default='complete')
     replay = commands.add_parser('replay', allow_abbrev=False)
     replay.add_argument('release', type=identifier)
     replay.add_argument('trace', type=identifier)
-    replay.add_argument('--baseline', required=True)
+    baseline = replay.add_mutually_exclusive_group(required=True)
+    baseline.add_argument('--baseline')
+    baseline.add_argument('--baseline-profile', choices=('empty-v1',))
+    replay.add_argument('--expected-baseline-id')
+    replay.add_argument('--preflight-only', action='store_true')
+    replay.add_argument('--capture-policy', choices=('complete', 'scoped-operations', 'partial-operations'), default='complete')
     replay.add_argument('--window-start', type=float, required=True)
     replay.add_argument('--window-end', type=float, required=True)
     replay.add_argument('--mode', choices=('recorded_operations', 'collector_with_background'), default='recorded_operations')
@@ -988,6 +1382,8 @@ def parser():
     replay.add_argument('--collector-component', action='append', default=[])
     replay.add_argument('--concurrency', type=int, default=8)
     replay.add_argument('--storage', choices=('disk', 'ram'), default='disk')
+    replay.add_argument('--pause-operational', action='store_true',
+                        help='gracefully stop and verify the approved server container during replay, then resume it')
     return result
 
 
@@ -1000,13 +1396,26 @@ def validate_args(args, config):
         require(args.profile != 'selected' or 0 < len(args.test) <= 100, 'selected_tests_required')
         require(all(TEST.fullmatch(x) for x in args.test), 'invalid_test_name')
     if args.command == 'replay':
-        require(HEX.fullmatch(args.baseline) is not None, 'invalid_baseline_id')
+        require(args.baseline is None or HEX.fullmatch(args.baseline) is not None, 'invalid_baseline_id')
+        require(args.expected_baseline_id is None or HEX.fullmatch(args.expected_baseline_id) is not None,
+                'invalid_baseline_id')
+        require(not args.preflight_only or args.baseline_profile == 'empty-v1', 'preflight_requires_empty_profile')
+        require(not (args.preflight_only and args.pause_operational), 'preflight_cannot_pause_operational')
+        require(not args.baseline_profile or args.preflight_only or args.expected_baseline_id is not None,
+                'expected_baseline_required')
+        require(args.expected_baseline_id is None or args.baseline_profile == 'empty-v1',
+                'expected_baseline_requires_profile')
+        require(args.capture_policy not in ('scoped-operations', 'partial-operations') or
+                (args.mode == 'recorded_operations' and bool(args.include_workload) and not args.collector_component),
+                'scoped_operations_selection_required')
         require(math.isfinite(args.window_start) and math.isfinite(args.window_end) and
                 0 <= args.window_start < args.window_end <= 7200, 'invalid_replay_window')
         require(1 <= args.concurrency <= config['max_concurrency'], 'invalid_concurrency')
         for values in (args.include_workload, args.exclude_workload, args.collector_component):
             require(len(values) <= 100 and all(WORD.fullmatch(x) for x in values), 'invalid_workload_selection')
         require(not set(args.include_workload) & set(args.exclude_workload), 'conflicting_workload_selection')
+        require(len(set(args.include_workload)) == len(args.include_workload) and
+                len(set(args.exclude_workload)) == len(args.exclude_workload), 'duplicate_workload_selection')
 
 
 def load_config(revoking=False):
@@ -1056,21 +1465,43 @@ def main(argv=None):
             elif args.command == 'revoke':
                 result = operator.revoke_access()
             else:
-                with operator.fence(recovery=args.command == 'recover') as store:
-                    if args.command == 'deploy':
-                        result = operator.deploy(store, args.release)
-                    elif args.command == 'rollback':
-                        previous = operator.journal().get('previous')
-                        require(previous is not None, 'previous_release_unavailable')
-                        result = operator.deploy(store, previous, rollback=True)
-                    elif args.command == 'recover':
-                        result = operator.recover(store)
-                    elif args.command in ('register-trace', 'register-baseline'):
-                        kind = 'traces' if args.command == 'register-trace' else 'baselines'
-                        result = operator.register(kind, args.input_id)
-                    else:
-                        manifest, content = operator.source(args.release)
-                        result = operator.run_job(args, manifest, content)
+                result = None
+                try:
+                    with operator.fence(recovery=args.command == 'recover') as store:
+                        if args.command == 'deploy':
+                            result = operator.deploy(store, args.release)
+                        elif args.command == 'rollback':
+                            previous = operator.journal().get('previous')
+                            require(previous is not None, 'previous_release_unavailable')
+                            result = operator.deploy(store, previous, rollback=True)
+                        elif args.command == 'recover':
+                            result = operator.recover(store)
+                        elif args.command in ('register-trace', 'register-baseline'):
+                            kind = 'traces' if args.command == 'register-trace' else 'baselines'
+                            result = operator.register(kind, args.input_id,
+                                capture_policy=getattr(args, 'capture_policy', 'complete'))
+                        else:
+                            manifest, content = operator.source(args.release)
+                            result = operator.run_job(args, manifest, content)
+                except BaseException as error:
+                    if isinstance(result, dict) and re.fullmatch('[a-f0-9]{32}', result.get('job_id', '')):
+                        result.update(state='failed', post_job_fence_verified=False,
+                                      error_type=type(error).__name__)
+                        if isinstance(error, Rejected):
+                            result['reason'] = str(error)
+                        if getattr(operator, 'identity_mismatch', None):
+                            result['identity_mismatch'] = operator.identity_mismatch
+                        result['active_release_and_containers_unchanged'] = False
+                        private.put_json('reports/' + result['job_id'] + '.json', result)
+                    raise
+                if args.command in ('test', 'replay'):
+                    result['post_job_fence_verified'] = True
+                    private.put_json('reports/' + result['job_id'] + '.json', result)
+                    if args.command == 'test':
+                        private.put_json('gates/' + args.release + '.json',
+                                         {'source_hash': result['source_hash'],
+                                          'profile': args.profile, 'passed': True,
+                                          'post_job_fence_verified': True})
             print(json.dumps({'state': 'ok', 'command': args.command, 'result': result}, sort_keys=True))
             return 0
     except Exception as error:

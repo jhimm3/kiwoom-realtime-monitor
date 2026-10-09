@@ -37,6 +37,9 @@ _STOP = threading.Event()
 _ABORT = threading.Event()
 _WAKE = threading.Event()
 _COPY_GATE = threading.BoundedSemaphore(2)
+# A DB worker's large snapshot copy must not occupy the collector's only lane.
+# All three reservations still share the same session/raw-memory admission limits.
+_COLLECTOR_COPY_GATE = threading.BoundedSemaphore(1)
 _COPY_RESERVATION = 8 * 1024 * 1024
 _MEMORY_LIMIT = 256 * 1024 * 1024
 _DEFERRED_MEMORY_LIMIT = 8 * 1024 * 1024 * 1024
@@ -159,6 +162,8 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
                     "queue_high_water": 0, "pending_events": 0, "reason": None,
                     "charged_bytes": 0, "scalar_charged_bytes": 0, "copy_reserved_bytes": 0,
                     "memory_high_water": 0, "blobs": {}, "payload_accepted": 0,
+                    "copy_inflight": {"store": 0, "collector": 0},
+                    "copy_slot_limits": {"store": 2, "collector": 1},
                     "memory_limit_bytes": _DEFERRED_MEMORY_LIMIT if persist_at is not None else _MEMORY_LIMIT,
                     "event_capacity": _CAPACITY,
                     "persistence_mode": 'deferred_ram' if persist_at is not None else 'streaming',
@@ -197,6 +202,8 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
 
 def _public(session: dict) -> dict:
     return {**session, "payload_capture": dict(session.get("payload_capture", {})),
+            "copy_inflight": dict(session.get("copy_inflight", {})),
+            "copy_slot_limits": dict(session.get("copy_slot_limits", {})),
             "chunks": [dict(part) for part in session.get("chunks", [])],
             "input_coverage": {key: dict(value) for key, value in session.get("input_coverage", {}).items()},
             "input_rejected_reasons": dict(session.get("input_rejected_reasons", {})),
@@ -497,8 +504,16 @@ def reject_input(trace_id: str, fields: dict) -> None:
 
 def emit_payload(trace_id: str, event_type: str, fields: dict, value) -> bool:
     """Try a bounded immutable copy; all encoding/hash/file work stays in the worker."""
-    if not _COPY_GATE.acquire(blocking=False):
-        reject_input(trace_id, {**fields, "reason": "capture_copy_busy"})
+    lane = "collector" if event_type == "collector_input" else "store"
+    gate = _COLLECTOR_COPY_GATE if lane == "collector" else _COPY_GATE
+    if not gate.acquire(blocking=False):
+        with _LOCK:
+            current = _SESSION if _SESSION and _SESSION["trace_id"] == trace_id else {}
+            detail = {"copy_lane": lane, "lane_capacity": 1 if lane == "collector" else 2,
+                      "store_reserved_copies": current.get("copy_inflight", {}).get("store", 0),
+                      "collector_reserved_copies": current.get("copy_inflight", {}).get("collector", 0),
+                      "copy_reserved_bytes": current.get("copy_reserved_bytes", 0)}
+        reject_input(trace_id, {**fields, "reason": "capture_copy_busy", "rejection_detail": detail})
         return False
     reservation = False
     try:
@@ -522,6 +537,7 @@ def emit_payload(trace_id: str, event_type: str, fields: dict, value) -> bool:
             else:
                 budget_available = True
                 session["copy_reserved_bytes"] += reservation_bytes
+                session["copy_inflight"][lane] += 1
                 session["memory_high_water"] = max(session["memory_high_water"],
                                                     session["charged_bytes"] + session["copy_reserved_bytes"])
                 reservation = True
@@ -545,6 +561,7 @@ def emit_payload(trace_id: str, event_type: str, fields: dict, value) -> bool:
         with _LOCK:
             # Charge remains reserved if stop/worker is draining; its finally waits for copies.
             session["copy_reserved_bytes"] -= reservation_bytes
+            session["copy_inflight"][lane] -= 1
             copy_ms = (time.perf_counter() - copy_started) * 1000
             session["copy_ms_total"] += copy_ms
             session["copy_ms_max"] = max(session["copy_ms_max"], copy_ms)
@@ -565,9 +582,10 @@ def emit_payload(trace_id: str, event_type: str, fields: dict, value) -> bool:
         if reservation:
             with _LOCK:
                 session["copy_reserved_bytes"] -= reservation_bytes
+                session["copy_inflight"][lane] -= 1
             if session.get('persist_at') is None or session['state'] != 'running':
                 _WAKE.set()
-        _COPY_GATE.release()
+        gate.release()
 
 
 def payload_bytes(trace_id: str, digest: str) -> bytes:
@@ -887,7 +905,10 @@ def recorded_events(trace_id: str) -> tuple[dict, list[dict]]:
 
 def recorded_window_events(trace_id: str, *, window_start_seconds: float,
                            window_end_seconds: float, mode: str,
-                           collector_components: tuple[str, ...] = ()) -> tuple[dict, list[dict]]:
+                           collector_components: tuple[str, ...] = (),
+                           capture_policy: str = 'complete',
+                           include_workloads: tuple[str, ...] = (),
+                           exclude_workloads: tuple[str, ...] = ()) -> tuple[dict, list[dict]]:
     """Read a bounded replay window while retaining only needed payloads.
 
     Chunk lines are still checksum- and sequence-verified across the complete
@@ -896,6 +917,14 @@ def recorded_window_events(trace_id: str, *, window_start_seconds: float,
     is limited to a 15-minute capture-relative end until periodic RAM snapshots
     exist.
     """
+    if capture_policy in {'scoped-operations', 'partial-operations'}:
+        return _recorded_store_window(trace_id, window_start_seconds=window_start_seconds,
+            window_end_seconds=window_end_seconds, mode=mode, collector_components=collector_components,
+            include_workloads=include_workloads, exclude_workloads=exclude_workloads,
+            capture_policy=capture_policy)
+    if capture_policy != 'complete':
+        raise ValueError('recorded_capture_policy_invalid')
+
     import math
 
     if (mode not in {"recorded_operations", "collector_with_background"}
@@ -1006,6 +1035,271 @@ def recorded_window_events(trace_id: str, *, window_start_seconds: float,
         "market_input_cycles_touched": len(market_input_cycles_touched),
         "market_input_cycles_with_split_window": split_market_input_cycles,
     }}, rows
+
+
+def _scoped_capture_manifest(manifest, trace_id):
+    """Durable source admission only; selected inputs still need their own gate."""
+    if (type(manifest) is not dict or manifest.get('trace_id') != trace_id
+            or type(manifest.get('schema_version')) is not int or manifest['schema_version'] not in {2, 3}
+            or manifest.get('state') not in {'complete', 'incomplete'}
+            or manifest.get('coverage') != 'observed_paths_only'
+            or manifest.get('input_capture_censored') is not False
+            or type(manifest.get('payload_capture')) is not dict
+            or manifest['payload_capture'].get('store_inputs') is not True
+            or manifest.get('unknown_tail_loss', False) is not False):
+        raise ValueError('recorded_capture_incomplete_or_old_schema')
+    counters = ('accepted', 'written', 'last_seq', 'known_dropped', 'input_rejected',
+                'payload_accepted', 'queued', 'pending_events', 'copy_reserved_bytes', 'bytes_written')
+    if (any(type(manifest.get(key)) is not int or manifest[key] < 0 for key in counters)
+            or not manifest['accepted'] == manifest['written'] == manifest['last_seq']
+            or manifest['written'] > _CAPACITY
+            or any(manifest[key] for key in ('known_dropped', 'queued', 'pending_events', 'copy_reserved_bytes'))):
+        raise ValueError('recorded_capture_not_durably_drained')
+    for key in ('charged_bytes', 'packed_events', 'packing_events', 'raw_charged_bytes',
+                'scalar_charged_bytes', 'pending_bytes', 'packed_bytes', 'packing_bytes'):
+        if key in manifest and (type(manifest[key]) is not int or manifest[key] != 0):
+            raise ValueError('recorded_capture_not_durably_drained')
+    if (manifest['state'] == 'incomplete' and (manifest['input_rejected'] <= 0
+            or manifest.get('reason') not in {'expired', 'manual', 'master_off_or_expired'})):
+        raise ValueError('recorded_capture_terminal_reason_invalid')
+    started, finished = manifest.get('started_mono_ns'), manifest.get('finished_mono_ns')
+    if type(started) is not int or type(finished) is not int or not 0 <= started < finished:
+        raise ValueError('recorded_capture_clock_invalid')
+    for key in ('drop_reasons', 'input_rejected_reasons'):
+        bucket = manifest.get(key)
+        if (type(bucket) is not dict or any(type(name) is not str or not name
+                or type(count) is not int or count < 0 for name, count in bucket.items())):
+            raise ValueError('recorded_capture_rejection_accounting_invalid')
+    if sum(manifest['drop_reasons'].values()) or sum(manifest['input_rejected_reasons'].values()) != manifest['input_rejected']:
+        raise ValueError('recorded_capture_rejection_accounting_invalid')
+    chunks = manifest.get('chunks')
+    if type(chunks) is not list or type(manifest.get('blobs')) is not dict:
+        raise ValueError('recorded_capture_manifest_invalid')
+    sequence, size = 1, 0
+    for index, part in enumerate(chunks, 1):
+        if (type(part) is not dict or part.get('name') != f'{index:06d}.jsonl'
+                or any(type(part.get(key)) is not int for key in ('count', 'first_seq', 'last_seq', 'bytes'))
+                or part['count'] <= 0 or part['bytes'] <= 0 or part['first_seq'] != sequence
+                or part['last_seq'] != sequence + part['count'] - 1
+                or type(part.get('sha256')) is not str
+                or re.fullmatch(r'[0-9a-f]{64}', part['sha256']) is None):
+            raise ValueError('recorded_chunk_manifest_mismatch')
+        sequence += part['count']
+        size += part['bytes']
+    if sequence - 1 != manifest['written'] or size > manifest['bytes_written']:
+        raise ValueError('recorded_chunk_manifest_mismatch')
+
+
+def _recorded_store_window(trace_id, *, window_start_seconds, window_end_seconds, mode,
+                           collector_components, include_workloads, exclude_workloads,
+                           capture_policy='scoped-operations'):
+    """Checksummed sparse native-operation frontier; no collector reconstruction.
+
+    Full source validation streams twice with a fixed manifest. Only selected
+    arguments are hydrated; source sequence and native DB-call associations stay
+    intact, including ends recorded after the selected entry window.
+    """
+    from .diagnostic_replay_contract import _seal_store_window, compile_recorded_plan
+
+    if (mode != 'recorded_operations' or collector_components or not include_workloads
+            or any(type(name) is not str or not name for name in (*include_workloads, *exclude_workloads))
+            or len(set(include_workloads)) != len(include_workloads)
+            or len(set(exclude_workloads)) != len(exclude_workloads)
+            or set(include_workloads) & set(exclude_workloads)):
+        raise ValueError('recorded_scoped_operations_selection_required')
+    if (any(type(value) not in (int, float) or not math.isfinite(value)
+            for value in (window_start_seconds, window_end_seconds))
+            or not 0 <= window_start_seconds < window_end_seconds <= 7200
+            or window_end_seconds - window_start_seconds > 600):
+        raise ValueError('recorded_window_out_of_bounds')
+    # Pin the raw manifest as well as its parsed value. status() can expose an
+    # in-process trace; this entry requires the durable disk manifest to match.
+    if type(trace_id) is not str or not _valid_id(trace_id):
+        raise ValueError('invalid_trace_id')
+    path = _directory() / trace_id / 'manifest.json'
+    if (path.parent.is_symlink() or path.is_symlink() or not path.is_file()
+            or path.stat().st_size > 64 * 1024 * 1024):
+        raise ValueError('recorded_capture_manifest_invalid')
+    raw_manifest = path.read_bytes()
+    manifest = status(trace_id)
+    if json.loads(raw_manifest) != manifest:
+        raise ValueError('recorded_capture_manifest_changed')
+    _scoped_capture_manifest(manifest, trace_id)
+    manifest_hash = hashlib.sha256(raw_manifest).hexdigest()
+    started = manifest['started_mono_ns']
+    start_ns = started + int(window_start_seconds * 1e9)
+    end_ns = started + int(window_end_seconds * 1e9)
+    if end_ns > manifest['finished_mono_ns']:
+        raise ValueError('recorded_window_exceeds_capture_duration')
+    selected = set(include_workloads)
+    rows_by_seq, selected_ids = {}, set()
+    seen_starts = set()
+    rejection_reasons, coverage, observed_workloads, event_counts = {}, {}, set(), {}
+    window_counts, omitted_inputs, omitted_ids = {}, [], set()
+    scalar_bytes = 0
+
+    def retain(row, size):
+        nonlocal scalar_bytes
+        if row['seq'] in rows_by_seq:
+            return
+        scalar_bytes += size
+        if len(rows_by_seq) >= _MAX_TOP20_WINDOW_ROWS or scalar_bytes > _MAX_WINDOW_PAYLOAD_BYTES:
+            raise ValueError('recorded_window_metadata_limit_exceeded')
+        rows_by_seq[row['seq']] = row
+
+    def verified_rows():
+        count = 0
+        for row, size in _top20_source_rows(trace_id, manifest):
+            count += 1
+            if row['seq'] != count:
+                raise ValueError('recorded_capture_sequence_invalid')
+            digest = row.get('payload_ref')
+            if 'payload_ref' in row and (type(digest) is not str
+                    or re.fullmatch(r'[0-9a-f]{64}', digest) is None or digest not in manifest['blobs']):
+                raise ValueError('recorded_payload_reference_missing')
+            yield row, size
+        if count != manifest['written']:
+            raise ValueError('recorded_capture_sequence_invalid')
+
+    for row, size in verified_rows():
+        kind = row.get('event_type')
+        if type(kind) is not str or not 0 < len(kind) <= 96:
+            raise ValueError('recorded_event_type_invalid')
+        event_counts[kind] = event_counts.get(kind, 0) + 1
+        if len(event_counts) > 128:
+            raise ValueError('recorded_window_metadata_limit_exceeded')
+        workload = row.get('workload_id', 'unsupported')
+        if kind == 'input_rejected' or 'payload_ref' in row:
+            if type(workload) is not str or not 0 < len(workload) <= 160:
+                raise ValueError('recorded_workload_missing')
+            bucket = coverage.setdefault(workload, {'accepted': 0, 'rejected': 0})
+            if len(coverage) > 4096:
+                raise ValueError('recorded_window_metadata_limit_exceeded')
+            bucket['rejected' if kind == 'input_rejected' else 'accepted'] += 1
+        if kind == 'input_rejected':
+            # A rejection with unknown time/owner cannot be safely attributed
+            # outside this experiment. Never quietly treat it as excluded.
+            at = row.get('entered_mono_ns', row.get('mono_ns'))
+            reason = row.get('reason')
+            if (type(at) is not int or not started <= at <= manifest['finished_mono_ns']
+                    or type(reason) is not str or not 0 < len(reason) <= 160
+                    or type(row.get('workload_id')) is not str or not row['workload_id']):
+                raise ValueError('recorded_rejection_attribution_invalid')
+            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+            if len(rejection_reasons) > 4096:
+                raise ValueError('recorded_window_metadata_limit_exceeded')
+        if kind not in {'operation_start', 'input_rejected', 'collector_input', 'market_input'}:
+            continue
+        at = row.get('entered_mono_ns', row.get('mono_ns'))
+        if type(at) is not int:
+            raise ValueError('recorded_time_missing')
+        if not start_ns <= at < end_ns:
+            continue
+        if type(row.get('workload_id')) is not str or not row['workload_id']:
+            raise ValueError('recorded_workload_missing')
+        if kind in {'operation_start', 'input_rejected', 'collector_input'}:
+            observed_workloads.add(row['workload_id'])
+        bucket = window_counts.setdefault(row['workload_id'], {'operations': 0, 'rejected': 0})
+        if kind == 'input_rejected':
+            bucket['rejected'] += 1
+            if workload in selected and capture_policy == 'partial-operations':
+                omitted_inputs.append({key: row[key] for key in (
+                    'seq', 'mono_ns', 'entered_mono_ns', 'operation_id', 'workload_id',
+                    'method', 'reason', 'rejection_detail', 'producer_component') if key in row})
+                if type(row.get('operation_id')) is str:
+                    omitted_ids.add(row['operation_id'])
+                # Keep original rejection evidence inside the sealed projection,
+                # without passing it off as an executable captured input.
+                row['original_event_type'] = kind
+                row['event_type'] = 'omitted_input'
+        if kind == 'operation_start':
+            bucket['operations'] += 1
+            identifier = row.get('operation_id')
+            if type(identifier) is not str or not identifier or identifier in seen_starts:
+                raise ValueError('recorded_operation_pair_invalid')
+            seen_starts.add(identifier)
+            if workload in selected:
+                selected_ids.add(identifier)
+        # Keep unselected start metadata so compile reports exclusions, but
+        # strip their payload references. They can never become replay inputs.
+        if workload not in selected or kind != 'operation_start':
+            row.pop('payload_ref', None)
+        retain(row, size)
+    if (rejection_reasons != manifest['input_rejected_reasons']
+            or coverage != manifest.get('input_coverage')
+            or sum(bucket['accepted'] for bucket in coverage.values()) != manifest['payload_accepted']
+            or 'event_counts' in manifest and event_counts != manifest['event_counts']):
+        raise ValueError('recorded_capture_rejection_accounting_invalid')
+    if (set(include_workloads) | set(exclude_workloads)) - observed_workloads:
+        raise ValueError('recorded_workload_not_observed')
+    if (capture_policy != 'partial-operations'
+            and any(window_counts.get(group, {}).get('rejected', 0) for group in selected)):
+        raise ValueError('recorded_selected_input_unsupported')
+    selected_ids -= omitted_ids
+    for row in rows_by_seq.values():
+        if row.get('event_type') == 'operation_start' and row.get('operation_id') in omitted_ids:
+            row['original_event_type'] = row['event_type']
+            row['event_type'] = 'omitted_operation_start'
+            row.pop('payload_ref', None)
+    if not selected_ids:
+        raise ValueError('recorded_selection_empty')
+    ends, calls = set(), {}
+    for row, size in verified_rows():
+        kind = row.get('event_type')
+        if kind == 'operation_end' and row.get('operation_id') in selected_ids:
+            identifier = row['operation_id']
+            if identifier in ends:
+                raise ValueError('recorded_operation_pair_invalid')
+            ends.add(identifier)
+            retain(row, size)
+        elif kind in {'call_start', 'call_end'} and row.get('input_operation_id') in selected_ids:
+            call_id = row.get('call_id')
+            if type(call_id) is not str or not call_id:
+                raise ValueError('recorded_db_call_pair_invalid')
+            pair = calls.setdefault(call_id, {})
+            if kind in pair:
+                raise ValueError('recorded_db_call_pair_invalid')
+            pair[kind] = row['input_operation_id']
+            retain(row, size)
+    if ends != selected_ids:
+        raise ValueError('recorded_operation_censored_or_codec_invalid')
+    if any(set(pair) != {'call_start', 'call_end'} or len(set(pair.values())) != 1 for pair in calls.values()):
+        raise ValueError('recorded_db_call_pair_invalid')
+    rows, cache, loaded_bytes = [], {}, 0
+    for row in sorted(rows_by_seq.values(), key=lambda item: item['seq']):
+        digest = row.pop('payload_ref', None)
+        if digest is not None:
+            if digest not in cache:
+                payload = _payload_bytes_from_manifest(trace_id, digest, manifest)
+                loaded_bytes += len(payload)
+                if loaded_bytes > _MAX_WINDOW_PAYLOAD_BYTES:
+                    raise ValueError('recorded_window_payload_limit_exceeded')
+                try:
+                    cache[digest] = json.loads(payload)
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise ValueError('recorded_payload_json_invalid') from error
+            row['payload'] = cache[digest]
+        row['source_seq'] = row['seq']
+        rows.append(row)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != manifest_hash or status(trace_id) != manifest:
+        raise ValueError('recorded_capture_manifest_changed')
+    selection = dict(started_mono_ns=started, window_start_seconds=window_start_seconds,
+        window_end_seconds=window_end_seconds, include_workloads=tuple(include_workloads),
+        exclude_workloads=tuple(exclude_workloads), mode=mode, collector_components=())
+    events = _seal_store_window(rows, manifest_hash=manifest_hash, **selection)
+    plan = compile_recorded_plan(events, **selection)
+    report = dict(capture_policy=capture_policy, source_integrity='checksummed_capture',
+        source_manifest_sha256=manifest_hash, original_capture_state=manifest['state'],
+        start_seconds=window_start_seconds, end_seconds=window_end_seconds, mode=mode,
+        events_verified=manifest['written'], events_retained=len(rows), scalar_bytes_retained=scalar_bytes,
+        payload_blobs_loaded=len(cache), payload_bytes_loaded=loaded_bytes,
+        selected_payload_hashes=sorted(cache), selected_workloads=list(plan.selected_workloads),
+        excluded_workloads=sorted(observed_workloads - selected), window_workloads=window_counts,
+        actor_known=plan.actor_known, source_state_equivalent=False,
+        omitted_input_count=len(omitted_inputs), omitted_inputs=omitted_inputs,
+        missing_load_reconstructed=False, selected_input_complete=not omitted_inputs,
+        fidelity='surviving_native_operations_only' if omitted_inputs else 'selected_native_operations_only')
+    return {**manifest, 'window_read': report}, events
 
 
 def _manifest(directory: Path, session: dict) -> None:

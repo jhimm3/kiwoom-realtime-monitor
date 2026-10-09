@@ -28,6 +28,7 @@ exec "$DOCKER" --host unix:///var/run/docker.sock run --rm --network none --user
   --security-opt no-new-privileges --cap-drop ALL \
   --tmpfs /op-fixture:rw,nosuid,nodev,size=32m,mode=0755 \
   --env PYTHONDONTWRITEBYTECODE=1 --env KIWOOM_OPERATOR_FS_GATE_ROOT=/op-fixture \
+  --env TMPDIR=/op-fixture --env TEMP=/op-fixture --env TMP=/op-fixture \
   --env "KIWOOM_OPERATOR_CPUSET=$CPUSET" \
   --mount "type=bind,src=$PROJECT/scripts,dst=/app/candidate/scripts,readonly" \
   --mount "type=bind,src=$PROJECT/tests,dst=/app/candidate/tests,readonly" \

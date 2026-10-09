@@ -1,1 +1,2 @@
 deploy/synology/source-runtime.sh text eol=lf
+deploy/synology/check-nas-operator.sh text eol=lf
