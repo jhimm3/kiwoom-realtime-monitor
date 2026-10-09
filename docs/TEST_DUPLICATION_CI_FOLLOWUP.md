@@ -872,5 +872,10 @@ PostgreSQL job은 성공했으나 Windows all-local에서 `test_stock_repository
 `tmp/regression/batch07-all-local-final-ci-fix/run.json`에서 408개 모듈·3,670/3,670건·268/268 worker
 통과다. 실패·오류·skip·미실행·timeout·누락 모듈·잔류 자손은 0이며 worker/process tree 종료는 각각
 268/268이다. 수정된 `test_stock_repository`의 새 hash가 회귀 manifest에 포함됐다. 이 수정이 포함된
-commit의 최종 GitHub hosted all-local 및 disposable PostgreSQL 결과는 재실행 후 기록한다. main 병합과
-NAS 운영 DB 검증·배포는 이 작업 범위에 포함되지 않는다.
+수정 commit `6dbaa8b3b4403103fcb6a5ad0e865e1902da4e40`의 [최종 hosted run
+37970598974](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37970598974)은 Windows
+all-local과 disposable PostgreSQL 두 job 모두 성공했다. Windows artifact
+`all-local-regression-37970598974`도 408개 모듈·3,670/3,670건·268/268 worker를 기록하고, failure/error/
+skip/unrun/timeout/missing module/leaked descendant는 0이다. worker와 process tree 종료가 268/268이며
+`test_stock_repository`의 수정된 hash가 manifest에 포함됐다. 이 hosted 결과는 수정된 테스트/profile의
+정확한 commit을 검사했다. main 병합과 NAS 운영 DB 검증·배포는 이 작업 범위에 포함되지 않는다.
