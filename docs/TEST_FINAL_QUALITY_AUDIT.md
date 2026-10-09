@@ -3,7 +3,8 @@
 2026-10-10 KST. **감사·설계와 실행기·테스트·브랜치 CI 구현을 완료**했다.
 통합 전 브랜치의 전체 hosted 검증은 통과했으며, 최신 main 통합 후의 최종 결과는
 [PR #15의 검증 기록](https://github.com/jhimm3/kiwoom-realtime-monitor/pull/15/checks)으로 확인한다.
-테스트 품질 작업은 제품 코드·DB 스키마·기대값을 변경하지 않았다.
+테스트 품질 작업은 제품 코드·DB 스키마를 변경하지 않았다. 폐기된 중간 visibility 기대값의
+변경 근거와 보존한 최종 검증은 아래 PostgreSQL acceptance 보완 기록에 구분했다.
 최신 main의 제품 변경은 그대로 통합했다. NAS 운영 배포는 이 테스트 작업의 완료 조건에 포함하지 않는다.
 
 ## 1. 이번 단계의 기준과 실제 검증 결과
@@ -83,15 +84,27 @@ cursor-commit-order, sequence-fence 세 개다. 선행 `check_postgres_integrati
 `marker` subject만 삭제해 분봉의 `marker:KRX` revision을 남겼다. 또 기존 access suite의
 여러 revision이 같은 DB에 있어, DB 전역 page/cursor를 검증하는 새 suite의 첫 페이지와
 100회 frames-only recovery에 섞였다. 로그의 다른 subject와 복구 `rows_read=100`이 이를 확인한다.
-세 파일의 실패는 개별 제품 결함 14개로 계산하지 않는다.
+격리 후 [run 37999161400](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37999161400)에서는
+151건 중 148건 통과, commit-order 3건 실패였다(오류·skip 0). 처음의 14건을 모두 fixture
+결함으로 단정하지 않는다. 남은 세 건은 기존 frozen red의 중간 조건이었다: 낮은 COMMIT이
+대기 중일 때 높은 peer를 전달하고 cursor를 앞서 기록할 것을 기대했다. 이는 main에 적용된
+`RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md`의 safe-prefix 계약과 충돌한다.
+과거 red 보고서와 Git 원본은 보존하며, 현재 acceptance는 실제 peer COMMIT 확인 → pending
+중 행/완료 checkpoint 공개 금지 → 두 입력의 정확한 순서·revision 전달 → 중복 0·재시작
+checkpoint 일치·bootstrap 역사적 decision 0을 검증하도록 보완한다. 제품 동작을 변경하거나
+실패를 expected-failure/skip으로 숨기지 않는다.
 
 수정은 누락된 `marker:KRX` cleanup과 세 suite에만 적용하는 고유 schema fixture다.
 fixture는 URL과 실제 연결 DB가 모두 `kiwoom_monitor_diagnostic_test`인지 확인하고,
 기존 연결 옵션을 유지한 채 고유 schema를 search_path로 제공한다. class 종료 시 자신이 만든
 schema만 제거하고 cleanup 오류는 실패로 전파한다. held native COMMIT/rollback, 페이지 수·순서,
-revision 일치·재시작·결정 재계산 금지 등 기존 assertion은 유지한다.
+revision 일치·재시작·결정 재계산 금지의 최종 검증 강도를 유지한다. 폐기된 조기 peer 노출
+조건만 현재 문서의 명시적 pending 계약으로 대체한다.
 공통 runner나 제품 저장 의미를 변경하지 않으며, 운영/NAS DB를 비우지 않는다.
 수정본의 실제 전체 Windows·PostgreSQL·replay 결과는 위 PR의 최종 SHA에 게시된 CI로 판정한다.
+`main-merge-final-dbec8f9` 로컬 전체 실행은 DB acceptance 보완 전 중단했으며 `incomplete`로
+보존한다. 성공 수에 포함하지 않는다. 중단 후 해당 실행 경로를 가진 Python 부모·자식
+프로세스가 없음을 확인했다. DB gate 통과 뒤 최종 소스로 전체 회귀를 다시 판정한다.
 
 [409개 의존성 원장](TEST_DEPENDENCY_AUDIT.md), [260개 보호 계약](REGRESSION_COVERAGE_AUDIT.md),
 [후속 선택 편입·실패·개선 기록](TEST_DUPLICATION_CI_FOLLOWUP.md)을 재사용했다.

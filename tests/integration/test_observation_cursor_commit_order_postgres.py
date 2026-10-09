@@ -1,8 +1,8 @@
-"""Desired reader contract under reversed native writer COMMIT visibility.
+"""Safe-prefix reader acceptance under reversed native writer COMMIT visibility.
 
-This is a correctness reproducer, not a performance benchmark or an expected-fail
-acceptance waiver. A failure at the final assertion means a late committed input
-exists in storage but is permanently behind the consumer's incremental cursor.
+The original unsafe-reader red reports remain immutable. Current acceptance
+withholds an unfinished prefix, then delivers both inputs and preserves restart
+checkpoints; it does not require the old premature peer visibility.
 """
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -56,6 +56,7 @@ class ObservationCursorCommitOrderPostgresTests(unittest.TestCase):
                      'available_at': seed_at + 60, 'capture_quality': 'complete',
                      'finalization_source': 'timer', 'operation_id': 'closed-cursor-final-' + row['code']}
                     for row in values]
+        reader = PostgresQueryStore(self.url)  # Each case owns its initial frontier.
 
         class HeldCommit(psycopg.Connection):
             def commit(self):
@@ -65,7 +66,7 @@ class ObservationCursorCommitOrderPostgresTests(unittest.TestCase):
                 return super().commit()
 
         def open_monitor(configuration):
-            monitor = CandidateMonitor(self.store, configuration, poll_seconds=1,
+            monitor = CandidateMonitor(reader, configuration, poll_seconds=1,
                                        universe_max_age_seconds=300, session_profile=profile)
             monitor_ids.append(monitor.monitor_id)
             return monitor
@@ -80,7 +81,8 @@ class ObservationCursorCommitOrderPostgresTests(unittest.TestCase):
             self.store.save_minute_bars(values, observations=observations)
             if not bootstrap_during_gap:
                 monitor = open_monitor(config)
-                self.assertEqual([], self.store.load_shadow_monitor_state(monitor.monitor_id)['bars'])
+                before = self.store.load_shadow_monitor_state(monitor.monitor_id)
+                self.assertEqual([], before['bars'])
 
             if reverse_commits:
                 held_store = PostgresQueryStore(self.url)
@@ -90,13 +92,17 @@ class ObservationCursorCommitOrderPostgresTests(unittest.TestCase):
                     try:
                         self.assertTrue(entered.wait(10), 'native finalizer must reach COMMIT')
                         self.store.finalize_minute_bars([closures[1]])
+                        peer = self.store.load_observation_revisions('minute_bar', subjects[1])
+                        self.assertTrue(any(row['payload'].get('window_closed') for row in peer),
+                                        'independent peer COMMIT must finish before releasing the low writer')
                         if bootstrap_during_gap:
                             monitor = open_monitor(config)
-                            self.assertEqual(0, monitor.run_once())
-                        else:
-                            self.assertEqual(1, monitor.run_once())
+                        self.assertEqual(0, monitor.run_once())
                         first_checkpoint = self.store.load_shadow_monitor_state(monitor.monitor_id)
-                        self.assertEqual({codes[1]}, {frame['code'] for frame in first_checkpoint['bars']})
+                        if bootstrap_during_gap:
+                            self.assertIsNone(first_checkpoint, 'pending bootstrap must not publish a checkpoint')
+                        else:
+                            self.assertEqual(before, first_checkpoint, 'pending COMMIT must not advance persisted state')
                     finally:
                         release.set()
                     future.result(timeout=10)
@@ -112,11 +118,13 @@ class ObservationCursorCommitOrderPostgresTests(unittest.TestCase):
             if reverse_commits:
                 [closed_sequence] = [row['accepted_sequence'] for row in stored
                                      if row['revision_id'] == closed.revision_id]
-                self.assertLess(closed_sequence, first_checkpoint['cursor'])
-            monitor.run_once()
+                self.assertGreater(closed_sequence, 0 if bootstrap_during_gap else first_checkpoint['cursor'])
+                self.assertEqual(0 if bootstrap_during_gap else 2, monitor.run_once())
+            else:
+                self.assertEqual(0, monitor.run_once())
             checkpoint = self.store.load_shadow_monitor_state(monitor.monitor_id)
             restarted = open_monitor(config)
-            restarted.run_once()
+            self.assertEqual(0, restarted.run_once())
             recovered = self.store.load_shadow_monitor_state(restarted.monitor_id)
             self.assertEqual(checkpoint, recovered)
 
@@ -124,6 +132,10 @@ class ObservationCursorCommitOrderPostgresTests(unittest.TestCase):
             bootstrapped = open_monitor(replace(config, capital_won=config.capital_won + 1))
             full = self.store.load_shadow_monitor_state(bootstrapped.monitor_id)
             self.assertEqual(set(codes), {frame['code'] for frame in full['bars']})
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute('SELECT COUNT(*) FROM central_shadow_decisions WHERE monitor_id=%s',
+                               (bootstrapped.monitor_id,))
+                self.assertEqual(0, cursor.fetchone()[0], 'bootstrap must not re-run historical decisions')
             return set(codes), {frame['code'] for frame in recovered['bars']}
         finally:
             release.set()
@@ -178,6 +190,7 @@ class ObservationCursorCommitOrderPostgresTests(unittest.TestCase):
 
         held_store = PostgresQueryStore(self.url)
         held_store._connect = lambda: HeldCommit.connect(self.url)
+        reader = PostgresQueryStore(self.url)
 
         def save(store, row):
             observation = minute_bar_observation(
@@ -194,18 +207,26 @@ class ObservationCursorCommitOrderPostgresTests(unittest.TestCase):
                 try:
                     self.assertTrue(entered.wait(10), 'first writer must reach native COMMIT')
                     save(self.store, values[1])  # Separate stock/day locks and independent COMMIT.
-                    first_page = self.store.load_observation_revisions_after(starting_cursor, ('minute_bar',), 1000)
-                    selected = [row for row in first_page if row['subject'] in subjects]
-                    self.assertEqual([subjects[1]], [row['subject'] for row in selected])
-                    advanced_cursor = max(row['accepted_sequence'] for row in first_page)
+                    [peer] = self.store.load_observation_revisions('minute_bar', subjects[1])
+                    self.assertGreater(peer['accepted_sequence'], starting_cursor)
+                    first_page = reader.load_observation_revision_page(starting_cursor, ('minute_bar',), 1000)
+                    self.assertFalse(first_page.ready)
+                    self.assertEqual('pending_sequence_commit', first_page.reason)
+                    self.assertEqual((), first_page.rows)
+                    self.assertEqual([], reader.load_observation_revisions_after(starting_cursor, ('minute_bar',), 1000))
                 finally:
                     release.set()
                 future.result(timeout=10)
             [late] = self.store.load_observation_revisions('minute_bar', subjects[0])
-            self.assertLess(late['accepted_sequence'], advanced_cursor)
-            next_page = self.store.load_observation_revisions_after(advanced_cursor, ('minute_bar',), 1000)
+            self.assertLess(late['accepted_sequence'], peer['accepted_sequence'])
+            next_page = reader.load_observation_revisions_after(starting_cursor, ('minute_bar',), 1000)
+            self.assertEqual(subjects, [row['subject'] for row in next_page])
+            self.assertEqual([late['revision_id'], peer['revision_id']], [row['revision_id'] for row in next_page])
             self.assertIn(late['revision_id'], [row['revision_id'] for row in next_page],
-                          'late COMMIT is stored but missing from an advanced incremental cursor')
+                          'late COMMIT must remain reachable from the held incremental cursor')
+            advanced_cursor = max(row['accepted_sequence'] for row in next_page)
+            self.assertEqual([], reader.load_observation_revisions_after(advanced_cursor, ('minute_bar',), 1000),
+                             'delivered revisions must not be repeated')
         finally:
             release.set()
             with self.store._connect() as connection, connection.cursor() as cursor:
