@@ -18,8 +18,11 @@ container. PC unit tests pass; the Linux gate and NAS install have not run. See
 0B collector 통합 진단은 `central_server/diagnostic_collector_replay.py`가 고정 입력,
 실행/종료 수명, 전용 DB 검증·정리를 소유한다. 실제 파서·RAM 집계·저장 주기는
 `central_server/realtime_collector.py`와 `minute_bars.py`를 재사용한다. 추가로
-`diagnostic_trace.py`가 선택된 store 입력과 collector 원인 사건을 bounded schema-2
-capture로 보존하고, `diagnostic_replay_contract.py`가 허용 메서드·codec·workload 선택과
+`diagnostic_trace.py`가 선택된 store 입력과 collector 원인 사건을 schema-3 capture로 보존한다.
+지연 저장 모드는 `diagnostic_trace_ram.py`의 framed RAM block으로 bounded raw queue를 압축하고,
+기존 writer가 순서대로 persistence한다. 메모리/event quota 및 packing backlog도 capture 상태로 공개한다.
+기본 schema-3 limits는 8 GiB / 5,000,000 events이며, 실제 RSS·장중 전체 부하 수용을 뜻하지 않는다.
+`diagnostic_replay_contract.py`가 허용 메서드·codec·workload 선택과
 collector descendant 제외 계획을 검사한다. `diagnostic_recorded_execution.py`는 명시된
 store allowlist를 caller-owned test store에서 실행하며 actor 순서·동시성·replay ID를 기록한다.
 collector mode는 0B 원인 사건을 실제 collector loop에 전달하고 그 component의 과거 sink만

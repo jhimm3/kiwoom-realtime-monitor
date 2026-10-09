@@ -1,8 +1,65 @@
+2026-10-09 NAS deferred trace recorder source integration (PC main):
+NAS candidate `2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9` is selectively integrated into PC main while preserving later main changes. The deferred recorder now uses framed RAM blocks, bounded raw staging/packing and the validated 8 GiB / 5,000,000 event limits; schema-3 capability metadata remains additive to the existing TOP20 capability fields. PC `server_logging.py` formats application log timestamps in KST, but the running NAS release above has not received this main source update. The installed restricted NAS operator supports fixed `test`/`replay` commands without an interactive password during development; installation and passwordless `status` are verified, while an actual operator replay invocation is not yet recorded. The existing October 8 trace is `incomplete` (1,188 rejected inputs), so it is not an eligible complete replay input. This source integration has not yet been regression-tested or deployed; publishing to Git does not activate it on NAS.
+
+2026-10-08 NAS restricted operator installation complete:
+The native-policy-v3 offline NAS gate passed all 45 tests and the installer completed. Its actual
+target-user probe confirmed `k379` can run the fixed `status` command with passwordless sudo.
+A direct SSH invocation of `/usr/local/bin/kiwoom-nas status` also returned `state=ok`,
+`installed=true`, `temporary_access=enabled`, active release/build
+`2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9` / `2026.10.08-trace-ram-8g-5m-v1`, diagnostics idle,
+and no active job. The prior trace remains durably `incomplete` because 1,188 inputs were rejected;
+all 2,033,667 accepted events were written and retained-memory counters are zero. Server was not
+restarted and the database container is unchanged. Use the operator only for development; run
+`kiwoom-nas revoke` after development ends. No test/replay/deploy command has yet been run.
+
+2026-10-08 NAS restricted operator POSIX ACL-tool response correction:
+The native-policy-v2 NAS gate passed all 44 tests without skips. Installation next stopped
+at `acl_inspection_unavailable`, before installing access files. Read-only SSH inspection found
+root-owned system directories report synoacltool exit 255 with stdout exactly
+`(synoacltool.c, 596)It's Linux mode` and empty stderr; a missing path also exits 255 but reports
+`Path not found`. The installer now accepts only the exact Linux-mode response, still verifies
+POSIX ownership/mode/type/link count, and rejects missing paths, warnings and other failures.
+PC 26 portable tests passed; new Linux ACL cases are included in native-policy-v3's 45-test gate.
+The v3 bundle was checksum-verified on NAS. On the same real NAS paths, a read-only before/after
+probe showed the old check reject /, /usr/local/libexec, /etc/sudoers.d and /volume1; the candidate
+accepts their verified POSIX mode and still rejects the absent helper path. The updated isolated
+Linux gate and actual target-account passwordless installation have since passed.
+
+2026-10-08 NAS restricted operator durable-incomplete fence correction:
+The native-policy-v1 NAS gate passed all 43 tests without skips. Installation then stopped
+before access-file writes at `trace_not_durably_idle`. A live authenticated API check at
+2026-10-08 23:30 KST found trace `20261007T235957Z-e8cb574bf964` in `incomplete` state:
+accepted=written=2,033,667, known_dropped=0, input_rejected=1,188; all six retained/pending
+counters are 0 and diagnostics/pauses/runs are off. The exact active recorder publishes
+`complete` and `incomplete` only after its final manifest file fsync/replace; the latter denotes
+coverage rejection, not remaining RAM. Maintenance now accepts either terminal state only
+with every retained counter known and zero and nonnegative integer accepted=written. Failed,
+interrupted, active or unknown states still block; replay trace admission remains lossless-only.
+PC 26 tests passed. The native-policy-v2 bootstrap will run the updated 44-test gate before
+installation; real native sudo policy and target-account passwordless acceptance remain pending.
+
+2026-10-08 NAS restricted operator native sudo validation candidate:
+The previous cpuset/revoke bundle passed all 36 offline NAS tests. Installation then stopped
+at tool preflight with no operator files/sudoers changes: this NAS has sudo 1.9.5p2 but no visudo.
+The new native_fixed_rule candidate checks only its literal rule, rejects parser warnings even
+with exit 0, confirms the effective NOPASSWD entry, and proves real passwordless status as the
+target UID with cached authentication ignored. Failure removes the grant before restoring files;
+revocation uses the same pinned policy check and never regrants on failure. PC 25 portable tests
+and Python 3.8 syntax passed. Updated Linux transaction/identity/rollback tests and actual NAS
+installation acceptance remain pending. See [the operator contract](NAS_OPERATOR_COMMANDS.md).
+The new `artifacts/nas-operator-install-20261008-native-policy-v1.sh` bootstrap and six-file
+bundle are published to the NAS artifacts directory and checksum-verified. NAS Python 3.8 and
+shell syntax checks passed read-only. The bootstrap requires all 43 portable/Linux tests to pass
+before installing; that new gate and the actual target-account sudo probe are not yet executed.
+
 2026-10-08 NAS restricted operator implementation prepared locally:
 [NAS operator contract](NAS_OPERATOR_COMMANDS.md) now has a PC implementation for the fixed
 `kiwoom-nas` client, root-owned restricted supervisor/installer, candidate admission, isolated test/replay,
-capture/persistence fences, and deployment rollback/recovery. Its portable unit suite passed 19 tests.
-The separate Linux directory-fd/ACL gate has not run, and NAS installation/sudoers changes have not run.
+capture/persistence fences, and deployment rollback/recovery. Its portable unit suite passed 22 tests.
+The NAS CFS quota failure is addressed with a bounded cpuset and actual CPU/memory probes.
+Development-only access now has a fixed `revoke` command: remove its NOPASSWD rule first,
+restore public entry files, preserve private inputs/reports, and never regrant on cleanup failure.
+The cpuset Linux directory-fd/ACL/revocation gate passed 36 tests; NAS installation stopped before writes.
 No operator command is available on NAS yet; local implementation is not deployment acceptance.
 
 2026-10-08 opening capture live check at 09:18 KST:

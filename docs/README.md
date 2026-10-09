@@ -36,7 +36,7 @@
 ## 운영·사용 가이드
 
 - [NAS 설치·운영](../deploy/synology/README.md)
-- [NAS 제한 운영 명령](NAS_OPERATOR_COMMANDS.md) — PC 구현 및 단위 검증 완료; Linux gate/NAS 설치는 미검증
+- [NAS 제한 운영 명령](NAS_OPERATOR_COMMANDS.md) — NAS 설치와 passwordless status 확인 완료; 개발 종료 뒤 권한 회수 필요
 - [NAS 작업별 병목 진단](NAS_RUNTIME_DIAGNOSTICS.md) — 작업 일시중지, writer 통계, 메트릭 수집 ON/OFF·자동 만료·전후 측정
 - [장중 기록으로 반복 부하 실험](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md) — 로컬 input capture/선택 plan과 전체/단독/제외, 동일 초기 상태 코드 A/B 비교의 남은 단계
 - [NAS 진단 API 연결 설계](NAS_DIAGNOSTIC_API_DESIGN.md) — 기존 운영 진단도구의 정보·제어·측정·보고서를 API로 제공하는 구현 계약(구현 전)

@@ -123,14 +123,21 @@ commit `b46150ce76f74640d1401c4707db711692e4e5f7`에서 Windows `all-local` 1,46
 기존 미등록 파일과 그 안에 추가되는 테스트는 잡지 못한다. **남음:** 260개를 기능 중요도,
 중복 커버리지, 실행 환경/시간을 기준으로 분류하고 필요한 모듈을 적절한 회귀 프로필 또는
 전용 자동 검사에 연결한다. 전체 일괄 등록은 분류와 실행 검증 전에는 하지 않는다.
+**2026-10-08 NAS restricted operator:** Installation and acceptance are complete. The native-policy-v3
+NAS gate passed 45 tests, installer verified actual passwordless `status` as `k379`, and a separate
+SSH `kiwoom-nas status` succeeded. Temporary development access is enabled; after development ends,
+revoke it with `kiwoom-nas revoke`. No operator test, replay, or deployment has been run yet.
 
 **2026-10-08 NAS restricted operator local implementation:**
 The fixed client/supervisor/installer and isolated worker are implemented in the PC workspace;
-`tests.unit.test_nas_operator` passed 19 tests. The offline Linux filesystem/ACL acceptance in
-`deploy/synology/check-nas-operator.sh` is prepared but has not been run. NAS install, sudoers
+`tests.unit.test_nas_operator` passed 22 tests. cpuset replaces unsupported NAS CFS quota;
+actual CPU/memory enforcement is checked at installation and job execution. The development-only
+`revoke` command removes NOPASSWD first and restores public entry files without regranting on failure.
+The offline Linux filesystem/ACL/resource/revocation acceptance in
+`deploy/synology/check-nas-operator.sh` passed 36 tests on the prior cpuset bundle. NAS install, sudoers
 validation, isolated NAS acceptance, and first command execution remain open. Do not treat this
-as available on NAS until those gates pass. The current 8GiB capture must finish and its deferred
-trace must persist before any NAS installation or server change. No production credentials are
+as available on NAS until those gates pass. The user has authorized installation after capture
+and deferred persistence complete; recheck live state before installation. No production credentials are
 included in the prepared operator reports.
 
 **2026-10-08 opening capture partial input coverage:**

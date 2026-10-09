@@ -4,6 +4,7 @@ import ast
 import contextlib
 import copy
 import hashlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -91,7 +92,7 @@ def manifest():
 
 def idle_snapshot(state='off'):
     trace = {'state': state}
-    if state == 'complete':
+    if state in ('complete', 'incomplete'):
         trace.update({key: 0 for key in ('queued', 'pending_events', 'copy_reserved_bytes', 'charged_bytes',
                                         'packing_events', 'packed_events')})
         trace.update(accepted=10, written=10, known_dropped=0, input_rejected=0, input_capture_censored=False)
@@ -100,6 +101,54 @@ def idle_snapshot(state='off'):
 
 
 class NasOperatorTests(unittest.TestCase):
+    def test_fixed_sudoers_rule_rejects_arbitrary_users_and_policy_text(self):
+        self.assertEqual(b'k379 ALL=(root) NOPASSWD: /usr/local/sbin/kiwoom-nas-root\n',
+                         op.sudoers_rule('k379'))
+        for user in ('root ALL', 'k379\nroot', 'ALL', 'k379:other', '*', None):
+            with self.subTest(user=user), self.assertRaises(op.Rejected):
+                op.sudoers_rule(user)
+
+    def test_native_policy_requires_exact_loaded_rule_and_no_parser_warnings(self):
+        config = {'sudoers_validation': 'native_fixed_rule', 'sudo': '/verified/sudo', 'allowed_user': 'k379'}
+        baseline = b'User k379 may run the following commands:\n    (ALL) ALL\n'
+        installed = baseline + b'    (root) NOPASSWD: /usr/local/sbin/kiwoom-nas-root\n'
+        cases = [(baseline, b'', 0, False, True), (installed, b'', 0, True, True),
+                 (installed, b'', 0, False, False), (baseline, b'', 0, True, False),
+                 (installed, b'sudoers: syntax error', 0, True, False),
+                 (installed, b'', 1, True, False), (b'', b'', 0, False, False),
+                 (installed.replace(b'NOPASSWD:', b'PASSWD:'), b'', 0, True, False),
+                 (installed.replace(b'(root)', b'(ALL)'), b'', 0, True, False),
+                 (installed.rstrip() + b', /bin/sh\n', b'', 0, True, False),
+                 (installed + installed, b'', 0, True, False)]
+        for output, stderr, code, present, allowed in cases:
+            with self.subTest(output=output, stderr=stderr, code=code, present=present), \
+                    patch.object(op.subprocess, 'run', return_value=subprocess.CompletedProcess([], code, output, stderr)) as run:
+                if allowed:
+                    self.assertEqual('native_fixed_rule', op.validate_sudo_policy(config, present))
+                else:
+                    with self.assertRaises(op.Rejected):
+                        op.validate_sudo_policy(config, present)
+                self.assertEqual(['/verified/sudo', '-n', '-l', '-U', 'k379'], run.call_args.args[0])
+                self.assertEqual(op.CLEAN_ENV, run.call_args.kwargs['env'])
+                self.assertEqual(subprocess.DEVNULL, run.call_args.kwargs['stdin'])
+
+    def test_policy_timeout_or_unknown_validator_never_passes(self):
+        config = {'sudoers_validation': 'native_fixed_rule', 'sudo': '/verified/sudo', 'allowed_user': 'k379'}
+        with patch.object(op.subprocess, 'run', side_effect=subprocess.TimeoutExpired('sudo', 15)), \
+                self.assertRaisesRegex(op.Rejected, 'sudoers_validation_timeout_after_revocation'):
+            op.validate_sudo_policy(config, False, suffix='_after_revocation')
+        with self.assertRaisesRegex(op.Rejected, 'invalid_sudoers_validator'):
+            op.validate_sudo_policy({'sudoers_validation': 'skip'}, False)
+
+    def test_revoke_has_no_path_or_shell_arguments_and_cannot_restore_sudo_access(self):
+        self.assertEqual('revoke', op.parser().parse_args(['revoke']).command)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            op.parser().parse_args(['revoke', '--path', '/etc/other'])
+        with self.assertRaisesRegex(op.Rejected, 'sudo_access_must_not_be_restored'):
+            op.restore_access_file(op.SUDOERS, (b'old sudo rule', 0o440))
+        with self.assertRaisesRegex(op.Rejected, 'access_path_outside_scope'):
+            op.restore_access_file('/etc/other', None)
+
     def test_identifiers_and_file_paths_reject_traversal_options_and_shell_text(self):
         for value in ('../other', '/etc/passwd', '-v', 'x;id', 'x\ny', 'x\\y', '', 'x' * 161):
             with self.subTest(value=value), self.assertRaises(op.Rejected):
@@ -161,7 +210,7 @@ class NasOperatorTests(unittest.TestCase):
     def test_capture_fence_distinguishes_durable_idle_from_retained_ram(self):
         op.idle(idle_snapshot())
         op.idle(idle_snapshot('complete'))
-        for state in ('running', 'awaiting_persistence', 'persisting', 'failed'):
+        for state in ('running', 'stopping', 'awaiting_persistence', 'persisting', 'interrupted', 'failed'):
             with self.subTest(state=state), self.assertRaises(op.Rejected):
                 op.idle(idle_snapshot(state))
         for key in ('queued', 'pending_events', 'charged_bytes', 'copy_reserved_bytes', 'packing_events', 'packed_events'):
@@ -177,6 +226,27 @@ class NasOperatorTests(unittest.TestCase):
         completed = idle_snapshot('complete')
         completed['trace'].update(input_rejected=217, known_dropped=3, input_capture_censored=True)
         op.idle(completed)
+
+    def test_durable_incomplete_trace_allows_maintenance_only_after_full_drain(self):
+        snapshot = idle_snapshot('incomplete')
+        snapshot['trace'].update(input_rejected=1188, known_dropped=0,
+                                 accepted=2033667, written=2033667)
+        op.idle(snapshot)
+        for key in ('queued', 'pending_events', 'charged_bytes', 'copy_reserved_bytes',
+                    'packing_events', 'packed_events'):
+            for missing in (False, True):
+                value = copy.deepcopy(snapshot)
+                if missing:
+                    del value['trace'][key]
+                else:
+                    value['trace'][key] = 1
+                with self.subTest(key=key, missing=missing), self.assertRaises(op.Rejected):
+                    op.idle(value)
+        for accepted, written in ((10, 9), (10, None), (1, True), (-1, -1)):
+            value = copy.deepcopy(snapshot)
+            value['trace'].update(accepted=accepted, written=written)
+            with self.subTest(accepted=accepted, written=written), self.assertRaises(op.Rejected):
+                op.idle(value)
 
     def test_master_pause_or_run_each_blocks_mutation(self):
         for key, value in (('diagnostic_tool', {'enabled': True}), ('trace_capture', {'enabled': True}),
@@ -211,7 +281,7 @@ class NasOperatorTests(unittest.TestCase):
             operator.docker(['inspect', 'server-id'])
 
     def test_worker_has_no_live_mount_socket_secrets_or_host_network(self):
-        config = {'worker_memory': 4 * 1024 ** 3, 'worker_cpus': 2, 'helper_dir': '/root/helper',
+        config = {'worker_memory': 4 * 1024 ** 3, 'worker_cpuset': '0,1', 'helper_dir': '/root/helper',
                   'runtime_image_id': 'sha256:fixed'}
         operator = op.Operator(config, MemoryTree())
         args = operator.worker_argv('a' * 32, 'pg', 'release')
@@ -224,6 +294,32 @@ class NasOperatorTests(unittest.TestCase):
         self.assertNotIn('--privileged', args)
         self.assertEqual(['-I', '/opt/kiwoom-operator/nas_operator_worker.py'], args[-2:])
         self.assertEqual(str(config['worker_memory']), args[args.index('--memory') + 1])
+        self.assertEqual('0,1', args[args.index('--cpuset-cpus') + 1])
+        self.assertNotIn('--cpus', args)
+
+    def test_cpu_lists_are_bounded_and_invalid_or_duplicate_ranges_fail(self):
+        self.assertEqual({0, 1, 4}, op.cpu_set('0-1,4'))
+        for value in (None, '', '0,0', '0-1,1', '2-1', '-1', '0;echo', '4096', '0-9999', ' 0', '0,'):
+            with self.subTest(value=value), self.assertRaises(op.Rejected):
+                op.cpu_set(value)
+
+    def test_cpu_pool_preserves_sparse_host_affinity_and_caps_both_jobs(self):
+        config = op.cpu_limits({2, 4, 6, 8})
+        self.assertEqual({'worker_cpuset': '2,4', 'pg_cpuset': '2'}, config)
+        self.assertEqual(({2, 4}, {2}), op.validate_cpu_limits(config, {2, 4, 6, 8}))
+        op.verify_cpu_affinity('2,4', '2,4')
+        op.verify_cpu_affinity('0-1', '0,1')
+        for invalid in ({'worker_cpuset': '0-2', 'pg_cpuset': '0'},
+                        {'worker_cpuset': '0-1', 'pg_cpuset': '0-1'},
+                        {'worker_cpuset': '0-1', 'pg_cpuset': '2'},
+                        {'worker_cpuset': '0-1', 'pg_cpuset': '0'}):
+            with self.subTest(config=invalid), self.assertRaises(op.Rejected):
+                op.validate_cpu_limits(invalid, {2, 4, 6, 8})
+        with self.assertRaisesRegex(op.Rejected, 'cpu_limit_not_enforced'):
+            op.verify_cpu_affinity('0-3', '0-1')
+        for unavailable in ({0}, set(), {0, True}, {0, 5000}):
+            with self.subTest(available=unavailable), self.assertRaises(op.Rejected):
+                op.cpu_limits(unavailable)
 
     def test_cleanup_refuses_another_container_with_matching_name_but_wrong_label(self):
         operator = op.Operator({}, None)

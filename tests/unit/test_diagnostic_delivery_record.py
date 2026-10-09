@@ -72,7 +72,7 @@ class DeliveryRecordTests(unittest.TestCase):
             self.assertEqual(0, status['charged_bytes'])
 
     def test_shared_context_released_only_after_last_stage_and_last_delivery(self):
-        with deferred_capture() as (token, _):
+        with patch.object(trace, '_pack_deferred'), deferred_capture() as (token, _):
             first, _, sub, source = identity(token)
             second, _, _, _ = identity(token, sub, source, 1)
             self.assertIs(first.node.children[0], second.node.children[0])
@@ -106,12 +106,14 @@ class DeliveryRecordTests(unittest.TestCase):
             trace.emit_delivery(token, receipt, 'enqueue')
             self.assertEqual(0, receipt.node._refs)
             self.assertEqual((0, 0), tuple(node._refs for node in receipt.node.children))
-            with trace._LOCK:
-                trace._SESSION['memory_limit_bytes'] = 1024**3
+            self.assertIsNone(trace.token())
+        with patch.object(trace, '_pack_deferred'), deferred_capture() as (token, _):
+            receipt, _, _, _ = identity(token)
             with patch.object(trace, '_CAPACITY', 30), ThreadPoolExecutor(4) as pool:
                 list(pool.map(lambda index: trace.emit_delivery(token, receipt, 'dequeue'), range(100)))
             status = trace.status()
-            self.assertEqual((30, 71), (status['accepted'], status['known_dropped']))
+            self.assertEqual((30, 1), (status['accepted'], status['known_dropped']))
+            self.assertIsNone(trace.token())
             self.assertEqual(30, receipt.node._refs)
             self.assertEqual((1, 1), tuple(node._refs for node in receipt.node.children))
             trace.stop('server_shutdown', timeout=10)
@@ -171,7 +173,8 @@ class DeliveryRecordTests(unittest.TestCase):
                 trace._WAKE.set()
                 failed = wait_state('failed', 10)
                 trace._THREAD.join(5)
-            self.assertEqual(1, old.node._refs)
+            self.assertEqual(0, old.node._refs)  # The packed bytes, rather than native receipt, own the suffix.
+            self.assertGreater(failed['packed_bytes'], 0)
             self.assertEqual((1, 0), (failed['queued'], failed['pending_events']))
         with deferred_capture() as (new_token, _):
             self.assertEqual(0, old.node._refs)

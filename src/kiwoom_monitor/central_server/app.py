@@ -42,7 +42,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.10.08-news-read-routes-v1"
+SERVER_BUILD = "2026.10.09-trace-ram-main-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -1289,7 +1289,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                 "sections": ["postgres", "activity", "news_jobs", "host", "storage"],
                 "run_kinds": ["measure", "compare", "replay"],
                 "trace_input_capture": {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "options": {"store_inputs": False, "collector_inputs": False, "top20_inputs": False},
                     "top20_input_capture": {"schema_version": 3,
                         "input_version": "top20-ranking-input/v1",
@@ -1297,14 +1297,24 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                         "candidate_flow_input_version": "top20-candidate-flow-input/v1",
                         "candidate_flow_scope": "candidate_flow_consumer_and_ingest",
                         "broker_queue_and_cache_scheduling_replayed": False},
+                    "causal_input_versions": {"market_request": "market-request-tape/v1",
+                        "ranking": "top20-ranking-input/v1", "realtime_lifecycle": "top20-realtime-tape/v1",
+                        "delivery": "top20-hub-delivery/v1"},
+                    "causal_input_boundaries": ["REST", "catalog", "ranking", "subscription", "lifecycle", "delivery_receipt"],
+                    "source_state_equivalence_verified": False,
+                    "capacity_acceptance": "pending_sizing_and_NAS_gates",
+                    "delivery_retention": "framed_ram_v1_deferred_only",
+                    "store_input_profiles": {"stock-catalog-documents/v1": {
+                        "method": "replace_documents", "collection": "stock_catalog",
+                        "maximum_copy_bytes": 16 * 1024 * 1024}},
                     "collector_input_version": "collector-input/v2",
                     "collector_event_types": ["0B", "0w", "0J", "0U"],
                     "coverage": "observed_paths_only",
                     "overhead_verified": False,
                     "deferred_persistence": {
                         "supported": True, "request_field": "persist_at", "max_delay_seconds": 86400,
-                        "memory_limit_bytes": 4 * 1024 * 1024 * 1024,
-                        "event_capacity": 1_000_000, "write_bytes_per_second": 1024 * 1024,
+                        "memory_limit_bytes": 8 * 1024 * 1024 * 1024,
+                        "event_capacity": 5_000_000, "write_bytes_per_second": 1024 * 1024,
                     },
                 },
                 "trace_replay_writer_kinds": sorted(TRACE_SYNTHETIC_KINDS),
