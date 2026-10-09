@@ -5,8 +5,8 @@
 ## 현재 결정
 
 2026-10-09 중복/상시 CI 후속 분석 및 구현 진행: [판정·수정·검증 상태](TEST_DUPLICATION_CI_FOLLOWUP.md).
-최신 main 통합과 NAS/capture·replay·causal 종료·TOP20 경계·입력·trace 저장 선택 편입 뒤 현재 전체 413개 중 Windows `all-local` 등록 240개,
-별도 Linux CI 5개, 미등록 168개다. 기존 235개와 core 실행 순서는 보존했다.
+최신 main 통합과 NAS/capture·replay·causal 종료·TOP20·trace 저장·진단 제어 선택 편입 뒤 현재 전체 413개 중 Windows `all-local` 등록 244개,
+별도 Linux CI 5개, 미등록 164개다. 기존 240개와 core 실행 순서는 보존했다.
 409개 조사 대상의 중복 선별에서 삭제할 완전 중복은 확정되지 않았다. 실행기의 빈 모듈 false-green을
 차단했고, 검증된 선택 profile 26개를 추가했다. 관련 선택 profile 218건과 모듈 간 setup 결합 수정은
 통과했다. 전체 `all-local`과 hosted CI 결과는 후속 문서의 최신 상태를 따른다. 아래의 당시 manifest,
@@ -311,8 +311,8 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_candidate_exchange_effective_dates.py](../tests/unit/test_candidate_exchange_effective_dates.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_candidate_monitor.py](../tests/unit/test_candidate_monitor.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_catalog_capture_profile.py](../tests/unit/test_catalog_capture_profile.py) | 기준 미등록 → P2 등록 | P2 NAS/capture profile 편입; catalog budget·native 결과·durable 복원 10건 | 1/0/3/4/0/0 |
-| [test_causal_capture_api.py](../tests/unit/test_causal_capture_api.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/0/0/0 |
-| [test_causal_capture_capacity.py](../tests/unit/test_causal_capture_capacity.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
+| [test_causal_capture_api.py](../tests/unit/test_causal_capture_api.py) | 기준 미등록 → P2 등록 | P2 diagnostic controls 편입; HTTP의 store/collector/TOP20 flags·deadline이 동일 recorder에 정확히 전달 1건; 실패 시 client cleanup 보강 | 0/0/2/0/0/0 |
+| [test_causal_capture_capacity.py](../tests/unit/test_causal_capture_capacity.py) | 기준 미등록 → P2 등록 | P2 diagnostic controls 편입; 정상 memory/event 포화와 잘못된 입력 구분·peak/headroom·측정 불가 유지 3건 | 0/0/0/0/0/0 |
 | [test_central_account_query.py](../tests/unit/test_central_account_query.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_central_ai_client.py](../tests/unit/test_central_ai_client.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_central_ai_service.py](../tests/unit/test_central_ai_service.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/5/0/0/0 |
@@ -369,8 +369,8 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_diagnostic_replay.py](../tests/unit/test_diagnostic_replay.py) | 기준 미등록 → P2 등록 | P2 replay admission 편입; 입력 shape·운영 DB 차단·lane 순서/완료/누락 방지 11건 | 0/0/12/0/0/0 |
 | [test_diagnostic_replay_database_cli.py](../tests/unit/test_diagnostic_replay_database_cli.py) | 기준 미등록 → P2 등록 | P2 NAS/capture profile 편입; DB 접근 전 입력 검증·lease/seal/restore·redaction 11건 | 0/0/17/0/0/0 |
 | [test_diagnostic_rest_input.py](../tests/unit/test_diagnostic_rest_input.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; 논리/transport/cache/ingest 인과 입력·소유권·tape 오류 차단 14건 | 0/0/11/4/0/0 |
-| [test_diagnostic_runs.py](../tests/unit/test_diagnostic_runs.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/21/1/0/0 |
-| [test_diagnostic_sampling_api.py](../tests/unit/test_diagnostic_sampling_api.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/1/0/0/0 |
+| [test_diagnostic_runs.py](../tests/unit/test_diagnostic_runs.py) | 기준 미등록 → P2 등록 | P2 diagnostic controls 편입; 인증·revision/session·run 소유/취소·전용 DB·보고서 완료·shape 불일치 거부 11건; main의 8GiB/5M 계약 기대 갱신 | 1/0/21/1/0/0 |
+| [test_diagnostic_sampling_api.py](../tests/unit/test_diagnostic_sampling_api.py) | 기준 미등록 → P2 등록 | P2 diagnostic controls 편입; device elapsed/rate·고정 read-only SQL·민감 query 제거·news table/index scope 3건 | 0/0/1/0/0/0 |
 | [test_diagnostic_top20_flow_input.py](../tests/unit/test_diagnostic_top20_flow_input.py) | 기준 미등록 → P2 등록 | P2 TOP20 input contracts 편입; 실제 SQLite 수급 저장·완료 marker·baseline·취소 drain 12건; assertion 실패 시 task 회수 2곳 보강 | 0/0/19/7/0/0 |
 | [test_diagnostic_top20_input.py](../tests/unit/test_diagnostic_top20_input.py) | 기준 미등록 → P2 등록 | P2 TOP20 input contracts 편입; 순위 freshness·20 slots·retry/error tape·OFF/ON 결과 동일·취소 incomplete 8건 | 0/0/13/0/0/0 |
 | [test_diagnostic_trace.py](../tests/unit/test_diagnostic_trace.py) | 기준 미등록 → P2 등록 | P2 trace persistence 편입; 실제 chunk 순서·checksum·overflow·65분 envelope의 bounded burst·run lock·중단 복구 7건 | 0/0/17/2/4/0 |

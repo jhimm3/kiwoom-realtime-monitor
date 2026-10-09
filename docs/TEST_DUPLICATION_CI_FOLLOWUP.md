@@ -26,7 +26,8 @@
 | causal replay lifecycle 5개 등록 시점 | 226 | 5 | 182 | 413 |
 | TOP20 replay boundaries 4개 등록 시점 | 230 | 5 | 178 | 413 |
 | TOP20 input contracts 5개 등록 시점 | 235 | 5 | 173 | 413 |
-| trace persistence 5개 등록 후 현재 | 240 | 5 | 168 | 413 |
+| trace persistence 5개 등록 시점 | 240 | 5 | 168 | 413 |
+| diagnostic controls 4개 등록 후 현재 | 244 | 5 | 164 | 413 |
 
 기존 문서의 'manifest 미등록 226개' 중 5개는 CI 제외가 아니다. 다음 모듈은
 `.github/workflows/dependency-regression.yml`의 Ubuntu job에서 이미 실행한다.
@@ -503,3 +504,65 @@ payload fsync/chunk rename 실패는 written=0·queued=1·blobs/chunks 미공개
 장시간 native TOP20 execution/session 후보의 약 94초/62초 비용·선택 보류 근거도 유지한다.
 이번 stage의 전체 회귀는 검증된 변경을 게시한 뒤 hosted artifact로 판정하며 NAS 운영 검증·배포·
 main 병합은 별도다. 로컬 pass로 hosted나 운영 DB 검증을 대신하지 않는다.
+
+## 2026-10-09 diagnostic controls 후속
+
+직전 `4eec49487e0249b2338e5fe434598db3ac301703`의
+[hosted run 37915653824](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37915653824)은
+Windows 2,452건/100 worker/240개 모듈, Linux 65건, disposable PostgreSQL 87건과 63개 저장
+경계 검사를 통과했다. 발견/실행 수·게시 commit·파일 hash·소스·worker/process tree 종료를
+대조했다. 비정상 결과/skip/미실행/잔류 자손은 0이다.
+
+이번 선택은 기존 조사에서 미등록이었던 실행 소유·인증 제어·조회 redaction·포화 판정 4개다.
+trace API 일부와 겹치지만 run lock/retry/report DB 격리·실제 shape 비교, 고정 read-only probe,
+전체 3 causal flag의 정확한 전달, 예상 포화와 잘못된 입력의 구분을 각각 보호한다.
+삭제할 완전 중복으로 확정하지 않았고 이미 등록된 검사 범위도 줄이지 않았다.
+
+| 모듈 (`tests.unit.test_` 이후) | 보호하는 계약 | 최종 실제 실행 | 로컬 worker 비용 |
+|---|---|---:|---:|
+| `diagnostic_runs` | 인증·revision/session·run 소유/취소·전용 DB·보고서 완료·shape 불일치 거부 11건; main의 8GiB/5M 계약 기대 갱신 | 11 | 3.18초 |
+| `diagnostic_sampling_api` | device elapsed/rate·고정 read-only SQL·민감 query 제거·news table/index scope 3건 | 3 | 0.53초 |
+| `causal_capture_api` | HTTP의 store/collector/TOP20 flags·deadline이 동일 recorder에 정확히 전달 1건; 실패 시 client cleanup 보강 | 1 | 1.22초 |
+| `causal_capture_capacity` | 정상 memory/event 포화와 잘못된 입력 구분·peak/headroom·측정 불가 유지 3건 | 3 | 0.36초 |
+
+`dependency-audit-p2-diagnostic-controls`를 manifest 끝에 추가했다. 기존 240개와 모든 core/profile
+항목·순서를 유지했다. 변경 전 18건은 1 failure/0 error/skip, 수정 후 최종 18건은 비정상 집계/
+미실행/잔류 자손 0이다. 모듈별 발견·실행 수는 전후 동일하고 worker/process tree 종료 4/4다.
+이전 실패를 통과로 재분류하지 않는다. 최종 추가 worker 비용은 로컬 약
+5.29초다. 기록: `tmp/regression/diagnostic-controls-before/run.json`,
+`diagnostic-controls-after/run.json`, `diagnostic-controls-final/run.json`.
+
+확정한 실패 원인은 `test_diagnostic_runs`의 capabilities 기대 2개다. 기존 memory=4GiB,
+event=1M은 [main 통합 d8683b0](https://github.com/jhimm3/kiwoom-realtime-monitor/commit/d8683b0d733b17fd49b651a7212aaca2ea8d6919)의
+trace `_DEFERRED_MEMORY_LIMIT`/`_CAPACITY` 및 authenticated capabilities가 8GiB/5M으로 바뀔 때
+갱신되지 않았다. 같은 값은 현재 recorder와 deferred lifecycle 테스트에도 명시돼 있다.
+현재 HTTP 응답에서 memory=8GiB를 확인했고 event=5M은 route/recorder 구현·통합 diff와
+최종 HTTP assertion으로 확인했다. 현재 코드 값에 자동 연동하거나 assertion을 없애지 않고
+명시적인 공개 계약 literal 2개만 갱신했다. 버전·0B/0w/0J/0U·deadline·409 guard는 그대로다.
+
+제품 파일을 쓰지 않은 별도 프로세스에서 실제 ASGI capabilities endpoint의 HTTP 출력만
+memory=4GiB 또는 event=1M으로 각각 변형했다. 최종 테스트는 두 대조군 모두 1 failure,
+0 error/skip으로 거부했다. 이 의도적 실패는 정상 18건의 pass에 합산하지 않는다.
+기록: `tmp/regression/diagnostic-capabilities-mutations.json`.
+
+다른 실제 수정은 `test_causal_capture_api`의 client 정리다. 원래 정상 끝의 close만 있어 첫 HTTP
+assertion에 오류를 주입하면 unittest cleanup 후에도 actual client.is_closed=false였다.
+생성 직후 addCleanup을 등록하고 정상 끝의 중복 close를 제거했다. 같은 assertion failure가
+유지되면서 cleanup 후 is_closed=true가 됐다. lifespan을 열어 collector/network 범위를
+추가하지 않았다. 기록: `tmp/regression/causal-api-cleanup-before.json`, `causal-api-cleanup-after.json`.
+
+AST로 전체 assertion을 대조해 위 두 literal 외에는 동일함을 확인했다. 변경 파일은 다른 테스트의
+공유 helper가 아니며 직접 import 소비자는 없다. run `_worker`/`_current`/manifest patch는 실제
+worker·실패 재시도·report publication 경계, sampling의 SQL은 read-only/redaction 경계가 검증
+대상이므로 유지했다. SQL 행 수를 실제 PostgreSQL 수용 증거로 사용하지 않는다. control/DB 파일은
+temporary path를 사용하고 실제 DB URL·토큰은 fixed fixture뿐이다.
+
+이 환경에서 이미 지원하는 FastAPI/Starlette TestClient와 httpx 경로로 정상 HTTP 검증을 실행했다.
+httpx2 안내는 deprecation warning이며 로딩 실패가 아니다. httpx2 설치·버전 변경·import 위장·
+검증 생략은 하지 않았다. 앞선 ASGI helper의 일반 공용 계층 확장도 필요하지 않았다.
+
+현재 전체 413개 중 Windows 244개, 별도 Linux 5개, 미등록 후보 164개다. 남은 항목은 기존 조사
+원장의 관련 변경 시 모듈별 격리 실행/후속 선택 profile 후보를 유지한다. 장시간 TOP20 2개는
+이전 약 94초/62초의 비용과 별도 판단 이유를 유지하고 이번 묶음에 넣지 않았다.
+전체 회귀는 이번 검증된 변경을 게시한 뒤 hosted artifact로 판정한다. 운영 NAS 검증·배포·
+main 병합은 별도이며 로컬 pass를 hosted 또는 실제 운영 DB 검증으로 대신하지 않는다.

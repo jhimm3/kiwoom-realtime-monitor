@@ -47,8 +47,8 @@ class DiagnosticRunTests(unittest.TestCase):
                     deferred = capabilities['trace_input_capture']['deferred_persistence']
                     self.assertEqual('collector-input/v2', capabilities['trace_input_capture']['collector_input_version'])
                     self.assertEqual(['0B', '0w', '0J', '0U'], capabilities['trace_input_capture']['collector_event_types'])
-                    self.assertEqual(4 * 1024**3, deferred['memory_limit_bytes'])
-                    self.assertEqual(1_000_000, deferred['event_capacity'])
+                    self.assertEqual(8 * 1024**3, deferred['memory_limit_bytes'])
+                    self.assertEqual(5_000_000, deferred['event_capacity'])
                 finally:
                     client.close()
 
