@@ -1,13 +1,30 @@
 # 남은 작업과 보류 사항
 
+**2026-10-09 함수형 테스트 우선 편입 후 현재 상태:** 발견 경로를 복구한 11개 파일/45건 중
+뉴스 본문·AI, 역사 context 수집 rollback, context 게시 완료 조건을 검증하는 4개 파일/33건을
+격리 CI profile에 선택 등록했다. 현재 manifest는 182개 등록/227개 미등록(Windows 222, Linux 5)이다.
+최종 `all-local`은 1,901건/42 worker 통과, 실패·오류·skip·미실행 0, process tree 종료 42/42,
+잔류 자손 0이다. 실행 기록은 `tmp/regression/final-selected-ci182-20261009/run.json`이며 새 테스트
+모듈 누락 검사도 통과했다. 나머지 7개 보조 역사 데이터·수집 테스트 파일/12건은 용도를 확인해
+각 스크립트를 변경할 때 선택 실행하도록 기록했다. 이 변경에 대한 GitHub hosted CI는 아직 실행하지 않았다.
+
+2026-10-09 후속 assertion 검토: 게시 테스트가 실제로 인접한 큰 원본 DB를 게시하지 않는지 검사하지 않아
+4 MiB `main.sqlite3`를 만들고 결과 run에 포함되지 않는 assertion을 추가했다. 게시 모듈을 포함한 계약 profile은
+33/33 통과, skip·실패·오류·미실행 0, worker tree 4/4 종료, 잔류 자손 0이다.
+기록은 `tmp/regression/publish-claim-review-20261009/run.json`이다. 제한 실행 환경에서 새 assertion 이후 `all-local`을
+시작했을 때는 비어 있는 worker에서 멈춰 중단했고, 이는 성공 결과로 세지 않았다. 빈 `asyncio` 루프도 같은
+환경에서 Windows `socketpair`의 `accept` 단계에서 멈췄으며, 사용자 Windows 실행 환경에서는 빈 루프와 동일 테스트가
+정상 종료했다. 최종 사용자 Windows `all-local`은 1,901건/42 worker 통과, 실패·오류·skip·expected failure·unexpected
+success·미실행 0, process tree 종료 42/42, 잔류 자손 0이다. 결과는
+`tmp/regression/final-audit-authorized-20261009/run.json`이며, 현재 수정된 테스트 파일과 manifest hash가 run 기록과 일치한다.
+
 **2026-10-09 테스트 계약 검토 6개 해결:**
 [재현·수정·한정된 기준선 조정](TEST_CONTRACT_RECONCILIATION_20261009.md).
 수정 후 단독 81건 통과, 실패/오류/skip/미실행 0, worker tree 종료 6/6, 자손 누수 0이다.
 기존 연구 후보 hash를 유지하고 일봉 invalidation 누락 대조군의 실패도 확인했다.
-현재 manifest 178개 등록/231개 미등록(Windows 후보 226개/Linux 5개)이다. 해결한 6개는 전용
-격리 profile로 편입했다. 1,868건/38 worker의 현재 `all-local`과 새 테스트 모듈 누락 검사는
-통과했다. 17개 수정 테스트 중 등록된 6개는 현재 all-local에 포함됐고, 나머지 함수형 변환 11개는
-별도 45건 통과 결과가 있다. Linux 5개는 Ubuntu에서 65건 모두 통과했다. hosted run
+그 당시 manifest는 178개 등록/231개 미등록(Windows 후보 226개/Linux 5개)이었다. 해결한 6개는 전용
+격리 profile로 편입했다. 당시 1,868건/38 worker의 `all-local`과 새 테스트 모듈 누락 검사가
+통과했다. Linux 5개는 Ubuntu에서 65건 모두 통과했다. hosted run
 [37805647697](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37805647697), commit
 `fe62396df07477e6e6fad81d5a69a2b3df96caa5`의 Windows all-local은 1,868건/38 worker, disposable PostgreSQL
 검사는 87건 통과했다. 최초 Linux 시도에서 발견한 fake Docker 실행권한 fixture 결함을 고친 뒤의 결과다.

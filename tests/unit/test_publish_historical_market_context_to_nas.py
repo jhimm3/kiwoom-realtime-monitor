@@ -34,6 +34,12 @@ class TestPublishHistoricalMarketContextToNas(unittest.TestCase):
         data = self.tmp_path / "data"
         database = data / "historical_market_context.sqlite3"
         collector.initialize(database, reference)
+        main_database = data / "main.sqlite3"
+        with closing(sqlite3.connect(main_database)) as connection:
+            with connection:
+                connection.execute("CREATE TABLE unrelated_payload(value BLOB)")
+                connection.execute("INSERT INTO unrelated_payload VALUES(zeroblob(?))", (4 * 1024 * 1024,))
+        assert main_database.stat().st_size >= 4 * 1024 * 1024
         raw_root = data / "historical_collection" / "context"
         with closing(sqlite3.connect(database)) as connection:
             vi.initialize(connection)
@@ -110,6 +116,7 @@ class TestPublishHistoricalMarketContextToNas(unittest.TestCase):
                    for item in manifest["raw_artifacts"])
         assert manifest["readiness"]["exchange_effective_expected"] == 1
         assert (run / "historical_market_context.sqlite3").exists()
+        assert not any(path.name == main_database.name for path in run.rglob("*"))
 
 
     def test_readiness_reports_provider_coverage_gap(self) -> None:

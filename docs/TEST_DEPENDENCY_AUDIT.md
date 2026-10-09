@@ -19,6 +19,20 @@
 
 ### 후속 반영 상태
 
+- **함수형 테스트 중 고위험 4개 선택 편입:** `test_article_text`, `test_news_ai`,
+  `test_collect_historical_market_context`, `test_publish_historical_market_context_to_nas`를
+  기존 core 순서를 바꾸지 않는 격리 profile로 등록했다. 본문·AI 해석 계약 외에 불완전 페이지의
+  전체 rollback과 historical context 게시 완료 조건·4 MiB 인접 원본 DB 미복사를 자동 회귀로 보호한다.
+  프로젝트 Python에서 4개 worker, 33건 통과; 실패·오류·skip·미실행 0이다. 새 테스트 모듈 누락 검사도 통과했다.
+  최종 manifest는 182개 등록/227개 미등록(Windows 222, Linux 5)이다. 변경을 포함한 전체
+  `all-local`은 1,901건/42 worker 통과, failure/error/skip/expected failure/unexpected success/미실행 0,
+  process tree 종료 42/42, 잔류 자손 0이다. 새 4 MiB 제외 assertion을 포함한 최종 실행 결과는
+  `tmp/regression/final-audit-authorized-20261009/run.json`이다.
+  제한 실행 환경의 별도 전체 실행은 Windows Proactor `socketpair` 초기화에서 멈춰 incomplete로 기록했으며 성공으로 세지 않았다.
+  승인된 사용자 Windows 환경의 최종 결과가 1,901건/42 worker 통과를 확인한다. manifest SHA256은
+  `0547f1f132e99401ab57783b30f11ce9ab2d15e768971170a58faacb38462f57`이다. 새 테스트 모듈 누락 검사도
+  통과했다. 나머지 7개 전문 역사 데이터·수집 보조 모듈은 용도를 확인했으며 관련 스크립트를 변경할 때
+  선택 실행 대상으로 남긴다. 이 변경 뒤 GitHub hosted CI는 아직 실행하지 않았고 NAS 배포/main 병합은 없다.
 - **2026-10-09 계약 검토 6개 해결 및 편입:** [원인·기준선 조정·실행 증거](TEST_CONTRACT_RECONCILIATION_20261009.md).
   변경 전 78건의 failure 5/error 1을 재현하고 테스트/fixture/감사 도구만 수정했다. 변경 후
   81건 통과, failure/error/skip/미실행 0, worker tree 종료 6/6, 자손 누수 0이다.
@@ -215,7 +229,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_analyze_db_trace.py](../tests/unit/test_analyze_db_trace.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_api_settings_dialog.py](../tests/unit/test_api_settings_dialog.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/7/0/0 |
 | [test_app_controller.py](../tests/unit/test_app_controller.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/40/12/0/0 |
-| [test_article_text.py](../tests/unit/test_article_text.py) | 미등록 | 일반 후보; 18건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
+| [test_article_text.py](../tests/unit/test_article_text.py) | 기준선 미등록 → 뉴스 계약 profile 등록 | 18건 발견 복구·단독 및 격리 통과; 본문 추출·원문 시각·본문 거부 계약 | 0/0/0/0/0/0 |
 | [test_audit_historical_five_minute_clock.py](../tests/unit/test_audit_historical_five_minute_clock.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_audit_historical_monthly_gap_causes.py](../tests/unit/test_audit_historical_monthly_gap_causes.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_audit_historical_monthly_gap_raw.py](../tests/unit/test_audit_historical_monthly_gap_raw.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
@@ -269,10 +283,10 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_central_sync_utils.py](../tests/unit/test_central_sync_utils.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_central_theme_sync.py](../tests/unit/test_central_theme_sync.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/1/0/0 |
 | [test_check_postgres_integration.py](../tests/unit/test_check_postgres_integration.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_classify_historical_stock_adjustments.py](../tests/unit/test_classify_historical_stock_adjustments.py) | 미등록 | 일반 후보; 2건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
-| [test_collect_candidate_event_disclosures.py](../tests/unit/test_collect_candidate_event_disclosures.py) | 미등록 | 일반 후보; 2건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
-| [test_collect_candidate_exchange_disclosures.py](../tests/unit/test_collect_candidate_exchange_disclosures.py) | 미등록 | 일반 후보; 1건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/2/0/1/0 |
-| [test_collect_historical_market_context.py](../tests/unit/test_collect_historical_market_context.py) | 미등록 | 일반 후보; 7건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
+| [test_classify_historical_stock_adjustments.py](../tests/unit/test_classify_historical_stock_adjustments.py) | 미등록 유지 | 전문 연구 분류 스크립트의 DART 사건 판정·후보 작업 생성 검사; 해당 workflow 변경 때 선택 실행 | 0/0/0/0/0/0 |
+| [test_collect_candidate_event_disclosures.py](../tests/unit/test_collect_candidate_event_disclosures.py) | 미등록 유지 | 과거 사건 후보 정리 및 검증 발행인 이름의 연구 보조 흐름; workflow 변경 때 선택 실행 | 0/0/0/0/0/0 |
+| [test_collect_candidate_exchange_disclosures.py](../tests/unit/test_collect_candidate_exchange_disclosures.py) | 미등록 유지 | 거래소 공시 1개 수집 스크립트의 receipt date/raw snapshot 검사; 스크립트 변경 때 선택 실행 | 0/0/2/0/1/0 |
+| [test_collect_historical_market_context.py](../tests/unit/test_collect_historical_market_context.py) | 기준선 미등록 → 역사 데이터 계약 profile 등록 | 7건 발견 복구·격리 통과; candidate 범위와 불완전 페이지 전체 rollback 보존 | 0/0/0/0/0/0 |
 | [test_column_settings_repository.py](../tests/unit/test_column_settings_repository.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_condition_runtime.py](../tests/unit/test_condition_runtime.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 2/0/7/7/0/0 |
 | [test_context_candidates.py](../tests/unit/test_context_candidates.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/7/0/0 |
@@ -285,7 +299,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_daily_high_worker_controller.py](../tests/unit/test_daily_high_worker_controller.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_daishin_candidate_collection.py](../tests/unit/test_daishin_candidate_collection.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/3/12/0/0 |
 | [test_dart_credential_owner.py](../tests/unit/test_dart_credential_owner.py) | 기준선 미등록 → P0 계약/fixture 등록 | fixed clock과 저장 전용 search 경로; 18건 통과, all-local 포함 | 1/0/11/4/2/0 |
-| [test_dart_disclosure_filter.py](../tests/unit/test_dart_disclosure_filter.py) | 미등록 | 일반 후보; 1건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
+| [test_dart_disclosure_filter.py](../tests/unit/test_dart_disclosure_filter.py) | 미등록 유지 | 단일 DART 필터 옵션 검사; 직접 관련 기능 변경 시 선택 실행 | 0/0/0/0/0/0 |
 | [test_detached_chart_window.py](../tests/unit/test_detached_chart_window.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/3/2/0/0 |
 | [test_diagnostic_cli_controls.py](../tests/unit/test_diagnostic_cli_controls.py) | 미등록 | 별도 환경; Windows skip 방지, Linux 격리 실행 전 보류 | 0/0/30/58/0/0 |
 | [test_diagnostic_collector_replay.py](../tests/unit/test_diagnostic_collector_replay.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/0/0/0 |
@@ -354,7 +368,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_historical_research_split.py](../tests/unit/test_historical_research_split.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/1/0 |
 | [test_image_theme_ocr_worker_controller.py](../tests/unit/test_image_theme_ocr_worker_controller.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_import_historical_market_news_to_nas.py](../tests/unit/test_import_historical_market_news_to_nas.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
-| [test_import_krx_vi_history.py](../tests/unit/test_import_krx_vi_history.py) | 미등록 | 일반 후보; 1건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
+| [test_import_krx_vi_history.py](../tests/unit/test_import_krx_vi_history.py) | 미등록 유지 | 과거 KRX VI 파일 가져오기 전용 dedup·시각 보존 검사; import workflow 변경 때 선택 실행 | 0/0/0/0/0/0 |
 | [test_inspect_research_operation_receipts.py](../tests/unit/test_inspect_research_operation_receipts.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/1/0 |
 | [test_investor_flow_service.py](../tests/unit/test_investor_flow_service.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_journal_backup.py](../tests/unit/test_journal_backup.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/1/0/2/1 |
@@ -370,7 +384,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_journal_settings_dialogs.py](../tests/unit/test_journal_settings_dialogs.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/1/0/0 |
 | [test_journal_snapshot_service.py](../tests/unit/test_journal_snapshot_service.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_journal_workers.py](../tests/unit/test_journal_workers.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_kind_name_history.py](../tests/unit/test_kind_name_history.py) | 미등록 | 일반 후보; 2건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
+| [test_kind_name_history.py](../tests/unit/test_kind_name_history.py) | 미등록 유지 | 과거 KIND 공시에서 직접·이전 상호명 파싱; 해당 parser 변경 때 선택 실행 | 0/0/0/0/0/0 |
 | [test_kiwoom_client_factory.py](../tests/unit/test_kiwoom_client_factory.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/3/0/0/0 |
 | [test_kiwoom_rest_client.py](../tests/unit/test_kiwoom_rest_client.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/3/1/0/0 |
 | [test_kiwoom_storage_audit.py](../tests/unit/test_kiwoom_storage_audit.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
@@ -428,7 +442,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_naver_news_config.py](../tests/unit/test_naver_news_config.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_naver_stock_market_news.py](../tests/unit/test_naver_stock_market_news.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/1/0/0/0 |
 | [test_naver_stock_news.py](../tests/unit/test_naver_stock_news.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
-| [test_news_ai.py](../tests/unit/test_news_ai.py) | 미등록 | 일반 후보; 5건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/4/0/0/0 |
+| [test_news_ai.py](../tests/unit/test_news_ai.py) | 기준선 미등록 → 뉴스 계약 profile 등록 | 5건 발견 복구·단독 및 격리 통과; 응답 해석·제공자 대체·요청 제한 계약 | 0/0/4/0/0/0 |
 | [test_news_ai_repository.py](../tests/unit/test_news_ai_repository.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_news_analysis.py](../tests/unit/test_news_analysis.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/4/0/0/0 |
 | [test_news_api_contract_baseline.py](../tests/unit/test_news_api_contract_baseline.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/1/2/0 |
@@ -462,9 +476,9 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_prepared_news_import_batch.py](../tests/unit/test_prepared_news_import_batch.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/5/0/0/0 |
 | [test_process_control.py](../tests/unit/test_process_control.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/3/0/2/0 |
 | [test_program_trade_service.py](../tests/unit/test_program_trade_service.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
-| [test_project_historical_minute_exclusions.py](../tests/unit/test_project_historical_minute_exclusions.py) | 미등록 | 일반 후보; 3건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/0/0 |
+| [test_project_historical_minute_exclusions.py](../tests/unit/test_project_historical_minute_exclusions.py) | 미등록 유지 | 과거 분봉 연구 projection의 날짜 제외 검증; projection 변경 때 선택 실행 | 0/0/0/0/0/0 |
 | [test_publish_historical_daishin_raw_to_nas.py](../tests/unit/test_publish_historical_daishin_raw_to_nas.py) | 미등록 | 별도 환경; Windows skip 방지, Linux 격리 실행 전 보류 | 0/0/0/0/3/1 |
-| [test_publish_historical_market_context_to_nas.py](../tests/unit/test_publish_historical_market_context_to_nas.py) | 미등록 | 일반 후보; 3건 발견 복구·단독 통과, CI 편입은 위험도/비용 검토 후 결정 | 0/0/0/0/2/0 |
+| [test_publish_historical_market_context_to_nas.py](../tests/unit/test_publish_historical_market_context_to_nas.py) | 기준선 미등록 → 역사 데이터 계약 profile 등록 | 3건 발견 복구·격리 통과; 게시 완료 조건과 4 MiB 인접 원본 DB 미복사 검증 | 0/0/0/0/2/0 |
 | [test_query_store_source.py](../tests/unit/test_query_store_source.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/3/0 |
 | [test_ranking_execution.py](../tests/unit/test_ranking_execution.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_ranking_schedule.py](../tests/unit/test_ranking_schedule.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |

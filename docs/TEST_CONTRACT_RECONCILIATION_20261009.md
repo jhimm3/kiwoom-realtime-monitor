@@ -104,3 +104,41 @@ disposable PostgreSQL 경계 검사와 접근 통합 87건 통과. 테스트 모
 검증 공백·제외 이유와 방법을
 원장에 기록하고 이 고위험 계약들의 별도 환경 검증 결과를 확인하면 이번 감사를 종료한다.
 409개 전체의 무기한 개선으로 확대하지 않는다. NAS 배포와 main 병합은 별도다.
+
+## 후속 함수형 테스트 편입 결과 (2026-10-09)
+
+발견 경로를 복구한 11개 파일/45건 중 뉴스 본문·AI, 역사 context 수집 rollback, context 게시 완료
+계약을 확인하는 4개 파일/33건을 `dependency-audit-news-contracts` 격리 profile에 선택 등록했다.
+profile 단독 실행은 4/4 worker, 33/33 통과했다. 새 테스트 모듈 coverage 검사도 미등록 0으로 통과했다.
+
+최종 `all-local`은 현재 manifest 182개/42 worker에서 1,901건 통과, failure/error/skip/expected
+failure/unexpected success/미실행 0, process tree 종료 42/42, 잔류 자손 0이다. 결과는
+`tmp/regression/final-selected-ci182-20261009/run.json`에 보존했다. manifest SHA256은
+`0547f1f132e99401ab57783b30f11ce9ab2d15e768971170a58faacb38462f57`, runner SHA256은
+`659c4c11fd3546dec156b77d5fb24b37245f7ddd48cb8ee8c8f9741b672c93d1`이다.
+
+### 게시 테스트 주장 정밀화
+
+후속 검토에서 publisher 테스트의 이름·이전 감사 문구와 assertion 사이에 공백을 확인했다.
+테스트가 큰 원본 DB를 실제로 만들거나 게시 산출물에서 제외되는지 확인하지 않고 있었다.
+인접한 `main.sqlite3`에 4 MiB payload를 생성하고 게시 run 전체에 해당 DB 파일이 없는지 assertion을
+추가했다. 이는 테스트만 변경하며 게시 동작은 수정하지 않았다. 후속 재검증 결과는 아래에 기록한다.
+
+2026-10-09 재검증: `dependency-audit-news-contracts` 33/33 통과, 4/4 worker 종료 확인, skip·실패·오류·미실행
+0, process tree 종료 4/4, 잔류 자손 0이다. 게시 모듈은 3/3 실행됐다. 결과는
+`tmp/regression/publish-claim-review-20261009/run.json`에 보존했다.
+
+새 assertion을 포함한 첫 `all-local` 시도는 제한 실행 환경의 첫 worker가 `asyncio` loop 생성 중 Windows
+`socketpair`의 `_fallback_socketpair → accept`에서 멈춰 중단됐다. 빈 coroutine만 실행하는 대조군도 같은 곳에서
+8초 제한에 걸렸다. 이 run은 `incomplete`이고 통과로 세지 않는다. 사용자 Windows 실행 환경에서 같은 빈 loop는
+정상 종료했고, 동일 게시 테스트는 1/1·0.081초에 통과했다. 이어서 승인된 환경에서 수행한 최종 `all-local`은
+42/42 worker, 1,901건 통과, failure/error/skip/expected failure/unexpected success/미실행 0, process tree 종료
+42/42, 잔류 자손 0이다. 실행 기록은 `tmp/regression/final-audit-authorized-20261009/run.json`이며 현재 게시 테스트
+파일 SHA256 `475ec77a19b2a76ad166d0753a6be309e3b4d245e0e0f17cccd6bece0c792354`와 manifest SHA256
+`0547f1f132e99401ab57783b30f11ce9ab2d15e768971170a58faacb38462f57`가 run 기록과 일치한다.
+
+나머지 7개 파일/12건은 과거 공시·KRX 파일 수집과 연구 projection 보조 스크립트 전용으로 남겼다.
+기능 용도를 확인했고 관련 스크립트를 바꿀 때 해당 모듈을 선택 실행한다. 앞선 restricted sandbox에서는
+Windows Proactor event loop가 내부 `socketpair`에서 대기해 async 테스트를 시작하지 못했으나, 같은 테스트를
+권한 허용 실행 경로에서 1/1 통과시켰고 당시 전체 검증도 그 경로에서 완료했다. 게시 assertion의 별도 후속 수정과
+그에 대한 좁은 profile 검증은 위에 기록했다. 그 후 GitHub hosted CI와 NAS 운영 검증은 실행하지 않았다.
