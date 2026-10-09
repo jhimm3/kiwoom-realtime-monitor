@@ -221,6 +221,36 @@
       "tests.unit.test_collect_historical_market_context",
       "tests.unit.test_publish_historical_market_context_to_nas",
       "tests.unit.test_build_prepared_historical_search_projection"
+    ],
+    "dependency-audit-p2-account-order-safety": [
+      "tests.unit.test_ai_credential_owner",
+      "tests.unit.test_central_credentials_client",
+      "tests.unit.test_selected_account_client",
+      "tests.unit.test_real_account_reader",
+      "tests.unit.test_real_account_reads",
+      "tests.unit.test_real_account_monitor",
+      "tests.unit.test_real_account_realtime",
+      "tests.unit.test_journal_selected_account",
+      "tests.unit.test_mock_account_bundle",
+      "tests.unit.test_mock_automation_admission",
+      "tests.unit.test_mock_automation_candidate",
+      "tests.unit.test_mock_automation_dialog",
+      "tests.unit.test_mock_automation_risk",
+      "tests.unit.test_mock_automation_runner",
+      "tests.unit.test_mock_automation_specification",
+      "tests.unit.test_mock_automation_supervisor",
+      "tests.unit.test_market_role_change",
+      "tests.unit.test_planned_reconnect",
+      "tests.unit.test_condition_runtime"
+    ],
+    "dependency-audit-p2-functional-discovery": [
+      "tests.unit.test_classify_historical_stock_adjustments",
+      "tests.unit.test_collect_candidate_event_disclosures",
+      "tests.unit.test_collect_candidate_exchange_disclosures",
+      "tests.unit.test_import_krx_vi_history",
+      "tests.unit.test_kind_name_history",
+      "tests.unit.test_project_historical_minute_exclusions",
+      "tests.unit.test_dart_disclosure_filter"
     ]
   },
   "core_order_sha256": "36DAE599F514EC9356B7DC3EAB9C7B4F1033C4A27076EB8A7FCD931FBEB1810A"

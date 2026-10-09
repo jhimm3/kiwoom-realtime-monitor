@@ -4,6 +4,32 @@
 
 ## 현재 결정
 
+2026-10-09 중복/상시 CI 후속 분석 및 구현 진행: [판정·수정·검증 상태](TEST_DUPLICATION_CI_FOLLOWUP.md).
+현재 전체 410개 중 Windows `all-local` 등록 210개, 별도 Linux CI 5개, 미등록 195개다.
+409개 조사 대상의 중복 선별에서 삭제할 완전 중복은 확정되지 않았다. 실행기의 빈 모듈 false-green을
+차단했고, 검증된 선택 profile 26개를 추가했다. 관련 선택 profile 218건과 모듈 간 setup 결합 수정은
+통과했다. 전체 `all-local`과 hosted CI 결과는 후속 문서의 최신 상태를 따른다. 아래의 당시 manifest,
+'미커밋/hosted 미실행' 표현은 각 이전 검증 시점의 기록이다.
+
+### 2026-10-09 최종 후속 회귀
+
+`test_real_account_monitor`의 주기 검사는 이벤트 수신 시 safety deadline이 재설정되는 동작을
+실제 작업 시작 시간과 비교했다. 기존 고정 대기 검사는 테스트 프로세스 부하에 따라 cycle 사이에
+간헐적으로 실패했다. 테스트에서만 asyncio loop clock/wait를 제어해 시간 조건을 결정적으로 만들고,
+실제 DB 저장과 요청 경로는 유지했다. 모듈은 20/20 통과했으며 이벤트 deadline 재설정을 제거한
+결함 주입 대조군은 의도한 assertion에서 실패했다.
+
+이 수정과 실행기·26개 profile 변경을 포함한 Windows `all-local`은 2,136건/70 worker 통과했다.
+failure, error, skip, expected failure, unexpected success, 미실행 worker는 모두 0이고,
+process tree 종료는 70/70, 잔류 자손은 0이다. 실행 기록은
+`tmp/regression/test-dedup-ci-all-local-stable-final/run.json`이다. Windows 210개 모듈과 신규
+profile 26개 전체가 기록에 있고, 모듈별 발견 수와 총 실행 수가 일치한다. 기존 core 순서 hash는
+`36DAE599F514EC9356B7DC3EAB9C7B4F1033C4A27076EB8A7FCD931FBEB1810A`로 유지됐다.
+
+새 테스트 모듈 누락 검사도 현재 작업 트리 기준 통과했다(신규 파일 0개). 이 검사는 PR base 비교나
+hosted CI 결과를 대신하지 않는다. GitHub hosted CI와 실제 NAS PostgreSQL 실행은 아직 검증하지
+않았으며, 로컬 `all-local` 성공과 별도로 남겨 둔다.
+
 2026-10-09 fixture follow-up: `test_research_final_preparation` no longer constructs
 `DevelopmentValidationTests` or reaches through its nested partition fixture. The test now owns its
 temporary directory and builds its request/source directly from the existing pure row, child-export,

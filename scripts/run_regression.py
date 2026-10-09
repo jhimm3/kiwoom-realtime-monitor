@@ -477,7 +477,8 @@ def _worker(output_path: Path, modules: Sequence[str]) -> int:
     source = _source_identity()
     result_document: dict[str, Any] = {
         "started_at": _utc_now(), "modules": list(modules),
-        "test_count": 0, "failures": [], "errors": [], "skipped": [],
+        "test_count": 0, "planned_test_count": 0, "module_test_counts": [],
+        "zero_test_modules": [], "failures": [], "errors": [], "skipped": [],
         "expected_failures": [], "unexpected_successes": [],
         "source": source, "status": "failed",
     }
@@ -487,7 +488,15 @@ def _worker(output_path: Path, modules: Sequence[str]) -> int:
         loaded = []
         for module_name in modules:
             module = importlib.import_module(module_name)
-            loaded.append(unittest.defaultTestLoader.loadTestsFromModule(module))
+            suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+            count = suite.countTestCases()
+            result_document["module_test_counts"].append(
+                {"module": module_name, "test_count": count},
+            )
+            if count == 0:
+                result_document["zero_test_modules"].append(module_name)
+            result_document["planned_test_count"] += count
+            loaded.append(suite)
         suite = unittest.TestSuite(loaded)
         if suite.countTestCases() == 0:
             result_document["status"] = "incomplete"
@@ -505,6 +514,13 @@ def _worker(output_path: Path, modules: Sequence[str]) -> int:
             "unexpected_successes": [test.id() for test in test_result.unexpectedSuccesses],
             "status": "passed" if test_result.wasSuccessful() and not has_unexpected_success else "failed",
         })
+        if result_document["zero_test_modules"] or (
+            test_result.testsRun != result_document["planned_test_count"]
+        ):
+            result_document["status"] = "incomplete"
+            result_document["load_error"] = (
+                "One or more requested modules had no tests, or planned and executed counts differed"
+            )
         if result_document["skipped"] or result_document["expected_failures"]:
             result_document["status"] = "incomplete"
         return _write_worker_result(
@@ -525,6 +541,25 @@ def _write_worker_result(path: Path, value: dict[str, Any], exit_code: int) -> i
     value["finished_at"] = _utc_now()
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return exit_code
+
+
+def _discovery_evidence_error(
+    worker_result: dict[str, Any], requested_modules: Sequence[str], executed_tests: int,
+) -> str | None:
+    counts = worker_result.get("module_test_counts")
+    if not isinstance(counts, list) or any(not isinstance(item, dict) for item in counts):
+        return "Worker per-module discovery counts are missing or invalid"
+    if [item.get("module") for item in counts] != list(requested_modules):
+        return "Worker per-module discovery order does not match the requested modules"
+    values = [item.get("test_count") for item in counts]
+    if any(type(value) is not int or value < 1 for value in values):
+        return "Every requested module must discover at least one test"
+    if worker_result.get("zero_test_modules") != []:
+        return "Worker reports modules with no discovered tests"
+    planned = worker_result.get("planned_test_count")
+    if type(planned) is not int or planned != sum(values) or planned != executed_tests:
+        return "Planned, per-module, and executed test counts do not agree"
+    return None
 
 
 def _sha256(path: Path) -> str:
@@ -661,6 +696,10 @@ def _run_process(
                 "failures", "errors", "skipped", "expected_failures", "unexpected_successes"))
         ):
             raise ValueError("Worker success does not contain complete passing evidence")
+        if worker_result.get("status") == "passed":
+            discovery_error = _discovery_evidence_error(worker_result, modules, count)
+            if discovery_error:
+                raise ValueError(discovery_error)
     except (OSError, ValueError) as error:
         worker_result = None
         result_error = f"{type(error).__name__}: {error}"
@@ -696,6 +735,9 @@ def _run_process(
         "exit_code": exit_code,
         "log": str(log_path), "result": str(result_path), "result_error": result_error,
         "test_count": worker_result.get("test_count", 0) if worker_result else 0,
+        "planned_test_count": worker_result.get("planned_test_count", 0) if worker_result else 0,
+        "module_test_counts": worker_result.get("module_test_counts", []) if worker_result else [],
+        "zero_test_modules": worker_result.get("zero_test_modules", []) if worker_result else [],
         "failures": worker_result.get("failures", []) if worker_result else [],
         "errors": worker_result.get("errors", []) if worker_result else [],
         "skipped": worker_result.get("skipped", []) if worker_result else [],

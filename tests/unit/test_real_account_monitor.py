@@ -7,8 +7,10 @@ import unittest
 from dataclasses import replace
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from kiwoom_monitor.central_server import real_runtime
 from kiwoom_monitor.central_server.credential_runtime import CredentialOperationError
 from kiwoom_monitor.central_server.database import _save_real_account_recovery
 from kiwoom_monitor.central_server.market_observations import as_kst
@@ -66,14 +68,62 @@ class RealAccountMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.owner._account_poll_interval = 0.02
         self.owner._account_safety_interval = 0.15
         self.owner._account_timer_cap = 0.01
-        context = await self.active()
-        await self.until(lambda: len(context.client.account_calls) == 5)
-        await self.until(lambda: len(context.client.account_calls) == 10)
-        self.owner._handle_account_event(self.profile, context, context.binding,
-                                         "order_changed", context.binding.scope)
-        await self.until(lambda: len(context.client.account_calls) == 15)
-        await asyncio.sleep(0.08)
-        self.assertEqual(15, len(context.client.account_calls))
+        clock = [0.0]
+        cycle_starts = []
+        event_sent = False
+        before_deadline = False
+        before_deadline_checked = False
+        original_read = self.owner.read_account
+
+        async def traced_read(*args, **kwargs):
+            cycle_starts.append(clock[0])
+            result = await original_read(*args, **kwargs)
+            if len(cycle_starts) == 4:
+                self.owner.bundle(self.profile).monitor_stop.set()
+            return result
+
+        async def controlled_wait(awaitable, timeout):
+            nonlocal event_sent, before_deadline, before_deadline_checked
+            if asyncio.current_task().get_name() != "real-account-monitor":
+                return await asyncio.wait_for(awaitable, timeout)
+            awaitable.close()
+            context = self.owner.bundle(self.profile)
+            request_count = len(context.client.account_calls)
+            if request_count == 10 and not event_sent:
+                clock[0] = cycle_starts[1] + 0.075
+                self.owner._handle_account_event(
+                    self.profile, context, context.binding, "order_changed", context.binding.scope,
+                )
+                event_sent = True
+                return True
+            if request_count == 15 and not before_deadline:
+                clock[0] = cycle_starts[2] + 0.14
+                before_deadline = True
+            else:
+                if request_count == 15:
+                    self.assertEqual(15, request_count)
+                    before_deadline_checked = True
+                clock[0] += timeout
+            raise asyncio.TimeoutError
+
+        controlled_asyncio = SimpleNamespace(**vars(asyncio))
+        controlled_asyncio.get_running_loop = lambda: SimpleNamespace(time=lambda: clock[0])
+        controlled_asyncio.wait_for = controlled_wait
+        with patch.object(real_runtime, "asyncio", controlled_asyncio), patch.object(
+            self.owner, "read_account", side_effect=traced_read,
+        ):
+            context = await self.active()
+            await asyncio.wait_for(asyncio.shield(context.monitor_task), 5)
+
+        self.assertEqual(20, len(context.client.account_calls))
+        self.assertEqual(4, len(cycle_starts))
+        self.assertTrue(event_sent)
+        self.assertTrue(before_deadline_checked)
+        self.assertGreaterEqual(cycle_starts[1] - cycle_starts[0], 0.15 - 1e-9)
+        self.assertAlmostEqual(cycle_starts[2] - cycle_starts[1], 0.575)
+        self.assertGreaterEqual(cycle_starts[3] - cycle_starts[2], 0.15 - 1e-9)
+        self.assertIsNone(context.monitor_error_code)
+        self.assertIsNotNone(context.monitor_last_success_at)
 
     async def test_offhours_connection_events_do_not_refresh_but_account_change_does(self):
         self.owner._account_poll_interval = 0.02

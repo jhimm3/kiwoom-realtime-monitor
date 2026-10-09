@@ -65,14 +65,18 @@ class RunRegressionTests(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.fixture_count = 0
 
-    def _run_fixture(self, mode: str, *, timeout: int = 5, module: str | None = None):
+    def _run_fixture(
+        self, mode: str, *, timeout: int = 5, module: str | None = None,
+        modules: list[str] | None = None,
+    ):
         self.fixture_count += 1
         directory = self.directory / str(self.fixture_count)
         directory.mkdir()
+        module_names = modules or [module or "tests.unit.regression_worker_fixtures"]
         with patch.dict(os.environ, {"REGRESSION_FIXTURE_MODE": mode,
                                    "REGRESSION_FIXTURE_DIR": str(directory)}):
             return run_regression._run_process(
-                modules=[module or "tests.unit.regression_worker_fixtures"],
+                modules=module_names,
                 result_path=directory / "result.json",
                 log_path=directory / "worker.log",
                 timeout_seconds=timeout,
@@ -164,7 +168,63 @@ class RunRegressionTests(unittest.TestCase):
         result = self._run_fixture("pass")
         self.assertEqual("passed", result["status"])
         self.assertEqual(1, result["test_count"])
+        self.assertEqual(1, result["planned_test_count"])
+        self.assertEqual(
+            [{"module": "tests.unit.regression_worker_fixtures", "test_count": 1}],
+            result["module_test_counts"],
+        )
         self.assertTrue(result["source"]["verified"])
+
+    def test_mixed_batch_with_empty_module_is_incomplete_in_either_order(self) -> None:
+        empty = "regression_empty_fixture"
+        passing = "tests.unit.regression_worker_fixtures"
+        for modules in ([empty, passing], [passing, empty]):
+            with self.subTest(modules=modules):
+                result = self._run_fixture("pass", modules=list(modules))
+                self.assertEqual("incomplete", result["status"])
+                self.assertEqual(1, result["test_count"])
+                self.assertEqual(1, result["planned_test_count"])
+                self.assertEqual(list(modules), [item["module"] for item in result["module_test_counts"]])
+                self.assertEqual([empty], result["zero_test_modules"])
+                self.assertIn("no tests", result["load_error"].lower())
+
+    def test_duplicate_requested_module_has_ordered_discovery_evidence(self) -> None:
+        module = "tests.unit.regression_worker_fixtures"
+        result = self._run_fixture("pass", modules=[module, module])
+        self.assertEqual("passed", result["status"])
+        self.assertEqual(2, result["test_count"])
+        self.assertEqual(2, result["planned_test_count"])
+        self.assertEqual(
+            [{"module": module, "test_count": 1}, {"module": module, "test_count": 1}],
+            result["module_test_counts"],
+        )
+
+    def test_worker_success_requires_complete_per_module_discovery_evidence(self) -> None:
+        modules = ["first", "second"]
+        valid = {
+            "module_test_counts": [
+                {"module": "first", "test_count": 2},
+                {"module": "second", "test_count": 1},
+            ],
+            "zero_test_modules": [],
+            "planned_test_count": 3,
+        }
+        self.assertIsNone(run_regression._discovery_evidence_error(valid, modules, 3))
+        invalid = [
+            ({**valid, "module_test_counts": valid["module_test_counts"][:1]}, modules, 2),
+            ({**valid, "module_test_counts": [
+                {"module": "first", "test_count": 0}, valid["module_test_counts"][1]]}, modules, 1),
+            ({**valid, "module_test_counts": [
+                {"module": "first", "test_count": True}, valid["module_test_counts"][1]]}, modules, 2),
+            ({**valid, "module_test_counts": list(reversed(valid["module_test_counts"]))}, modules, 3),
+            ({**valid, "zero_test_modules": ["second"]}, modules, 3),
+            ({**valid, "planned_test_count": 4}, modules, 3),
+        ]
+        for result, requested, executed in invalid:
+            with self.subTest(result=result):
+                self.assertIsNotNone(
+                    run_regression._discovery_evidence_error(result, requested, executed),
+                )
 
     def test_failure_import_error_empty_suite_and_skip_are_not_passes(self) -> None:
         failed = self._run_fixture("fail")
