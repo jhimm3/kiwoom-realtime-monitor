@@ -57,6 +57,14 @@ Dockerfile의 LF↔CRLF는 같은 지문, 내용 변경은 다른 지문임을 �
 0700/0600 임시 비밀 경계를 유지하면서 생성·검사 Python container를 host 임시 디렉터리 소유 UID/GID로
 실행하도록 바꿨다. 로컬 Docker가 없어 이 권한 수정의 실제 통합 결과는 후속 hosted CI에서 판정한다.
 
+[후속 CI run 37991461321](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37991461321)은
+Linux 작업이 테스트 시작 전에 Docker Hub의 익명 이미지 pull 제한 `429 Too Many Requests`에 걸렸다.
+필수·확장 PostgreSQL의 service container, 봉인 replay의 service container, Linux operator의
+Python image 빌드가 같은 제한을 보였다. 이 작업은 기능 실패나 skip 성공으로 계산하지 않는다.
+CI 전용 PostgreSQL 17 Alpine/Python 3.13 slim 이미지 참조를 ECR Public `docker/library` 경로로 바꿨고,
+두 태그의 registry manifest가 HTTP 200으로 존재함을 읽기 전용으로 확인했다. 제품·NAS 이미지,
+테스트 assertion, DB 계약은 변경하지 않았다. 변경 후 실제 hosted 실행 결과가 최종 판정이다.
+
 ## 2. 유지·중복·구조 판정
 
 [409개 의존성 원장](TEST_DEPENDENCY_AUDIT.md), [260개 보호 계약](REGRESSION_COVERAGE_AUDIT.md),

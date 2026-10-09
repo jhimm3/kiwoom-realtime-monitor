@@ -110,7 +110,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:17-alpine
+        image: public.ecr.aws/docker/library/postgres:17-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -281,7 +281,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:17-alpine
+        image: public.ecr.aws/docker/library/postgres:17-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -335,7 +335,7 @@ jobs:
     timeout-minutes: 60
     services:
       postgres:
-        image: postgres:17-alpine
+        image: public.ecr.aws/docker/library/postgres:17-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -379,9 +379,9 @@ jobs:
         run: |
           docker build --label "com.kiwoom.ci-source=$GITHUB_SHA" \
             -f tests/ci_runtime.Dockerfile -t kiwoom-ci-runtime:local .
-          docker pull postgres:17-alpine
+          docker pull public.ecr.aws/docker/library/postgres:17-alpine
           docker image inspect kiwoom-ci-runtime:local --format '{{.Id}}' > tmp/regression/ci-sealed/image-id
-          docker image inspect postgres:17-alpine --format '{{.Id}}' > tmp/regression/ci-sealed/postgres-image-id
+          docker image inspect public.ecr.aws/docker/library/postgres:17-alpine --format '{{.Id}}' > tmp/regression/ci-sealed/postgres-image-id
       - name: Confirm installed package matches the copied checkout source
         shell: bash
         run: |
