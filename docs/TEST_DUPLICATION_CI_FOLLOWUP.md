@@ -31,7 +31,7 @@
 | 미등록 선택 묶음 1·2 등록 후 | 290 | 5 | 118 | 413 |
 | 미등록 선택 묶음 1·2·3 등록 후 | 314 | 5 | 94 | 413 |
 | 미등록 선택 묶음 1·2·3·4 등록 후 | 338 | 5 | 70 | 413 |
-| 미등록 선택 묶음 1·2·3·4·5 등록 후 | 366 | 5 | 42 | 413 |
+| 미등록 선택 묶음 1·2·3·4·5 등록 후 | 365 | 5 | 43 | 413 |
 
 기존 문서의 'manifest 미등록 226개' 중 5개는 CI 제외가 아니다. 다음 모듈은
 `.github/workflows/dependency-regression.yml`의 Ubuntu job에서 이미 실행한다.
@@ -754,7 +754,8 @@ unverified/leaked descendant 0이다. 최초 rename 오류 원인은 직접 증�
 ## 2026-10-09 미등록 CI 선택 묶음 5
 
 다음 정렬 구간 24개 모듈을 검토하고, 공유 연구 fixture를 사용하는 4개 후속 모듈을 함께 확인했다.
-28개 신규 모듈/398건을 `dependency-audit-batch-05-research-campaign-and-recovery`에 선택 등록했다.
+28개 모듈/398건을 `dependency-audit-batch-05-research-campaign-and-recovery` profile에 넣었다.
+이 중 `test_research_final_preparation`은 기존에 이미 등록돼 있어 실제 신규 편입은 27개 모듈/370건이다.
 연구 campaign 입력·예산·등록·실행, 개발 검증과 final holdout 복구, process/queue 종료, DB 상태 저장과
 failure recovery 계약을 보호한다. 기존 `test_research_process`와 `test_research_queue`도 fixture 결합
 영향 검증을 위해 같은 targeted profile에 포함했지만 이미 core에서 실행되므로 all-local 집계에는 중복되지 않는다.
@@ -767,8 +768,8 @@ failure recovery 계약을 보호한다. 기존 `test_research_process`와 `test
 `test_research_campaign_nas`에서 한 번 발생했으나 재실행과 전체 targeted run은 통과했다. 원인은 미확정이며
 최초 실패 기록은 보존한다.
 
-선택 profile은 기존 core 두 모듈을 포함해 30개 모듈/415건 통과했다. 최종 fixture import 정리 후
-`test_research_campaign_inputs`도 23/23 통과했다. 최종 전체 `all-local`은 Windows 366개 모듈/3,334건/
+선택 profile은 이미 등록된 `test_research_final_preparation`과 core 두 모듈을 포함해 30개 모듈/415건 통과했다. 최종 fixture import 정리 후
+`test_research_campaign_inputs`도 23/23 통과했다. 최종 전체 `all-local`은 Windows 365개 모듈/3,334건/
 225 worker 통과, failure/error/skip/unexpected success/unrun/timeout/missing module/leaked descendant
 0이며 worker process tree 종료는 225/225다. 신규 test module 누락 검사도 통과했다. 제한된 sandbox에서
 Windows Proactor loopback socketpair 내부 accept가 멈춰 실행을 중단했지만, 동일 unchanged test는
@@ -781,5 +782,12 @@ Windows 338개 모듈/2,964건/198 worker, Linux 전용 65건/5개 모듈, dispo
 저장 경계 63개 및 rollback 검사를 통과했다. local/hosted manifest와 runner hash가 일치했다. 테스트 파일
 13개의 raw hash 차이는 Windows CRLF와 hosted LF checkout 차이였고 CRLF 정규화 후 모두 같았다.
 
-현재 Windows 등록 범위는 366개, Linux 전용은 5개, Windows 후보는 42개다. B5 hosted 검증은 게시 뒤
-확인하며, main 병합·NAS 검증 및 배포는 별도다.
+게시 commit `55935c1a677faffd677165205f240d2fdb1d375c`의 [B5 hosted run
+37939207498](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37939207498)은 성공했다.
+Windows 365개 모듈/3,334건/225 worker, Linux 전용 65건/5개 모듈, disposable PostgreSQL 87건과 schema
+21의 63개 저장 경계 및 rollback 검사가 통과했다. Windows hosted와 local은 같은 profile manifest 및
+runner hash, 365개 모듈 목록, 3,334건, 225 worker, 미실행 0을 보고했다. raw test-file hash 13개 차이는
+LF와 CRLF checkout 차이만으로 모두 일치했다. artifact는
+`tmp/regression/batch05-hosted/all-local-regression-37939207498/run.json`이다.
+
+현재 Windows 등록 범위는 365개, Linux 전용은 5개, Windows 후보는 43개다. main 병합·NAS 검증 및 배포는 별도다.
