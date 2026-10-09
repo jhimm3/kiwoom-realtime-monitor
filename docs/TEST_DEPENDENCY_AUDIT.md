@@ -5,8 +5,8 @@
 ## 현재 결정
 
 2026-10-09 중복/상시 CI 후속 분석 및 구현 진행: [판정·수정·검증 상태](TEST_DUPLICATION_CI_FOLLOWUP.md).
-최신 main 통합과 NAS/capture·replay·causal 종료·TOP20 경계 선택 편입 뒤 현재 전체 413개 중 Windows `all-local` 등록 230개,
-별도 Linux CI 5개, 미등록 178개다. 기존 226개와 core 실행 순서는 보존했다.
+최신 main 통합과 NAS/capture·replay·causal 종료·TOP20 경계·입력 계약 선택 편입 뒤 현재 전체 413개 중 Windows `all-local` 등록 235개,
+별도 Linux CI 5개, 미등록 173개다. 기존 230개와 core 실행 순서는 보존했다.
 409개 조사 대상의 중복 선별에서 삭제할 완전 중복은 확정되지 않았다. 실행기의 빈 모듈 false-green을
 차단했고, 검증된 선택 profile 26개를 추가했다. 관련 선택 profile 218건과 모듈 간 setup 결합 수정은
 통과했다. 전체 `all-local`과 hosted CI 결과는 후속 문서의 최신 상태를 따른다. 아래의 당시 manifest,
@@ -371,8 +371,8 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_diagnostic_rest_input.py](../tests/unit/test_diagnostic_rest_input.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; 논리/transport/cache/ingest 인과 입력·소유권·tape 오류 차단 14건 | 0/0/11/4/0/0 |
 | [test_diagnostic_runs.py](../tests/unit/test_diagnostic_runs.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/21/1/0/0 |
 | [test_diagnostic_sampling_api.py](../tests/unit/test_diagnostic_sampling_api.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/1/0/0/0 |
-| [test_diagnostic_top20_flow_input.py](../tests/unit/test_diagnostic_top20_flow_input.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/19/7/0/0 |
-| [test_diagnostic_top20_input.py](../tests/unit/test_diagnostic_top20_input.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/13/0/0/0 |
+| [test_diagnostic_top20_flow_input.py](../tests/unit/test_diagnostic_top20_flow_input.py) | 기준 미등록 → P2 등록 | P2 TOP20 input contracts 편입; 실제 SQLite 수급 저장·완료 marker·baseline·취소 drain 12건; assertion 실패 시 task 회수 2곳 보강 | 0/0/19/7/0/0 |
+| [test_diagnostic_top20_input.py](../tests/unit/test_diagnostic_top20_input.py) | 기준 미등록 → P2 등록 | P2 TOP20 input contracts 편입; 순위 freshness·20 slots·retry/error tape·OFF/ON 결과 동일·취소 incomplete 8건 | 0/0/13/0/0/0 |
 | [test_diagnostic_trace.py](../tests/unit/test_diagnostic_trace.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/17/2/4/0 |
 | [test_diagnostic_trace_api.py](../tests/unit/test_diagnostic_trace_api.py) | 기준선 미등록 → P0 계약/fixture 등록 | capability/auth 응답 계약; 4건 통과, all-local 포함 | 0/0/3/1/4/0 |
 | [test_diagnostic_trace_batches.py](../tests/unit/test_diagnostic_trace_batches.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/11/7/4/2 |
@@ -659,10 +659,10 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_theme_ranking.py](../tests/unit/test_theme_ranking.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_theme_suggestions.py](../tests/unit/test_theme_suggestions.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
 | [test_theme_text_import.py](../tests/unit/test_theme_text_import.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/0/0 |
-| [test_top20_delivery_provenance.py](../tests/unit/test_top20_delivery_provenance.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/14/24/1/0 |
+| [test_top20_delivery_provenance.py](../tests/unit/test_top20_delivery_provenance.py) | 기준 미등록 → P2 등록 | P2 TOP20 input contracts 편입; 실제 hub/parser 전달 원인·subscriber coverage·minute batch·chunk/tail/disk frontier 21건 | 0/0/14/24/1/0 |
 | [test_top20_execution_boundaries.py](../tests/unit/test_top20_execution_boundaries.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_top20_fixture_seed.py](../tests/unit/test_top20_fixture_seed.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/1/3/0/0 |
-| [test_top20_lifecycle_inputs.py](../tests/unit/test_top20_lifecycle_inputs.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/7/8/0/0 |
+| [test_top20_fixture_seed.py](../tests/unit/test_top20_fixture_seed.py) | 기준 미등록 → P2 등록 | P2 TOP20 input contracts 편입; cold seed의 warm marker/cache/task/lock/outbox 거부·shared clock/frontier·금지 IO 10건 | 1/0/1/3/0/0 |
+| [test_top20_lifecycle_inputs.py](../tests/unit/test_top20_lifecycle_inputs.py) | 기준 미등록 → P2 등록 | P2 TOP20 input contracts 편입; native 구독의 REG ACK·fresh READY·gap/epoch·0초 소비·shared effect owner 거부 11건 | 0/0/7/8/0/0 |
 | [test_top20_market_repair_worker_controller.py](../tests/unit/test_top20_market_repair_worker_controller.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_top20_program_shutdown.py](../tests/unit/test_top20_program_shutdown.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/11/0/0 |
 | [test_top20_replay_execution.py](../tests/unit/test_top20_replay_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/0/0/0 |

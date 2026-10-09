@@ -3,13 +3,13 @@
 **2026-10-09 테스트 중복·상시 CI 후속:** [분석·등록·실행 근거](TEST_DUPLICATION_CI_FOLLOWUP.md).
 원래 409개를 포함한 410개 정적 선별에서 삭제 가능한 완전 중복은 확정되지 않았다. 발견 증거와
 실제 worker/process tree 종료 판정을 강화하고 확인된 실패 주입·fixture 종료 결합을 보강했다.
-기존 core와 모든 등록 profile의 검증 범위·순서는 유지한다. 현재 unit 파일 413개 중 Windows 230개,
-별도 Linux 5개, 단계적 미등록 후보 178개다. 최근 TOP20 재생 경계 4개는 전후 28/28 통과했고,
-peer native 요청 실패 뒤 대기 task가 1개 남는 테스트 cleanup 경로를 재현해 0개 종료로 보강했다.
-기존 assertion·기대값·제품 코드는 변경하지 않았다.
-직전 `8d7d632` hosted CI는 Windows 2,323건/86 worker, Linux 65건, disposable PostgreSQL 87건과
-63개 저장 경계 검사 통과다. 새 TOP20 4개 포함 전체 회귀는 게시 branch의 CI artifact로 별도 판정한다.
-남은 178개를 모두 실행했거나 제외 확정한 것으로 보고하지 않는다. 이전 단계별 실행과 판단은 후속
+기존 core와 모든 등록 profile의 검증 범위·순서는 유지한다. 현재 unit 파일 413개 중 Windows 235개,
+별도 Linux 5개, 단계적 미등록 후보 173개다. 최근 TOP20 입력 계약 5개는 전후 62/62 통과했고,
+수급 취소 테스트 2곳의 중간 assertion 실패 뒤 미회수 task를 재현해 1개→0개 종료로 보강했다.
+기존 assertion·기대값·제품 코드는 유지하고 native 경계 진입 확인 2개를 추가했다.
+직전 `1c059f2` hosted CI는 Windows 2,351건/90 worker, Linux 65건, disposable PostgreSQL 87건과
+63개 저장 경계 검사 통과다. 새 입력 계약 5개 포함 전체 회귀는 게시 branch의 CI artifact로 별도 판정한다.
+남은 173개를 모두 실행했거나 제외 확정한 것으로 보고하지 않는다. 이전 단계별 실행과 판단은 후속
 문서를 따른다. NAS 운영 검증·배포·main 병합은 별도로 유지한다.
 
 **2026-10-09 녹화 입력 거부 원인과 복사 경합 감사:** 원본 trace `20261007T235957Z-e8cb574bf964`의

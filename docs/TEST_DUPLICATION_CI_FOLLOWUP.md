@@ -24,7 +24,8 @@
 | NAS/capture 안전 4개 등록 시점 | 217 | 5 | 191 | 413 |
 | replay admission 안전 4개 등록 시점 | 221 | 5 | 187 | 413 |
 | causal replay lifecycle 5개 등록 시점 | 226 | 5 | 182 | 413 |
-| TOP20 replay boundaries 4개 등록 후 현재 | 230 | 5 | 178 | 413 |
+| TOP20 replay boundaries 4개 등록 시점 | 230 | 5 | 178 | 413 |
+| TOP20 input contracts 5개 등록 후 현재 | 235 | 5 | 173 | 413 |
 
 기존 문서의 'manifest 미등록 226개' 중 5개는 CI 제외가 아니다. 다음 모듈은
 `.github/workflows/dependency-regression.yml`의 Ubuntu job에서 이미 실행한다.
@@ -396,3 +397,52 @@ outbox의 cold seed helper는 IO나 cleanup 자원을 만들지 않는 메모리
 새 모듈 누락 guard는 유지하며, 최종 전체 검증은 이 변경을 게시한 commit의 hosted artifact로 판정한다.
 기존의 장시간 native session/execution 후보는 시간 의미를 줄이거나 skip으로 통과시키지 않고
 별도의 비용/범위 판단 대상으로 유지한다. 남은 후보의 전부 편입·삭제를 이번 묶음의 완료 조건으로 늘리지 않는다.
+
+## 2026-10-09 TOP20 input contracts 후속
+
+직전 `1c059f20073bf52189c346f4ae38633d309a9f9c`의
+[hosted run 37911629226](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37911629226)은
+Windows 2,351건/90 worker/230개 모듈, Linux 65건, disposable PostgreSQL 87건과 63개 저장
+경계 검사를 통과했다. 계획·발견/실행 수·게시 commit·파일 hash·worker/process tree 종료를
+대조했다. 비정상 결과/skip/미실행/잔류 자손은 0이다.
+
+기존 조사에서 미등록이었던 TOP20 순위·수급·출처·초기 상태·구독 수명 5개를 선택했다.
+기존 재생 boundary와 일부 영역은 겹치지만 실제 입력 생산과 저장·전달 원인·cold baseline·ACK
+상태 전이를 각각 검증하므로 삭제할 완전 중복으로 판단하지 않았다.
+
+| 모듈 (`tests.unit.test_` 이후) | 보호하는 계약 | 현재 실제 실행 | 로컬 worker 비용 |
+|---|---|---:|---:|
+| `diagnostic_top20_flow_input` | 실제 SQLite 수급 저장·완료 marker·baseline·취소 drain 12건; assertion 실패 시 task 회수 2곳 보강 | 12 | 4.98초 |
+| `diagnostic_top20_input` | 순위 freshness·20 slots·retry/error tape·OFF/ON 결과 동일·취소 incomplete 8건 | 8 | 4.33초 |
+| `top20_delivery_provenance` | 실제 hub/parser 전달 원인·subscriber coverage·minute batch·chunk/tail/disk frontier 21건 | 21 | 3.35초 |
+| `top20_fixture_seed` | cold seed의 warm marker/cache/task/lock/outbox 거부·shared clock/frontier·금지 IO 10건 | 10 | 0.63초 |
+| `top20_lifecycle_inputs` | native 구독의 REG ACK·fresh READY·gap/epoch·0초 소비·shared effect owner 거부 11건 | 11 | 0.88초 |
+
+`dependency-audit-p2-top20-input-contracts`를 manifest 끝에 추가했다. 기존 230개와 모든
+core/profile 항목·순서를 유지했다. 전후 62/62의 모듈별 발견 수·실행 수가 같고 비정상 집계/
+미실행/잔류 자손 0, worker/process tree 종료 5/5다. 추가 worker 비용은 이번 로컬
+약 14.17초다. 파일 이름이나 과거 pass로 현재 결과를 승계하지 않았다.
+기록: `tmp/regression/top20-input-contracts-before/run.json`, `top20-input-contracts-after/run.json`.
+
+실제 수정 대상은 `test_diagnostic_top20_flow_input`의 native 저장 및 baseline 조회 취소 검사
+두 곳이다. 저장·조회 경계의 `entered.wait(2)` 결과를 확인하지 않았고, 본문의 `assertFalse`가
+실패하면 release와 task 회수를 건너뛰었다. 별도 프로세스의 assertion 실패 주입으로 두 곳 모두
+native 경계 진입 뒤 release=false, 테스트 메서드 종료 시 pending task=1을 재현했다.
+변경 후 같은 assertion 실패가 유지되면서 release=true, pending task=0을 확인했다.
+기록: `tmp/regression/flow-cleanup-before.json`, `flow-cleanup-after.json`.
+
+경계 진입의 성공 assertion 2개를 추가하고 finally에서 release 후 소유 task의 실제 종료를 기다린다.
+기존 not-done·CancelledError·저장·완료 assertion을 AST로 대조해 모두 유지했다.
+cleanup의 `gather(return_exceptions=True)`는 본문의 실패 판정을 대체하지 않는다. 제품 로직·
+기대값·원본 데이터는 바꾸지 않았다. 정상 통과 결과를 false-green으로 단정하지 않는다.
+
+의존성 판단: native ingestor·SQLite natural key와 완료 marker, hub/parser receipt·subscriber queue,
+REG ACK/epoch/owner 및 fixture seed의 금지 상태가 실제 검증 경계이므로 필요한 내부 의존성을
+유지했다. 순수 입력 helper·ExitStack capture fixture는 수정하지 않았고 이 파일을 직접 import하는
+다른 테스트는 없다. 새로운 wrapper나 공용 fixture 계층이 필요하지 않았다.
+
+현재 전체 413개 중 Windows 235개, 별도 Linux 5개, 미등록 후보 173개다. 전체 회귀는 이번
+검증된 변경을 게시한 뒤 hosted artifact로 별도 확인한다. 로컬 62건 통과를 전체/hosted/운영 NAS
+검증으로 대체하지 않는다. 미등록 실행 계획은 기존 coverage audit을 유지하며 장시간
+`top20_replay_execution`(이전 약 94초), `top20_session_plan`(약 62초)은 이번 묶음에 넣지 않았다.
+timeout·sleep·assertion을 줄여 실행 비용을 숨기지 않았다. 운영 배포·main 병합은 별도다.
