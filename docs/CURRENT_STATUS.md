@@ -1,3 +1,401 @@
+2026-10-09 upper-limit P0 implementation (worktree 91b3, inactive candidate):
+MarketEventService now owns frozen JSON facts, per-key shared ACK futures, a bounded
+pending map and one retrying native writer. Reception normally waits only for RAM
+admission, while public observe/regular-close waits for actual ACK. Close disconnects
+the producer, drains queued decisions/native work, and repeated caller cancellation
+cannot abandon COMMIT. Condition REG state is separate from fact_collection gaps.
+Native one-fact connections/transactions, keys and first-write-wins remain unchanged.
+Local gates: new delivery13 + market16 + capture/REST/replay38 + collector32
+passed; existing quota/run-lock rejection1 also passed (100 local tests total).
+Same1001/hash/1ms controlled held-write input: queue high1/drop0/TOUCHED and
+CURRENT retained (old high1000/drop1/both absent). Not Oct8 or whole-app replay.
+Real pending representation at20000keys used about7.79MB payload; entry count first.
+Production-debug-off Windows admission315.765ms/CPU328.125ms; Linux RSS unmeasured
+locally. Candidate20000/64MiB is not a deployed setting or RSS budget.
+Inactive NAS candidate: 2026.10.10-upper-limit-fact-drain-v4-97bcf9bf50764f6b.
+v3-baf398c3a624dfd9 NAS job ffbbb18efeb9189f487134f6b2ed4640 passed106,
+errors/failures/skips0, cleanup/post-job fence passed, active/both containers unchanged.
+Native rollback/ACK-loss/independent VI/capture/cohort-race gates passed in v3.
+Earlier gate13 errors were fixture storage headroom; production quota remains intact.
+A later gate exposed3 new capture tests incompatible with the older base runtime and
+one condition test failure. Same-source isolation passed1, but v2 failed the same
+condition assertion again (103/104 passed). Controlled red reproduction confirmed
+that a signal write could bypass metadata's lock and race an older current snapshot.
+v3 keeps signal snapshot/native ACK/RAM publication under the existing state lock;
+new local regression preserves last_signal, eligibility and all3 history events.
+The candidate retains the base runtime's full14 capture tests and does not modify the
+newer local capture tests. Those3 later runtime contracts are outside this candidate.
+v4 additionally preserves invocation time/session/condition before state-lock wait;
+local29 passed with a midnight boundary. Final v4 NAS job4c4b0a26fd0684d642f155783545c7df
+passed39, errors/failures/skips0, cleanup/post-job fence passed, active/both containers
+unchanged. v3 full106 and v4 direct39 are overlapping gates, not145 unique tests.
+Linux memory is sampled by a test but exact RSS values are not exposed by the current
+restricted operator report; do not call that capacity/overhead approval.
+Active remains2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9. No deployment.
+RAM admission is not durability; forced-stop pre-ACK recovery and whole-app peak
+capture overhead remain unverified. No new outbox/schema/pool/global hub policy.
+P1 shared10-20s cause attribution remains open after this narrow P0 gate.
+Signal/metadata workers' pre-existing failure-discard and cancellation/native-drain
+boundaries are separate P0 follow-ups; this is not whole MarketEventService recovery approval.
+Controlled SQLite/fake-REST probes reproduced: signal failure1 -> DB/RAM rows0,
+queue consumed with no retry retained; metadata failure1 -> DB eligibility null/RAM true,
+queue consumed. No source replay/production occurrence or later-reconnect repair claim.
+
+2026-10-09 P0 native concurrent-reader acceptance and P1 common-delay audit (worktree 91b3):
+Inactive observation-concurrency-v1-2d67e2620004fa7d keeps recovery-v1 runtime and
+adds real concurrent probe publication and PostgreSQL fast-path sequence-lock
+transfer gates. Isolated NAS job 98589a7267e41651c4d3b11bf5246c86: 57 passed,
+errors/failures/skips 0. Active release/containers unchanged, temporary PG removed.
+No deployment or whole-app P0 completion. Additional-reader cost, multi-code NAS
+RSS/consumer latency and alternate cursor consumer ownership gates remain.
+
+P0 queue audit: recorded TOP20 trade enqueue/dequeue/consume_end each141,344 and
+program-trade each2,307 in09:00-09:10, recorded drops0. Hot-cohort subscriber has no
+capture_component: this is NOT all-subscriber no-loss proof. Controlled native hub/
+event-loop + temporary SQLite reproduces upper-limit save failure terminating the
+consumer (close also raises before disconnect), and1001queued events dropping a
+transient CURRENT fact at capacity1000. Historical occurrence remains unmeasured.
+No queue/cadence/runtime change was applied. Immutable pending-fact ownership,
+retry/ack/drain/restart/bounded overload and causal provenance need a narrow design
+decision before correction; evidence market-event-delivery-proof-20261009.json.
+
+Original Oct 8 trace checksums/sequences reverified: 1,490 chunks/2,033,667 events.
+09:00-09:10 native scalar calls: 4,026; commits >=1s:182, >=10s:7; observed concurrent
+commits max8. During 09:04:43-09:05:04 query-minute/shadow/second-bar/lease/VI stalls
+overlap, including shadow SQL92.525ms vs COMMIT20.893s and lease SQL1.723ms vs
+COMMIT10.715s. Common waiting is a candidate, not attributed WAL/lock/storage proof:
+no wait owner, disk, CPU/GC or upstream queue metrics were captured. Trace has
+1,188 rejected inputs; scalar analysis is not a complete replay/performance baseline.
+Local recovery fixture cost and explicit consumer audit are in the design document.
+Disk scoped replay failed at temporary PG readiness before replay/operational pause;
+cleanup and no server restart confirmed. See common-commit-window-audit-20261009.json
+and observation-concurrency-proof-20261009.json. Follow user P0->P1->P2->P3->P4 order
+and fixed-input/baseline/function/performance/side-effect acceptance criteria.
+
+RAM scoped control completed: job a5208bed012d72e3705be7471e8ceceb, recorded realtime
+09:04-09:06, 23 native store calls/253 SQL, empty-v1/concurrency8, selected omissions0,
+timing and source outcomes verified, DB observation drop/truncation0. COMMIT
+p50/p95/max .255/.559/6.083ms. Baseline restored, temporary PG removed and original
+operational source resumed after the authorized 222.340s collection gap. No collector
+logic/full workload/source-state/disk equivalence and no common-cause attribution.
+This run applies no new runtime optimization. Proof: common-bottleneck-realtime-ram-proof-20261009.json.
+
+2026-10-09 legacy observation checkpoint frames-only recovery gated (worktree 91b3):
+Unversioned shadow/mock checkpoints now keep their original cursor C and execution
+state while rebuilding <=C input frames on bounded safe pages. Partial scratch is
+never checkpointed. Frames/protocol/recovery provenance share the existing native
+checkpoint transaction; RAM becomes ready only after its acknowledgement. A failed
+save retries the finished scratch, and restart after actual COMMIT/ack loss restores
+the fully repaired checkpoint. Historical decisions/orders are not re-evaluated.
+Mock fills, STOP/replaced-control, pending intent and account/spec/run binding are
+preserved. Independent account monitor/risk work and subsequent decision gates are
+unchanged; no extra account REST polling was added. Owned repair/fill/control work
+drains before close returns, including repeated cancellation.
+
+Inactive `2026.10.09-observation-recovery-v1-da67999ec33a61b4`, isolated NAS job
+`305011ce14daba8d456843b8dab591f2`: 55 passed, errors/failures/skips 0.
+Local related regressions: 36 passed. Native gates include held low/committed high
+recovery, inline/normalized shadow, mock intent/fill/binding preservation, actual
+repair COMMIT acknowledgement loss/restart and no historical shadow decisions.
+Unit gates additionally cover 6,004-row bounded repair, strict filtering/revision
+replacement, >C resumption, partial restart/final save failure, unknown protocol,
+new mock fills/STOP and actual thread drain on repeated cancellation.
+The first gate's one nonexistent reader test selector caused a loader error;
+54 tests passed. The same candidate reran with the correct selector and all 55
+passed. Both reports are retained; this was not a runtime code repair.
+Evidence: `artifacts/observation-recovery-proof-20261009.json` and
+`artifacts/observation-recovery-report-20261009.json`.
+
+Active release and both containers preserved, diagnostics idle, temporary PG
+cleaned up. Not deployed. Native concurrent-reader/lock-transfer gates, scoped
+same-workload reader cost and long-history recovery RSS/latency remain before
+deployment. Existing per-code trim does not bound total scratch codes; the long
+membership fixture also exposes material trim CPU cost. No normal-market migration
+latency, historical strategy equivalence or whole-app performance claim.
+
+2026-10-09 shadow/mock safe bootstrap integrated and gated (worktree 91b3):
+CandidateMonitor and MockAutomationRunner now seed both input kinds through the
+common-snapshot bootstrap API. Pending initial history stays in WARMUP and retries
+on the existing poll; it cannot publish a completed checkpoint or evaluate/dispatch
+historical inputs. A failed bootstrap checkpoint retries initial seeding before
+incremental processing. Only actual seed row maxima become cursors; protocol and
+frames are saved in the same existing checkpoint transaction. Restoring/saving a
+legacy checkpoint does not upgrade its delivery marker without recovery.
+
+Inactive `2026.10.09-observation-bootstrap-v1-86ca1a8376d8e626`, NAS isolated job
+`0abbb49c0e8368f62cbee053047fb194`: 44 passed, errors/failures/skips 0.
+The native consumer gates cover shadow/mock late COMMIT both at first bootstrap
+and subsequent polling, independent peer COMMIT, pending-bootstrap restart,
+inline/normalized shadow protocol retention and complete frames after restart.
+Historical shadow decisions are absent during seeding; the mock fixture has no
+order runtime/transport, so an accidental historical dispatch would fail the gate.
+Existing safe-reader/metrics and local consumer/fill/supervisor regression also
+pass. Local selected regression: 29 passed. Evidence:
+`artifacts/observation-bootstrap-proof-20261009.json` and
+`artifacts/observation-bootstrap-report-20261009.json`.
+
+Temporary PostgreSQL cleaned up; active release, both containers and diagnostics
+were preserved. No deployment/performance-improvement claim. Legacy checkpoint
+frames-only repair, recovery failure/drain/fill/intent gates, lock-transfer/native
+concurrent-reader coverage and scoped reader-cost replay remain. Frozen original
+red proofs are unchanged. Next correctness phase: preserve legacy C and execution
+state while rehydrating <=C frames without historical strategy/order re-evaluation.
+
+2026-10-09 observation safe reader pages implemented and gated (worktree 91b3):
+Phase 1 adds `load_observation_revision_page` and common-snapshot
+`load_observation_bootstrap`, with per-store finite-cohort state, epoch reset and
+concurrent-probe fencing. The legacy incremental list reader delegates to safe
+pages; raw history and fixed research exports remain unchanged. Writer SQL,
+connections, locks and independent COMMITs are unchanged. PostgreSQL incremental
+reads now use four SQL calls on the same native connection (three while pending),
+instead of one; performance improvement is not certified.
+
+Inactive `2026.10.09-observation-safe-page-v3-79ac4191c0c2b8c7`, isolated NAS job
+`46022cd36f6b162693c670582f8e0a93`: 17 passed, errors/failures/skips 0.
+Native scalar/batch late COMMIT and independent peers, rollback gaps, pending
+pages, common bootstrap query, unsupported configuration and sequence regression,
+reader metrics and in-order checkpoint control passed. Local regressions: 20 passed.
+The v2 gate's missing diagnostic phase fields caused one metrics error; v3 fixes
+the producer record to the existing schema and reruns the same 17 tests. Both
+reports are retained. Active source and both containers are unchanged, diagnostics
+idle, temporary PostgreSQL cleaned up. Evidence:
+`artifacts/observation-safe-page-proof-20261009.json` and
+`artifacts/observation-safe-page-report-20261009.json`.
+
+This is reader-boundary acceptance only. Consumer bootstrap integration, delivery
+protocol checkpoints, legacy frames-only recovery, lock-transfer/concurrent native
+reader gates and same-workload reader-cost comparison remain. No deployment,
+historical strategy equivalence or complete incident-resolution claim.
+
+2026-10-09 sequence-lock safe-prefix design selected and probed (worktree 91b3):
+The existing PostgreSQL sequence relation lock can identify a finite cohort of
+unfinished allocations without adding writer registration SQL, new transaction
+locks, a publication ledger, or global COMMIT serialization. Read high bound first,
+then lock owners; retain that cohort; after it finishes, read <= bound in a fresh
+READ COMMITTED statement. Persist only actual delivered row cursors, never raw
+sequence bounds. CACHE 1 / +1 / NO CYCLE and epoch/fencing checks are mandatory.
+
+Inactive `2026.10.09-sequence-fence-proof-v1-4c356d3ccf73e70f` overlays only a design
+probe test and build marker on the exact immutable post-batch proof source. NAS
+job `4fc918b5d36ccaab992b5c55f512632a`: 4 passed, no errors/failures/skips. Native
+scalar+batch writers, late COMMIT, independent peer COMMIT, rollback gap, preinsert
+allocation/savepoint and backend reuse passed. New pending writers did not extend
+the original cohort. Temporary RAM PostgreSQL was cleaned up; active release and
+containers were unchanged, diagnostics idle. Report:
+`artifacts/sequence-fence-report-20261009.json`.
+
+Implementation contract is in RECORDED_WORKLOAD_EXPERIMENT_DESIGN, delivery-boundary
+section: safe pages, common-snapshot bootstrap, then legacy checkpoint frames-only
+rehydration through its existing cursor C. Preserve strategy/execution/fill/intent
+state, emit no historical decisions/orders/alerts, atomically publish repaired
+frames plus protocol at C; only then process >C. Historical strategy equivalence
+is not certified. Runtime correction, consumer recovery gates, lock-transfer/epoch
+failure gates and same-workload reader-cost comparison remain unimplemented.
+Existing red reproduction reports remain valid and immutable. No deployment or
+performance-resolution claim. Next phase: Sol High implementation under this
+contract; no Luna transition requested by the user.
+
+2026-10-09 cursor correction boundary audit and initial-bootstrap gap (worktree 91b3):
+Native source audit identified both PostgreSQL allocation paths: the scalar
+BIGSERIAL default and the batch's explicit nextval allocation before INSERT.
+CandidateMonitor and MockAutomationRunner persist max accepted_sequence not only
+after polling but also after kind-by-kind bootstrap. The fixed research export
+membership/order and original sequence/source times must stay separate from any
+new live-delivery progress contract. No runtime correction has been implemented.
+
+Inactive `2026.10.09-bootstrap-cursor-proof-v1-c23bc19ad1f24cf3` adds only the
+controlled bootstrap reproducer and build marker to the immutable post-batch
+proof source. Isolated NAS tests=2/errors=0/skipped=0: in-order control passed;
+initial-bootstrap delivery contract failed at its final recovered-frame assertion
+(frozen line 154). A new native CandidateMonitor started while the lower-sequence
+finalizer was awaiting COMMIT; it bootstrapped the higher peer and checkpointed
+past the pending completed minute. After the lower COMMIT, strict stored history
+and a later fresh bootstrap see both frames, but the original checkpoint/restart
+still omits one. Default inline layout; actual mock automation, normalized layout,
+live incidents and signal/order effects remain untested. Gate remains FAILED.
+Report: `artifacts/bootstrap-cursor-report-20261009.json`; source/report/contract
+summary: `artifacts/bootstrap-cursor-proof-20261009.json`. Temporary job cleaned up,
+active 8 GiB source unchanged, diagnostics idle; no operational pause/deployment.
+
+The design document records safe delivery-frontier versus separate durable
+delivery-cursor alternatives, their writer/reader/bootstrap/checkpoint boundaries,
+rollback-gap and bounded-progress gates, and how to preserve frozen red evidence
+when a chosen safe-frontier contract changes intermediate visibility assertions.
+Next requires a delivery/recovery contract decision before implementation; neither
+all-writer COMMIT serialization nor arbitrary rewind is an accepted shortcut.
+
+2026-10-09 closed-minute shadow processing and restart gap reproduced (worktree 91b3):
+Extended the native cursor reproducer with actual finalize_minute_bars and
+CandidateMonitor.run_once/checkpoint/restart, plus an in-order positive control.
+Inactive reference `2026.10.09-closed-cursor-reference-v2-d1ff934911bfe39c` and
+candidate `2026.10.09-closed-cursor-candidate-v2-64e6fb148a8c28da` each ran two
+isolated NAS tests: control passed, late-COMMIT delivery contract failed;
+tests=2/passed=1/failures=1/errors=0/skipped=0 in each. Native COMMIT order was
+controlled at psycopg commit only; all writer/finalizer/consumer SQL stayed native.
+The late completed minute exists in PostgreSQL and passes strict krx-regular/v1
+eligibility. It is absent from the processed shadow frame checkpoint and remains
+absent after the same monitor restarts from that checkpoint. A fresh monitor with
+no prior checkpoint bootstraps both completed frames from the same stored inputs.
+This confirms an existing delivered-input/checkpoint recovery defect in both
+sources, not a minute batch regression or a demonstrated live trading incident.
+Tests use the default inline checkpoint layout. Normalized layout and actual
+MockAutomationRunner/signal/order effects remain untested; no actual orders occur.
+Two existing local candidate/restart unit tests also passed. The initial candidate
+v1 run had two fixture errors (legacy replay profile is not supported by the monitor);
+that run is retained and excluded from delivery evidence, not treated as acceptance.
+Both v2 gate states remain FAILED. Summary:
+`artifacts/closed-cursor-comparison-20261009.json`; individual reports and final
+healthy/idle NAS status are retained. Active 8 GiB source and operational DB stayed
+unchanged; temporary jobs cleaned up, no operational pause/deployment/runtime fix.
+Next: choose a commit-safe delivery/checkpoint contract preserving independent
+writer transactions, rollback gaps, duplicate/retry behavior and realtime priority.
+Do not use global writer COMMIT serialization or a fixed cursor rewind as an
+unmeasured correctness/performance shortcut. Performance optimization stays separate.
+
+2026-10-09 minute consumer gates and existing commit-visibility cursor gap (worktree 91b3):
+Local collector/chart/ingest/candidate/mock/API regression passed 72 tests. Inactive
+`2026.10.09-minute-consumer-gate-v1-28a172a81c4b48ce` passed isolated NAS 8/8,
+zero skips/errors/failures. Native reader/export/restart tests preserve source
+available_at and sequence membership when only internal received_at/processed_at
+change; negative control changing source available_at changes the as-of result.
+Idempotent replay and independent transaction/rollback gates also passed. This is
+narrow minute-consumer evidence, not full app/time/source-state equivalence.
+
+A separate desired-contract test FAILED on both inactive pre-batch reference
+`2026.10.09-cursor-visibility-reference-v1-20ad199bf3bb082a` and post-batch candidate
+`2026.10.09-cursor-visibility-candidate-v1-7fbcaea436438a69`: a native transaction
+allocates a lower accepted_sequence, a different subject commits a higher one first,
+and the reader advances its cursor. After the lower transaction commits, its stored
+revision is absent from load_observation_revisions_after(advanced_cursor).
+Each run had one AssertionError at the same final reader-contract assertion,
+tests=1/failures=1/errors=0/skipped=0. Top-level docker_command_failed reflects the
+test worker's nonzero exit; sanitized worker reports show the actual assertion.
+Do not report these red gates as passing acceptance or as a batch-created regression.
+Reproduction uses in-progress realtime minute revisions. Actual completed-bar
+candidate/mock processing, checkpoint/restart impact and live occurrence remain
+unverified. Keep this category-3 correctness/recovery issue separate from performance.
+Next: reproduce with closed native minutes and actual checkpoint consumers, then
+choose a cursor fix preserving independent writers instead of serializing all commits.
+Reports: `artifacts/minute-consumer-gate-20261009.json` and
+`artifacts/cursor-visibility-comparison-20261009.json` (individual reports retained).
+Temporary jobs cleaned up. Final status confirms healthy unchanged active 8 GiB
+release, diagnostics off/no paused workloads. No runtime fix or deployment applied.
+
+2026-10-09 minute batch before/after content proof (worktree 91b3):
+Published inactive pre-batch reference
+`2026.10.09-replay-content-reference-v1-0c5d206ac8af226b` from finalize-batch v6,
+with the exact same comparison boundary as proof-v1. Manifest differences between
+reference and candidate are limited to app build marker, database_market_bars.py
+and its storage-boundary tests. NAS isolated gate passed 37/37, zero skips/errors/failures.
+Replayed the same actual 09:00-09:02 realtime selection on the same empty-v1 RAM DB
+baseline: 18 operations, identical input hash, preserved input timing and zero selected
+omissions. Compared this reference run against both prior post-batch proof runs.
+All nonprojected final-table hashes, sequence values, source-call results and the four
+projected content/revision-lineage hashes match. This closes selected stored-content
+parity across the batch change, including available_at/status and validated parents.
+For the 40-row realtime_minute call, SQL was 242 before vs 48 after; execute time
+73.146ms vs 39.799/39.301ms; writer total 96.589ms vs 57.891/57.168ms.
+Both versions kept one transaction/COMMIT for this call. These are one reference
+and two candidate observations in RAM PostgreSQL, NOT disk/WAL peak or full-app
+performance evidence. Time-dependent readers and source-state equivalence remain
+unverified. The incomplete trace and rejected inputs are unchanged and not filled.
+Reference baseline restored, cleanup/post-job fence passed; original operational
+release resumed healthy after an authorized 220.622s pause, DB container unchanged.
+Neither comparison candidate was deployed. Reports:
+`artifacts/replay-content-reference-gate-20261009.json`,
+`artifacts/replay-content-reference-round1-20261009.json`,
+`artifacts/replay-content-before-after-comparison-20261009.json`.
+Next: inspect time-dependent consumers for the changed batch boundary and choose
+the next measured writer; do not generalize this partial RAM result to the whole app.
+
+2026-10-09 replay result-content comparison and actual repeat proof (worktree 91b3):
+Added post-drain `final_content_comparison` for the four tables whose exact hashes
+change between runs. Exact final-table/sequence digests and baseline/reset gates remain
+unchanged. Generated storage times are separately hashed; revision UUIDs are mapped
+to accepted_sequence with explicit parent existence, earlier-sequence and scope checks.
+Payload, source/effective/available times, completeness and additional columns remain
+in the content digest. The bounded reader uses the existing owned maintenance cursor
+outside the workload measurement interval and does not modify native writers/clocks.
+Local unit/CLI regression passed 46/46. Exact inactive source
+`2026.10.09-replay-content-proof-v1-d28ba5ce2865587a`, based on the minute batch v2
+candidate, passed NAS isolated acceptance 37/37, zero skips/failures/errors; real PG
+tests detect changed available_at and invalid lineage while tolerating generated UUID/time.
+Same-source actual replay ran twice on trace `20261007T235957Z-e8cb574bf964`, KST
+09:00-09:02, partial-operations/realtime only, concurrency 8, RAM PostgreSQL and empty-v1
+baseline `56e88db7bc556afdd8a64a5800a47a1f6663f339aa299cb9f462a4fb804b56a3`.
+Both runs preserved timing, returned all 18 native calls, matched source outcomes, omitted
+zero selected inputs and used input hash
+`9f865571b48e05dc9a8f74b4940101aa5307c3a2650c4736b764e6130c964a1e`.
+Dataset/document/operation/revision content hashes matched (4/5/80/80 rows), all parent
+chains validated and final sequence values matched. Their exact hashes and separated
+time hashes differed in both runs; canonical minute/metadata exact hashes matched.
+This verifies same-candidate stored-content repeatability, NOT before/after batch
+equivalence, time-dependent reader behavior, full intraday performance or source-state
+equivalence. These flags stay false. Both baselines restored, temporary jobs cleaned
+up and post-job fences passed. The user-authorized operational app pause lasted
+221.483 and 222.699 seconds; both resumed the same active 8 GiB release. The DB container
+was unchanged; realtime zero-loss is not claimed. The proof candidate remains inactive.
+Reports: `artifacts/replay-content-proof-gate-20261009.json`,
+`artifacts/replay-content-proof-round1-20261009.json`,
+`artifacts/replay-content-proof-round2-20261009.json`,
+`artifacts/replay-content-proof-comparison-20261009.json`.
+Next: run the pre-batch source with the same comparison boundary and fixed selection
+to test candidate-vs-reference content/lineage, then continue one app writer at a time.
+
+2026-10-09 store/collector copy-slot saturation comparison (worktree 91b3):
+Ran 24 fresh-process workers: active and inactive copy-lanes source, capture OFF/ON,
+0B-only and mixed 0B/0w/0J/0U profiles, three rounds each. The controlled fixture holds
+two real store input copies while the real collector parser/RAM path processes 300
+messages of 10 0B rows each; native store methods return deterministic fixture data
+without database access. In every ON round the active shared two-slot recorder rejected
+all 301 realtime inputs (initial state plus 300 messages) with `capture_copy_busy`;
+the candidate accepted all 301 without rejection. Both retained two store operation
+start/end pairs. Collector state and native return-value hashes matched in all 24 workers,
+and every store thread drained. This confirms recorder copy-slot contention, not native
+collector or database data loss.
+Peak copy reservations increased from 16 MiB to 24 MiB; the shared total limits remain
+8 GiB and 5,000,000 events. Candidate charged-memory high-water reached 37,550,440 bytes;
+this is recorder accounting, not process RSS. No payload was durably written, no known
+events were dropped, and no network, PostgreSQL, live controls or operational release
+were changed. The private deferred traces were aborted after measurement and drained;
+these fixture traces are not complete captures.
+Candidate ON producer p95 medians were 0.500 ms (0B-only) and 0.787 ms (mixed), with
+individual maximums 5.783 ms and 12.031 ms. Active ON drops all collector payloads, so
+its lower timings cannot establish a capture-cost improvement. OFF timing variability
+and the injected store-copy hold also prevent intraday or whole-app performance claims.
+The timing outlier cause, NAS RSS/available-memory behavior and real disk contention
+remain unverified. Candidate `2026.10.09-trace-copy-lanes-v1-8cb5816a3ac72c53` stays
+inactive. Raw report: `artifacts/trace-copy-overlap-comparison-20261009.json`;
+private probe: `artifacts/trace-copy-overlap-probe-20261009.py`.
+
+2026-10-09 NAS recorder copy-lane candidate gate (worktree 91b3):
+The inactive candidate `2026.10.09-trace-copy-lanes-v1-8cb5816a3ac72c53` passed all 52 selected
+recorder/copy-lane tests on the NAS isolated RAM PostgreSQL worker (0 failures, errors, or skips;
+post-job fence and cleanup passed). The first NAS attempt exposed a test-fixture mismatch: recorder
+startup correctly requires 256 MiB free, while deferred persistence additionally requires its 8 GiB
+storage limit plus 64 MiB; the worker's `/tmp` tmpfs is only 256 MiB. Tests now model the required
+headroom without changing production checks or recorder limits. Local regression also passed 52/52.
+NAS reports `pids_support=false`; the worker still verified its 4 GiB memory limit and CPU affinity
+`0,1`, with no OOM. Active release remains `2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9`; the
+ operational server and database were unchanged. This is a correctness gate, not a capture on/off
+latency measurement or a production deployment.
+
+2026-10-09 capture overhead partial measurement:
+The existing isolated producer benchmark was updated to read recorder event counters instead of
+peeking into the raw queue, because deferred capture now packs accepted events into RAM segments.
+Three fresh-process rounds compared the active 8 GiB recorder source against the inactive copy-lanes
+candidate, with 300 messages at 100/s, 10 0B rows/message, 12 in-memory SQLite store calls, and both
+0B-only and mixed 0B/0w/0J/0U profiles. Functional hashes matched with capture OFF/ON; ON samples
+had 0 known drops and 0 rejected inputs, and each accepted all 300 collector messages plus initial
+state. At the producer p95, the paired capture overhead median was 0.30 ms (active) vs 0.24 ms
+(candidate) for 0B-only, and 0.31 ms vs 0.27 ms for mixed. Copy time averaged 36.15 vs 35.65 ms
+per 300 messages for 0B-only and 42.03 vs 41.20 ms for mixed. Recorder memory high-water averaged
+about 8.9 MiB and 9.0 MiB respectively. No measurable producer regression appeared in this fixture;
+the small differences are not proof of an improvement. Windows RSS was unavailable. This has no
+network, PostgreSQL, durable flush/fsync, or real WebSocket load, and does not reproduce simultaneous
+store/collector copy saturation or serve as an intraday baseline. Candidate remains inactive; no NAS
+service/control or database changed. Raw results: `artifacts/trace-copy-lane-overhead-20261009.json`.
+
 2026-10-09 realtime minute batching experiment (current worktree 91b3):
 The verified inactive candidate `2026.10.09-realtime-minute-batch-v2-c5d8a54aa816e05c`
 passed 12/12 NAS PostgreSQL tests (skipped=0). Local related regressions passed 62/62.
@@ -12,6 +410,16 @@ inputs were omitted, and the isolated job cleanup/fence passed.
 The total row counts and revision sequence next value matched across runs, but four
 other table hashes differed: dataset snapshots, documents, minute operation markers,
 and observation revisions. Their semantic equality is not established by this run.
+Follow-up source audit found run-generated fields in all four differing tables:
+dataset `saved_at=time()`, document `updated_at=time()`, minute operation
+`processed_at=datetime.now(timezone.utc)`, and revision `revision_id=uuid4()` /
+`received_at=datetime.now(timezone.utc)` with `revision_of` pointing to generated IDs.
+The replay final-table digest includes every column; the retained report exposes only
+row counts and SHA-256, not per-row differences. These fields explain why exact hashes
+need not repeat, but do not prove that they are the only differences. Do not ignore
+payload, source/effective/available times or revision ordering to force equality.
+Semantic row/chain comparison on the same inputs remains required before claiming
+full functional equivalence of the batch candidate.
 WAL attribution is unavailable; source_state_equivalent=false. This is a partial,
 single-actor RAM-PostgreSQL comparison, not a whole-app or operational disk contention
 baseline. The first candidate attempt failed one fixture-source assertion (11/12);

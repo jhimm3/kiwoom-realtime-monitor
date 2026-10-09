@@ -16,10 +16,24 @@ from kiwoom_monitor.central_server.diagnostic_workloads import _set_tool, _set_t
 
 
 @contextmanager
+def recorder_storage_headroom():
+    """Model the recorder's minimum free-space requirement in bounded NAS tmpfs tests."""
+    original = trace.shutil.disk_usage
+
+    def with_headroom(path):
+        usage = original(path)
+        required = trace._DEFERRED_MEMORY_LIMIT + 64 * 1024 ** 2
+        return usage._replace(free=max(usage.free, required))
+
+    with patch.object(trace.shutil, 'disk_usage', side_effect=with_headroom):
+        yield
+
+
+@contextmanager
 def deferred_capture():
     with tempfile.TemporaryDirectory() as root:
         control = Path(root) / 'control.json'
-        with patch.object(trace, 'control_path', return_value=control), patch(
+        with recorder_storage_headroom(), patch.object(trace, 'control_path', return_value=control), patch(
                 'kiwoom_monitor.central_server.diagnostic_workloads.control_path', return_value=control), \
                 patch.object(trace, '_deferred_memory_check', return_value={'test_headroom': True}):
             master = _set_tool(control, True, 300)['diagnostic_tool']['session_id']

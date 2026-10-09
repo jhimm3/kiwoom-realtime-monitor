@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from .database_observation_readers import OBSERVATION_DELIVERY_PROTOCOL
+from .observation_frame_recovery import (
+    ObservationFrameRecovery, drain_thread_call, trim_bar_frames, trim_universe_frames,
+)
 from time import perf_counter
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -86,11 +90,15 @@ class MockAutomationRunner:
         self._latency: dict[str, Any] | None = None
         self._task: asyncio.Task[None] | None = None
         self._closing = False
+        self._bootstrap_pending = True
+        self._delivery_protocol: str | None = None
+        self._frame_recovery: ObservationFrameRecovery | None = None
+        self._frame_recovery_receipt: dict[str, Any] | None = None
         self._restore_or_bootstrap()
 
     @property
     def status(self) -> dict[str, Any]:
-        return {
+        value = {
             "version": "mock_automation_runner_status/v1",
             "account_ref": self._bundle.account_ref,
             "spec_id": self._spec.spec_id,
@@ -101,6 +109,11 @@ class MockAutomationRunner:
             **self._status,
             "latency": dict(self._latency) if self._latency is not None else None,
         }
+        if self._frame_recovery is not None:
+            value["input_recovery"] = self._frame_recovery.receipt()
+            if self._status.get("state") not in ("BLOCKED", "STOPPED", "ERROR"):
+                value.update(state="WARMUP", reason="legacy_frames_recovery", orders_enabled=False)
+        return value
 
     async def start(self) -> None:
         if self._closing:
@@ -129,6 +142,7 @@ class MockAutomationRunner:
             except Exception as error:
                 logger.exception("automatic mock runner iteration failed")
                 self._status = {
+                    **(self._status if self._frame_recovery is not None else {}),
                     "state": "ERROR", "reason": type(error).__name__,
                     "detail": str(error), "orders_enabled": False,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -141,12 +155,16 @@ class MockAutomationRunner:
 
     async def run_once(self, *, limit: int = 1000) -> int:
         poll_started = perf_counter()
-        await asyncio.to_thread(self._apply_new_fills)
-        control = await asyncio.to_thread(
+        # A legacy recovery poll owns its fill/control native work as well as
+        # scratch/checkpoint work; close must not leave a fill thread behind.
+        native_call = drain_thread_call if self._frame_recovery is not None else asyncio.to_thread
+        await native_call(self._apply_new_fills)
+        control = await native_call(
             self._repository.load_mock_automation_control, self._bundle.account_ref,
         )
         if control is None or control.active_spec_id != self._spec.spec_id:
             status = {
+                **(self._status if self._frame_recovery is not None else {}),
                 "state": "BLOCKED", "reason": "automation_control_missing_or_replaced",
                 "orders_enabled": False,
             }
@@ -156,6 +174,7 @@ class MockAutomationRunner:
             return 0
         if control.desired_state.value != "RUNNING":
             status = {
+                **(self._status if self._frame_recovery is not None else {}),
                 "state": "STOPPED", "reason": "user_stopped", "orders_enabled": False,
             }
             if status != self._status:
@@ -164,6 +183,12 @@ class MockAutomationRunner:
             return 0
 
         load_started = perf_counter()
+        if self._bootstrap_pending:
+            await asyncio.to_thread(self._bootstrap)
+            return 0  # Never evaluate historical seed or dispatch its orders.
+        if self._frame_recovery is not None:
+            await drain_thread_call(self._recover_frames, limit)
+            return 0
         observations = await asyncio.to_thread(
             self._store.load_observation_revisions_after,
             self._cursor, INPUT_KINDS, limit,
@@ -362,6 +387,8 @@ class MockAutomationRunner:
             and document.get("execution_run_id") == self._bundle.run_id
             and document.get("candidate_package_hash") == self._spec.candidate_package_hash
         ):
+            if document.get("delivery_protocol") not in (None, OBSERVATION_DELIVERY_PROTOCOL):
+                raise RuntimeError("unsupported_mock_observation_delivery_protocol")
             try:
                 self._cursor = max(0, int(document.get("input_cursor", 0)))
                 self._fill_cursor = max(0, int(document.get("fill_cursor", 0)))
@@ -378,15 +405,36 @@ class MockAutomationRunner:
                 ]
                 self._seen_fill_ids = set(str(value) for value in document.get("seen_fill_ids", ()))
                 self._status = dict(document.get("status", self._status))
+                self._delivery_protocol = document.get("delivery_protocol")
+                self._frame_recovery_receipt = document.get("input_recovery")
+                self._bootstrap_pending = False
+                if self._delivery_protocol is None:
+                    self._frame_recovery = ObservationFrameRecovery(
+                        self._cursor, str(self._spec.session_profile),
+                        int(self._config.lookback_bars) + 2,
+                        max(int(self._spec.maximum_data_gap_seconds or 0),
+                            int(self._config.rank_window_seconds or 0)
+                            + int(self._config.rank_max_gap_seconds or 0)), False,
+                    )
                 return
             except (TypeError, ValueError):
                 logger.warning("invalid automatic runner checkpoint ignored", exc_info=True)
-        seed: list[dict[str, Any]] = []
-        for kind in INPUT_KINDS:
-            seed.extend(self._store.load_observation_revisions(kind, limit=5000))
+        self._apply_new_fills()
+        self._bootstrap()
+
+    def _bootstrap(self) -> bool:
+        page = self._store.load_observation_bootstrap(INPUT_KINDS, per_kind_limit=5000)
+        if not page.ready:
+            self._status = {
+                "state": "WARMUP", "reason": "bootstrap_pending:" + page.reason,
+                "orders_enabled": False,
+            }
+            return False
+        seed = page.rows
+        self._cursor = max((int(value.get("accepted_sequence", 0)) for value in seed), default=0)
+        self._universes = list(replay_candidate_universe(seed))
+        self._bars = {}
         if seed:
-            self._cursor = max(int(value.get("accepted_sequence", 0)) for value in seed)
-            self._universes = list(replay_candidate_universe(seed))
             for frame in replay_krx_minute_bars(
                 seed, strict=True, session_profile=str(self._spec.session_profile),
             ):
@@ -395,42 +443,44 @@ class MockAutomationRunner:
                 self._trim_bars(code)
             if self._universes:
                 self._trim_universes(self._universes[-1].available_at)
-        self._apply_new_fills()
         self._status = {
             "state": "WARMUP", "reason": "bootstrapped_without_historical_orders",
             "orders_enabled": False,
         }
-        self._save_checkpoint()
+        self._delivery_protocol = OBSERVATION_DELIVERY_PROTOCOL
+        self._bootstrap_pending = False
+        try:
+            self._save_checkpoint()
+        except Exception:
+            self._bootstrap_pending = True
+            raise
+        return True
 
     def _trim_bars(self, code: str) -> None:
-        rows = sorted(
-            (value for value in self._bars.values() if value.code == code),
-            key=lambda value: (value.bar_start, value.available_at, value.revision_id),
-            reverse=True,
-        )
-        keep = {
-            (value.code, value.observation_key)
-            for value in rows[: int(self._config.lookback_bars) + 2]
-        }
-        self._bars = {
-            key: value for key, value in self._bars.items()
-            if value.code != code or key in keep
-        }
+        self._bars = trim_bar_frames(self._bars, code, int(self._config.lookback_bars) + 2)
 
     def _trim_universes(self, latest_at: str) -> None:
-        latest = datetime.fromisoformat(latest_at).astimezone(timezone.utc)
         horizon = max(
             int(self._spec.maximum_data_gap_seconds or 0),
             int(self._config.rank_window_seconds or 0)
             + int(self._config.rank_max_gap_seconds or 0),
         )
-        self._universes = [
-            value for value in self._universes
-            if (latest - datetime.fromisoformat(value.available_at).astimezone(timezone.utc)).total_seconds()
-            <= horizon
-        ][-5000:]
+        self._universes = trim_universe_frames(self._universes, latest_at, horizon, use_maximum=False)
 
-    def _save_checkpoint(self) -> None:
+    def _recover_frames(self, limit: int) -> None:
+        recovery = self._frame_recovery
+        if recovery.advance(self._store, INPUT_KINDS, limit):
+            self._save_checkpoint(recovery=recovery)
+            self._bars, self._universes = recovery.bars, recovery.universes
+            self._delivery_protocol = OBSERVATION_DELIVERY_PROTOCOL
+            self._frame_recovery_receipt = recovery.receipt()
+            self._frame_recovery = None
+
+    def _save_checkpoint(self, *, recovery=None) -> None:
+        if self._bootstrap_pending or (self._frame_recovery is not None and recovery is None):
+            return  # Fills remain in their durable ledger and will be reapplied on restart.
+        if recovery is not None and not recovery.complete:
+            raise RuntimeError("cannot_checkpoint_partial_frame_recovery")
         self._checkpoint_revision += 1
         document = {
             "version": RUNNER_CHECKPOINT_VERSION,
@@ -444,11 +494,20 @@ class MockAutomationRunner:
             "pending_intent_id": str(self._status.get("pending_intent_id", "")),
             "strategy_state": self._state.to_dict(),
             "seen_fill_ids": sorted(self._seen_fill_ids),
-            "universes": [asdict(value) for value in self._universes],
-            "bars": [asdict(value) for value in self._bars.values()],
+            "universes": [asdict(value) for value in
+                          (recovery.universes if recovery is not None else self._universes)],
+            "bars": [asdict(value) for value in
+                     (recovery.bars if recovery is not None else self._bars).values()],
             "status": self._status,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
+        if recovery is not None:
+            document["delivery_protocol"] = OBSERVATION_DELIVERY_PROTOCOL
+            document["input_recovery"] = recovery.receipt()
+        elif self._delivery_protocol is not None:
+            document["delivery_protocol"] = self._delivery_protocol
+            if self._frame_recovery_receipt is not None:
+                document["input_recovery"] = self._frame_recovery_receipt
         self._store.upsert_documents(
             "execution_mock_automation_runner_current",
             [{"owner": self._bundle.account_ref, "key": "current", "document": document}],

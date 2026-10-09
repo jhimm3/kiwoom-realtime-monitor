@@ -21,6 +21,10 @@ from kiwoom_monitor.application.research_families import BREAKOUT_FAMILY_ID
 from kiwoom_monitor.application.research_splits import ResearchEvaluationSpec, ResearchFoldSpec
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner
+from kiwoom_monitor.central_server.database_observation_readers import (
+    OBSERVATION_DELIVERY_PROTOCOL, ObservationRevisionPage,
+)
+from unittest.mock import patch
 from kiwoom_monitor.domain.execution_activation import (
     MOCK_CANDIDATE_TRANSITION_POLICY,
     MOCK_RECOVERY_POLICY,
@@ -193,6 +197,75 @@ class MockAutomationRunnerTests(unittest.TestCase):
 
 
 class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pending_bootstrap_preserves_fills_and_never_dispatches_history(self):
+        from tests.unit.test_candidate_monitor import _rank, _bar
+        case = MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")
+        case.setUp()
+        self.addCleanup(case.store.close)
+        pending = ObservationRevisionPage(ready=False, reason="pending_sequence_commit")
+        with patch.object(case.store, "load_observation_bootstrap", return_value=pending) as loader:
+            runner = MockAutomationRunner(case.store, case.bundle, case.spec)
+            runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+                active_spec_id=case.spec.spec_id, desired_state=SimpleNamespace(value="RUNNING"))
+            case.events.values.append(case.event(1, "fill-1", "BUY", 2, 10000))
+            self.assertEqual(0, await runner.run_once())
+            self.assertEqual(1, runner._fill_cursor)
+            self.assertEqual(2, runner._state.position_quantity)
+            runner._save_checkpoint()
+            self.assertEqual([], case.store.load_documents(
+                "execution_mock_automation_runner_current", ACCOUNT_REF, 1))
+            loader.return_value = ObservationRevisionPage(
+                rows=(_rank(1), _bar(2, 0, 1000, 1010)), safe_through=999)
+            with patch.object(runner, "_consume", side_effect=AssertionError("historical dispatch")):
+                self.assertEqual(0, await runner.run_once())
+            saved = case.store.load_documents(
+                "execution_mock_automation_runner_current", ACCOUNT_REF, 1)[0]["document"]
+            self.assertEqual(2, saved["input_cursor"])
+            self.assertEqual(1, saved["fill_cursor"])
+            self.assertEqual(OBSERVATION_DELIVERY_PROTOCOL, saved["delivery_protocol"])
+            restarted = MockAutomationRunner(case.store, case.bundle, case.spec)
+            self.assertEqual(1, restarted._fill_cursor)
+            self.assertEqual(2, restarted._state.position_quantity)
+            self.assertEqual(2, restarted._cursor)
+            self.assertEqual(3, loader.call_count)
+
+    async def test_stopped_pending_runner_does_not_bootstrap_or_write_ready_checkpoint(self):
+        case = MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")
+        case.setUp()
+        self.addCleanup(case.store.close)
+        with patch.object(case.store, "load_observation_bootstrap",
+                          return_value=ObservationRevisionPage(ready=False)) as loader:
+            runner = MockAutomationRunner(case.store, case.bundle, case.spec)
+            runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+                active_spec_id=case.spec.spec_id, desired_state=SimpleNamespace(value="STOPPED"))
+            self.assertEqual(0, await runner.run_once())
+            self.assertEqual(1, loader.call_count)
+            self.assertEqual("STOPPED", runner.status["state"])
+            self.assertEqual(0, runner._checkpoint_revision)
+            self.assertEqual([], case.store.load_documents(
+                "execution_mock_automation_runner_current", ACCOUNT_REF, 1))
+
+    async def test_failed_bootstrap_save_retries_seed_before_any_strategy_processing(self):
+        case = MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")
+        case.setUp()
+        self.addCleanup(case.store.close)
+        with patch.object(case.store, "load_observation_bootstrap",
+                          return_value=ObservationRevisionPage(ready=False)) as loader:
+            runner = MockAutomationRunner(case.store, case.bundle, case.spec)
+            runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+                active_spec_id=case.spec.spec_id, desired_state=SimpleNamespace(value="RUNNING"))
+            loader.return_value = ObservationRevisionPage()
+            with patch.object(case.store, "upsert_documents", side_effect=OSError("seed save failed")):
+                with self.assertRaisesRegex(OSError, "seed save failed"):
+                    await runner.run_once()
+            self.assertTrue(runner._bootstrap_pending)
+            self.assertEqual(0, await runner.run_once())
+            self.assertFalse(runner._bootstrap_pending)
+            saved = case.store.load_documents(
+                "execution_mock_automation_runner_current", ACCOUNT_REF, 1)[0]["document"]
+            self.assertEqual(0, saved["input_cursor"])
+            self.assertEqual(OBSERVATION_DELIVERY_PROTOCOL, saved["delivery_protocol"])
+
     async def test_stop_restart_resume_consumes_only_unseen_observations(self):
         case = MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")
         case.setUp()

@@ -302,6 +302,12 @@
       "tests.unit.test_causal_capture_api",
       "tests.unit.test_causal_capture_capacity"
     ],
+    "main-observation-delivery-contracts": [
+      "tests.unit.test_market_event_fact_delivery",
+      "tests.unit.test_observation_delivery",
+      "tests.unit.test_observation_frame_recovery",
+      "tests.unit.test_replay_content_comparison"
+    ],
     "dependency-audit-batch-01-central-and-data-contracts": [
       "tests.unit.test_api_settings_dialog",
       "tests.unit.test_audit_historical_five_minute_clock",

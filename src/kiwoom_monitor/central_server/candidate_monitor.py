@@ -5,6 +5,10 @@ from __future__ import annotations
 from .diagnostic_replay_contract import captured_workload
 
 from .diagnostic_workloads import is_paused
+from .database_observation_readers import OBSERVATION_DELIVERY_PROTOCOL
+from .observation_frame_recovery import (
+    ObservationFrameRecovery, drain_thread_call, trim_bar_frames, trim_universe_frames,
+)
 
 import asyncio
 import json
@@ -71,6 +75,10 @@ class CandidateMonitor:
         }
         self._task: asyncio.Task[None] | None = None
         self._checkpoint_pending = False
+        self._bootstrap_pending = True
+        self._delivery_protocol: str | None = None
+        self._frame_recovery: ObservationFrameRecovery | None = None
+        self._frame_recovery_receipt: dict[str, Any] | None = None
         self._restore_or_bootstrap()
 
     @classmethod
@@ -94,7 +102,11 @@ class CandidateMonitor:
 
     @property
     def quality(self) -> dict[str, Any]:
-        return {**self._quality, "monitor_id": self.monitor_id}
+        value = {**self._quality, "monitor_id": self.monitor_id}
+        if self._frame_recovery is not None:
+            value.update(status="WARMUP", reason="legacy_frames_recovery",
+                         input_recovery=self._frame_recovery.receipt())
+        return value
 
     async def start(self) -> None:
         if self._task is None or self._task.done():
@@ -115,7 +127,7 @@ class CandidateMonitor:
         while True:
             try:
                 if not is_paused("candidate_monitor"):
-                    await asyncio.to_thread(self.run_once)
+                    await drain_thread_call(self.run_once)
             except Exception as error:  # keep the NAS collector alive; quality exposes the failure
                 logger.exception("shadow candidate monitor iteration failed")
                 self._quality = {
@@ -129,6 +141,18 @@ class CandidateMonitor:
             await asyncio.sleep(self._poll_seconds)
 
     def run_once(self, *, limit: int = 1000) -> int:
+        if self._bootstrap_pending:
+            self._bootstrap()
+            return 0  # Initial history is seeded without historical decisions.
+        if self._frame_recovery is not None:
+            recovery = self._frame_recovery
+            if recovery.advance(self._store, INPUT_KINDS, limit):
+                self._save_checkpoint(reason="legacy_frames_recovery", recovery=recovery)
+                self._bars, self._universes = recovery.bars, recovery.universes
+                self._delivery_protocol = OBSERVATION_DELIVERY_PROTOCOL
+                self._frame_recovery_receipt = recovery.receipt()
+                self._frame_recovery = None
+            return 0  # Repair input frames only, never re-run historical strategy decisions.
         observations = self._store.load_observation_revisions_after(
             self._cursor, INPUT_KINDS, limit,
         )
@@ -215,6 +239,8 @@ class CandidateMonitor:
     def _restore_or_bootstrap(self) -> None:
         document = self._store.load_shadow_monitor_state(self.monitor_id)
         if document:
+            if document.get("delivery_protocol") not in (None, OBSERVATION_DELIVERY_PROTOCOL):
+                raise RuntimeError("unsupported_shadow_observation_delivery_protocol")
             try:
                 if document.get("session_profile", KRX_REGULAR_RESEARCH_PROFILE) != self._session_profile:
                     raise ValueError("shadow checkpoint session profile mismatch")
@@ -228,15 +254,34 @@ class CandidateMonitor:
                     for frame in (KrxMinuteBarFrame(**value) for value in document.get("bars", []))
                 }
                 self._quality = dict(document.get("quality", self._quality))
+                self._delivery_protocol = document.get("delivery_protocol")
+                self._frame_recovery_receipt = document.get("input_recovery")
+                self._bootstrap_pending = False
+                if self._delivery_protocol is None:
+                    self._frame_recovery = ObservationFrameRecovery(
+                        self._cursor, self._session_profile, self._config.lookback_bars + 2,
+                        max(self._universe_max_age_seconds,
+                            int(self._config.rank_window_seconds or 0)
+                            + int(self._config.rank_max_gap_seconds or 0)), True,
+                    )
                 return
             except (TypeError, ValueError):
                 logger.warning("invalid shadow checkpoint ignored", exc_info=True)
-        seed = []
-        for kind in INPUT_KINDS:
-            seed.extend(self._store.load_observation_revisions(kind, limit=5000))
+        self._bootstrap()
+
+    def _bootstrap(self) -> bool:
+        page = self._store.load_observation_bootstrap(INPUT_KINDS, per_kind_limit=5000)
+        if not page.ready:
+            self._quality = {
+                **self._quality, "status": "WARMUP",
+                "reason": "bootstrap_pending:" + page.reason,
+            }
+            return False
+        seed = page.rows
+        self._cursor = max((int(value.get("accepted_sequence", 0)) for value in seed), default=0)
+        self._universes = list(replay_candidate_universe(seed))
+        self._bars = {}
         if seed:
-            self._cursor = max(int(value.get("accepted_sequence", 0)) for value in seed)
-            self._universes = list(replay_candidate_universe(seed))
             for frame in replay_krx_minute_bars(
                 seed, strict=True, session_profile=self._session_profile,
             ):
@@ -249,38 +294,32 @@ class CandidateMonitor:
             "status": "WARMUP", "reason": "bootstrapped_without_historical_alerts",
             "last_processed_sequence": self._cursor,
         }
-        self._save_checkpoint(reason="bootstrap")
+        self._delivery_protocol = OBSERVATION_DELIVERY_PROTOCOL
+        self._bootstrap_pending = False
+        try:
+            self._save_checkpoint(reason="bootstrap")
+        except Exception:
+            self._bootstrap_pending = True
+            raise
+        return True
 
     def _trim_bars(self, code: str) -> None:
-        rows = sorted(
-            (frame for frame in self._bars.values() if frame.code == code),
-            key=lambda frame: (frame.bar_start, frame.available_at, frame.revision_id),
-            reverse=True,
-        )
-        keep = {(frame.code, frame.observation_key) for frame in rows[: self._config.lookback_bars + 2]}
-        self._bars = {
-            key: value for key, value in self._bars.items()
-            if value.code != code or key in keep
-        }
+        self._bars = trim_bar_frames(self._bars, code, self._config.lookback_bars + 2)
 
     def _trim_universes(self, latest_at: str) -> None:
-        latest = max(
-            datetime.fromisoformat(frame.available_at).astimezone(timezone.utc)
-            for frame in self._universes
-        ) if self._universes else datetime.fromisoformat(latest_at).astimezone(timezone.utc)
         horizon = max(
             self._universe_max_age_seconds,
             int(self._config.rank_window_seconds or 0) + int(self._config.rank_max_gap_seconds or 0),
         )
-        self._universes = [
-            frame for frame in self._universes
-            if (latest - datetime.fromisoformat(frame.available_at).astimezone(timezone.utc)).total_seconds()
-            <= horizon
-        ][-5000:]
+        self._universes = trim_universe_frames(self._universes, latest_at, horizon, use_maximum=True)
 
-    def _save_checkpoint(self, *, reason: str = "manual") -> None:
+    def _save_checkpoint(self, *, reason: str = "manual", recovery=None) -> None:
         from .postgres_access import db_call_source
 
+        if self._bootstrap_pending or (self._frame_recovery is not None and recovery is None):
+            return  # A waiting or failed seed must never become a completed checkpoint.
+        if recovery is not None and not recovery.complete:
+            raise RuntimeError("cannot_checkpoint_partial_frame_recovery")
         # A failed final batch must retry even when no later observation arrives.
         self._checkpoint_pending = True
         # Replay frames are frozen and contain scalars or immutable tuples;
@@ -291,10 +330,19 @@ class CandidateMonitor:
             "cursor": self._cursor,
             "strategy_config": self._config.to_dict(),
             "strategy_state": self._state.to_dict(),
-            "universes": [vars(value).copy() for value in self._universes],
-            "bars": [vars(value).copy() for value in self._bars.values()],
+            "universes": [vars(value).copy() for value in
+                          (recovery.universes if recovery is not None else self._universes)],
+            "bars": [vars(value).copy() for value in
+                     (recovery.bars if recovery is not None else self._bars).values()],
             "quality": self._quality,
         }
+        if recovery is not None:
+            document["delivery_protocol"] = OBSERVATION_DELIVERY_PROTOCOL
+            document["input_recovery"] = recovery.receipt()
+        elif self._delivery_protocol is not None:
+            document["delivery_protocol"] = self._delivery_protocol
+            if self._frame_recovery_receipt is not None:
+                document["input_recovery"] = self._frame_recovery_receipt
         with db_call_source(f"candidate_monitor.{reason}"):
             self._store.save_shadow_monitor_state(self.monitor_id, document)
         self._checkpoint_pending = False

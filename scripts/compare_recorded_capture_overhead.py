@@ -80,7 +80,6 @@ def worker(args):
     sys.path.insert(0, str(source / "src"))
     from kiwoom_monitor.central_server import diagnostic_trace as trace
     from kiwoom_monitor.central_server.database import SQLiteQueryStore
-    from kiwoom_monitor.central_server.diagnostic_replay_contract import thaw_payload
     from kiwoom_monitor.central_server.diagnostic_workloads import _set_tool, _set_trace
     from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
     from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
@@ -169,20 +168,22 @@ def worker(args):
                 result = loop.run_until_complete(measure(store, collector))
                 measured_rss = rss()
                 trace_metrics = trace.status()
-                captured_rows, excluded_rows, event_counts = Counter(), Counter(), Counter()
+                event_counts = Counter(trace_metrics.get("event_counts", {}))
+                captured_collector_payload_events = event_counts["collector_input"]
+                expected_collector_payload_events = args.messages + 1  # messages plus one initial-state payload
                 if args.mode == "on":
-                    with trace._LOCK:
-                        captured = list(trace._QUEUE)
-                    for event in captured:
-                        event_counts[event["event_type"]] += 1
-                        if event.get("input_kind") == "message":
-                            payload = thaw_payload(event["payload"])
-                            captured_rows.update(row["type"] for row in payload["message"]["data"])
-                            excluded_rows.update(event.get("excluded_types", {}))
                     if event_counts["operation_start"] != args.store_calls or event_counts["operation_end"] != args.store_calls:
                         raise RuntimeError("store_capture_pairs_missing")
-                    if captured_rows["0B"] != args.messages * args.rows:
-                        raise RuntimeError("collector_fixture_rows_missing")
+                    realtime_coverage = trace_metrics.get("input_coverage", {}).get("realtime", {})
+                    if (captured_collector_payload_events != expected_collector_payload_events
+                            or realtime_coverage.get("accepted") != expected_collector_payload_events
+                            or trace_metrics.get("input_rejected") != 0):
+                        raise RuntimeError("collector_fixture_payload_events_missing:" + json.dumps({
+                            "event_counts": dict(event_counts),
+                            "realtime_coverage": realtime_coverage,
+                            "input_rejected": trace_metrics.get("input_rejected"),
+                            "input_coverage": trace_metrics.get("input_coverage"),
+                        }, ensure_ascii=False, sort_keys=True))
                 # Hold all payloads in RAM for the entire sample. Shutdown discards only this private fixture.
                 if trace_metrics.get("written", 0) != 0 or trace_metrics.get("known_dropped", 0) or trace_metrics.get("input_rejected", 0):
                     raise RuntimeError("controlled_capture_dropped_rejected_or_wrote_payloads")
@@ -205,8 +206,9 @@ def worker(args):
                     "trace": {key: trace_metrics.get(key) for key in (
                         "accepted", "written", "known_dropped", "input_rejected", "input_coverage",
                         "memory_high_water", "charged_bytes", "copy_ms_total", "copy_ms_max", "queue_high_water")},
-                    "captured_collector_rows_by_type": dict(captured_rows),
-                    "explicitly_excluded_collector_rows_by_type": dict(excluded_rows),
+                    "expected_collector_input_rows": args.messages * args.rows if args.mode == "on" else 0,
+                    "captured_collector_payload_events": captured_collector_payload_events,
+                    "expected_collector_payload_events": expected_collector_payload_events if args.mode == "on" else 0,
                     "captured_event_counts": dict(event_counts),
                     "scope": "collector_parser_RAM_and_in_memory_SQLite_store_input_capture_only",
                     "network_access": False, "postgres_access": False, "live_controls_changed": False,

@@ -6598,7 +6598,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             and call["outcome"] == "committed"
             and call["transactions"] == 1
             and call["commits"] == 1
-            and call["sql_calls"] == 1
+            and call["sql_calls"] == (4 if call["writer_kind"] == "observation_revisions_after" else 1)
             and call["backend_pid"] is not None
             for call in reader_calls
         ))
@@ -6608,6 +6608,11 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             "read.observation_revisions/observation_revision"]["calls"])
         self.assertEqual(1, summary["readers"][
             "read.observation_revisions/observation_revisions_after"]["calls"])
+        frontier = summary["readers"][
+            "read.observation_revisions/observation_revisions_after"]["phase_diagnostics"]["observation_delivery"]
+        self.assertEqual(1, frontier["executions"])
+        self.assertEqual({"not_requested": 1}, frontier["sampling_status"])
+        self.assertEqual({}, frontier["wait_samples"])
 
     def test_active_readers_batch_preserve_native_context_and_separate_metrics(self) -> None:
         snapshot_subject = f"DIAG-{uuid.uuid4().hex}"

@@ -247,7 +247,7 @@ class RecordedExecutionPostgresTests(unittest.TestCase):
         return code, result
 
     def test_same_captured_inputs_repeat_three_times_and_workload_masks_preserve_native_calls(self):
-        fingerprints, operation_ids, native_ids = [], [], set()
+        fingerprints, operation_ids, native_ids, content_signatures = [], [], set(), []
         with self._recorded_fixture() as capture:
             for arguments, expected in [([], {11, 20})] * 3 + [
                     (['--include-workload', 'top20'], {11}),
@@ -269,10 +269,21 @@ class RecordedExecutionPostgresTests(unittest.TestCase):
                     self.assertNotIn(identifier, native_ids)
                     native_ids.add(identifier)
                 fingerprints.append(result['input_sha256'])
+                comparison = result['final_content_comparison']
+                self.assertFalse(comparison['functional_equivalence_verified'])
+                self.assertFalse(comparison['timing_equivalence_verified'])
+                self.assertTrue(all(table['content_projection_valid']
+                                    for table in comparison['tables'].values()))
+                content_signatures.append({name: (table['rows'], table['sha256'])
+                                           for name, table in comparison['tables'].items()})
                 operation_ids.append({call['source_operation_id'] for call in result['calls']})
             self.assertEqual(1, len(set(fingerprints)))
             self.assertEqual(operation_ids[0], operation_ids[1])
             self.assertEqual(operation_ids[0], operation_ids[2])
+            self.assertEqual(content_signatures[0], content_signatures[1])
+            self.assertEqual(content_signatures[0], content_signatures[2])
+            self.assertNotEqual(content_signatures[0], content_signatures[3])
+            self.assertNotEqual(content_signatures[0], content_signatures[4])
             self.assertEqual(operation_ids[0], operation_ids[3] | operation_ids[4])
             self.assertFalse(operation_ids[3] & operation_ids[4])
 

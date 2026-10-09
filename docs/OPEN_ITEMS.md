@@ -88,7 +88,231 @@ capture API assertion 실패 후 client가 닫히지 않는 경로도 재현해 
 63개 저장 경계 검사 통과다. 새 제어 4개 포함 전체 회귀는 게시 branch의 CI artifact로 별도 판정한다.
 남은 164개를 모두 실행했거나 제외 확정한 것으로 보고하지 않는다. 이전 단계별 실행과 판단은 후속
 문서를 따른다. NAS 운영 검증·배포·main 병합은 별도로 유지한다.
+**2026-10-09 main 후속 기록:**
+**2026-10-09 전체 앱 최적화 P0/P1 진행:** 사용자가 지정한 P0 정합성·복구 → P1 공통
+장기 지연 → P2 중복 → P3 개별 → P4 확대 부하 순서를 따른다. 10/8 불완전 capture는
+부분 비교만 허용하며 저장 주기/batch/concurrency 변경이나 전체 완료 근거로 쓰지 않는다.
+각 변경은 동일 입력/초기 상태/조건에서 기능·성능·타 경로 영향과 미측정 지표를 기록한다.
 
+P0 native 동시 reader/fast-path 잠금 이전 gate를 추가했다. 비활성
+`2026.10.09-observation-concurrency-v1-2d67e2620004fa7d`, job
+`98589a7267e41651c4d3b11bf5246c86`: 57건 통과(오류·실패·skip 0), 운영 보존/cleanup 확인.
+복구 비용 통제 fixture도 측정했다: 시간순 6,004 membership은 51~68ms, 같은 시각 stress는
+5.9~9.9초(CPU 대부분, GC 총 1ms 미만). native reader·NAS 다종목 RSS/consumer 지연은 남는다.
+후보 UI/체결 원장도 추적했으나 운영 Shadow 단일 producer drain과 모의 owned 계좌 lease
+잠금이 있으므로 같은 결함으로 단정하지 않는다. offline/import 혼합·관련 소비자 회귀는 남는다.
+
+P1 scalar 감사: 09:00~09:10 native call 4,026건, COMMIT >=1초 182건/>=10초 7건,
+관측 동시 COMMIT 최대 8. 09:04:43~09:05:04에 분봉/Shadow/초봉/lease/VI 장기 대기가
+겹친다. lease SQL 1.723ms/COMMIT 10.714초, Shadow SQL 92.525ms/COMMIT 20.893초다.
+공통 대기는 후보로 확정했지만 WAL/장치/lock/thread 스케줄 원인은 미확정이며 직접
+wait owner·I/O·CPU/queue 지표가 없다. 관련 증거와 제외 경로는 설계 문서 최신 절에 기록했다.
+
+디스크 scoped replay는 임시 PG readiness 실패로 실행되지 않았다. 서버 pause/재시작 없이
+cleanup 확인. 실패 원인을 수집한 뒤 디스크 대조를 재개해야 하며 이를 성능 결과로 사용하지 않는다.
+운영 변경/새 배포는 없고 전체 P0/P1 완료는 아니다.
+
+같은 09:04~09:06 realtime 23 store call은 RAM/empty-v1/concurrency8에서 완료됐다.
+선택 누락 0, timing/result 확인·baseline 복원·운영 재개·cleanup 완료,
+COMMIT p50/p95/max 0.255/0.559/6.083ms. 운영 정지 창 222.340초는 승인된 수집 공백이다.
+collector·다른 writer·원래 DB 상태/디스크가 빠져 있어 장기 지연 재현 및 원인 확정은 아니다.
+증거: `artifacts/common-bottleneck-realtime-ram-proof-20261009.json`.
+
+**P0 추가 확인: 상한가 사실 수집의 실패/수신 정체**
+2026-10-09 설계대로 로컬 구현 완료, NAS 검증/배포는 별도다. 같은 1,001건/1ms의
+held-writer 대조는 기존 high1000/drop1에서 수정 후 high1/drop0으로 바뀌었고 transient
+TOUCHED/CURRENT가 보존됐다. MarketEventService 내부의 immutable pending/단일 소유
+writer/재시도/ack/drain이며 같은 key의 최초 문서·시각을 재시도에도 유지한다.
+기존 native store와 fact key를 보존하고 조건 REG 상태와 별도인 fact_collection으로
+포화·gap을 공개한다. 로컬 전달13/시장16/capture·REST38/collector32 통과.
+실제 pending20,000건은 payload 약7.79MB로 count 한도가 먼저 찬다.
+후보 한도20,000key/64MiB payload는 NAS RSS·capture off/on 검증 전에는 배포하지 않는다. RAM 입장은 영속
+완료가 아니며 강제 종료의 미저장 사실까지 해결됐다고 보고하지 않는다. 구체 계약과
+gate는 설계 문서의 최신 절을 따른다. v3-baf398c3a624dfd9 NAS 전체 관련106개가
+errors/failures/skips0으로 통과했다. 최종 후보v4-97bcf9bf50764f6b는 잠금 대기 전 원래
+호출 시각·날짜·조건을 고정하며 로컬29개 및 자정 경계를 통과했다. 변경 관련 native39개도
+job4c4b0a26fd0684d642f155783545c7df에서 errors/failures/skips0, cleanup/fence 통과,
+active/두 컨테이너 보존으로 끝났다. 전체106과 후속39는 겹치는 검증이다.
+앞선 저장 공간 fixture와 capture/runtime 판본 불일치는 검증 환경 문제로
+분리한다. 조건식 검사 단독 재현은 통과했지만 v2 묶음 검사에서는 다시 실패했다.
+메타데이터의 기존 상태 잠금을 조건식 신호가 우회하는 경합을 통제 재현했고, 동일
+잠금 안에서 snapshot/DB ACK/RAM publication을 유지하도록 수정했다. 로컬 history/current
+회귀는 통과했고 실제 PostgreSQL의 해당 경합 검사는 v3 gate에 포함한다.
+기존 signal/metadata worker는 저장 실패를 로그 후 task_done으로 소비하는 경로가 있고,
+종료 timeout 뒤 native to_thread와 상태 잠금의 실제 drain은 별도 검증이 필요하다.
+이번 상한가 fact worker 승인으로 그 경로들의 실패/취소 복구까지 승인하지 않는다.
+2026-10-10 임시 SQLite/native worker/가짜 REST의 통제 재현에서 signal 저장 실패1회는
+DB/RAM 종목0, queue unfinished0, retry 미보존이었다. ELIGIBILITY 저장 실패1회는
+DB NXT=null/RAM NXT=true인데 metadata queue unfinished0으로 끝났다.
+`artifacts/market-event-worker-failure-proof-20261010.json`의 좁은 증거이며 운영 발생 횟수,
+재연결/다음 신호가 보완하는 범위, 종료 중 실제 native drain은 미검증이다. P0 후속은
+이 두 producer/consumer의 원래 입력·ACK·재시도·RAM publication·종료 경계를 먼저 정한다.
+현재 제한된 operator 보고서는 검사에서 출력한 RSS를 제공하지 않으므로 NAS 메모리
+승인으로 계산하지 않는다. 강제 종료 복구/장초 전체 capture 비용과 P1 공통 대기 원인은 미검증이다.
+
+native hub/event loop와 임시 SQLite의 통제 재현에서 저장 예외 한 번이면 consumer가
+종료되고 close도 disconnect 전에 같은 예외를 다시 낸다. DB 대기 중 1,001건 publish는
+현재 1,000건 큐에서 transient CURRENT 체결 한 건을 버려 사실/last_tick을 누락한다.
+10/8의 실제 발생은 미확정이며 녹화본 누락을 만들어 채우지 않는다. TOP20 receipt의
+trade 141,344건/프로그램 2,307건 enqueue/dequeue/consume_end 일치·recorded drop0은
+capture_component 없는 hot-cohort subscriber까지 포함하지 않는다.
+`market-event-delivery-proof-20261009.json`과 설계 문서의 좁은 선택지를 기준으로
+fact 소유권·idempotent 재시도·ack 유실·drain/재시작·과부하 및 causal 경계를 결정한 뒤
+최소 수정하고 같은 통제 사건과 관련 consumer/native PG 회귀를 검증한다.
+queue/timer/concurrency 변경 및 새 운영 배포는 없음. P0 미완료.
+
+**2026-10-09 구형 관측 checkpoint frames-only 복구 완료·gate 통과:**
+기존 cursor C/strategy/emitted keys와 mock fills/intents/account·run·spec binding을
+유지하고 안전한 C 이하 행만 poll당 한 page씩 읽어 scratch를 구성한다. 완료된
+frames/protocol/출처를 기존 checkpoint transaction으로 저장한 뒤에만 >C를 처리한다.
+부분 scratch의 종료/error 저장은 차단하며 unknown protocol은 명시 거부한다.
+체결/control 검사는 계속하고 owned native 복구 작업을 실제로 drain한 후 종료한다.
+과거 주문·판단을 재실행하지 않으며 역사적 전략 state 동등성을 주장하지 않는다.
+
+비활성 `2026.10.09-observation-recovery-v1-da67999ec33a61b4`, NAS job
+`305011ce14daba8d456843b8dab591f2`: 55건 통과, 오류·실패·skip 0. 로컬 36건 통과.
+native 늦은 COMMIT, inline/normalized, 실제 final COMMIT ack 유실 후 재시작과
+mock binding/체결/intent 보존을 확인했다. 최초 gate는 잘못 적은 테스트 이름 하나로
+loader error 1건(나머지 54건 통과)이었고, 같은 소스를 정확한 이름으로 재검증했다.
+보고서: `artifacts/observation-recovery-proof-20261009.json`.
+
+**다음:** 실제 concurrent reader/fast-path 이전, 동일 scoped workload의 추가 읽기
+비용·consumer 지연 검증. 긴 이력의 scratch RSS/전체 종목 수/복구 시간 및 반복 trim의
+CPU 비용도 실측해야 한다. 그 전에 운영 배포하지 않는다. 운영 active와 컨테이너는
+보존했고 임시 PG는 정리됐다. 아래 이전 단계의 미완료 표현은 당시 기록이다.
+
+**2026-10-09 shadow·모의 자동매매 공통 bootstrap 연결 완료:** 초기 종목목록/분봉을
+안전한 한 snapshot으로 seed하고, pending은 WARMUP에서 기존 poll로 재확인한다.
+pending/실패한 seed를 완료 checkpoint로 쓰지 않으며 과거 주문·판단을 재평가하지 않는다.
+실제 seed의 최대 순번과 delivery protocol을 기존 checkpoint transaction에 함께 저장한다.
+비활성 `2026.10.09-observation-bootstrap-v1-86ca1a8376d8e626`,
+NAS job `0abbb49c0e8368f62cbee053047fb194`: 44건 통과, 오류·실패·skip 0.
+로컬 29건 통과. native 두 consumer의 늦은 COMMIT·독립 peer·초기 대기/재시작과
+inline/normalized header 보존을 확인했다. 모의 fill 보존·사용자 STOP과 seed 저장 실패
+재시도는 로컬 회귀에도 포함한다. 증거: `artifacts/observation-bootstrap-proof-20261009.json`.
+
+**다음:** protocol 없는 기존 checkpoint의 C 이하 frames-only 복구. 기존 strategy,
+emitted key, fills/intents/run/account binding은 유지하고 복구 완료를 원자 저장한 뒤 >C를
+진행한다. 기존 checkpoint를 새 규약 완료로 재표시하지 않는 회귀는 통과했지만 실제 복구는
+아직 구현하지 않았다. 복구 중 실패·종료·COMMIT ack 유실과 실제 concurrent-reader/
+fast-path 이전, 동일 workload 비용 검증 후 배포한다. 운영 active·컨테이너 보존 및
+임시 DB cleanup을 확인했고 성능 해결이나 역사적 전략 동등성을 주장하지 않는다.
+
+**2026-10-09 안전한 reader page 1단계 구현·검증:**
+`load_observation_revision_page`와 단일 snapshot의 `load_observation_bootstrap`,
+store별 유한 cohort·epoch·동시 probe fencing을 구현했다. 기존 증분 list는 안전한
+page에 위임하며 raw history/연구 export와 writer transaction은 유지한다.
+비활성 `2026.10.09-observation-safe-page-v3-79ac4191c0c2b8c7`,
+NAS job `46022cd36f6b162693c670582f8e0a93`: 17/17 통과, 오류·실패·skip 0.
+로컬 20건 통과. v2 계측 phase schema 오류 1건은 producer에서 수정하고 같은 gate를
+재실행했다. 증거: `artifacts/observation-safe-page-proof-20261009.json`.
+
+**아직 미완료:** 두 consumer의 공통 bootstrap 연결과 실제 전달 행 cursor/protocol 저장,
+구형 checkpoint의 frames-only 복구 및 관련 failure/restart/fill/intent gate.
+증분 reader의 SQL은 동일 native 연결에서 1→4회(대기 시 3회)로 늘어나므로 동일
+workload의 비용 비교도 필요하다. fast-path 이전·실제 동시 reader 검증은 별도다.
+운영 활성 릴리즈·컨테이너 보존과 임시 DB 정리를 확인했으며 배포하지 않았다.
+
+**2026-10-09 커서 전달·복구 설계 선택:** 기존 sequence lock을 이용한 safe-prefix를
+선택했다. 비활성 `2026.10.09-sequence-fence-proof-v1-4c356d3ccf73e70f`의 NAS
+격리 설계 probe 4/4 통과(실패·오류·skip 0). 독립 native scalar/batch COMMIT,
+낮은 번호의 늦은 완료, rollback 공백, 새 writer의 cohort 비확장, INSERT 전 할당과
+savepoint·backend 재사용을 확인했다. 운영 reader 수정이나 기존 결함 해결은 아니다.
+
+남은 구현: 안전한 page/epoch/fencing → 공통 snapshot bootstrap → legacy checkpoint
+frames-only 복구. 구형 cursor C는 유지하고 C 이하 입력 상태만 복원한 뒤 >C를 진행하며,
+기존 주문·체결·의도·전략 state를 지우거나 과거 판단을 재실행하지 않는다. 복구 완료 header와
+frames는 같은 기존 checkpoint transaction에 저장한다. 과거 전략 결과 동등성은 미확정이다.
+consumer/복구/fast-path 이전/재시작 gate 및 같은 workload의 reader 비용 비교 후에만
+릴리즈 판단한다. 자세한 계약과 전제는 `RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md`의
+전달 경계 설계 절 참조. 원본 red evidence, 운영 active와 컨테이너는 보존했다.
+증거: `artifacts/sequence-fence-report-20261009.json`.
+
+**2026-10-09 최초 bootstrap도 같은 누락 재현:** 비활성
+`2026.10.09-bootstrap-cursor-proof-v1-c23bc19ad1f24cf3`의 NAS 전용 gate는
+정상 대조 PASS/첫 시작 중 늦은 COMMIT 전달 계약 FAIL(각 합계 2건/오류·skip 0)이다.
+높은 peer 완료 뒤 낮은 transaction이 COMMIT 대기하는 동안 새 CandidateMonitor를
+생성하면 초기 checkpoint부터 낮은 완료봉을 건너뛴다. 이후 해당 봉은 strict 저장
+조회에 적격이고 별도 새 bootstrap도 읽지만 기존 checkpoint/restart는 누락한다.
+기본 inline 경로의 controlled native proof이며 실제 장중 주문/신호 영향은 미확정이다.
+원본 red 보고서를 보존했다: `artifacts/bootstrap-cursor-report-20261009.json`.
+
+순번 할당 helper 두 곳과 두 consumer의 polling/최초 시작/복구를 함께 다뤄야 한다.
+안전한 전달 경계와 별도 delivery cursor/ack의 계약 선택, 구형 checkpoint 복구 정책,
+rollback 번호 공백과 장기 transaction의 지연 한도를 먼저 결정한다. 연구 export의
+고정 membership/accepted_sequence를 새 전달 진행과 혼동하지 않는다. 자세한 경계와
+회귀 목록은 `RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md`의 커서 수정 전 감사 절을 따른다.
+runtime 수정/배포는 없고, 격리 작업 정리와 운영 활성 릴리즈 보존/진단 idle을 확인했다.
+
+**2026-10-09 완료봉·실제 shadow·checkpoint 재시작 누락 확인:** 실제 native 분봉 확정과
+CandidateMonitor 처리/저장/재시작으로 후속 재현했다. 비활성 pre/post batch v2 각각
+정상 순서 대조 1건 통과, 늦은 COMMIT 전달 계약 1건 실패였다(각 tests=2/오류 0/skip 0).
+늦은 완료봉은 DB에 저장되어 strict KRX 입력으로 적격이지만 처리된 shadow frame에서
+빠지고 같은 checkpoint로 재시작해도 돌아오지 않는다. checkpoint가 없는 새 monitor는
+같은 DB에서 두 완료봉을 모두 복원한다. 기존 결함이며 batch 수정의 회귀는 아니다.
+증거: `artifacts/closed-cursor-comparison-20261009.json` 및 pre/post 개별 report.
+기본 inline checkpoint를 검증했다. 실제 장중 발생·신호/주문 손실·모의 자동매매 runner·
+normalized checkpoint는 별도 검증이며 확정하지 않는다. 최초 v1 fixture의 미지원
+프로필 오류 2건은 보존하되 재현/acceptance 증거에서 제외했다. v2 gate는 실패로 남긴다.
+
+다음 정합성 작업은 accepted_sequence 할당과 COMMIT 완료를 같은 것으로 취급하지 않는
+전달/복구 계약 선택이다. per-call 독립 transaction, rollback 뒤 번호 공백, 중복 재시도,
+checkpoint 장애/재시작과 실시간 우선순위를 보존해야 한다. writer 전체 COMMIT 직렬화나
+고정 횟수/시간 cursor 되감기로 정합성을 대신하지 않는다. 성능 후보 수정과는 분리한다.
+운영 source/DB/진단 상태는 그대로 유지했고 임시 작업은 정리됐다. 아직 운영 수정은 없다.
+
+**2026-10-09 분봉 consumer 회귀와 별도 정합성 결함:** 로컬 collector/chart/ingest/
+candidate/mock/API 72건 및 비활성 `minute-consumer-gate-v1-28a172a81c4b48ce`의
+NAS 8건이 통과했다(skip/실패/오류 0). 저장 내부 시각만 바꿔도 native cursor·
+export·as-of·새 store/retry 결과가 보존되며, 실제 available_at 변경은 결과에 반영된다.
+이 범위의 reader TODO는 검증됐지만 전체 앱/시간/source-state 동등성을 뜻하지 않는다.
+
+별도 실패 재현은 pre/post batch 양쪽에서 동일했다: 낮은 accepted_sequence를 받은
+독립 transaction이 늦게 COMMIT되면, 먼저 완료된 높은 번호까지 진전한 증분 reader가
+그 낮은 번호의 저장 행을 다음 page에서 누락한다. 각 테스트는 1건/실패 1/오류 0/
+skip 0이며 통과로 처리하지 않았다. 테스트 worker exit 때문에 상위 응답은
+docker_command_failed지만 상세 report의 실패는 최종 reader assertion이다.
+이는 **3번: 데이터 정합성·복구 문제**이며 batch 최적화가 새로 만든 결함은 아니다.
+현재 증거는 격리 DB의 진행 중 분봉이다. 다음에는 완료봉과 실제 CandidateMonitor/
+모의 자동매매의 checkpoint·재시작 영향을 재현한 뒤 해결 계약을 정한다.
+실제 장중 발생·신호 누락·성능 효과는 아직 확정하지 않는다. 전체 writer 직렬화나
+임의 cursor 되감기로 우회하지 말고 독립 transaction과 기존 소비자 계약을 보존한다.
+증거: `artifacts/cursor-visibility-comparison-20261009.json` 및 개별 실패 report.
+운영 active/source/DB는 유지했고 진단 OFF/idle·임시 작업 cleanup을 확인했다.
+
+**2026-10-09 분봉 batch 전후 저장 내용 대조 완료:** 비활성 pre-batch reference
+`2026.10.09-replay-content-reference-v1-0c5d206ac8af226b`에 같은 비교 경계를 붙여
+NAS gate 37건을 skip/실패/오류 없이 통과했다. 같은 실제 09:00~09:02 realtime
+18 operation을 같은 입력 hash·empty-v1·concurrency 8·RAM DB에서 실행하고,
+post-batch proof의 앞선 두 실행과 대조했다. 선택 입력 생략 0, input timing 보존,
+source-call 결과·sequence·비투영 표의 전체 hash·네 표의 내용/revision 연결 hash가
+모두 같았다. 40행 분봉 SQL은 242→48, SQL 시간은 73.146→39.799/39.301ms,
+writer 총시간은 96.589→57.891/57.168ms였다. 해당 호출은 양쪽 모두 COMMIT 1회다.
+기준선 복구·cleanup·fence와 원래 운영 릴리즈의 정상 재개를 확인했고 DB 컨테이너는
+유지됐다. 승인된 운영 앱 정지는 220.622초이며 후보를 운영 배포하지 않았다.
+보고서: `artifacts/replay-content-before-after-comparison-20261009.json`.
+남은 것: 저장 시각을 소비하는 reader 회귀, 운영 디스크/WAL 경합 및 전체 장초 부하.
+현재 결과는 불완전한 녹화본의 선택된 부분 입력·RAM PG에서의 저장 내용 보존과
+SQL 비용 비교다. 원본 입력을 보충하지 않았고 source-state/full-app 동등성은 미검증이다.
+아래 같은 후보 반복 검증의 pre-batch 대조 TODO는 이 결과로 완료했다.
+
+**2026-10-09 replay 내용 비교 경계 구현·반복 실측 완료:** 기존 전체 hash/reset 증거를 유지하고
+네 결과 표의 `final_content_comparison`을 native drain 뒤·측정 구간 밖에서 추가했다.
+저장 시각은 별도 hash로 남기며 revision UUID는 accepted_sequence와 부모 scope/순서 검사로
+대응시킨다. payload·available_at·상태·revision 연결을 지워서 통과시키지 않는다.
+로컬 46건 및 비활성 후보 `2026.10.09-replay-content-proof-v1-d28ba5ce2865587a`의
+NAS 격리 gate 37건이 통과했다(모두 skip/실패/오류 0). 같은 actual trace의 09:00~09:02,
+realtime 18 native operation을 같은 입력 hash·empty-v1·concurrency 8로 두 번 실행했다.
+timing preserved/source outcomes match, 선택 입력 생략 0이며 네 표의 내용 hash와 revision
+연결/순번이 동일했다(4/5/80/80행). 네 표의 전체 hash와 생성 저장 시각 hash는 달랐고,
+canonical minute/metadata의 전체 hash는 같았다. 같은 후보의 반복성 증거이며 이전 batch
+버전과의 기능 동등성이나 시간 의존 reader 동작까지 검증한 것이 아니다.
+두 작업 모두 baseline restore·cleanup·post-job fence와 원래 운영 릴리즈 재개를 확인했다.
+사용자 승인 운영 앱 정지는 각각 221.483/222.699초였다. 운영 DB 컨테이너와 active release는
+유지됐으며 후보를 운영 배포하지 않았다. 요약 `artifacts/replay-content-proof-comparison-20261009.json`.
+남은 것: 같은 비교 경계를 pre-batch reference에도 적용해 동일 recorded 입력으로 후보/기준선
+내용·revision 연결을 대조한다. `functional_equivalence_verified`, `timing_equivalence_verified`,
+`source_state_equivalent`는 아직 false이며 전체 앱 부하 개선으로 일반화하지 않는다.
 **2026-10-09 녹화 입력 거부 원인과 복사 경합 감사:** 원본 trace `20261007T235957Z-e8cb574bf964`의
 1,490 chunks/2,033,667 events를 checksum·sequence와 함께 재검증했다. 거부 692건은 모두 호출별
 immutable-copy 8MiB byte budget 초과이며 object-node 120,000 한도 초과는 0건이다:
@@ -106,12 +330,38 @@ immutable-copy 8MiB byte budget 초과이며 object-node 120,000 한도 초과�
 1개를 예약한다. 전체 RAM 예산과 운영 저장 경로는 그대로 두며 대기·재시도하지 않는다. 관련 회귀
 52건 통과. 상세 증거는 `artifacts/trace-input-rejection-audit-20261009.json`이다.
 
-**남음:** 이번 변경만 포함한 비활성 NAS 후보 gate는 아직 실행되지 않았다. 후보 작성은 active NAS
-source에서 시작했으나 source-runtime 게시가 요구하는 pinned Dockerfile hash
-`d9bf4426c5bcdbc2b410f71df37ef7a1c569a1346d849a8f6f2a2b8106bdbdf3`의 본문을 찾지 못했다.
-현재 worktree Dockerfile hash는 `eaa7398d2b19890bd5c3370977b524d56e064fdfe589a5be414479c82c7562ef`로 달라,
-계약 검사를 우회하지 않고 게시를 중단했다. 운영 active release는 변경하지 않았다. 정확한 pinned
-Dockerfile을 확보한 뒤 isolated NAS gate와 capture on/off 지연을 확인한다.
+**NAS gate 완료:** 테스트 fixture가 tmpfs 크기보다 큰 recorder preflight 여유를 요구해 첫 실행은
+기능 테스트에 도달하지 못했다. fixture에서만 저장공간 여유를 모델링하고 운영 검사는 유지했다.
+최종 비활성 후보 `2026.10.09-trace-copy-lanes-v1-8cb5816a3ac72c53`의 isolated NAS gate와
+로컬 회귀가 각각 52/52 통과했고 skip·실패·오류는 0이다. cleanup/post-job fence가 확인됐다.
+운영 릴리즈는 `2026.10.08-trace-ram-8g-5m-v1-e1cc01dde5bacbb9` 그대로다.
+동일한 0B-only/mixed synthetic producer fixture로 active와 비활성 후보를 각각 capture OFF/ON
+3회 비교했다. 기능 hash가 일치하고 ON 입력 300개 + initial state, rejected/dropped 0이었다.
+paired p95 overhead median은 0B-only active/candidate 0.30/0.24ms, mixed 0.31/0.27ms였고,
+후보에서 이 fixture상 producer 회귀는 관측되지 않았다. 이 결과는 실제 WebSocket, NAS/Postgres,
+durable persistence/fsync, 동시 store-copy 포화, RSS를 측정하지 않으므로 장중 성능이나 전체
+capture 비용 판단으로 일반화하지 않는다. 원시 결과는
+`artifacts/trace-copy-lane-overhead-20261009.json`이다. 운영 배포는 수행하지 않았다.
+상세 원본 감사는 `artifacts/trace-input-rejection-audit-20261009.json`이다.
+
+**동시 복사 경합 부분 비교 완료:** active/비활성 후보 × capture OFF/ON × 0B-only/mixed ×
+3 rounds, 총 24개 fresh-process worker를 비교했다. 실제 store 입력 복사 2개를 fixture에서
+점유한 동안 실제 collector parser/RAM 경로에 300개 메시지(각 0B 10행)를 전달했다.
+active는 ON 6개 표본 모두 realtime 입력 301개를 `capture_copy_busy`로 거부했고 후보는
+301개를 모두 수락했다(initial state 포함). native 함수 반환값·collector 결과 hash는
+24개 표본에서 동일했고 모든 store thread가 종료됐다. 운영 수집·저장 유실의 증거가 아니라
+녹화 슬롯 공유 경합의 재현이다. store operation start/end는 각각 2개씩 기록됐다.
+후보의 최대 복사 예약은 16→24MiB, 전체 한도는 8GiB·500만 events 그대로이며 recorder
+charged-memory high-water 최대 37,550,440 bytes였다(RSS 아님). 후보 ON producer p95
+median은 0B-only 0.500ms/mixed 0.787ms, 개별 최대는 5.783/12.031ms였다. active는
+collector payload를 거부하므로 단순 시간 비교로 후보의 비용 감소를 주장하지 않는다.
+입력 간격 없는 controlled burst·주입된 store-copy hold·DB 미사용 조건이다. 지연 outlier
+원인, NAS RSS/MemAvailable 및 실제 디스크 경합 성능은 미검증이다. private capture는
+측정 뒤 abort/drain했으며 complete 녹화본으로 사용하지 않는다. 운영 배포는 하지 않았다.
+원시 보고서 `artifacts/trace-copy-overlap-comparison-20261009.json`.
+이 거부 유형의 원인·최소 개선은 확인됐으므로 recorder 전면 재설계로 범위를 늘리지 않는다.
+다음 앱 병목 단계는 기존 realtime.minute 부분 replay의 네 테이블 hash 차이를 검증해
+기능 보존 범위를 확정한 뒤 동일 살아 있는 입력으로 다음 writer 비용 후보를 한 개씩 비교한다.
 
 **2026-10-09 realtime.minute batch 부분 비교 완료:** 비활성 NAS 후보
 `2026.10.09-realtime-minute-batch-v2-c5d8a54aa816e05c`의 NAS PostgreSQL gate 12건과
@@ -124,6 +374,12 @@ KST 09:00~09:02, 18개 realtime native operation, 같은 입력 hash
 기준선과 일치했다. source outcomes match, selected input omission 0, cleanup/post-job fence 통과.
 반면 `central_dataset_snapshots`, `central_documents`, `central_minute_bar_operations`,
 `central_observation_revisions`는 행 수와 revision sequence 다음 값이 같아도 전체 hash가 다르다.
+코드 추적에서 네 표 모두 실행마다 생성되는 값이 확인됐다: dataset `saved_at`, document
+`updated_at`, minute operation `processed_at`, revision `revision_id`/`received_at`와 UUID 기반
+`revision_of` 연결이다. 현재 final-table digest는 모든 컬럼을 포함하며 보존된 보고서는
+행별 값 없이 rows/SHA-256만 제공한다. 따라서 전체 hash 불일치가 반드시 기능 회귀를
+뜻하지는 않지만, 이 필드만 다른 것인지도 기존 보고서로는 증명할 수 없다. payload,
+source/effective/available 시간과 revision 순서·연결을 무시해서 통과시키지 않는다.
 이 표들의 의미상 동등성은 아직 입증하지 않았다. RAM 기반 단일 actor·부분 입력 결과이고
 WAL 귀속도 없다. 전체 앱 성능이나 운영 디스크 병목 개선으로 일반화하지 않는다.
 후속: 남은 hash 차이의 재생별 변동 원인을 분리하고, 다음 비용 후보는 호출 내용/consumer를 추적한 뒤

@@ -6,6 +6,24 @@
 
 ## 앱·시장·저장
 
+`central_server/market_events.py` owns upper-limit fact decisions and immutable RAM
+admission separately from native ACK waits. One feature-owned worker retries frozen
+one-fact calls; the existing store owns each connection/transaction. Public observations
+and regular-close markers wait for ACK. Close disconnects/drains input and persistence;
+fact_collection reports saturation/gaps separately from condition REG. RAM admission
+does not provide crash recovery. VI ownership and the shared hub drop policy are unchanged.
+Condition signals share metadata/expiry's existing state lock through snapshot, native
+ACK and RAM publication; invocation time/session/condition are frozen before lock wait.
+
+`central_server/observation_frame_recovery.py` owns ephemeral legacy checkpoint
+prefix progress and frames-only repair. CandidateMonitor and MockAutomationRunner
+retain their execution cursor/state, seed scratch through the old cursor on bounded
+safe pages, then atomically save frames/protocol through their existing checkpoint
+writer. Shared frame trim functions preserve each consumer's existing horizon policy;
+no historical decision/order path is invoked. Cancellation drains owned native repair
+work before consumer close returns. NAS deployment and migration cost acceptance are
+separate from this correctness gate.
+
 `src/kiwoom_monitor/` 기준 경로다.
 
 2026-10-08 NAS operator: `scripts/nas_operator.py` owns fixed command parsing, source/trace admission,
@@ -32,6 +50,10 @@ container. PC unit tests pass; the Linux gate and NAS install have not run. See
 `diagnostic_replay_contract.py`가 허용 메서드·codec·workload 선택과
 collector descendant 제외 계획을 검사한다. `diagnostic_recorded_execution.py`는 명시된
 store allowlist를 caller-owned test store에서 실행하며 actor 순서·동시성·replay ID를 기록한다.
+`diagnostic_replay_comparison.py`는 소유한 replay DB의 native drain 이후 네 결과 표의
+내용·revision 연결 비교값을 만든다. 기존 전체 hash/reset 판정은 그대로이며, 저장 시각과
+UUID 차이는 명시적으로 분리하고 source 시각·payload·revision 순서는 유지한다.
+이 비교는 화면/증분 동기화 등 wall-clock reader 동작이나 전체 기능 동등성을 승인하지 않는다.
 collector mode는 0B 원인 사건을 실제 collector loop에 전달하고 그 component의 과거 sink만
 제외한다. 로컬 collector-input/v2는 최소 0w·0J·0U 입력과 같은 component의 market_state-only
 dataset sink 대체도 지원하며 peer 및 다른 dataset은 유지한다. TOP20 subscriber 자체는
@@ -118,6 +140,7 @@ schema-2 recorded-operation replay를 제공한다. 실행은 기존에 봉인�
 | 실행 원장·mock 제어·lease DB | `central_server/database_execution.py`, `central_server/database.py` | SQLite/PostgreSQL intent/event/account snapshot, mock control CAS, runtime lease 저장·조회. ExecutionRepository·ForwardEvaluationRepository와 기존 mock 주문/이벤트 API 연결을 유지하고 소유권 fence, 독립 트랜잭션과 native 계측을 보존. 전용 PostgreSQL fence·ledger·control CAS 검사 3건 통과 |
 | Shadow 상태·평가 DB | `central_server/database_shadow_state.py`, `central_server/shadow_checkpoint.py`, `central_server/database.py` | SQLite/PostgreSQL checkpoint 상태, shadow 평가·candidate event 저장과 cursor page 조회. `CandidateMonitor`·인증 API 연결 및 기존 caller-owned transaction을 유지하고, normalized frame format/schema/DML helper는 `shadow_checkpoint.py`에 둠. 전용 PostgreSQL gate 7건 통과 |
 | dataset snapshot·관측 SQL DB | `central_server/database_datasets.py`, `central_server/database_observation_writes.py`, `central_server/database.py`, `central_server/postgres_access.py` | SQLite/PostgreSQL dataset snapshot 저장·조회 구현과 caller-owned cursor의 metadata/revision SQL을 분리했다. root QueryStore·기존 import alias 및 writer transaction은 유지한다. NAS 전용 PostgreSQL gate 9/9 통과 |
+| 관측 증분 전달·bootstrap DB | `central_server/database_observation_readers.py`, `central_server/database.py` | 기존 native 연결에서 sequence 상한과 유한 잠금 cohort로 safe page를 제공한다. store별 RAM epoch/fencing과 단일 snapshot bootstrap API를 소유하며 writer SQL/COMMIT·raw history·연구 export는 유지한다. 두 consumer의 bootstrap/legacy frames-only 복구까지 NAS 55건·로컬 36건 gate 통과. concurrent reader/lock-transfer와 비용 검증 후 배포하며 현재 운영 미배포다. |
 | PostgreSQL 공통 관측 pilot | `central_server/postgres_access.py`, `central_server/database.py:PostgresQueryStore`, `central_server/diagnostic_metrics.py`, `central_server/diagnostic_writer_registry.py` | 기존 호출별 연결과 transaction 경계를 유지한 명시적 writer 계측 및 query-cache·document-collection·market-bar·observation-revision·shadow·dataset snapshot·market metadata·news READ grouping. writer kind는 활성 호출 경계를 따라 점진 이관한다. 전체 store coverage나 pool 도입을 뜻하지 않는다. 상세 writer/kind와 검증 범위는 `docs/COMMON_DB_ACCESS_OBSERVABILITY_REVIEW.md` 참조 |
 | PostgreSQL pilot 전용 통합검사 실행 | `scripts/run_postgres_access_integration.py`, `tests/integration/test_postgres_access_postgres.py` | 서버 컨테이너의 운영 DSN으로 읽기 전용 preflight 후 DB명만 전용 진단 DB로 바꿔 pilot 통합검사에 전달. URL·자격증명을 파일에 저장하지 않음 |
 | NAS 운영 소스 release·반복 검사 | `scripts/nas_source_runtime.py`, `deploy/synology/docker-compose.source.yml`, `deploy/synology/source-runtime.sh` | 선택 가능한 읽기 전용 소스 마운트. 전체 release 게시·검사 후 수동 재시작하며 실행 경로를 release에 고정한다. 동일 마운트의 후보 release에서 기존 전용 PostgreSQL 검사 실행기를 사용한다. 기본 이미지 배포는 복귀 경로로 유지 |
@@ -197,11 +220,11 @@ schema-2 recorded-operation replay를 제공한다. 실행은 기존에 봉인�
 | 계좌 신원 | `application/account_identity.py`, `infrastructure/kiwoom_rest/account_identity.py` | scope/binding; A4B 직접 연결 미완료 범위 별도 |
 | 인증 | `central_server/credential_store.py`, `central_server/credential_runtime.py` | 암호화 vault·prepare/apply·세대·drain |
 | 인증 UI | `infrastructure/central_credentials_client.py`, `presentation/nas_credentials_dialog.py` | HTTPS 요청·입력·worker |
-| 후보 감시 | `central_server/candidate_monitor.py` | 현재 shadow producer·후보 알림 |
+| 후보 감시 | `central_server/candidate_monitor.py`, `central_server/observation_frame_recovery.py` | 현재 shadow producer·후보 알림. 안전한 공통 bootstrap과 구형 C 이하 frames-only 복구를 수행한다. protocol과 frames는 기존 checkpoint에 원자 저장하고 과거 판단을 재실행하지 않는다. 독립 scratch 진행·trim 및 close 시 실제 native 작업 drain을 보존한다. |
 | 운용 명세·입장 | `application/mock_automation_specification.py`, `application/mock_automation_admission.py` | 동결 spec·적격성·단일 계좌 lease |
 | 위험·복구·전달 | `application/mock_automation_risk.py`, `application/mock_automation_recovery.py`, `application/mock_automation_execution.py` | 실제 위험 근거·대사·Decision gate |
 | 주문 원장 | `application/order_lifecycle.py`, `central_server/execution_runtime.py` | intent·unknown·멱등·owner |
-| 자동 모의 수명 | `central_server/mock_automation_runner.py`, `central_server/mock_automation_supervisor.py`, `presentation/mock_automation_dialog.py` | runner·영속 제어·UI |
+| 자동 모의 수명 | `central_server/mock_automation_runner.py`, `central_server/mock_automation_supervisor.py`, `central_server/observation_frame_recovery.py`, `presentation/mock_automation_dialog.py` | runner·영속 제어·UI. 안전한 bootstrap/legacy 복구 중 fill 반영/control 검사와 기존 intent/binding을 유지한다. 구형 C 이하 frames만 복구하고 과거 주문을 실행하지 않는다. frames/protocol 원자 checkpoint 및 실제 native drain 후 종료를 소유한다. |
 
 ## 다음 개발의 진입점
 

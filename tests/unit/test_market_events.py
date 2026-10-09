@@ -113,6 +113,52 @@ class MarketEventServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("19", socket.messages[-1]["seq"])
 
+    async def test_metadata_snapshot_cannot_overwrite_later_condition_signal(self) -> None:
+        metadata_entered, release_metadata = asyncio.Event(), asyncio.Event()
+        delete_started, delete_store_entered = asyncio.Event(), asyncio.Event()
+        native_to_thread = asyncio.to_thread
+
+        async def controlled_to_thread(function, *args, **kwargs):
+            if getattr(function, "__name__", "") == "record_hot_cohort_revision":
+                if args[0]["event_type"] == "ELIGIBILITY":
+                    metadata_entered.set()
+                    await release_metadata.wait()
+                elif args[0]["event_type"] == "D":
+                    delete_store_entered.set()
+            return await native_to_thread(function, *args, **kwargs)
+
+        async def delete():
+            delete_started.set()
+            await self.service.record_condition_signal("005930", "D", source="REAL")
+
+        self.service._selected = ("7", "상승 15%")
+        signal_time = self.now[0]
+        deleting = None
+        with patch("kiwoom_monitor.central_server.market_events.asyncio.to_thread",
+                   side_effect=controlled_to_thread):
+            try:
+                await self.service.record_condition_signal("005930", "I", source="INITIAL")
+                await asyncio.wait_for(metadata_entered.wait(), 5)
+                deleting = asyncio.create_task(delete())
+                # The started waiter resumes after delete reaches its first await.
+                # Metadata still owns the old snapshot and has not reached DB ACK.
+                await asyncio.wait_for(delete_started.wait(), 5)
+                self.assertFalse(delete_store_entered.is_set(), "signal write bypassed metadata state ownership")
+                self.now[0] = datetime(2026, 9, 12, 0, 1)
+            finally:
+                release_metadata.set()
+                if deleting is not None:
+                    await asyncio.wait_for(deleting, 5)
+                await asyncio.wait_for(self.service._metadata_queue.join(), 5)
+        current = self.store.load_hot_cohort(active_only=True)[0]
+        self.assertEqual("D", current["last_signal"])
+        self.assertEqual(signal_time.timestamp(), current["last_signal_at"])
+        self.assertTrue(current["nxt_eligible"])
+        self.assertEqual("D", self.service._cohort["005930"]["last_signal"])
+        history = self.store.load_market_event_history("cohort", code="005930", limit=10)
+        self.assertEqual({"ENTERED", "ELIGIBILITY", "D"}, {row["event_type"] for row in history})
+        self.assertEqual("2026-09-11", next(row for row in history if row["event_type"] == "D")["session_id"])
+
     async def test_retention_uses_next_observed_session_not_calendar(self) -> None:
         self.service._selected = ("7", "상승 15%")
         await self.service.record_condition_signal("005930", "I", source="INITIAL")

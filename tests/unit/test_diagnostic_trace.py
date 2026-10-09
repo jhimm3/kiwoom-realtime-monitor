@@ -11,9 +11,15 @@ from unittest.mock import patch
 from kiwoom_monitor.central_server import diagnostic_trace as trace
 from kiwoom_monitor.central_server.diagnostic_workloads import _set_tool, _set_trace
 from kiwoom_monitor.central_server.diagnostic_workloads import diagnostic_run_lock, trace_status
+from tests.unit.test_diagnostic_trace_deferred import recorder_storage_headroom
 
 
 class DiagnosticTraceTests(unittest.TestCase):
+    def setUp(self):
+        self.storage_headroom = recorder_storage_headroom()
+        self.storage_headroom.__enter__()
+        self.addCleanup(self.storage_headroom.__exit__, None, None, None)
+
     def test_periodic_byte_limit_keeps_pending_suffix_before_new_events(self):
         with tempfile.TemporaryDirectory() as root:
             control = Path(root) / "control.json"

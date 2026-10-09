@@ -143,7 +143,7 @@ class RunRegressionTests(unittest.TestCase):
         integration = run_regression._test_modules_under("integration")
         self.assertEqual([], run_regression._catalog_errors(manifest, groups, unit, integration))
         membership = run_regression._ci_membership(manifest, groups)
-        self.assertEqual((274, 132, 2), tuple(len(membership[name]) for name in
+        self.assertEqual((278, 132, 2), tuple(len(membership[name]) for name in
                          run_regression.CI_WINDOWS_PROFILES))
         required = run_regression._planned_batches(manifest, "ci-required-windows")
         self.assertEqual(

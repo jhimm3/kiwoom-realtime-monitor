@@ -21,7 +21,8 @@
     "dependency-audit-p2-top20-replay-boundaries",
     "dependency-audit-p2-top20-input-contracts",
     "dependency-audit-p2-trace-persistence",
-    "dependency-audit-p2-diagnostic-controls"
+    "dependency-audit-p2-diagnostic-controls",
+    "main-observation-delivery-contracts"
   ],
   "required_windows_additions": [
     "tests.unit.test_central_operational_settings",
@@ -70,6 +71,10 @@
     "tests.integration.test_postgres_access_postgres",
     "tests.integration.test_storage_boundary_postgres",
     "tests.integration.test_market_events_postgres",
+    "tests.integration.test_observation_bootstrap_postgres",
+    "tests.integration.test_observation_cursor_commit_order_postgres",
+    "tests.integration.test_observation_sequence_fence_postgres",
+    "tests.integration.test_replay_content_comparison_postgres",
     "tests.integration.test_top20_program_postgres"
   ],
   "postgres_extended": [

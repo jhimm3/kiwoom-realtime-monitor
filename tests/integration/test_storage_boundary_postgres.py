@@ -475,6 +475,104 @@ class PostgresStorageBoundaryTests(unittest.TestCase):
                 cursor.execute("DELETE FROM central_minute_bar_operations WHERE operation_id=ANY(%s)",
                                ([row["operation_id"] for row in [*values, seed]],))
 
+    def test_realtime_minute_consumer_cursor_cutoff_export_and_restart_keep_source_times(self) -> None:
+        """Native readers use sequence/source availability, not internal save times."""
+        from kiwoom_monitor.application.research_replay import replay_krx_minute_bars
+
+        exports = []
+        with _seeded_finalization_fixture(self.store) as (values, closures):
+            code, day = values[0]["code"], values[0]["trading_date"]
+            subject = f"{code}:KRX"
+            first_close, last_close = [datetime.fromtimestamp(row["available_at"], timezone.utc)
+                                       for row in closures]
+            self.store.finalize_minute_bars(closures)
+
+            def subject_revisions(store):
+                return sorted(store.load_observation_revisions("minute_bar", subject),
+                              key=lambda row: row["accepted_sequence"])
+
+            def frames(rows, at):
+                return replay_krx_minute_bars(rows, as_of=at, strict=True,
+                                            session_profile="legacy-unfiltered-krx/v0")
+
+            def create_page(store):
+                manifest = store.create_observation_export(
+                    first_close, last_close, ("minute_bar",), subject)
+                watermark = manifest["fixed_watermark"]
+                exports.append(watermark)
+                return watermark, store.load_observation_export_page(watermark)
+
+            before = subject_revisions(self.store)
+            self.assertEqual(4, len(before))  # Two in-progress and two finalized revisions.
+            self.assertEqual([], list(frames(before, first_close - timedelta(microseconds=1))))
+            self.assertEqual(["10:01"], [datetime.fromisoformat(row.bar_start).strftime("%H:%M")
+                                        for row in frames(before, first_close)])
+            self.assertEqual(2, len(frames(before, last_close)))
+            bars = self.store.load_minute_bars(code, day, "KRX")
+            metadata = self.store.load_market_data_metadata(
+                MarketDatasetKind.MINUTE_BAR, subject, f"{day}T10:01")
+            try:
+                watermark, page = create_page(self.store)
+                expected_ids = [row["revision_id"] for row in before
+                                if first_close <= datetime.fromisoformat(row["available_at"]) < last_close]
+                self.assertEqual(expected_ids, [row["revision_id"] for row in page["observations"]])
+                self.assertNotIn(before[-1]["revision_id"], expected_ids)  # Half-open upper bound.
+                cursor = before[1]["accepted_sequence"]
+                with self.store._connect() as connection, connection.cursor() as db_cursor:
+                    db_cursor.execute(
+                        "UPDATE central_observation_revisions SET received_at=received_at+INTERVAL '7 days' "
+                        "WHERE kind='minute_bar' AND subject=%s", (subject,))
+                    self.assertEqual(4, db_cursor.rowcount)
+                    db_cursor.execute(
+                        "UPDATE central_minute_bar_operations SET processed_at=processed_at+INTERVAL '7 days' "
+                        "WHERE operation_id=ANY(%s)",
+                        ([row["operation_id"] for row in values + closures],))
+                    self.assertEqual(4, db_cursor.rowcount)
+
+                # New store and native per-call connections model a process restart.
+                restarted = PostgresQueryStore(self.store._database_url)
+                after = subject_revisions(restarted)
+                self.assertNotEqual([row["received_at"] for row in before],
+                                    [row["received_at"] for row in after])
+                self.assertEqual([{k: v for k, v in row.items() if k != "received_at"} for row in before],
+                                 [{k: v for k, v in row.items() if k != "received_at"} for row in after])
+                incremental = [row for row in restarted.load_observation_revisions_after(
+                    cursor, ("minute_bar",), 1000) if row["subject"] == subject]
+                self.assertEqual([row["revision_id"] for row in before if row["accepted_sequence"] > cursor],
+                                 [row["revision_id"] for row in incremental])
+                self.assertEqual(bars, restarted.load_minute_bars(code, day, "KRX"))
+                self.assertEqual(metadata, restarted.load_market_data_metadata(
+                    MarketDatasetKind.MINUTE_BAR, subject, f"{day}T10:01"))
+                for cutoff in (first_close - timedelta(microseconds=1), first_close, last_close):
+                    self.assertEqual(frames(before, cutoff), frames(after, cutoff))
+                self.assertEqual(expected_ids, [row["revision_id"] for row in
+                    restarted.load_observation_export_page(watermark)["observations"]])
+                _, new_page = create_page(restarted)
+                self.assertEqual(expected_ids, [row["revision_id"] for row in new_page["observations"]])
+
+                observations = []
+                for value in values:
+                    observation = minute_bar_observation(
+                        value, origin=ObservationOrigin.REALTIME, completeness=DataCompleteness.IN_PROGRESS,
+                        source="kiwoom-websocket-0B", value_kind=DataValueKind.ACTUAL)
+                    observations.append((bar_observation_key(observation), observation))
+                restarted.save_minute_bars(values, observations=observations)
+                restarted.finalize_minute_bars(closures)
+                self.assertEqual(after, subject_revisions(restarted))  # Retry remains idempotent.
+                self.assertEqual(bars, restarted.load_minute_bars(code, day, "KRX"))
+
+                # Source availability is deliberately NOT an ignored field.
+                with restarted._connect() as connection, connection.cursor() as db_cursor:
+                    db_cursor.execute("UPDATE central_observation_revisions SET available_at=available_at+INTERVAL '1 day' "
+                                      "WHERE revision_id=%s", (before[-1]["revision_id"],))
+                changed = subject_revisions(restarted)
+                self.assertEqual(1, len(frames(changed, last_close)))
+                self.assertEqual(2, len(frames(changed, last_close + timedelta(days=1))))
+            finally:
+                with self.store._connect() as connection, connection.cursor() as db_cursor:
+                    db_cursor.execute("DELETE FROM central_research_export_members WHERE dataset_id=ANY(%s)", (exports,))
+                    db_cursor.execute("DELETE FROM central_research_exports WHERE dataset_id=ANY(%s)", (exports,))
+
     def test_realtime_minute_batch_failure_rolls_back_and_parallel_retry_keeps_one_delta(self) -> None:
         import psycopg
 
