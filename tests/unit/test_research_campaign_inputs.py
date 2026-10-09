@@ -41,8 +41,8 @@ class CampaignInputTests(unittest.TestCase):
         self.claim = self.repo.claim_campaign_worker('c', owner_token='worker', lease_seconds=3600)
         self.now = datetime.now(UTC)
 
-    def candidate(self, name='new', *, rows=True, scope=None):
-        path = self.watch / name
+    def candidate(self, name='new', *, rows=True, scope=None, parent=None):
+        path = (Path(parent) if parent is not None else self.watch) / name
         shutil.copytree(self.request.dataset, path)
         values = [{'ordinal': 1, 'revision_id': 'rank-' + name, 'kind': 'top20_membership', 'available_at': '2026-09-12T00:00:00+00:00', 'accepted_sequence': 1, 'observation_key': '2026-09-12T00:00:00+00:00', 'payload': {'codes': ['005930']}}] if rows else []
         encoded = ''.join(json.dumps(row) + '\n' for row in values).encode()
@@ -230,8 +230,8 @@ class RollingDailyInputTests(unittest.TestCase):
         self.claim = self.repo.claim_campaign_worker('c', owner_token='rolling-worker', lease_seconds=3600)
         self.now = datetime.now(UTC)
 
-    def candidate(self, name, day, *, include_bar=True, subject=''):
-        path = self.watch / name
+    def candidate(self, name, day, *, include_bar=True, subject='', parent=None):
+        path = (Path(parent) if parent is not None else self.watch) / name
         shutil.copytree(self.request.dataset, path)
         start = f'2026-09-{day:02d}T00:00:00+00:00'
         end = f'2026-09-{day:02d}T01:00:00+00:00'

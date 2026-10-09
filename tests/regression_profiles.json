@@ -435,6 +435,32 @@
       "tests.unit.test_research_partition_campaign",
       "tests.unit.test_research_process",
       "tests.unit.test_research_queue"
+    ],
+    "dependency-audit-batch-06-research-state-and-settings": [
+      "tests.unit.test_research_final_exposure_cli",
+      "tests.unit.test_research_final_holdout_ledger",
+      "tests.unit.test_research_hypotheses",
+      "tests.unit.test_research_hypothesis_repository",
+      "tests.unit.test_research_independent_comparison_dialog",
+      "tests.unit.test_research_independent_comparison_process",
+      "tests.unit.test_research_independent_comparisons",
+      "tests.unit.test_research_partition_search",
+      "tests.unit.test_research_result_publication",
+      "tests.unit.test_research_staging_cleanup",
+      "tests.unit.test_research_storage",
+      "tests.unit.test_research_storage_capacity",
+      "tests.unit.test_research_symbol_partitions",
+      "tests.unit.test_research_symbol_validation",
+      "tests.unit.test_research_symbol_validation_dialog",
+      "tests.unit.test_rest_request_lane_capacity",
+      "tests.unit.test_retry_daishin_missing_5m",
+      "tests.unit.test_run_naver_stock_market_news",
+      "tests.unit.test_run_postgres_access_integration",
+      "tests.unit.test_select_historical_news_page_keys",
+      "tests.unit.test_settings_api_hub",
+      "tests.unit.test_settings_backup",
+      "tests.unit.test_settings_repository",
+      "tests.unit.test_shadow_checkpoint"
     ]
   },
   "core_order_sha256": "36DAE599F514EC9356B7DC3EAB9C7B4F1033C4A27076EB8A7FCD931FBEB1810A"

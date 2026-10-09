@@ -55,9 +55,7 @@ class CampaignNasTests(unittest.TestCase):
         self.repo.save_campaign_input_source('c', self.fixture.job, self.watch, nas_auto_prepare=True, nas_config_path=self.config_path)
         self.repo.set_campaign_desired_state('c', 'RUNNING')
         self.fixture.claim = self.repo.claim_campaign_worker('c', owner_token='worker', lease_seconds=3600)
-        remote = self.fixture.candidate('remote')
-        self.remote = self.root / 'remote'
-        remote.rename(self.remote)
+        self.remote = self.fixture.candidate('remote', parent=self.root)
         self.client = SnapshotClient({self.fixture.scope['captured_range']['start']: self.remote})
         self.secret = secrets.token_urlsafe(24)
         self.settings = DataSourceSettings(mode='personal_server', server_url='https://nas.invalid', access_token=self.secret)
@@ -246,9 +244,7 @@ class RollingNasTests(unittest.TestCase):
                                              nas_auto_prepare=True, nas_config_path=self.root / 'data_source.json')
         self.repo.set_campaign_desired_state('c', 'RUNNING')
         self.fixture.claim = self.repo.claim_campaign_worker('c', owner_token='rolling-worker', lease_seconds=3600)
-        remote = self.fixture.candidate('remote-monday', 14)
-        self.remote = self.root / 'remote-monday'
-        remote.rename(self.remote)
+        self.remote = self.fixture.candidate('remote-monday', 14, parent=self.root)
         self.client = SnapshotClient({'2026-09-14T00:00:00+00:00': self.remote})
         settings = DataSourceSettings(mode='personal_server', server_url='https://nas.invalid', access_token=secrets.token_urlsafe(24))
         for item in (patch('kiwoom_monitor.research_process.DataSourceConfig.load', return_value=settings),

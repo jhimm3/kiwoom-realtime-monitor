@@ -790,4 +790,39 @@ runner hash, 365개 모듈 목록, 3,334건, 225 worker, 미실행 0을 보고�
 LF와 CRLF checkout 차이만으로 모두 일치했다. artifact는
 `tmp/regression/batch05-hosted/all-local-regression-37939207498/run.json`이다.
 
-현재 Windows 등록 범위는 365개, Linux 전용은 5개, Windows 후보는 43개다. main 병합·NAS 검증 및 배포는 별도다.
+B5 검증 시점의 Windows 등록 범위는 365개, Linux 전용은 5개, Windows 후보는 43개였다. 현재 수치는 아래 B6 기록을 따른다. main 병합·NAS 검증 및 배포는 별도다.
+
+## 2026-10-10 미등록 CI 선택 묶음 6
+
+미등록 43개에서 연구 상태·symbol validation·설정·뉴스 페이지 선택·요청 용량 및 PostgreSQL 통합 진입점
+등 24개 모듈/222건을 순차 검토해 `dependency-audit-batch-06-research-state-and-settings` profile에
+편입했다. 중요 holdout·ledger·publication·cleanup·storage capacity 계약, partition과 symbol validation,
+settings 저장·백업, 제한된 요청 lane 및 기존 PostgreSQL 통합 guard를 보호한다. 추가 편입 뒤 Windows
+등록은 389개, Linux 전용은 5개, 남은 Windows 후보는 19개다. core 실행 순서는 바꾸지 않았다.
+
+테스트 모듈 간 fixture 의존성도 확인했다. final-exposure CLI는 기존 CLI 테스트의 `TestCase` setup을,
+independent-comparison dialog/process/partition 테스트는 다른 테스트 모듈의 seed·record·fixture를,
+symbol validation dialog와 campaign storage/cleanup 테스트는 다른 모듈의 테스트 객체를 사용한다.
+이번 단계에서는 이 연결을 기능 실패로 오인하거나 공용 추상화로 넓히지 않았다. 구체적인 실행 신뢰성 문제가
+확인된 NAS 입력 fixture의 이동만 제거했다. campaign test fixture에 선택적 부모 경로를 추가하고 remote
+dataset을 처음부터 감시 폴더 밖에 생성하도록 바꿨다. 기본 호출 경로와 데이터, assertion은 유지했다.
+
+검증 결과:
+
+- B6 선택 profile은 fixture 변경 전후 모두 24 modules/222 tests 통과했다. 변경 후 결과는
+  `tmp/regression/batch06-targeted-after-fixture-change/run.json`이다.
+- 입력/NAS/storage/staging 관련 5개 모듈 90건도 통과했다. 그중 NAS·staging fixture가 쓰던 경로 이동을
+  제거했고, 전체 회귀에서 `test_research_campaign_nas` 23건도 모두 통과했다.
+- 새 테스트 모듈 등록 guard와 `git diff --check`는 통과했다.
+- 변경 포함 Windows `all-local`은 3,556건/249 worker를 모두 발견·실행했지만 **실패**했다. skip·미실행은
+  0이고 process tree 249/249 종료, 누수 0이다. 첫 전체 시도에서는 `test_research_campaign_nas`의 임시
+  directory rename이 `PermissionError`를 냈다. 이를 직접 이동하지 않는 fixture로 수정했다.
+  후속 전체 실행에서는 이 모듈 23건이 통과했지만, 기존 `test_historical_learning_cases`와
+  `test_historical_news_review_decisions`에서 각각 `os.replace`가 `WinError 5`를 반환해 2건 오류가 났다.
+  두 모듈 전체 7건은 동일한 workspace-local TEMP 전략에서 별도 재실행해 통과했다. Windows가 해당 순간
+  교체를 거부한 정확한 원인은 재현되지 않아 미확정이며, 이 전체 실행을 성공으로 세지 않는다.
+  기록은 `tmp/regression/batch06-all-local/run.json`과
+  `tmp/regression/batch06-all-local-final/run.json`이다.
+
+이번 묶음의 GitHub hosted 전체 CI는 아직 실행하지 않았다. 로컬의 두 파일 교체 오류 원인과 hosted 결과를
+구분해 후속 검증한다. main 병합, NAS 운영 DB 검증·배포는 수행하지 않았다.
