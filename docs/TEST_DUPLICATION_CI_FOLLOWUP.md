@@ -566,3 +566,51 @@ httpx2 안내는 deprecation warning이며 로딩 실패가 아니다. httpx2 �
 이전 약 94초/62초의 비용과 별도 판단 이유를 유지하고 이번 묶음에 넣지 않았다.
 전체 회귀는 이번 검증된 변경을 게시한 뒤 hosted artifact로 판정한다. 운영 NAS 검증·배포·
 main 병합은 별도이며 로컬 pass를 hosted 또는 실제 운영 DB 검증으로 대신하지 않는다.
+
+## 2026-10-09 미등록 CI 선택 묶음 1
+
+미등록 Windows 후보 164개 중 파일명 정렬 순서 첫 24개를 기능 목적·기존 회귀 중복·CI 비용·환경
+의존성을 기준으로 순차 검토했다. 22개 모듈/83건은 공통 CI profile에 편입하고,
+`test_analyze_db_trace`(별도 DB 진단 CLI)와 `test_central_resource_usage`(호스트별 실시간 자원 표본)는
+각 진단 코드 변경 시 격리 실행하도록 남겼다. 선택 모듈은 임시 SQLite·가짜 HTTP/배포 transport·
+offscreen Qt 경로에서 운영 비밀이나 NAS 접근 없이 실행된다. assertion과 제품 코드는 변경하지 않았다.
+
+| 모듈 | 건수 | 편입 근거 |
+|---|---:|---|
+| `api_settings_dialog` | 11 | 설정 표시·failover·비동기 저장·충돌 동작 |
+| `audit_historical_five_minute_clock` | 4 | 거래 세션의 5분 bin·종가·지연 세션 |
+| `audit_historical_monthly_gap_causes` | 1 | 원시 거래량과 분봉 누락 원인의 구분 |
+| `audit_historical_monthly_gap_raw` | 1 | 원시 분봉 누락과 저장된 월간 공백 대사 |
+| `audit_historical_nas_minute_alignment` | 5 | CREON/NAS 시각 정렬·누락·중복·거래량 차이 |
+| `audit_kiwoom_adjusted_minute_overlap` | 2 | 수정/비수정 분봉 가격·거래량 구분 |
+| `audit_kiwoom_adjustment_candidates` | 6 | 기업행사 조정 배수 후보의 모호성·증거 |
+| `audit_prepared_historical_archive_readiness` | 2 | stale/incomplete archive 차단과 원본 불변 |
+| `audit_prepared_historical_body_provenance` | 1 | 본문 출처 증거와 누락 증거 구분 |
+| `auxiliary_window_geometry` | 3 | 보조창 위치·크기 저장/복원 |
+| `build_historical_exchange_case_context` | 1 | 공식 효력일 연결 및 sealed OOS 제외 |
+| `candidate_daily_nas_scripts` | 6 | 파일 잠금·NAS 장애 지속성·빈 봉·보관 자격 |
+| `candidate_exchange_effective_dates` | 2 | 거래소 정지와 발행사 상장폐지 구분 |
+| `central_ai_client` | 1 | 중앙 AI 요청/응답 transport |
+| `central_deployment_check` | 1 | health·인증·DB 읽기·실시간 transport 점검 |
+| `central_news_client` | 3 | 뉴스 cursor·정확한 ID·응답 불일치 차단 |
+| `central_operational_settings` | 2 | partial update·revision 호환성 |
+| `central_server_config` | 22 | 서버 secret·계좌 식별·mock 주문 경계·query 한도 설정 |
+| `central_server_db_api_connection` | 1 | 실제 ASGI 요청과 임시 SQLite composed store 연결 |
+| `central_server_logging` | 2 | 민감 접근 로그 파일 전용·보존 한도 |
+| `central_server_process` | 5 | 서버 실행 인자·재사용·종료 stream 계약 |
+| `column_settings_repository` | 1 | 임시 SQLite 열 상태 저장/복원 |
+
+profile은 기존 core batch/profile의 내용과 순서를 그대로 둔 채 manifest 끝에 추가했다. 선택 profile
+실행은 22/22 worker·83건 통과, skip·오류·미실행 0, worker tree 종료 22/22다. 전체 `all-local`은
+최종 manifest 기준 266개 모듈·2,553건·126 worker 통과, 실패·오류·skip·기대 실패·예상 밖 성공·
+미실행·timeout·새 테스트 모듈 누락 0, worker process tree 종료 126/126이다. 실제 실행 기록은
+`tmp/regression/batch01-final-targeted/run.json`과
+`tmp/regression/batch01-all-local-600/run.json`이다. 첫 180초 전체 시도는 `desktop-and-server`
+프로필이 제한 시간을 넘어 timeout됐고 worker tree 종료를 확인했다. 이를 pass로 계산하지 않았고,
+600초 제한의 새 전체 run으로 다시 실행했다.
+
+제한 실행 환경에서 `central_deployment_check` 단독 검사가 Windows Proactor event loop 생성 중
+`socket.accept()`에서 멈춘 사실을 stack trace로 확인했다. 그 시도는 성공으로 세지 않고 중단했으며,
+사용자 Windows 실행 권한에서 동일 선택 profile을 다시 수행해 83건 모두 통과했다. 제품 동작을 바꾸지
+않았다. 이번 stage의 GitHub hosted Windows/Linux/PostgreSQL 결과는 branch 게시 뒤 다음 단계에서 기록한다.
+NAS 운영 검증·배포와 main 병합은 수행하지 않는다.
