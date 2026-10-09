@@ -210,6 +210,7 @@
       "tests.unit.test_daily_bar_coverage",
       "tests.unit.test_dart_credential_owner",
       "tests.unit.test_diagnostic_trace_api",
+      "tests.unit.test_diagnostic_trace_ram",
       "tests.unit.test_audit_postgres_access",
       "tests.unit.test_audit_query_store_consumers",
       "tests.unit.test_research_final_preparation"
