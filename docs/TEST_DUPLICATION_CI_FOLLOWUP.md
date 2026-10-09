@@ -835,6 +835,8 @@ coverage basis와 저장 행 날짜가 제품 query date와 달라졌다. 제품
 `tmp/regression/batch06-all-local-post-ci-fix/run.json`에서 3,556건/249 worker 통과다. failure/error/skip/
 unrun/timeout/missing module/source unverified/leaked descendant는 모두 0이고, worker process tree 종료는
 249/249다. 수정된 `test_daily_high_service`도 최종 manifest에 포함됐다. 앞서 두 historical 모듈에서
-관측한 일시적 `WinError 5`는 이 최종 실행에서 재발하지 않았다. B6 hosted 전체 CI는 수정 commit을 게시한
-뒤 재실행해야 하며, 그 결과 전까지 hosted 검증은 미완료다. main 병합, NAS 운영 DB 검증·배포는 수행하지
-않았다.
+관측한 일시적 `WinError 5`는 이 최종 실행에서 재발하지 않았다. 수정 commit
+`13c1d31ca1150f9d855077ec5562eb7a3e1f32dc`의 [B6 hosted run
+37956080259](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37956080259)은 Windows
+all-local과 disposable PostgreSQL 두 job 모두 성공했다. 이 run은 수정된 fixture와 위 verification note를
+포함한 정확한 commit을 검사했다. main 병합, NAS 운영 DB 검증·배포는 수행하지 않았다.
