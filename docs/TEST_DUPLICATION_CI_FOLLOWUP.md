@@ -20,7 +20,9 @@
 | 원래 감사한 파일 | 183 | 5 | 221 | 409 |
 | 이후 추가된 `test_diagnostic_trace_ram` | 1 | 0 | 0 | 1 |
 | 26개 후속 profile 적용 시점 | 210 | 5 | 195 | 410 |
-| 최신 main 신규 3개 등록 후 현재 파일 전체 | 213 | 5 | 195 | 413 |
+| 최신 main 신규 3개 등록 시점 | 213 | 5 | 195 | 413 |
+| NAS/capture 안전 4개 등록 시점 | 217 | 5 | 191 | 413 |
+| replay admission 안전 4개 등록 후 현재 | 221 | 5 | 187 | 413 |
 
 기존 문서의 'manifest 미등록 226개' 중 5개는 CI 제외가 아니다. 다음 모듈은
 `.github/workflows/dependency-regression.yml`의 Ubuntu job에서 이미 실행한다.
@@ -249,3 +251,46 @@ disk 실패 주입은 실제 payload 파일 교체에서 OSError를 발생시키
 각 수정마다 로컬 전체 회귀를 반복하지 않고 선택 검사와 최종 독립 환경 전체 검사를 구분한다.
 남은 191개는 기존 보호 근거에 따른 선택 후보로 유지하며, 이번 단계의 완료 조건을 모두의 편입이나
 중복 삭제로 확대하지 않는다.
+
+## 2026-10-09 replay admission 안전 후속
+
+직전 `df7f4e1d4b42c96453c5e7717629f050a335cfaf`의
+[hosted run 37898538029](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37898538029)은
+Windows 2,237건/77 worker/217개 모듈, Linux 65건, disposable PostgreSQL 87건과 63개 저장
+경계 검사를 통과했다. 게시 commit·전체 실행 계획·모듈별 발견 수·파일 hash와 실제 종료를 대조했고
+Windows 비정상 결과/미실행/잔류 자손은 0이다. NAS/capture 묶음의 최종 독립 검증은 완료됐다.
+
+다음은 기존 조사에서 보호 계약이 확인된 저비용 4개다. 이전 CI와 유사한 입력 검증을 일부 수행하지만,
+허용 shape/순서, baseline lease drain, provisioning DDL, capture start ACK의 서로 다른 경계를
+검증하므로 완전 중복 삭제 대상으로 판단하지 않았다.
+
+| 모듈 (`tests.unit.test_` 이후) | 추가로 보호하는 계약 | 실제 실행 | 로컬 worker 비용 |
+|---|---|---:|---:|
+| `diagnostic_replay` | 저장 전 shape/운영 DB 차단·상대 timing·독립 lane·busy 중 호출 누락 금지 | 11 | 0.73초 |
+| `recorded_replay_baseline` | 연결별 소유 receipt·identity·retired generation·open/drain·commit 오류 뒤 close | 14 | 0.66초 |
+| `recorded_replay_operator` | foreign DB/privileged role의 DDL 사전 거부·관리자 권한·오류의 secret 비노출 | 4 | 0.62초 |
+| `nas_scheduled_trace` | 정확한 release/revision/flags/deadline·read-only preflight·불확실한 시작 ACK 재시도 금지 | 7 | 0.34초 |
+
+`dependency-audit-p2-replay-admission-safety`를 끝에 추가했다. 기존 core와 모든 profile 항목·순서는
+그대로 유지한다. patch는 connection/driver 경계에서 실제 admission 함수로 진입하며,
+오류·DDL 미실행·lock 해제·receipt 해제·native exception 보존을 assertion으로 확인한다.
+내부 condition/generation/lock/SQL 호출은 실제 소유권과 저장 안전 구현 경계가 검증 대상이므로
+유지했다. 다른 테스트의 `events` helper는 순수 입력 생성만 공유하고 테스트 클래스·상태는 공유하지 않는다.
+예약 trace fixture는 임시 경로와 fake API/clock을 사용하며 반복 setup의 cleanup도 등록되어 있다.
+공용 fixture 계층을 늘릴 필요는 확인되지 않았다.
+
+수정 대상은 `test_recorded_replay_baseline`의 opening/retirement 경합 두 곳이다.
+기존 release/close와 join을 유지하고 `thread.is_alive()`의 명시적 실패 assertion을 추가했다.
+기존 14건을 수정 전 코드로 다시 실행해 통과했고 수정 후에도 14건이 통과했다. 기대값을 변경하거나
+기존 assertion을 제거하지 않았다. 다른 3개 테스트는 수정 없이 등록했다.
+
+고위험 한 경계의 강도 확인: 별도 테스트 프로세스에서만 `_OwnedConnection.__exit__`를 native exit만
+호출하도록 바꿔 commit ACK 오류 뒤 close를 누락시켰다. 해당 검사 1건은 오류/skip 없이 정확히
+`Expected 'close' to be called once. Called 0 times.`에서 실패했다. 결함은 제품 파일에 쓰지 않았다.
+기록: `tmp/regression/replay-admission-strength.json`.
+
+선택 36/36, 모든 비정상 집계/미실행/잔류 자손 0, worker와 process tree 종료 4/4다.
+기록: `tmp/regression/replay-admission-safety-selected/run.json`. 합계 worker 비용은 약 2.35초다.
+현재 전체 413개 중 Windows 221개, 별도 Linux 5개, 단계적 미등록 후보 187개다.
+mock 기반 소유권 검사를 실제 PostgreSQL rollback/sequence 또는 NAS 운영 검증으로 보고하지 않는다.
+마지막 전체 검증은 이 변경을 게시한 commit의 hosted artifact로 판정한다.

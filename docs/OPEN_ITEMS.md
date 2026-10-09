@@ -5,9 +5,12 @@
 빈 모듈이 정상 batch의 성공에 가려지는 실행기 공백을 차단하고 계좌 안전·함수형 26개를 선택 등록했다.
 기존 소스의 전체 로컬 회귀는 2,136건/70 worker 통과했다. 이후 최신 main에서 새 모듈 3개가 누락돼
 Windows CI를 막은 것을 확인해 해당 3개만 추가 등록했다. 이후 NAS/capture 안전 4개(83건)를 선택
-편입해 현재 unit 파일 413개 중 Windows 217개, 별도 Linux 5개, 단계적 미등록 후보 191개다.
+편입했고 replay admission 안전 4개(36건)를 추가했다. 현재 unit 파일 413개 중 Windows 221개,
+별도 Linux 5개, 단계적 미등록 후보 187개다. 연결 소유 스레드 종료 assertion 2개를 보강했고
+commit 오류 뒤 close 누락 결함 주입은 의도한 assertion에서 실패했다.
 직전 commit `10e9080` hosted CI는 Windows 2,154건, Linux 65건, disposable PostgreSQL 87건 및
-저장 경계 검사 통과를 확인했다. 새 4개 포함 hosted 전체 회귀는 직전 결과와
+저장 경계 검사 통과를 확인했다. NAS/capture 4개 포함 `df7f4e1` hosted 전체 회귀 2,237건/77 worker도 통과했다.
+새 replay admission 4개 포함 hosted 전체 회귀는 직전 결과와
 구분하며 결과는 위 후속 문서와 작업 branch CI artifact를 따른다. 아래 수치는 각 이전 시점의 기록이다.
 
 **2026-10-09 녹화 입력 거부 원인과 복사 경합 감사:** 원본 trace `20261007T235957Z-e8cb574bf964`의
