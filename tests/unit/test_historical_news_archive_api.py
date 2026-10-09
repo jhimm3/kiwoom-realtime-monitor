@@ -13,14 +13,16 @@ from fastapi.testclient import TestClient
 from kiwoom_monitor.central_server.app import create_app
 from kiwoom_monitor.central_server.config import CentralServerSettings
 from kiwoom_monitor.central_server.diagnostic_workloads import instance_id
-from tests.unit import test_historical_news_archive_reader as reader_fixture
+from tests.unit.historical_news_test_support import (
+    historical_news_archive_fixture, seal_historical_news_archive_fixture,
+)
 
 
 class HistoricalNewsArchiveApiTests(unittest.TestCase):
     def test_unconfigured_or_unsealed_archive_does_not_change_existing_capability(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root)
-            archive = reader_fixture.HistoricalNewsArchiveReaderTests()._archive(directory)
+            archive = historical_news_archive_fixture(directory)
             for configured in (False, True):
                 settings = CentralServerSettings(
                     f"sqlite:///{directory / 'monitor.sqlite3'}", "test-token",
@@ -41,8 +43,8 @@ class HistoricalNewsArchiveApiTests(unittest.TestCase):
     def test_sealed_archive_api_is_authenticated_read_only_and_diagnostic_gated(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root)
-            archive = reader_fixture.HistoricalNewsArchiveReaderTests()._archive(directory)
-            reader_fixture.HistoricalNewsArchiveReaderTests._seal_fixture(archive)
+            archive = historical_news_archive_fixture(directory)
+            seal_historical_news_archive_fixture(archive)
             before = hashlib.sha256(archive.read_bytes()).hexdigest()
             settings = CentralServerSettings(
                 f"sqlite:///{directory / 'monitor.sqlite3'}", "test-token",

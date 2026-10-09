@@ -325,6 +325,32 @@
       "tests.unit.test_central_server_logging",
       "tests.unit.test_central_server_process",
       "tests.unit.test_column_settings_repository"
+    ],
+    "dependency-audit-batch-02-historical-runtime-contracts": [
+      "tests.unit.test_daily_high_service",
+      "tests.unit.test_daishin_candidate_collection",
+      "tests.unit.test_exchange_effective_dates",
+      "tests.unit.test_export_historical_news_seed",
+      "tests.unit.test_export_news_classification_corpus",
+      "tests.unit.test_external_market_runtime",
+      "tests.unit.test_feedback_evidence",
+      "tests.unit.test_finalize_prepared_historical_article_bodies",
+      "tests.unit.test_finalize_prepared_historical_assessments",
+      "tests.unit.test_finalize_prepared_historical_news_events",
+      "tests.unit.test_generic_strategy_evaluator",
+      "tests.unit.test_google_drive_sync",
+      "tests.unit.test_high_price_policy",
+      "tests.unit.test_historical_backfill",
+      "tests.unit.test_historical_baseline_requests",
+      "tests.unit.test_historical_collection_counts",
+      "tests.unit.test_historical_collection_monitor",
+      "tests.unit.test_historical_high_service",
+      "tests.unit.test_historical_learning_cases",
+      "tests.unit.test_historical_monthly_selection_coverage",
+      "tests.unit.test_historical_news_archive_api",
+      "tests.unit.test_historical_news_archive_dialog",
+      "tests.unit.test_historical_news_archive_reader",
+      "tests.unit.test_historical_news_blind_validation"
     ]
   },
   "core_order_sha256": "36DAE599F514EC9356B7DC3EAB9C7B4F1033C4A27076EB8A7FCD931FBEB1810A"

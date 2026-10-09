@@ -1,11 +1,22 @@
 # 남은 작업과 보류 사항
 
+**2026-10-09 미등록 CI 2차 묶음:** 다음 정렬 구간 24개 모듈을 검토해 24개/160건을
+`dependency-audit-batch-02-historical-runtime-contracts`에 편입했다. 공유 테스트 fixture를
+테스트 모듈 간 import에서 `historical_news_test_support.py`로 옮겼고 기존 7개 테스트 파일의
+assertion AST가 모두 동일함을 확인했다. 직접 관련된 7개 모듈 27건과 선택 profile 160건,
+전체 `all-local` 290개 모듈/2,713건/150 worker가 통과했다. 실패·오류·skip·기대 실패·예상 밖 성공·
+미실행·timeout·잔류 자손·미등록 모듈은 0이다. 새 테스트 모듈 누락 검사도 통과했다. 이 묶음의
+GitHub hosted CI는 현재 branch에 게시 후 실행할 예정이다. Windows 등록 범위는 290개, 미등록 후보는
+118개다. 실행 기록은 `tmp/regression/batch02-targeted/run.json`,
+`tmp/regression/batch02-all-local/run.json`, `tmp/regression/batch02-fixture-targeted/run.json`이다.
+main 병합과 NAS 배포는 별도다.
+
 **2026-10-09 미등록 CI 1차 묶음:** 정렬 순서상 후보 24개를 검토해 22개 모듈/83건을 선택 profile에
 등록했다. 현재 Windows `all-local` 범위는 266개 모듈이고 미등록 후보는 142개다. 선택 profile
 83/83 통과, 이어진 전체 `all-local`은 2,553건/126 worker 통과, 실패·오류·skip·기대 실패·예상 밖
 성공·미실행 0, worker process tree 종료 126/126, 새 테스트 파일 누락 0이다. 180초 제한의 첫 전체
 시도는 첫 프로필이 끝나기 전에 timeout되어 성공으로 세지 않았고, worker와 자손 종료를 확인한 뒤
-600초 제한으로 전체 검사를 다시 완료했다. 이 묶음의 GitHub hosted CI는 아직 실행 전이다.
+600초 제한으로 전체 검사를 다시 완료했다. [GitHub run 37921972310](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37921972310)은 Windows 2,553건/126 worker/266개 모듈, Linux 전용 65건/5개 모듈, disposable PostgreSQL 87건과 저장 경계 63개를 통과했다. 실패·오류·skip·미실행·worker 누수는 모두 0이다.
 
 **2026-10-09 테스트 중복·상시 CI 후속:** [분석·등록·실행 근거](TEST_DUPLICATION_CI_FOLLOWUP.md).
 원래 409개를 포함한 410개 정적 선별에서 삭제 가능한 완전 중복은 확정되지 않았다. 발견 증거와

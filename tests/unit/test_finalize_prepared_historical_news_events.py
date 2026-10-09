@@ -15,7 +15,7 @@ from scripts.finalize_prepared_historical_news_events import (
     _release_run_lease, finalize,
 )
 from scripts.verify_prepared_historical_news_rules import verify
-from tests.unit.test_verify_prepared_historical_news_rules import _fixture
+from tests.unit.historical_news_test_support import prepared_news_rules_fixture
 
 
 class FinalizePreparedHistoricalEventsTests(unittest.TestCase):
@@ -46,7 +46,7 @@ class FinalizePreparedHistoricalEventsTests(unittest.TestCase):
 
     def test_event_and_null_resume_without_new_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            prepared, archive, _, digest = _fixture(Path(root), mismatch=False)
+            prepared, archive, _, digest = prepared_news_rules_fixture(Path(root), mismatch=False)
             verify(prepared, archive, digest)
             first = finalize(prepared, archive, digest, max_rows=1)
             self.assertEqual(1, first["remaining"])
@@ -67,7 +67,7 @@ class FinalizePreparedHistoricalEventsTests(unittest.TestCase):
 
     def test_mismatch_blocks_worklist_before_any_event(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            prepared, archive, _, digest = _fixture(Path(root))
+            prepared, archive, _, digest = prepared_news_rules_fixture(Path(root))
             verify(prepared, archive, digest)
             with self.assertRaisesRegex(ValueError, "unverified or mismatched"):
                 finalize(prepared, archive, digest)
@@ -77,8 +77,9 @@ class FinalizePreparedHistoricalEventsTests(unittest.TestCase):
 
     def test_same_key_appends_parent_and_membership_chain(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            prepared, archive, _, digest = _fixture(Path(root), mismatch=False,
-                                                     same_event=True)
+            prepared, archive, _, digest = prepared_news_rules_fixture(
+                Path(root), mismatch=False, same_event=True,
+            )
             verify(prepared, archive, digest)
             finalize(prepared, archive, digest)
             with closing(sqlite3.connect(archive)) as db:
@@ -98,7 +99,7 @@ class FinalizePreparedHistoricalEventsTests(unittest.TestCase):
 
     def test_exact_seed_reuse_preserves_seed_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            prepared, archive, _, digest = _fixture(Path(root), mismatch=False)
+            prepared, archive, _, digest = prepared_news_rules_fixture(Path(root), mismatch=False)
             verify(prepared, archive, digest)
             with closing(sqlite3.connect(archive)) as db:
                 article_id, body_id, payload = db.execute(
@@ -131,7 +132,7 @@ class FinalizePreparedHistoricalEventsTests(unittest.TestCase):
 
     def test_event_resolution_failure_rolls_back_event_and_progress(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            prepared, archive, _, digest = _fixture(Path(root), mismatch=False)
+            prepared, archive, _, digest = prepared_news_rules_fixture(Path(root), mismatch=False)
             verify(prepared, archive, digest)
             with closing(sqlite3.connect(archive)) as db:
                 _freeze(db, digest)
@@ -152,7 +153,7 @@ class FinalizePreparedHistoricalEventsTests(unittest.TestCase):
 
     def test_ambiguous_seed_key_blocks_without_guessing_group(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            prepared, archive, _, digest = _fixture(Path(root), mismatch=False)
+            prepared, archive, _, digest = prepared_news_rules_fixture(Path(root), mismatch=False)
             verify(prepared, archive, digest)
             with closing(sqlite3.connect(archive)) as db:
                 article_id, body_id, payload = db.execute(
@@ -247,7 +248,7 @@ class FinalizePreparedHistoricalEventsTests(unittest.TestCase):
 
     def test_only_one_builder_runs_and_expired_lease_can_resume(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            prepared, archive, _, digest = _fixture(Path(root), mismatch=False)
+            prepared, archive, _, digest = prepared_news_rules_fixture(Path(root), mismatch=False)
             verify(prepared, archive, digest)
             with closing(sqlite3.connect(archive)) as db:
                 _freeze(db, digest)

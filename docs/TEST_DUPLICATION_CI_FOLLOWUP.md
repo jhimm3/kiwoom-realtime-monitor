@@ -612,5 +612,60 @@ profile은 기존 core batch/profile의 내용과 순서를 그대로 둔 채 ma
 제한 실행 환경에서 `central_deployment_check` 단독 검사가 Windows Proactor event loop 생성 중
 `socket.accept()`에서 멈춘 사실을 stack trace로 확인했다. 그 시도는 성공으로 세지 않고 중단했으며,
 사용자 Windows 실행 권한에서 동일 선택 profile을 다시 수행해 83건 모두 통과했다. 제품 동작을 바꾸지
-않았다. 이번 stage의 GitHub hosted Windows/Linux/PostgreSQL 결과는 branch 게시 뒤 다음 단계에서 기록한다.
-NAS 운영 검증·배포와 main 병합은 수행하지 않는다.
+않았다. [GitHub hosted run 37921972310](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37921972310)은
+동일 commit `4404f9dae608d3d2e3fe35f2c943e1bc64104dc0`에서 Windows 2,553건/126 worker/266개 모듈,
+Linux 전용 65건/5개 모듈, disposable PostgreSQL 87건과 schema 21의 저장 경계 63개 및 rollback을
+통과했다. hosted worker failure/error/skip/unrun/leaked descendant는 0이며 새 테스트 모듈 검사도
+통과했다. hosted Windows artifact의 manifest hash는 local run과 동일한
+`1827633b8ad51be6d88c53dd26d6835e783b05bbf3dc348145200d479b06448b`다. NAS 운영 검증·배포와 main 병합은
+수행하지 않는다.
+
+## 2026-10-09 미등록 CI 선택 묶음 2
+
+1차 다음 정렬 구간 24개 모듈을 순차 검토했다. 과거 데이터 수집·보완과 archive read API, 외부 시장
+runtime, 전략 정책·평가, feedback evidence를 검증하는 모듈로 모두 `dependency-audit-batch-02-historical-runtime-contracts`
+profile에 편입했다. 기존 CI 범위는 266에서 290개 Windows 모듈로 늘고, 미등록 Windows 후보는 142에서
+118개가 됐다. 선택 실행은 24 worker·160건 통과, failure/error/skip/unrun/worker 종료 이상 0이다.
+
+| 모듈 | 건수 |
+|---|---:|
+| `test_daily_high_service` | 9 |
+| `test_daishin_candidate_collection` | 8 |
+| `test_exchange_effective_dates` | 3 |
+| `test_export_historical_news_seed` | 4 |
+| `test_export_news_classification_corpus` | 2 |
+| `test_external_market_runtime` | 14 |
+| `test_feedback_evidence` | 17 |
+| `test_finalize_prepared_historical_article_bodies` | 2 |
+| `test_finalize_prepared_historical_assessments` | 3 |
+| `test_finalize_prepared_historical_news_events` | 9 |
+| `test_generic_strategy_evaluator` | 2 |
+| `test_google_drive_sync` | 15 |
+| `test_high_price_policy` | 6 |
+| `test_historical_backfill` | 27 |
+| `test_historical_baseline_requests` | 2 |
+| `test_historical_collection_counts` | 4 |
+| `test_historical_collection_monitor` | 7 |
+| `test_historical_high_service` | 12 |
+| `test_historical_learning_cases` | 2 |
+| `test_historical_monthly_selection_coverage` | 2 |
+| `test_historical_news_archive_api` | 2 |
+| `test_historical_news_archive_dialog` | 3 |
+| `test_historical_news_archive_reader` | 3 |
+| `test_historical_news_blind_validation` | 2 |
+
+상세 의존성 점검에서 역사 뉴스/archive 계열의 테스트 모듈 간 fixture import를 확인했다.
+공유 데이터 준비와 hash helper를 `tests/unit/historical_news_test_support.py`로 이동하고,
+assessment·rule·event finalization·archive reader/API 및 이미 등록된 search-projection 테스트가 그
+지원 모듈을 사용하도록 바꿨다. 관련 테스트 모듈 사이의 private fixture import 결합을 제거했다.
+7개 변경 테스트 파일에서 이동 전후 assertion AST 호출 목록이 모두 동일했고, 해당 7개 모듈 27건이
+worker 단위로 통과했다. archive reader의 production `_connect` 직접 사용은 read-only 경계 검증이므로
+유지했다. 제품 코드는 수정하지 않았다.
+
+선택 profile과 `--check-new-test-modules --base-ref HEAD`는 통과했다. 최종 local `all-local`은
+Windows 290개 모듈·2,713건·150 worker 통과, 실패·오류·skip·expected failure·unexpected success·
+미실행·timeout·missing module·미검증 source·잔류 자손 0이다. 기록은
+`tmp/regression/batch02-targeted/run.json`, `tmp/regression/batch02-fixture-targeted/run.json`,
+`tmp/regression/batch02-all-local/run.json`이다. 두 번째 묶음의 GitHub hosted Windows/Linux/
+disposable PostgreSQL 결과는 현재 branch 게시 후 별도로 기록한다. NAS 운영 PostgreSQL은 이 결과에
+포함하지 않으며 main 병합·NAS 배포도 하지 않는다.
