@@ -1,31 +1,69 @@
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import tempfile
 import unittest
 from unittest.mock import patch
 
-import test_research_development_validation as fixtures
 from kiwoom_monitor import research_process as rp
-from kiwoom_monitor.application.research_splits import FinalHoldoutBatchSpec
+from kiwoom_monitor.application.research_splits import (
+    DEVELOPMENT_PARTITION_VERSION, DevelopmentPartitionSpec, FinalHoldoutBatchSpec,
+    ResearchEvaluationSpec, ResearchFoldSpec,
+)
 from kiwoom_monitor.application.mock_automation_candidate import _validate_candidate_spec
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.research_data_source import (
-    FINAL_INPUT_VERSION, FrozenResearchDataset, development_partition_start,
+    FINAL_INPUT_VERSION, FrozenResearchDataset, development_partition_start, load_research_input,
     prepare_development_partition, prepare_final_holdout_partition,
 )
+from test_research_bundle_execution import KST, PROFILE, child, rows_for
+from test_research_process import _request_document
 
 
 class FinalPreparationTests(unittest.TestCase):
     def setUp(self):
-        self.fixture = fixtures.DevelopmentValidationTests(); self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
-        self.root, self.source = self.fixture.root, self.fixture.source
-        original = self.fixture.batch.request
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        day = date(2026, 9, 14)
+        base = datetime.combine(day, datetime.min.time(), tzinfo=KST).replace(hour=9)
+        self.at_development_minute = lambda minute: (base + timedelta(minutes=minute)).isoformat()
+        rows = tuple(rows_for(day, 30))
+        self.full_evaluation = ResearchEvaluationSpec(
+            'chronological_holdout/v1', tuple(ResearchFoldSpec(name, role,
+                self.at_development_minute(start), self.at_development_minute(end))
+                for name, role, start, end in (
+                    ('train', 'TRAIN', 2, 10),
+                    ('validation', 'VALIDATION', 12, 20),
+                    ('final', 'OOS', 22, 30),
+                )), 120, 120, 0, 0, 0,
+        )
+        self.development_partition = DevelopmentPartitionSpec(DEVELOPMENT_PARTITION_VERSION, 'train')
+        relative = child(self.root, day, list(rows))
+        document = _request_document()
+        document.update(mode='single_run', dataset=relative, session_profile=PROFILE,
+                        evaluation=self.full_evaluation.to_dict(),
+                        development_partition=self.development_partition.to_dict())
+        document['execution']['cost_model'].update(
+            valid_from='2026-09-14T00:00:00+09:00', valid_to='2026-09-15T00:00:00+09:00')
+        request_path = self.root / 'request.json'
+        request_path.write_text(json.dumps(document), encoding='utf-8')
+        validation_document = json.loads(request_path.read_text(encoding='utf-8'))
+        validation_document.pop('development_partition')
+        validation_document['resource_budget'] = {'cpu_duty_percent': 100, 'memory_mb': 512}
+        self.source = load_research_input(self.root / validation_document['dataset'], session_profile=PROFILE)
+        validation_document = {'version': 'independent_development_validation/v1',
+            'request': validation_document, 'dataset_id': self.source.manifest['dataset_id'],
+            'dataset_hash': self.source.manifest['revision_ids_hash'],
+            'fold_names': ['train', 'validation'], 'max_seconds': 60}
+        self.validation_path = self.root / 'validation.json'
+        self.validation_path.write_text(json.dumps(validation_document), encoding='utf-8')
+        original = rp.load_development_validation_request(self.validation_path).request
         self.evaluation = replace(original.evaluation, folds=(original.evaluation.folds[-1],))
         self.request = replace(original, evaluation=self.evaluation)
         self.code_hash = rp.research_implementation_hash(self.request.session_profile)
@@ -65,7 +103,7 @@ class FinalPreparationTests(unittest.TestCase):
     def test_hash_excludes_operating_paths_budget_dates_and_binds_strategy_costs_code(self):
         changed = replace(self.request, dataset=self.root/'other', database=self.root/'other.db',
             runs_dir=self.root/'other-runs', resource_limits=replace(self.request.resource_limits, memory_mb=1024),
-            evaluation=self.fixture.batch.request.evaluation)
+            evaluation=self.full_evaluation)
         expected = rp.final_candidate_spec_hash(self.request, self.code_hash)
         self.assertEqual(expected, rp.final_candidate_spec_hash(changed, self.code_hash))
         for request, code in ((replace(self.request, strategy=replace(self.request.strategy, buffer_bps=self.request.strategy.buffer_bps+1)), self.code_hash),
@@ -113,14 +151,14 @@ class FinalPreparationTests(unittest.TestCase):
 
     def test_invalid_candidate_rejected_before_loading_and_db_creation(self):
         for changes in ({'mode':'rank_comparison'}, {'family':'unknown'}, {'session_profile':None},
-                        {'development_partition':self.fixture.fixture.partition},
+                        {'development_partition':self.development_partition},
                         {'execution':replace(self.request.execution, cost_model=None)}):
             with self.subTest(changes=changes), patch.object(rp, 'load_research_input', side_effect=AssertionError('no load')):
                 with self.assertRaises(ValueError): self.prepare(candidates=(replace(self.request, **changes),))
         self.assertFalse(self.request.database.exists())
 
     def test_wrong_policy_or_paths_rejected_before_loading(self):
-        for changed in (replace(self.request, evaluation=self.fixture.batch.request.evaluation),
+        for changed in (replace(self.request, evaluation=self.full_evaluation),
                         replace(self.request, database=self.request.dataset/'state.db')):
             with patch.object(rp, 'load_research_input', side_effect=AssertionError('no load')):
                 with self.assertRaises(ValueError): self.prepare(candidates=(changed,))
@@ -158,7 +196,7 @@ class FinalPreparationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'gated final evaluator'):
             development_partition_start(projected, self.evaluation)
         with self.assertRaisesRegex(ValueError, 'recycled'):
-            prepare_development_partition(projected, self.fixture.fixture.partition, self.fixture.batch.request.evaluation)
+            prepare_development_partition(projected, self.development_partition, self.full_evaluation)
         untagged = FrozenResearchDataset({**projected.manifest, 'runtime_input_version':None}, projected.observations)
         with self.assertRaisesRegex(ValueError, 'gated final evaluator'):
             development_partition_start(untagged, self.evaluation)
@@ -171,7 +209,7 @@ class FinalPreparationTests(unittest.TestCase):
             prepare_final_holdout_partition(forged, self.batch)
 
     def test_legacy_full_oos_history_blocked_without_access_event(self):
-        self.insert_history(self.fixture.batch.request.evaluation)
+        self.insert_history(self.full_evaluation)
         with self.assertRaisesRegex(ValueError, 'already used'): self.prepare()
         self.assertIsNone(self.repo().load_final_holdout_window(self.batch.window_id))
 
@@ -180,15 +218,15 @@ class FinalPreparationTests(unittest.TestCase):
         for role in ('TRAIN','VALIDATION'):
             with self.subTest(role=role):
                 evaluation = replace(self.evaluation, folds=(replace(self.evaluation.folds[0], role=role,
-                    start=self.fixture.fixture.at(30), end=self.fixture.fixture.at(32)),))
+                    start=self.at_development_minute(30), end=self.at_development_minute(32)),))
                 with closing(sqlite3.connect(self.request.database)) as connection, connection:
                     connection.execute('DELETE FROM research_runs')
                 self.insert_history(evaluation)
                 with self.assertRaisesRegex(ValueError, 'including warmup'): self.prepare()
 
     def test_disjoint_development_history_allowed(self):
-        full = self.fixture.batch.request.evaluation
-        partition = replace(self.fixture.fixture.partition, fold_name='validation')
+        full = self.full_evaluation
+        partition = replace(self.development_partition, fold_name='validation')
         projected = prepare_development_partition(self.source, partition, full)
         evaluation = partition.evaluation_for(full)
         self.insert_history(evaluation, projected.manifest)
@@ -205,14 +243,14 @@ class FinalPreparationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'already used'): self.prepare()
 
     def test_continuous_input_outside_reported_folds_is_still_exposed(self):
-        full = self.fixture.batch.request.evaluation
+        full = self.full_evaluation
         evaluation = replace(full, folds=full.folds[:1])
         self.insert_history(evaluation)
         with self.assertRaisesRegex(ValueError, 'already used'): self.prepare()
         self.assertIsNone(self.repo().load_final_holdout_window(self.batch.window_id))
 
     def test_continuous_input_between_reported_folds_is_still_exposed(self):
-        full = self.fixture.batch.request.evaluation
+        full = self.full_evaluation
         evaluation = replace(full, folds=full.folds[:2], warmup_seconds=0)
         self.insert_history(evaluation)
         final = replace(self.evaluation, folds=(replace(self.evaluation.folds[0],

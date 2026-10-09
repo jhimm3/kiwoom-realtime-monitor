@@ -218,7 +218,8 @@
       "tests.unit.test_article_text",
       "tests.unit.test_news_ai",
       "tests.unit.test_collect_historical_market_context",
-      "tests.unit.test_publish_historical_market_context_to_nas"
+      "tests.unit.test_publish_historical_market_context_to_nas",
+      "tests.unit.test_build_prepared_historical_search_projection"
     ]
   },
   "core_order_sha256": "36DAE599F514EC9356B7DC3EAB9C7B4F1033C4A27076EB8A7FCD931FBEB1810A"

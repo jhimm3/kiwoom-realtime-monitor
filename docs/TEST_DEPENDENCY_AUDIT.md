@@ -4,6 +4,25 @@
 
 ## 현재 결정
 
+2026-10-09 fixture follow-up: `test_research_final_preparation` no longer constructs
+`DevelopmentValidationTests` or reaches through its nested partition fixture. The test now owns its
+temporary directory and builds its request/source directly from the existing pure row, child-export,
+and request-document helpers. Candidate hash, transaction, history, and projection assertions are
+unchanged. The module passed 28/28, its validation/partition neighbors passed 47/47, and the full
+`all-local` passed 1,906/43 workers with failure/error/skip/expected-failure/unexpected-success/unrun
+all zero, process trees confirmed exited 43/43, and leaked descendants 0. See
+`tmp/regression/all-local-fixture-refactor-user-context-20261009/run.json`. Hosted CI and live
+PostgreSQL/NAS checks were not run for these uncommitted changes.
+
+2026-10-09 후속 결함 주입으로 `test_build_prepared_historical_search_projection`의 rollback 공백을 확인했다.
+기존 검사는 batch 첫 INSERT 실패만 주입해 rollback을 `commit()`으로 바꾼 결함도 통과했다. 부분 row 저장 후
+INSERT 실패와 row batch 뒤 progress manifest 갱신 실패를 각각 주입하도록 강화하고, projection rows·전체 manifest·
+source 목록 전 상태 보존, lease 해제, retry 완료와 idempotence를 검사한다. 두 결함 대조군은 모두 실패했다.
+관련 4개 모듈 20/20, 격리 profile 38/38, 현재 `all-local` 1,906/43 worker 통과, 실패·오류·skip·
+expected failure·unexpected success·미실행 0, process tree 종료 43/43, 자손 누수 0이다. 현재 manifest는
+183개 등록/226개 미등록(Windows 221, Linux 5)이며 새 profile과 검사 기록은 로컬 미커밋 상태다.
+`origin/main` 기준 새 unit test module coverage gate는 새 모듈 3개 모두 등록으로 통과했다.
+
 기존 CI의 고유 테스트 파일 149개와 미등록 260개를 **같은 기준**으로 조사했다.
 전체 AST/본문에서 import, patch, private 호출, 경로/디렉터리 검사, 테스트 간 fixture 공유를
 수집하고, 실제 실패하거나 코드 이동에 따른 유지보수 부담이 드러난 파일만 상세 검토했다.
@@ -168,10 +187,11 @@ DB 반환 계약의 차이는 이전 저장 자료·소비자 의미를 검토�
 - DB 구조 감사(`test_query_store_source`, 두 DB audit 파일, storage ledger)는 물리적 owner와
   연결 경계가 검증 대상이다. 코드 이동 시 의도적으로 review_required가 되는 것을 없애지 않는다.
   기능 회귀의 성공과 구조 감사의 review_required는 따로 보고한다.
-- 24개 미등록 파일이 다른 TestCase의 setUp을 가져다 쓴다. 주로 research pipeline의 고정 데이터
-  작성과 검증 fixture chain이다. 이것만으로 24개 전부 재작성하지 않는다. 실제 hash fixture 부담이
-  확인된 final preparation 경계부터 immutable candidate descriptor/경로·초기 DB 함수만 추출한다.
-  runtime owner·트랜잭션은 fixture abstraction 뒤에 숨기지 않는다.
+- 조사 당시 24개 미등록 파일이 다른 TestCase의 setUp을 가져다 썼다. 주로 research pipeline의 고정 데이터
+  작성과 검증 fixture chain이다. 이것만으로 모두 재작성하지 않는다. 실제 결합이 확인된
+  `test_research_final_preparation`은 자체 임시 경로와 입력 fixture를 소유하도록 바꿨다. 나머지
+  cross-TestCase 연결은 해당 테스트별 실제 유지보수 부담이 확인될 때만 검토하며, runtime owner·
+  트랜잭션은 fixture abstraction 뒤에 숨기지 않는다.
 - API/기능 테스트는 요청·상태·JSON·저장 결과로 보호하고, 필요한 source architecture 검사는 별도
   성격으로 유지한다. unit이 검증하는 클래스 자체의 import 이름까지 없애기 위한 wrapper는 만들지 않는다.
 

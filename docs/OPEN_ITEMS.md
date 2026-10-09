@@ -1,5 +1,16 @@
 # 남은 작업과 보류 사항
 
+**2026-10-09 projection rollback 검증 보완:** 이전 테스트는 실패가 현재 batch의 첫 INSERT에서 발생해
+rollback 없는 `commit()` 결함도 통과했다. 새 검사는 batch 안의 일부 row INSERT 뒤 발생하는 실패와,
+모든 row INSERT 뒤 progress manifest 갱신에서 발생하는 실패를 각각 주입한다. 두 경우 모두 projection row,
+전체 manifest, frozen source 목록이 실패 전 상태로 복원되고 lease가 해제되며, 재시도는 전체 완료 후
+다시 실행해도 중복 행을 만들지 않는 것을 확인했다. 이전 테스트는 결함 주입에서 통과했고 새 테스트는 두 경로
+모두 실패해 rollback 회귀를 탐지한다. 직접 연관된 검증·확정·reader 회귀 20/20, 격리 profile 38/38,
+현재 전체 `all-local`은 manifest 183개·1,906건·43 worker 통과, failure/error/skip/expected failure/
+unexpected success/미실행 0, worker process tree 종료 43/43, 자손 누수 0이다. 기록은
+`tmp/regression/projection-rollback-all-local-20261009/run.json`이다. `origin/main` 기준 새 unit test module
+coverage gate에서 새 모듈 3개가 모두 profile에 등록된 것을 확인했다. 테스트와 profile 변경은 현재 로컬 미커밋 상태다.
+
 **2026-10-09 함수형 테스트 우선 편입 후 현재 상태:** 발견 경로를 복구한 11개 파일/45건 중
 뉴스 본문·AI, 역사 context 수집 rollback, context 게시 완료 조건을 검증하는 4개 파일/33건을
 격리 CI profile에 선택 등록했다. 현재 manifest는 182개 등록/227개 미등록(Windows 222, Linux 5)이다.

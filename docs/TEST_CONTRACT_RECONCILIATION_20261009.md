@@ -142,3 +142,43 @@ failure/unexpected success/미실행 0, process tree 종료 42/42, 잔류 자손
 Windows Proactor event loop가 내부 `socketpair`에서 대기해 async 테스트를 시작하지 못했으나, 같은 테스트를
 권한 허용 실행 경로에서 1/1 통과시켰고 당시 전체 검증도 그 경로에서 완료했다. 게시 assertion의 별도 후속 수정과
 그에 대한 좁은 profile 검증은 위에 기록했다. 그 후 GitHub hosted CI와 NAS 운영 검증은 실행하지 않았다.
+
+### Projection batch rollback 결함 주입 보완
+
+2026-10-09 후속 검토에서 기존 `test_failed_projection_batch_rolls_back_rows_and_manifest`는 이미 projection된
+한 행 뒤 남은 유일한 행의 INSERT가 실패했다. 실패 이전에 현재 batch가 쓴 row가 없어 rollback을 `commit()`으로
+바꿔도 테스트가 통과했다. 이 대조군으로 기존 assertion의 false pass를 재현했다.
+
+테스트 데이터에 정렬상 중간에 오는 seed row를 추가해 두 건이 남은 batch를 만들고, (1) 첫 신규 row가 INSERT된 뒤
+두 번째 INSERT에서, (2) 두 신규 row가 INSERT된 뒤 progress manifest UPDATE에서 각각 SQLite trigger로 실패시킨다.
+두 경로에서 projection 전체 행, 전체 manifest, frozen source 목록이 사전 snapshot과 같은지 확인하고 lease 해제,
+재시도 완료, 이후 무변경 재실행과 seed row 보존도 검증한다. 정상 제품 구현에서는 모듈 5/5 통과했고,
+rollback을 commit으로 대체한 결함은 각 injection case에서 assertion 실패했다. 직접 연관된 규칙 검증·이벤트 확정·
+archive reader 포함 4개 모듈 20/20, 격리 profile 38/38 통과했다.
+
+고위험 저장 계약 공백이 재현됐으므로 이 모듈 5건만 기존 `dependency-audit-news-contracts` profile에 추가했다.
+전체 `all-local`은 183개 등록 모듈, 1,906건/43 worker 통과, failure/error/skip/expected failure/
+unexpected success/미실행 0, process tree 종료 43/43, 잔류 자손 0이다. run은
+`tmp/regression/projection-rollback-all-local-20261009/run.json`이다. 수정 테스트 SHA256은
+`7af590390ac87f5bda468a1db8baafeb0c8d3739e2580db21701752ce551df73`, manifest SHA256은
+`307d01eba6a50a08d84d5f6c85f454b54d59ad213d5369a04e7831ee9aa0aac9`, runner SHA256은
+`659c4c11fd3546dec156b77d5fb24b37245f7ddd48cb8ee8c8f9741b672c93d1`이며 모두 run 입력과 일치한다.
+이 테스트/profile/문서 수정은 로컬에 남아 있고 새 GitHub hosted run은 아직 없다.
+
+## final-preparation fixture 소유권 follow-up
+
+`test_research_final_preparation`은 `DevelopmentValidationTests().setUp()`을 직접 호출하고 그 테스트 케이스의
+정리 함수를 등록한 뒤, 다시 내부 partition fixture의 필드와 메서드에 접근하고 있었다. 이를 제거하고
+final-preparation 테스트가 `TemporaryDirectory`를 직접 소유하며 입력 export, validation request, source,
+partition, evaluation을 구성하도록 바꿨다. 독립적으로 필요한 순수 `rows_for`, `child`, request-document
+helper는 재사용한다. 제품 코드와 DB·주문 동작은 변경하지 않았고, 기존 candidate hash·저장·history·rollback·
+projection assertion은 수정하거나 삭제하지 않았다. 조사 당시 다른 TestCase fixture를 재사용하던 24개 중
+확인된 이 한 경계만 다뤘으며 나머지를 일괄 변환하지 않았다.
+
+검증은 final-preparation 28/28, 직접 관련된 development-validation/development-partition 47/47, 이어서
+전체 `all-local` 1,906건/43 worker 통과다. failure/error/skip/expected failure/unexpected success/unrun은 모두
+0이고 process tree 종료 43/43, leaked descendants 0이다. 산출물은
+`tmp/regression/all-local-fixture-refactor-user-context-20261009/run.json`이며, 실행 시 해당 테스트 파일 SHA256은
+`b0bcc22f151a351ee0914177d45588617ea3738c4266422b94fb5e00c37fe448`로 run 입력과 일치한다. 제한된 sandbox에서는
+Windows Proactor `socketpair` 초기화가 멈춰 실행을 완료로 세지 않았고, 일반 사용자 Windows 실행 환경의 최종
+결과만 완료 검증으로 기록한다. 새 GitHub hosted CI와 실제 PostgreSQL/NAS 검증은 아직 없다.

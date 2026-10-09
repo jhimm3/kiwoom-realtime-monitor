@@ -18,6 +18,18 @@ UI 계약 2개를 정리했다. 그 시점 미등록은 일반 226개, Linux 5�
 통과했다. 나머지 7개 파일/12건은 전문 역사 데이터·수집 보조 workflow에서 선택 실행한다.
 GitHub hosted CI는 이 후속 변경에 대해 아직 실행하지 않았다.
 
+2026-10-09 추가 검토에서 부분 projection batch 및 progress 갱신 실패 rollback을 보강했고,
+`test_build_prepared_historical_search_projection` 5건을 이 격리 profile에 선택 추가했다. 현재 manifest는
+183개 등록/226개 미등록(Windows 221, Linux 5)이며 profile 38/38, 전체 `all-local` 1,906건/43 worker가
+실패·오류·skip·미실행 없이 통과했다. [결함 주입과 hash 근거](TEST_CONTRACT_RECONCILIATION_20261009.md).
+
+2026-10-09 final-preparation fixture 결합 follow-up: 해당 테스트의 28건과 관련 validation/partition
+테스트 47건을 통과시킨 뒤 full `all-local`을 다시 실행해 1,906/43 worker를 확인했다. 실패·오류·skip·
+expected failure·unexpected success·미실행 0, process tree 종료 43/43, 잔류 자손 0이다. 이전 TestCase의
+`setUp()`/내부 fixture 직접 접근만 제거했으며 기존 assertion과 고정 hash는 유지했다. 결과는
+`tmp/regression/all-local-fixture-refactor-user-context-20261009/run.json`에 있다. 이 로컬 변경의 GitHub
+hosted CI와 실제 PostgreSQL/NAS 검증은 실행하지 않았다.
+
 일반 후보를 모두 즉시 CI에 넣지 않는다. 첫 12개와 다음 8개는 격리 검증 후 편입했다.
 나머지 226개는 관련 변경의 모듈별 격리 검증/후속 정기 프로필 후보다.
 해결한 계약 검토 6개는 전용 profile로 편입했으며,
