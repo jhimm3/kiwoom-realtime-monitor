@@ -18,6 +18,7 @@ from kiwoom_monitor.central_server.market_observations import (
 from kiwoom_monitor.domain.market_data_contract import (
     DataCompleteness, DataValueKind, ObservationOrigin,
 )
+from tests.integration.postgres_test_support import isolated_observation_schema
 
 
 class ObservationSequenceFencePostgresTests(unittest.TestCase):
@@ -30,6 +31,7 @@ class ObservationSequenceFencePostgresTests(unittest.TestCase):
             raise unittest.SkipTest('dedicated diagnostic PostgreSQL URL is required')
         if urlsplit(cls.url).path != '/kiwoom_monitor_diagnostic_test':
             raise RuntimeError('sequence fence probe requires diagnostic database')
+        cls.url = cls.enterClassContext(isolated_observation_schema(cls.url))
         cls.store = PostgresQueryStore(cls.url)
         cls.store.initialize()
 
@@ -292,8 +294,10 @@ class ObservationSequenceFencePostgresTests(unittest.TestCase):
                     reader.load_observation_revision_page(0, ('minute_bar',))
             finally:
                 cursor.execute(self.pg.sql.SQL('ALTER SEQUENCE {} CACHE 1').format(name))
+        # Keep the owned schema while intentionally changing only isolation.
+        options = self.pg.conninfo.conninfo_to_dict(self.url)['options']
         reader._connect = lambda: self.pg.connect(self.url,
-            options='-c default_transaction_isolation=repeatable\ read')
+            options=options + r' -c default_transaction_isolation=repeatable\ read')
         with self.assertRaisesRegex(RuntimeError, 'configuration_unsupported'):
             reader.load_observation_revision_page(0, ('minute_bar',))
 

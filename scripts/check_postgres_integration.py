@@ -1043,8 +1043,8 @@ def main() -> int:
                     ("ranking", marker),
                 )
                 cursor.execute(
-                    "DELETE FROM central_observation_revisions WHERE subject IN (%s,%s)",
-                    (marker, rollback_marker),
+                    "DELETE FROM central_observation_revisions WHERE subject IN (%s,%s,%s)",
+                    (marker, rollback_marker, f"{marker}:KRX"),
                 )
                 if export_dataset_id:
                     cursor.execute(

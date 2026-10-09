@@ -15,6 +15,61 @@ from scripts.run_postgres_access_integration import (
     _resolve_target_url,
     main,
 )
+from tests.integration.postgres_test_support import isolated_observation_schema
+
+
+class ObservationSchemaFixtureTests(unittest.TestCase):
+    URL = "postgresql://user:secret@localhost/kiwoom_monitor_diagnostic_test?sslmode=require"
+
+    def test_non_diagnostic_url_is_rejected_before_connecting(self) -> None:
+        with patch("psycopg.connect") as connect:
+            with self.assertRaisesRegex(RuntimeError, "dedicated diagnostic database"):
+                with isolated_observation_schema("postgresql://user:secret@localhost/kiwoom_monitor"):
+                    self.fail("production database must not be touched")
+            connect.assert_not_called()
+
+    def test_connected_database_is_verified_before_creating_schema(self) -> None:
+        with patch("psycopg.connect") as connect:
+            cursor = connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+            cursor.fetchone.return_value = ("production",)
+            with self.assertRaisesRegex(RuntimeError, "non-diagnostic database"):
+                with isolated_observation_schema(self.URL):
+                    self.fail("wrong connected database must not be touched")
+            self.assertEqual([unittest.mock.call("SELECT current_database()")], cursor.execute.call_args_list)
+
+    def test_owned_schema_and_connection_options_survive_body_failure(self) -> None:
+        from psycopg.conninfo import conninfo_to_dict
+
+        source = self.URL + "&options=-c%20statement_timeout%3D12000"
+        with patch("psycopg.connect") as connect:
+            cursor = connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+            cursor.fetchone.return_value = ("kiwoom_monitor_diagnostic_test",)
+            with self.assertRaisesRegex(OSError, "injected test failure"):
+                with isolated_observation_schema(source) as scoped:
+                    parameters = conninfo_to_dict(scoped)
+                    self.assertEqual("require", parameters["sslmode"])
+                    self.assertEqual("kiwoom_monitor_diagnostic_test", parameters["dbname"])
+                    self.assertRegex(parameters["options"],
+                                     r"^-c statement_timeout=12000 -c search_path=observation_test_[0-9a-f]{32}$")
+                    schema = parameters["options"].rsplit("=", 1)[1]
+                    raise OSError("injected test failure")
+            statements = [args[0].as_string() for args, _ in cursor.execute.call_args_list
+                          if not isinstance(args[0], str)]
+            self.assertEqual([f'CREATE SCHEMA "{schema}"', f'DROP SCHEMA "{schema}" CASCADE'], statements)
+
+    def test_failed_schema_cleanup_propagates(self) -> None:
+        with patch("psycopg.connect") as connect:
+            cursor = connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+            cursor.fetchone.return_value = ("kiwoom_monitor_diagnostic_test",)
+
+            def execute(statement):
+                if not isinstance(statement, str) and statement.as_string().startswith("DROP SCHEMA"):
+                    raise OSError("injected cleanup failure")
+
+            cursor.execute.side_effect = execute
+            with self.assertRaisesRegex(OSError, "cleanup failure"):
+                with isolated_observation_schema(self.URL):
+                    pass
 
 
 class DedicatedPostgresUrlTests(unittest.TestCase):

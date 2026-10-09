@@ -1,8 +1,10 @@
 # 전체 테스트 최종 품질 감사와 CI 전환 설계
 
-2026-10-10 KST. **감사·설계와 실행기·테스트·브랜치 CI 구현 완료, hosted 검증 대기**다.
-현재 수정본의 전체 로컬 회귀는 통과했다. hosted 결과와 정기 실행은 아직 확인하지 않았다.
-제품 코드·DB 스키마·기대값은 변경하지 않았다. main 병합과 NAS 배포는 별도다.
+2026-10-10 KST. **감사·설계와 실행기·테스트·브랜치 CI 구현을 완료**했다.
+통합 전 브랜치의 전체 hosted 검증은 통과했으며, 최신 main 통합 후의 최종 결과는
+[PR #15의 검증 기록](https://github.com/jhimm3/kiwoom-realtime-monitor/pull/15/checks)으로 확인한다.
+테스트 품질 작업은 제품 코드·DB 스키마·기대값을 변경하지 않았다.
+최신 main의 제품 변경은 그대로 통합했다. NAS 운영 배포는 이 테스트 작업의 완료 조건에 포함하지 않는다.
 
 ## 1. 이번 단계의 기준과 실제 검증 결과
 
@@ -66,6 +68,30 @@ CI 전용 PostgreSQL 17 Alpine/Python 3.13 slim 이미지 참조를 ECR Public `
 테스트 assertion, DB 계약은 변경하지 않았다. 변경 후 실제 hosted 실행 결과가 최종 판정이다.
 
 ## 2. 유지·중복·구조 판정
+
+### 최신 main 통합 시 PostgreSQL fixture 결합 확인
+
+통합 전 [run 37991977901](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37991977901)은
+전체 9개 job이 성공했다. 이후 `4efd67239e0f332fa1c1ab2a62f3c39d60755636`을 통합하고,
+main에서 빠졌던 unit 4개와 PostgreSQL integration 4개를 원장에 추가했다.
+기존 unit 실행 순서·그룹을 유지했고, QueryStore API 101개·SQLite 105개·PostgreSQL 107개와
+내부 위임 6개를 실제 소스 및 consumer 감사 결과에 맞춰 재계수했다.
+
+[통합 run 37998172362](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37998172362)은
+필수 PostgreSQL suite 151건 중 14건이 실패했다(오류·skip 0). 실패 파일은 bootstrap,
+cursor-commit-order, sequence-fence 세 개다. 선행 `check_postgres_integration.py`의 cleanup은
+`marker` subject만 삭제해 분봉의 `marker:KRX` revision을 남겼다. 또 기존 access suite의
+여러 revision이 같은 DB에 있어, DB 전역 page/cursor를 검증하는 새 suite의 첫 페이지와
+100회 frames-only recovery에 섞였다. 로그의 다른 subject와 복구 `rows_read=100`이 이를 확인한다.
+세 파일의 실패는 개별 제품 결함 14개로 계산하지 않는다.
+
+수정은 누락된 `marker:KRX` cleanup과 세 suite에만 적용하는 고유 schema fixture다.
+fixture는 URL과 실제 연결 DB가 모두 `kiwoom_monitor_diagnostic_test`인지 확인하고,
+기존 연결 옵션을 유지한 채 고유 schema를 search_path로 제공한다. class 종료 시 자신이 만든
+schema만 제거하고 cleanup 오류는 실패로 전파한다. held native COMMIT/rollback, 페이지 수·순서,
+revision 일치·재시작·결정 재계산 금지 등 기존 assertion은 유지한다.
+공통 runner나 제품 저장 의미를 변경하지 않으며, 운영/NAS DB를 비우지 않는다.
+수정본의 실제 전체 Windows·PostgreSQL·replay 결과는 위 PR의 최종 SHA에 게시된 CI로 판정한다.
 
 [409개 의존성 원장](TEST_DEPENDENCY_AUDIT.md), [260개 보호 계약](REGRESSION_COVERAGE_AUDIT.md),
 [후속 선택 편입·실패·개선 기록](TEST_DUPLICATION_CI_FOLLOWUP.md)을 재사용했다.
