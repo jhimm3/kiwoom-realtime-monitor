@@ -840,3 +840,24 @@ unrun/timeout/missing module/source unverified/leaked descendant는 모두 0이�
 37956080259](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37956080259)은 Windows
 all-local과 disposable PostgreSQL 두 job 모두 성공했다. 이 run은 수정된 fixture와 위 verification note를
 포함한 정확한 commit을 검사했다. main 병합, NAS 운영 DB 검증·배포는 수행하지 않았다.
+
+## 2026-10-10 미등록 CI 선택 묶음 7
+
+마지막 Windows 미등록 19개 모듈을 순차 검토하고 기능 계약이 겹치지 않는 19개 모두를
+`dependency-audit-batch-07-final-unregistered-contracts` profile에 등록했다. 주식 기본정보·저장소,
+테마 backup/import/parser/suggestion, TOP20 replay/session lifecycle, 매매일지 통계·분석·분류,
+업데이트 경로 안전, 준비 뉴스 snapshot/staging/verification 계약을 보호한다. assertion이나 제품 코드는
+바꾸지 않았다. 등록 후 Windows 대상 408개, 별도 Linux CI 대상 5개, 미등록 후보 0개다. 기존 core
+순서와 profile의 순차 실행을 유지했다.
+
+선택한 19개 모듈·114건은 project venv에서 모두 통과했고, 실패·오류·skip·미실행·timeout·잔류 자손은
+0이다. 신규 테스트 모듈 등록 guard도 통과했다. 전역 Python은 `tzdata`가 없어 `Asia/Seoul` 테스트를
+수집하지 못했고, 제한된 실행 환경에서는 Windows Proactor socketpair 초기화의 `accept` 대기가 관찰됐다.
+이 상태들을 통과로 세지 않았으며, 잠긴 의존성을 갖춘 project venv의 승인된 Windows 실행에서 다시 검증했다.
+
+B7을 포함한 최종 Windows `all-local`은
+`tmp/regression/batch07-all-local-final/run.json`에서 408개 모듈·3,670건·268 worker를 모두 발견·실행해
+통과했다. failure/error/skip/unrun/timeout/missing module은 0이며, 모든 worker 결과가 `passed`다.
+변경된 profile manifest가 최종 실행 입력에 포함됐다. `git diff --check`도 통과했다.
+게시 후 GitHub hosted Windows all-local 및 disposable PostgreSQL job 결과는 아래에 기록한다.
+main 병합과 NAS 운영 DB 검증·배포는 이 작업 범위에 포함되지 않는다.
