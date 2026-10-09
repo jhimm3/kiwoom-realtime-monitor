@@ -275,6 +275,12 @@
       "tests.unit.test_diagnostic_rest_input",
       "tests.unit.test_recorded_execution",
       "tests.unit.test_top20_replay_runtime"
+    ],
+    "dependency-audit-p2-top20-replay-boundaries": [
+      "tests.unit.test_replay_cache_clock",
+      "tests.unit.test_top20_replay_outbox",
+      "tests.unit.test_top20_replay_transport",
+      "tests.unit.test_top20_shared_execution"
     ]
   },
   "core_order_sha256": "36DAE599F514EC9356B7DC3EAB9C7B4F1033C4A27076EB8A7FCD931FBEB1810A"

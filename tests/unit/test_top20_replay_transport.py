@@ -82,6 +82,7 @@ class Top20ReplayTransportTests(unittest.IsolatedAsyncioTestCase):
             if not delayed:
                 release.set()
             return value.payload["code"]
+        first = second = None
         try:
             with patch.object(trace, "input_token", return_value=None), binding.activate():
                 first = owned_create_task(request("005930", True), name="entry")
@@ -91,6 +92,12 @@ class Top20ReplayTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(["source:first", "source:second"],
                              [item["source_lane"] for item in binding.report()["bound_tasks"]])
         finally:
+            release.set()
+            tasks = [task for task in (first, second) if task is not None]
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             await broker.close()
 
     async def test_missing_child_binding_cannot_inherit_parent_lane(self):

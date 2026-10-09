@@ -1,19 +1,16 @@
 # 남은 작업과 보류 사항
 
 **2026-10-09 테스트 중복·상시 CI 후속:** [분석·등록·실행 근거](TEST_DUPLICATION_CI_FOLLOWUP.md).
-원래 409개를 포함한 410개 정적 중복 선별에서 삭제 가능한 완전 중복은 확정되지 않았다.
-빈 모듈이 정상 batch의 성공에 가려지는 실행기 공백을 차단하고 계좌 안전·함수형 26개를 선택 등록했다.
-기존 소스의 전체 로컬 회귀는 2,136건/70 worker 통과했다. 이후 최신 main에서 새 모듈 3개가 누락돼
-Windows CI를 막은 것을 확인해 해당 3개만 추가 등록했다. 이후 NAS/capture 안전 4개(83건)를 선택
-편입했고 replay admission 안전 4개(36건)를 추가했다. 이후 causal replay lifecycle 5개(50건)를 편입했다. 현재 unit 파일 413개 중 Windows 226개,
-별도 Linux 5개, 단계적 미등록 후보 182개다. 이번 취소 fixture 2곳의 assertion 실패 시 해제 신호 누락을
-재현한 뒤 finally에서 해제·실제 task 종료를 기다리도록 보강했고, failed trace writer 종료도 확인한다. 연결 소유 스레드 종료 assertion 2개를 보강했고
-commit 오류 뒤 close 누락 결함 주입은 의도한 assertion에서 실패했다.
-직전 commit `10e9080` hosted CI는 Windows 2,154건, Linux 65건, disposable PostgreSQL 87건 및
-저장 경계 검사 통과를 확인했다. NAS/capture 4개 포함 `df7f4e1` hosted 전체 회귀 2,237건/77 worker도 통과했다.
-replay admission 4개 포함 `a413b80` hosted 전체 회귀도 2,273건/81 worker 통과했다.
-새 causal lifecycle 5개 포함 hosted 전체 회귀는 직전 결과와
-구분하며 결과는 위 후속 문서와 작업 branch CI artifact를 따른다. 아래 수치는 각 이전 시점의 기록이다.
+원래 409개를 포함한 410개 정적 선별에서 삭제 가능한 완전 중복은 확정되지 않았다. 발견 증거와
+실제 worker/process tree 종료 판정을 강화하고 확인된 실패 주입·fixture 종료 결합을 보강했다.
+기존 core와 모든 등록 profile의 검증 범위·순서는 유지한다. 현재 unit 파일 413개 중 Windows 230개,
+별도 Linux 5개, 단계적 미등록 후보 178개다. 최근 TOP20 재생 경계 4개는 전후 28/28 통과했고,
+peer native 요청 실패 뒤 대기 task가 1개 남는 테스트 cleanup 경로를 재현해 0개 종료로 보강했다.
+기존 assertion·기대값·제품 코드는 변경하지 않았다.
+직전 `8d7d632` hosted CI는 Windows 2,323건/86 worker, Linux 65건, disposable PostgreSQL 87건과
+63개 저장 경계 검사 통과다. 새 TOP20 4개 포함 전체 회귀는 게시 branch의 CI artifact로 별도 판정한다.
+남은 178개를 모두 실행했거나 제외 확정한 것으로 보고하지 않는다. 이전 단계별 실행과 판단은 후속
+문서를 따른다. NAS 운영 검증·배포·main 병합은 별도로 유지한다.
 
 **2026-10-09 녹화 입력 거부 원인과 복사 경합 감사:** 원본 trace `20261007T235957Z-e8cb574bf964`의
 1,490 chunks/2,033,667 events를 checksum·sequence와 함께 재검증했다. 거부 692건은 모두 호출별

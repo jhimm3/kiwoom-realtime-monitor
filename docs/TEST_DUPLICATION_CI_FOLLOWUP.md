@@ -23,7 +23,8 @@
 | 최신 main 신규 3개 등록 시점 | 213 | 5 | 195 | 413 |
 | NAS/capture 안전 4개 등록 시점 | 217 | 5 | 191 | 413 |
 | replay admission 안전 4개 등록 시점 | 221 | 5 | 187 | 413 |
-| causal replay lifecycle 5개 등록 후 현재 | 226 | 5 | 182 | 413 |
+| causal replay lifecycle 5개 등록 시점 | 226 | 5 | 182 | 413 |
+| TOP20 replay boundaries 4개 등록 후 현재 | 230 | 5 | 178 | 413 |
 
 기존 문서의 'manifest 미등록 226개' 중 5개는 CI 제외가 아니다. 다음 모듈은
 `.github/workflows/dependency-regression.yml`의 Ubuntu job에서 이미 실행한다.
@@ -348,3 +349,50 @@ trace RAM·baseline lease·cache clock·shared execution 4개도 별도 실행�
 현재 전체 413개 중 Windows 226개, 별도 Linux 5개, 단계적 미등록 후보 182개다.
 로컬 before/after와 helper 검사 합계는 각각 50건/50건/39건이며 마지막 전체 검증은 게시 commit의
 hosted artifact로 판정한다. 운영 NAS PostgreSQL 검증·배포·main 병합은 별도로 유지한다.
+
+## 2026-10-09 TOP20 replay boundaries 후속
+
+직전 `8d7d6324cc9dedac06a97e52eefe052bdd686940`의
+[hosted run 37910046205](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37910046205)은
+Windows 2,323건/86 worker/226개 모듈, Linux 65건, disposable PostgreSQL 87건과 63개 저장
+경계 검사를 통과했다. 전체 계획·발견/실행 수·게시 commit·파일 hash·worker/process tree 종료를
+대조했다. 비정상 결과/skip/미실행/잔류 자손은 0이다. causal lifecycle 묶음의 독립 검증은 완료됐다.
+
+다음은 기존 조사에서 확인된 source 시간·durable 파일·native transport·공유 실행 계약 4개다.
+기존 payload/lease/lifecycle 검사와 일부 영역이 겹치지만 실제 cache TTL, outbox pending 파일,
+spawn lane 및 구독 ACK, 공유 clock/runtime의 소유권을 각각 검증하므로 삭제할 완전 중복이 아니다.
+
+| 모듈 (`tests.unit.test_` 이후) | 보호하는 계약 | 현재 실제 실행 | 로컬 worker 비용 |
+|---|---|---:|---:|
+| `replay_cache_clock` | 실제 SQLite cache TTL·source 시간과 07:00 경계·lease/version·dirty baseline 거부 | 9 | 1.01초 |
+| `top20_replay_outbox` | 실제 native 파일의 동일 pending seed 복원·외부/손상 파일 거부·replace 실패·ACK loss 재시작 | 7 | 1.15초 |
+| `top20_replay_transport` | 실제 broker의 lane/spawn identity·reverse arrival·native fresh ACK·gap 및 바뀐 registration 차단 | 5 | 0.89초 |
+| `top20_shared_execution` | 한 source clock/runtime/lease 소유·실제 native thread overlap·반복 취소 drain·native 실패 판정 | 7 | 0.96초 |
+
+`dependency-audit-p2-top20-replay-boundaries`를 끝에 추가했다. 기존 226개와 모든 core/profile
+항목·순서를 유지했다. 전후 28/28의 모듈별 발견 수와 실행 수가 같으며 모든 비정상 집계/미실행/
+잔류 자손 0, worker/process tree 종료 4/4다. 합계 추가 worker 비용은 이번 로컬 약 4.01초다.
+기록: `tmp/regression/top20-replay-boundaries-before/run.json`, `top20-replay-boundaries-after/run.json`.
+
+실제 수정 대상은 transport의 reverse request arrival 검사 한 곳이다. offline tape의 두 번째
+native `request_with_continuation`에 OSError를 주입하자 기존 메서드는 오류를 전달하지만 첫 번째
+테스트 task가 release를 기다리는 상태로 남았다. 이후 IsolatedAsyncioTestCase의 loop 정리에
+의존하는 상태였으며 제품 task 잔류나 정상 검사의 false-green으로 단정하지 않는다.
+테스트의 finally에서 release를 열고 미완료 소유 task를 취소·회수한 뒤 broker를 닫도록 수정했다.
+같은 실패 주입에서 원래 OSError를 유지하고 테스트 메서드 종료 시 pending task는 1개→0개가 됐다.
+native 요청은 실패한 종목 한 번뿐이며 뒤늦은 다른 요청은 실행하지 않았다.
+기록: `tmp/regression/transport-peer-cleanup-before.json`, `transport-peer-cleanup-after.json`.
+별도 프로세스의 in-memory 실패 주입이며 제품 source는 변경하지 않았다.
+
+본문의 성공·lane/spawn·승인·gap assertion을 전부 유지했고 AST로 assertion 변경/삭제 0개를
+대조했다. cleanup의 exception 회수는 본문에서 전파하는 원래 오류를 성공으로 바꾸지 않는다.
+다른 3개는 수정 없이 등록했다. 실제 SQLite 저장/TTL과 native outbox 파일을 fake 결과로
+대체하지 않았다. lease generation/clock identity/SQL/table scope/private RAM은 실제 소유·복원
+경계의 검증 대상이므로 유지했다. 공유 fixture와 상수는 그대로 두고 공용 계층을 추가하지 않았다.
+outbox의 cold seed helper는 IO나 cleanup 자원을 만들지 않는 메모리 fixture라 현재 단계에서
+분리할 실제 근거가 없었다. PostgreSQL restore/sequence의 실환경 증거로 이 unit 결과를 사용하지 않는다.
+
+현재 전체 413개 중 Windows 230개, 별도 Linux 5개, 단계적 미등록 후보 178개다.
+새 모듈 누락 guard는 유지하며, 최종 전체 검증은 이 변경을 게시한 commit의 hosted artifact로 판정한다.
+기존의 장시간 native session/execution 후보는 시간 의미를 줄이거나 skip으로 통과시키지 않고
+별도의 비용/범위 판단 대상으로 유지한다. 남은 후보의 전부 편입·삭제를 이번 묶음의 완료 조건으로 늘리지 않는다.

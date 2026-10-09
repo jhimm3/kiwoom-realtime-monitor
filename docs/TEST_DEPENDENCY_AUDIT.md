@@ -5,8 +5,8 @@
 ## 현재 결정
 
 2026-10-09 중복/상시 CI 후속 분석 및 구현 진행: [판정·수정·검증 상태](TEST_DUPLICATION_CI_FOLLOWUP.md).
-최신 main 통합과 NAS/capture·replay·causal 종료 안전 선택 편입 뒤 현재 전체 413개 중 Windows `all-local` 등록 226개,
-별도 Linux CI 5개, 미등록 182개다. 기존 221개와 core 실행 순서는 보존했다.
+최신 main 통합과 NAS/capture·replay·causal 종료·TOP20 경계 선택 편입 뒤 현재 전체 413개 중 Windows `all-local` 등록 230개,
+별도 Linux CI 5개, 미등록 178개다. 기존 226개와 core 실행 순서는 보존했다.
 409개 조사 대상의 중복 선별에서 삭제할 완전 중복은 확정되지 않았다. 실행기의 빈 모듈 false-green을
 차단했고, 검증된 선택 profile 26개를 추가했다. 관련 선택 profile 218건과 모듈 간 setup 결합 수정은
 통과했다. 전체 `all-local`과 hosted CI 결과는 후속 문서의 최신 상태를 따른다. 아래의 당시 manifest,
@@ -562,7 +562,7 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_recover_development_validation_orphan.py](../tests/unit/test_recover_development_validation_orphan.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/1/3/0/0/0 |
 | [test_recover_final_holdout_orphan.py](../tests/unit/test_recover_final_holdout_orphan.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/1/2/1/0/0 |
 | [test_remote_kiwoom_rest_client.py](../tests/unit/test_remote_kiwoom_rest_client.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
-| [test_replay_cache_clock.py](../tests/unit/test_replay_cache_clock.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 3/0/13/6/0/0 |
+| [test_replay_cache_clock.py](../tests/unit/test_replay_cache_clock.py) | 기준 미등록 → P2 등록 | P2 TOP20 replay boundaries 편입; 실제 SQLite cache TTL·source clock·lease/version/dirty baseline 거부 9건 | 3/0/13/6/0/0 |
 | [test_report_historical_collection_status.py](../tests/unit/test_report_historical_collection_status.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/1/0/0 |
 | [test_research_bundle.py](../tests/unit/test_research_bundle.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/0/0/8/0 |
 | [test_research_bundle_execution.py](../tests/unit/test_research_bundle_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 3/0/2/0/3/0 |
@@ -666,11 +666,11 @@ I=private 호출 수, R=소스/출력 파일 읽기 수, D=디렉터리 나열 �
 | [test_top20_market_repair_worker_controller.py](../tests/unit/test_top20_market_repair_worker_controller.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_top20_program_shutdown.py](../tests/unit/test_top20_program_shutdown.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/11/0/0 |
 | [test_top20_replay_execution.py](../tests/unit/test_top20_replay_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/2/0/0/0 |
-| [test_top20_replay_outbox.py](../tests/unit/test_top20_replay_outbox.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/1/2/0/2/2 |
+| [test_top20_replay_outbox.py](../tests/unit/test_top20_replay_outbox.py) | 기준 미등록 → P2 등록 | P2 TOP20 replay boundaries 편입; 실제 파일 seed 복원·foreign/corrupt 거부·ACK loss restart 7건 | 1/1/2/0/2/2 |
 | [test_top20_replay_runtime.py](../tests/unit/test_top20_replay_runtime.py) | 기준 미등록 → P2 등록 | P2 causal lifecycle 편입; 실제 executor pending·취소 drain·timeout quarantine·native broker late 완료 8건 | 1/0/1/4/0/0 |
-| [test_top20_replay_transport.py](../tests/unit/test_top20_replay_transport.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 2/0/15/2/0/0 |
+| [test_top20_replay_transport.py](../tests/unit/test_top20_replay_transport.py) | 기준 미등록 → P2 등록 | P2 TOP20 replay boundaries 편입; lane/spawn identity·fresh ACK·gap/registration 거부 5건; peer 오류 시 task 종료 보강 | 2/0/15/2/0/0 |
 | [test_top20_session_plan.py](../tests/unit/test_top20_session_plan.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 0/0/7/0/0/0 |
-| [test_top20_shared_execution.py](../tests/unit/test_top20_shared_execution.py) | 미등록 | 일반 후보 후속; 핵심 20개 우선, 관련 기능 변경 시 단독/정기 검증 | 1/0/2/3/0/0 |
+| [test_top20_shared_execution.py](../tests/unit/test_top20_shared_execution.py) | 기준 미등록 → P2 등록 | P2 TOP20 replay boundaries 편입; 같은 clock/runtime/lease 소유·native peer overlap·반복 취소 drain 7건 | 1/0/2/3/0/0 |
 | [test_top20_trade_value_collector.py](../tests/unit/test_top20_trade_value_collector.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_trade_analysis_preparation_service.py](../tests/unit/test_trade_analysis_preparation_service.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
 | [test_trade_chart.py](../tests/unit/test_trade_chart.py) | 149 등록 | 유지; 현재 CI 검증, 즉시 수정 근거 없음 | 0/0/0/0/0/0 |
