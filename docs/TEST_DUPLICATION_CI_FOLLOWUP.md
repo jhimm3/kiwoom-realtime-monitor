@@ -859,5 +859,18 @@ B7을 포함한 최종 Windows `all-local`은
 `tmp/regression/batch07-all-local-final/run.json`에서 408개 모듈·3,670건·268 worker를 모두 발견·실행해
 통과했다. failure/error/skip/unrun/timeout/missing module은 0이며, 모든 worker 결과가 `passed`다.
 변경된 profile manifest가 최종 실행 입력에 포함됐다. `git diff --check`도 통과했다.
-게시 후 GitHub hosted Windows all-local 및 disposable PostgreSQL job 결과는 아래에 기록한다.
-main 병합과 NAS 운영 DB 검증·배포는 이 작업 범위에 포함되지 않는다.
+게시한 commit `4d7fffd819a9d84eeb9a3f5c0c1a86e6933bbc5e`의 [B7 hosted run
+37965231726](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37965231726)은 disposable
+PostgreSQL job은 성공했으나 Windows all-local에서 `test_stock_repository` 한 건이 실패했다. 실패 worker는
+실패 assertion 뒤 정상 종료했고 worker tree 268/268 종료, 잔류 자손·timeout·skip·미실행은 0이었다.
+원인은 이 테스트만 UTC `date.today()`를 기준일로 사용해 DB의 SQLite UTC timestamp를 KST 날짜로 해석하는
+제품 기준과 하루 차이가 날 수 있는 fixture였다. 제품 코드와 assertion은 유지하고 기준일을
+`daily_query_date()`로 맞췄다.
+
+수정 후 `test_stock_repository` 13건, B7 선택 profile 19개 모듈/114건이 통과했다. 신규 모듈 guard도
+통과했다. 최종 Windows `all-local` 재실행은
+`tmp/regression/batch07-all-local-final-ci-fix/run.json`에서 408개 모듈·3,670/3,670건·268/268 worker
+통과다. 실패·오류·skip·미실행·timeout·누락 모듈·잔류 자손은 0이며 worker/process tree 종료는 각각
+268/268이다. 수정된 `test_stock_repository`의 새 hash가 회귀 manifest에 포함됐다. 이 수정이 포함된
+commit의 최종 GitHub hosted all-local 및 disposable PostgreSQL 결과는 재실행 후 기록한다. main 병합과
+NAS 운영 DB 검증·배포는 이 작업 범위에 포함되지 않는다.

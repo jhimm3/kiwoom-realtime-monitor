@@ -10,6 +10,7 @@ from pathlib import Path
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
 from kiwoom_monitor.application.historical_high_service import HistoricalHighEvidence
+from kiwoom_monitor.application.daily_bar_coverage import daily_query_date
 
 
 class StockRepositoryTests(unittest.TestCase):
@@ -189,7 +190,7 @@ class StockRepositoryTests(unittest.TestCase):
             Database(database_path).initialize()
             stocks = StockRepository(database_path)
             stocks.upsert("005930", "삼성전자")
-            today = date.today().isoformat()
+            today = daily_query_date().isoformat()
 
             stocks.update_fundamentals("005930", 2_000_000, 55.5, 72_000)
             self.assertEqual(("005930",), stocks.fundamentals_to_refresh(("005930",), today))
