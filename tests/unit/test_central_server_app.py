@@ -1440,7 +1440,7 @@ def market_read_contract_app(app_factory, database_path):
     from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
     from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
     store = SQLiteQueryStore(database_path)
-    at = datetime(2026, 9, 14, 10, 4, 40)
+    at = datetime(2026, 9, 14, 10, 4, 40, tzinfo=KST)
     clock = datetime(2026, 9, 14, 16, tzinfo=KST).timestamp()
 
     class FixedNow(datetime):
