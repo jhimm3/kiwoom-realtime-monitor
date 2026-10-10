@@ -1,0 +1,2378 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "input_control": "native SQLite documents and completed minute/daily bars; fixed clocks; existing broker constructor and collector status doubles verify HTTP transport policy; native readers observed without replacing behavior",
+  "results": [
+    [
+      {
+        "name": "unauthorized",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "unknown-path",
+        "status": 404,
+        "headers": {
+          "content-length": "22",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "Not Found"
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "missing-fields",
+        "status": 422,
+        "headers": {
+          "content-length": "164",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "path"
+              ],
+              "msg": "Field required",
+              "input": {}
+            }
+          ]
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "short-id",
+        "status": 422,
+        "headers": {
+          "content-length": "152",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_too_short",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "String should have at least 7 characters",
+              "input": "short",
+              "ctx": {
+                "min_length": 7
+              }
+            }
+          ]
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "invalid-body",
+        "status": 422,
+        "headers": {
+          "content-length": "109",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "dict_type",
+              "loc": [
+                "body",
+                "body"
+              ],
+              "msg": "Input should be a valid dictionary",
+              "input": []
+            }
+          ]
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "null-path",
+        "status": 422,
+        "headers": {
+          "content-length": "109",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_type",
+              "loc": [
+                "body",
+                "path"
+              ],
+              "msg": "Input should be a valid string",
+              "input": null
+            }
+          ]
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "account-scope-required-ka10075",
+        "status": 400,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_SCOPE_REQUIRED"
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "account-scope-required-ka10076",
+        "status": 400,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_SCOPE_REQUIRED"
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "account-scope-required-kt00018",
+        "status": 400,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_SCOPE_REQUIRED"
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "account-scope-required-kt00001",
+        "status": 400,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_SCOPE_REQUIRED"
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10001-fresh",
+        "status": 200,
+        "headers": {
+          "content-length": "109",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "mac": "1000",
+            "dstr_rt": "40"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10001-fresh-NX",
+        "status": 200,
+        "headers": {
+          "content-length": "109",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "mac": "1000",
+            "dstr_rt": "40"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10001-fresh-AL",
+        "status": 200,
+        "headers": {
+          "content-length": "109",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "mac": "1000",
+            "dstr_rt": "40"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10001-stale",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "000660",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10001-malformed",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "035420",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10001-missing",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "999999",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10001-empty",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10001-continuation-bypasses-archive",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10100-fresh",
+        "status": 200,
+        "headers": {
+          "content-length": "97",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "nxtEnable": "Y"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_nxt_eligibility",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10100-fresh-NX",
+        "status": 200,
+        "headers": {
+          "content-length": "97",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "nxtEnable": "Y"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_nxt_eligibility",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10100-fresh-AL",
+        "status": 200,
+        "headers": {
+          "content-length": "97",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "nxtEnable": "Y"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_nxt_eligibility",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10100-stale",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_nxt_eligibility",
+                "000660",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10100-malformed",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_nxt_eligibility",
+                "035420",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10100-missing",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_nxt_eligibility",
+                "999999",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10100-empty",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10100-continuation-bypasses-archive",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10080-complete",
+        "status": 200,
+        "headers": {
+          "content-length": "334",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "stk_min_pole_chart_qry": [
+              {
+                "cntr_tm": "20260914100100",
+                "open_pric": "100",
+                "high_pric": "110",
+                "low_pric": "90",
+                "cur_prc": "105",
+                "trde_qty": "11"
+              },
+              {
+                "cntr_tm": "20260914100000",
+                "open_pric": "100",
+                "high_pric": "110",
+                "low_pric": "90",
+                "cur_prc": "105",
+                "trde_qty": "10"
+              }
+            ]
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "market_data_coverage",
+                "2026-09-14:005930:KRX",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [
+            [
+              [
+                "005930",
+                "2026-09-14",
+                "KRX"
+              ],
+              {}
+            ]
+          ],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10080-NXT-unconfirmed",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "market_data_coverage",
+                "2026-09-14:005930:NXT",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10080-invalid-date",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10080-missing-code",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10081-complete",
+        "status": 200,
+        "headers": {
+          "content-length": "351",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "stk_dt_pole_chart_qry": [
+              {
+                "date": "20260914",
+                "open_pric": "100",
+                "high_pric": "110",
+                "low_pric": "90",
+                "cur_prc": "105",
+                "trde_qty": "10",
+                "trde_prica": "20"
+              },
+              {
+                "date": "20260911",
+                "open_pric": "100",
+                "high_pric": "110",
+                "low_pric": "90",
+                "cur_prc": "105",
+                "trde_qty": "10",
+                "trde_prica": "20"
+              }
+            ]
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "market_data_coverage_daily",
+                "005930:KRX",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": [
+            [
+              [
+                "005930",
+                "KRX",
+                5000
+              ],
+              {}
+            ]
+          ]
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10081-NXT-unconfirmed",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "market_data_coverage_daily",
+                "005930:NXT",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10081-invalid-date",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10081-missing-code",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "broker-only-api",
+        "status": 503,
+        "headers": {
+          "content-length": "70",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "서버에 키움 API 키가 설정되지 않았습니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      }
+    ],
+    [
+      {
+        "name": "unauthorized",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "unknown-path",
+        "status": 404,
+        "headers": {
+          "content-length": "22",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "Not Found"
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "missing-fields",
+        "status": 422,
+        "headers": {
+          "content-length": "164",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "path"
+              ],
+              "msg": "Field required",
+              "input": {}
+            }
+          ]
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "short-id",
+        "status": 422,
+        "headers": {
+          "content-length": "152",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_too_short",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "String should have at least 7 characters",
+              "input": "short",
+              "ctx": {
+                "min_length": 7
+              }
+            }
+          ]
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "invalid-body",
+        "status": 422,
+        "headers": {
+          "content-length": "109",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "dict_type",
+              "loc": [
+                "body",
+                "body"
+              ],
+              "msg": "Input should be a valid dictionary",
+              "input": []
+            }
+          ]
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "null-path",
+        "status": 422,
+        "headers": {
+          "content-length": "109",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_type",
+              "loc": [
+                "body",
+                "path"
+              ],
+              "msg": "Input should be a valid string",
+              "input": null
+            }
+          ]
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "account-scope-required-ka10075",
+        "status": 400,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_SCOPE_REQUIRED"
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "account-scope-required-ka10076",
+        "status": 400,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_SCOPE_REQUIRED"
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "account-scope-required-kt00018",
+        "status": 400,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_SCOPE_REQUIRED"
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "account-scope-required-kt00001",
+        "status": 400,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_SCOPE_REQUIRED"
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10001-fresh",
+        "status": 200,
+        "headers": {
+          "content-length": "109",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "mac": "1000",
+            "dstr_rt": "40"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10001-fresh-NX",
+        "status": 200,
+        "headers": {
+          "content-length": "109",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "mac": "1000",
+            "dstr_rt": "40"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10001-fresh-AL",
+        "status": 200,
+        "headers": {
+          "content-length": "109",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "mac": "1000",
+            "dstr_rt": "40"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10001-stale",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "000660",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10001",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "000660"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10001-malformed",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "035420",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10001",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "035420"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10001-missing",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "999999",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10001",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "999999"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10001-empty",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10001",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": ""
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10001-continuation-bypasses-archive",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10001",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "005930"
+              }
+            ],
+            {
+              "cont_yn": "Y",
+              "next_key": "cursor-1"
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10100-fresh",
+        "status": 200,
+        "headers": {
+          "content-length": "97",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "nxtEnable": "Y"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_nxt_eligibility",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10100-fresh-NX",
+        "status": 200,
+        "headers": {
+          "content-length": "97",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "nxtEnable": "Y"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_nxt_eligibility",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10100-fresh-AL",
+        "status": 200,
+        "headers": {
+          "content-length": "97",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "nxtEnable": "Y"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_nxt_eligibility",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10100-stale",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_nxt_eligibility",
+                "000660",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10100",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "000660"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10100-malformed",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_nxt_eligibility",
+                "035420",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10100",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "035420"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10100-missing",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_nxt_eligibility",
+                "999999",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10100",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "999999"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10100-empty",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10100",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": ""
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10100-continuation-bypasses-archive",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10100",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "005930"
+              }
+            ],
+            {
+              "cont_yn": "Y",
+              "next_key": "cursor-1"
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10080-complete",
+        "status": 200,
+        "headers": {
+          "content-length": "334",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "stk_min_pole_chart_qry": [
+              {
+                "cntr_tm": "20260914100100",
+                "open_pric": "100",
+                "high_pric": "110",
+                "low_pric": "90",
+                "cur_prc": "105",
+                "trde_qty": "11"
+              },
+              {
+                "cntr_tm": "20260914100000",
+                "open_pric": "100",
+                "high_pric": "110",
+                "low_pric": "90",
+                "cur_prc": "105",
+                "trde_qty": "10"
+              }
+            ]
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "market_data_coverage",
+                "2026-09-14:005930:KRX",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [
+            [
+              [
+                "005930",
+                "2026-09-14",
+                "KRX"
+              ],
+              {}
+            ]
+          ],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10080-NXT-unconfirmed",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "market_data_coverage",
+                "2026-09-14:005930:NXT",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10080",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "005930_NX",
+                "base_dt": "20260914"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10080-invalid-date",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10080",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "005930",
+                "base_dt": "invalid"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10080-missing-code",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10080",
+              "/api/dostk/stkinfo",
+              {
+                "base_dt": "20260914"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10081-complete",
+        "status": 200,
+        "headers": {
+          "content-length": "351",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "stk_dt_pole_chart_qry": [
+              {
+                "date": "20260914",
+                "open_pric": "100",
+                "high_pric": "110",
+                "low_pric": "90",
+                "cur_prc": "105",
+                "trde_qty": "10",
+                "trde_prica": "20"
+              },
+              {
+                "date": "20260911",
+                "open_pric": "100",
+                "high_pric": "110",
+                "low_pric": "90",
+                "cur_prc": "105",
+                "trde_qty": "10",
+                "trde_prica": "20"
+              }
+            ]
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "market_data_coverage_daily",
+                "005930:KRX",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": [
+            [
+              [
+                "005930",
+                "KRX",
+                5000
+              ],
+              {}
+            ]
+          ]
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "ka10081-NXT-unconfirmed",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "market_data_coverage_daily",
+                "005930:NXT",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10081",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "005930_NX",
+                "base_dt": "20260914"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10081-invalid-date",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10081",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "005930",
+                "base_dt": "invalid"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "ka10081-missing-code",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10081",
+              "/api/dostk/stkinfo",
+              {
+                "base_dt": "20260914"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "broker-only-api",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10004",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "005930"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "broker-error-invalid-query",
+        "status": 400,
+        "headers": {
+          "content-length": "26",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid-query"
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10004",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "005930"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "broker-error-query-unavailable",
+        "status": 502,
+        "headers": {
+          "content-length": "30",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "query-unavailable"
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10004",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "005930"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      },
+      {
+        "name": "reconnecting-blocks-broker",
+        "status": 503,
+        "headers": {
+          "content-length": "113",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": {
+            "code": "REALTIME_RECONNECTING",
+            "connection_status": {
+              "planned_reconnect": true,
+              "phase": "RECONNECTING"
+            }
+          }
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "archive-precedes-reconnecting-gate",
+        "status": 200,
+        "headers": {
+          "content-length": "109",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "mac": "1000",
+            "dstr_rt": "40"
+          },
+          "has_next": false,
+          "next_key": "",
+          "cache_hit": false,
+          "archive_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [
+            [
+              [
+                "stock_fundamentals",
+                "005930",
+                1
+              ],
+              {}
+            ]
+          ],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": []
+      },
+      {
+        "name": "paused-without-planned-reconnect",
+        "status": 200,
+        "headers": {
+          "content-length": "96",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "source": "broker",
+            "value": 9
+          },
+          "has_next": true,
+          "next_key": "cursor-2",
+          "cache_hit": true
+        },
+        "storage_hash": "56a9aa5f3eb5ec2604a0b08becd57bfb5a34821550b661ccec46c7b25b82060b",
+        "store_calls": {
+          "load_documents": [],
+          "load_minute_bars": [],
+          "load_daily_bars": []
+        },
+        "broker_calls": [
+          [
+            [
+              "ka10004",
+              "/api/dostk/stkinfo",
+              {
+                "stk_cd": "005930"
+              }
+            ],
+            {
+              "cont_yn": "N",
+              "next_key": ""
+            }
+          ]
+        ]
+      }
+    ]
+  ]
+}

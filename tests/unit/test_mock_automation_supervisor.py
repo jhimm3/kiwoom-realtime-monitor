@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import unittest
+import json
+import secrets
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from kiwoom_monitor.application.mock_automation_admission import MockAutomationDesiredState
 from kiwoom_monitor.central_server.mock_automation_supervisor import (
@@ -17,6 +22,112 @@ ACCOUNT_REF = "af64a3fa-197f-49df-8e8b-65b71bee02d9"
 PROFILE_ID = "mock-profile"
 SPEC_ID = "mock_automation_spec_1"
 NOW = datetime(2026, 9, 21, tzinfo=timezone.utc)
+
+
+@contextmanager
+def automation_http_contract_app(app_factory, database_path, configured):
+    from kiwoom_monitor.central_server.config import CentralServerSettings
+    settings = CentralServerSettings(f"sqlite:///{database_path}", "private-token",
+        kiwoom_environment="mock", autonomous_top20_enabled=False,
+        market_event_collection_enabled=False, news_history_jobs_enabled=False,
+        credential_directory=str(database_path.parent / "vault") if configured else "",
+        account_identity_registry_enabled=configured, account_identity_hmac_key=secrets.token_hex(32))
+    if not configured:
+        yield app_factory(settings), None
+        return
+    supervisor = MagicMock(spec=MockAutomationSupervisor)
+    supervisor.status.return_value = {"account_ref": ACCOUNT_REF, "state": "STOPPED", "control_revision": 7}
+    for method in ("activate", "stop", "resume"):
+        getattr(supervisor, method).return_value = {"operation": method, "account_ref": ACCOUNT_REF, "orders_enabled": False}
+    with patch("kiwoom_monitor.central_server.mock_automation_supervisor.MockAutomationSupervisor", return_value=supervisor) as constructor:
+        yield app_factory(settings), supervisor
+    if constructor.call_count != 1 or supervisor.start.await_count != 1 or supervisor.close.await_count != 1:
+        raise AssertionError("app-owned supervisor construction/start/close behavior changed")
+
+
+def capture_automation_http_contract(client, supervisor):
+    from kiwoom_monitor.central_server.credential_runtime import CredentialOperationError
+    headers = {"Authorization": "Bearer private-token"}
+    prefix = "configured" if supervisor is not None else "unavailable"
+    cases = []
+    methods = ("status", "activate", "stop", "resume")
+
+    def calls(name):
+        if supervisor is None:
+            return []
+        mock = getattr(supervisor, name)
+        return mock.call_args_list if name == "status" else mock.await_args_list
+
+    def request(name, method, path, *, authenticated=True, **kwargs):
+        counts = {key: len(calls(key)) for key in methods}
+        response = client.request(method, path, headers=headers if authenticated else {}, **kwargs)
+        invoked = [{"method": key, "args": list(call.args), "kwargs": call.kwargs}
+                   for key in methods for call in calls(key)[counts[key]:]]
+        cases.append({"name": prefix + ":" + name, "status": response.status_code,
+                      "headers": dict(response.headers), "body": response.json(), "supervisor_calls": invoked})
+
+    status = f"/api/v1/mock-automation/accounts/{ACCOUNT_REF}"
+    params = {"credential_profile_id": PROFILE_ID}
+    start = {"account_ref": ACCOUNT_REF, "credential_profile_id": PROFILE_ID, "spec_id": SPEC_ID,
+             "expected_settings_revision": 3, "credential_revision": 5}
+    stop = {"account_ref": ACCOUNT_REF, "credential_profile_id": PROFILE_ID, "spec_id": SPEC_ID,
+            "expected_control_revision": 7, "reason": "사용자 중지"}
+    resume = {**stop, "expected_settings_revision": 3, "credential_revision": 5}
+    request("status-unauthorized", "GET", status, authenticated=False, params=params)
+    request("status-missing-profile", "GET", status)
+    request("status-invalid-profile", "GET", status, params={"credential_profile_id": "bad/profile"})
+    request("status", "GET", status, params=params)
+    for operation, body in (("start", start), ("stop", stop), ("resume", resume)):
+        path = "/api/v1/mock-automation/" + operation
+        request(operation + "-unauthorized", "POST", path, authenticated=False, json=body)
+        request(operation + "-empty", "POST", path, json={})
+        request(operation + "-extra-field", "POST", path, json={**body, "unexpected": True})
+        revision = "expected_settings_revision" if operation == "start" else "expected_control_revision"
+        request(operation + "-boolean-revision", "POST", path, json={**body, revision: True})
+        request(operation + "-string-revision", "POST", path, json={**body, revision: "7"})
+        request(operation + "-invalid-account", "POST", path, json={**body, "account_ref": "short"})
+        if operation != "start":
+            request(operation + "-empty-reason", "POST", path, json={**body, "reason": ""})
+        request(operation, "POST", path, json=body)
+        if supervisor is None:
+            continue
+        backend = getattr(supervisor, "activate" if operation == "start" else operation)
+        for label, error in (
+            ("supervisor-conflict", MockAutomationSupervisorError("STALE_CONTROL_REVISION", 409)),
+            ("supervisor-blocked", MockAutomationSupervisorError("ADMISSION_REQUIRED", 412)),
+            ("credential-forbidden", CredentialOperationError("PROFILE_DISABLED", 403)),
+            ("credential-not-found", CredentialOperationError("PROFILE_NOT_FOUND", 404)),
+            ("invalid-operation", ValueError("INVALID_SPEC")),
+            ("runtime-conflict", RuntimeError("RUN_ALREADY_ACTIVE")),
+        ):
+            backend.side_effect = error
+            request(operation + "-" + label, "POST", path, json=body)
+        backend.side_effect = None
+    lifecycle = None if supervisor is None else {"start": supervisor.start.await_count}
+    return {"cases": cases, "lifecycle": lifecycle}
+
+
+class MockAutomationHTTPContractTests(unittest.TestCase):
+    def test_http_contract_and_supervisor_arguments_match_pre_extraction_baseline(self):
+        from fastapi.testclient import TestClient
+        from kiwoom_monitor.central_server.app import create_app
+        baseline = Path(__file__).resolve().parents[2] / "tests/fixtures/api_contract_baselines/mock_automation_http_v1.json"
+        expected = json.loads(baseline.read_text(encoding="utf-8"))["results"]
+        actual = []
+        with tempfile.TemporaryDirectory() as directory:
+            for configured in (True, False):
+                path = Path(directory) / str(configured) / "automation.sqlite3"
+                path.parent.mkdir()
+                with automation_http_contract_app(create_app, path, configured) as (app, supervisor):
+                    with TestClient(app) as client:
+                        actual.append(capture_automation_http_contract(client, supervisor))
+        self.assertEqual(len(expected), len(actual))
+        for original, observed in zip(expected, actual, strict=True):
+            self.assertEqual(original["lifecycle"], observed["lifecycle"])
+            self.assertEqual([case["name"] for case in original["cases"]], [case["name"] for case in observed["cases"]])
+            for before, after in zip(original["cases"], observed["cases"], strict=True):
+                with self.subTest(case=before["name"]):
+                    self.assertEqual(before, after)
 
 
 class _Control:

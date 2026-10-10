@@ -10,14 +10,13 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
     StockPriceReference, TradeTick, ViEvent, parse_stock_price_references,
     parse_vi_events,
 )
 
-from .database import QueryStore
 from .diagnostic_replay_contract import capture_owner, operation_identity
 from .diagnostic_replay_runtime import owned_create_task, owned_to_thread
 from .diagnostic_trace import input_token
@@ -26,6 +25,27 @@ from .rest_broker import CentralRestBroker
 
 
 logger = logging.getLogger(__name__)
+
+
+class MarketEventStore(Protocol):
+    """MarketEventService가 사용하는 시장 사실·cohort 저장 계약."""
+
+    def load_hot_cohort(self, *, active_only: bool = False) -> list[dict[str, Any]]: ...
+
+    def record_hot_cohort_revision(
+        self, value: dict[str, Any], current: dict[str, Any] | None = None,
+    ) -> bool: ...
+
+    def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
+
+    def load_documents(
+        self, collection: str, owner: str = "", limit: int = 1000, offset: int = 0,
+        updated_after: float = 0.0,
+    ) -> list[dict[str, Any]]: ...
+
+    def append_upper_limit_facts(self, values: list[dict[str, Any]]) -> int: ...
+
+    def append_vi_events(self, values: list[dict[str, Any]]) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +85,7 @@ class MarketEventService:
     """조건 선택 정책, cohort 수명, VI/상한가 사실을 소유한다."""
 
     def __init__(
-        self, broker: CentralRestBroker, hub: RealtimeHub, store: QueryStore, *,
+        self, broker: CentralRestBroker, hub: RealtimeHub, store: MarketEventStore, *,
         exact_condition_name: str = "", condition_substring: str = "15%",
         condition_enabled: bool = True,
         now_provider: Callable[[], datetime] = datetime.now,

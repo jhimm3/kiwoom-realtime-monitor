@@ -1,0 +1,2506 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "input_control": "native SQLite execution ledger/repository/lifecycle/runtime/gateways; constructor owner double and fake external order transport; fixed runtime/lease clocks; deterministic business IDs and event hashes",
+  "results": [
+    [
+      {
+        "name": "unauthorized-POST/api/v1/mock/orders",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unauthorized-GET/api/v1/mock/orders/missing",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unauthorized-POST/api/v1/mock/orders/missing/cancel",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unauthorized-POST/api/v2/mock/accounts/00000000-0000-0000-0000-000000000002/orders",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unauthorized-GET/api/v2/mock/accounts/00000000-0000-0000-0000-000000000002/orders/missing",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unauthorized-POST/api/v2/mock/accounts/00000000-0000-0000-0000-000000000002/orders/missing/cancel",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unauthorized-GET/api/v2/mock/accounts/00000000-0000-0000-0000-000000000002/execution-events",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "invalid-legacy",
+        "status": 422,
+        "headers": {
+          "content-length": "406",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "request_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "symbol"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "side"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "quantity"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "limit_price"
+              ],
+              "msg": "Field required",
+              "input": {}
+            }
+          ]
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "strict-scoped-quantity",
+        "status": 422,
+        "headers": {
+          "content-length": "110",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "int_type",
+              "loc": [
+                "body",
+                "quantity"
+              ],
+              "msg": "Input should be a valid integer",
+              "input": "1"
+            }
+          ]
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-extra",
+        "status": 422,
+        "headers": {
+          "content-length": "114",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "extra_forbidden",
+              "loc": [
+                "body",
+                "extra"
+              ],
+              "msg": "Extra inputs are not permitted",
+              "input": true
+            }
+          ]
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "missing-read-context",
+        "status": 422,
+        "headers": {
+          "content-length": "291",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "credential_profile_id"
+              ],
+              "msg": "Field required",
+              "input": null
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "expected_binding_revision"
+              ],
+              "msg": "Field required",
+              "input": null
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "environment"
+              ],
+              "msg": "Field required",
+              "input": null
+            }
+          ]
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "invalid-event-limit",
+        "status": 422,
+        "headers": {
+          "content-length": "147",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "less_than_equal",
+              "loc": [
+                "query",
+                "limit"
+              ],
+              "msg": "Input should be less than or equal to 1000",
+              "input": "1001",
+              "ctx": {
+                "le": 1000
+              }
+            }
+          ]
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "invalid-cancel",
+        "status": 422,
+        "headers": {
+          "content-length": "145",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "body",
+                "quantity"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": -1,
+              "ctx": {
+                "ge": 0
+              }
+            }
+          ]
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "legacy-disabled",
+        "status": 503,
+        "headers": {
+          "content-length": "68",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "모의주문 전송이 활성화되지 않았습니다."
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-owner-absent",
+        "status": 503,
+        "headers": {
+          "content-length": "38",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "PROFILE_RUNTIME_NOT_READY"
+        },
+        "storage_hash": "63d15ba923f075c66d1163487d271de073933e01e9aa17706c4e1df1cb965be0",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      }
+    ],
+    [
+      {
+        "name": "unauthorized-POST/api/v1/mock/orders",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unauthorized-GET/api/v1/mock/orders/missing",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unauthorized-POST/api/v1/mock/orders/missing/cancel",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unauthorized-POST/api/v2/mock/accounts/00000000-0000-0000-0000-000000000002/orders",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unauthorized-GET/api/v2/mock/accounts/00000000-0000-0000-0000-000000000002/orders/missing",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unauthorized-POST/api/v2/mock/accounts/00000000-0000-0000-0000-000000000002/orders/missing/cancel",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unauthorized-GET/api/v2/mock/accounts/00000000-0000-0000-0000-000000000002/execution-events",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "invalid-legacy",
+        "status": 422,
+        "headers": {
+          "content-length": "406",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "request_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "symbol"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "side"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "quantity"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "limit_price"
+              ],
+              "msg": "Field required",
+              "input": {}
+            }
+          ]
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "strict-scoped-quantity",
+        "status": 422,
+        "headers": {
+          "content-length": "110",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "int_type",
+              "loc": [
+                "body",
+                "quantity"
+              ],
+              "msg": "Input should be a valid integer",
+              "input": "1"
+            }
+          ]
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-extra",
+        "status": 422,
+        "headers": {
+          "content-length": "114",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "extra_forbidden",
+              "loc": [
+                "body",
+                "extra"
+              ],
+              "msg": "Extra inputs are not permitted",
+              "input": true
+            }
+          ]
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "missing-read-context",
+        "status": 422,
+        "headers": {
+          "content-length": "291",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "credential_profile_id"
+              ],
+              "msg": "Field required",
+              "input": null
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "expected_binding_revision"
+              ],
+              "msg": "Field required",
+              "input": null
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "environment"
+              ],
+              "msg": "Field required",
+              "input": null
+            }
+          ]
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "invalid-event-limit",
+        "status": 422,
+        "headers": {
+          "content-length": "147",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "less_than_equal",
+              "loc": [
+                "query",
+                "limit"
+              ],
+              "msg": "Input should be less than or equal to 1000",
+              "input": "1001",
+              "ctx": {
+                "le": 1000
+              }
+            }
+          ]
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "invalid-cancel",
+        "status": 422,
+        "headers": {
+          "content-length": "145",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "body",
+                "quantity"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": -1,
+              "ctx": {
+                "ge": 0
+              }
+            }
+          ]
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "wrong-binding",
+        "status": 409,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_CONTEXT_MISMATCH"
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "wrong-account",
+        "status": 409,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_CONTEXT_MISMATCH"
+        },
+        "storage_hash": "296a78fa1e46a971043d787d1d56a3da13f4c07970e3305411bc6ac3ebd7f9f1",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "legacy-submit",
+        "status": 200,
+        "headers": {
+          "content-length": "1712",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+          "request_id": "http-first",
+          "run_id": "run-contract-mock",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "ACCEPTED",
+          "broker_order_id": "broker-contract-mock-1",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_fa40fa4e10e66b7a7150ec2e8327d9733bbb5e18c2692979b17ab38b05b6ff2e",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_9797f46056ffcb0d11af8951f7ccace98ee00b307631c9a496d75067b061676e",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_b643121fd9a820f40278edfb969f6041258ee8d30609a70ce4ba913a2bd44983",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-1",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ]
+        },
+        "storage_hash": "9bf4d6960a8384ff676a3aa2d0baae875d633211414f3ba98c1467d7cd0fdfa5",
+        "transport_calls": {
+          "contract-mock": [
+            {
+              "action": "submit",
+              "intent": {
+                "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+                "run_id": "run-contract-mock",
+                "decision_id": "manual:http-first",
+                "account_ref": "00000000-0000-0000-0000-000000000002",
+                "environment": "mock",
+                "symbol": "005930",
+                "venue": "KRX",
+                "side": "BUY",
+                "quantity": 1,
+                "order_type": "LIMIT",
+                "limit_price": 70000,
+                "created_at": "2026-09-15T00:00:00+00:00",
+                "expires_at": "2026-09-15T00:02:00+00:00",
+                "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14"
+              }
+            }
+          ],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "legacy-duplicate-no-resend",
+        "status": 200,
+        "headers": {
+          "content-length": "1712",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+          "request_id": "http-first",
+          "run_id": "run-contract-mock",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "ACCEPTED",
+          "broker_order_id": "broker-contract-mock-1",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_fa40fa4e10e66b7a7150ec2e8327d9733bbb5e18c2692979b17ab38b05b6ff2e",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_9797f46056ffcb0d11af8951f7ccace98ee00b307631c9a496d75067b061676e",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_b643121fd9a820f40278edfb969f6041258ee8d30609a70ce4ba913a2bd44983",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-1",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ]
+        },
+        "storage_hash": "9bf4d6960a8384ff676a3aa2d0baae875d633211414f3ba98c1467d7cd0fdfa5",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "legacy-request-conflict",
+        "status": 400,
+        "headers": {
+          "content-length": "65",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "request_id already belongs to a different mock order"
+        },
+        "storage_hash": "9bf4d6960a8384ff676a3aa2d0baae875d633211414f3ba98c1467d7cd0fdfa5",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "legacy-read",
+        "status": 200,
+        "headers": {
+          "content-length": "1712",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+          "request_id": "http-first",
+          "run_id": "run-contract-mock",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "ACCEPTED",
+          "broker_order_id": "broker-contract-mock-1",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_fa40fa4e10e66b7a7150ec2e8327d9733bbb5e18c2692979b17ab38b05b6ff2e",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_9797f46056ffcb0d11af8951f7ccace98ee00b307631c9a496d75067b061676e",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_b643121fd9a820f40278edfb969f6041258ee8d30609a70ce4ba913a2bd44983",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-1",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ]
+        },
+        "storage_hash": "9bf4d6960a8384ff676a3aa2d0baae875d633211414f3ba98c1467d7cd0fdfa5",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "legacy-missing",
+        "status": 404,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "'unknown order intent: missing'"
+        },
+        "storage_hash": "9bf4d6960a8384ff676a3aa2d0baae875d633211414f3ba98c1467d7cd0fdfa5",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "legacy-cancel",
+        "status": 200,
+        "headers": {
+          "content-length": "2501",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+          "request_id": "http-first",
+          "run_id": "run-contract-mock",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "CANCEL_PENDING",
+          "broker_order_id": "broker-contract-mock-1",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_fa40fa4e10e66b7a7150ec2e8327d9733bbb5e18c2692979b17ab38b05b6ff2e",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_9797f46056ffcb0d11af8951f7ccace98ee00b307631c9a496d75067b061676e",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_b643121fd9a820f40278edfb969f6041258ee8d30609a70ce4ba913a2bd44983",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-1",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_d7a5d81cbab37114ca6cad0c9e47f3de77d8dfb3bfc413763de5b7f1941c06da",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "CANCEL_STARTED",
+              "state": "CANCEL_PENDING",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_64d20b3eb2bf72b356d004ca9dfa19fcd7f61a9775d97aa73672642ff1ac92d5",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "event_type": "CANCEL_ACCEPTED",
+              "state": "CANCEL_PENDING",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ]
+        },
+        "storage_hash": "0d582c7063e1d0d8e3354752337927b6decc1a2aa26a8ce590b8db419f4a8230",
+        "transport_calls": {
+          "contract-mock": [
+            {
+              "action": "cancel",
+              "intent": {
+                "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+                "run_id": "run-contract-mock",
+                "decision_id": "manual:http-first",
+                "account_ref": "00000000-0000-0000-0000-000000000002",
+                "environment": "mock",
+                "symbol": "005930",
+                "venue": "KRX",
+                "side": "BUY",
+                "quantity": 1,
+                "order_type": "LIMIT",
+                "limit_price": 70000,
+                "created_at": "2026-09-15T00:00:00+00:00",
+                "expires_at": "2026-09-15T00:02:00+00:00",
+                "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14"
+              },
+              "broker_order_id": "broker-contract-mock-1",
+              "quantity": 0
+            }
+          ],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-submit",
+        "status": 200,
+        "headers": {
+          "content-length": "1979",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+          "request_id": "http-first",
+          "run_id": "run-contract-mock",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "ACCEPTED",
+          "broker_order_id": "broker-contract-mock-2",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_d5d6ed2c05627dad121048c69656ae276821c8ae4f038e55168bd7d0bd507513",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_bbfc4be15bf6fa91e2729c4c7d9e4c763706220e14cf8ba8fc515cc30d30c260",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_d070f4d040fd33b55c9efd40e03888297fbb7fdd56e078120cd44efb73a71fed",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-2",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ],
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-09-15T00:00:00+00:00",
+            "verification_method": "ka00001"
+          }
+        },
+        "storage_hash": "f1e44f6303d9a8c70aa7c1145ca7b99ccf413c970fc6d3ed409b206616649451",
+        "transport_calls": {
+          "contract-mock": [
+            {
+              "action": "submit",
+              "intent": {
+                "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+                "run_id": "run-contract-mock",
+                "decision_id": "manual:http-first",
+                "account_ref": "00000000-0000-0000-0000-000000000002",
+                "environment": "mock",
+                "symbol": "005930",
+                "venue": "KRX",
+                "side": "BUY",
+                "quantity": 1,
+                "order_type": "LIMIT",
+                "limit_price": 70000,
+                "created_at": "2026-09-15T00:00:00+00:00",
+                "expires_at": "2026-09-15T00:02:00+00:00",
+                "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14"
+              }
+            }
+          ],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-duplicate-no-resend",
+        "status": 200,
+        "headers": {
+          "content-length": "1979",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+          "request_id": "http-first",
+          "run_id": "run-contract-mock",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "ACCEPTED",
+          "broker_order_id": "broker-contract-mock-2",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_d5d6ed2c05627dad121048c69656ae276821c8ae4f038e55168bd7d0bd507513",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_bbfc4be15bf6fa91e2729c4c7d9e4c763706220e14cf8ba8fc515cc30d30c260",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_d070f4d040fd33b55c9efd40e03888297fbb7fdd56e078120cd44efb73a71fed",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-2",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ],
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-09-15T00:00:00+00:00",
+            "verification_method": "ka00001"
+          }
+        },
+        "storage_hash": "f1e44f6303d9a8c70aa7c1145ca7b99ccf413c970fc6d3ed409b206616649451",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "second-account-same-request",
+        "status": 200,
+        "headers": {
+          "content-length": "1987",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_scoped_290bea4041f26eb425ec6bc290c38648",
+          "request_id": "http-first",
+          "run_id": "run-contract-mock-b",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "ACCEPTED",
+          "broker_order_id": "broker-contract-mock-b-1",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_8f0129ed7266356fcb122e0b25a936bc27c183e8334d783d4d9ebe060ddc3467",
+              "intent_id": "manual_mock_scoped_290bea4041f26eb425ec6bc290c38648",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_4e54a29ea38525a2ff698e848f3b0617162766d829f9b8254427865074621498",
+              "intent_id": "manual_mock_scoped_290bea4041f26eb425ec6bc290c38648",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_727fd05416cb8ac715db30dffed4fd569e3721da7ba7c9663f98481f78c5d670",
+              "intent_id": "manual_mock_scoped_290bea4041f26eb425ec6bc290c38648",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-b-1",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ],
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000016",
+            "credential_profile_id": "contract-mock-b",
+            "binding_revision": 1,
+            "verified_at": "2026-09-15T00:00:00+00:00",
+            "verification_method": "ka00001"
+          }
+        },
+        "storage_hash": "94878c9ceb83ee6bcb0b6ca1323c237fe8930850f07ce166967474b8e2ae4251",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": [
+            {
+              "action": "submit",
+              "intent": {
+                "intent_id": "manual_mock_scoped_290bea4041f26eb425ec6bc290c38648",
+                "run_id": "run-contract-mock-b",
+                "decision_id": "manual:http-first",
+                "account_ref": "00000000-0000-0000-0000-000000000016",
+                "environment": "mock",
+                "symbol": "005930",
+                "venue": "KRX",
+                "side": "BUY",
+                "quantity": 1,
+                "order_type": "LIMIT",
+                "limit_price": 70000,
+                "created_at": "2026-09-15T00:00:00+00:00",
+                "expires_at": "2026-09-15T00:02:00+00:00",
+                "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "foreign-record-hidden",
+        "status": 404,
+        "headers": {
+          "content-length": "33",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MOCK_ORDER_NOT_FOUND"
+        },
+        "storage_hash": "94878c9ceb83ee6bcb0b6ca1323c237fe8930850f07ce166967474b8e2ae4251",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "old-run-hidden",
+        "status": 404,
+        "headers": {
+          "content-length": "33",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MOCK_ORDER_NOT_FOUND"
+        },
+        "storage_hash": "94878c9ceb83ee6bcb0b6ca1323c237fe8930850f07ce166967474b8e2ae4251",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "foreign-cancel-rejected",
+        "status": 404,
+        "headers": {
+          "content-length": "33",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MOCK_ORDER_NOT_FOUND"
+        },
+        "storage_hash": "94878c9ceb83ee6bcb0b6ca1323c237fe8930850f07ce166967474b8e2ae4251",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-read",
+        "status": 200,
+        "headers": {
+          "content-length": "1979",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+          "request_id": "http-first",
+          "run_id": "run-contract-mock",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "ACCEPTED",
+          "broker_order_id": "broker-contract-mock-2",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_d5d6ed2c05627dad121048c69656ae276821c8ae4f038e55168bd7d0bd507513",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_bbfc4be15bf6fa91e2729c4c7d9e4c763706220e14cf8ba8fc515cc30d30c260",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_d070f4d040fd33b55c9efd40e03888297fbb7fdd56e078120cd44efb73a71fed",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-2",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ],
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-09-15T00:00:00+00:00",
+            "verification_method": "ka00001"
+          }
+        },
+        "storage_hash": "94878c9ceb83ee6bcb0b6ca1323c237fe8930850f07ce166967474b8e2ae4251",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "event-first-page",
+        "status": 200,
+        "headers": {
+          "content-length": "891",
+          "content-type": "application/json"
+        },
+        "body": {
+          "events": [
+            {
+              "accepted_sequence": 1,
+              "source_event_id": "order_event_fa40fa4e10e66b7a7150ec2e8327d9733bbb5e18c2692979b17ab38b05b6ff2e",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "run_id": "run-contract-mock",
+              "decision_id": "manual:http-first",
+              "account_ref": "00000000-0000-0000-0000-000000000002",
+              "environment": "mock",
+              "symbol": "005930",
+              "venue": "KRX",
+              "side": "BUY",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-1",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ],
+          "next_cursor": 1,
+          "has_more": true,
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-09-15T00:00:00+00:00",
+            "verification_method": "ka00001"
+          }
+        },
+        "storage_hash": "94878c9ceb83ee6bcb0b6ca1323c237fe8930850f07ce166967474b8e2ae4251",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "event-next-page",
+        "status": 200,
+        "headers": {
+          "content-length": "4662",
+          "content-type": "application/json"
+        },
+        "body": {
+          "events": [
+            {
+              "accepted_sequence": 2,
+              "source_event_id": "order_event_9797f46056ffcb0d11af8951f7ccace98ee00b307631c9a496d75067b061676e",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "run_id": "run-contract-mock",
+              "decision_id": "manual:http-first",
+              "account_ref": "00000000-0000-0000-0000-000000000002",
+              "environment": "mock",
+              "symbol": "005930",
+              "venue": "KRX",
+              "side": "BUY",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-1",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "accepted_sequence": 3,
+              "source_event_id": "order_event_b643121fd9a820f40278edfb969f6041258ee8d30609a70ce4ba913a2bd44983",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "run_id": "run-contract-mock",
+              "decision_id": "manual:http-first",
+              "account_ref": "00000000-0000-0000-0000-000000000002",
+              "environment": "mock",
+              "symbol": "005930",
+              "venue": "KRX",
+              "side": "BUY",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-1",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "accepted_sequence": 4,
+              "source_event_id": "order_event_d7a5d81cbab37114ca6cad0c9e47f3de77d8dfb3bfc413763de5b7f1941c06da",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "run_id": "run-contract-mock",
+              "decision_id": "manual:http-first",
+              "account_ref": "00000000-0000-0000-0000-000000000002",
+              "environment": "mock",
+              "symbol": "005930",
+              "venue": "KRX",
+              "side": "BUY",
+              "event_type": "CANCEL_STARTED",
+              "state": "CANCEL_PENDING",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-1",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "accepted_sequence": 5,
+              "source_event_id": "order_event_64d20b3eb2bf72b356d004ca9dfa19fcd7f61a9775d97aa73672642ff1ac92d5",
+              "intent_id": "manual_mock_b8970d5de1ad133cd05d2700126286de",
+              "run_id": "run-contract-mock",
+              "decision_id": "manual:http-first",
+              "account_ref": "00000000-0000-0000-0000-000000000002",
+              "environment": "mock",
+              "symbol": "005930",
+              "venue": "KRX",
+              "side": "BUY",
+              "event_type": "CANCEL_ACCEPTED",
+              "state": "CANCEL_PENDING",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-1",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "accepted_sequence": 6,
+              "source_event_id": "order_event_d5d6ed2c05627dad121048c69656ae276821c8ae4f038e55168bd7d0bd507513",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "run_id": "run-contract-mock",
+              "decision_id": "manual:http-first",
+              "account_ref": "00000000-0000-0000-0000-000000000002",
+              "environment": "mock",
+              "symbol": "005930",
+              "venue": "KRX",
+              "side": "BUY",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-2",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "accepted_sequence": 7,
+              "source_event_id": "order_event_bbfc4be15bf6fa91e2729c4c7d9e4c763706220e14cf8ba8fc515cc30d30c260",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "run_id": "run-contract-mock",
+              "decision_id": "manual:http-first",
+              "account_ref": "00000000-0000-0000-0000-000000000002",
+              "environment": "mock",
+              "symbol": "005930",
+              "venue": "KRX",
+              "side": "BUY",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-2",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "accepted_sequence": 8,
+              "source_event_id": "order_event_d070f4d040fd33b55c9efd40e03888297fbb7fdd56e078120cd44efb73a71fed",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "run_id": "run-contract-mock",
+              "decision_id": "manual:http-first",
+              "account_ref": "00000000-0000-0000-0000-000000000002",
+              "environment": "mock",
+              "symbol": "005930",
+              "venue": "KRX",
+              "side": "BUY",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-2",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ],
+          "next_cursor": 8,
+          "has_more": false,
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-09-15T00:00:00+00:00",
+            "verification_method": "ka00001"
+          }
+        },
+        "storage_hash": "94878c9ceb83ee6bcb0b6ca1323c237fe8930850f07ce166967474b8e2ae4251",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-cancel",
+        "status": 200,
+        "headers": {
+          "content-length": "2782",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+          "request_id": "http-first",
+          "run_id": "run-contract-mock",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "CANCEL_PENDING",
+          "broker_order_id": "broker-contract-mock-2",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_d5d6ed2c05627dad121048c69656ae276821c8ae4f038e55168bd7d0bd507513",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_bbfc4be15bf6fa91e2729c4c7d9e4c763706220e14cf8ba8fc515cc30d30c260",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_d070f4d040fd33b55c9efd40e03888297fbb7fdd56e078120cd44efb73a71fed",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-2",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_f02cb10346fc03ae7c76ab90c813ff962acb26f7df349b562e95e2ea885a5b0b",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "CANCEL_STARTED",
+              "state": "CANCEL_PENDING",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_606202b496f52f139dc620fbab002f9141922cad8b358ad2ef5a8aca13bb9d29",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "CANCEL_ACCEPTED",
+              "state": "CANCEL_PENDING",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ],
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-09-15T00:00:00+00:00",
+            "verification_method": "ka00001"
+          }
+        },
+        "storage_hash": "ee02bc40b4128e4d0cc1e918740f7a4466c3473ce4589ceee8c92fb7da797469",
+        "transport_calls": {
+          "contract-mock": [
+            {
+              "action": "cancel",
+              "intent": {
+                "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+                "run_id": "run-contract-mock",
+                "decision_id": "manual:http-first",
+                "account_ref": "00000000-0000-0000-0000-000000000002",
+                "environment": "mock",
+                "symbol": "005930",
+                "venue": "KRX",
+                "side": "BUY",
+                "quantity": 1,
+                "order_type": "LIMIT",
+                "limit_price": 70000,
+                "created_at": "2026-09-15T00:00:00+00:00",
+                "expires_at": "2026-09-15T00:02:00+00:00",
+                "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14"
+              },
+              "broker_order_id": "broker-contract-mock-2",
+              "quantity": 0
+            }
+          ],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "legacy-error-ValueError",
+        "status": 400,
+        "headers": {
+          "content-length": "26",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "private error"
+        },
+        "storage_hash": "ee02bc40b4128e4d0cc1e918740f7a4466c3473ce4589ceee8c92fb7da797469",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-error-ValueError",
+        "status": 409,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MOCK_ORDER_REQUEST_CONFLICT"
+        },
+        "storage_hash": "ee02bc40b4128e4d0cc1e918740f7a4466c3473ce4589ceee8c92fb7da797469",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "legacy-error-RuntimeError",
+        "status": 502,
+        "headers": {
+          "content-length": "26",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "private error"
+        },
+        "storage_hash": "ee02bc40b4128e4d0cc1e918740f7a4466c3473ce4589ceee8c92fb7da797469",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-error-RuntimeError",
+        "status": 503,
+        "headers": {
+          "content-length": "35",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MOCK_ORDER_UNAVAILABLE"
+        },
+        "storage_hash": "ee02bc40b4128e4d0cc1e918740f7a4466c3473ce4589ceee8c92fb7da797469",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "legacy-cancel-error-KeyError",
+        "status": 404,
+        "headers": {
+          "content-length": "28",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "'private error'"
+        },
+        "storage_hash": "ee02bc40b4128e4d0cc1e918740f7a4466c3473ce4589ceee8c92fb7da797469",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-cancel-error-KeyError",
+        "status": 404,
+        "headers": {
+          "content-length": "33",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MOCK_ORDER_NOT_FOUND"
+        },
+        "storage_hash": "ee02bc40b4128e4d0cc1e918740f7a4466c3473ce4589ceee8c92fb7da797469",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "legacy-cancel-error-ValueError",
+        "status": 409,
+        "headers": {
+          "content-length": "26",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "private error"
+        },
+        "storage_hash": "ee02bc40b4128e4d0cc1e918740f7a4466c3473ce4589ceee8c92fb7da797469",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-cancel-error-ValueError",
+        "status": 409,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MOCK_ORDER_CANCEL_CONFLICT"
+        },
+        "storage_hash": "ee02bc40b4128e4d0cc1e918740f7a4466c3473ce4589ceee8c92fb7da797469",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "legacy-cancel-error-RuntimeError",
+        "status": 502,
+        "headers": {
+          "content-length": "26",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "private error"
+        },
+        "storage_hash": "ee02bc40b4128e4d0cc1e918740f7a4466c3473ce4589ceee8c92fb7da797469",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-cancel-error-RuntimeError",
+        "status": 503,
+        "headers": {
+          "content-length": "35",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MOCK_ORDER_UNAVAILABLE"
+        },
+        "storage_hash": "ee02bc40b4128e4d0cc1e918740f7a4466c3473ce4589ceee8c92fb7da797469",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "response-loss",
+        "status": 200,
+        "headers": {
+          "content-length": "1720",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_195560280737e3968a71d6b116b1bfd0",
+          "request_id": "unknown",
+          "run_id": "run-contract-mock",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "SUBMISSION_UNKNOWN",
+          "broker_order_id": "",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_e9ea744c17de60a9517a8682a3d52aae81cb0e72406a7c8a096ead5475d4d4d3",
+              "intent_id": "manual_mock_195560280737e3968a71d6b116b1bfd0",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_eafd4a4e4d520fd971fcfc4c91b8f174f4c9ee3a7bf553bf791fe95da68fe1c5",
+              "intent_id": "manual_mock_195560280737e3968a71d6b116b1bfd0",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_f322cc5b8d2cfd81d614961585f7e0619c9fa9ab86ad82c1622cfdf125929fa0",
+              "intent_id": "manual_mock_195560280737e3968a71d6b116b1bfd0",
+              "event_type": "SUBMISSION_RESPONSE_UNKNOWN",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "injected response lost",
+              "broker_as_of": null
+            }
+          ]
+        },
+        "storage_hash": "2c37d205050cf2cd081ed15ac0ee023b1a38d4ddc81f5c645046dad9b11e84a5",
+        "transport_calls": {
+          "contract-mock": [
+            {
+              "action": "submit",
+              "intent": {
+                "intent_id": "manual_mock_195560280737e3968a71d6b116b1bfd0",
+                "run_id": "run-contract-mock",
+                "decision_id": "manual:unknown",
+                "account_ref": "00000000-0000-0000-0000-000000000002",
+                "environment": "mock",
+                "symbol": "005930",
+                "venue": "KRX",
+                "side": "BUY",
+                "quantity": 1,
+                "order_type": "LIMIT",
+                "limit_price": 70000,
+                "created_at": "2026-09-15T00:00:00+00:00",
+                "expires_at": "2026-09-15T00:02:00+00:00",
+                "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14"
+              }
+            }
+          ],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "unknown-duplicate-no-resend",
+        "status": 200,
+        "headers": {
+          "content-length": "1720",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_195560280737e3968a71d6b116b1bfd0",
+          "request_id": "unknown",
+          "run_id": "run-contract-mock",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "SUBMISSION_UNKNOWN",
+          "broker_order_id": "",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_e9ea744c17de60a9517a8682a3d52aae81cb0e72406a7c8a096ead5475d4d4d3",
+              "intent_id": "manual_mock_195560280737e3968a71d6b116b1bfd0",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_eafd4a4e4d520fd971fcfc4c91b8f174f4c9ee3a7bf553bf791fe95da68fe1c5",
+              "intent_id": "manual_mock_195560280737e3968a71d6b116b1bfd0",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_f322cc5b8d2cfd81d614961585f7e0619c9fa9ab86ad82c1622cfdf125929fa0",
+              "intent_id": "manual_mock_195560280737e3968a71d6b116b1bfd0",
+              "event_type": "SUBMISSION_RESPONSE_UNKNOWN",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "injected response lost",
+              "broker_as_of": null
+            }
+          ]
+        },
+        "storage_hash": "2c37d205050cf2cd081ed15ac0ee023b1a38d4ddc81f5c645046dad9b11e84a5",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "publication-during-submit-keeps-gateway",
+        "status": 200,
+        "headers": {
+          "content-length": "1713",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_d16f2c3c3f53742978f7baa8d49a88af",
+          "request_id": "publication",
+          "run_id": "run-contract-mock",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "ACCEPTED",
+          "broker_order_id": "broker-contract-mock-4",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_7a0ba195dbbf17a5b61d67b73effcbe8f2d856df7c02bced51148af942dfc986",
+              "intent_id": "manual_mock_d16f2c3c3f53742978f7baa8d49a88af",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_438bf1e4ae83bc68e501c029e10a5964975c1fd36fcbe5c709c2f7a10dadd0bf",
+              "intent_id": "manual_mock_d16f2c3c3f53742978f7baa8d49a88af",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_2e6ba2cfc14662234b961e94f0fd9d31e3b5e3d20892f061ca84214be9597426",
+              "intent_id": "manual_mock_d16f2c3c3f53742978f7baa8d49a88af",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-4",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ]
+        },
+        "storage_hash": "b9617f1719d61137491bf7c6e259d35e6e04df32b4dd9c0d15e8351599247db5",
+        "transport_calls": {
+          "contract-mock": [
+            {
+              "action": "submit",
+              "intent": {
+                "intent_id": "manual_mock_d16f2c3c3f53742978f7baa8d49a88af",
+                "run_id": "run-contract-mock",
+                "decision_id": "manual:publication",
+                "account_ref": "00000000-0000-0000-0000-000000000002",
+                "environment": "mock",
+                "symbol": "005930",
+                "venue": "KRX",
+                "side": "BUY",
+                "quantity": 1,
+                "order_type": "LIMIT",
+                "limit_price": 70000,
+                "created_at": "2026-09-15T00:00:00+00:00",
+                "expires_at": "2026-09-15T00:02:00+00:00",
+                "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14"
+              }
+            }
+          ],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-read-with-orders-off",
+        "status": 200,
+        "headers": {
+          "content-length": "2782",
+          "content-type": "application/json"
+        },
+        "body": {
+          "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+          "request_id": "http-first",
+          "run_id": "run-contract-mock",
+          "environment": "mock",
+          "symbol": "005930",
+          "venue": "KRX",
+          "side": "BUY",
+          "quantity": 1,
+          "order_type": "LIMIT",
+          "limit_price": 70000,
+          "policy_version": "manual-mock-krx-regular-limit/v2@krx-nxt-schedule/2026-09-14",
+          "state": "CANCEL_PENDING",
+          "broker_order_id": "broker-contract-mock-2",
+          "filled_quantity": 0,
+          "created_at": "2026-09-15T00:00:00+00:00",
+          "expires_at": "2026-09-15T00:02:00+00:00",
+          "updated_at": "2026-09-15T00:00:00+00:00",
+          "events": [
+            {
+              "event_id": "order_event_d5d6ed2c05627dad121048c69656ae276821c8ae4f038e55168bd7d0bd507513",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "QUEUED",
+              "state": "QUEUED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_bbfc4be15bf6fa91e2729c4c7d9e4c763706220e14cf8ba8fc515cc30d30c260",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "SUBMISSION_STARTED",
+              "state": "SUBMISSION_UNKNOWN",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_d070f4d040fd33b55c9efd40e03888297fbb7fdd56e078120cd44efb73a71fed",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "ORDER_ACCEPTED",
+              "state": "ACCEPTED",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "broker-contract-mock-2",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_f02cb10346fc03ae7c76ab90c813ff962acb26f7df349b562e95e2ea885a5b0b",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "CANCEL_STARTED",
+              "state": "CANCEL_PENDING",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            },
+            {
+              "event_id": "order_event_606202b496f52f139dc620fbab002f9141922cad8b358ad2ef5a8aca13bb9d29",
+              "intent_id": "manual_mock_scoped_1036fe2c2d9f4a7a0c087a0c4ee10a5b",
+              "event_type": "CANCEL_ACCEPTED",
+              "state": "CANCEL_PENDING",
+              "occurred_at": "2026-09-15T00:00:00+00:00",
+              "received_at": "2026-09-15T00:00:00+00:00",
+              "broker_order_id": "",
+              "broker_execution_id": "",
+              "quantity": 0,
+              "price": 0,
+              "reason": "",
+              "broker_as_of": null
+            }
+          ],
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-09-15T00:00:00+00:00",
+            "verification_method": "ka00001"
+          }
+        },
+        "storage_hash": "b9617f1719d61137491bf7c6e259d35e6e04df32b4dd9c0d15e8351599247db5",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-submit-orders-off",
+        "status": 503,
+        "headers": {
+          "content-length": "42",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MOCK_ORDER_TRANSPORT_DISABLED"
+        },
+        "storage_hash": "b9617f1719d61137491bf7c6e259d35e6e04df32b4dd9c0d15e8351599247db5",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      },
+      {
+        "name": "scoped-cancel-orders-off",
+        "status": 503,
+        "headers": {
+          "content-length": "42",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MOCK_ORDER_TRANSPORT_DISABLED"
+        },
+        "storage_hash": "b9617f1719d61137491bf7c6e259d35e6e04df32b4dd9c0d15e8351599247db5",
+        "transport_calls": {
+          "contract-mock": [],
+          "contract-mock-b": []
+        }
+      }
+    ]
+  ]
+}

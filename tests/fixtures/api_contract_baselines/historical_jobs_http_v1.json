@@ -1,0 +1,413 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "contract": {
+    "cases": [
+      {
+        "name": "unauthorized-import",
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      },
+      {
+        "name": "invalid-source",
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "179"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "body",
+                "source"
+              ],
+              "msg": "String should match pattern '^(flash|world)$'",
+              "input": "invalid",
+              "ctx": {
+                "pattern": "^(flash|world)$"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "wrong-publication-date",
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "78"
+        },
+        "body": {
+          "detail": "과거 시황 기사 형식·날짜가 올바르지 않습니다."
+        }
+      },
+      {
+        "name": "import",
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "71"
+        },
+        "body": {
+          "state": "imported",
+          "raw_count": 1,
+          "unique_count": 1,
+          "duplicate_count": 0
+        }
+      },
+      {
+        "name": "duplicate-import",
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "42"
+        },
+        "body": {
+          "state": "already_imported",
+          "raw_count": 1
+        }
+      },
+      {
+        "name": "unauthorized-claim",
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      },
+      {
+        "name": "invalid-stage",
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "175"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "stage"
+              ],
+              "msg": "String should match pattern '^(BODY|RULE)$'",
+              "input": "invalid",
+              "ctx": {
+                "pattern": "^(BODY|RULE)$"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "invalid-scope",
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "209"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "scope"
+              ],
+              "msg": "String should match pattern '^(all|pc_market|pc_search|pc)$'",
+              "input": "invalid",
+              "ctx": {
+                "pattern": "^(all|pc_market|pc_search|pc)$"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "invalid-exclusion",
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "69"
+        },
+        "body": {
+          "detail": "제외 종목코드 형식이 올바르지 않습니다."
+        }
+      },
+      {
+        "name": "other-scope-empty",
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "12"
+        },
+        "body": {
+          "job": null
+        }
+      },
+      {
+        "name": "body-claim",
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "1108"
+        },
+        "body": {
+          "job": {
+            "job_key": "04b74a0a60e7991655603865ba036b3b1cbe3cfec51e373b953c2e7d4aae7f3a",
+            "article_revision_id": "00000000000000000000000000000001",
+            "stock_code": "GLOBAL",
+            "target_id": "GLOBAL",
+            "stage": "BODY",
+            "input_hash": "abd4c5aca418a47719d6a0e5d4036c0dc93f8bfb2210fd5bd76be96fe83ae043",
+            "processing_version": "article-text-v7",
+            "attempts": 1,
+            "payload": {
+              "title": "해외시장",
+              "description": "해외 뉴스",
+              "link": "https://example.com/1",
+              "published_at": "2020-01-01T15:00:01+00:00",
+              "identity": "world-1",
+              "stock_code": "GLOBAL"
+            },
+            "queued_at": 1790300000.0
+          },
+          "article": {
+            "article_revision_id": "00000000000000000000000000000001",
+            "stock_code": "GLOBAL",
+            "identity": "world-1",
+            "content_hash": "abd4c5aca418a47719d6a0e5d4036c0dc93f8bfb2210fd5bd76be96fe83ae043",
+            "collector_id": "naver",
+            "published_at": "2020-01-01T15:00:01+00:00",
+            "received_at": 1790300000.0,
+            "available_at": 1790300000.0,
+            "collection_scope": "historical_market_pc_backfill",
+            "revision_of": null,
+            "document": {
+              "title": "해외시장",
+              "description": "해외 뉴스",
+              "link": "https://example.com/1",
+              "published_at": "2020-01-01T15:00:01+00:00",
+              "identity": "world-1",
+              "stock_code": "GLOBAL"
+            }
+          }
+        }
+      },
+      {
+        "name": "running-job-not-reclaimed",
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "12"
+        },
+        "body": {
+          "job": null
+        }
+      },
+      {
+        "name": "unauthorized-complete",
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      },
+      {
+        "name": "invalid-attempt",
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "144"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "body",
+                "attempts"
+              ],
+              "msg": "Input should be greater than or equal to 1",
+              "input": 0,
+              "ctx": {
+                "ge": 1
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "stale-body-owner",
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "98"
+        },
+        "body": {
+          "detail": "뉴스 작업 소유권이 만료되었거나 다른 실행기가 완료했습니다."
+        }
+      },
+      {
+        "name": "body-complete",
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "69"
+        },
+        "body": {
+          "state": "completed",
+          "output_ref": "00000000000000000000000000000004"
+        }
+      },
+      {
+        "name": "rule-claim",
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "1421"
+        },
+        "body": {
+          "job": {
+            "job_key": "ef252ced7a500359c2a866ef9dbda3d3e2bd503a347b203cf1a8cb901e5f1f8d",
+            "article_revision_id": "00000000000000000000000000000001",
+            "stock_code": "GLOBAL",
+            "target_id": "GLOBAL",
+            "stage": "RULE",
+            "input_hash": "88d9a65fdfe092c914e4692b01afc8bbf1c0181f943066b7581944dea1de325f",
+            "processing_version": "supply-contract-rule-v2",
+            "attempts": 1,
+            "payload": {
+              "body_revision_id": "00000000000000000000000000000004",
+              "stock_code": "GLOBAL",
+              "stock_name": "시황"
+            },
+            "queued_at": 1790300000.0
+          },
+          "article": {
+            "article_revision_id": "00000000000000000000000000000001",
+            "stock_code": "GLOBAL",
+            "identity": "world-1",
+            "content_hash": "abd4c5aca418a47719d6a0e5d4036c0dc93f8bfb2210fd5bd76be96fe83ae043",
+            "collector_id": "naver",
+            "published_at": "2020-01-01T15:00:01+00:00",
+            "received_at": 1790300000.0,
+            "available_at": 1790300000.0,
+            "collection_scope": "historical_market_pc_backfill",
+            "revision_of": null,
+            "document": {
+              "title": "해외시장",
+              "description": "해외 뉴스",
+              "link": "https://example.com/1",
+              "published_at": "2020-01-01T15:00:01+00:00",
+              "identity": "world-1",
+              "stock_code": "GLOBAL"
+            }
+          },
+          "body": {
+            "body_revision_id": "00000000000000000000000000000004",
+            "article_revision_id": "00000000000000000000000000000001",
+            "content_hash": "88d9a65fdfe092c914e4692b01afc8bbf1c0181f943066b7581944dea1de325f",
+            "extractor_version": "article-text-v7",
+            "fetched_at": 1790300000.0,
+            "available_at": 1790300000.0,
+            "status": "fulltext",
+            "body_text": "해외 경제 지표가 발표됐다.",
+            "error": ""
+          }
+        }
+      },
+      {
+        "name": "stale-rule-owner",
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "98"
+        },
+        "body": {
+          "detail": "뉴스 작업 소유권이 만료되었거나 다른 실행기가 완료했습니다."
+        }
+      },
+      {
+        "name": "rule-complete",
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "77"
+        },
+        "body": {
+          "state": "completed",
+          "output_ref": "ignored:00000000000000000000000000000004"
+        }
+      }
+    ],
+    "stored": {
+      "body": [
+        {
+          "body_revision_id": "00000000000000000000000000000004",
+          "article_revision_id": "00000000000000000000000000000001",
+          "content_hash": "88d9a65fdfe092c914e4692b01afc8bbf1c0181f943066b7581944dea1de325f",
+          "extractor_version": "article-text-v7",
+          "fetched_at": 1790300000.0,
+          "available_at": 1790300000.0,
+          "status": "fulltext",
+          "body_text": "해외 경제 지표가 발표됐다.",
+          "error": ""
+        }
+      ],
+      "assessment": {
+        "owner": "GLOBAL",
+        "key": "00000000000000000000000000000001",
+        "updated_at": 1790300000.0,
+        "document": {
+          "article_revision_id": "00000000000000000000000000000001",
+          "body_revision_id": "00000000000000000000000000000004",
+          "rule_version": "stock-news-assessment-v1",
+          "published_at": "2020-01-01T15:00:01+00:00",
+          "listing_published_at": "2020-01-01T15:00:01+00:00",
+          "original_published_at": "",
+          "published_at_source": "listing",
+          "assessment": {
+            "relevant": false,
+            "category": "기타 증권뉴스",
+            "outlook": "관련성 낮음",
+            "reason": "종목 직접 언급과 증권 관련 표현이 부족합니다.",
+            "relevance_score": 0,
+            "outlook_score": 0
+          },
+          "core_sentences": [
+            "해외 경제 지표가 발표됐다."
+          ]
+        }
+      },
+      "feed": [
+        {
+          "title": "해외시장",
+          "description": "해외 뉴스",
+          "link": "https://example.com/1",
+          "original_link": null,
+          "published_at": "2020-01-01T15:00:01+00:00",
+          "query_membership": "world",
+          "core_sentences": [
+            "해외 경제 지표가 발표됐다."
+          ]
+        }
+      ]
+    }
+  }
+}

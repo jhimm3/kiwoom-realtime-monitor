@@ -22,11 +22,27 @@ Windows 메인 앱 ─ monitor.sqlite3
 
 내부 `local_server`/`personal_server`는 기존 설정과 장애전환 호환값이다. 화면 명칭을 이유로 일괄 변경하지 않는다. 테스트 실행 소스는 `scripts/run_test_app_with_data.py`의 `SOURCE_ROOT`로 판단한다. 원본 프로젝트의 Python·데이터 폴더 재사용은 소스 버전의 근거가 아니다.
 
+PC 종료는 AppController가 생산자·queued 결과를 기다린 뒤 pending을 flush하고 실제 writer와
+queued 저장 결과까지 기다린다. 마지막 분봉/가격 저장 실패로 복원한 pending이 남으면
+`cache_failed` 상태에서 창과 보조 자원을 유지하고 저장 타이머·생산자는 재시작하지 않는다.
+사용자가 닫기를 다시 요청하면 같은 정지 writer를 다시 실행해 남은 batch를 저장한다.
+이미 끝낸 TOP20 partial 저장·백업·화면 저장은 반복하지 않는다. 종료 때 마지막에 보낸 batch만
+보관해 최신 값으로 대체된 옛 실패 key를 복원에서 제외한다. 마지막 batch의 실패와 대체되지 않은
+peer는 유지하며, 실제 writer 종료와 queued 저장 결과 처리 뒤 종료 준비 신호와 close 수락을 허용한다.
+이 보완은 기존 분봉/가격 실패 복원 경로의 종료 정책이며 다른 writer job의 완료 보장을 뜻하지 않는다.
+
 ## 시장 자료
 
 중앙 REST는 `CentralRestBroker`가 우선순위·동시 요청·캐시를 관리한다. `ka00198` 순위가 분봉/일봉/백필보다 우선하며 저우선 작업이 순위 경계를 막지 않는다. NAS 순위 수집은 앱 실행과 독립된다. 화면은 저장된 NAS 자료를 우선 조회하며 정상 연결의 시장자료 부족을 PC의 자동 직접 TR 조회로 바꾸지 않는다.
 
 중앙 WebSocket은 체결·시장·계좌 경계를 구분한다. TOP20/관심 후보의 수신 체결로 1초 OHLCV·거래대금·건수를 집계하고 분봉·TOP20 구성/지수·시장 상태를 저장한다. 1초봉은 수신한 체결의 집계이며 모든 종목·기간의 원시 틱/호가 전수 기록이 아니다. 구독 전·끊김·부분 수집을 완전한 기록이나 실제 0으로 바꾸지 않는다.
+
+TOP20의 0W 프로그램수급은 서비스가 수신 값을 정규화하고 기존 주기로 저장을 요청한다.
+`ProgramSnapshotWriter`는 종목별 최신 pending, 분리한 batch의 실제 저장 task, 실패한 값의 병합과
+종료 drain을 소유하며 `save_dataset_snapshots` 하나만 요구한다. 전체 종료는 TOP20 서비스가
+생산자를 멈춘 뒤 writer를 drain하는 순서다. 같은 native DB batch·저장 키·transaction을 사용하고,
+COMMIT ACK 유실 재시도와 취소 시 실제 작업 대기를 유지한다. cold seed 문서는 소유 객체 이동과
+무관하게 기존 pending/task 의미와 직렬화 키를 보존한다.
 
 확정값·최신 조회값과 불변 observation revision은 목적이 다르다. 순위·분봉·테마·뉴스의 당시 가용시각을 보존한다. 장후 보완은 당시 장중 관측으로 소급하지 않는다. 거래일별 세션 정책, 정규장 종가와 전체일 종가, 거래소, 수정주가·금액 단위를 구분한다. 자세한 규칙은 [과거 데이터 계약](HISTORICAL_DATA_CONTRACT.md)을 따른다.
 

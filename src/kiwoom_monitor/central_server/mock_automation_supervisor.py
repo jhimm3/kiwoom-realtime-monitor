@@ -55,6 +55,7 @@ class MockAutomationSupervisor:
         self._restore_errors: dict[str, str] = {}
         self._restore_retry_after: dict[str, float] = {}
         self._restore_task: asyncio.Task[None] | None = None
+        self._close_task: asyncio.Task[None] | None = None
         self._restore_stop = asyncio.Event()
         self._closing = False
 
@@ -67,16 +68,22 @@ class MockAutomationSupervisor:
             )
 
     async def close(self) -> None:
-        if self._closing:
-            return
         self._closing = True
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close(), name="mock-automation-supervisor-close")
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
         if self._restore_task is not None:
             self._restore_stop.set()
             await asyncio.shield(self._restore_task)
             self._restore_task = None
         runners = tuple(self._runners.values())
+        results = await asyncio.gather(*(runner.close() for runner in runners), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         self._runners.clear()
-        await asyncio.gather(*(runner.close() for runner in runners), return_exceptions=True)
 
     async def activate(
         self,

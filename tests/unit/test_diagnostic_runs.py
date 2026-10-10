@@ -21,6 +21,100 @@ from kiwoom_monitor.central_server.diagnostic_workloads import (
 
 
 class DiagnosticRunTests(unittest.TestCase):
+    def test_replay_timeout_retains_run_lease_and_drains_native_child_before_close(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+        from kiwoom_monitor.central_server.diagnostic_replay import ReplayCall, ReplayProfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "diagnostic-workloads.json"
+            store = SQLiteQueryStore(Path(directory) / "replay.sqlite3")
+            store.initialize()
+            release, entered, committed = threading.Event(), threading.Event(), threading.Event()
+            progress, report_entered, closed = threading.Event(), threading.Event(), threading.Event()
+            child_threads, bounded_joins = [], []
+            native_join = threading.Thread.join
+            runs, closing = None, None
+            profile = ReplayProfile("trace-1", 10, 1, 1,
+                (ReplayCall(0, "query_minute", rows_attempted=1),), {}, 0, 10, ("query_minute",), ())
+            def replay(plan, url, run_id, stop, ready, gate, done):
+                child_threads.append(threading.current_thread())
+                ready.set()
+                self.assertTrue(gate.wait(3))
+                self.assertTrue(done.wait(3))
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("test replay write not released")
+                store.upsert_documents("app_settings", [{"owner": "replay", "key": "committed",
+                                                        "document": {"value": 17}}])
+                committed.set()
+                return {"state": "complete", "completed_calls": {}, "replayed_calls": []}
+            def measure(*args, **kwargs):
+                kwargs["on_started"]()
+                return {"state": "complete", "db_calls": {"state": "complete"},
+                        "db_calls_raw": {"calls": []}}
+            def join(thread, timeout=None):
+                if thread.name.startswith("replay-"):
+                    if timeout == 15:
+                        bounded_joins.append(timeout)
+                        return  # Inject expiry; the actual child remains alive.
+                    if timeout is None:
+                        progress.set()
+                return native_join(thread, timeout)
+            try:
+                with patch.dict(os.environ, {"KIWOOM_DIAGNOSTIC_WORKLOAD_PATH": str(path)}), \
+                     patch("kiwoom_monitor.central_server.diagnostic_replay.require_after_hours"), \
+                     patch("kiwoom_monitor.central_server.diagnostic_replay.compile_trace_replay_profile", return_value=profile), \
+                     patch("kiwoom_monitor.central_server.diagnostic_replay.run_replay", side_effect=replay), \
+                     patch("scripts.nas_workload_diagnostic._measure", side_effect=measure), \
+                     patch.object(threading.Thread, "join", join):
+                    _set_tool(path, True, 120)
+                    runs = DiagnosticRuns(path, lambda *_: {}, "postgresql://user:password@database/kiwoom_monitor")
+                    native_report = runs._write_report
+                    def report(run):
+                        report_entered.set()
+                        progress.set()
+                        native_report(run)
+                    with patch.object(runs, "_write_report", side_effect=report):
+                        run = runs.start(kind="replay", seconds=15, label="drain", workload="trace_synthetic",
+                                         profile_trace_id="trace-1", window_end_seconds=10,
+                                         include_writer_kinds=("query_minute",))
+                        self.assertTrue(entered.wait(3))
+                        def close():
+                            runs.close(timeout=None)
+                            closed.set()
+                        closing = threading.Thread(target=close, name="test-diagnostic-close")
+                        closing.start()
+                        self.assertTrue(progress.wait(3))
+                        self.assertFalse(report_entered.is_set(), "report/run lease finalized before child stopped")
+                        self.assertFalse(closed.is_set())
+                        self.assertFalse(committed.is_set())
+                        with self.assertRaisesRegex(RuntimeError, "diagnostic_run_busy"):
+                            with diagnostic_run_lock(path):
+                                pass
+                        release.set()
+                        native_join(closing, 3)
+                        self.assertFalse(closing.is_alive())
+                        self.assertFalse(runs._worker.is_alive())
+                        self.assertFalse(child_threads[0].is_alive())
+                        self.assertEqual([15, 15], bounded_joins)
+                        self.assertTrue(committed.is_set())
+                        document = store.load_documents("app_settings", "replay")[0]["document"]
+                        self.assertEqual({"value": 17}, document)
+                        result = runs.report(run["run_id"])
+                        self.assertEqual("aborted", result["state"])
+                        self.assertEqual("replay_worker_did_not_stop", result["result"]["replay"]["error_type"])
+                        with diagnostic_run_lock(path):
+                            pass
+            finally:
+                release.set()
+                if runs is not None and runs._worker is not None:
+                    native_join(runs._worker, 5)
+                for child in child_threads:
+                    native_join(child, 5)
+                if closing is not None:
+                    native_join(closing, 5)
+                store.close()
+
     def test_trace_api_forwards_deferred_deadline_and_guards_ram_held_trace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'diagnostic-workloads.json'

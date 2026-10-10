@@ -1,0 +1,2400 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "input_control": "native SQLite profiles and actual AccountQuerySessionManager; owner constructors and broker transport doubled; actual owner publication callback at startup, unpublication and republication; fixed clocks and UUIDs",
+  "results": [
+    [
+      {
+        "name": "unauthorized-/api/v3/kiwoom/accounts",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "unauthorized-/api/v2/kiwoom/account-query",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "unauthorized-/api/v3/kiwoom/account-query",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "unknown-route",
+        "status": 404,
+        "headers": {
+          "content-length": "22",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "Not Found"
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "account-list",
+        "status": 200,
+        "headers": {
+          "content-length": "15",
+          "content-type": "application/json"
+        },
+        "body": {
+          "accounts": []
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [
+          [
+            [],
+            {}
+          ]
+        ],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v2/kiwoom/account-query-empty",
+        "status": 422,
+        "headers": {
+          "content-length": "164",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "path"
+              ],
+              "msg": "Field required",
+              "input": {}
+            }
+          ]
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v2/kiwoom/account-query-wrong-api",
+        "status": 422,
+        "headers": {
+          "content-length": "187",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "String should match pattern '^(kt00007|kt00015)$'",
+              "input": "ka10001",
+              "ctx": {
+                "pattern": "^(kt00007|kt00015)$"
+              }
+            }
+          ]
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v2/kiwoom/account-query-negative-page",
+        "status": 422,
+        "headers": {
+          "content-length": "147",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "body",
+                "page_index"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": -1,
+              "ctx": {
+                "ge": 0
+              }
+            }
+          ]
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v3/kiwoom/account-query-empty",
+        "status": 422,
+        "headers": {
+          "content-length": "436",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "path"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "account_scope"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "credential_profile_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "expected_binding_revision"
+              ],
+              "msg": "Field required",
+              "input": {}
+            }
+          ]
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v3/kiwoom/account-query-wrong-api",
+        "status": 422,
+        "headers": {
+          "content-length": "187",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "String should match pattern '^(kt00007|kt00015)$'",
+              "input": "ka10001",
+              "ctx": {
+                "pattern": "^(kt00007|kt00015)$"
+              }
+            }
+          ]
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v3/kiwoom/account-query-negative-page",
+        "status": 422,
+        "headers": {
+          "content-length": "147",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "body",
+                "page_index"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": -1,
+              "ctx": {
+                "ge": 0
+              }
+            }
+          ]
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "strict-revision",
+        "status": 422,
+        "headers": {
+          "content-length": "127",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "int_type",
+              "loc": [
+                "body",
+                "expected_binding_revision"
+              ],
+              "msg": "Input should be a valid integer",
+              "input": "1"
+            }
+          ]
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "extra-scoped-field",
+        "status": 422,
+        "headers": {
+          "content-length": "119",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "extra_forbidden",
+              "loc": [
+                "body",
+                "unexpected"
+              ],
+              "msg": "Extra inputs are not permitted",
+              "input": true
+            }
+          ]
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "invalid-account-uuid",
+        "status": 400,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_SCOPE_INVALID"
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "unknown-profile",
+        "status": 503,
+        "headers": {
+          "content-length": "38",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "PROFILE_RUNTIME_NOT_READY"
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "legacy-startup-publication",
+        "status": 503,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "scoped-owner-absent",
+        "status": 503,
+        "headers": {
+          "content-length": "38",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "PROFILE_RUNTIME_NOT_READY"
+        },
+        "storage_hash": "dba87771cae3045346dc9795024e5fc9bed5fda0d380444aba074d0862ccf040",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      }
+    ],
+    [
+      {
+        "name": "unauthorized-/api/v3/kiwoom/accounts",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "unauthorized-/api/v2/kiwoom/account-query",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "unauthorized-/api/v3/kiwoom/account-query",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "unknown-route",
+        "status": 404,
+        "headers": {
+          "content-length": "22",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "Not Found"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "account-list",
+        "status": 200,
+        "headers": {
+          "content-length": "271",
+          "content-type": "application/json"
+        },
+        "body": {
+          "accounts": [
+            {
+              "broker": "kiwoom",
+              "environment": "mock",
+              "account_ref": "00000000-0000-0000-0000-000000000002",
+              "credential_profile_id": "contract-mock",
+              "binding_revision": 1,
+              "verified_at": "2026-10-10T03:00:00+00:00",
+              "verification_method": "ka00001",
+              "display_label": "Mock desk"
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [
+          [
+            [],
+            {}
+          ]
+        ],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v2/kiwoom/account-query-empty",
+        "status": 422,
+        "headers": {
+          "content-length": "164",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "path"
+              ],
+              "msg": "Field required",
+              "input": {}
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v2/kiwoom/account-query-wrong-api",
+        "status": 422,
+        "headers": {
+          "content-length": "187",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "String should match pattern '^(kt00007|kt00015)$'",
+              "input": "ka10001",
+              "ctx": {
+                "pattern": "^(kt00007|kt00015)$"
+              }
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v2/kiwoom/account-query-negative-page",
+        "status": 422,
+        "headers": {
+          "content-length": "147",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "body",
+                "page_index"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": -1,
+              "ctx": {
+                "ge": 0
+              }
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v3/kiwoom/account-query-empty",
+        "status": 422,
+        "headers": {
+          "content-length": "436",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "path"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "account_scope"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "credential_profile_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "expected_binding_revision"
+              ],
+              "msg": "Field required",
+              "input": {}
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v3/kiwoom/account-query-wrong-api",
+        "status": 422,
+        "headers": {
+          "content-length": "187",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "String should match pattern '^(kt00007|kt00015)$'",
+              "input": "ka10001",
+              "ctx": {
+                "pattern": "^(kt00007|kt00015)$"
+              }
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v3/kiwoom/account-query-negative-page",
+        "status": 422,
+        "headers": {
+          "content-length": "147",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "body",
+                "page_index"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": -1,
+              "ctx": {
+                "ge": 0
+              }
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "strict-revision",
+        "status": 422,
+        "headers": {
+          "content-length": "127",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "int_type",
+              "loc": [
+                "body",
+                "expected_binding_revision"
+              ],
+              "msg": "Input should be a valid integer",
+              "input": "1"
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "extra-scoped-field",
+        "status": 422,
+        "headers": {
+          "content-length": "119",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "extra_forbidden",
+              "loc": [
+                "body",
+                "unexpected"
+              ],
+              "msg": "Extra inputs are not permitted",
+              "input": true
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "invalid-account-uuid",
+        "status": 400,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_SCOPE_INVALID"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "unknown-profile",
+        "status": 503,
+        "headers": {
+          "content-length": "38",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "PROFILE_RUNTIME_NOT_READY"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "legacy-startup-publication",
+        "status": 503,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "wrong-binding-revision",
+        "status": 409,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_CONTEXT_MISMATCH"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "wrong-account",
+        "status": 409,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_CONTEXT_MISMATCH"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "first-page",
+        "status": 200,
+        "headers": {
+          "content-length": "429",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "profile": "contract-mock"
+          },
+          "batch_id": "00000000000000000000000000000064",
+          "page_index": 0,
+          "complete": false,
+          "next_key": "cursor-1",
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-10-10T03:00:00+00:00",
+            "verification_method": "ka00001"
+          },
+          "provenance": {
+            "transport": "nas",
+            "cache_hit": false
+          }
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "body-mismatch-before-broker",
+        "status": 409,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_BODY_MISMATCH"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "cursor-mismatch-before-broker",
+        "status": 409,
+        "headers": {
+          "content-length": "42",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_CURSOR_MISMATCH"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "complete-second-page",
+        "status": 200,
+        "headers": {
+          "content-length": "428",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "profile": "contract-mock"
+          },
+          "batch_id": "00000000000000000000000000000064",
+          "page_index": 1,
+          "complete": true,
+          "next_key": "cursor-1",
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-10-10T03:00:00+00:00",
+            "verification_method": "ka00001"
+          },
+          "provenance": {
+            "transport": "nas",
+            "cache_hit": false
+          }
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "Y",
+                "next_key": "cursor-1"
+              }
+            ]
+          ],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "completed-cursor-reuse",
+        "status": 409,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_CURSOR_EXPIRED"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "invalid-endpoint",
+        "status": 409,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_INVALID"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "expiring-first-page",
+        "status": 200,
+        "headers": {
+          "content-length": "429",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "profile": "contract-mock"
+          },
+          "batch_id": "00000000000000000000000000000065",
+          "page_index": 0,
+          "complete": false,
+          "next_key": "cursor-1",
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-10-10T03:00:00+00:00",
+            "verification_method": "ka00001"
+          },
+          "provenance": {
+            "transport": "nas",
+            "cache_hit": false
+          }
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "expired-cursor",
+        "status": 409,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_CURSOR_EXPIRED"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "broker-failure-ValueError",
+        "status": 409,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_INVALID"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "broker-failure-RuntimeError",
+        "status": 409,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_CONTEXT_MISMATCH"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "broker-failure-OSError",
+        "status": 502,
+        "headers": {
+          "content-length": "38",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_UNAVAILABLE"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "credential-drain-busy",
+        "status": 503,
+        "headers": {
+          "content-length": "31",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_BUSY"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "closed-session",
+        "status": 503,
+        "headers": {
+          "content-length": "33",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_CLOSED"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      }
+    ],
+    [
+      {
+        "name": "unauthorized-/api/v3/kiwoom/accounts",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "unauthorized-/api/v2/kiwoom/account-query",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "unauthorized-/api/v3/kiwoom/account-query",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "unknown-route",
+        "status": 404,
+        "headers": {
+          "content-length": "22",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "Not Found"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "account-list",
+        "status": 200,
+        "headers": {
+          "content-length": "760",
+          "content-type": "application/json"
+        },
+        "body": {
+          "accounts": [
+            {
+              "broker": "kiwoom",
+              "environment": "real",
+              "account_ref": "00000000-0000-0000-0000-000000000001",
+              "credential_profile_id": "nas-real-default",
+              "binding_revision": 1,
+              "verified_at": "2026-10-10T03:00:00+00:00",
+              "verification_method": "ka00001"
+            },
+            {
+              "broker": "kiwoom",
+              "environment": "mock",
+              "account_ref": "00000000-0000-0000-0000-000000000002",
+              "credential_profile_id": "contract-mock",
+              "binding_revision": 1,
+              "verified_at": "2026-10-10T03:00:00+00:00",
+              "verification_method": "ka00001",
+              "display_label": "Mock desk"
+            },
+            {
+              "broker": "kiwoom",
+              "environment": "real",
+              "account_ref": "00000000-0000-0000-0000-000000000001",
+              "credential_profile_id": "contract-real",
+              "binding_revision": 1,
+              "verified_at": "2026-10-10T03:00:00+00:00",
+              "verification_method": "ka00001",
+              "display_label": "Real desk"
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [
+          [
+            [],
+            {}
+          ]
+        ],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v2/kiwoom/account-query-empty",
+        "status": 422,
+        "headers": {
+          "content-length": "164",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "path"
+              ],
+              "msg": "Field required",
+              "input": {}
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v2/kiwoom/account-query-wrong-api",
+        "status": 422,
+        "headers": {
+          "content-length": "187",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "String should match pattern '^(kt00007|kt00015)$'",
+              "input": "ka10001",
+              "ctx": {
+                "pattern": "^(kt00007|kt00015)$"
+              }
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v2/kiwoom/account-query-negative-page",
+        "status": 422,
+        "headers": {
+          "content-length": "147",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "body",
+                "page_index"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": -1,
+              "ctx": {
+                "ge": 0
+              }
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v3/kiwoom/account-query-empty",
+        "status": 422,
+        "headers": {
+          "content-length": "436",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "path"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "account_scope"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "credential_profile_id"
+              ],
+              "msg": "Field required",
+              "input": {}
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "expected_binding_revision"
+              ],
+              "msg": "Field required",
+              "input": {}
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v3/kiwoom/account-query-wrong-api",
+        "status": 422,
+        "headers": {
+          "content-length": "187",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "body",
+                "api_id"
+              ],
+              "msg": "String should match pattern '^(kt00007|kt00015)$'",
+              "input": "ka10001",
+              "ctx": {
+                "pattern": "^(kt00007|kt00015)$"
+              }
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "/api/v3/kiwoom/account-query-negative-page",
+        "status": 422,
+        "headers": {
+          "content-length": "147",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "body",
+                "page_index"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": -1,
+              "ctx": {
+                "ge": 0
+              }
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "strict-revision",
+        "status": 422,
+        "headers": {
+          "content-length": "127",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "int_type",
+              "loc": [
+                "body",
+                "expected_binding_revision"
+              ],
+              "msg": "Input should be a valid integer",
+              "input": "1"
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "extra-scoped-field",
+        "status": 422,
+        "headers": {
+          "content-length": "119",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "extra_forbidden",
+              "loc": [
+                "body",
+                "unexpected"
+              ],
+              "msg": "Extra inputs are not permitted",
+              "input": true
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "invalid-account-uuid",
+        "status": 400,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_SCOPE_INVALID"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "unknown-profile",
+        "status": 503,
+        "headers": {
+          "content-length": "38",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "PROFILE_RUNTIME_NOT_READY"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "legacy-startup-publication",
+        "status": 200,
+        "headers": {
+          "content-length": "435",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "profile": "nas-real-default"
+          },
+          "batch_id": "00000000000000000000000000000064",
+          "page_index": 0,
+          "complete": false,
+          "next_key": "cursor-1",
+          "context": {
+            "broker": "kiwoom",
+            "environment": "real",
+            "account_ref": "00000000-0000-0000-0000-000000000001",
+            "credential_profile_id": "nas-real-default",
+            "binding_revision": 1,
+            "verified_at": "2026-10-10T03:00:00+00:00",
+            "verification_method": "ka00001"
+          },
+          "provenance": {
+            "transport": "nas",
+            "cache_hit": false
+          }
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ]
+        }
+      },
+      {
+        "name": "wrong-binding-revision",
+        "status": 409,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_CONTEXT_MISMATCH"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "wrong-account",
+        "status": 409,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_CONTEXT_MISMATCH"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "first-page",
+        "status": 200,
+        "headers": {
+          "content-length": "429",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "profile": "contract-mock"
+          },
+          "batch_id": "00000000000000000000000000000065",
+          "page_index": 0,
+          "complete": false,
+          "next_key": "cursor-1",
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-10-10T03:00:00+00:00",
+            "verification_method": "ka00001"
+          },
+          "provenance": {
+            "transport": "nas",
+            "cache_hit": false
+          }
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "body-mismatch-before-broker",
+        "status": 409,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_BODY_MISMATCH"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "cursor-mismatch-before-broker",
+        "status": 409,
+        "headers": {
+          "content-length": "42",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_CURSOR_MISMATCH"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "complete-second-page",
+        "status": 200,
+        "headers": {
+          "content-length": "428",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "profile": "contract-mock"
+          },
+          "batch_id": "00000000000000000000000000000065",
+          "page_index": 1,
+          "complete": true,
+          "next_key": "cursor-1",
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-10-10T03:00:00+00:00",
+            "verification_method": "ka00001"
+          },
+          "provenance": {
+            "transport": "nas",
+            "cache_hit": false
+          }
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "Y",
+                "next_key": "cursor-1"
+              }
+            ]
+          ],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "completed-cursor-reuse",
+        "status": 409,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_CURSOR_EXPIRED"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "invalid-endpoint",
+        "status": 409,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_INVALID"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "expiring-first-page",
+        "status": 200,
+        "headers": {
+          "content-length": "429",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "profile": "contract-mock"
+          },
+          "batch_id": "00000000000000000000000000000066",
+          "page_index": 0,
+          "complete": false,
+          "next_key": "cursor-1",
+          "context": {
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "00000000-0000-0000-0000-000000000002",
+            "credential_profile_id": "contract-mock",
+            "binding_revision": 1,
+            "verified_at": "2026-10-10T03:00:00+00:00",
+            "verification_method": "ka00001"
+          },
+          "provenance": {
+            "transport": "nas",
+            "cache_hit": false
+          }
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "expired-cursor",
+        "status": 409,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_CURSOR_EXPIRED"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "broker-failure-ValueError",
+        "status": 409,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_INVALID"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "broker-failure-RuntimeError",
+        "status": 409,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_CONTEXT_MISMATCH"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "broker-failure-OSError",
+        "status": 502,
+        "headers": {
+          "content-length": "38",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_UNAVAILABLE"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "credential-drain-busy",
+        "status": 503,
+        "headers": {
+          "content-length": "31",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_BUSY"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "independent-real-profile",
+        "status": 200,
+        "headers": {
+          "content-length": "429",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "profile": "contract-real"
+          },
+          "batch_id": "0000000000000000000000000000006a",
+          "page_index": 0,
+          "complete": false,
+          "next_key": "cursor-1",
+          "context": {
+            "broker": "kiwoom",
+            "environment": "real",
+            "account_ref": "00000000-0000-0000-0000-000000000001",
+            "credential_profile_id": "contract-real",
+            "binding_revision": 1,
+            "verified_at": "2026-10-10T03:00:00+00:00",
+            "verification_method": "ka00001"
+          },
+          "provenance": {
+            "transport": "nas",
+            "cache_hit": false
+          }
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "late-response-context-guard",
+        "status": 409,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_CONTEXT_MISMATCH"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "legacy-after-unpublication",
+        "status": 503,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "list-after-unpublication",
+        "status": 200,
+        "headers": {
+          "content-length": "528",
+          "content-type": "application/json"
+        },
+        "body": {
+          "accounts": [
+            {
+              "broker": "kiwoom",
+              "environment": "mock",
+              "account_ref": "00000000-0000-0000-0000-000000000002",
+              "credential_profile_id": "contract-mock",
+              "binding_revision": 1,
+              "verified_at": "2026-10-10T03:00:00+00:00",
+              "verification_method": "ka00001",
+              "display_label": "Mock desk"
+            },
+            {
+              "broker": "kiwoom",
+              "environment": "real",
+              "account_ref": "00000000-0000-0000-0000-000000000001",
+              "credential_profile_id": "contract-real",
+              "binding_revision": 1,
+              "verified_at": "2026-10-10T03:00:00+00:00",
+              "verification_method": "ka00001",
+              "display_label": "Real desk"
+            }
+          ]
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [
+          [
+            [],
+            {}
+          ]
+        ],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      },
+      {
+        "name": "legacy-after-republication",
+        "status": 200,
+        "headers": {
+          "content-length": "435",
+          "content-type": "application/json"
+        },
+        "body": {
+          "payload": {
+            "profile": "nas-real-default"
+          },
+          "batch_id": "0000000000000000000000000000006b",
+          "page_index": 0,
+          "complete": false,
+          "next_key": "cursor-1",
+          "context": {
+            "broker": "kiwoom",
+            "environment": "real",
+            "account_ref": "00000000-0000-0000-0000-000000000001",
+            "credential_profile_id": "nas-real-default",
+            "binding_revision": 1,
+            "verified_at": "2026-10-10T03:00:00+00:00",
+            "verification_method": "ka00001"
+          },
+          "provenance": {
+            "transport": "nas",
+            "cache_hit": false
+          }
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": [
+            [
+              [
+                "kt00007",
+                "/api/dostk/acnt",
+                {
+                  "ord_dt": "20261010"
+                }
+              ],
+              {
+                "cont_yn": "N",
+                "next_key": ""
+              }
+            ]
+          ]
+        }
+      },
+      {
+        "name": "closed-session",
+        "status": 503,
+        "headers": {
+          "content-length": "33",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_QUERY_CLOSED"
+        },
+        "storage_hash": "31da1e2f2e94572dc3de9eca60dad1e35b9927d97b5a4604bc47d57595bd60ab",
+        "profile_reads": [],
+        "broker_calls": {
+          "contract-mock": [],
+          "contract-real": [],
+          "nas-real-default": []
+        }
+      }
+    ]
+  ]
+}

@@ -1,3 +1,10 @@
+## 2026-10-11 PC 마지막 분봉·가격 저장 실패 보완 (로컬)
+
+- 종료 중 마지막 분봉/가격 저장 실패로 대기 자료가 복원되면 창을 닫지 않고 자료를 유지한다.
+  문제 해결 뒤 닫기를 다시 요청하면 같은 writer로 재시도하고 저장을 마친 후 종료한다.
+  늦게 도착한 옛 저장 실패가 최신 저장 값을 덮지 않도록 하고, 완료한 TOP20 마감/백업은 반복하지 않는다.
+  정상 종료 순서와 DB 저장 형식은 유지한다. 실행 중인 테스트 앱의 수동 확인은 아직 하지 않았다.
+
 ## 2026-10-09 Recorded trace deferred RAM integration (PC main)
 
 - Integrated the NAS-validated deferred trace recorder's framed RAM blocks and bounded packing into PC main, with schema-3 capability fields and the 8 GiB / 5,000,000 event limits. Existing main changes and legacy capability fields are preserved. This updates source only; it does not switch the active NAS release.

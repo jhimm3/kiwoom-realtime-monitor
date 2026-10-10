@@ -7,12 +7,176 @@ import threading
 import unittest
 import uuid
 from contextlib import contextmanager
+from contextlib import ExitStack, closing
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+import hashlib
+import sqlite3
 
 import httpx
 
 from kiwoom_monitor.central_server.database import SQLiteQueryStore, _load_market_profile_settings, _save_market_profile_settings
+
+
+ACCOUNT_SETTINGS_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/account_settings_http_v1.json"
+
+
+@contextmanager
+def account_settings_contract_app(app_factory, database_path, mode):
+    """Native settings storage; owner doubles cover HTTP delegation, not live admission."""
+    from kiwoom_monitor.central_server.config import CentralServerSettings
+    from kiwoom_monitor.central_server.mock_runtime import MockCredentialOwner
+    from kiwoom_monitor.central_server.real_runtime import RealCredentialOwner
+
+    class FixedNow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 10, 10, 3, tzinfo=timezone.utc)
+            return value.astimezone(tz) if tz else value
+
+    owners = [MagicMock(spec=RealCredentialOwner), MagicMock(spec=MockCredentialOwner)]
+    real, mock = owners
+    for owner in owners:
+        owner.start, owner.close = AsyncMock(), AsyncMock()
+        owner.account_bindings.return_value = ()
+        owner.errors = {}
+    real.applied_market_role_revision.return_value = 7
+    real.applied_settings_revision.return_value = 13
+    real.account_monitor_status.return_value = {"status": "RECOVERING", "reason": "fixture-admission"}
+    real.change_market_role = AsyncMock()
+    mock.applied_settings_revision.return_value = 17
+    store = SQLiteQueryStore(database_path)
+    app_stores = []
+    original_factory = app_factory.__globals__["create_query_store"]
+
+    def owned_store(*args, **kwargs):
+        result = original_factory(*args, **kwargs)
+        app_stores.append(result)
+        return result
+
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(patch("kiwoom_monitor.central_server.schema_migrations.datetime", FixedNow))
+            stack.enter_context(patch("kiwoom_monitor.central_server.database_credentials.datetime", FixedNow))
+            stack.enter_context(patch("kiwoom_monitor.central_server.news_credentials.datetime", FixedNow))
+            stack.enter_context(patch("kiwoom_monitor.central_server.ai_credentials.datetime", FixedNow))
+            stack.enter_context(patch("kiwoom_monitor.central_server.database_account_settings.time", return_value=2000.0))
+            stack.enter_context(patch("kiwoom_monitor.central_server.database_documents.time", return_value=2000.0))
+            stack.enter_context(patch.dict(app_factory.__globals__, {"create_query_store": owned_store}))
+            stack.enter_context(patch("kiwoom_monitor.central_server.real_runtime.RealCredentialOwner", return_value=real))
+            stack.enter_context(patch("kiwoom_monitor.central_server.mock_runtime.MockCredentialOwner", return_value=mock))
+            for target in ("app.CentralRestBroker", "app.CentralRealtimeCollector", "news_service.CentralNewsService",
+                           "mock_automation_supervisor.MockAutomationSupervisor"):
+                stack.enter_context(patch(f"kiwoom_monitor.central_server.{target}.start", new_callable=AsyncMock))
+            store.initialize()
+            refs = {}
+            for index, environment in enumerate(("real", "mock"), 1):
+                refs[environment] = store.register_account_identity({"broker": "kiwoom", "environment": environment,
+                    "account_ref": str(uuid.UUID(int=index)), "identity_fingerprint": str(index) * 64,
+                    "created_at": "2026-10-10T03:00:00+00:00"})
+                store.finalize_credential_activation({"provider": f"kiwoom_{environment}", "environment": environment,
+                    "profile_id": f"contract-{environment}", "account_ref": refs[environment],
+                    "run_id": str(uuid.UUID(int=10 + index)), "operation_id": f"operation-{environment}",
+                    "request_id": f"request-{environment}", "request_digest": str(index) * 64,
+                    "credential_revision": 1, "committed_at": "2026-10-10T03:00:00+00:00"})
+            store.save_market_profile_settings({"market_profile_id": "contract-real", "expected_binding_revision": 1},
+                                              expected_revision=0)
+            app = app_factory(CentralServerSettings(f"sqlite:///{database_path}", "private-token",
+                credential_directory=str(database_path.parent / "vault") if mode != "absent" else "",
+                kiwoom_environment="mock" if mode == "mock" else "real",
+                account_identity_registry_enabled=mode != "absent", account_identity_hmac_key="contract-key" * 4,
+                autonomous_top20_enabled=False, market_event_collection_enabled=False, news_history_jobs_enabled=False,
+                news_naver_api_enabled=False, news_naver_stock_enabled=False, news_naver_market_enabled=False,
+                news_query_set_enabled=False))
+            if len(app_stores) != 1:
+                raise AssertionError("expected one app-owned native store")
+            yield app, store, app_stores[0], real if mode == "real" else None, mock if mode != "absent" else None, refs
+        for owner in ([real, mock] if mode == "real" else [mock] if mode == "mock" else []):
+            owner.start.assert_awaited_once()
+            if owner.close.await_count != 1:
+                raise AssertionError("app must close each owner exactly once after lifecycle cleanup repair")
+    finally:
+        store.close()
+
+
+def capture_account_settings_http_contract(client, store, request_store, real, mock, refs, database_path):
+    from kiwoom_monitor.central_server.credential_runtime import CredentialOperationError
+    from kiwoom_monitor.central_server.credential_store import CredentialStoreError
+    cases = []
+
+    def stored_hash():
+        with closing(sqlite3.connect(database_path)) as connection:
+            return hashlib.sha256("\n".join(connection.iterdump()).encode()).hexdigest()
+
+    def request(name, method, path, *, status=200, authenticated=True, **kwargs):
+        before = stored_hash()
+        for owner in (real, mock):
+            if owner is not None:
+                owner.method_calls.clear()
+        with patch.object(request_store, "load_market_profile_settings", wraps=request_store.load_market_profile_settings) as market, \
+                patch.object(request_store, "load_account_settings", wraps=request_store.load_account_settings) as account:
+            response = client.request(method, path,
+                headers={"Authorization": "Bearer private-token"} if authenticated else {}, **kwargs)
+        if response.status_code != status:
+            raise AssertionError((name, response.status_code, response.text))
+        after = stored_hash()
+        if before != after:
+            raise AssertionError((name, "settings HTTP request changed native storage"))
+        cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers),
+            "body": response.json(), "storage_hash": after,
+            "market_reads": [(call.args, call.kwargs) for call in market.call_args_list],
+            "account_reads": [(call.args, call.kwargs) for call in account.call_args_list],
+            "real_calls": [(call[0], call.args, call.kwargs) for call in real.method_calls] if real is not None else [],
+            "mock_calls": [(call[0], call.args, call.kwargs) for call in mock.method_calls] if mock is not None else []})
+
+    market = "/api/v1/settings/market-profile"
+    for method in ("GET", "PUT"):
+        request(f"unauthorized-market-{method}", method, market, authenticated=False, status=401,
+                **({"json": {}} if method == "PUT" else {}))
+    request("market-persisted-and-applied", "GET", market)
+    valid = {"market_profile_id": "contract-real", "expected_revision": 1, "expected_binding_revision": 1}
+    for name, body in (("empty", {}), ("missing-binding", {k: v for k, v in valid.items() if k != "expected_binding_revision"}),
+                       ("extra-key", {**valid, "extra": True}), ("non-object", [])):
+        request(f"market-invalid-{name}", "PUT", market, status=422, json=body)
+    request("market-owner-delegation", "PUT", market, status=200 if real is not None else 503, json=valid)
+    if real is not None:
+        for error, status in ((CredentialOperationError("MARKET_PROFILE_SETTINGS_INVALID", 409), 422),
+                (CredentialOperationError("MARKET_PROFILE_SETTINGS_REVISION_CONFLICT"), 409),
+                (CredentialOperationError("MARKET_ROLE_BUSY", 423), 423), (CredentialStoreError("RECOVERY_REQUIRED"), 503),
+                *((ValueError(code), 409) for code in ("ACCOUNT_CONTEXT_MISMATCH", "ACCOUNT_IDENTITY_UNVERIFIED",
+                    "ACCOUNT_SETTINGS_RECOVERY_REQUIRED", "MARKET_PROFILE_SETTINGS_RECOVERY_REQUIRED", "unknown-detail"))):
+            real.change_market_role.side_effect = error
+            request(f"market-owner-error-{str(error)}", "PUT", market, status=status, json=valid)
+        real.change_market_role.side_effect = None
+    for environment in ("real", "mock"):
+        url = f"/api/v1/settings/accounts/{refs[environment]}"
+        request(f"account-{environment}-unauthorized", "GET", url, authenticated=False, status=401,
+                params={"environment": environment})
+        request(f"account-{environment}-applied", "GET", url, params={"environment": environment})
+        request(f"account-{environment}-explicit-broker", "GET", url,
+                params={"environment": environment, "broker": "kiwoom"})
+        request(f"account-{environment}-wrong-environment", "GET", url, status=404,
+                params={"environment": "mock" if environment == "real" else "real"})
+    url = f"/api/v1/settings/accounts/{refs['real']}"
+    for name, params in (("missing-environment", {}), ("invalid-environment", {"environment": "other"}),
+                          ("invalid-broker", {"environment": "real", "broker": "other"})):
+        request(f"account-{name}", "GET", url, status=422, params=params)
+    request("account-invalid-identity", "GET", "/api/v1/settings/accounts/not-a-uuid", status=400,
+            params={"environment": "real"})
+    request("account-unknown-identity", "GET", f"/api/v1/settings/accounts/{uuid.UUID(int=999)}", status=404,
+            params={"environment": "real"})
+    # Corrupt native documents exercise the actual reader's recovery branch.
+    with store._connection() as connection:
+        connection.execute("UPDATE central_documents SET document_json=? WHERE collection='server_account_settings'",
+                           (json.dumps({"revision": 0}),))
+    request("account-recovery-required", "GET", url, status=409, params={"environment": "real"})
+    with store._connection() as connection:
+        connection.execute("UPDATE central_documents SET document_json=? WHERE collection='server_market_profile_settings'",
+                           (json.dumps({"revision": 0}),))
+    request("market-recovery-required", "GET", market, status=409)
+    return json.loads(json.dumps(cases, ensure_ascii=False))
 
 
 class MarketProfileSettingsTests(unittest.TestCase):
@@ -25,6 +189,21 @@ class MarketProfileSettingsTests(unittest.TestCase):
     def tearDown(self):
         self.store.close()
         self.temp.cleanup()
+
+    def test_account_settings_http_matches_pre_extraction_baseline(self):
+        from fastapi.testclient import TestClient
+        from kiwoom_monitor.central_server.app import create_app
+        expected = json.loads(ACCOUNT_SETTINGS_BASELINE.read_text(encoding="utf-8"))["results"]
+        for mode, baseline in zip(("absent", "mock", "real"), expected, strict=True):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "settings.sqlite3"
+                with account_settings_contract_app(create_app, path, mode) as (app, store, request_store, real, mock, refs):
+                    with TestClient(app) as client:
+                        actual = capture_account_settings_http_contract(client, store, request_store, real, mock, refs, path)
+            self.assertEqual([case["name"] for case in baseline], [case["name"] for case in actual])
+            for original, observed in zip(baseline, actual, strict=True):
+                with self.subTest(mode=mode, case=original["name"]):
+                    self.assertEqual(original, observed)
 
     def account(self, environment="real", profile=None):
         profile = profile or str(uuid.uuid4())

@@ -15,6 +15,58 @@ from tests.unit.test_diagnostic_trace_deferred import recorder_storage_headroom
 
 
 class DiagnosticTraceTests(unittest.TestCase):
+    def test_server_shutdown_waits_for_native_trace_writer_and_releases_lease(self):
+        with tempfile.TemporaryDirectory() as root:
+            control = Path(root) / "control.json"
+            entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+            native_manifest = trace._manifest
+            stopped = []
+            stopper = None
+            def hold_final_manifest(directory, session):
+                if session["state"] in ("complete", "incomplete"):
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError("test did not release final trace write")
+                native_manifest(directory, session)
+            try:
+                with patch.object(trace, "control_path", return_value=control), \
+                     patch("kiwoom_monitor.central_server.diagnostic_workloads.control_path", return_value=control), \
+                     patch.object(trace, "_manifest", side_effect=hold_final_manifest):
+                    master = _set_tool(control, True, 300)
+                    _set_trace(control, True, 120, expected_session=master["diagnostic_tool"]["session_id"])
+                    active = trace.start(seconds=60)
+                    identifier = active["trace_id"]
+                    trace.emit(identifier, "call_start", {"call_id": "one"})
+                    trace.emit(identifier, "call_end", {"call_id": "one", "outcome": "committed"})
+                    def stop():
+                        stopped.append(trace.stop("server_shutdown", timeout=None))
+                        finished.set()
+                    stopper = threading.Thread(target=stop, name="test-trace-close")
+                    stopper.start()
+                    self.assertTrue(entered.wait(3))
+                    self.assertFalse(finished.is_set())
+                    with self.assertRaisesRegex(RuntimeError, "diagnostic_run_busy"):
+                        with diagnostic_run_lock(control):
+                            pass
+                    release.set()
+                    stopper.join(3)
+                    self.assertFalse(stopper.is_alive())
+                    self.assertEqual(1, len(stopped))
+                    self.assertEqual("complete", stopped[0]["state"])
+                    self.assertEqual(2, stopped[0]["written"])
+                    self.assertEqual(0, stopped[0]["known_dropped"])
+                    chunk = trace.chunk_bytes(identifier, stopped[0]["chunks"][0]["name"])
+                    rows = [json.loads(line) for line in chunk.decode().splitlines()]
+                    self.assertEqual(["call_start", "call_end"], [row["event_type"] for row in rows])
+                    self.assertEqual([1, 2], [row["seq"] for row in rows])
+                    with diagnostic_run_lock(control):
+                        pass
+            finally:
+                release.set()
+                if stopper is not None:
+                    stopper.join(5)
+                trace.stop("server_shutdown", timeout=None)
+
     def setUp(self):
         self.storage_headroom = recorder_storage_headroom()
         self.storage_headroom.__enter__()

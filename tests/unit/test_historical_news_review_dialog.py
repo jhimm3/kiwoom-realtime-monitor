@@ -46,6 +46,17 @@ class HistoricalNewsReviewDialogTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def setUp(self) -> None:
+        # An unexpected save error must fail the test, rather than leave an
+        # offscreen modal warning waiting forever for a user to dismiss it.
+        def unexpected_warning(parent, title, message, *args, **kwargs):
+            self.fail(f"unexpected QMessageBox.warning: {title}: {message}")
+
+        self.enterContext(patch(
+            "kiwoom_monitor.presentation.historical_news_review_dialog.QMessageBox.warning",
+            side_effect=unexpected_warning,
+        ))
+
     def test_saves_review_and_freezes_human_decision_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             research_dir = Path(directory)
@@ -132,13 +143,16 @@ class HistoricalNewsReviewDialogTests(unittest.TestCase):
 
             with patch(
                 "kiwoom_monitor.presentation.historical_news_review_dialog.QMessageBox.information"
-            ):
+            ) as messages:
                 dialog._create_development_inputs()
 
             development_outputs = list(
                 (research_dir / "historical-news-development-inputs").glob("*/manifest.json")
             )
-            self.assertEqual(1, len(development_outputs))
+            self.assertEqual(
+                1, len(development_outputs),
+                msg=f"development input messages: {[call.args[1:] for call in messages.call_args_list]}",
+            )
             dataset = load_historical_news_development_inputs(
                 development_outputs[0].parent
             )

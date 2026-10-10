@@ -9,13 +9,12 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 
-from .database import QueryStore
 from .futures_roll import (
     change_percent,
     evaluate_roll,
@@ -30,11 +29,17 @@ logger = logging.getLogger(__name__)
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
 
+class ExternalMarketCollectorStore(Protocol):
+    def save_external_bars(self, values: list[dict[str, Any]]) -> None: ...
+    def load_documents(self, collection: str, owner: str = "", limit: int = 1000) -> list[dict[str, Any]]: ...
+    def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
+
+
 class YahooDelayedMarketCollector:
     """외부 지연 시세 실패를 다른 중앙 서비스와 격리해 누적 저장한다."""
 
     def __init__(
-        self, store: QueryStore, symbols: dict[str, str], *, poll_seconds: int = 300,
+        self, store: ExternalMarketCollectorStore, symbols: dict[str, str], *, poll_seconds: int = 300,
         auto_roll_enabled: bool = True, roll_confirmations: int = 2,
         opener: Callable[..., Any] = urlopen,
     ) -> None:

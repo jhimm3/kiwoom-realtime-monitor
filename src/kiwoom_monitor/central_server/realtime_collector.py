@@ -8,7 +8,7 @@ import time
 from uuid import uuid4
 from dataclasses import asdict
 from datetime import datetime, time as clock_time, timedelta, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Protocol
 
 from websockets.asyncio.client import connect
 
@@ -29,7 +29,6 @@ from kiwoom_monitor.domain.order_contract import AccountScope
 from .realtime_hub import (
     RealtimeHub, CapturedMessageReceipt, CapturedParserReceipt, CapturedHubEvent,
 )
-from .database import QueryStore
 from .diagnostic_replay_contract import (
     COLLECTOR_EVENT_FIELDS, COLLECTOR_INPUT_VERSION, captured_workload, validate_collector_message,
 )
@@ -55,6 +54,35 @@ REALTIME_ITEMS_PER_TYPE = 200
 REALTIME_REG_INTERVAL_SECONDS = 0.25
 LATEST_CHECKPOINT_SECONDS = 300
 LATEST_CHECKPOINT_OFFSET_SECONDS = 10
+
+
+class RealtimeCollectorStore(Protocol):
+    """실시간 collector의 snapshot·bar 저장 및 복구 조회 계약."""
+
+    def save_realtime_snapshots(self, values: list[dict[str, Any]]) -> None: ...
+
+    def save_minute_bars(
+        self, values: list[dict[str, Any]], *,
+        observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
+    ) -> None: ...
+
+    def save_second_trade_bars(self, values: list[dict[str, Any]]) -> None: ...
+
+    def finalize_minute_bars(self, values: list[dict[str, Any]]) -> None: ...
+
+    def load_minute_bars(
+        self, code: str, trading_date: str, market: str = "", *,
+        realtime_deltas: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def save_dataset_snapshots(
+        self,
+        values: list[tuple[
+            str, str, str, dict[str, Any], MarketDataObservation[object] | None,
+        ]],
+    ) -> None: ...
+
+    def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
 
 
 def _next_latest_checkpoint(now: float) -> float:
@@ -124,7 +152,7 @@ class CentralRealtimeCollector:
 
     def __init__(
         self, token_provider: Callable[[], str], environment: str, hub: RealtimeHub,
-        now_provider: Callable[[], datetime], store: QueryStore | None = None,
+        now_provider: Callable[[], datetime], store: RealtimeCollectorStore | None = None,
         market_events: Any | None = None,
         account_scope_resolver: Callable[[str], AccountScope | None] | None = None,
         account_event_handler: Callable[[str, object], None] | None = None,
