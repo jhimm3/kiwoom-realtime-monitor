@@ -1,15 +1,11 @@
 import asyncio
-import hashlib
 import hmac
 import json
 import logging
 import re
 import sqlite3
-import uuid
-from urllib.parse import urlsplit
 from pathlib import Path
 from contextlib import asynccontextmanager
-from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -23,23 +19,22 @@ from .market_ingest import (
 from .realtime_hub import RealtimeHub
 from .realtime_collector import CentralRealtimeCollector
 from .rest_broker import CentralRestBroker
-from .resource_usage import resource_usage
 from .autonomous_top20 import AutonomousTop20Service
 from .external_market_collector import YahooDelayedMarketCollector
 from .market_observations import KST, as_kst
-from .market_events import MarketEventService
-from .historical_news_archive import (
-    ArchiveUnavailableError, HistoricalNewsArchiveReader, InvalidArchiveCursorError,
+from .market_read_routes import (
+    _archive_coverage_ready, _trade_value_comparison_summary,
+    _combined_minute_bars, _explicit_coverage_complete,
 )
+from .market_events import MarketEventService
+from .historical_news_archive import HistoricalNewsArchiveReader
 from .candidate_monitor import CandidateMonitor
 from .account_query import AccountQuerySessionManager
+from .market_query_routes import _stored_market_response, _archived_chart_response
 from kiwoom_monitor.application.breakout_strategy import (
     BreakoutStrategyConfig,
     default_shadow_breakout_config,
 )
-from kiwoom_monitor.application.market_data_coverage import evaluate_coverage
-from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
-from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
 SERVER_BUILD = "2026.10.09-trace-ram-main-v1"
@@ -65,7 +60,7 @@ def _verified_realtime_scope(
 def create_app(settings: CentralServerSettings | None = None) -> Any:
     """FastAPI 앱을 만든다. 서버 선택 의존성은 로컬 앱과 분리해 지연 로드한다."""
     try:
-        from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+        from fastapi import Depends, FastAPI, Header, HTTPException, Query
         from pydantic import BaseModel, Field, ConfigDict
     except ImportError as error:
         raise RuntimeError("중앙 서버 의존성을 설치하세요: pip install -e .[server]") from error
@@ -89,7 +84,6 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     market_event_service: MarketEventService | None = None
     external_market_service: YahooDelayedMarketCollector | None = None
     candidate_monitor: CandidateMonitor | None = None
-    candidate_settings_lock = asyncio.Lock()
     news_service = None
     ai_service = None
     realtime_hub = RealtimeHub()
@@ -183,7 +177,6 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     saved_operational = store.load_documents("server_operational_settings", "global", 1)
     if saved_operational and isinstance(saved_operational[0].get("document"), dict):
         operational.update(saved_operational[0]["document"])
-    applied_operational_revision = int(operational.get("revision", 0))
     try:
         shadow_document = operational.get("shadow_candidate_config")
         if not isinstance(shadow_document, dict):
@@ -398,16 +391,21 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             poll_seconds=float(operational["shadow_candidate_poll_seconds"]),
             universe_max_age_seconds=int(operational["shadow_candidate_universe_max_age_seconds"]),
         )
+    from .operational_settings_routes import OperationalSettingsState, create_operational_settings_routers
+    operational_state = OperationalSettingsState(
+        operational, int(operational.get("revision", 0)), candidate_monitor)
     if news_service is not None:
         news_service.set_ai_service(ai_service)
     if mock_owner is not None:
         from .mock_automation_supervisor import MockAutomationSupervisor
         mock_automation_supervisor = MockAutomationSupervisor(store, mock_owner)
 
-    @asynccontextmanager
-    async def service_lifespan(_app: Any):
+    mock_bundle_close_error: BaseException | None = None
+
+    async def start_services(_app: Any):
         nonlocal account_broker, main_binding, main_identity, mock_bundle
         nonlocal mock_account_monitor, mock_account_realtime, mock_order_gateway
+        nonlocal mock_bundle_close_error
         from .diagnostic_trace import recover_interrupted
         await asyncio.to_thread(recover_interrupted)
         if broker is not None:
@@ -418,24 +416,14 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             verified_bindings.extend(real_owner.account_bindings())
         if main_identity_reader is not None:
             from kiwoom_monitor.application.account_identity import bind_verified_account_identity
-            try:
-                main_identity = await main_identity_reader.verify()
-                main_binding = bind_verified_account_identity(
-                    main_identity, store,
-                    credential_profile_id=("nas-main-mock-default"
-                        if credential_vault is not None and active.kiwoom_environment == "mock"
-                        else f"nas-{active.kiwoom_environment}-default"),
-                )
-                verified_bindings.append(main_binding)
-            except Exception:
-                if mock_owner is not None:
-                    await mock_owner.close()
-                elif mock_bundle is not None:
-                    await mock_bundle.close()
-                if broker is not None:
-                    await broker.close()
-                store.close()
-                raise
+            main_identity = await main_identity_reader.verify()
+            main_binding = bind_verified_account_identity(
+                main_identity, store,
+                credential_profile_id=("nas-main-mock-default"
+                    if credential_vault is not None and active.kiwoom_environment == "mock"
+                    else f"nas-{active.kiwoom_environment}-default"),
+            )
+            verified_bindings.append(main_binding)
         if mock_owner is not None:
             if main_binding is not None and main_binding.scope.environment.value == "mock":
                 mock_owner.reserved_accounts.add(main_binding.scope.account_ref)
@@ -454,7 +442,12 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                     else "MOCK_ACCOUNT_STARTUP_FAILED"
                 )
                 logger.error("모의계좌 기능만 비활성화합니다: %s", code)
-                await mock_bundle.close()
+                try:
+                    await mock_bundle.close()
+                except BaseException as close_error:
+                    # A failed close is not safe to retry or treat as a disabled bundle.
+                    mock_bundle_close_error = close_error
+                    raise error from None
                 mock_bundle = None
                 account_broker = None
                 mock_account_monitor = None
@@ -479,68 +472,111 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             await news_service.start()
         if external_market_service is not None and bool(operational["external_market_enabled"]):
             await external_market_service.start()
-        if candidate_monitor is not None:
-            await candidate_monitor.start()
-        yield
+        if operational_state.candidate_monitor is not None:
+            await operational_state.candidate_monitor.start()
+    async def close_services(_app: Any):
+        status = _app.state.shutdown_status
+        status["stage"] = "diagnostic_runs"
         if diagnostic_runs is not None:
-            await asyncio.to_thread(diagnostic_runs.close)
+            await asyncio.to_thread(diagnostic_runs.close, timeout=None)
+        status["stage"] = "diagnostic_trace"
         from .diagnostic_trace import stop as stop_diagnostic_trace
-        await asyncio.to_thread(stop_diagnostic_trace, "server_shutdown")
+        await asyncio.to_thread(stop_diagnostic_trace, "server_shutdown", timeout=None)
+        status["stage"] = "credentials"
         if credential_runtime is not None:
             await credential_runtime.close()
+        status["stage"] = "mock_automation"
         if mock_automation_supervisor is not None:
             await mock_automation_supervisor.close()
+        status["stage"] = "real_accounts"
         if real_owner is not None:
             await real_owner.close()
+        status["stage"] = "mock_accounts"
         if mock_owner is not None:
             await mock_owner.close()
         elif mock_bundle is not None:
+            if mock_bundle_close_error is not None:
+                raise mock_bundle_close_error
             await mock_bundle.close()
-        if candidate_monitor is not None:
-            await candidate_monitor.close()
+        status["stage"] = "candidate"
+        async with operational_state.lock:
+            if operational_state.candidate_monitor is not None:
+                await operational_state.candidate_monitor.close()
+        status["stage"] = "external_market"
         if external_market_service is not None:
             await external_market_service.close()
+        status["stage"] = "news"
         if news_service is not None:
             await news_service.close()
+        status["stage"] = "ai"
         if ai_service is not None:
             await ai_service.close()
+        status["stage"] = "top20"
         if top20_service is not None:
             await top20_service.close()
+        status["stage"] = "collector"
         if collector is not None:
             await collector.close()
+        status["stage"] = "market_events"
         if market_event_service is not None:
             await market_event_service.close()
+        status["stage"] = "account_queries"
         if account_query_manager is not None:
             await account_query_manager.close()
+        status["stage"] = "broker"
         if broker is not None:
             await broker.close()
+        status["stage"] = "vault"
         if credential_vault is not None:
             credential_vault.close()
+        status["stage"] = "store"
         store.close()
 
     @asynccontextmanager
     async def lifespan(_app: Any):
+        primary_error: BaseException | None = None
+        _app.state.shutdown_status = {"state": "pending", "stage": "startup"}
         try:
             _app.state.diagnostic_loop = asyncio.get_running_loop()
             if credential_runtime is not None:
                 await credential_runtime.start()
-            async with service_lifespan(_app):
-                yield
+            await start_services(_app)
+            yield
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
-            if credential_runtime is not None:
-                await credential_runtime.close()
-            if mock_automation_supervisor is not None:
-                await mock_automation_supervisor.close()
-            if real_owner is not None:
-                await real_owner.close()
-            if mock_owner is not None:
-                await mock_owner.close()
-            elif mock_bundle is not None:
-                await mock_bundle.close()
-            # Also release the vault when startup fails before service_lifespan yields.
-            if credential_vault is not None:
-                credential_vault.close()
-                store.close()
+            _app.state.shutdown_status["state"] = "running"
+            shutdown = asyncio.create_task(close_services(_app), name="central-server-shutdown")
+            cancelled: asyncio.CancelledError | None = None
+            shutdown_error: BaseException | None = None
+            while True:
+                try:
+                    await asyncio.shield(shutdown)
+                    break
+                except asyncio.CancelledError as error:
+                    if shutdown.cancelled():
+                        shutdown_error = error
+                        break
+                    cancelled = error
+                except BaseException as error:
+                    shutdown_error = error
+                    break
+            if shutdown_error is not None:
+                status = _app.state.shutdown_status
+                status["state"] = "failed"
+                logger.error("SERVER_SHUTDOWN_FAILED stage=%s", status["stage"])
+                if primary_error is not None:
+                    primary_error.add_note("SERVER_SHUTDOWN_FAILED:" + status["stage"])
+                elif cancelled is not None:
+                    cancelled.add_note("SERVER_SHUTDOWN_FAILED:" + status["stage"])
+                    raise cancelled from None
+                else:
+                    raise shutdown_error
+            else:
+                _app.state.shutdown_status["state"] = "completed"
+            if cancelled is not None and primary_error is None:
+                raise cancelled
 
     app = FastAPI(title="Kiwoom Monitor Personal Server", version="1", lifespan=lifespan)
     app.state.credential_statuses = credential_statuses
@@ -550,7 +586,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     app.state.autonomous_top20_service = top20_service
     app.state.market_event_service = market_event_service
     app.state.external_market_collector = external_market_service
-    app.state.candidate_monitor = candidate_monitor
+    app.state.candidate_monitor = operational_state.candidate_monitor
     app.state.mock_account_monitor = mock_account_monitor
     app.state.mock_account_realtime = mock_account_realtime
     app.state.mock_order_gateway = mock_order_gateway
@@ -561,226 +597,11 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     app.state.mock_account_startup_error = ""
     app.state.verified_account_bindings = ()
 
-    class DiagnosticControlRequest(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-        target: str = Field(pattern=r"^(master|capture|workload)$")
-        enabled: bool | None = None
-        paused: bool | None = None
-        workload: str = ""
-        ttl_seconds: int = Field(default=600, ge=60, le=7200)
-        expected_session: str | None = None
-        expected_revision: int = Field(ge=0)
-        expected_instance: str | None = None
-
-    class DiagnosticRunRequest(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-        kind: str = Field(pattern=r"^(measure|compare|replay)$")
-        seconds: int = Field(ge=5, le=1100)
-        label: str = Field(default="manual", max_length=80)
-        workload: str = ""
-        profile_report_id: str = Field(default="", max_length=80)
-        profile_trace_id: str = Field(default="", max_length=80)
-        window_start_seconds: float = Field(default=0, ge=0, le=7200)
-        window_end_seconds: float | None = Field(default=None, gt=0, le=7200)
-        include_writer_kinds: list[str] = Field(default_factory=list, max_length=20)
-        exclude_writer_kinds: list[str] = Field(default_factory=list, max_length=20)
-        query_minute_scenario: str = Field(default="", pattern=r"^(|unchanged_page|one_changed_bar|fresh_page|recorded_counts)$")
-        request_id: str = Field(default="", max_length=80)
-        expected_session: str | None = None
-        expected_revision: int | None = Field(default=None, ge=0)
-
-    class DiagnosticTraceRequest(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-        seconds: int = Field(ge=60, le=7200)
-        expected_session: str
-        store_inputs: bool = Field(default=False, strict=True)
-        collector_inputs: bool = Field(default=False, strict=True)
-        top20_inputs: bool = Field(default=False, strict=True)
-        persist_at: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-
-    class QueryRequest(BaseModel):
-        api_id: str = Field(min_length=7, max_length=7)
-        path: str
-        body: dict[str, Any] = Field(default_factory=dict)
-        cont_yn: str = "N"
-        next_key: str = ""
-
-    class AccountQueryRequest(BaseModel):
-        api_id: str = Field(pattern=r"^(kt00007|kt00015)$")
-        path: str = Field(min_length=1, max_length=100)
-        body: dict[str, Any] = Field(default_factory=dict)
-        batch_id: str = Field(default="", max_length=64)
-        page_index: int = Field(default=0, ge=0, le=20)
-        next_key: str = Field(default="", max_length=500)
-
-    class MockOrderRequest(BaseModel):
-        request_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._:-]+$")
-        symbol: str = Field(pattern=r"^\d{6}$")
-        side: str = Field(pattern=r"^(BUY|SELL)$")
-        quantity: int = Field(ge=1, le=1_000_000)
-        limit_price: int = Field(ge=1)
-        expires_seconds: int = Field(default=120, ge=10, le=600)
-
-    class MockCancelRequest(BaseModel):
-        quantity: int = Field(default=0, ge=0, le=1_000_000)
-
     class AccountTarget(BaseModel):
         model_config = ConfigDict(extra="forbid")
         broker: str = Field(pattern=r"^kiwoom$")
         environment: str = Field(pattern=r"^(mock|real)$")
         account_ref: str = Field(min_length=36, max_length=36)
-
-    class ScopedAccountQueryRequest(AccountQueryRequest):
-        model_config = ConfigDict(extra="forbid")
-        account_scope: AccountTarget
-        credential_profile_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,96}$")
-        expected_binding_revision: int = Field(strict=True, ge=1)
-
-    class ScopedMockOrderRequest(MockOrderRequest):
-        model_config = ConfigDict(extra="forbid")
-        account_scope: AccountTarget
-        credential_profile_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,96}$")
-        expected_binding_revision: int = Field(strict=True, ge=1)
-        quantity: int = Field(strict=True, ge=1, le=1_000_000)
-        limit_price: int = Field(strict=True, ge=1)
-
-    class ScopedMockCancelRequest(MockCancelRequest):
-        model_config = ConfigDict(extra="forbid")
-        account_scope: AccountTarget
-        credential_profile_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,96}$")
-        expected_binding_revision: int = Field(strict=True, ge=1)
-        quantity: int = Field(default=0, strict=True, ge=0, le=1_000_000)
-
-    class DocumentInput(BaseModel):
-        owner: str = Field(max_length=200)
-        key: str = Field(min_length=1, max_length=2000)
-        document: dict[str, Any]
-        effective_at: str | None = Field(default=None, max_length=100)
-        origin_device: str | None = Field(default=None, max_length=200)
-        collector_id: str | None = Field(default=None, max_length=200)
-        collection_scope: str | None = Field(default=None, max_length=200)
-
-    class DocumentBatch(BaseModel):
-        documents: list[DocumentInput] = Field(min_length=1, max_length=1000)
-
-    class DocumentSnapshot(BaseModel):
-        documents: list[DocumentInput] = Field(default_factory=list, max_length=10000)
-
-    class NewsSearchRequest(BaseModel):
-        stock_code: str = Field(min_length=6, max_length=12)
-        stock_name: str = Field(min_length=1, max_length=100)
-        since: datetime | None = None
-        ai_auto_analyze: bool = False
-        ai_auto_recent_limit: int = Field(default=10, ge=1, le=1000)
-        ai_provider: str = Field(default="none", max_length=20)
-        ai_model: str = Field(default="", max_length=100)
-
-    class NewsStoredPageRequest(NewsSearchRequest):
-        offset: int = Field(default=0, ge=0, le=99_800)
-
-    class HistoricalNewsJobResult(BaseModel):
-        job_key: str = Field(min_length=64, max_length=64)
-        attempts: int = Field(ge=1)
-        stage: str = Field(pattern="^(BODY|RULE)$")
-        body_text: str = Field(default="", max_length=2_000_000)
-        body_status: str = Field(default="", max_length=20)
-        fetched_at: float | None = None
-        original_published_at: str = Field(default="", max_length=100)
-        source_url: str = Field(default="", max_length=2000)
-        assessment: dict[str, Any] | None = None
-        core_sentences: list[str] | None = Field(default=None, max_length=10)
-        rule_result: dict[str, Any] | None = None
-        error: str = Field(default="", max_length=1000)
-
-    class HistoricalMarketNewsBatch(BaseModel):
-        source: str = Field(pattern="^(flash|world)$")
-        target_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
-        batch_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-        processing_owner: str = Field(default="nas", pattern="^(nas|pc)$")
-        items: list[dict[str, Any]] = Field(min_length=1, max_length=100)
-
-    class AIEventInput(BaseModel):
-        identity: str = Field(min_length=1, max_length=2000)
-        title: str = Field(max_length=1000)
-        body: str = Field(default="", max_length=2_000_000)
-        body_hash: str = Field(default="", max_length=128)
-        articles: list[dict[str, str]] = Field(default_factory=list, max_length=100)
-
-    class AIAnalysisRequest(BaseModel):
-        stock_code: str = Field(min_length=6, max_length=12)
-        stock_name: str = Field(min_length=1, max_length=100)
-        provider: str = Field(default="", max_length=20)
-        model: str = Field(default="", max_length=100)
-        events: list[AIEventInput] = Field(min_length=1, max_length=20)
-        article_count: int = Field(default=0, ge=0, le=10_000)
-
-    class MockAutomationCandidatePublicationRequest(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-        account_ref: str = Field(min_length=36, max_length=36)
-        credential_profile_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,96}$")
-        expected_binding_revision: int = Field(strict=True, ge=1)
-        package: dict[str, Any]
-        eligibility_policy: dict[str, Any]
-        eligibility_receipt: dict[str, Any]
-
-    class MockAutomationSpecPublicationRequest(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-        account_ref: str = Field(min_length=36, max_length=36)
-        credential_profile_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,96}$")
-        expected_binding_revision: int = Field(strict=True, ge=1)
-        shadow_event_id: str = Field(min_length=1, max_length=128)
-        forward_profile: dict[str, Any]
-        stage_revisions: list[dict[str, Any]] = Field(min_length=3, max_length=3)
-        operating_spec: dict[str, Any]
-
-    class MockAutomationStartRequest(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-        account_ref: str = Field(min_length=36, max_length=36)
-        credential_profile_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,96}$")
-        spec_id: str = Field(min_length=1, max_length=128)
-        expected_settings_revision: int = Field(strict=True, ge=1)
-        credential_revision: int = Field(strict=True, ge=1)
-
-    class MockAutomationControlRequest(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-        account_ref: str = Field(min_length=36, max_length=36)
-        credential_profile_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,96}$")
-        spec_id: str = Field(min_length=1, max_length=128)
-        expected_control_revision: int = Field(strict=True, ge=1)
-        reason: str = Field(min_length=1, max_length=500)
-
-    class MockAutomationResumeRequest(MockAutomationControlRequest):
-        expected_settings_revision: int = Field(strict=True, ge=1)
-        credential_revision: int = Field(strict=True, ge=1)
-
-    class OperationalSettingsUpdate(BaseModel):
-        expected_revision: int | None = Field(default=None, ge=0)
-        ai_provider: str | None = Field(default=None, pattern=r"^(none|openai|gemini|claude)$")
-        ai_model: str | None = Field(default=None, max_length=100)
-        ai_daily_limit: int | None = Field(default=None, ge=0, le=1_000_000)
-        news_refresh_seconds: int | None = Field(default=None, ge=60, le=86_400)
-        news_naver_api_enabled: bool | None = Field(default=None, strict=True)
-        news_naver_stock_enabled: bool | None = Field(default=None, strict=True)
-        news_naver_market_enabled: bool | None = Field(default=None, strict=True)
-        news_naver_stock_url: str | None = Field(default=None, max_length=500, strict=True)
-        news_naver_flash_url: str | None = Field(default=None, max_length=500, strict=True)
-        news_naver_world_url: str | None = Field(default=None, max_length=500, strict=True)
-        dart_enabled: bool | None = None
-        news_query_set_enabled: bool | None = None
-        news_query_set: list[str] | None = Field(default=None, max_length=50)
-        news_query_set_refresh_seconds: int | None = Field(default=None, ge=60, le=86_400)
-        news_processing_excluded_providers: list[str] | None = Field(default=None, max_length=100)
-        external_market_enabled: bool | None = Field(default=None, strict=True)
-        external_market_poll_seconds: int | None = Field(default=None, ge=60, le=86_400, strict=True)
-        external_market_auto_roll_enabled: bool | None = Field(default=None, strict=True)
-        external_market_roll_confirmations: int | None = Field(default=None, ge=1, le=100, strict=True)
-        hot_cohort_condition_enabled: bool | None = Field(default=None, strict=True)
-        hot_cohort_condition_name: str | None = Field(default=None, max_length=120, strict=True)
-        hot_cohort_condition_substring: str | None = Field(default=None, max_length=120, strict=True)
-        shadow_candidate_enabled: bool | None = None
-        shadow_candidate_config: dict[str, Any] | None = None
-        shadow_candidate_poll_seconds: float | None = Field(default=None, ge=0.5, le=60)
-        shadow_candidate_universe_max_age_seconds: int | None = Field(default=None, ge=1, le=3600)
 
     def authorize(authorization: str = Header(default="")) -> None:
         scheme, _, supplied = authorization.partition(" ")
@@ -792,86 +613,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
 
     install_credential_routes(app, credential_runtime, authorize, active.credential_trusted_proxies, mock_owner, real_owner)
 
-    @app.get("/api/v1/settings/market-profile", dependencies=[Depends(authorize)])
-    async def market_profile_settings() -> dict[str, object]:
-        try:
-            document = await asyncio.to_thread(store.load_market_profile_settings)
-        except ValueError:
-            raise HTTPException(409, detail="MARKET_PROFILE_SETTINGS_RECOVERY_REQUIRED") from None
-        # Persisted role intent is not proof of a completed live transport change.
-        return {"settings": document, "applied_revision":
-                real_owner.applied_market_role_revision() if real_owner is not None else None}
-
-    @app.put("/api/v1/settings/market-profile", dependencies=[Depends(authorize)])
-    async def put_market_profile(values: dict[str, Any]) -> dict[str, object]:
-        from .credential_runtime import CredentialOperationError
-        from .credential_store import CredentialStoreError
-        if set(values) != {"market_profile_id", "expected_revision", "expected_binding_revision"}:
-            raise HTTPException(422, detail="MARKET_PROFILE_SETTINGS_INVALID")
-        if real_owner is None:
-            raise HTTPException(503, detail="PROFILE_RUNTIME_NOT_READY")
-        try:
-            await real_owner.change_market_role(values["market_profile_id"],
-                expected_revision=values["expected_revision"],
-                expected_binding_revision=values["expected_binding_revision"])
-        except CredentialOperationError as error:
-            raise HTTPException(422 if error.code == "MARKET_PROFILE_SETTINGS_INVALID" else error.status,
-                                detail=error.code) from None
-        except CredentialStoreError:
-            raise HTTPException(503, detail="PROFILE_RUNTIME_NOT_READY") from None
-        except ValueError as error:
-            code = str(error) if str(error) in {"ACCOUNT_CONTEXT_MISMATCH", "ACCOUNT_IDENTITY_UNVERIFIED",
-                "ACCOUNT_SETTINGS_RECOVERY_REQUIRED", "MARKET_PROFILE_SETTINGS_RECOVERY_REQUIRED"} else "MARKET_ROLE_CHANGE_FAILED"
-            raise HTTPException(409, detail=code) from None
-        return await market_profile_settings()
-
-    @app.get("/api/v1/settings/accounts/{account_ref}", dependencies=[Depends(authorize)])
-    async def account_settings(
-        account_ref: str,
-        environment: str = Query(pattern=r"^(mock|real)$"),
-        broker_name: str = Query(default="kiwoom", alias="broker", pattern=r"^kiwoom$"),
-    ) -> dict[str, object]:
-        try:
-            document = await asyncio.to_thread(store.load_account_settings, {
-                "broker": broker_name, "environment": environment, "account_ref": account_ref,
-            })
-        except ValueError as error:
-            code = str(error)
-            status = (404 if code == "ACCOUNT_IDENTITY_UNVERIFIED" else
-                      409 if code == "ACCOUNT_SETTINGS_RECOVERY_REQUIRED" else 400)
-            raise HTTPException(status_code=status, detail=code) from None
-        # DB preferences are not proof of an admitted runtime.
-        result = {"settings": document, "applied_revision": (
-            real_owner.applied_settings_revision(document["scope"]) if real_owner and environment == "real" else
-            mock_owner.applied_settings_revision(document["scope"]) if mock_owner else None
-        )}
-        if real_owner and environment == "real":
-            result["monitor_status"] = real_owner.account_monitor_status(document["scope"])
-        return result
-
-    async def mock_order_document(record: Any, gateway: Any) -> dict[str, object]:
-        intent = record.intent
-        events = await asyncio.to_thread(gateway.events, intent.intent_id)
-        return {
-            "intent_id": intent.intent_id,
-            "request_id": intent.decision_id.removeprefix("manual:"),
-            "run_id": intent.run_id,
-            "environment": intent.environment,
-            "symbol": intent.symbol,
-            "venue": intent.venue,
-            "side": intent.side.value,
-            "quantity": intent.quantity,
-            "order_type": intent.order_type.value,
-            "limit_price": intent.limit_price,
-            "policy_version": intent.policy_version,
-            "state": record.state.value,
-            "broker_order_id": record.broker_order_id,
-            "filled_quantity": record.filled_quantity,
-            "created_at": intent.created_at.isoformat(),
-            "expires_at": intent.expires_at.isoformat(),
-            "updated_at": record.updated_at.isoformat(),
-            "events": list(events),
-        }
+    from .account_settings_routes import create_account_settings_router
+    app.include_router(create_account_settings_router(store, authorize, real_owner, mock_owner))
 
     @app.get("/health")
     async def health() -> dict[str, object]:
@@ -922,57 +665,11 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         )
         return document
 
-    @app.post("/api/v1/mock/orders", dependencies=[Depends(authorize)])
-    async def submit_mock_order(command: MockOrderRequest) -> dict[str, object]:
-        bundle = mock_owner.bundle() if mock_owner is not None else None
-        gateway = bundle.gateway if bundle is not None else (mock_order_gateway if mock_owner is None else None)
-        if gateway is None:
-            raise HTTPException(status_code=503, detail="모의주문 전송이 활성화되지 않았습니다.")
-        from kiwoom_monitor.domain.order_contract import OrderSide
-        try:
-            record = await gateway.submit_limit(
-                request_id=command.request_id,
-                symbol=command.symbol,
-                side=OrderSide(command.side),
-                quantity=command.quantity,
-                limit_price=command.limit_price,
-                expires_seconds=command.expires_seconds,
-            )
-        except ValueError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
-        except RuntimeError as error:
-            raise HTTPException(status_code=502, detail=str(error)) from error
-        return await mock_order_document(record, gateway)
+    from .account_query_routes import create_account_contexts_router, create_account_query_router, scoped_context
 
-    @app.get("/api/v1/mock/orders/{intent_id}", dependencies=[Depends(authorize)])
-    async def get_mock_order(intent_id: str) -> dict[str, object]:
-        bundle = mock_owner.bundle() if mock_owner is not None else None
-        gateway = bundle.gateway if bundle is not None else (mock_order_gateway if mock_owner is None else None)
-        if gateway is None:
-            raise HTTPException(status_code=503, detail="모의주문 전송이 활성화되지 않았습니다.")
-        try:
-            record = await asyncio.to_thread(gateway.load, intent_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        return await mock_order_document(record, gateway)
-
-    @app.post("/api/v1/mock/orders/{intent_id}/cancel", dependencies=[Depends(authorize)])
-    async def cancel_mock_order(
-        intent_id: str, command: MockCancelRequest,
-    ) -> dict[str, object]:
-        bundle = mock_owner.bundle() if mock_owner is not None else None
-        gateway = bundle.gateway if bundle is not None else (mock_order_gateway if mock_owner is None else None)
-        if gateway is None:
-            raise HTTPException(status_code=503, detail="모의주문 전송이 활성화되지 않았습니다.")
-        try:
-            record = await gateway.cancel(intent_id, command.quantity)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
-        except RuntimeError as error:
-            raise HTTPException(status_code=502, detail=str(error)) from error
-        return await mock_order_document(record, gateway)
+    def current_legacy_account_query():
+        # Owners publish or remove these values after composition and key changes.
+        return main_binding, account_query_manager
 
     def selected_account(scope, profile_id, revision):
         from kiwoom_monitor.domain.order_contract import AccountScope, AccountEnvironment
@@ -1000,255 +697,35 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             raise HTTPException(503, detail="MOCK_ORDER_TRANSPORT_DISABLED")
         return binding, bundle
 
-    def scoped_context(binding):
-        return {**binding.scope.to_dict(), "credential_profile_id": binding.credential_profile_id,
-            "binding_revision": binding.binding_revision, "verified_at": binding.verified_at.isoformat(),
-            "verification_method": binding.verification_method}
+    def current_mock_order_gateway():
+        bundle = mock_owner.bundle() if mock_owner is not None else None
+        return bundle.gateway if bundle is not None else (mock_order_gateway if mock_owner is None else None)
 
-    @app.get("/api/v3/kiwoom/accounts", dependencies=[Depends(authorize)])
-    def account_contexts():
-        bindings = list(mock_owner.account_bindings()) if mock_owner is not None else []
-        if real_owner is not None:
-            bindings.extend(real_owner.account_bindings())
-        if account_query_manager is not None and main_binding is not None:
-            if main_binding not in bindings: bindings.insert(0, main_binding)
-        labels = {
-            profile["profile_id"]: str(profile.get("label", "")).strip()
-            for profile in store.list_credential_profiles()
-            if profile.get("lifecycle_state") != "archived"
-        }
-        accounts = []
-        for binding in bindings:
-            document = scoped_context(binding)
-            label = labels.get(binding.credential_profile_id, "")
-            if label:
-                document["display_label"] = label
-            accounts.append(document)
-        return {"accounts": accounts}
+    from .mock_order_routes import create_mock_order_routers
+    mock_order_router, scoped_mock_order_router = create_mock_order_routers(
+        authorize, AccountTarget, current_mock_order_gateway, selected_mock)
+    app.include_router(mock_order_router)
 
-    async def scoped_order_record(bundle, intent_id):
-        record = await asyncio.to_thread(bundle.repository.load, intent_id)
-        if (record is None or record.intent.environment != "mock"
-                or record.intent.account_ref != bundle.account_ref or record.intent.run_id != bundle.run_id):
-            raise HTTPException(404, detail="MOCK_ORDER_NOT_FOUND")
-        return record
+    app.include_router(create_account_contexts_router(
+        store, authorize, mock_owner, real_owner, current_legacy_account_query))
 
-    @app.post("/api/v2/mock/accounts/{account_ref}/orders", dependencies=[Depends(authorize)])
-    async def submit_scoped_mock_order(account_ref: str, command: ScopedMockOrderRequest):
-        from kiwoom_monitor.domain.order_contract import OrderSide
-        binding, bundle = selected_mock(account_ref, command.account_scope.model_dump(),
-            command.credential_profile_id, command.expected_binding_revision, orders=True)
-        gateway = bundle.gateway
-        try:
-            record = await gateway.submit_limit(request_id=command.request_id, symbol=command.symbol,
-                side=OrderSide(command.side), quantity=command.quantity, limit_price=command.limit_price,
-                expires_seconds=command.expires_seconds, scoped=True)
-        except (ValueError, KeyError):
-            raise HTTPException(409, detail="MOCK_ORDER_REQUEST_CONFLICT") from None
-        except RuntimeError:
-            raise HTTPException(503, detail="MOCK_ORDER_UNAVAILABLE") from None
-        return {**await mock_order_document(record, gateway), "context": scoped_context(binding)}
+    app.include_router(scoped_mock_order_router)
 
-    @app.get("/api/v2/mock/accounts/{account_ref}/orders/{intent_id}", dependencies=[Depends(authorize)])
-    async def get_scoped_mock_order(account_ref: str, intent_id: str,
-        credential_profile_id: str = Query(pattern=r"^[A-Za-z0-9_-]{1,96}$"),
-        expected_binding_revision: int = Query(ge=1),
-        environment: str = Query(pattern=r"^mock$"),
-        broker_name: str = Query(default="kiwoom", alias="broker", pattern=r"^kiwoom$")):
-        binding, bundle = selected_mock(account_ref,
-            {"broker": broker_name, "environment": environment, "account_ref": account_ref},
-            credential_profile_id, expected_binding_revision)
-        record = await scoped_order_record(bundle, intent_id)
-        return {**await mock_order_document(record, bundle.repository), "context": scoped_context(binding)}
+    def publish_candidate_monitor(monitor):
+        app.state.candidate_monitor = monitor
 
-    @app.get("/api/v2/mock/accounts/{account_ref}/execution-events", dependencies=[Depends(authorize)])
-    async def get_scoped_mock_execution_events(
-        account_ref: str,
-        credential_profile_id: str = Query(pattern=r"^[A-Za-z0-9_-]{1,96}$"),
-        expected_binding_revision: int = Query(ge=1),
-        after_sequence: int = Query(default=0, ge=0),
-        limit: int = Query(default=500, ge=1, le=1000),
-        environment: str = Query(default="mock", pattern=r"^mock$"),
-        broker_name: str = Query(default="kiwoom", alias="broker", pattern=r"^kiwoom$"),
-    ):
-        binding, bundle = selected_mock(
-            account_ref,
-            {"broker": broker_name, "environment": environment, "account_ref": account_ref},
-            credential_profile_id,
-            expected_binding_revision,
-        )
-        page = await asyncio.to_thread(
-            bundle.repository.account_events,
-            "mock",
-            account_ref,
-            after_sequence=after_sequence,
-            limit=limit,
-        )
-        return {**page.to_dict(), "context": scoped_context(binding)}
+    operational_read_router, operational_update_router = create_operational_settings_routers(
+        store, authorize, operational_state, market_event_service, external_market_service,
+        ai_service, news_service, publish_candidate_monitor, logger)
+    app.include_router(operational_read_router)
 
-    @app.post("/api/v2/mock/accounts/{account_ref}/orders/{intent_id}/cancel", dependencies=[Depends(authorize)])
-    async def cancel_scoped_mock_order(account_ref: str, intent_id: str, command: ScopedMockCancelRequest):
-        binding, bundle = selected_mock(account_ref, command.account_scope.model_dump(),
-            command.credential_profile_id, command.expected_binding_revision, orders=True)
-        await scoped_order_record(bundle, intent_id)
-        gateway = bundle.gateway
-        try:
-            record = await gateway.cancel(intent_id, command.quantity)
-        except KeyError:
-            raise HTTPException(404, detail="MOCK_ORDER_NOT_FOUND") from None
-        except ValueError:
-            raise HTTPException(409, detail="MOCK_ORDER_CANCEL_CONFLICT") from None
-        except RuntimeError:
-            raise HTTPException(503, detail="MOCK_ORDER_UNAVAILABLE") from None
-        return {**await mock_order_document(record, gateway), "context": scoped_context(binding)}
+    from .diagnostic_read_routes import create_diagnostic_read_router
+    diagnostic_read_router, diagnostic_workloads = create_diagnostic_read_router(
+        store, authorize, active.database_url, top20_service, news_service,
+        external_market_service, lambda: operational_state.candidate_monitor, historical_archive)
+    app.include_router(diagnostic_read_router)
 
-    def operational_document() -> dict[str, object]:
-        revision = int(operational["revision"])
-        condition = market_event_service.condition_status() if market_event_service is not None else None
-        return {
-            **operational, "applied_revision": applied_operational_revision,
-            "apply_status": "ACTIVE" if revision == applied_operational_revision and
-                (condition is None or condition["apply_status"] != "RECOVERY_REQUIRED") else "RECOVERY_REQUIRED",
-            "condition_runtime_supported": market_event_service is not None,
-            "condition_status": condition,
-        }
-
-    @app.get("/api/v1/settings/operations", dependencies=[Depends(authorize)])
-    async def get_operational_settings() -> dict[str, object]:
-        return operational_document()
-
-    @app.get("/api/v1/diagnostics/resources", dependencies=[Depends(authorize)])
-    async def diagnostics_resources() -> dict[str, object]:
-        database_size, storage_categories = await asyncio.gather(
-            asyncio.to_thread(store.storage_size_bytes),
-            asyncio.to_thread(store.storage_breakdown),
-        )
-        return {
-            **resource_usage("/app/data", database_size),
-            "storage_categories": storage_categories,
-            "storage_category_bytes_are_estimates": True,
-            "retention_policy": {
-                "mode": "unlimited",
-                "automatic_deletion_enabled": False,
-            },
-        }
-
-    @app.get("/api/v1/diagnostics/workloads", dependencies=[Depends(authorize)])
-    async def diagnostic_workloads() -> dict[str, object]:
-        from .diagnostic_workloads import WORKLOADS, control_path, control_snapshot
-        from .diagnostic_metrics import refresh_capture_state
-
-        refresh_capture_state(force=True)
-        path = control_path()
-        control = control_snapshot(path)
-        capture = control["metrics_capture"]
-        diagnostic_tool = control["diagnostic_tool"]
-        paused = control["paused"]
-        configured = {
-            "minute_backfill": bool(top20_service and top20_service._minute_backfill_enabled),
-            "minute_query_metadata": bool(active.database_url.startswith("postgres")),
-            "top20_after_close": top20_service is not None,
-            "news_jobs": bool(news_service and news_service._job_runner),
-            "news_stock_refresh": bool(news_service and (
-                news_service._naver_api_enabled or news_service._naver_stock_enabled
-                or news_service._dart_enabled)),
-            "news_query_set": bool(news_service and news_service._query_collector._enabled),
-            "news_market_feed": bool(news_service and news_service._market_collector
-                                     and news_service._market_collector._enabled),
-            "external_market": external_market_service is not None,
-            "candidate_monitor": candidate_monitor is not None,
-            "historical_news_archive": historical_archive is not None,
-        }
-        external_runtime = (external_market_service.diagnostic_status()
-                            if external_market_service is not None else {
-                                "configured": False, "operational_enabled": False,
-                                "running": False, "poll_seconds": None,
-                                "collection_attempts": 0,
-                                "collection_completions": 0,
-                                "collection_saved_rows_total": 0,
-                                "last_collection_started_at": None,
-                                "last_collection_completed_at": None,
-                                "last_collection_saved_rows": 0,
-                                "last_collection_error": None,
-                            })
-        expiries = control["workload_expiries"]
-        workloads = {}
-        for name in sorted(WORKLOADS):
-            effective = configured[name] and name not in paused
-            item = {"configured": configured[name], "effective": effective,
-                    "diagnostic_switch_available": diagnostic_tool["enabled"],
-                    "paused_by_diagnostic": name in paused,
-                    "expires_at": expiries.get(name)}
-            if name == "external_market":
-                item["effective"] = bool(external_runtime["operational_enabled"]
-                                         and external_runtime["running"]
-                                         and name not in paused)
-                item["runtime"] = external_runtime
-            workloads[name] = item
-        return {"diagnostic_tool": diagnostic_tool, "workloads": workloads,
-            "metrics_capture": capture, "trace_capture": control["trace_capture"],
-            "expires_at": control["expires_at"],
-            "control_revision": control["control_revision"]}
-
-    @app.get("/api/v1/diagnostics/market-bar-saves", dependencies=[Depends(authorize)])
-    async def diagnostic_market_bar_saves(start: float, end: float) -> dict[str, object]:
-        from .diagnostic_metrics import refresh_capture_state, summarize_market_bar_saves
-
-        if end <= start or end - start > 1800:
-            raise HTTPException(400, detail="DIAGNOSTIC_TIME_RANGE_INVALID")
-        refresh_capture_state(force=True)
-        return summarize_market_bar_saves(start, end)
-
-    @app.get("/api/v1/diagnostics/writers", dependencies=[Depends(authorize)])
-    async def diagnostic_writers() -> dict[str, object]:
-        from .diagnostic_writer_registry import writer_registry
-
-        return {"coverage": "instrumented_postgres_writers_only",
-                "writers": writer_registry(),
-                "unmeasured": ["raw/unmigrated PostgreSQL writers", "PC SQLite", "Journal SQLite",
-                               "errors/retries outside common DB pilot", "payload byte estimates",
-                               "per-backend wait attribution"]}
-
-    @app.get("/api/v1/diagnostics/db-calls", dependencies=[Depends(authorize)])
-    async def diagnostic_db_calls(start: float, end: float,
-                                  mode: str = "summary", limit: int = 200,
-                                  slow_ms: int = 500) -> dict[str, object]:
-        from .diagnostic_metrics import summarize_db_calls
-
-        if end <= start or end - start > 1800:
-            raise HTTPException(400, detail="DIAGNOSTIC_TIME_RANGE_INVALID")
-        if (mode not in {"summary", "verbose", "raw"}
-                or not 1 <= limit <= 500 or not 1 <= slow_ms <= 30_000):
-            raise HTTPException(400, detail="DIAGNOSTIC_DB_MODE_INVALID")
-        return summarize_db_calls(start, end, mode=mode, limit=limit, slow_ms=slow_ms)
-
-    @app.get("/api/v1/diagnostics/news-job-claim-plan", dependencies=[Depends(authorize)])
-    async def diagnostic_news_job_claim_plan() -> dict[str, object]:
-        explain = getattr(store, "explain_news_job_claim_plan", None)
-        if not callable(explain):
-            raise HTTPException(501, detail="POSTGRES_DIAGNOSTIC_UNAVAILABLE")
-        result = await asyncio.to_thread(explain)
-        if len(json.dumps(result).encode("utf-8")) > 1_048_576:
-            raise HTTPException(503, detail="DIAGNOSTIC_PLAN_TOO_LARGE")
-        return result
-
-    @app.get("/api/v1/diagnostics/news-job-claim-readonly-analyze",
-             dependencies=[Depends(authorize)])
-    async def diagnostic_news_job_claim_readonly_analyze(stage: str = "BODY") -> dict[str, object]:
-        analyze = getattr(store, "analyze_news_job_claim_read_only", None)
-        if not callable(analyze):
-            raise HTTPException(501, detail="POSTGRES_DIAGNOSTIC_UNAVAILABLE")
-        if stage not in {"BODY", "RULE"}:
-            raise HTTPException(400, detail="NEWS_JOB_STAGE_INVALID")
-        return await asyncio.to_thread(analyze, stage)
-
-    from .diagnostic_workloads import (
-        WORKLOADS, _history as record_diagnostic_history,
-        _set as set_diagnostic_workload, _set_capture as set_diagnostic_capture,
-        _set_tool as set_diagnostic_master, capture_status as diagnostic_capture_status,
-        control_path as diagnostic_control_path, control_snapshot as diagnostic_control_snapshot,
-        instance_id as diagnostic_instance_id,
-    )
+    from .diagnostic_workloads import control_path as diagnostic_control_path
     from .diagnostic_runs import DiagnosticRuns
 
     def diagnostic_internal_api(path: str, query: dict | None = None) -> dict:
@@ -1279,1648 +756,68 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             raise HTTPException(501, detail="DIAGNOSTIC_CONTROL_UNAVAILABLE")
         return diagnostic_runs
 
-    @app.get("/api/v1/diagnostics/capabilities", dependencies=[Depends(authorize)])
-    async def diagnostic_capabilities() -> dict[str, object]:
-        from .diagnostic_replay import (MAX_QUERY_MINUTE_ROWS, MAX_QUERY_MINUTE_TOTAL_ROWS,
-                                        QUERY_MINUTE_SCENARIOS, TRACE_SYNTHETIC_KINDS)
-        return {"server_build": SERVER_BUILD, "producer_instance": diagnostic_instance_id(),
-                "control_available": diagnostic_runs is not None,
-                "postgres_available": active.database_url.startswith("postgres"),
-                "sections": ["postgres", "activity", "news_jobs", "host", "storage"],
-                "run_kinds": ["measure", "compare", "replay"],
-                "trace_input_capture": {
-                    "schema_version": 3,
-                    "options": {"store_inputs": False, "collector_inputs": False, "top20_inputs": False},
-                    "top20_input_capture": {"schema_version": 3,
-                        "input_version": "top20-ranking-input/v1",
-                        "scope": "ranking_validation_only", "downstream_replay_supported": False,
-                        "candidate_flow_input_version": "top20-candidate-flow-input/v1",
-                        "candidate_flow_scope": "candidate_flow_consumer_and_ingest",
-                        "broker_queue_and_cache_scheduling_replayed": False},
-                    "causal_input_versions": {"market_request": "market-request-tape/v1",
-                        "ranking": "top20-ranking-input/v1", "realtime_lifecycle": "top20-realtime-tape/v1",
-                        "delivery": "top20-hub-delivery/v1"},
-                    "causal_input_boundaries": ["REST", "catalog", "ranking", "subscription", "lifecycle", "delivery_receipt"],
-                    "source_state_equivalence_verified": False,
-                    "capacity_acceptance": "pending_sizing_and_NAS_gates",
-                    "delivery_retention": "framed_ram_v1_deferred_only",
-                    "store_input_profiles": {"stock-catalog-documents/v1": {
-                        "method": "replace_documents", "collection": "stock_catalog",
-                        "maximum_copy_bytes": 16 * 1024 * 1024}},
-                    "collector_input_version": "collector-input/v2",
-                    "collector_event_types": ["0B", "0w", "0J", "0U"],
-                    "coverage": "observed_paths_only",
-                    "overhead_verified": False,
-                    "deferred_persistence": {
-                        "supported": True, "request_field": "persist_at", "max_delay_seconds": 86400,
-                        "memory_limit_bytes": 8 * 1024 * 1024 * 1024,
-                        "event_capacity": 5_000_000, "write_bytes_per_second": 1024 * 1024,
-                    },
-                },
-                "trace_replay_writer_kinds": sorted(TRACE_SYNTHETIC_KINDS),
-                "query_minute_scenarios": sorted(QUERY_MINUTE_SCENARIOS),
-                "limits": {"measure_seconds": 300, "compare_phase_seconds": 1100,
-                           "ttl_seconds": 7200, "activity_rows": 200,
-                           "query_minute_rows_per_call": MAX_QUERY_MINUTE_ROWS,
-                           "query_minute_total_input_rows": MAX_QUERY_MINUTE_TOTAL_ROWS},
-                "scope_note": "server-process metrics, database-wide counters and host samples; independent PC/importer memory unavailable"}
+    from .diagnostic_control_routes import create_diagnostic_control_router
+    app.include_router(create_diagnostic_control_router(
+        authorize, diagnostic_path, diagnostic_runs, require_diagnostic_runs,
+        diagnostic_workloads, active.database_url, SERVER_BUILD))
 
-    @app.put("/api/v1/diagnostics/control", dependencies=[Depends(authorize)])
-    async def diagnostic_control_update(body: DiagnosticControlRequest) -> dict[str, object]:
-        require_diagnostic_runs()
-        if body.target != "master" and body.ttl_seconds > 3600:
-            raise HTTPException(422, detail="DIAGNOSTIC_CHILD_TTL_OUT_OF_BOUNDS")
-        if (body.target in {"master", "capture"} and
-                (body.enabled is None or body.paused is not None or body.workload)
-                or body.target == "workload" and
-                (body.paused is None or body.enabled is not None or body.workload not in WORKLOADS)):
-            raise HTTPException(422, detail="DIAGNOSTIC_CONTROL_INPUT_INVALID")
-        kwargs = {"expected_revision": body.expected_revision,
-                  "expected_instance": body.expected_instance}
-        try:
-            if body.target == "master":
-                await asyncio.to_thread(set_diagnostic_master, diagnostic_path,
-                                        body.enabled, body.ttl_seconds,
-                                        expected_session=body.expected_session, **kwargs)
-            elif body.target == "capture":
-                if body.expected_session is None:
-                    raise ValueError("diagnostic_control_conflict")
-                await asyncio.to_thread(set_diagnostic_capture, diagnostic_path,
-                                        body.enabled, body.ttl_seconds,
-                                        expected_session=body.expected_session, **kwargs)
-            else:
-                if body.expected_session is None:
-                    raise ValueError("diagnostic_control_conflict")
-                await asyncio.to_thread(set_diagnostic_workload, diagnostic_path,
-                                        body.workload, body.paused, body.ttl_seconds,
-                                        expected_session=body.expected_session, **kwargs)
-        except ValueError as error:
-            raise HTTPException(409, detail=str(error)) from error
-        history_error = None
-        try:
-            record_diagnostic_history("api_control", workload=body.workload,
-                                      detail={"target": body.target,
-                                              "revision": body.expected_revision})
-        except OSError as error:
-            history_error = type(error).__name__
-        from .diagnostic_metrics import refresh_capture_state
-        refresh_capture_state(force=True)
-        result = await diagnostic_workloads()
-        if history_error:
-            result["history_error_type"] = history_error
-        return result
+    from .diagnostic_run_routes import create_diagnostic_run_router
+    app.include_router(create_diagnostic_run_router(
+        authorize, require_diagnostic_runs, active.database_url, SERVER_BUILD, logger))
 
-    @app.post("/api/v1/diagnostics/trace", dependencies=[Depends(authorize)])
-    async def diagnostic_trace_start(body: DiagnosticTraceRequest) -> dict[str, object]:
-        from .diagnostic_workloads import _set_trace, control_snapshot
-        from .diagnostic_trace import start as start_trace, status as trace_state
-        path = diagnostic_control_path()
-        if path is None:
-            raise HTTPException(501, detail="DIAGNOSTIC_CONTROL_UNAVAILABLE")
-        control = control_snapshot(path)
-        if control["diagnostic_tool"]["session_id"] != body.expected_session:
-            raise HTTPException(409, detail="diagnostic_control_conflict")
-        busy_states = {"running", "stopping", "awaiting_persistence", "persisting"}
-        if trace_state().get("state") in busy_states:
-            raise HTTPException(409, detail="trace_already_running")
-        try:
-            await asyncio.to_thread(_set_trace, path, True, body.seconds,
-                                    expected_session=body.expected_session)
-            return await asyncio.to_thread(start_trace, seconds=body.seconds,
-                                          store_inputs=body.store_inputs,
-                                          collector_inputs=body.collector_inputs,
-                                          top20_inputs=body.top20_inputs,
-                                          persist_at=body.persist_at)
-        except ValueError as error:
-            if trace_state().get("state") not in busy_states:
-                await asyncio.to_thread(_set_trace, path, False, body.seconds,
-                                        expected_session=body.expected_session)
-            raise HTTPException(409, detail=str(error)) from error
+    app.include_router(operational_update_router)
 
-    @app.get("/api/v1/diagnostics/trace", dependencies=[Depends(authorize)])
-    async def diagnostic_trace_status() -> dict[str, object]:
-        from .diagnostic_trace import status as trace_state
-        return await asyncio.to_thread(trace_state)
+    from .market_query_routes import create_market_query_router
+    app.include_router(create_market_query_router(store, authorize, broker, collector))
 
-    @app.post("/api/v1/diagnostics/trace/stop", dependencies=[Depends(authorize)])
-    async def diagnostic_trace_stop() -> dict[str, object]:
-        from .diagnostic_trace import stop as stop_trace
-        return await asyncio.to_thread(stop_trace)
+    app.include_router(create_account_query_router(
+        authorize, AccountTarget, current_legacy_account_query, selected_account))
 
-    @app.get("/api/v1/diagnostics/trace/{trace_id}", dependencies=[Depends(authorize)])
-    async def diagnostic_trace_manifest(trace_id: str) -> dict[str, object]:
-        from .diagnostic_trace import status as trace_state
-        try:
-            return await asyncio.to_thread(trace_state, trace_id)
-        except KeyError as error:
-            raise HTTPException(404, detail="TRACE_NOT_FOUND") from error
+    from .news_service_routes import create_news_analysis_router, create_news_search_router
 
-    @app.get("/api/v1/diagnostics/trace/{trace_id}/chunks/{chunk_name}",
-             dependencies=[Depends(authorize)])
-    async def diagnostic_trace_chunk(trace_id: str, chunk_name: str) -> Response:
-        from .diagnostic_trace import chunk_bytes
-        try:
-            content = await asyncio.to_thread(chunk_bytes, trace_id, chunk_name)
-        except KeyError as error:
-            raise HTTPException(404, detail="TRACE_CHUNK_NOT_FOUND") from error
-        except ValueError as error:
-            raise HTTPException(409, detail=str(error)) from error
-        return Response(content=content, media_type="application/x-ndjson")
+    app.include_router(create_news_search_router(news_service, authorize))
 
-    @app.get("/api/v1/diagnostics/snapshot", dependencies=[Depends(authorize)])
-    async def diagnostic_snapshot(sections: str = "postgres,activity,news_jobs,host,storage",
-                                  pid: int | None = None) -> dict[str, object]:
-        from .diagnostic_sampling import read_host_snapshot, read_postgres_snapshot
-        selected = frozenset(part.strip() for part in sections.split(","))
-        valid = {"postgres", "activity", "news_jobs", "host", "storage"}
-        if not selected or not selected.issubset(valid) or len(sections) > 100 or (pid is not None and pid <= 0):
-            raise HTTPException(400, detail="DIAGNOSTIC_SECTION_INVALID")
-        result: dict[str, object] = {"server_build": SERVER_BUILD, "sections": {}}
-        if selected & {"postgres", "activity", "news_jobs"}:
-            if not active.database_url.startswith("postgres"):
-                raise HTTPException(501, detail="POSTGRES_DIAGNOSTIC_UNAVAILABLE")
-            try:
-                database = await asyncio.to_thread(read_postgres_snapshot, active.database_url,
-                                                   sections=selected, pid=pid)
-            except Exception as error:
-                logger.warning("diagnostic PostgreSQL snapshot unavailable: %s", type(error).__name__)
-                raise HTTPException(503, detail="DIAGNOSTIC_POSTGRES_SNAPSHOT_UNAVAILABLE") from error
-            result.update(database)
-        if selected & {"host", "storage"}:
-            host = await asyncio.to_thread(read_host_snapshot)
-            if "host" in selected:
-                result["sections"]["host"] = {
-                    key: value for key, value in host.items() if key != "storage_mapping"}
-            if "storage" in selected:
-                result["sections"]["storage"] = host["storage_mapping"]
-        return result
+    from .historical_news_archive_routes import create_historical_news_archive_router
 
-    @app.post("/api/v1/diagnostics/runs", status_code=202,
-              dependencies=[Depends(authorize)])
-    async def diagnostic_run_start(body: DiagnosticRunRequest) -> dict[str, object]:
-        runs = require_diagnostic_runs()
-        if not active.database_url.startswith("postgres"):
-            raise HTTPException(501, detail="POSTGRES_DIAGNOSTIC_UNAVAILABLE")
-        try:
-            return await asyncio.to_thread(runs.start, kind=body.kind, seconds=body.seconds,
-                                           label=body.label, workload=body.workload,
-                                           request_id=body.request_id,
-                                           profile_report_id=body.profile_report_id,
-                                           profile_trace_id=body.profile_trace_id,
-                                           window_start_seconds=body.window_start_seconds,
-                                           window_end_seconds=body.window_end_seconds,
-                                           include_writer_kinds=tuple(body.include_writer_kinds),
-                                           exclude_writer_kinds=tuple(body.exclude_writer_kinds),
-                                           query_minute_scenario=body.query_minute_scenario,
-                                           expected_session=body.expected_session,
-                                           expected_revision=body.expected_revision)
-        except ValueError as error:
-            raise HTTPException(409 if "busy" in str(error) or "conflict" in str(error)
-                                else 400, detail=str(error)) from error
+    app.include_router(create_historical_news_archive_router(historical_archive, authorize))
 
-    @app.get("/api/v1/diagnostics/runs/{run_id}", dependencies=[Depends(authorize)])
-    async def diagnostic_run_status(run_id: str) -> dict[str, object]:
-        try:
-            return await asyncio.to_thread(require_diagnostic_runs().status, run_id)
-        except KeyError as error:
-            raise HTTPException(404, detail="DIAGNOSTIC_RUN_NOT_FOUND") from error
+    app.include_router(create_news_analysis_router(ai_service, authorize))
 
-    @app.post("/api/v1/diagnostics/runs/{run_id}/cancel", status_code=202,
-              dependencies=[Depends(authorize)])
-    async def diagnostic_run_cancel(run_id: str) -> dict[str, object]:
-        try:
-            return await asyncio.to_thread(require_diagnostic_runs().cancel, run_id)
-        except KeyError as error:
-            raise HTTPException(404, detail="DIAGNOSTIC_RUN_NOT_FOUND") from error
+    from .historical_news_processing_routes import create_historical_news_processing_router
 
-    @app.get("/api/v1/diagnostics/reports", dependencies=[Depends(authorize)])
-    async def diagnostic_reports(limit: int = 100, offset: int = 0) -> dict[str, object]:
-        try:
-            return await asyncio.to_thread(require_diagnostic_runs().reports,
-                                           limit=limit, offset=offset)
-        except ValueError as error:
-            raise HTTPException(400, detail=str(error)) from error
-
-    @app.get("/api/v1/diagnostics/reports/{report_id}", dependencies=[Depends(authorize)])
-    async def diagnostic_report(report_id: str, mode: str = "summary") -> dict[str, object]:
-        if mode not in {"summary", "raw"}:
-            raise HTTPException(400, detail="DIAGNOSTIC_REPORT_MODE_INVALID")
-        try:
-            report = await asyncio.to_thread(require_diagnostic_runs().report, report_id)
-        except KeyError as error:
-            raise HTTPException(404, detail="DIAGNOSTIC_REPORT_NOT_FOUND") from error
-        if mode == "summary":
-            result = report.get("result", report)
-            if isinstance(result, dict):
-                phases = ([result.get("phase", {})] if result.get("kind") == "measure"
-                          else result.get("phases", []))
-                for phase in phases:
-                    if not isinstance(phase, dict):
-                        continue
-                    phase.pop("db_calls_raw", None)
-                    phase.pop("db_calls_raw_last_checkpoint", None)
-                    for kind in phase.get("market_bar_saves", {}).get("kinds", {}).values():
-                        kind.pop("call_samples", None)
-        return report
-
-    @app.get("/api/v1/diagnostics/history", dependencies=[Depends(authorize)])
-    async def diagnostic_history(limit: int = 100, offset: int = 0) -> dict[str, object]:
-        try:
-            return await asyncio.to_thread(require_diagnostic_runs().history,
-                                           limit=limit, offset=offset)
-        except ValueError as error:
-            raise HTTPException(400, detail=str(error)) from error
-
-    @app.put("/api/v1/settings/operations", dependencies=[Depends(authorize)])
-    async def put_operational_settings(values: OperationalSettingsUpdate) -> dict[str, object]:
-        nonlocal candidate_monitor, applied_operational_revision
-        async with candidate_settings_lock:
-            changes = values.model_dump(exclude_none=True, exclude={"expected_revision"})
-            if values.expected_revision is not None and values.expected_revision != int(operational["revision"]):
-                raise HTTPException(status_code=409, detail="OPERATIONAL_SETTINGS_REVISION_CONFLICT")
-            proposed = {**operational, **changes}
-            for field in ("news_naver_stock_url", "news_naver_flash_url", "news_naver_world_url"):
-                endpoint = str(proposed[field]).strip()
-                parsed = urlsplit(endpoint)
-                if (parsed.scheme != "https" or not parsed.hostname or parsed.username
-                        or parsed.password or parsed.query or parsed.fragment or not parsed.path):
-                    raise HTTPException(status_code=422, detail=f"{field}: HTTPS API 주소를 입력하세요.")
-                proposed[field] = endpoint
-            condition_fields = {"hot_cohort_condition_enabled", "hot_cohort_condition_name", "hot_cohort_condition_substring"}
-            if condition_fields.intersection(changes) and market_event_service is None:
-                raise HTTPException(status_code=422, detail="CONDITION_RUNTIME_NOT_READY")
-            if proposed["hot_cohort_condition_enabled"] and not (
-                    str(proposed["hot_cohort_condition_name"]).strip() or str(proposed["hot_cohort_condition_substring"]).strip()):
-                raise HTTPException(status_code=422, detail="CONDITION_SELECTION_REQUIRED")
-            condition_recovery = market_event_service is not None and market_event_service.condition_status()["apply_status"] == "RECOVERY_REQUIRED"
-            condition_changed = condition_recovery or any(
-                name in changes and proposed[name] != operational[name] for name in condition_fields)
-            external_fields = {"external_market_enabled", "external_market_poll_seconds",
-                               "external_market_auto_roll_enabled", "external_market_roll_confirmations"}
-            if proposed["external_market_enabled"] and external_market_service is None:
-                raise HTTPException(status_code=422, detail="EXTERNAL_MARKET_SYMBOLS_REQUIRED")
-            shadow_fields = {
-                "shadow_candidate_enabled", "shadow_candidate_config",
-                "shadow_candidate_poll_seconds",
-                "shadow_candidate_universe_max_age_seconds",
-            }
-            recovery_required = int(operational["revision"]) != applied_operational_revision
-            condition_changed = condition_changed or (recovery_required and market_event_service is not None)
-            external_changed = recovery_required or any(
-                name in changes and proposed[name] != operational[name] for name in external_fields)
-            shadow_changed = recovery_required or any(
-                name in changes and proposed[name] != operational[name] for name in shadow_fields
-            )
-            replacement = candidate_monitor
-            if shadow_changed and bool(proposed["shadow_candidate_enabled"]):
-                try:
-                    replacement = await asyncio.to_thread(
-                        CandidateMonitor.from_json,
-                        store,
-                        json.dumps(proposed["shadow_candidate_config"]),
-                        poll_seconds=float(proposed["shadow_candidate_poll_seconds"]),
-                        universe_max_age_seconds=int(
-                            proposed["shadow_candidate_universe_max_age_seconds"]
-                        ),
-                    )
-                except (TypeError, ValueError) as error:
-                    raise HTTPException(status_code=422, detail=str(error)) from error
-            elif shadow_changed:
-                replacement = None
-            changed = any(proposed[name] != operational.get(name) for name in changes)
-            if not changed and not recovery_required and not condition_recovery:
-                return operational_document()
-            proposed["revision"] = int(operational["revision"]) + (1 if changed else 0)
-            try:
-                await asyncio.to_thread(store.upsert_documents, "server_operational_settings", [{
-                    "owner": "global", "key": "current", "document": proposed,
-                }])
-            except Exception as error:
-                logger.exception("operational settings persistence failed")
-                raise HTTPException(status_code=503, detail="OPERATIONAL_SETTINGS_SAVE_FAILED") from error
-            operational.update(proposed)
-            try:
-                if condition_changed:
-                    market_event_service.update_operational_settings(
-                        enabled=bool(proposed["hot_cohort_condition_enabled"]),
-                        exact_name=str(proposed["hot_cohort_condition_name"]),
-                        substring=str(proposed["hot_cohort_condition_substring"]),
-                    )
-                if external_changed and external_market_service is not None:
-                    await external_market_service.update_operational_settings(
-                        enabled=bool(proposed["external_market_enabled"]),
-                        poll_seconds=int(proposed["external_market_poll_seconds"]),
-                        auto_roll_enabled=bool(proposed["external_market_auto_roll_enabled"]),
-                        roll_confirmations=int(proposed["external_market_roll_confirmations"]),
-                    )
-                if ai_service is not None:
-                    ai_service.update_operational_settings(
-                        provider=str(proposed["ai_provider"]), model=str(proposed["ai_model"]),
-                        daily_limit=int(proposed["ai_daily_limit"]),
-                    )
-                if news_service is not None:
-                    news_service.update_operational_settings(
-                        refresh_seconds=int(proposed["news_refresh_seconds"]),
-                        naver_api_enabled=bool(proposed["news_naver_api_enabled"]),
-                        naver_stock_enabled=bool(proposed["news_naver_stock_enabled"]),
-                        naver_market_enabled=bool(proposed["news_naver_market_enabled"]),
-                        naver_stock_url=str(proposed["news_naver_stock_url"]),
-                        naver_flash_url=str(proposed["news_naver_flash_url"]),
-                        naver_world_url=str(proposed["news_naver_world_url"]),
-                        dart_enabled=bool(proposed["dart_enabled"]),
-                        query_set_enabled=bool(proposed["news_query_set_enabled"]),
-                        query_set=tuple(str(value) for value in proposed["news_query_set"]),
-                        query_set_refresh_seconds=int(proposed["news_query_set_refresh_seconds"]),
-                        processing_excluded_providers=tuple(
-                            str(value) for value in proposed["news_processing_excluded_providers"]
-                        ),
-                    )
-                if shadow_changed:
-                    previous = candidate_monitor
-                    if previous is not None:
-                        await previous.close()
-                    candidate_monitor = replacement
-                    app.state.candidate_monitor = replacement
-                    if replacement is not None:
-                        await replacement.start()
-                applied_operational_revision = int(proposed["revision"])
-            except Exception as error:
-                logger.exception("operational settings runtime apply failed")
-                raise HTTPException(status_code=503, detail="OPERATIONAL_SETTINGS_APPLY_PENDING") from error
-            return operational_document()
-
-    @app.post("/api/v1/kiwoom/query", dependencies=[Depends(authorize)])
-    async def kiwoom_query(query: QueryRequest) -> dict[str, object]:
-        from .rest_broker import ACCOUNT_RECOVERY_ENDPOINTS
-        if query.api_id in ACCOUNT_RECOVERY_ENDPOINTS:
-            raise HTTPException(400, detail="ACCOUNT_QUERY_SCOPE_REQUIRED")
-        if query.cont_yn == "N":
-            archived = await asyncio.to_thread(
-                _stored_market_response, store, query.api_id, query.body,
-            )
-            if archived is not None:
-                return {
-                    "payload": archived, "has_next": False, "next_key": "",
-                    "cache_hit": False, "archive_hit": True,
-                }
-        if broker is None:
-            raise HTTPException(status_code=503, detail="서버에 키움 API 키가 설정되지 않았습니다.")
-        if collector is not None and getattr(broker, "_credential_paused", False):
-            connection_status = collector.credential_connection_status()
-            if connection_status["planned_reconnect"]:
-                raise HTTPException(503, detail={"code": "REALTIME_RECONNECTING", "connection_status": connection_status})
-        try:
-            result = await broker.request(
-                query.api_id, query.path, query.body, cont_yn=query.cont_yn, next_key=query.next_key,
-            )
-        except ValueError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
-        except RuntimeError as error:
-            raise HTTPException(status_code=502, detail=str(error)) from error
-        return {
-            "payload": result.payload,
-            "has_next": result.has_next,
-            "next_key": result.next_key,
-            "cache_hit": result.cache_hit,
-        }
-
-    @app.post("/api/v2/kiwoom/account-query", dependencies=[Depends(authorize)])
-    async def account_query(query: AccountQueryRequest) -> dict[str, object]:
-        if account_query_manager is None or main_binding is None:
-            raise HTTPException(status_code=503, detail="ACCOUNT_IDENTITY_UNVERIFIED")
-        try:
-            return await account_query_manager.query(
-                api_id=query.api_id, path=query.path, body=query.body,
-                batch_id=query.batch_id, page_index=query.page_index,
-                next_key=query.next_key,
-            )
-        except ValueError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
-        except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
-
-    @app.post("/api/v3/kiwoom/account-query", dependencies=[Depends(authorize)])
-    async def scoped_account_query(query: ScopedAccountQueryRequest):
-        binding, manager, _ = selected_account(query.account_scope.model_dump(),
-            query.credential_profile_id, query.expected_binding_revision)
-        if manager is None: raise HTTPException(503, detail="PROFILE_RUNTIME_NOT_READY")
-        try:
-            result = await manager.query(api_id=query.api_id, path=query.path, body=query.body,
-                batch_id=query.batch_id, page_index=query.page_index, next_key=query.next_key)
-        except ValueError as error:
-            code = str(error)
-            if code not in {"ACCOUNT_QUERY_CURSOR_EXPIRED", "ACCOUNT_QUERY_BODY_MISMATCH", "ACCOUNT_QUERY_CURSOR_MISMATCH"}:
-                code = "ACCOUNT_QUERY_INVALID"
-            raise HTTPException(409, detail=code) from None
-        except RuntimeError as error:
-            code = str(error)
-            if code in {"ACCOUNT_QUERY_BUSY", "ACCOUNT_QUERY_CLOSED"}:
-                raise HTTPException(503, detail=code) from None
-            raise HTTPException(409, detail="ACCOUNT_CONTEXT_MISMATCH") from None
-        except Exception:
-            raise HTTPException(502, detail="ACCOUNT_QUERY_UNAVAILABLE") from None
-        if result["context"] != scoped_context(binding):
-            raise HTTPException(409, detail="ACCOUNT_CONTEXT_MISMATCH")
-        return result
-
-    @app.post("/api/v1/news/search", dependencies=[Depends(authorize)])
-    async def news_search(query: NewsSearchRequest) -> dict[str, object]:
-        if news_service is None:
-            raise HTTPException(status_code=503, detail="서버에 네이버 뉴스 API 키가 설정되지 않았습니다.")
-        try:
-            items = await news_service.search(query.stock_code, query.stock_name, query.since, automation={
-                "auto_analyze": query.ai_auto_analyze,
-                "auto_recent_limit": query.ai_auto_recent_limit,
-                "provider": query.ai_provider,
-                "model": query.ai_model,
-            })
-        except ValueError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
-        except RuntimeError as error:
-            raise HTTPException(status_code=502, detail=str(error)) from error
-        return {"stock_code": query.stock_code, "items": items}
-
-    @app.post("/api/v1/news/stored-page", dependencies=[Depends(authorize)])
-    async def news_stored_page(query: NewsStoredPageRequest) -> dict[str, object]:
-        if news_service is None:
-            raise HTTPException(status_code=503, detail="서버 뉴스 저장소가 준비되지 않았습니다.")
-        page = await news_service.stored_page(query.stock_code, query.stock_name, offset=query.offset,
-            automation={
-                "auto_analyze": query.ai_auto_analyze,
-                "auto_recent_limit": query.ai_auto_recent_limit,
-                "provider": query.ai_provider,
-                "model": query.ai_model,
-            })
-        return {"stock_code": query.stock_code, **page}
-
-    def archive_reader() -> HistoricalNewsArchiveReader:
-        if historical_archive is None:
-            raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_UNAVAILABLE")
-        from .diagnostic_workloads import is_paused
-        if is_paused("historical_news_archive"):
-            raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_PAUSED")
-        return historical_archive
-
-    @app.get("/api/v1/news/historical-archive/search", dependencies=[Depends(authorize)])
-    async def historical_archive_search(
-        stock_code: str = Query(pattern=r"^[0-9A-Z]{6}$"),
-        limit: int = Query(default=100, ge=1, le=200),
-        cursor: str | None = Query(default=None, max_length=2048),
-    ) -> dict[str, object]:
-        reader = archive_reader()
-        try:
-            return await asyncio.to_thread(reader.search_page, stock_code, limit=limit, cursor=cursor)
-        except InvalidArchiveCursorError:
-            raise HTTPException(status_code=400, detail="HISTORICAL_NEWS_ARCHIVE_CURSOR_INVALID") from None
-        except (ArchiveUnavailableError, OSError, sqlite3.DatabaseError):
-            raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_UNAVAILABLE") from None
-
-    @app.get("/api/v1/news/historical-archive/articles/{article_revision_id}",
-             dependencies=[Depends(authorize)])
-    async def historical_archive_article(
-        article_revision_id: str,
-        dataset_id: str = Query(min_length=1, max_length=128),
-        body_revision_id: str | None = Query(default=None, max_length=128),
-    ) -> dict[str, object]:
-        reader = archive_reader()
-        if dataset_id != reader.dataset_id:
-            raise HTTPException(status_code=409, detail="HISTORICAL_NEWS_ARCHIVE_DATASET_CHANGED")
-        try:
-            result = await asyncio.to_thread(
-                reader.article_by_id, article_revision_id, body_revision_id=body_revision_id,
-            )
-        except ValueError as error:
-            if isinstance(error, ArchiveUnavailableError):
-                raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_UNAVAILABLE") from None
-            raise HTTPException(status_code=400, detail="HISTORICAL_NEWS_ARCHIVE_ID_MISMATCH") from None
-        except (OSError, sqlite3.DatabaseError):
-            raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_UNAVAILABLE") from None
-        if result is None:
-            raise HTTPException(status_code=404, detail="HISTORICAL_NEWS_ARCHIVE_ARTICLE_NOT_FOUND")
-        return result
-
-    @app.post("/api/v1/news/analyze", dependencies=[Depends(authorize)])
-    async def news_analyze(query: AIAnalysisRequest) -> dict[str, object]:
-        if ai_service is None:
-            raise HTTPException(status_code=503, detail="서버에 AI API 키가 설정되지 않았습니다.")
-        try:
-            return await ai_service.analyze(
-                query.stock_code, query.stock_name, query.provider, query.model,
-                [value.model_dump() for value in query.events], query.article_count,
-            )
-        except ValueError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
-        except NewsAIProviderError as error:
-            raise HTTPException(status_code=error.status_code, detail=str(error)) from error
-        except RuntimeError as error:
-            raise HTTPException(status_code=502, detail=str(error)) from error
-
-    @app.post("/api/v1/news/historical-jobs/claim", dependencies=[Depends(authorize)])
-    async def claim_historical_news_job(
-        stage: str = Query(pattern="^(BODY|RULE)$"),
-        excluded_codes: str = Query(default="", max_length=6000),
-        scope: str = Query(default="all", pattern="^(all|pc_market|pc_search|pc)$"),
-    ) -> dict[str, object]:
-        excluded = tuple(dict.fromkeys(code.strip().upper() for code in excluded_codes.split(",") if code.strip()))
-        if len(excluded) > 500 or any(not re.fullmatch(r"[0-9A-Z]{6}", code) for code in excluded):
-            raise HTTPException(status_code=422, detail="제외 종목코드 형식이 올바르지 않습니다.")
-        job = await asyncio.to_thread(store.claim_external_historical_news_job, stage, excluded, scope)
-        if job is None:
-            return {"job": None}
-        article = await asyncio.to_thread(store.load_news_article_revision, job["article_revision_id"])
-        if article is None:
-            raise HTTPException(status_code=409, detail="기사 리비전이 없어 작업을 처리할 수 없습니다.")
-        response: dict[str, object] = {"job": job, "article": article}
-        if stage == "RULE":
-            body_id = str(job["payload"].get("body_revision_id") or "")
-            response["body"] = await asyncio.to_thread(store.load_news_body_revision, body_id)
-        return response
-
-    @app.post("/api/v1/news/historical-market-articles", dependencies=[Depends(authorize)])
-    async def import_historical_market_articles(batch: HistoricalMarketNewsBatch) -> dict[str, Any]:
-        for item in batch.items:
-            document = item.get("document")
-            published = str(document.get("published_at") or "") if isinstance(document, dict) else ""
-            try:
-                publication_time = datetime.fromisoformat(published)
-                matching_date = (publication_time.tzinfo is not None
-                                 and publication_time.astimezone(KST).date().isoformat() == batch.target_date)
-            except ValueError:
-                matching_date = False
-            if (not isinstance(document, dict) or not str(item.get("identity") or "")
-                    or not str(document.get("title") or "")
-                    or not matching_date
-                    or not isinstance(item.get("targets"), list)):
-                raise HTTPException(status_code=422, detail="과거 시황 기사 형식·날짜가 올바르지 않습니다.")
-        try:
-            return await asyncio.to_thread(store.save_historical_market_news_batch,
-                                           batch.source, batch.target_date, batch.batch_id, batch.items,
-                                           batch.processing_owner)
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-
-    @app.post("/api/v1/news/historical-jobs/complete", dependencies=[Depends(authorize)])
-    async def complete_historical_news_job(result: HistoricalNewsJobResult) -> dict[str, str]:
-        try:
-            return await asyncio.to_thread(store.complete_external_historical_news_job, result.model_dump())
-        except ValueError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+    app.include_router(create_historical_news_processing_router(store, authorize))
 
     from .news_read_routes import create_news_read_router
 
     app.include_router(create_news_read_router(store, authorize))
 
-    async def load_display_minute_bars(code: str, day: str, market: str) -> list[dict[str, Any]]:
-        current_collector = app.state.realtime_collector
-        if current_collector is not None:
-            return await current_collector.load_live_minute_bars(code, day, market)
-        return await asyncio.to_thread(store.load_minute_bars, code, day, market)
-
-    @app.get("/api/v1/market/minute-bars", dependencies=[Depends(authorize)])
-    async def minute_bars(
-        code: str = Query(min_length=6, max_length=12),
-        trading_date: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
-        market: str = Query(default="", pattern=r"^(|KRX|NXT|SOR|COMBINED)$"),
-    ) -> dict[str, object]:
-        requested_market = market.upper()
-        values = await load_display_minute_bars(
-            code, trading_date,
-            "" if requested_market == "COMBINED" else requested_market,
-        )
-        if requested_market == "COMBINED":
-            values = _combined_minute_bars(values)
-        coverage_markets = (
-            ("KRX",) if requested_market in {"", "COMBINED"} and trading_date >= "2026-09-14"
-            else (requested_market,) if requested_market else ("KRX",)
-        )
-        coverage_documents = [
-            await asyncio.to_thread(
-                store.load_documents,
-                "market_data_coverage",
-                f"{trading_date}:{code}:{value}",
-                1,
-            )
-            for value in coverage_markets
-        ]
-        coverage_complete = bool(coverage_documents) and all(
-            _archive_coverage_ready(rows, trading_date, "minute")
-            for rows in coverage_documents
-        )
-        return {
-            "code": code, "trading_date": trading_date, "market": requested_market, "bars": values,
-            "coverage": {"complete": coverage_complete, "markets": list(coverage_markets)},
-        }
-
-    @app.get("/api/v1/market/recent-minute-bars", dependencies=[Depends(authorize)])
-    async def recent_minute_bars(
-        code: str = Query(min_length=6, max_length=12),
-        end_date: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
-        market: str = Query(default="", pattern=r"^(|KRX|NXT|SOR|COMBINED)$"),
-        trading_days: int = Query(default=2, ge=1, le=5),
-    ) -> dict[str, object]:
-        """TR 없이 중앙 저장 이력과 미저장 RAM 집계로 최근 거래일 분봉을 반환한다."""
-        end = datetime.fromisoformat(end_date).date()
-        values: list[dict[str, Any]] = []
-        found_days: set[str] = set()
-        for offset in range(31):
-            day = (end - timedelta(days=offset)).isoformat()
-            requested_market = market.upper()
-            rows = await load_display_minute_bars(
-                code, day,
-                "" if requested_market == "COMBINED" else requested_market,
-            )
-            if requested_market == "COMBINED":
-                rows = _combined_minute_bars(rows)
-            if rows:
-                values.extend(rows)
-                found_days.add(day)
-                if len(found_days) >= trading_days:
-                    break
-        values.sort(key=lambda value: (
-            str(value.get("trading_date", "")), str(value.get("minute", "")),
-        ))
-        return {
-            "code": code, "end_date": end_date, "market": market.upper(),
-            "trading_days": sorted(found_days), "bars": values,
-        }
-
-    @app.get("/api/v1/market/latest-market-caps", dependencies=[Depends(authorize)])
-    async def latest_market_caps(
-        codes: list[str] = Query(default=[]),
-    ) -> dict[str, object]:
-        """Return only durable 0B market-cap references, regardless of tick age."""
-        normalized = list(dict.fromkeys(str(code).strip() for code in codes))
-        if not normalized or len(normalized) > 200 or any(
-            re.fullmatch(r"\d{6}", code) is None for code in normalized
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="종목코드는 1~200개의 6자리 값이어야 합니다.",
-            )
-        values = await asyncio.to_thread(store.load_latest_market_caps, normalized)
-        return {"market_caps": values}
-
-    @app.get("/api/v1/market/trade-value-comparisons", dependencies=[Depends(authorize)])
-    async def trade_value_comparisons(
-        code: str = Query(min_length=6, max_length=12),
-        trading_date: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
-        limit: int = Query(default=1500, ge=1, le=5000),
-    ) -> dict[str, object]:
-        owner = f"{trading_date}:{code}"
-        values = await asyncio.to_thread(
-            store.load_documents, "minute_trade_value_comparisons", owner, limit,
-        )
-        return {
-            "code": code,
-            "trading_date": trading_date,
-            "summary": _trade_value_comparison_summary(values),
-            "comparisons": values,
-        }
-
-    @app.get("/api/v1/market/events", dependencies=[Depends(authorize)])
-    async def market_events(
-        kind: str = Query(pattern=r"^(vi|cohort|upper_limit)$"),
-        code: str = Query(default="", max_length=12),
-        limit: int = Query(default=100, ge=1, le=1000),
-    ) -> dict[str, object]:
-        history = await asyncio.to_thread(
-            store.load_market_event_history, kind, code=code, limit=limit,
-        )
-        result: dict[str, object] = {"kind": kind, "code": code, "history": history}
-        if kind == "cohort":
-            current = await asyncio.to_thread(store.load_hot_cohort, active_only=False)
-            result["current"] = [value for value in current if not code or value.get("stock_code") == code]
-            diagnostic = await asyncio.to_thread(
-                store.load_documents, "condition_search_status", "hot_cohort", 1,
-            )
-            result["condition"] = diagnostic[0]["document"] if diagnostic else {"status": "NOT_OBSERVED"}
-            if market_event_service is not None:
-                result["condition"]["runtime"] = market_event_service.condition_status()
-        return result
-
-    @app.get("/api/v1/market/daily-bars", dependencies=[Depends(authorize)])
-    async def daily_bars(
-        code: str = Query(min_length=6, max_length=12),
-        market: str = Query(default="", max_length=8),
-        limit: int = Query(default=250, ge=1, le=5000),
-    ) -> dict[str, object]:
-        from .postgres_access import db_call_source
-        from kiwoom_monitor.application.daily_bar_coverage import COLLECTION, choose_daily_coverage
-        from datetime import timedelta, timezone
-        with db_call_source("api.market.daily_bars"):
-            values = await asyncio.to_thread(store.load_daily_bars, code, market.upper(), limit)
-            documents = await asyncio.to_thread(store.load_documents, COLLECTION, f"{code}:{market.upper()}", 2)
-        coverage = choose_daily_coverage(values, documents, code=code, market=market.upper(),
-                                        query_basis_date=datetime.now(timezone(timedelta(hours=9))).date().isoformat())
-        return {"code": code, "market": market.upper(), "bars": values, "coverage": coverage}
-
-    @app.get("/api/v1/market/coverage", dependencies=[Depends(authorize)])
-    async def market_coverage(
-        kind: str = Query(max_length=40),
-        subject: str = Query(min_length=1, max_length=100),
-        start: datetime = Query(),
-        end: datetime = Query(),
-        available_by: datetime | None = Query(default=None),
-        expected_seconds: int | None = Query(default=None, ge=1, le=86_400),
-    ) -> dict[str, object]:
-        try:
-            dataset_kind = MarketDatasetKind(kind)
-        except ValueError as error:
-            raise HTTPException(status_code=400, detail="지원하지 않는 관측 자료 종류입니다.") from error
-        if dataset_kind == MarketDatasetKind.UNKNOWN:
-            raise HTTPException(status_code=400, detail="지원하지 않는 관측 자료 종류입니다.")
-        cadence_kinds = {
-            MarketDatasetKind.CANDIDATE_SET,
-            MarketDatasetKind.TOP20_INDEX,
-            MarketDatasetKind.MARKET_STATE,
-        }
-        if expected_seconds and dataset_kind not in cadence_kinds:
-            raise HTTPException(
-                status_code=400,
-                detail="이 자료 종류는 예상 주기로 결측을 단정할 수 없습니다.",
-            )
-        normalized_start, normalized_end = as_kst(start), as_kst(end)
-        if normalized_end <= normalized_start:
-            raise HTTPException(status_code=400, detail="end는 start보다 뒤여야 합니다.")
-        cutoff = as_kst(available_by or datetime.now().astimezone())
-        from .postgres_access import db_call_source
-        with db_call_source("api.market.coverage"):
-            observations = await asyncio.to_thread(
-                store.load_market_data_metadata_range,
-                dataset_kind,
-                subject,
-                normalized_start,
-                normalized_end,
-            )
-        explicit_complete = await asyncio.to_thread(
-            _explicit_coverage_complete,
-            store,
-            dataset_kind,
-            subject,
-            normalized_start,
-            normalized_end,
-            cutoff,
-        )
-        report = evaluate_coverage(
-            tuple(observations),
-            start=normalized_start,
-            end=normalized_end,
-            available_by=cutoff,
-            explicit_complete=explicit_complete,
-            expected_seconds=expected_seconds,
-        )
-        return {
-            "kind": dataset_kind.value,
-            "subject": subject,
-            "start": normalized_start.isoformat(),
-            "end": normalized_end.isoformat(),
-            "available_by": cutoff.isoformat(),
-            **report.as_document(),
-        }
-
-    @app.get("/api/v1/market/external-bars", dependencies=[Depends(authorize)])
-    async def external_bars(
-        instrument: str = Query(min_length=1, max_length=40),
-        timeframe: str = Query(pattern=r"^(5m|1d)$"),
-        limit: int = Query(default=1000, ge=1, le=10000),
-    ) -> dict[str, object]:
-        normalized = instrument.strip().upper()
-        values = await asyncio.to_thread(store.load_external_bars, normalized, timeframe, limit)
-        return {"instrument": normalized, "timeframe": timeframe, "bars": values}
-
-    @app.get("/api/v1/research/observations", dependencies=[Depends(authorize)])
-    async def research_observations(
-        start: datetime = Query(),
-        end: datetime = Query(),
-        kinds: str = Query(min_length=1, max_length=64),
-        subject: str = Query(default="", max_length=32),
-        cursor: int = Query(default=0, ge=0),
-        watermark: str = Query(default="", max_length=64),
-        limit: int = Query(default=1000, ge=1, le=1000),
-    ) -> dict[str, object]:
-        requested_kinds = tuple(dict.fromkeys(
-            value.strip() for value in kinds.split(",") if value.strip()
-        ))
-        try:
-            if start.tzinfo is None or end.tzinfo is None:
-                raise ValueError("research export timestamps must be timezone-aware")
-            if not watermark:
-                if cursor:
-                    raise ValueError("cursor requires a fixed watermark")
-                manifest = await asyncio.to_thread(
-                    store.create_observation_export, start, end, requested_kinds, subject,
-                )
-                watermark = str(manifest["fixed_watermark"])
-            page = await asyncio.to_thread(
-                store.load_observation_export_page, watermark, cursor, limit,
-            )
-        except ValueError as error:
-            status = 404 if "unknown research export watermark" in str(error) else 400
-            raise HTTPException(status_code=status, detail=str(error)) from error
-        manifest = page["manifest"]
-        expected_range = manifest.get("captured_range", {})
-        if (
-            list(requested_kinds) != manifest.get("kinds")
-            or subject != manifest.get("subject")
-            or start.astimezone(timezone.utc).isoformat() != expected_range.get("start")
-            or end.astimezone(timezone.utc).isoformat() != expected_range.get("end")
-        ):
-            raise HTTPException(status_code=409, detail="watermark parameters do not match its fixed dataset")
-        return page
-
-    @app.get("/api/v1/research/candidates", dependencies=[Depends(authorize)])
-    async def research_candidates(
-        after_sequence: int = Query(default=0, ge=0),
-        limit: int = Query(default=100, ge=1, le=1000),
-    ) -> dict[str, object]:
-        page = await asyncio.to_thread(store.load_shadow_candidates, after_sequence, limit)
-        now = datetime.now(timezone.utc)
-        for event in page["events"]:
-            try:
-                expires_at = datetime.fromisoformat(str(event.get("expires_at", "")))
-                expired = expires_at.astimezone(timezone.utc) < now
-            except ValueError:
-                expired = True
-            event["status"] = "EXPIRED" if expired else "ACTIVE"
-        page["quality"] = (
-            candidate_monitor.quality if candidate_monitor is not None
-            else {"status": "DISABLED", "reason": "shadow_candidate_generation_disabled"}
-        )
-        return page
-
-    @app.post(
-        "/api/v1/research/mock-automation-candidates",
-        dependencies=[Depends(authorize)],
+    from .market_read_routes import (
+        create_market_live_read_router, create_market_event_read_router, create_market_archive_read_router,
     )
-    async def publish_mock_automation_candidate(
-        request: MockAutomationCandidatePublicationRequest,
-    ) -> dict[str, object]:
-        from kiwoom_monitor.application.mock_automation_candidate import (
-            candidate_package_from_dict,
-            eligibility_policy_from_dict,
-            eligibility_receipt_from_dict,
-            validate_publication_size,
-        )
-        from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
-            ForwardEvaluationRepository,
-        )
-        from kiwoom_monitor.application.research_implementation import research_implementation_hash
-        try:
-            validate_publication_size(
-                request.package, request.eligibility_policy, request.eligibility_receipt,
-            )
-            package = candidate_package_from_dict(request.package)
-            policy = eligibility_policy_from_dict(request.eligibility_policy)
-            receipt = eligibility_receipt_from_dict(request.eligibility_receipt)
-            if receipt.account_ref != request.account_ref:
-                raise ValueError("candidate publication account_ref conflict")
-            session = package.candidate_spec.get("session_profile", {})
-            profile = str(session.get("profile", "")) if isinstance(session, dict) else ""
-            if package.scientific_implementation_hash != research_implementation_hash(profile):
-                raise ValueError("candidate scientific implementation hash does not match this server")
-            saved = await asyncio.to_thread(
-                ForwardEvaluationRepository(store).publish_mock_automation_candidate,
-                package, policy, receipt,
-                credential_profile_id=request.credential_profile_id,
-                expected_binding_revision=request.expected_binding_revision,
-            )
-        except (KeyError, TypeError, ValueError) as error:
-            detail = str(error)
-            status = 409 if any(token in detail for token in (
-                "conflict", "current verified mock binding", "does not match this server",
-                "immutable document",
-            )) else 400
-            raise HTTPException(status_code=status, detail=detail) from error
-        return {
-            "status": "saved" if saved else "unchanged",
-            "package_hash": package.package_hash,
-            "policy_id": policy.policy_id,
-            "receipt_id": receipt.receipt_id,
-            "eligibility_status": receipt.status.value,
-            "orders_started": False,
-        }
 
-    def current_mock_binding(credential_profile_id: str) -> dict[str, Any] | None:
-        bindings = [
-            row for row in store.load_account_bindings()
-            if str(row.get("credential_profile_id", "")) == credential_profile_id
-            and str(row.get("broker", "")) == "kiwoom"
-            and str(row.get("environment", "")) == "mock"
-        ]
-        return max(
-            bindings, key=lambda row: int(row.get("binding_revision", 0)), default=None,
-        )
+    app.include_router(create_market_live_read_router(store, authorize, lambda: app.state.realtime_collector))
 
-    @app.get(
-        "/api/v1/research/mock-automation-candidates/{account_ref}",
-        dependencies=[Depends(authorize)],
-    )
-    async def list_mock_automation_candidates(
-        account_ref: str,
-        credential_profile_id: str = Query(
-            min_length=1, max_length=96, pattern=r"^[A-Za-z0-9_-]+$",
-        ),
-    ) -> dict[str, object]:
-        from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
-            ForwardEvaluationRepository,
-        )
-        binding = await asyncio.to_thread(current_mock_binding, credential_profile_id)
-        if binding is None or str(binding.get("account_ref", "")) != account_ref:
-            raise HTTPException(status_code=409, detail="current verified mock binding mismatch")
-        repository = ForwardEvaluationRepository(store)
-        try:
-            publications = await asyncio.to_thread(
-                repository.load_mock_automation_candidate_publications, account_ref,
-            )
-        except ValueError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from None
-        return {
-            "account_ref": account_ref,
-            "binding": {
-                "credential_profile_id": credential_profile_id,
-                "broker": "kiwoom",
-                "environment": "mock",
-                "account_ref": account_ref,
-                "binding_revision": int(binding["binding_revision"]),
-                "verified_at": str(binding["verified_at"]),
-                "verification_method": str(binding["verification_method"]),
-            },
-            "candidates": [{
-                "package": package.to_dict(),
-                "eligibility_policy": policy.to_dict(),
-                "eligibility_receipt": receipt.to_dict(),
-            } for package, policy, receipt in publications],
-        }
+    app.include_router(create_market_event_read_router(store, authorize, market_event_service))
 
-    def find_shadow_candidate(event_id: str) -> dict[str, Any] | None:
-        cursor = 0
-        for _ in range(100):
-            page = store.load_shadow_candidates(cursor, 1000)
-            for event in page["events"]:
-                if str(event.get("event_id", "")) == event_id:
-                    return event
-            if not page.get("has_more") or page.get("next_cursor") is None:
-                return None
-            cursor = int(page["next_cursor"])
-        raise ValueError("shadow evidence search exceeded 100,000 events")
+    app.include_router(create_market_archive_read_router(store, authorize))
 
-    @app.post(
-        "/api/v1/research/mock-automation-specs",
-        dependencies=[Depends(authorize)],
-    )
-    async def publish_mock_automation_spec(
-        request: MockAutomationSpecPublicationRequest,
-    ) -> dict[str, object]:
-        from kiwoom_monitor.application.mock_automation_specification import (
-            publish_ready_mock_automation_spec,
-        )
-        from kiwoom_monitor.domain.execution_activation import (
-            forward_spec_from_dict,
-            mock_automation_spec_from_dict,
-            stage_revision_from_dict,
-        )
-        from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
-            ForwardEvaluationRepository,
-        )
-        try:
-            encoded = json.dumps(
-                request.model_dump(), ensure_ascii=False, sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            if len(encoded) > 256 * 1024:
-                raise ValueError("mock automation spec publication is too large")
-            profile = forward_spec_from_dict(request.forward_profile)
-            stages = tuple(stage_revision_from_dict(value) for value in request.stage_revisions)
-            spec = mock_automation_spec_from_dict(request.operating_spec)
-            if (
-                request.account_ref != spec.account_scope.account_ref
-                or request.credential_profile_id != spec.credential_profile_id
-                or request.expected_binding_revision != spec.binding_revision
-            ):
-                raise ValueError("mock automation spec request scope conflict")
-            binding = await asyncio.to_thread(
-                current_mock_binding, request.credential_profile_id,
-            )
-            if binding is None:
-                raise ValueError("current verified mock binding is missing")
-            shadow_event = await asyncio.to_thread(
-                find_shadow_candidate, request.shadow_event_id,
-            )
-            if shadow_event is None:
-                raise ValueError("stored shadow evidence event is missing")
-            repository = ForwardEvaluationRepository(store)
-            readiness, changed = await asyncio.to_thread(
-                publish_ready_mock_automation_spec,
-                repository,
-                profile=profile,
-                stage_revisions=stages,
-                spec=spec,
-                shadow_event=shadow_event,
-                current_binding=binding,
-            )
-        except (KeyError, TypeError, ValueError) as error:
-            detail = str(error)
-            status = 409 if any(token in detail for token in (
-                "conflict", "current verified mock binding", "stored strategy stage",
-                "request scope",
-            )) else 400
-            raise HTTPException(status_code=status, detail=detail) from None
-        return {
-            "status": "saved" if changed else "unchanged",
-            "spec_id": spec.spec_id,
-            "readiness": readiness.status.value,
-            "reasons": list(readiness.reasons),
-            "orders_started": False,
-        }
+    from .research_read_routes import create_research_read_router
+    app.include_router(create_research_read_router(store, authorize, lambda: operational_state.candidate_monitor))
 
-    @app.get(
-        "/api/v1/research/mock-automation-specs/{account_ref}",
-        dependencies=[Depends(authorize)],
-    )
-    async def list_mock_automation_specs(account_ref: str) -> dict[str, object]:
-        from kiwoom_monitor.domain.execution_activation import assess_mock_automation_readiness
-        from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
-            ForwardEvaluationRepository,
-        )
-        repository = ForwardEvaluationRepository(store)
-        specs = await asyncio.to_thread(repository.load_mock_automation_specs, account_ref)
-        values = []
-        for spec in specs:
-            profile = await asyncio.to_thread(
-                repository.load_profile, spec.strategy_ref, spec.forward_profile_id,
-            )
-            stage = await asyncio.to_thread(repository.latest_stage, spec.strategy_ref)
-            readiness = (
-                assess_mock_automation_readiness(spec, profile, strategy_stage=stage)
-                if profile is not None else None
-            )
-            values.append({
-                "spec": spec.to_dict(),
-                "readiness": readiness.status.value if readiness is not None else "BLOCKED",
-                "reasons": list(readiness.reasons) if readiness is not None else ["FORWARD_PROFILE_MISSING"],
-            })
-        return {"account_ref": account_ref, "specs": values}
+    from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository
+    from .mock_publication_routes import create_mock_publication_router
+    app.include_router(create_mock_publication_router(store, ForwardEvaluationRepository(store), authorize))
 
-    def require_mock_automation_supervisor():
-        if mock_automation_supervisor is None:
-            raise HTTPException(status_code=503, detail="MOCK_AUTOMATION_RUNTIME_UNAVAILABLE")
-        return mock_automation_supervisor
+    from .mock_automation_routes import create_mock_automation_router
+    app.include_router(create_mock_automation_router(mock_automation_supervisor, authorize))
 
-    @app.get(
-        "/api/v1/mock-automation/accounts/{account_ref}",
-        dependencies=[Depends(authorize)],
-    )
-    async def mock_automation_status(
-        account_ref: str,
-        credential_profile_id: str = Query(
-            min_length=1, max_length=96, pattern=r"^[A-Za-z0-9_-]+$",
-        ),
-    ) -> dict[str, object]:
-        supervisor = require_mock_automation_supervisor()
-        return await asyncio.to_thread(
-            supervisor.status,
-            account_ref,
-            credential_profile_id=credential_profile_id,
-        )
+    from .market_dataset_read_routes import create_market_dataset_read_router
+    app.include_router(create_market_dataset_read_router(store, authorize, top20_service))
 
-    async def run_mock_automation_operation(operation: Any) -> dict[str, object]:
-        from .credential_runtime import CredentialOperationError
-        from .mock_automation_supervisor import MockAutomationSupervisorError
-        try:
-            return await operation
-        except MockAutomationSupervisorError as error:
-            raise HTTPException(status_code=error.status, detail=error.code) from None
-        except CredentialOperationError as error:
-            raise HTTPException(status_code=error.status, detail=error.code) from None
-        except ValueError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from None
-        except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from None
+    from .content_routes import create_content_router
+    app.include_router(create_content_router(store, authorize))
 
-    @app.post("/api/v1/mock-automation/start", dependencies=[Depends(authorize)])
-    async def start_mock_automation(
-        request: MockAutomationStartRequest,
-    ) -> dict[str, object]:
-        supervisor = require_mock_automation_supervisor()
-        return await run_mock_automation_operation(supervisor.activate(
-            credential_profile_id=request.credential_profile_id,
-            account_ref=request.account_ref,
-            spec_id=request.spec_id,
-            expected_settings_revision=request.expected_settings_revision,
-            credential_revision=request.credential_revision,
-        ))
-
-    @app.post("/api/v1/mock-automation/stop", dependencies=[Depends(authorize)])
-    async def stop_mock_automation(
-        request: MockAutomationControlRequest,
-    ) -> dict[str, object]:
-        supervisor = require_mock_automation_supervisor()
-        return await run_mock_automation_operation(supervisor.stop(
-            credential_profile_id=request.credential_profile_id,
-            account_ref=request.account_ref,
-            spec_id=request.spec_id,
-            expected_control_revision=request.expected_control_revision,
-            reason=request.reason,
-        ))
-
-    @app.post("/api/v1/mock-automation/resume", dependencies=[Depends(authorize)])
-    async def resume_mock_automation_runtime(
-        request: MockAutomationResumeRequest,
-    ) -> dict[str, object]:
-        supervisor = require_mock_automation_supervisor()
-        return await run_mock_automation_operation(supervisor.resume(
-            credential_profile_id=request.credential_profile_id,
-            account_ref=request.account_ref,
-            spec_id=request.spec_id,
-            expected_control_revision=request.expected_control_revision,
-            expected_settings_revision=request.expected_settings_revision,
-            credential_revision=request.credential_revision,
-            reason=request.reason,
-        ))
-
-    @app.get("/api/v1/market/snapshots/{kind}", dependencies=[Depends(authorize)])
-    async def dataset_snapshots(
-        kind: str, subject: str = Query(default="", max_length=32),
-        limit: int = Query(default=100, ge=1, le=5000),
-        prefer_live: bool = Query(default=False),
-    ) -> dict[str, object]:
-        allowed = {
-            "ranking", "top20_membership", "top20_index", "market_state",
-            "investor_flow", "program_flow", "new_high", "stock_fundamentals",
-            "nxt_eligibility", "market_index_chart",
-        }
-        if kind not in allowed:
-            raise HTTPException(status_code=404, detail="지원하지 않는 중앙 시장 자료입니다.")
-        if kind == "top20_membership" and limit == 1 and prefer_live and top20_service is not None:
-            latest = top20_service.latest_membership_snapshot(subject)
-            if latest is not None:
-                return {"kind": kind, "subject": subject, "snapshots": [latest]}
-        values = await asyncio.to_thread(store.load_dataset_snapshots, kind, subject, limit)
-        return {"kind": kind, "subject": subject, "snapshots": values}
-
-    @app.get("/api/v1/market/top20-statistics", dependencies=[Depends(authorize)])
-    async def top20_statistics(start_date: str, end_date: str) -> dict[str, object]:
-        try:
-            start = datetime.fromisoformat(start_date).date()
-            end = datetime.fromisoformat(end_date).date()
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail="TOP20 통계 날짜 형식이 올바르지 않습니다.") from error
-        if end < start or (end - start).days > 366:
-            raise HTTPException(status_code=422, detail="TOP20 통계 범위는 최대 367일입니다.")
-        result = await asyncio.to_thread(
-            store.load_top20_statistics, start.isoformat(), end.isoformat(),
-        )
-        return {"start_date": start.isoformat(), "end_date": end.isoformat(), **result}
-
-    content_collections = {
-        "news_article", "news_ai", "news_ai_shared", "news_request_usage", "journal_news_link", "journal_v2_news_links", "news_sync", "news_watchlist",
-        "theme_profile", "theme_stock", "theme_metadata",
-        "journal_settings", "journal_fills", "journal_reviews", "journal_setups",
-        "journal_cycle_overrides", "journal_group_overrides", "journal_entry_snapshots",
-        "journal_costs", "journal_stocks", "journal_backfill",
-        "journal_v2_fills", "journal_v2_reviews", "journal_v2_setups",
-        "journal_v2_cycle_overrides", "journal_v2_group_overrides",
-        "journal_v2_entry_snapshots", "journal_v2_costs",
-        "journal_v2_enrichment_tasks", "journal_v2_analysis_revisions",
-        "journal_v2_research_links", "journal_sync_states", "journal_v2_sync_states",
-        "app_settings", "app_column_settings",
-        "stock_fundamentals", "stock_nxt_eligibility", "stock_price_references",
-        "historical_highs",
-    }
-
-    def validate_journal_document(collection: str, value: dict[str, Any]) -> None:
-        if not collection.startswith("journal"):
-            return
-        document = value.get("document")
-        if not isinstance(document, dict):
-            raise HTTPException(status_code=422, detail="일지 문서 형식이 올바르지 않습니다.")
-        if collection in {"journal_sync_states", "journal_v2_sync_states"}:
-            target = str(document.get("collection", ""))
-            is_v2_state = collection == "journal_v2_sync_states"
-            owner = str(document.get("owner", ""))
-            document_key = str(document.get("document_key", ""))
-            if (
-                not target or is_v2_state != target.startswith("journal_v2_")
-                or str(value.get("owner", "")) != owner
-                or str(value.get("key", "")) != document_key
-            ):
-                raise HTTPException(status_code=422, detail="일지 삭제 상태 namespace가 올바르지 않습니다.")
-            if not is_v2_state:
-                if owner != "legacy" or str(document.get("origin_broker", "legacy")) != "legacy":
-                    raise HTTPException(status_code=422, detail="v1 삭제 상태는 legacy scope만 허용합니다.")
-                return
-            required = (
-                "origin_broker", "origin_environment", "origin_account_ref",
-                "canonical_account_ref",
-            )
-            if any(not str(document.get(name, "")).strip() for name in required):
-                raise HTTPException(status_code=422, detail="검증 계좌 삭제 상태 scope가 필요합니다.")
-            try:
-                uuid.UUID(str(document["origin_account_ref"]))
-                uuid.UUID(str(document["canonical_account_ref"]))
-            except (ValueError, AttributeError):
-                raise HTTPException(status_code=422, detail="검증 계좌 삭제 상태 UUID가 올바르지 않습니다.")
-            if (
-                document["origin_broker"] != "kiwoom"
-                or document["origin_environment"] not in {"real", "mock"}
-                or owner != str(document["origin_account_ref"])
-            ):
-                raise HTTPException(status_code=422, detail="검증 계좌 삭제 상태 scope가 일치하지 않습니다.")
-            if document["origin_account_ref"] != document["canonical_account_ref"]:
-                resolved = store.resolve_account_scope(
-                    str(document["origin_broker"]), str(document["origin_environment"]),
-                    str(document["origin_account_ref"]),
-                )
-                if (
-                    not bool(resolved.get("verified"))
-                    or str(resolved.get("canonical_account_ref", ""))
-                    != str(document["canonical_account_ref"])
-                ):
-                    raise HTTPException(status_code=422, detail="검증된 계좌 alias가 필요합니다.")
-            return
-        if collection.startswith("journal_v2_"):
-            required = (
-                "origin_broker", "origin_environment", "origin_account_ref",
-                "canonical_account_ref",
-            )
-            if any(not str(document.get(name, "")).strip() for name in required):
-                raise HTTPException(status_code=422, detail="검증 계좌 scope가 필요합니다.")
-            try:
-                uuid.UUID(str(document["origin_account_ref"]))
-                uuid.UUID(str(document["canonical_account_ref"]))
-            except (ValueError, AttributeError):
-                raise HTTPException(status_code=422, detail="검증 계좌 UUID가 올바르지 않습니다.")
-            if (
-                document["origin_broker"] != "kiwoom"
-                or document["origin_environment"] not in {"real", "mock"}
-                or str(value.get("owner", "")) != str(document["origin_account_ref"])
-            ):
-                raise HTTPException(status_code=422, detail="검증 계좌 scope 연결이 올바르지 않습니다.")
-            if document["origin_account_ref"] != document["canonical_account_ref"]:
-                resolved = store.resolve_account_scope(
-                    str(document["origin_broker"]), str(document["origin_environment"]),
-                    str(document["origin_account_ref"]),
-                )
-                if (
-                    not bool(resolved.get("verified"))
-                    or str(resolved.get("canonical_account_ref", ""))
-                    != str(document["canonical_account_ref"])
-                ):
-                    raise HTTPException(status_code=422, detail="검증된 계좌 alias가 필요합니다.")
-            if collection == "journal_v2_news_links":
-                identity = {
-                    "origin_scope": {
-                        "broker": document["origin_broker"],
-                        "environment": document["origin_environment"],
-                        "account_ref": document["origin_account_ref"],
-                    },
-                    "group_id": str(document.get("group_id", "")),
-                    "stock_code": str(document.get("stock_code", "")),
-                    "identity": str(document.get("identity", "")),
-                }
-                encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                expected = "journal-news-link:v2:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-                if str(value.get("key", "")) != expected:
-                    raise HTTPException(status_code=422, detail="뉴스 연결 key와 scope가 일치하지 않습니다.")
-            return
-        if str(document.get("origin_broker", "legacy")) not in {"", "legacy"}:
-            raise HTTPException(status_code=422, detail="v1 일지 문서는 legacy scope만 허용합니다.")
-        if collection == "journal_news_link":
-            expected = f'{document.get("stock_code", "")}|{document.get("identity", "")}'
-            if str(value.get("owner", "")) != str(document.get("group_id", "")) or str(value.get("key", "")) != expected:
-                raise HTTPException(status_code=422, detail="legacy 뉴스 연결 owner/key가 올바르지 않습니다.")
-
-    @app.get("/api/v1/content/{collection}", dependencies=[Depends(authorize)])
-    async def content_documents(
-        collection: str, owner: str = Query(default="", max_length=200),
-        limit: int = Query(default=1000, ge=1, le=10000),
-        offset: int = Query(default=0, ge=0),
-        updated_after: float = Query(default=0.0, ge=0.0),
-    ) -> dict[str, object]:
-        if collection not in content_collections:
-            raise HTTPException(status_code=404, detail="지원하지 않는 중앙 자료 종류입니다.")
-        values = await asyncio.to_thread(
-            store.load_documents, collection, owner, limit, offset, updated_after,
-        )
-        return {"collection": collection, "owner": owner, "documents": values}
-
-    @app.post("/api/v1/content/{collection}", dependencies=[Depends(authorize)])
-    async def upsert_content(collection: str, batch: DocumentBatch) -> dict[str, object]:
-        if collection not in content_collections:
-            raise HTTPException(status_code=404, detail="지원하지 않는 중앙 자료 종류입니다.")
-        values = [value.model_dump() for value in batch.documents]
-        for value in values:
-            validate_journal_document(collection, value)
-        await asyncio.to_thread(store.upsert_documents, collection, values)
-        return {"collection": collection, "saved": len(values)}
-
-    @app.put("/api/v1/content/{collection}", dependencies=[Depends(authorize)])
-    async def replace_content(collection: str, snapshot: DocumentSnapshot) -> dict[str, object]:
-        # 삭제·이름 변경도 정확히 전파해야 하는 작은 설정 컬렉션에만 허용한다.
-        if collection not in {"theme_profile", "theme_stock", "theme_metadata"}:
-            raise HTTPException(status_code=405, detail="전체 교체를 지원하지 않는 중앙 자료 종류입니다.")
-        values = [value.model_dump() for value in snapshot.documents]
-        await asyncio.to_thread(store.replace_documents, collection, values)
-        return {"collection": collection, "saved": len(values)}
-
-    @app.get("/api/v1/themes/history", dependencies=[Depends(authorize)])
-    async def theme_history(
-        as_of: float | None = Query(default=None, ge=0.0),
-        limit: int = Query(default=100, ge=1, le=1000),
-    ) -> dict[str, object]:
-        values = await asyncio.to_thread(
-            store.load_theme_snapshots, available_at=as_of, limit=limit,
-        )
-        return {"as_of": as_of, "known": bool(values), "snapshots": values}
-
-    @app.websocket("/api/v1/realtime")
-    async def realtime(websocket: WebSocket) -> None:
-        authorization = websocket.headers.get("authorization", "")
-        scheme, _, header_token = authorization.partition(" ")
-        supplied = header_token if scheme.casefold() == "bearer" else websocket.query_params.get("token", "")
-        if not valid_token(supplied):
-            await websocket.close(code=4401, reason="유효한 서버 접속 토큰이 필요합니다.")
-            return
-        await websocket.accept()
-        subscriber = realtime_hub.connect()
-
-        async def send_events() -> None:
-            reported_drops = 0
-            while True:
-                event = await subscriber.queue.get()
-                if subscriber.dropped_events != reported_drops:
-                    lost = subscriber.dropped_events - reported_drops
-                    reported_drops = subscriber.dropped_events
-                    await websocket.send_json({"type": "realtime_gap", "dropped_events": lost})
-                await websocket.send_json(event)
-
-        sender = asyncio.create_task(send_events())
-        try:
-            await websocket.send_json({"type": "ready", "schema_version": 1,
-                                       "connection_status": collector.credential_connection_status() if collector is not None else None})
-            while True:
-                message = await websocket.receive_json()
-                message_type = str(message.get("type", "")).casefold()
-                if message_type == "ping":
-                    await websocket.send_json({"type": "pong"})
-                elif message_type == "subscribe":
-                    codes, nxt_codes = realtime_hub.update_subscription(
-                        subscriber, list(message.get("codes", [])), list(message.get("nxt_codes", [])),
-                    )
-                    await websocket.send_json({
-                        "type": "subscribed", "codes": sorted(subscriber.codes),
-                        "nxt_codes": sorted(subscriber.nxt_codes),
-                        "upstream_code_count": len(codes), "upstream_nxt_code_count": len(nxt_codes),
-                    })
-                    snapshots = await asyncio.to_thread(
-                        store.load_realtime_snapshots, sorted(subscriber.codes),
-                    )
-                    if collector is not None:
-                        snapshots = collector.initial_realtime_snapshots(
-                            snapshots, sorted(subscriber.codes),
-                        )
-                    for snapshot in snapshots:
-                        await websocket.send_json(snapshot)
-                    # 같은 종목을 이미 다른 앱이 구독 중이면 상류 구독 변경 이벤트가
-                    # 다시 발생하지 않는다. 각 앱에는 별도로 준비 완료를 알려준다.
-                    await websocket.send_json({"type": "central_ready", "codes": sorted(subscriber.codes),
-                                               "connection_status": collector.credential_connection_status() if collector is not None else None})
-                    if realtime_hub.upstream_ready_for(subscriber.codes):
-                        await websocket.send_json({
-                            "type": "connection_opened", "scope": "client",
-                            "codes": sorted(subscriber.codes),
-                        })
-        except WebSocketDisconnect:
-            pass
-        finally:
-            sender.cancel()
-            with suppress(asyncio.CancelledError):
-                await sender
-            realtime_hub.disconnect(subscriber)
+    from .realtime_routes import create_realtime_router
+    app.include_router(create_realtime_router(realtime_hub, store, valid_token, collector))
 
     return app
-
-
-def _stored_market_response(
-    store: Any, api_id: str, body: dict[str, Any],
-) -> dict[str, Any] | None:
-    """완료 차트와 최신 종목 문서를 키움 TR보다 먼저 재사용한다."""
-    if api_id in {"ka10001", "ka10100"}:
-        code = str(body.get("stk_cd", "")).strip().removesuffix("_NX").removesuffix("_AL")
-        collection = (
-            "stock_fundamentals" if api_id == "ka10001"
-            else "stock_nxt_eligibility"
-        )
-        values = store.load_documents(collection, code, 1) if code else []
-        if values:
-            document = values[0].get("document", {})
-            checked_at = datetime.now(KST)
-            if api_id == "ka10001" and not fundamentals_document_is_current(
-                document, checked_at.date(), checked_at=checked_at,
-            ):
-                return None
-            if api_id == "ka10100" and not nxt_eligibility_document_is_current(
-                document, checked_at.date(),
-            ):
-                return None
-            payload = document.get("payload") if isinstance(document, dict) else None
-            if isinstance(payload, dict):
-                return payload
-    return _archived_chart_response(store, api_id, body)
-
-
-def _archived_chart_response(store: Any, api_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
-    """완료 확인된 NAS 차트를 키움 TR보다 먼저 재사용한다."""
-    raw_code = str(body.get("stk_cd", "")).strip()
-    market = "NXT" if raw_code.endswith("_NX") else "SOR" if raw_code.endswith("_AL") else "KRX"
-    code = raw_code.removesuffix("_NX").removesuffix("_AL")
-    if not code:
-        return None
-    if api_id == "ka10080":
-        raw_day = str(body.get("base_dt", "")).strip()
-        if len(raw_day) != 8 or not raw_day.isdigit():
-            return None
-        day = f"{raw_day[:4]}-{raw_day[4:6]}-{raw_day[6:]}"
-        coverage = store.load_documents("market_data_coverage", f"{day}:{code}:{market}", 1)
-        if not _archive_coverage_ready(coverage, day, "minute"):
-            return None
-        bars = store.load_minute_bars(code, day, market)
-        if not bars:
-            return None
-        return {"stk_min_pole_chart_qry": [{
-            "cntr_tm": f"{raw_day}{str(bar['minute']).replace(':', '')}00",
-            "open_pric": str(bar["open"]), "high_pric": str(bar["high"]),
-            "low_pric": str(bar["low"]), "cur_prc": str(bar["close"]),
-            "trde_qty": str(bar["volume"]),
-        } for bar in reversed(bars)]}
-    if api_id == "ka10081":
-        raw_day = str(body.get("base_dt", "")).strip()
-        if len(raw_day) != 8 or not raw_day.isdigit():
-            return None
-        day = f"{raw_day[:4]}-{raw_day[4:6]}-{raw_day[6:]}"
-        coverage = store.load_documents("market_data_coverage_daily", f"{code}:{market}", 1)
-        if not _archive_coverage_ready(coverage, day, "daily"):
-            return None
-        from .postgres_access import db_call_source
-        with db_call_source("api.kiwoom.archive_daily_bars"):
-            stored_bars = store.load_daily_bars(code, market, 5000)
-        bars = [
-            bar for bar in stored_bars
-            if str(bar.get("trading_date", "")) <= day
-        ][:250]
-        # 과거 버전이 NXT 빈 응답도 완료(rows=0)로 남긴 경우가 있다.
-        # 빈 아카이브는 확정 자료가 아니므로 키움 조회를 우회하지 않는다.
-        if not bars:
-            return None
-        return {"stk_dt_pole_chart_qry": [{
-            "date": str(bar["trading_date"]).replace("-", ""),
-            "open_pric": str(bar["open"]), "high_pric": str(bar["high"]),
-            "low_pric": str(bar["low"]), "cur_prc": str(bar["close"]),
-            "trde_qty": str(bar["volume"]),
-            "trde_prica": str(bar.get("trade_value_million_won") or 0),
-        } for bar in bars]}
-    return None
-
-
-def _archive_coverage_ready(values: list[dict[str, Any]], requested_day: str, kind: str) -> bool:
-    if not values:
-        return False
-    document = values[0].get("document")
-    if not isinstance(document, dict):
-        return False
-    as_of = str(document.get("as_of", "")).strip()
-    return (
-        document.get("kind") == kind
-        and document.get("window_closed") is True
-        and document.get("session_finalized") is True
-        and bool(as_of) and as_of >= requested_day
-    )
-
-
-def _trade_value_comparison_summary(values: list[dict[str, Any]]) -> dict[str, object]:
-    """KRX와 NXT가 모두 보완된 분만 주 비교 통계에 포함한다."""
-    documents = [
-        value.get("document")
-        for value in values
-        if isinstance(value.get("document"), dict)
-    ]
-    complete = [
-        document for document in documents
-        if document.get("query_scope") == "KRX+NXT"
-    ]
-    realtime_total = sum(
-        int(document.get("realtime_trade_value_million_won", 0) or 0)
-        for document in complete
-    )
-    query_total = sum(
-        int(document.get("query_trade_value_million_won", 0) or 0)
-        for document in complete
-    )
-    differences = [
-        float(document["difference_percent"])
-        for document in complete
-        if document.get("difference_percent") is not None
-    ]
-    latest = max(
-        (str(document.get("compared_at", "")) for document in documents),
-        default="",
-    )
-    difference_total = realtime_total - query_total
-    return {
-        "complete_count": len(complete),
-        "partial_count": len(documents) - len(complete),
-        "scope_counts": {
-            scope: sum(1 for document in documents if str(document.get("query_scope", "")) == scope)
-            for scope in sorted({str(document.get("query_scope", "")) for document in documents})
-            if scope
-        },
-        "latest_compared_at": latest or None,
-        "total_realtime_trade_value_million_won": realtime_total,
-        "total_query_trade_value_million_won": query_total,
-        "total_difference_million_won": difference_total,
-        "total_difference_percent": (
-            round(difference_total / query_total * 100, 6) if query_total else None
-        ),
-        "average_difference_percent": (
-            round(sum(differences) / len(differences), 6) if differences else None
-        ),
-        "mean_absolute_difference_percent": (
-            round(sum(abs(value) for value in differences) / len(differences), 6)
-            if differences else None
-        ),
-        "max_absolute_difference_percent": (
-            round(max(abs(value) for value in differences), 6) if differences else None
-        ),
-    }
-
-
-def _combined_minute_bars(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """같은 분에 SOR 한 벌 또는 KRX+NXT 한 벌만 선택한다."""
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for value in values:
-        key = (str(value.get("trading_date", "")), str(value.get("minute", "")))
-        if key[0] and key[1]:
-            grouped.setdefault(key, []).append(value)
-    result: list[dict[str, Any]] = []
-    for key in sorted(grouped):
-        rows = grouped[key]
-        sor = [row for row in rows if str(row.get("market", "")).upper() == "SOR"]
-        if sor:
-            selected = dict(max(sor, key=lambda row: float(row.get("updated_at", 0) or 0)))
-            selected["market"] = "COMBINED"
-            selected["source_market"] = "SOR"
-            result.append(selected)
-            continue
-        by_market = {
-            str(row.get("market", "")).upper(): row
-            for row in rows if str(row.get("market", "")).upper() in {"KRX", "NXT"}
-        }
-        krx, nxt = by_market.get("KRX"), by_market.get("NXT")
-        base = krx or nxt
-        if base is None:
-            continue
-        selected = dict(base)
-        selected["market"] = "COMBINED"
-        selected["source_market"] = "KRX+NXT" if krx is not None and nxt is not None else str(base["market"])
-        if krx is not None and nxt is not None:
-            selected.update({
-                "high": max(int(krx["high"]), int(nxt["high"])),
-                "low": min(int(krx["low"]), int(nxt["low"])),
-                "volume": int(krx["volume"]) + int(nxt["volume"]),
-                "trade_value_million_won": (
-                    int(krx.get("trade_value_million_won", 0) or 0)
-                    + int(nxt.get("trade_value_million_won", 0) or 0)
-                ),
-                "updated_at": max(
-                    float(krx.get("updated_at", 0) or 0),
-                    float(nxt.get("updated_at", 0) or 0),
-                ),
-            })
-        result.append(selected)
-    return result
-
-
-def _explicit_coverage_complete(
-    store: Any,
-    kind: MarketDatasetKind,
-    subject: str,
-    start: datetime,
-    end: datetime,
-    available_by: datetime,
-) -> bool:
-    """실제 장후 조회가 끝났다는 별도 증거가 있을 때만 완전으로 승격한다."""
-    covered_end = end - timedelta(microseconds=1)
-    if kind != MarketDatasetKind.MINUTE_BAR or start.date() != covered_end.date():
-        return False
-    code, separator, market = subject.rpartition(":")
-    if not separator or not code or market not in {"KRX", "NXT"}:
-        return False
-    values = store.load_documents(
-        "market_data_coverage", f"{start.date().isoformat()}:{code}:{market}", 1
-    )
-    if not values or values[0].get("document", {}).get("kind") != "minute":
-        return False
-    try:
-        return float(values[0]["updated_at"]) <= available_by.timestamp()
-    except (KeyError, TypeError, ValueError, OSError):
-        return False

@@ -1,0 +1,1397 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "input_control": "fixed native document timestamps; real scientific hash and account/evidence inputs; no service/repository doubles; transport date/server headers disabled",
+  "result": {
+    "cases": [
+      {
+        "name": "unauthorized-candidate",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "validation-mock-automation-candidates-expected_binding_revision-True",
+        "status": 422,
+        "headers": {
+          "content-length": "128",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "int_type",
+              "loc": [
+                "body",
+                "expected_binding_revision"
+              ],
+              "msg": "Input should be a valid integer",
+              "input": true
+            }
+          ]
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "validation-mock-automation-candidates-expected_binding_revision-1",
+        "status": 422,
+        "headers": {
+          "content-length": "127",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "int_type",
+              "loc": [
+                "body",
+                "expected_binding_revision"
+              ],
+              "msg": "Input should be a valid integer",
+              "input": "1"
+            }
+          ]
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "validation-mock-automation-candidates-credential_profile_id-bad profile",
+        "status": 422,
+        "headers": {
+          "content-length": "210",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "body",
+                "credential_profile_id"
+              ],
+              "msg": "String should match pattern '^[A-Za-z0-9_-]{1,96}$'",
+              "input": "bad profile",
+              "ctx": {
+                "pattern": "^[A-Za-z0-9_-]{1,96}$"
+              }
+            }
+          ]
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "validation-mock-automation-candidates-extra-1",
+        "status": 422,
+        "headers": {
+          "content-length": "111",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "extra_forbidden",
+              "loc": [
+                "body",
+                "extra"
+              ],
+              "msg": "Extra inputs are not permitted",
+              "input": 1
+            }
+          ]
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "unauthorized-spec",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "validation-mock-automation-specs-expected_binding_revision-True",
+        "status": 422,
+        "headers": {
+          "content-length": "128",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "int_type",
+              "loc": [
+                "body",
+                "expected_binding_revision"
+              ],
+              "msg": "Input should be a valid integer",
+              "input": true
+            }
+          ]
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "validation-mock-automation-specs-expected_binding_revision-1",
+        "status": 422,
+        "headers": {
+          "content-length": "127",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "int_type",
+              "loc": [
+                "body",
+                "expected_binding_revision"
+              ],
+              "msg": "Input should be a valid integer",
+              "input": "1"
+            }
+          ]
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "validation-mock-automation-specs-credential_profile_id-bad profile",
+        "status": 422,
+        "headers": {
+          "content-length": "210",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "body",
+                "credential_profile_id"
+              ],
+              "msg": "String should match pattern '^[A-Za-z0-9_-]{1,96}$'",
+              "input": "bad profile",
+              "ctx": {
+                "pattern": "^[A-Za-z0-9_-]{1,96}$"
+              }
+            }
+          ]
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "validation-mock-automation-specs-extra-1",
+        "status": 422,
+        "headers": {
+          "content-length": "111",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "extra_forbidden",
+              "loc": [
+                "body",
+                "extra"
+              ],
+              "msg": "Extra inputs are not permitted",
+              "input": 1
+            }
+          ]
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "unauthorized-candidate-list",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "unauthorized-spec-list",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "candidate-list-missing-profile",
+        "status": 422,
+        "headers": {
+          "content-length": "107",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "credential_profile_id"
+              ],
+              "msg": "Field required",
+              "input": null
+            }
+          ]
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "candidate-list-invalid-profile",
+        "status": 422,
+        "headers": {
+          "content-length": "201",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "credential_profile_id"
+              ],
+              "msg": "String should match pattern '^[A-Za-z0-9_-]+$'",
+              "input": "bad profile",
+              "ctx": {
+                "pattern": "^[A-Za-z0-9_-]+$"
+              }
+            }
+          ]
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "candidate-list-empty",
+        "status": 200,
+        "headers": {
+          "content-length": "312",
+          "content-type": "application/json"
+        },
+        "body": {
+          "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+          "binding": {
+            "credential_profile_id": "nas-mock-default",
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+            "binding_revision": 1,
+            "verified_at": "2026-09-20T00:00:00+00:00",
+            "verification_method": "ka00001"
+          },
+          "candidates": []
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "spec-list-empty",
+        "status": 200,
+        "headers": {
+          "content-length": "65",
+          "content-type": "application/json"
+        },
+        "body": {
+          "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+          "specs": []
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "spec-without-candidate",
+        "status": 400,
+        "headers": {
+          "content-length": "60",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "mock automation candidate package is not stored"
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "candidate-other-account",
+        "status": 409,
+        "headers": {
+          "content-length": "55",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "candidate publication account_ref conflict"
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "candidate-missing-binding",
+        "status": 409,
+        "headers": {
+          "content-length": "77",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "candidate publication requires the current verified mock binding"
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "candidate-stale-binding",
+        "status": 409,
+        "headers": {
+          "content-length": "77",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "candidate publication requires the current verified mock binding"
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "candidate-invalid-package",
+        "status": 400,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "source_final must be an object"
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "candidate-wrong-scientific-hash",
+        "status": 400,
+        "headers": {
+          "content-length": "69",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "candidate scientific implementation hash is inconsistent"
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd"
+      },
+      {
+        "name": "candidate-save",
+        "status": 200,
+        "headers": {
+          "content-length": "355",
+          "content-type": "application/json"
+        },
+        "body": {
+          "status": "saved",
+          "package_hash": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+          "policy_id": "mock_eligibility_policy_bd307ac4f98a76f3b634f21c51a17d7a65c6995b676a9ba61ad75d8656c85bc7",
+          "receipt_id": "mock_eligibility_5b4d249712533fe6279e40e62a5e4b083a47f7666f4c8da1c01c7d203ea054bd",
+          "eligibility_status": "ELIGIBLE",
+          "orders_started": false
+        },
+        "stored_before": "c4e8c7d017b2d7223af3ddef3eea49532c23d285049b2c5c78b98a579fa351cd",
+        "stored_after": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0"
+      },
+      {
+        "name": "candidate-repeat",
+        "status": 200,
+        "headers": {
+          "content-length": "359",
+          "content-type": "application/json"
+        },
+        "body": {
+          "status": "unchanged",
+          "package_hash": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+          "policy_id": "mock_eligibility_policy_bd307ac4f98a76f3b634f21c51a17d7a65c6995b676a9ba61ad75d8656c85bc7",
+          "receipt_id": "mock_eligibility_5b4d249712533fe6279e40e62a5e4b083a47f7666f4c8da1c01c7d203ea054bd",
+          "eligibility_status": "ELIGIBLE",
+          "orders_started": false
+        },
+        "stored_before": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0",
+        "stored_after": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0"
+      },
+      {
+        "name": "candidate-list",
+        "status": 200,
+        "headers": {
+          "content-length": "4384",
+          "content-type": "application/json"
+        },
+        "body": {
+          "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+          "binding": {
+            "credential_profile_id": "nas-mock-default",
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+            "binding_revision": 1,
+            "verified_at": "2026-09-20T00:00:00+00:00",
+            "verification_method": "ka00001"
+          },
+          "candidates": [
+            {
+              "package": {
+                "package_hash": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+                "version": "mock_automation_candidate_package/v1",
+                "strategy_ref": "strategy-1",
+                "candidate_spec": {
+                  "version": "final_candidate/v1",
+                  "family": "krx_bar_close_breakout/v1",
+                  "parameters": {
+                    "strategy_version": "v1",
+                    "rolling_factor_version": "v1",
+                    "rank_factor_version": "v1",
+                    "lookback_bars": 5,
+                    "buffer_bps": 0,
+                    "rank_persistence_enabled": true,
+                    "rank_persistence_required": true,
+                    "rank_top_k": 20,
+                    "rank_window_seconds": 300,
+                    "rank_max_gap_seconds": 60,
+                    "rank_min_residency_seconds": 60,
+                    "stop_loss_bps": 300,
+                    "target_bps": 500,
+                    "max_hold_minutes": 10,
+                    "quantity": 1,
+                    "capital_won": 1000000,
+                    "signal_valid_seconds": 60,
+                    "cooldown_seconds": 30
+                  },
+                  "execution_model": {
+                    "version": "next_tradable_bar_open/v1",
+                    "same_bar_path_version": "conservative_with_optimistic_bound/v1",
+                    "initial_cash_won": 10000000,
+                    "cost_model": {
+                      "version": "fixed_bps/v1",
+                      "commission_bps": 2,
+                      "sell_tax_bps": 18,
+                      "slippage_bps": 5,
+                      "rate_basis": "official_period_rule",
+                      "source": "fixture",
+                      "valid_from": "2026-01-01T00:00:00+00:00",
+                      "valid_to": "2027-01-01T00:00:00+00:00"
+                    }
+                  },
+                  "session_profile": {
+                    "profile": "krx-regular/v1",
+                    "venue": "KRX",
+                    "schedule_version_policy": "by_trading_date/v1",
+                    "verified_delayed_session_dates_kst": [
+                      "2021-11-18",
+                      "2022-11-17",
+                      "2023-11-16",
+                      "2024-11-14",
+                      "2025-11-13"
+                    ],
+                    "windows_kst": [
+                      "09:00-15:30"
+                    ],
+                    "verified_delayed_regular_window_kst": "10:00-16:30",
+                    "excluded_windows_kst": [
+                      "15:30-16:00"
+                    ],
+                    "verified_delayed_excluded_window_kst": "16:30-17:00",
+                    "factor_session_policy": "reset_at_each_window/v1",
+                    "next_bar_policy": "continuous_next_minute_same_window/v1",
+                    "auction_execution_policy": "unsupported_without_orderbook/v1",
+                    "horizon_policy": "wall_clock_continuous_coverage/v1"
+                  },
+                  "implementation_hash": "8d873510fa626aa39c08ca622d6017a82e4e90c796ba1dd9d3ef58c7d5a22bc2"
+                },
+                "candidate_spec_hash": "418ee27f88c401a6a0511f67bd4ee2c1e50f4e500adde16e82ec08a46a9b7c2b",
+                "scientific_implementation_hash": "8d873510fa626aa39c08ca622d6017a82e4e90c796ba1dd9d3ef58c7d5a22bc2",
+                "source_final": {
+                  "batch_id": "batch-1",
+                  "run_id": "run-1",
+                  "result_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "started_at": "2026-09-20T21:00:00+00:00",
+                  "finished_at": "2026-09-20T22:00:00+00:00"
+                },
+                "evaluation_evidence": {
+                  "report_id": "report-1",
+                  "report_status": "ELIGIBLE",
+                  "evaluation_spec": {
+                    "version": "chronological_holdout/v1",
+                    "folds": [
+                      {
+                        "name": "final",
+                        "role": "OOS",
+                        "start": "2026-09-01T00:00:00+00:00",
+                        "end": "2026-09-10T00:00:00+00:00"
+                      }
+                    ],
+                    "warmup_seconds": 60,
+                    "gap_seconds": 0,
+                    "purge_seconds": 0,
+                    "minimum_closed_trades": 10,
+                    "minimum_active_days": 3,
+                    "fold_state_policy": "continuous_state_and_cash/v1",
+                    "period_end_position_policy": "censor_open_position/v1",
+                    "fit_policy": "no_fitted_parameters/v1",
+                    "final_holdout_accessed_at": "2026-09-11T00:00:00+00:00",
+                    "final_holdout_access_reason": "locked final evaluation"
+                  },
+                  "oos_fold": {
+                    "role": "OOS",
+                    "status": "ELIGIBLE",
+                    "closed_trade_count": 12,
+                    "active_day_count": 4,
+                    "net_realized_pnl_won": 120000,
+                    "max_drawdown_ppm": 50000
+                  }
+                }
+              },
+              "eligibility_policy": {
+                "policy_id": "mock_eligibility_policy_bd307ac4f98a76f3b634f21c51a17d7a65c6995b676a9ba61ad75d8656c85bc7",
+                "version": "mock_automation_eligibility_policy/v1",
+                "strategy_ref": "strategy-1",
+                "candidate_spec_hash": "418ee27f88c401a6a0511f67bd4ee2c1e50f4e500adde16e82ec08a46a9b7c2b",
+                "frozen_at": "2026-09-20T20:00:00+00:00",
+                "minimum_closed_trades": 10,
+                "minimum_active_days": 3,
+                "minimum_net_realized_pnl_won": 0,
+                "maximum_drawdown_ppm": 100000
+              },
+              "eligibility_receipt": {
+                "receipt_id": "mock_eligibility_5b4d249712533fe6279e40e62a5e4b083a47f7666f4c8da1c01c7d203ea054bd",
+                "version": "mock_automation_eligibility_receipt/v1",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "package_hash": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+                "candidate_spec_hash": "418ee27f88c401a6a0511f67bd4ee2c1e50f4e500adde16e82ec08a46a9b7c2b",
+                "policy_id": "mock_eligibility_policy_bd307ac4f98a76f3b634f21c51a17d7a65c6995b676a9ba61ad75d8656c85bc7",
+                "evaluated_at": "2026-09-20T22:00:00+00:00",
+                "status": "ELIGIBLE",
+                "reasons": [],
+                "observed_metrics": {
+                  "closed_trade_count": 12,
+                  "active_day_count": 4,
+                  "net_realized_pnl_won": 120000,
+                  "max_drawdown_ppm": 50000
+                }
+              }
+            }
+          ]
+        },
+        "stored_before": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0",
+        "stored_after": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0"
+      },
+      {
+        "name": "candidate-list-other-account",
+        "status": 409,
+        "headers": {
+          "content-length": "51",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "current verified mock binding mismatch"
+        },
+        "stored_before": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0",
+        "stored_after": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0"
+      },
+      {
+        "name": "spec-other-account",
+        "status": 409,
+        "headers": {
+          "content-length": "56",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "mock automation spec request scope conflict"
+        },
+        "stored_before": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0",
+        "stored_after": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0"
+      },
+      {
+        "name": "spec-other-profile",
+        "status": 409,
+        "headers": {
+          "content-length": "56",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "mock automation spec request scope conflict"
+        },
+        "stored_before": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0",
+        "stored_after": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0"
+      },
+      {
+        "name": "spec-stale-binding",
+        "status": 409,
+        "headers": {
+          "content-length": "56",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "mock automation spec request scope conflict"
+        },
+        "stored_before": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0",
+        "stored_after": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0"
+      },
+      {
+        "name": "spec-missing-shadow",
+        "status": 400,
+        "headers": {
+          "content-length": "52",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "stored shadow evidence event is missing"
+        },
+        "stored_before": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0",
+        "stored_after": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0"
+      },
+      {
+        "name": "spec-invalid-profile",
+        "status": 400,
+        "headers": {
+          "content-length": "49",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "forward profile criteria are missing"
+        },
+        "stored_before": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0",
+        "stored_after": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0"
+      },
+      {
+        "name": "spec-short-stage-chain",
+        "status": 422,
+        "headers": {
+          "content-length": "537",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "too_short",
+              "loc": [
+                "body",
+                "stage_revisions"
+              ],
+              "msg": "List should have at least 3 items after validation, not 1",
+              "input": [
+                {
+                  "revision_id": "strategy_stage_fe69110e843f134a5db9354994ac8a0db491b45b67aea60081bf6bf6040a706c",
+                  "strategy_ref": "strategy-1",
+                  "previous_stage": "draft",
+                  "stage": "evaluated",
+                  "evidence_refs": [
+                    "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9"
+                  ],
+                  "reason": "final candidate evaluated",
+                  "decided_at": "2026-09-20T22:00:00+00:00"
+                }
+              ],
+              "ctx": {
+                "field_type": "List",
+                "min_length": 3,
+                "actual_length": 1
+              }
+            }
+          ]
+        },
+        "stored_before": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0",
+        "stored_after": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0"
+      },
+      {
+        "name": "spec-reversed-stage-chain",
+        "status": 400,
+        "headers": {
+          "content-length": "72",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "strategy stage revisions are not one complete ordered chain"
+        },
+        "stored_before": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0",
+        "stored_after": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0"
+      },
+      {
+        "name": "spec-save",
+        "status": 200,
+        "headers": {
+          "content-length": "172",
+          "content-type": "application/json"
+        },
+        "body": {
+          "status": "saved",
+          "spec_id": "mock_automation_spec_f1721062e1f0b5f07317a084119f40947e022e507dba8e7e9f0fd004149ad5fd",
+          "readiness": "READY",
+          "reasons": [],
+          "orders_started": false
+        },
+        "stored_before": "7d6b1fbf6cd221aae1256129ee1850119f28500c7606d24cee8f2699869bbfc0",
+        "stored_after": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc"
+      },
+      {
+        "name": "spec-repeat",
+        "status": 200,
+        "headers": {
+          "content-length": "176",
+          "content-type": "application/json"
+        },
+        "body": {
+          "status": "unchanged",
+          "spec_id": "mock_automation_spec_f1721062e1f0b5f07317a084119f40947e022e507dba8e7e9f0fd004149ad5fd",
+          "readiness": "READY",
+          "reasons": [],
+          "orders_started": false
+        },
+        "stored_before": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc",
+        "stored_after": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc"
+      },
+      {
+        "name": "spec-list",
+        "status": 200,
+        "headers": {
+          "content-length": "1465",
+          "content-type": "application/json"
+        },
+        "body": {
+          "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+          "specs": [
+            {
+              "spec": {
+                "spec_id": "mock_automation_spec_f1721062e1f0b5f07317a084119f40947e022e507dba8e7e9f0fd004149ad5fd",
+                "version": "mock_automation_operating_spec/v1",
+                "strategy_ref": "strategy-1",
+                "candidate_package_hash": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+                "final_result_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "final_batch_id": "batch-1",
+                "final_run_id": "run-1",
+                "forward_profile_id": "forward_profile_377b99c0ebe42595762ffb1763e5de734af4cdeaa6645958ef1f4ca5969a8265",
+                "account_scope": {
+                  "broker": "kiwoom",
+                  "environment": "mock",
+                  "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9"
+                },
+                "credential_profile_id": "nas-mock-default",
+                "binding_revision": 1,
+                "binding_verified_at": "2026-09-20T00:00:00+00:00",
+                "frozen_at": "2026-09-21T01:00:00+00:00",
+                "shadow_evidence_ref": "strategy_stage_65d15165621e09f44707f2162f7f68f4c972245ee1840aa1bcac043c22acee16",
+                "maximum_concurrent_strategies": 1,
+                "maximum_concurrent_positions": 1,
+                "maximum_capital_won": 10000000,
+                "maximum_daily_loss_won": 300000,
+                "maximum_data_gap_seconds": 5,
+                "maximum_submission_unknown_count": 0,
+                "maximum_reconnect_count": 2,
+                "maximum_balance_mismatch_count": 0,
+                "supported_venue": "KRX",
+                "session_profile": "krx-regular/v1",
+                "data_path": "nas",
+                "candidate_transition_policy": "wait_until_flat",
+                "stop_policy": "disable_new_orders_and_reconcile",
+                "recovery_policy": "broker_reconcile_before_resume"
+              },
+              "readiness": "READY",
+              "reasons": []
+            }
+          ]
+        },
+        "stored_before": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc",
+        "stored_after": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc"
+      },
+      {
+        "name": "spec-list-other-account",
+        "status": 200,
+        "headers": {
+          "content-length": "65",
+          "content-type": "application/json"
+        },
+        "body": {
+          "account_ref": "00000000-0000-0000-0000-000000000000",
+          "specs": []
+        },
+        "stored_before": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc",
+        "stored_after": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc"
+      },
+      {
+        "name": "candidate-after-binding-change",
+        "status": 409,
+        "headers": {
+          "content-length": "77",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "candidate publication requires the current verified mock binding"
+        },
+        "stored_before": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc",
+        "stored_after": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc"
+      },
+      {
+        "name": "spec-after-binding-change",
+        "status": 409,
+        "headers": {
+          "content-length": "77",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "operating publication requires the current verified mock binding"
+        },
+        "stored_before": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc",
+        "stored_after": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc"
+      },
+      {
+        "name": "candidate-list-current-binding",
+        "status": 200,
+        "headers": {
+          "content-length": "4384",
+          "content-type": "application/json"
+        },
+        "body": {
+          "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+          "binding": {
+            "credential_profile_id": "nas-mock-default",
+            "broker": "kiwoom",
+            "environment": "mock",
+            "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+            "binding_revision": 2,
+            "verified_at": "2026-09-22T00:00:00+00:00",
+            "verification_method": "ka00001"
+          },
+          "candidates": [
+            {
+              "package": {
+                "package_hash": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+                "version": "mock_automation_candidate_package/v1",
+                "strategy_ref": "strategy-1",
+                "candidate_spec": {
+                  "version": "final_candidate/v1",
+                  "family": "krx_bar_close_breakout/v1",
+                  "parameters": {
+                    "strategy_version": "v1",
+                    "rolling_factor_version": "v1",
+                    "rank_factor_version": "v1",
+                    "lookback_bars": 5,
+                    "buffer_bps": 0,
+                    "rank_persistence_enabled": true,
+                    "rank_persistence_required": true,
+                    "rank_top_k": 20,
+                    "rank_window_seconds": 300,
+                    "rank_max_gap_seconds": 60,
+                    "rank_min_residency_seconds": 60,
+                    "stop_loss_bps": 300,
+                    "target_bps": 500,
+                    "max_hold_minutes": 10,
+                    "quantity": 1,
+                    "capital_won": 1000000,
+                    "signal_valid_seconds": 60,
+                    "cooldown_seconds": 30
+                  },
+                  "execution_model": {
+                    "version": "next_tradable_bar_open/v1",
+                    "same_bar_path_version": "conservative_with_optimistic_bound/v1",
+                    "initial_cash_won": 10000000,
+                    "cost_model": {
+                      "version": "fixed_bps/v1",
+                      "commission_bps": 2,
+                      "sell_tax_bps": 18,
+                      "slippage_bps": 5,
+                      "rate_basis": "official_period_rule",
+                      "source": "fixture",
+                      "valid_from": "2026-01-01T00:00:00+00:00",
+                      "valid_to": "2027-01-01T00:00:00+00:00"
+                    }
+                  },
+                  "session_profile": {
+                    "profile": "krx-regular/v1",
+                    "venue": "KRX",
+                    "schedule_version_policy": "by_trading_date/v1",
+                    "verified_delayed_session_dates_kst": [
+                      "2021-11-18",
+                      "2022-11-17",
+                      "2023-11-16",
+                      "2024-11-14",
+                      "2025-11-13"
+                    ],
+                    "windows_kst": [
+                      "09:00-15:30"
+                    ],
+                    "verified_delayed_regular_window_kst": "10:00-16:30",
+                    "excluded_windows_kst": [
+                      "15:30-16:00"
+                    ],
+                    "verified_delayed_excluded_window_kst": "16:30-17:00",
+                    "factor_session_policy": "reset_at_each_window/v1",
+                    "next_bar_policy": "continuous_next_minute_same_window/v1",
+                    "auction_execution_policy": "unsupported_without_orderbook/v1",
+                    "horizon_policy": "wall_clock_continuous_coverage/v1"
+                  },
+                  "implementation_hash": "8d873510fa626aa39c08ca622d6017a82e4e90c796ba1dd9d3ef58c7d5a22bc2"
+                },
+                "candidate_spec_hash": "418ee27f88c401a6a0511f67bd4ee2c1e50f4e500adde16e82ec08a46a9b7c2b",
+                "scientific_implementation_hash": "8d873510fa626aa39c08ca622d6017a82e4e90c796ba1dd9d3ef58c7d5a22bc2",
+                "source_final": {
+                  "batch_id": "batch-1",
+                  "run_id": "run-1",
+                  "result_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "started_at": "2026-09-20T21:00:00+00:00",
+                  "finished_at": "2026-09-20T22:00:00+00:00"
+                },
+                "evaluation_evidence": {
+                  "report_id": "report-1",
+                  "report_status": "ELIGIBLE",
+                  "evaluation_spec": {
+                    "version": "chronological_holdout/v1",
+                    "folds": [
+                      {
+                        "name": "final",
+                        "role": "OOS",
+                        "start": "2026-09-01T00:00:00+00:00",
+                        "end": "2026-09-10T00:00:00+00:00"
+                      }
+                    ],
+                    "warmup_seconds": 60,
+                    "gap_seconds": 0,
+                    "purge_seconds": 0,
+                    "minimum_closed_trades": 10,
+                    "minimum_active_days": 3,
+                    "fold_state_policy": "continuous_state_and_cash/v1",
+                    "period_end_position_policy": "censor_open_position/v1",
+                    "fit_policy": "no_fitted_parameters/v1",
+                    "final_holdout_accessed_at": "2026-09-11T00:00:00+00:00",
+                    "final_holdout_access_reason": "locked final evaluation"
+                  },
+                  "oos_fold": {
+                    "role": "OOS",
+                    "status": "ELIGIBLE",
+                    "closed_trade_count": 12,
+                    "active_day_count": 4,
+                    "net_realized_pnl_won": 120000,
+                    "max_drawdown_ppm": 50000
+                  }
+                }
+              },
+              "eligibility_policy": {
+                "policy_id": "mock_eligibility_policy_bd307ac4f98a76f3b634f21c51a17d7a65c6995b676a9ba61ad75d8656c85bc7",
+                "version": "mock_automation_eligibility_policy/v1",
+                "strategy_ref": "strategy-1",
+                "candidate_spec_hash": "418ee27f88c401a6a0511f67bd4ee2c1e50f4e500adde16e82ec08a46a9b7c2b",
+                "frozen_at": "2026-09-20T20:00:00+00:00",
+                "minimum_closed_trades": 10,
+                "minimum_active_days": 3,
+                "minimum_net_realized_pnl_won": 0,
+                "maximum_drawdown_ppm": 100000
+              },
+              "eligibility_receipt": {
+                "receipt_id": "mock_eligibility_5b4d249712533fe6279e40e62a5e4b083a47f7666f4c8da1c01c7d203ea054bd",
+                "version": "mock_automation_eligibility_receipt/v1",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "package_hash": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+                "candidate_spec_hash": "418ee27f88c401a6a0511f67bd4ee2c1e50f4e500adde16e82ec08a46a9b7c2b",
+                "policy_id": "mock_eligibility_policy_bd307ac4f98a76f3b634f21c51a17d7a65c6995b676a9ba61ad75d8656c85bc7",
+                "evaluated_at": "2026-09-20T22:00:00+00:00",
+                "status": "ELIGIBLE",
+                "reasons": [],
+                "observed_metrics": {
+                  "closed_trade_count": 12,
+                  "active_day_count": 4,
+                  "net_realized_pnl_won": 120000,
+                  "max_drawdown_ppm": 50000
+                }
+              }
+            }
+          ]
+        },
+        "stored_before": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc",
+        "stored_after": "35f6d8fd76953edeed7f37bca3acca41e411a3b8d22dd143a527bf230a813dfc"
+      }
+    ],
+    "stored": {
+      "execution_mock_automation_candidate_packages": [
+        {
+          "owner": "strategy-1",
+          "key": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+          "updated_at": 1000.0,
+          "document": {
+            "package_hash": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+            "version": "mock_automation_candidate_package/v1",
+            "strategy_ref": "strategy-1",
+            "candidate_spec": {
+              "version": "final_candidate/v1",
+              "family": "krx_bar_close_breakout/v1",
+              "parameters": {
+                "strategy_version": "v1",
+                "rolling_factor_version": "v1",
+                "rank_factor_version": "v1",
+                "lookback_bars": 5,
+                "buffer_bps": 0,
+                "rank_persistence_enabled": true,
+                "rank_persistence_required": true,
+                "rank_top_k": 20,
+                "rank_window_seconds": 300,
+                "rank_max_gap_seconds": 60,
+                "rank_min_residency_seconds": 60,
+                "stop_loss_bps": 300,
+                "target_bps": 500,
+                "max_hold_minutes": 10,
+                "quantity": 1,
+                "capital_won": 1000000,
+                "signal_valid_seconds": 60,
+                "cooldown_seconds": 30
+              },
+              "execution_model": {
+                "version": "next_tradable_bar_open/v1",
+                "same_bar_path_version": "conservative_with_optimistic_bound/v1",
+                "initial_cash_won": 10000000,
+                "cost_model": {
+                  "version": "fixed_bps/v1",
+                  "commission_bps": 2,
+                  "sell_tax_bps": 18,
+                  "slippage_bps": 5,
+                  "rate_basis": "official_period_rule",
+                  "source": "fixture",
+                  "valid_from": "2026-01-01T00:00:00+00:00",
+                  "valid_to": "2027-01-01T00:00:00+00:00"
+                }
+              },
+              "session_profile": {
+                "profile": "krx-regular/v1",
+                "venue": "KRX",
+                "schedule_version_policy": "by_trading_date/v1",
+                "verified_delayed_session_dates_kst": [
+                  "2021-11-18",
+                  "2022-11-17",
+                  "2023-11-16",
+                  "2024-11-14",
+                  "2025-11-13"
+                ],
+                "windows_kst": [
+                  "09:00-15:30"
+                ],
+                "verified_delayed_regular_window_kst": "10:00-16:30",
+                "excluded_windows_kst": [
+                  "15:30-16:00"
+                ],
+                "verified_delayed_excluded_window_kst": "16:30-17:00",
+                "factor_session_policy": "reset_at_each_window/v1",
+                "next_bar_policy": "continuous_next_minute_same_window/v1",
+                "auction_execution_policy": "unsupported_without_orderbook/v1",
+                "horizon_policy": "wall_clock_continuous_coverage/v1"
+              },
+              "implementation_hash": "8d873510fa626aa39c08ca622d6017a82e4e90c796ba1dd9d3ef58c7d5a22bc2"
+            },
+            "candidate_spec_hash": "418ee27f88c401a6a0511f67bd4ee2c1e50f4e500adde16e82ec08a46a9b7c2b",
+            "scientific_implementation_hash": "8d873510fa626aa39c08ca622d6017a82e4e90c796ba1dd9d3ef58c7d5a22bc2",
+            "source_final": {
+              "batch_id": "batch-1",
+              "run_id": "run-1",
+              "result_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "started_at": "2026-09-20T21:00:00+00:00",
+              "finished_at": "2026-09-20T22:00:00+00:00"
+            },
+            "evaluation_evidence": {
+              "report_id": "report-1",
+              "report_status": "ELIGIBLE",
+              "evaluation_spec": {
+                "version": "chronological_holdout/v1",
+                "folds": [
+                  {
+                    "name": "final",
+                    "role": "OOS",
+                    "start": "2026-09-01T00:00:00+00:00",
+                    "end": "2026-09-10T00:00:00+00:00"
+                  }
+                ],
+                "warmup_seconds": 60,
+                "gap_seconds": 0,
+                "purge_seconds": 0,
+                "minimum_closed_trades": 10,
+                "minimum_active_days": 3,
+                "fold_state_policy": "continuous_state_and_cash/v1",
+                "period_end_position_policy": "censor_open_position/v1",
+                "fit_policy": "no_fitted_parameters/v1",
+                "final_holdout_accessed_at": "2026-09-11T00:00:00+00:00",
+                "final_holdout_access_reason": "locked final evaluation"
+              },
+              "oos_fold": {
+                "role": "OOS",
+                "status": "ELIGIBLE",
+                "closed_trade_count": 12,
+                "active_day_count": 4,
+                "net_realized_pnl_won": 120000,
+                "max_drawdown_ppm": 50000
+              }
+            }
+          }
+        }
+      ],
+      "execution_mock_automation_eligibility_policies": [
+        {
+          "owner": "strategy-1",
+          "key": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+          "updated_at": 1000.0,
+          "document": {
+            "policy_id": "mock_eligibility_policy_bd307ac4f98a76f3b634f21c51a17d7a65c6995b676a9ba61ad75d8656c85bc7",
+            "version": "mock_automation_eligibility_policy/v1",
+            "strategy_ref": "strategy-1",
+            "candidate_spec_hash": "418ee27f88c401a6a0511f67bd4ee2c1e50f4e500adde16e82ec08a46a9b7c2b",
+            "frozen_at": "2026-09-20T20:00:00+00:00",
+            "minimum_closed_trades": 10,
+            "minimum_active_days": 3,
+            "minimum_net_realized_pnl_won": 0,
+            "maximum_drawdown_ppm": 100000
+          }
+        }
+      ],
+      "execution_mock_automation_eligibility_receipts": [
+        {
+          "owner": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+          "key": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+          "updated_at": 1000.0,
+          "document": {
+            "receipt_id": "mock_eligibility_5b4d249712533fe6279e40e62a5e4b083a47f7666f4c8da1c01c7d203ea054bd",
+            "version": "mock_automation_eligibility_receipt/v1",
+            "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+            "package_hash": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+            "candidate_spec_hash": "418ee27f88c401a6a0511f67bd4ee2c1e50f4e500adde16e82ec08a46a9b7c2b",
+            "policy_id": "mock_eligibility_policy_bd307ac4f98a76f3b634f21c51a17d7a65c6995b676a9ba61ad75d8656c85bc7",
+            "evaluated_at": "2026-09-20T22:00:00+00:00",
+            "status": "ELIGIBLE",
+            "reasons": [],
+            "observed_metrics": {
+              "closed_trade_count": 12,
+              "active_day_count": 4,
+              "net_realized_pnl_won": 120000,
+              "max_drawdown_ppm": 50000
+            }
+          }
+        }
+      ],
+      "execution_forward_profiles": [
+        {
+          "owner": "strategy-1",
+          "key": "forward_profile_377b99c0ebe42595762ffb1763e5de734af4cdeaa6645958ef1f4ca5969a8265",
+          "updated_at": 1000.0,
+          "document": {
+            "profile_id": "forward_profile_377b99c0ebe42595762ffb1763e5de734af4cdeaa6645958ef1f4ca5969a8265",
+            "strategy_ref": "strategy-1",
+            "family_version": "krx_bar_close_breakout/v1",
+            "factor_versions": [
+              "rolling_high_breakout/v1",
+              "rank_persistence/v1"
+            ],
+            "policy_version": "mock_eligibility_policy_bd307ac4f98a76f3b634f21c51a17d7a65c6995b676a9ba61ad75d8656c85bc7",
+            "data_path": "nas",
+            "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+            "environment": "mock",
+            "evaluation_start": "2026-09-21T02:00:00+00:00",
+            "evaluation_end": "2026-09-28T00:00:00+00:00",
+            "frozen_at": "2026-09-20T23:00:00+00:00",
+            "criteria": {
+              "minimum_comparable_observations": 100,
+              "minimum_coverage_ppm": 990000,
+              "maximum_p95_delay_ms": 2000,
+              "maximum_gap_count": 1,
+              "maximum_submission_unknown_count": 0,
+              "maximum_rejected_order_count": 1,
+              "maximum_cancel_failure_count": 0,
+              "maximum_reconnect_count": 2,
+              "maximum_balance_mismatch_count": 0,
+              "minimum_active_day_count": 5,
+              "minimum_closed_trade_count": 10,
+              "minimum_adjusted_net_pnl_won": 0,
+              "maximum_drawdown_ppm": 100000,
+              "maximum_exposure_ppm": 500000
+            },
+            "session_profile": {
+              "profile": "krx-regular/v1",
+              "venue": "KRX",
+              "schedule_version_policy": "by_trading_date/v1",
+              "verified_delayed_session_dates_kst": [
+                "2021-11-18",
+                "2022-11-17",
+                "2023-11-16",
+                "2024-11-14",
+                "2025-11-13"
+              ],
+              "windows_kst": [
+                "09:00-15:30"
+              ],
+              "verified_delayed_regular_window_kst": "10:00-16:30",
+              "excluded_windows_kst": [
+                "15:30-16:00"
+              ],
+              "verified_delayed_excluded_window_kst": "16:30-17:00",
+              "factor_session_policy": "reset_at_each_window/v1",
+              "next_bar_policy": "continuous_next_minute_same_window/v1",
+              "auction_execution_policy": "unsupported_without_orderbook/v1",
+              "horizon_policy": "wall_clock_continuous_coverage/v1"
+            }
+          }
+        }
+      ],
+      "execution_strategy_stage_revisions": [
+        {
+          "owner": "strategy-1",
+          "key": "strategy_stage_1744e8c78d63d2e8b9c97af204e22a639988ef81b5240d3f49d91a78b9255627",
+          "updated_at": 1000.0,
+          "document": {
+            "revision_id": "strategy_stage_1744e8c78d63d2e8b9c97af204e22a639988ef81b5240d3f49d91a78b9255627",
+            "strategy_ref": "strategy-1",
+            "previous_stage": "evaluated",
+            "stage": "validated",
+            "evidence_refs": [
+              "mock_eligibility_5b4d249712533fe6279e40e62a5e4b083a47f7666f4c8da1c01c7d203ea054bd"
+            ],
+            "reason": "eligibility validated",
+            "decided_at": "2026-09-20T23:00:00+00:00"
+          }
+        },
+        {
+          "owner": "strategy-1",
+          "key": "strategy_stage_65d15165621e09f44707f2162f7f68f4c972245ee1840aa1bcac043c22acee16",
+          "updated_at": 1000.0,
+          "document": {
+            "revision_id": "strategy_stage_65d15165621e09f44707f2162f7f68f4c972245ee1840aa1bcac043c22acee16",
+            "strategy_ref": "strategy-1",
+            "previous_stage": "validated",
+            "stage": "shadow",
+            "evidence_refs": [
+              "shadow-event-1"
+            ],
+            "reason": "shadow event observed",
+            "decided_at": "2026-09-21T00:00:00+00:00"
+          }
+        },
+        {
+          "owner": "strategy-1",
+          "key": "strategy_stage_fe69110e843f134a5db9354994ac8a0db491b45b67aea60081bf6bf6040a706c",
+          "updated_at": 1000.0,
+          "document": {
+            "revision_id": "strategy_stage_fe69110e843f134a5db9354994ac8a0db491b45b67aea60081bf6bf6040a706c",
+            "strategy_ref": "strategy-1",
+            "previous_stage": "draft",
+            "stage": "evaluated",
+            "evidence_refs": [
+              "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9"
+            ],
+            "reason": "final candidate evaluated",
+            "decided_at": "2026-09-20T22:00:00+00:00"
+          }
+        }
+      ],
+      "execution_mock_automation_specs": [
+        {
+          "owner": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+          "key": "mock_automation_spec_f1721062e1f0b5f07317a084119f40947e022e507dba8e7e9f0fd004149ad5fd",
+          "updated_at": 1000.0,
+          "document": {
+            "spec_id": "mock_automation_spec_f1721062e1f0b5f07317a084119f40947e022e507dba8e7e9f0fd004149ad5fd",
+            "version": "mock_automation_operating_spec/v1",
+            "strategy_ref": "strategy-1",
+            "candidate_package_hash": "59a52050e38367be6e48510b157136920c909d04a189fb4302d08951d23e16a9",
+            "final_result_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "final_batch_id": "batch-1",
+            "final_run_id": "run-1",
+            "forward_profile_id": "forward_profile_377b99c0ebe42595762ffb1763e5de734af4cdeaa6645958ef1f4ca5969a8265",
+            "account_scope": {
+              "broker": "kiwoom",
+              "environment": "mock",
+              "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9"
+            },
+            "credential_profile_id": "nas-mock-default",
+            "binding_revision": 1,
+            "binding_verified_at": "2026-09-20T00:00:00+00:00",
+            "frozen_at": "2026-09-21T01:00:00+00:00",
+            "shadow_evidence_ref": "strategy_stage_65d15165621e09f44707f2162f7f68f4c972245ee1840aa1bcac043c22acee16",
+            "maximum_concurrent_strategies": 1,
+            "maximum_concurrent_positions": 1,
+            "maximum_capital_won": 10000000,
+            "maximum_daily_loss_won": 300000,
+            "maximum_data_gap_seconds": 5,
+            "maximum_submission_unknown_count": 0,
+            "maximum_reconnect_count": 2,
+            "maximum_balance_mismatch_count": 0,
+            "supported_venue": "KRX",
+            "session_profile": "krx-regular/v1",
+            "data_path": "nas",
+            "candidate_transition_policy": "wait_until_flat",
+            "stop_policy": "disable_new_orders_and_reconcile",
+            "recovery_policy": "broker_reconcile_before_resume"
+          }
+        }
+      ]
+    },
+    "binding": [
+      {
+        "binding_id": "account_binding_e8ead3ecd34bb56ec63cd286f8a3ace2fe0f09348c4ff8e5cd09c744aa3c9b23",
+        "credential_profile_id": "nas-mock-default",
+        "broker": "kiwoom",
+        "environment": "mock",
+        "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+        "binding_revision": 1,
+        "verified_at": "2026-09-20T00:00:00+00:00",
+        "verification_method": "ka00001"
+      },
+      {
+        "binding_id": "account_binding_4b6dec0f76bb4c5744fd7fb1bef2e3e61a04e18c6ca7bf34339cfea80137a829",
+        "credential_profile_id": "nas-mock-default",
+        "broker": "kiwoom",
+        "environment": "mock",
+        "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+        "binding_revision": 2,
+        "verified_at": "2026-09-22T00:00:00+00:00",
+        "verification_method": "ka00001"
+      }
+    ],
+    "shadow": {
+      "high_watermark": 1,
+      "events": [
+        {
+          "available_at": "2026-09-21T00:00:00+00:00",
+          "event_id": "shadow-event-1",
+          "quantity": 1,
+          "run_id": "shadow:krx_bar_close_breakout:v1:9eab6a57572730a9",
+          "strategy_id": "krx_bar_close_breakout",
+          "strategy_version": "v1",
+          "transition": "flat->candidate",
+          "accepted_sequence": 1,
+          "expires_at": "2026-09-21T00:05:00+00:00"
+        }
+      ],
+      "next_cursor": 1,
+      "has_more": false
+    },
+    "control": null
+  }
+}

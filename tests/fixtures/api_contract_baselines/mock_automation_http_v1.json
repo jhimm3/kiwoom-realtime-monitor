@@ -1,0 +1,1837 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "service_boundary": "mock supervisor; native empty SQLite/vault/runtime; no broker credentials or orders",
+  "transport_control": "server/date header generation disabled; full response headers/body preserved",
+  "results": [
+    {
+      "cases": [
+        {
+          "name": "configured:status-unauthorized",
+          "status": 401,
+          "headers": {
+            "content-length": "63",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "유효한 서버 접속 토큰이 필요합니다."
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:status-missing-profile",
+          "status": 422,
+          "headers": {
+            "content-length": "107",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "missing",
+                "loc": [
+                  "query",
+                  "credential_profile_id"
+                ],
+                "msg": "Field required",
+                "input": null
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:status-invalid-profile",
+          "status": 422,
+          "headers": {
+            "content-length": "201",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "string_pattern_mismatch",
+                "loc": [
+                  "query",
+                  "credential_profile_id"
+                ],
+                "msg": "String should match pattern '^[A-Za-z0-9_-]+$'",
+                "input": "bad/profile",
+                "ctx": {
+                  "pattern": "^[A-Za-z0-9_-]+$"
+                }
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:status",
+          "status": 200,
+          "headers": {
+            "content-length": "93",
+            "content-type": "application/json"
+          },
+          "body": {
+            "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+            "state": "STOPPED",
+            "control_revision": 7
+          },
+          "supervisor_calls": [
+            {
+              "method": "status",
+              "args": [
+                "af64a3fa-197f-49df-8e8b-65b71bee02d9"
+              ],
+              "kwargs": {
+                "credential_profile_id": "mock-profile"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:start-unauthorized",
+          "status": 401,
+          "headers": {
+            "content-length": "63",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "유효한 서버 접속 토큰이 필요합니다."
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:start-empty",
+          "status": 422,
+          "headers": {
+            "content-length": "451",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "account_ref"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "credential_profile_id"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "spec_id"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "expected_settings_revision"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "credential_revision"
+                ],
+                "msg": "Field required",
+                "input": {}
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:start-extra-field",
+          "status": 422,
+          "headers": {
+            "content-length": "119",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "extra_forbidden",
+                "loc": [
+                  "body",
+                  "unexpected"
+                ],
+                "msg": "Extra inputs are not permitted",
+                "input": true
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:start-boolean-revision",
+          "status": 422,
+          "headers": {
+            "content-length": "129",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "int_type",
+                "loc": [
+                  "body",
+                  "expected_settings_revision"
+                ],
+                "msg": "Input should be a valid integer",
+                "input": true
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:start-string-revision",
+          "status": 422,
+          "headers": {
+            "content-length": "128",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "int_type",
+                "loc": [
+                  "body",
+                  "expected_settings_revision"
+                ],
+                "msg": "Input should be a valid integer",
+                "input": "7"
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:start-invalid-account",
+          "status": 422,
+          "headers": {
+            "content-length": "159",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "string_too_short",
+                "loc": [
+                  "body",
+                  "account_ref"
+                ],
+                "msg": "String should have at least 36 characters",
+                "input": "short",
+                "ctx": {
+                  "min_length": 36
+                }
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:start",
+          "status": 200,
+          "headers": {
+            "content-length": "100",
+            "content-type": "application/json"
+          },
+          "body": {
+            "operation": "activate",
+            "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+            "orders_enabled": false
+          },
+          "supervisor_calls": [
+            {
+              "method": "activate",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_settings_revision": 3,
+                "credential_revision": 5
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:start-supervisor-conflict",
+          "status": 409,
+          "headers": {
+            "content-length": "35",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "STALE_CONTROL_REVISION"
+          },
+          "supervisor_calls": [
+            {
+              "method": "activate",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_settings_revision": 3,
+                "credential_revision": 5
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:start-supervisor-blocked",
+          "status": 412,
+          "headers": {
+            "content-length": "31",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "ADMISSION_REQUIRED"
+          },
+          "supervisor_calls": [
+            {
+              "method": "activate",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_settings_revision": 3,
+                "credential_revision": 5
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:start-credential-forbidden",
+          "status": 403,
+          "headers": {
+            "content-length": "29",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "PROFILE_DISABLED"
+          },
+          "supervisor_calls": [
+            {
+              "method": "activate",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_settings_revision": 3,
+                "credential_revision": 5
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:start-credential-not-found",
+          "status": 404,
+          "headers": {
+            "content-length": "30",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "PROFILE_NOT_FOUND"
+          },
+          "supervisor_calls": [
+            {
+              "method": "activate",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_settings_revision": 3,
+                "credential_revision": 5
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:start-invalid-operation",
+          "status": 400,
+          "headers": {
+            "content-length": "25",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "INVALID_SPEC"
+          },
+          "supervisor_calls": [
+            {
+              "method": "activate",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_settings_revision": 3,
+                "credential_revision": 5
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:start-runtime-conflict",
+          "status": 409,
+          "headers": {
+            "content-length": "31",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "RUN_ALREADY_ACTIVE"
+          },
+          "supervisor_calls": [
+            {
+              "method": "activate",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_settings_revision": 3,
+                "credential_revision": 5
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:stop-unauthorized",
+          "status": 401,
+          "headers": {
+            "content-length": "63",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "유효한 서버 접속 토큰이 필요합니다."
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:stop-empty",
+          "status": 422,
+          "headers": {
+            "content-length": "437",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "account_ref"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "credential_profile_id"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "spec_id"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "expected_control_revision"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "reason"
+                ],
+                "msg": "Field required",
+                "input": {}
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:stop-extra-field",
+          "status": 422,
+          "headers": {
+            "content-length": "119",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "extra_forbidden",
+                "loc": [
+                  "body",
+                  "unexpected"
+                ],
+                "msg": "Extra inputs are not permitted",
+                "input": true
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:stop-boolean-revision",
+          "status": 422,
+          "headers": {
+            "content-length": "128",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "int_type",
+                "loc": [
+                  "body",
+                  "expected_control_revision"
+                ],
+                "msg": "Input should be a valid integer",
+                "input": true
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:stop-string-revision",
+          "status": 422,
+          "headers": {
+            "content-length": "127",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "int_type",
+                "loc": [
+                  "body",
+                  "expected_control_revision"
+                ],
+                "msg": "Input should be a valid integer",
+                "input": "7"
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:stop-invalid-account",
+          "status": 422,
+          "headers": {
+            "content-length": "159",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "string_too_short",
+                "loc": [
+                  "body",
+                  "account_ref"
+                ],
+                "msg": "String should have at least 36 characters",
+                "input": "short",
+                "ctx": {
+                  "min_length": 36
+                }
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:stop-empty-reason",
+          "status": 422,
+          "headers": {
+            "content-length": "146",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "string_too_short",
+                "loc": [
+                  "body",
+                  "reason"
+                ],
+                "msg": "String should have at least 1 character",
+                "input": "",
+                "ctx": {
+                  "min_length": 1
+                }
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:stop",
+          "status": 200,
+          "headers": {
+            "content-length": "96",
+            "content-type": "application/json"
+          },
+          "body": {
+            "operation": "stop",
+            "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+            "orders_enabled": false
+          },
+          "supervisor_calls": [
+            {
+              "method": "stop",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:stop-supervisor-conflict",
+          "status": 409,
+          "headers": {
+            "content-length": "35",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "STALE_CONTROL_REVISION"
+          },
+          "supervisor_calls": [
+            {
+              "method": "stop",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:stop-supervisor-blocked",
+          "status": 412,
+          "headers": {
+            "content-length": "31",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "ADMISSION_REQUIRED"
+          },
+          "supervisor_calls": [
+            {
+              "method": "stop",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:stop-credential-forbidden",
+          "status": 403,
+          "headers": {
+            "content-length": "29",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "PROFILE_DISABLED"
+          },
+          "supervisor_calls": [
+            {
+              "method": "stop",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:stop-credential-not-found",
+          "status": 404,
+          "headers": {
+            "content-length": "30",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "PROFILE_NOT_FOUND"
+          },
+          "supervisor_calls": [
+            {
+              "method": "stop",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:stop-invalid-operation",
+          "status": 400,
+          "headers": {
+            "content-length": "25",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "INVALID_SPEC"
+          },
+          "supervisor_calls": [
+            {
+              "method": "stop",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:stop-runtime-conflict",
+          "status": 409,
+          "headers": {
+            "content-length": "31",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "RUN_ALREADY_ACTIVE"
+          },
+          "supervisor_calls": [
+            {
+              "method": "stop",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:resume-unauthorized",
+          "status": 401,
+          "headers": {
+            "content-length": "63",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "유효한 서버 접속 토큰이 필요합니다."
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:resume-empty",
+          "status": 422,
+          "headers": {
+            "content-length": "624",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "account_ref"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "credential_profile_id"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "spec_id"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "expected_control_revision"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "reason"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "expected_settings_revision"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "credential_revision"
+                ],
+                "msg": "Field required",
+                "input": {}
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:resume-extra-field",
+          "status": 422,
+          "headers": {
+            "content-length": "119",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "extra_forbidden",
+                "loc": [
+                  "body",
+                  "unexpected"
+                ],
+                "msg": "Extra inputs are not permitted",
+                "input": true
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:resume-boolean-revision",
+          "status": 422,
+          "headers": {
+            "content-length": "128",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "int_type",
+                "loc": [
+                  "body",
+                  "expected_control_revision"
+                ],
+                "msg": "Input should be a valid integer",
+                "input": true
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:resume-string-revision",
+          "status": 422,
+          "headers": {
+            "content-length": "127",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "int_type",
+                "loc": [
+                  "body",
+                  "expected_control_revision"
+                ],
+                "msg": "Input should be a valid integer",
+                "input": "7"
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:resume-invalid-account",
+          "status": 422,
+          "headers": {
+            "content-length": "159",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "string_too_short",
+                "loc": [
+                  "body",
+                  "account_ref"
+                ],
+                "msg": "String should have at least 36 characters",
+                "input": "short",
+                "ctx": {
+                  "min_length": 36
+                }
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:resume-empty-reason",
+          "status": 422,
+          "headers": {
+            "content-length": "146",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "string_too_short",
+                "loc": [
+                  "body",
+                  "reason"
+                ],
+                "msg": "String should have at least 1 character",
+                "input": "",
+                "ctx": {
+                  "min_length": 1
+                }
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "configured:resume",
+          "status": 200,
+          "headers": {
+            "content-length": "98",
+            "content-type": "application/json"
+          },
+          "body": {
+            "operation": "resume",
+            "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+            "orders_enabled": false
+          },
+          "supervisor_calls": [
+            {
+              "method": "resume",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "expected_settings_revision": 3,
+                "credential_revision": 5,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:resume-supervisor-conflict",
+          "status": 409,
+          "headers": {
+            "content-length": "35",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "STALE_CONTROL_REVISION"
+          },
+          "supervisor_calls": [
+            {
+              "method": "resume",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "expected_settings_revision": 3,
+                "credential_revision": 5,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:resume-supervisor-blocked",
+          "status": 412,
+          "headers": {
+            "content-length": "31",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "ADMISSION_REQUIRED"
+          },
+          "supervisor_calls": [
+            {
+              "method": "resume",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "expected_settings_revision": 3,
+                "credential_revision": 5,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:resume-credential-forbidden",
+          "status": 403,
+          "headers": {
+            "content-length": "29",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "PROFILE_DISABLED"
+          },
+          "supervisor_calls": [
+            {
+              "method": "resume",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "expected_settings_revision": 3,
+                "credential_revision": 5,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:resume-credential-not-found",
+          "status": 404,
+          "headers": {
+            "content-length": "30",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "PROFILE_NOT_FOUND"
+          },
+          "supervisor_calls": [
+            {
+              "method": "resume",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "expected_settings_revision": 3,
+                "credential_revision": 5,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:resume-invalid-operation",
+          "status": 400,
+          "headers": {
+            "content-length": "25",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "INVALID_SPEC"
+          },
+          "supervisor_calls": [
+            {
+              "method": "resume",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "expected_settings_revision": 3,
+                "credential_revision": 5,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        },
+        {
+          "name": "configured:resume-runtime-conflict",
+          "status": 409,
+          "headers": {
+            "content-length": "31",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "RUN_ALREADY_ACTIVE"
+          },
+          "supervisor_calls": [
+            {
+              "method": "resume",
+              "args": [],
+              "kwargs": {
+                "credential_profile_id": "mock-profile",
+                "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
+                "spec_id": "mock_automation_spec_1",
+                "expected_control_revision": 7,
+                "expected_settings_revision": 3,
+                "credential_revision": 5,
+                "reason": "사용자 중지"
+              }
+            }
+          ]
+        }
+      ],
+      "lifecycle": {
+        "start": 1
+      }
+    },
+    {
+      "cases": [
+        {
+          "name": "unavailable:status-unauthorized",
+          "status": 401,
+          "headers": {
+            "content-length": "63",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "유효한 서버 접속 토큰이 필요합니다."
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:status-missing-profile",
+          "status": 422,
+          "headers": {
+            "content-length": "107",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "missing",
+                "loc": [
+                  "query",
+                  "credential_profile_id"
+                ],
+                "msg": "Field required",
+                "input": null
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:status-invalid-profile",
+          "status": 422,
+          "headers": {
+            "content-length": "201",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "string_pattern_mismatch",
+                "loc": [
+                  "query",
+                  "credential_profile_id"
+                ],
+                "msg": "String should match pattern '^[A-Za-z0-9_-]+$'",
+                "input": "bad/profile",
+                "ctx": {
+                  "pattern": "^[A-Za-z0-9_-]+$"
+                }
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:status",
+          "status": 503,
+          "headers": {
+            "content-length": "48",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "MOCK_AUTOMATION_RUNTIME_UNAVAILABLE"
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:start-unauthorized",
+          "status": 401,
+          "headers": {
+            "content-length": "63",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "유효한 서버 접속 토큰이 필요합니다."
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:start-empty",
+          "status": 422,
+          "headers": {
+            "content-length": "451",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "account_ref"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "credential_profile_id"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "spec_id"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "expected_settings_revision"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "credential_revision"
+                ],
+                "msg": "Field required",
+                "input": {}
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:start-extra-field",
+          "status": 422,
+          "headers": {
+            "content-length": "119",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "extra_forbidden",
+                "loc": [
+                  "body",
+                  "unexpected"
+                ],
+                "msg": "Extra inputs are not permitted",
+                "input": true
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:start-boolean-revision",
+          "status": 422,
+          "headers": {
+            "content-length": "129",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "int_type",
+                "loc": [
+                  "body",
+                  "expected_settings_revision"
+                ],
+                "msg": "Input should be a valid integer",
+                "input": true
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:start-string-revision",
+          "status": 422,
+          "headers": {
+            "content-length": "128",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "int_type",
+                "loc": [
+                  "body",
+                  "expected_settings_revision"
+                ],
+                "msg": "Input should be a valid integer",
+                "input": "7"
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:start-invalid-account",
+          "status": 422,
+          "headers": {
+            "content-length": "159",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "string_too_short",
+                "loc": [
+                  "body",
+                  "account_ref"
+                ],
+                "msg": "String should have at least 36 characters",
+                "input": "short",
+                "ctx": {
+                  "min_length": 36
+                }
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:start",
+          "status": 503,
+          "headers": {
+            "content-length": "48",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "MOCK_AUTOMATION_RUNTIME_UNAVAILABLE"
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:stop-unauthorized",
+          "status": 401,
+          "headers": {
+            "content-length": "63",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "유효한 서버 접속 토큰이 필요합니다."
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:stop-empty",
+          "status": 422,
+          "headers": {
+            "content-length": "437",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "account_ref"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "credential_profile_id"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "spec_id"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "expected_control_revision"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "reason"
+                ],
+                "msg": "Field required",
+                "input": {}
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:stop-extra-field",
+          "status": 422,
+          "headers": {
+            "content-length": "119",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "extra_forbidden",
+                "loc": [
+                  "body",
+                  "unexpected"
+                ],
+                "msg": "Extra inputs are not permitted",
+                "input": true
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:stop-boolean-revision",
+          "status": 422,
+          "headers": {
+            "content-length": "128",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "int_type",
+                "loc": [
+                  "body",
+                  "expected_control_revision"
+                ],
+                "msg": "Input should be a valid integer",
+                "input": true
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:stop-string-revision",
+          "status": 422,
+          "headers": {
+            "content-length": "127",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "int_type",
+                "loc": [
+                  "body",
+                  "expected_control_revision"
+                ],
+                "msg": "Input should be a valid integer",
+                "input": "7"
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:stop-invalid-account",
+          "status": 422,
+          "headers": {
+            "content-length": "159",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "string_too_short",
+                "loc": [
+                  "body",
+                  "account_ref"
+                ],
+                "msg": "String should have at least 36 characters",
+                "input": "short",
+                "ctx": {
+                  "min_length": 36
+                }
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:stop-empty-reason",
+          "status": 422,
+          "headers": {
+            "content-length": "146",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "string_too_short",
+                "loc": [
+                  "body",
+                  "reason"
+                ],
+                "msg": "String should have at least 1 character",
+                "input": "",
+                "ctx": {
+                  "min_length": 1
+                }
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:stop",
+          "status": 503,
+          "headers": {
+            "content-length": "48",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "MOCK_AUTOMATION_RUNTIME_UNAVAILABLE"
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:resume-unauthorized",
+          "status": 401,
+          "headers": {
+            "content-length": "63",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "유효한 서버 접속 토큰이 필요합니다."
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:resume-empty",
+          "status": 422,
+          "headers": {
+            "content-length": "624",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "account_ref"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "credential_profile_id"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "spec_id"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "expected_control_revision"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "reason"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "expected_settings_revision"
+                ],
+                "msg": "Field required",
+                "input": {}
+              },
+              {
+                "type": "missing",
+                "loc": [
+                  "body",
+                  "credential_revision"
+                ],
+                "msg": "Field required",
+                "input": {}
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:resume-extra-field",
+          "status": 422,
+          "headers": {
+            "content-length": "119",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "extra_forbidden",
+                "loc": [
+                  "body",
+                  "unexpected"
+                ],
+                "msg": "Extra inputs are not permitted",
+                "input": true
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:resume-boolean-revision",
+          "status": 422,
+          "headers": {
+            "content-length": "128",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "int_type",
+                "loc": [
+                  "body",
+                  "expected_control_revision"
+                ],
+                "msg": "Input should be a valid integer",
+                "input": true
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:resume-string-revision",
+          "status": 422,
+          "headers": {
+            "content-length": "127",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "int_type",
+                "loc": [
+                  "body",
+                  "expected_control_revision"
+                ],
+                "msg": "Input should be a valid integer",
+                "input": "7"
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:resume-invalid-account",
+          "status": 422,
+          "headers": {
+            "content-length": "159",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "string_too_short",
+                "loc": [
+                  "body",
+                  "account_ref"
+                ],
+                "msg": "String should have at least 36 characters",
+                "input": "short",
+                "ctx": {
+                  "min_length": 36
+                }
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:resume-empty-reason",
+          "status": 422,
+          "headers": {
+            "content-length": "146",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": [
+              {
+                "type": "string_too_short",
+                "loc": [
+                  "body",
+                  "reason"
+                ],
+                "msg": "String should have at least 1 character",
+                "input": "",
+                "ctx": {
+                  "min_length": 1
+                }
+              }
+            ]
+          },
+          "supervisor_calls": []
+        },
+        {
+          "name": "unavailable:resume",
+          "status": 503,
+          "headers": {
+            "content-length": "48",
+            "content-type": "application/json"
+          },
+          "body": {
+            "detail": "MOCK_AUTOMATION_RUNTIME_UNAVAILABLE"
+          },
+          "supervisor_calls": []
+        }
+      ],
+      "lifecycle": null
+    }
+  ]
+}

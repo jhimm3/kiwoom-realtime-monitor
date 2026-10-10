@@ -225,7 +225,7 @@ class Top20DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(self.subscriber.queue.empty())
                 now[0] += timedelta(seconds=1)
             with capture_owner("top20", self.component, self.component + ":index-loop"):
-                await service._flush_program_snapshots()
+                await service._program_snapshots.flush()
             self.assertEqual({"005930", "000660"}, {row[1] for row in store.values})
             starts = [row for row in self.events if row.get("event_type") == "operation_start"]
             self.assertEqual(1, len(starts))
@@ -263,7 +263,7 @@ class Top20DeliveryTests(unittest.IsolatedAsyncioTestCase):
                     break
                 await asyncio.sleep(0)
             self.assertTrue(self.subscriber.queue.empty())
-            self.assertIn("005930", service._pending_program_snapshots)
+            self.assertIn("005930", service._program_snapshots._pending)
             self.assertEqual(2, len(self.coverage()["delivery_ids"]))
         finally:
             task.cancel()

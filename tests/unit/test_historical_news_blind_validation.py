@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from kiwoom_monitor.application.historical_news_blind_validation import (
     HistoricalNewsBlindValidation,
@@ -40,9 +44,34 @@ class HistoricalNewsBlindValidationTests(unittest.TestCase):
 
     def test_round_trip_detects_tampering_and_target_leak(self) -> None:
         dataset = build_historical_news_blind_validation(_development_inputs())
+        original_replace = Path.replace
+
+        def diagnostic_replace(source: Path, target: Path) -> Path:
+            try:
+                return original_replace(source, target)
+            except PermissionError as error:
+                snapshot = {"process_id": os.getpid(), "time_ns": time.time_ns(),
+                            "winerror": getattr(error, "winerror", None)}
+                for name, path in (("staging", source), ("destination", Path(target))):
+                    try:
+                        stat = path.stat()
+                        snapshot[name] = {
+                            "path": str(path), "exists": True, "directory": path.is_dir(),
+                            "attributes": getattr(stat, "st_file_attributes", None),
+                            "entries": sorted(child.name for child in path.iterdir()) if path.is_dir() else None,
+                        }
+                    except FileNotFoundError:
+                        snapshot[name] = {"path": str(path), "exists": False}
+                    except OSError as observation_error:
+                        snapshot[name] = {"path": str(path), "observation_error": repr(observation_error)}
+                # Observe before the writer removes staging; preserve the original error.
+                error.add_note("blind_validation_rename_state=" + json.dumps(snapshot, sort_keys=True))
+                raise
+
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "blind"
-            write_historical_news_blind_validation(dataset, output)
+            with patch.object(Path, "replace", diagnostic_replace):
+                write_historical_news_blind_validation(dataset, output)
             self.assertEqual(dataset, load_historical_news_blind_validation(output))
             with (output / "requests.jsonl").open("a", encoding="utf-8") as stream:
                 stream.write("{}\n")

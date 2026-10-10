@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .autonomous_top20 import AutonomousTop20Service, KST
+from .program_snapshot_writer import ProgramSnapshotWriter
 from .diagnostic_replay_baseline import DEFAULT_CONFIG, TABLES, TABLES_V2, ReplayDatabaseLease
 from .realtime_hub import RealtimeHub
 from .rest_broker import CentralRestBroker
@@ -43,7 +44,7 @@ _SERVICE_EMPTY = {
         "_krx_trading_day_cache": dict, "_calendar_unknown_logged_days": set,
         "_backfill_completed_steps": dict,
     },
-    "pending_storage": {"_pending_index_records": dict, "_pending_program_snapshots": dict},
+    "pending_storage": {"_pending_index_records": dict},
 }
 _SERVICE_SCALARS = {
     "_observed_dropped_events": 0, "_market_catalog_day": "", "_subscription_revision": 0,
@@ -55,7 +56,7 @@ _SERVICE_SCALARS = {
 _SERVICE_LIFECYCLE = {
     "_tasks": list, "_fundamentals_pending": set, "_fundamentals_tasks": set,
     "_subscriber": None, "_market_catalog_task": None, "_subscription_task": None,
-    "_backfill_task": None, "_program_save_task": None, "_close_task": None,
+    "_backfill_task": None, "_close_task": None,
 }
 _COLLECTOR_EMPTY = {
     "active_codes": tuple, "next_codes": tuple, "samples": list,
@@ -183,6 +184,12 @@ def _cold_state(service, clock, outbox_fixture=None):
     state = {name: _empty(service, fields) for name, fields in _SERVICE_EMPTY.items()}
     state["service_markers"] = _scalars(service, _SERVICE_SCALARS)
     state["lifecycle"] = _empty(service, _SERVICE_LIFECYCLE)
+    writer = service._program_snapshots
+    if type(writer) is not ProgramSnapshotWriter or writer._store is not service._store:
+        raise ValueError("top20_seed_program_writer_missing_or_shared")
+    # Keep v1's semantic seed document while its native state owner moves.
+    state["pending_storage"]["_pending_program_snapshots"] = _empty(writer, {"_pending": dict})["_pending"]
+    state["lifecycle"]["_program_save_task"] = _empty(writer, {"_save_task": None})["_save_task"]
     for owner, names in ((service, ("_collector_lock", "_index_outbox_lock", "_daily_input_lock")),
                          (broker, ("_guard",))):
         if any(getattr(owner, name).locked() for name in names):

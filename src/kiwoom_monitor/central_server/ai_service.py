@@ -4,7 +4,7 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from kiwoom_monitor.infrastructure.naver_news import NewsAISettings
@@ -19,7 +19,35 @@ from kiwoom_monitor.domain.news_observation import (
 from kiwoom_monitor.infrastructure.article_text import fetch_article_text
 
 from .config import CentralServerSettings
-from .database import QueryStore
+
+
+class CentralAIStore(Protocol):
+    """CentralAIService가 사용하는 뉴스 문서·revision 저장 계약."""
+
+    def load_documents(
+        self, collection: str, owner: str = "", limit: int = 1000, offset: int = 0,
+        updated_after: float = 0.0,
+    ) -> list[dict[str, Any]]: ...
+
+    def find_news_ai_revision(
+        self, *, target_id: str, article_revision_id: str, body_revision_id: str,
+        provider: str, model: str, prompt_version: str, schema_version: str,
+        input_hash: str,
+    ) -> str | None: ...
+
+    def load_news_history(
+        self, kind: str, *, target: str = "", identity: str = "",
+        available_at: float | None = None, limit: int = 100,
+    ) -> list[dict[str, Any]]: ...
+
+    def save_news_body_revision(self, value: dict[str, Any]) -> str: ...
+
+    def save_news_ai_results(
+        self, documents: list[dict[str, Any]], revisions: list[dict[str, Any]],
+        usage_documents: list[dict[str, Any]] | None = None,
+    ) -> None: ...
+
+    def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -33,7 +61,7 @@ class _AIRequestCredential:
 class CentralAIService:
     """AI 판정 캐시와 실행 중 요청을 중앙에서 공유한다."""
 
-    def __init__(self, settings: CentralServerSettings, store: QueryStore) -> None:
+    def __init__(self, settings: CentralServerSettings, store: CentralAIStore) -> None:
         self._settings, self._store = settings, store
         self._provider = settings.ai_provider
         self._model = settings.ai_model

@@ -1,0 +1,1832 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "input_control": "fixed migration/bar-operation/observation/document/dataset clocks and UUID sequence; app date fixed after schema creation; real SQLite/live collector buffers; no producer tasks; transport date/server headers disabled",
+  "result": {
+    "cases": [
+      {
+        "name": "unauthorized-minute-bars",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "stored-minute-bars",
+        "status": 200,
+        "headers": {
+          "content-length": "1006",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "trading_date": "2026-09-14",
+          "market": "",
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "KRX",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 10,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "NXT",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 5,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "SOR",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 12,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "KRX",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 10,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "NXT",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 4,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            }
+          ],
+          "coverage": {
+            "complete": true,
+            "markets": [
+              "KRX"
+            ]
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "unauthorized-recent-minute-bars",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "stored-recent-minute-bars",
+        "status": 200,
+        "headers": {
+          "content-length": "1177",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "end_date": "2026-09-14",
+          "market": "",
+          "trading_days": [
+            "2026-09-11",
+            "2026-09-14"
+          ],
+          "bars": [
+            {
+              "trading_date": "2026-09-11",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "KRX",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 10,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "KRX",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 10,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "NXT",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 5,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "SOR",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 12,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "KRX",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 10,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "NXT",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 4,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "unauthorized-latest-market-caps",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "stored-latest-market-caps",
+        "status": 200,
+        "headers": {
+          "content-length": "104",
+          "content-type": "application/json"
+        },
+        "body": {
+          "market_caps": [
+            {
+              "code": "005930",
+              "market_cap_eok": 4321000.0,
+              "observed_at": "1970-01-01T00:00:01+00:00"
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "unauthorized-trade-value-comparisons",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "stored-trade-value-comparisons",
+        "status": 200,
+        "headers": {
+          "content-length": "1194",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "trading_date": "2026-09-14",
+          "summary": {
+            "complete_count": 2,
+            "partial_count": 1,
+            "scope_counts": {
+              "KRX": 1,
+              "KRX+NXT": 2
+            },
+            "latest_compared_at": "2026-09-14T10:02:00+09:00",
+            "total_realtime_trade_value_million_won": 200,
+            "total_query_trade_value_million_won": 200,
+            "total_difference_million_won": 0,
+            "total_difference_percent": 0.0,
+            "average_difference_percent": 0.0,
+            "mean_absolute_difference_percent": 10.0,
+            "max_absolute_difference_percent": 10.0
+          },
+          "comparisons": [
+            {
+              "owner": "2026-09-14:005930",
+              "key": "0",
+              "updated_at": 1789369200.0,
+              "document": {
+                "query_scope": "KRX+NXT",
+                "compared_at": "2026-09-14T10:02:00+09:00",
+                "realtime_trade_value_million_won": 110,
+                "query_trade_value_million_won": 100,
+                "difference_percent": 10.0
+              }
+            },
+            {
+              "owner": "2026-09-14:005930",
+              "key": "1",
+              "updated_at": 1789369200.0,
+              "document": {
+                "query_scope": "KRX+NXT",
+                "compared_at": "2026-09-14T10:02:00+09:00",
+                "realtime_trade_value_million_won": 90,
+                "query_trade_value_million_won": 100,
+                "difference_percent": -10.0
+              }
+            },
+            {
+              "owner": "2026-09-14:005930",
+              "key": "2",
+              "updated_at": 1789369200.0,
+              "document": {
+                "query_scope": "KRX",
+                "compared_at": "2026-09-14T10:02:00+09:00",
+                "realtime_trade_value_million_won": 999,
+                "query_trade_value_million_won": 50,
+                "difference_percent": 1898.0
+              }
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "unauthorized-daily-bars",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "stored-daily-bars",
+        "status": 200,
+        "headers": {
+          "content-length": "634",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "market": "",
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "code": "005930",
+              "market": "KRX",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 10,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-11",
+              "code": "005930",
+              "market": "KRX",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 10,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            }
+          ],
+          "coverage": {
+            "collection_verified": false,
+            "scope": "unverified",
+            "periods": {
+              "5": {
+                "status": "unverified",
+                "reason": "missing_or_stale_evidence"
+              },
+              "20": {
+                "status": "unverified",
+                "reason": "missing_or_stale_evidence"
+              },
+              "250": {
+                "status": "unverified",
+                "reason": "missing_or_stale_evidence"
+              }
+            }
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "unauthorized-coverage",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "stored-coverage",
+        "status": 200,
+        "headers": {
+          "content-length": "462",
+          "content-type": "application/json"
+        },
+        "body": {
+          "kind": "minute_bar",
+          "subject": "005930:KRX",
+          "start": "2026-09-14T00:00:00+09:00",
+          "end": "2026-09-15T00:00:00+09:00",
+          "available_by": "2026-10-10T12:00:00+09:00",
+          "state": "complete",
+          "observation_count": 0,
+          "usable_count": 0,
+          "complete_count": 0,
+          "partial_count": 0,
+          "unavailable_by_cutoff_count": 0,
+          "explicit_complete": true,
+          "window_closed": true,
+          "session_finalized": true,
+          "gap_inference_supported": false,
+          "missing_intervals": [],
+          "absence_meaning": "no_trade_with_complete_coverage"
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "unauthorized-external-bars",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "stored-external-bars",
+        "status": 200,
+        "headers": {
+          "content-length": "273",
+          "content-type": "application/json"
+        },
+        "body": {
+          "instrument": "NASDAQ_FUTURES",
+          "timeframe": "5m",
+          "bars": [
+            {
+              "provider": "yahoo_delayed",
+              "instrument": "NASDAQ_FUTURES",
+              "contract": "MNQU26.CME",
+              "timeframe": "5m",
+              "bar_time": "2026-09-14T00:00:00Z",
+              "open": 100.0,
+              "high": 101.0,
+              "low": 99.0,
+              "close": 100.0,
+              "volume": 10.0,
+              "updated_at": 1.0
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "minute-all",
+        "status": 200,
+        "headers": {
+          "content-length": "1006",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "trading_date": "2026-09-14",
+          "market": "",
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "KRX",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 10,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "NXT",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 5,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "SOR",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 12,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "KRX",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 10,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "NXT",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 4,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            }
+          ],
+          "coverage": {
+            "complete": true,
+            "markets": [
+              "KRX"
+            ]
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "minute-KRX",
+        "status": 200,
+        "headers": {
+          "content-length": "474",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "trading_date": "2026-09-14",
+          "market": "KRX",
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "KRX",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 10,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "KRX",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 10,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            }
+          ],
+          "coverage": {
+            "complete": true,
+            "markets": [
+              "KRX"
+            ]
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "minute-NXT",
+        "status": 200,
+        "headers": {
+          "content-length": "473",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "trading_date": "2026-09-14",
+          "market": "NXT",
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "NXT",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 5,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "NXT",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 4,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            }
+          ],
+          "coverage": {
+            "complete": false,
+            "markets": [
+              "NXT"
+            ]
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "minute-SOR",
+        "status": 200,
+        "headers": {
+          "content-length": "296",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "trading_date": "2026-09-14",
+          "market": "SOR",
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "SOR",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 12,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            }
+          ],
+          "coverage": {
+            "complete": false,
+            "markets": [
+              "SOR"
+            ]
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "minute-COMBINED",
+        "status": 200,
+        "headers": {
+          "content-length": "537",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "trading_date": "2026-09-14",
+          "market": "COMBINED",
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 12,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0,
+              "source_market": "SOR"
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 14,
+              "trade_value_million_won": 40,
+              "updated_at": 1.0,
+              "source_market": "KRX+NXT"
+            }
+          ],
+          "coverage": {
+            "complete": true,
+            "markets": [
+              "KRX"
+            ]
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "minute-empty",
+        "status": 200,
+        "headers": {
+          "content-length": "115",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "999999",
+          "trading_date": "2026-09-14",
+          "market": "",
+          "bars": [],
+          "coverage": {
+            "complete": false,
+            "markets": [
+              "KRX"
+            ]
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "minute-invalid-market",
+        "status": 422,
+        "headers": {
+          "content-length": "200",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "market"
+              ],
+              "msg": "String should match pattern '^(|KRX|NXT|SOR|COMBINED)$'",
+              "input": "INVALID",
+              "ctx": {
+                "pattern": "^(|KRX|NXT|SOR|COMBINED)$"
+              }
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "minute-invalid-code",
+        "status": 422,
+        "headers": {
+          "content-length": "147",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_too_short",
+              "loc": [
+                "query",
+                "code"
+              ],
+              "msg": "String should have at least 6 characters",
+              "input": "x",
+              "ctx": {
+                "min_length": 6
+              }
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "recent-limited",
+        "status": 200,
+        "headers": {
+          "content-length": "516",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "end_date": "2026-09-14",
+          "market": "COMBINED",
+          "trading_days": [
+            "2026-09-14"
+          ],
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 12,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0,
+              "source_market": "SOR"
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 14,
+              "trade_value_million_won": 40,
+              "updated_at": 1.0,
+              "source_market": "KRX+NXT"
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "recent-empty",
+        "status": 200,
+        "headers": {
+          "content-length": "81",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "999999",
+          "end_date": "2026-09-14",
+          "market": "",
+          "trading_days": [],
+          "bars": []
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "recent-invalid-days",
+        "status": 422,
+        "headers": {
+          "content-length": "145",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "less_than_equal",
+              "loc": [
+                "query",
+                "trading_days"
+              ],
+              "msg": "Input should be less than or equal to 5",
+              "input": "6",
+              "ctx": {
+                "le": 5
+              }
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "caps-0-[]",
+        "status": 422,
+        "headers": {
+          "content-length": "72",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "종목코드는 1~200개의 6자리 값이어야 합니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "caps-1-['bad']",
+        "status": 422,
+        "headers": {
+          "content-length": "72",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "종목코드는 1~200개의 6자리 값이어야 합니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "caps-201-['005930']",
+        "status": 200,
+        "headers": {
+          "content-length": "104",
+          "content-type": "application/json"
+        },
+        "body": {
+          "market_caps": [
+            {
+              "code": "005930",
+              "market_cap_eok": 4321000.0,
+              "observed_at": "1970-01-01T00:00:01+00:00"
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "caps-201-['000000']",
+        "status": 422,
+        "headers": {
+          "content-length": "72",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "종목코드는 1~200개의 6자리 값이어야 합니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "caps-3-['005930']",
+        "status": 200,
+        "headers": {
+          "content-length": "104",
+          "content-type": "application/json"
+        },
+        "body": {
+          "market_caps": [
+            {
+              "code": "005930",
+              "market_cap_eok": 4321000.0,
+              "observed_at": "1970-01-01T00:00:01+00:00"
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "comparison-limit",
+        "status": 200,
+        "headers": {
+          "content-length": "700",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "trading_date": "2026-09-14",
+          "summary": {
+            "complete_count": 1,
+            "partial_count": 0,
+            "scope_counts": {
+              "KRX+NXT": 1
+            },
+            "latest_compared_at": "2026-09-14T10:02:00+09:00",
+            "total_realtime_trade_value_million_won": 110,
+            "total_query_trade_value_million_won": 100,
+            "total_difference_million_won": 10,
+            "total_difference_percent": 10.0,
+            "average_difference_percent": 10.0,
+            "mean_absolute_difference_percent": 10.0,
+            "max_absolute_difference_percent": 10.0
+          },
+          "comparisons": [
+            {
+              "owner": "2026-09-14:005930",
+              "key": "0",
+              "updated_at": 1789369200.0,
+              "document": {
+                "query_scope": "KRX+NXT",
+                "compared_at": "2026-09-14T10:02:00+09:00",
+                "realtime_trade_value_million_won": 110,
+                "query_trade_value_million_won": 100,
+                "difference_percent": 10.0
+              }
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "comparison-empty",
+        "status": 200,
+        "headers": {
+          "content-length": "416",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "999999",
+          "trading_date": "2026-09-14",
+          "summary": {
+            "complete_count": 0,
+            "partial_count": 0,
+            "scope_counts": {},
+            "latest_compared_at": null,
+            "total_realtime_trade_value_million_won": 0,
+            "total_query_trade_value_million_won": 0,
+            "total_difference_million_won": 0,
+            "total_difference_percent": null,
+            "average_difference_percent": null,
+            "mean_absolute_difference_percent": null,
+            "max_absolute_difference_percent": null
+          },
+          "comparisons": []
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "daily-filter-limit",
+        "status": 200,
+        "headers": {
+          "content-length": "475",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "market": "KRX",
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "code": "005930",
+              "market": "KRX",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 10,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0
+            }
+          ],
+          "coverage": {
+            "collection_verified": false,
+            "scope": "unverified",
+            "periods": {
+              "5": {
+                "status": "unverified",
+                "reason": "missing_or_stale_evidence"
+              },
+              "20": {
+                "status": "unverified",
+                "reason": "missing_or_stale_evidence"
+              },
+              "250": {
+                "status": "unverified",
+                "reason": "missing_or_stale_evidence"
+              }
+            }
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "daily-empty",
+        "status": 200,
+        "headers": {
+          "content-length": "314",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "999999",
+          "market": "NXT",
+          "bars": [],
+          "coverage": {
+            "collection_verified": false,
+            "scope": "unverified",
+            "periods": {
+              "5": {
+                "status": "unverified",
+                "reason": "missing_or_stale_evidence"
+              },
+              "20": {
+                "status": "unverified",
+                "reason": "missing_or_stale_evidence"
+              },
+              "250": {
+                "status": "unverified",
+                "reason": "missing_or_stale_evidence"
+              }
+            }
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "daily-invalid-limit",
+        "status": 422,
+        "headers": {
+          "content-length": "144",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "query",
+                "limit"
+              ],
+              "msg": "Input should be greater than or equal to 1",
+              "input": "0",
+              "ctx": {
+                "ge": 1
+              }
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "coverage-unknown",
+        "status": 400,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "지원하지 않는 관측 자료 종류입니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "coverage-unrecognized",
+        "status": 400,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "지원하지 않는 관측 자료 종류입니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "coverage-reversed",
+        "status": 400,
+        "headers": {
+          "content-length": "52",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "end는 start보다 뒤여야 합니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "coverage-cadence-rejected",
+        "status": 400,
+        "headers": {
+          "content-length": "88",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "이 자료 종류는 예상 주기로 결측을 단정할 수 없습니다."
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "coverage-early-cutoff",
+        "status": 200,
+        "headers": {
+          "content-length": "459",
+          "content-type": "application/json"
+        },
+        "body": {
+          "kind": "minute_bar",
+          "subject": "005930:KRX",
+          "start": "2026-09-14T00:00:00+09:00",
+          "end": "2026-09-15T00:00:00+09:00",
+          "available_by": "2026-09-14T15:00:00+09:00",
+          "state": "missing",
+          "observation_count": 0,
+          "usable_count": 0,
+          "complete_count": 0,
+          "partial_count": 0,
+          "unavailable_by_cutoff_count": 0,
+          "explicit_complete": false,
+          "window_closed": false,
+          "session_finalized": false,
+          "gap_inference_supported": false,
+          "missing_intervals": [],
+          "absence_meaning": "no_trade_or_no_observation"
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "coverage-late-cutoff",
+        "status": 200,
+        "headers": {
+          "content-length": "457",
+          "content-type": "application/json"
+        },
+        "body": {
+          "kind": "minute_bar",
+          "subject": "005930:KRX",
+          "start": "2026-09-14T00:00:00+09:00",
+          "end": "2026-09-15T00:00:00+09:00",
+          "available_by": "2026-09-14T17:00:00+09:00",
+          "state": "missing",
+          "observation_count": 0,
+          "usable_count": 0,
+          "complete_count": 0,
+          "partial_count": 0,
+          "unavailable_by_cutoff_count": 0,
+          "explicit_complete": true,
+          "window_closed": false,
+          "session_finalized": true,
+          "gap_inference_supported": false,
+          "missing_intervals": [],
+          "absence_meaning": "no_trade_or_no_observation"
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "coverage-invalid-time",
+        "status": 422,
+        "headers": {
+          "content-length": "194",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "datetime_from_date_parsing",
+              "loc": [
+                "query",
+                "start"
+              ],
+              "msg": "Input should be a valid datetime or date, input is too short",
+              "input": "bad",
+              "ctx": {
+                "error": "input is too short"
+              }
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "coverage-candidate-cadence",
+        "status": 200,
+        "headers": {
+          "content-length": "582",
+          "content-type": "application/json"
+        },
+        "body": {
+          "kind": "candidate_set",
+          "subject": "5",
+          "start": "2026-09-14T00:00:00+09:00",
+          "end": "2026-09-15T00:00:00+09:00",
+          "available_by": "2026-10-10T12:00:00+09:00",
+          "state": "partial",
+          "observation_count": 1,
+          "usable_count": 1,
+          "complete_count": 1,
+          "partial_count": 0,
+          "unavailable_by_cutoff_count": 0,
+          "explicit_complete": false,
+          "window_closed": true,
+          "session_finalized": false,
+          "gap_inference_supported": true,
+          "missing_intervals": [
+            {
+              "start": "2026-09-14T00:00:00+09:00",
+              "end": "2026-09-14T10:00:00+09:00"
+            },
+            {
+              "start": "2026-09-14T10:00:30+09:00",
+              "end": "2026-09-15T00:00:00+09:00"
+            }
+          ],
+          "absence_meaning": "no_observation"
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "external-whitespace",
+        "status": 200,
+        "headers": {
+          "content-length": "273",
+          "content-type": "application/json"
+        },
+        "body": {
+          "instrument": "NASDAQ_FUTURES",
+          "timeframe": "5m",
+          "bars": [
+            {
+              "provider": "yahoo_delayed",
+              "instrument": "NASDAQ_FUTURES",
+              "contract": "MNQU26.CME",
+              "timeframe": "5m",
+              "bar_time": "2026-09-14T00:00:00Z",
+              "open": 100.0,
+              "high": 101.0,
+              "low": 99.0,
+              "close": 100.0,
+              "volume": 10.0,
+              "updated_at": 1.0
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "external-empty",
+        "status": 200,
+        "headers": {
+          "content-length": "51",
+          "content-type": "application/json"
+        },
+        "body": {
+          "instrument": "UNKNOWN",
+          "timeframe": "1d",
+          "bars": []
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "external-invalid-timeframe",
+        "status": 422,
+        "headers": {
+          "content-length": "166",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "timeframe"
+              ],
+              "msg": "String should match pattern '^(5m|1d)$'",
+              "input": "1m",
+              "ctx": {
+                "pattern": "^(5m|1d)$"
+              }
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "live-minute-1",
+        "status": 200,
+        "headers": {
+          "content-length": "752",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "trading_date": "2026-09-14",
+          "market": "COMBINED",
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 12,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0,
+              "source_market": "SOR"
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 14,
+              "trade_value_million_won": 40,
+              "updated_at": 1.0,
+              "source_market": "KRX+NXT"
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:04",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 100,
+              "low": 100,
+              "close": 100,
+              "volume": 13,
+              "trade_value_million_won": 0,
+              "updated_at": 1789347880.0,
+              "source_market": "SOR"
+            }
+          ],
+          "coverage": {
+            "complete": true,
+            "markets": [
+              "KRX"
+            ]
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "live-recent-1",
+        "status": 200,
+        "headers": {
+          "content-length": "731",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "end_date": "2026-09-14",
+          "market": "COMBINED",
+          "trading_days": [
+            "2026-09-14"
+          ],
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 12,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0,
+              "source_market": "SOR"
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 14,
+              "trade_value_million_won": 40,
+              "updated_at": 1.0,
+              "source_market": "KRX+NXT"
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:04",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 100,
+              "low": 100,
+              "close": 100,
+              "volume": 13,
+              "trade_value_million_won": 0,
+              "updated_at": 1789347880.0,
+              "source_market": "SOR"
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "live-minute-2",
+        "status": 200,
+        "headers": {
+          "content-length": "752",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "trading_date": "2026-09-14",
+          "market": "COMBINED",
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 12,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0,
+              "source_market": "SOR"
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 14,
+              "trade_value_million_won": 40,
+              "updated_at": 1.0,
+              "source_market": "KRX+NXT"
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:04",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 100,
+              "low": 100,
+              "close": 100,
+              "volume": 23,
+              "trade_value_million_won": 0,
+              "updated_at": 1789347880.0,
+              "source_market": "SOR"
+            }
+          ],
+          "coverage": {
+            "complete": true,
+            "markets": [
+              "KRX"
+            ]
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "live-recent-2",
+        "status": 200,
+        "headers": {
+          "content-length": "731",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "end_date": "2026-09-14",
+          "market": "COMBINED",
+          "trading_days": [
+            "2026-09-14"
+          ],
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 12,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0,
+              "source_market": "SOR"
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 14,
+              "trade_value_million_won": 40,
+              "updated_at": 1.0,
+              "source_market": "KRX+NXT"
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:04",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 100,
+              "low": 100,
+              "close": 100,
+              "volume": 23,
+              "trade_value_million_won": 0,
+              "updated_at": 1789347880.0,
+              "source_market": "SOR"
+            }
+          ]
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      },
+      {
+        "name": "collector-removed-fallback",
+        "status": 200,
+        "headers": {
+          "content-length": "537",
+          "content-type": "application/json"
+        },
+        "body": {
+          "code": "005930",
+          "trading_date": "2026-09-14",
+          "market": "COMBINED",
+          "bars": [
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:00",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 12,
+              "trade_value_million_won": 20,
+              "updated_at": 1.0,
+              "source_market": "SOR"
+            },
+            {
+              "trading_date": "2026-09-14",
+              "minute": "10:01",
+              "code": "005930",
+              "market": "COMBINED",
+              "open": 100,
+              "high": 110,
+              "low": 90,
+              "close": 105,
+              "volume": 14,
+              "trade_value_million_won": 40,
+              "updated_at": 1.0,
+              "source_market": "KRX+NXT"
+            }
+          ],
+          "coverage": {
+            "complete": true,
+            "markets": [
+              "KRX"
+            ]
+          }
+        },
+        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
+        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+      }
+    ],
+    "pending": [
+      [
+        {
+          "trading_date": "2026-09-14",
+          "minute": "10:04",
+          "code": "005930",
+          "market": "SOR",
+          "open": 100,
+          "high": 100,
+          "low": 100,
+          "close": 100,
+          "volume": 13,
+          "trade_value_million_won": 0,
+          "updated_at": 1789347880.0,
+          "operation_id": "00000000-0000-0000-0000-000000000008"
+        }
+      ],
+      [
+        {
+          "trading_date": "2026-09-14",
+          "minute": "10:04",
+          "code": "005930",
+          "market": "SOR",
+          "open": 100,
+          "high": 100,
+          "low": 100,
+          "close": 100,
+          "volume": 23,
+          "trade_value_million_won": 0,
+          "updated_at": 1789347880.0,
+          "operation_id": "00000000-0000-0000-0000-000000000009"
+        }
+      ]
+    ],
+    "stored_minutes": [
+      {
+        "trading_date": "2026-09-14",
+        "minute": "10:00",
+        "code": "005930",
+        "market": "KRX",
+        "open": 100,
+        "high": 110,
+        "low": 90,
+        "close": 105,
+        "volume": 10,
+        "trade_value_million_won": 20,
+        "updated_at": 1.0
+      },
+      {
+        "trading_date": "2026-09-14",
+        "minute": "10:00",
+        "code": "005930",
+        "market": "NXT",
+        "open": 100,
+        "high": 110,
+        "low": 90,
+        "close": 105,
+        "volume": 5,
+        "trade_value_million_won": 20,
+        "updated_at": 1.0
+      },
+      {
+        "trading_date": "2026-09-14",
+        "minute": "10:00",
+        "code": "005930",
+        "market": "SOR",
+        "open": 100,
+        "high": 110,
+        "low": 90,
+        "close": 105,
+        "volume": 12,
+        "trade_value_million_won": 20,
+        "updated_at": 1.0
+      },
+      {
+        "trading_date": "2026-09-14",
+        "minute": "10:01",
+        "code": "005930",
+        "market": "KRX",
+        "open": 100,
+        "high": 110,
+        "low": 90,
+        "close": 105,
+        "volume": 10,
+        "trade_value_million_won": 20,
+        "updated_at": 1.0
+      },
+      {
+        "trading_date": "2026-09-14",
+        "minute": "10:01",
+        "code": "005930",
+        "market": "NXT",
+        "open": 100,
+        "high": 110,
+        "low": 90,
+        "close": 105,
+        "volume": 4,
+        "trade_value_million_won": 20,
+        "updated_at": 1.0
+      }
+    ]
+  }
+}

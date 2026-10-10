@@ -1,0 +1,633 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "cases": [
+    {
+      "name": "first-page",
+      "request": {
+        "url": "/api/v1/news/historical-archive/search",
+        "params": {
+          "stock_code": "005930",
+          "limit": 1
+        },
+        "authenticated": true
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "2306"
+        },
+        "body": {
+          "dataset_id": "fixture-1",
+          "items": [
+            {
+              "identity": "match",
+              "article_revision_id": "00000000000000000000000000000001",
+              "body_revision_id": "00000000000000000000000000000002",
+              "event_id": "00000000000000000000000000000006",
+              "event_revision_id": "00000000000000000000000000000007",
+              "membership_revision_id": "00000000000000000000000000000008",
+              "source_kind": "prepared",
+              "body_status": "summary_only",
+              "assessment_status": "verified",
+              "display": {
+                "assessment": {
+                  "assessment": {
+                    "category": "수주·계약",
+                    "outlook": "호재 가능성 높음",
+                    "outlook_score": 5,
+                    "reason": "기사에서 공급계약, 계약 체결 표현을 확인했습니다.",
+                    "relevance_score": 8,
+                    "relevant": true
+                  },
+                  "core_sentences": [],
+                  "rule_result": {
+                    "ai_reason": [],
+                    "ai_required": false,
+                    "amount_text": "500억원",
+                    "amount_won": 50000000000,
+                    "certainty": "CONFIRMED",
+                    "conditional_amount": false,
+                    "confidence_score": 100,
+                    "counterparty": "삼성전자",
+                    "currency": "원",
+                    "event_key": "f53cfc6f35a19b1a532a301936a7500d4087b161379b1aafa84fa7ef057849cd",
+                    "event_type": "SUPPLY_CONTRACT",
+                    "evidence_spans": [
+                      {
+                        "end": 20,
+                        "fact": "supply_contract",
+                        "field": "title",
+                        "start": 16,
+                        "text": "공급계약"
+                      },
+                      {
+                        "end": 23,
+                        "fact": "confirmed",
+                        "field": "title",
+                        "start": 16,
+                        "text": "공급계약 체결"
+                      },
+                      {
+                        "end": 15,
+                        "fact": "amount",
+                        "field": "title",
+                        "start": 10,
+                        "text": "500억원"
+                      },
+                      {
+                        "end": 8,
+                        "fact": "counterparty",
+                        "field": "title",
+                        "start": 4,
+                        "text": "삼성전자"
+                      }
+                    ],
+                    "importance_score": 80,
+                    "novelty": "NEW",
+                    "novelty_score": 80,
+                    "revenue_ratio": null,
+                    "role": "FACT",
+                    "rule_version": "supply-contract-rule-v2",
+                    "scope": "TARGET_COMPANY",
+                    "score_components": {
+                      "amount": 15,
+                      "confirmed_fact": 35,
+                      "conflict_penalty": 0,
+                      "counterparty": 15,
+                      "direct_target": 15,
+                      "status_fact": 0,
+                      "uncertain_penalty": 0
+                    },
+                    "score_formula_version": "supply-contract-score-v1",
+                    "targets": [
+                      {
+                        "direction": "POSITIVE",
+                        "directness": "DIRECT",
+                        "target_id": "005930"
+                      }
+                    ],
+                    "title_body_conflict": false
+                  }
+                },
+                "assessment_status": "verified",
+                "body_status": "summary_only",
+                "body_text": "",
+                "description": "",
+                "link": "",
+                "original_link": "",
+                "published_at": "2026-09-01T00:00:00+00:00",
+                "title": "기업, 삼성전자와 500억원 공급계약 체결"
+              }
+            }
+          ],
+          "next_cursor": "eyJkYXRhc2V0X2lkIjoiZml4dHVyZS0xIiwiZmlsdGVyX2hhc2giOiJjMzY0MDRhYmYwZTM4M2UyYTBhOTUyN2Y5ZWU0YjM2Njk0YjJkY2M0MWJhYjRhMzdhYmIxN2RkM2NmOTA5NThiIiwibGFzdCI6WzAsMTc4ODIyMDgwMDAwMDAwMCwibWF0Y2giXSwidiI6MX0.BXiEjoRwQyAvnuFdtOzW2uMtrmAXbYLdSYKef-pdQ4A"
+        }
+      }
+    },
+    {
+      "name": "next-page",
+      "request": {
+        "url": "/api/v1/news/historical-archive/search",
+        "params": {
+          "stock_code": "005930",
+          "limit": 1,
+          "cursor": "eyJkYXRhc2V0X2lkIjoiZml4dHVyZS0xIiwiZmlsdGVyX2hhc2giOiJjMzY0MDRhYmYwZTM4M2UyYTBhOTUyN2Y5ZWU0YjM2Njk0YjJkY2M0MWJhYjRhMzdhYmIxN2RkM2NmOTA5NThiIiwibGFzdCI6WzAsMTc4ODIyMDgwMDAwMDAwMCwibWF0Y2giXSwidiI6MX0.BXiEjoRwQyAvnuFdtOzW2uMtrmAXbYLdSYKef-pdQ4A"
+        },
+        "authenticated": true
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "815"
+        },
+        "body": {
+          "dataset_id": "fixture-1",
+          "items": [
+            {
+              "identity": "mismatch",
+              "article_revision_id": "00000000000000000000000000000003",
+              "body_revision_id": "00000000000000000000000000000004",
+              "event_id": null,
+              "event_revision_id": null,
+              "membership_revision_id": null,
+              "source_kind": "prepared",
+              "body_status": "summary_only",
+              "assessment_status": "verified",
+              "display": {
+                "assessment": {
+                  "assessment": {
+                    "category": "기타 증권뉴스",
+                    "outlook": "관련성 낮음",
+                    "outlook_score": 0,
+                    "reason": "종목 직접 언급과 증권 관련 표현이 부족합니다.",
+                    "relevance_score": 4,
+                    "relevant": false
+                  },
+                  "core_sentences": [],
+                  "rule_result": null
+                },
+                "assessment_status": "verified",
+                "body_status": "summary_only",
+                "body_text": "",
+                "description": "",
+                "link": "",
+                "original_link": "",
+                "published_at": "2026-09-01T00:00:00+00:00",
+                "title": "일반 기업 소식"
+              }
+            }
+          ],
+          "next_cursor": null
+        }
+      }
+    },
+    {
+      "name": "empty-page",
+      "request": {
+        "url": "/api/v1/news/historical-archive/search",
+        "params": {
+          "stock_code": "000660"
+        },
+        "authenticated": true
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "56"
+        },
+        "body": {
+          "dataset_id": "fixture-1",
+          "items": [],
+          "next_cursor": null
+        }
+      }
+    },
+    {
+      "name": "search-unauthorized",
+      "request": {
+        "url": "/api/v1/news/historical-archive/search",
+        "params": {
+          "stock_code": "005930"
+        },
+        "authenticated": false
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      }
+    },
+    {
+      "name": "invalid-stock",
+      "request": {
+        "url": "/api/v1/news/historical-archive/search",
+        "params": {
+          "stock_code": "bad"
+        },
+        "authenticated": true
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "176"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "stock_code"
+              ],
+              "msg": "String should match pattern '^[0-9A-Z]{6}$'",
+              "input": "bad",
+              "ctx": {
+                "pattern": "^[0-9A-Z]{6}$"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "invalid-limit",
+      "request": {
+        "url": "/api/v1/news/historical-archive/search",
+        "params": {
+          "stock_code": "005930",
+          "limit": 0
+        },
+        "authenticated": true
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "144"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "query",
+                "limit"
+              ],
+              "msg": "Input should be greater than or equal to 1",
+              "input": "0",
+              "ctx": {
+                "ge": 1
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "invalid-cursor",
+      "request": {
+        "url": "/api/v1/news/historical-archive/search",
+        "params": {
+          "stock_code": "005930",
+          "cursor": "invalid"
+        },
+        "authenticated": true
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "51"
+        },
+        "body": {
+          "detail": "HISTORICAL_NEWS_ARCHIVE_CURSOR_INVALID"
+        }
+      }
+    },
+    {
+      "name": "article",
+      "request": {
+        "url": "/api/v1/news/historical-archive/articles/00000000000000000000000000000001",
+        "params": {
+          "dataset_id": "fixture-1",
+          "body_revision_id": "00000000000000000000000000000002"
+        },
+        "authenticated": true
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "3573"
+        },
+        "body": {
+          "dataset_id": "fixture-1",
+          "article_revision_id": "00000000000000000000000000000001",
+          "stock_code": "005930",
+          "identity": "match",
+          "published_at": "2026-09-01T00:00:00+00:00",
+          "received_at": 1790300000.0,
+          "available_at": 1790300000.0,
+          "revision_of": null,
+          "document": {
+            "stock_code": "005930",
+            "stock_name": "기업",
+            "identity": "match",
+            "title": "기업, 삼성전자와 500억원 공급계약 체결",
+            "description": "",
+            "published_at": "2026-09-01T00:00:00+00:00"
+          },
+          "body": {
+            "body_revision_id": "00000000000000000000000000000002",
+            "status": "summary_only",
+            "text": "기사 요약",
+            "error": "",
+            "fetched_at": 1790300000.0,
+            "available_at": 1790300000.0
+          },
+          "assessment": {
+            "assessment": {
+              "category": "수주·계약",
+              "outlook": "호재 가능성 높음",
+              "outlook_score": 5,
+              "reason": "기사에서 공급계약, 계약 체결 표현을 확인했습니다.",
+              "relevance_score": 8,
+              "relevant": true
+            },
+            "core_sentences": [],
+            "rule_result": {
+              "ai_reason": [],
+              "ai_required": false,
+              "amount_text": "500억원",
+              "amount_won": 50000000000,
+              "certainty": "CONFIRMED",
+              "conditional_amount": false,
+              "confidence_score": 100,
+              "counterparty": "삼성전자",
+              "currency": "원",
+              "event_key": "f53cfc6f35a19b1a532a301936a7500d4087b161379b1aafa84fa7ef057849cd",
+              "event_type": "SUPPLY_CONTRACT",
+              "evidence_spans": [
+                {
+                  "end": 20,
+                  "fact": "supply_contract",
+                  "field": "title",
+                  "start": 16,
+                  "text": "공급계약"
+                },
+                {
+                  "end": 23,
+                  "fact": "confirmed",
+                  "field": "title",
+                  "start": 16,
+                  "text": "공급계약 체결"
+                },
+                {
+                  "end": 15,
+                  "fact": "amount",
+                  "field": "title",
+                  "start": 10,
+                  "text": "500억원"
+                },
+                {
+                  "end": 8,
+                  "fact": "counterparty",
+                  "field": "title",
+                  "start": 4,
+                  "text": "삼성전자"
+                }
+              ],
+              "importance_score": 80,
+              "novelty": "NEW",
+              "novelty_score": 80,
+              "revenue_ratio": null,
+              "role": "FACT",
+              "rule_version": "supply-contract-rule-v2",
+              "scope": "TARGET_COMPANY",
+              "score_components": {
+                "amount": 15,
+                "confirmed_fact": 35,
+                "conflict_penalty": 0,
+                "counterparty": 15,
+                "direct_target": 15,
+                "status_fact": 0,
+                "uncertain_penalty": 0
+              },
+              "score_formula_version": "supply-contract-score-v1",
+              "targets": [
+                {
+                  "direction": "POSITIVE",
+                  "directness": "DIRECT",
+                  "target_id": "005930"
+                }
+              ],
+              "title_body_conflict": false
+            }
+          },
+          "assessment_status": "verified",
+          "events": [
+            {
+              "membership_revision_id": "00000000000000000000000000000008",
+              "event_id": "00000000000000000000000000000006",
+              "event_revision_id": "00000000000000000000000000000007",
+              "relation": "EVIDENCE",
+              "membership_available_at": 1790300000.0,
+              "revision_of": null,
+              "result": {
+                "ai_reason": [],
+                "ai_required": false,
+                "amount_text": "500억원",
+                "amount_won": 50000000000,
+                "certainty": "CONFIRMED",
+                "conditional_amount": false,
+                "confidence_score": 100,
+                "counterparty": "삼성전자",
+                "currency": "원",
+                "event_key": "f53cfc6f35a19b1a532a301936a7500d4087b161379b1aafa84fa7ef057849cd",
+                "event_type": "SUPPLY_CONTRACT",
+                "evidence_spans": [
+                  {
+                    "end": 20,
+                    "fact": "supply_contract",
+                    "field": "title",
+                    "start": 16,
+                    "text": "공급계약"
+                  },
+                  {
+                    "end": 23,
+                    "fact": "confirmed",
+                    "field": "title",
+                    "start": 16,
+                    "text": "공급계약 체결"
+                  },
+                  {
+                    "end": 15,
+                    "fact": "amount",
+                    "field": "title",
+                    "start": 10,
+                    "text": "500억원"
+                  },
+                  {
+                    "end": 8,
+                    "fact": "counterparty",
+                    "field": "title",
+                    "start": 4,
+                    "text": "삼성전자"
+                  }
+                ],
+                "importance_score": 80,
+                "novelty": "NEW",
+                "novelty_score": 80,
+                "revenue_ratio": null,
+                "role": "FACT",
+                "rule_version": "supply-contract-rule-v2",
+                "scope": "TARGET_COMPANY",
+                "score_components": {
+                  "amount": 15,
+                  "confirmed_fact": 35,
+                  "conflict_penalty": 0,
+                  "counterparty": 15,
+                  "direct_target": 15,
+                  "status_fact": 0,
+                  "uncertain_penalty": 0
+                },
+                "score_formula_version": "supply-contract-score-v1",
+                "targets": [
+                  {
+                    "direction": "POSITIVE",
+                    "directness": "DIRECT",
+                    "target_id": "005930"
+                  }
+                ],
+                "title_body_conflict": false,
+                "possible_related_event_ids": [],
+                "article_revision_id": "00000000000000000000000000000001",
+                "body_revision_id": "00000000000000000000000000000002"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "article-unauthorized",
+      "request": {
+        "url": "/api/v1/news/historical-archive/articles/00000000000000000000000000000001",
+        "params": {
+          "dataset_id": "fixture-1"
+        },
+        "authenticated": false
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      }
+    },
+    {
+      "name": "missing-article",
+      "request": {
+        "url": "/api/v1/news/historical-archive/articles/missing",
+        "params": {
+          "dataset_id": "fixture-1"
+        },
+        "authenticated": true
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "54"
+        },
+        "body": {
+          "detail": "HISTORICAL_NEWS_ARCHIVE_ARTICLE_NOT_FOUND"
+        }
+      }
+    },
+    {
+      "name": "changed-dataset",
+      "request": {
+        "url": "/api/v1/news/historical-archive/articles/00000000000000000000000000000001",
+        "params": {
+          "dataset_id": "older-generation"
+        },
+        "authenticated": true
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "52"
+        },
+        "body": {
+          "detail": "HISTORICAL_NEWS_ARCHIVE_DATASET_CHANGED"
+        }
+      }
+    },
+    {
+      "name": "missing-dataset",
+      "request": {
+        "url": "/api/v1/news/historical-archive/articles/00000000000000000000000000000001",
+        "params": {},
+        "authenticated": true
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "96"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "dataset_id"
+              ],
+              "msg": "Field required",
+              "input": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "wrong-body",
+      "request": {
+        "url": "/api/v1/news/historical-archive/articles/00000000000000000000000000000001",
+        "params": {
+          "dataset_id": "fixture-1",
+          "body_revision_id": "missing"
+        },
+        "authenticated": true
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "48"
+        },
+        "body": {
+          "detail": "HISTORICAL_NEWS_ARCHIVE_ID_MISMATCH"
+        }
+      }
+    }
+  ]
+}

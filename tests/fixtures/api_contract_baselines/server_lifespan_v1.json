@@ -1,0 +1,579 @@
+{
+  "baseline_source": "36b4e7c",
+  "controlled": "network resource methods; native app lifespan, SQLite, vault, to_thread calls",
+  "results": [
+    {
+      "mode": "legacy",
+      "failure": "",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "external.start",
+        "candidate.start",
+        "yield",
+        "mock-bundle:present",
+        "bindings:1",
+        "trace.stop:server_shutdown",
+        "mock-bundle.close",
+        "candidate.close",
+        "external.close",
+        "news.close",
+        "ai.close",
+        "top20.close",
+        "collector.close",
+        "market.close",
+        "account-query.close",
+        "broker.close",
+        "store.close",
+        "mock-bundle.close"
+      ],
+      "outcome": "normal",
+      "injected": [],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "external-disabled",
+      "failure": "",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "candidate.start",
+        "yield",
+        "mock-bundle:present",
+        "bindings:1",
+        "trace.stop:server_shutdown",
+        "mock-bundle.close",
+        "candidate.close",
+        "external.close",
+        "news.close",
+        "ai.close",
+        "top20.close",
+        "collector.close",
+        "market.close",
+        "account-query.close",
+        "broker.close",
+        "store.close",
+        "mock-bundle.close"
+      ],
+      "outcome": "normal",
+      "injected": [],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "vault",
+      "failure": "",
+      "events": [
+        "credentials.start",
+        "trace.recover",
+        "broker.start",
+        "real.start",
+        "mock-owner.start",
+        "supervisor.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "external.start",
+        "candidate.start",
+        "yield",
+        "mock-bundle:present",
+        "bindings:0",
+        "trace.stop:server_shutdown",
+        "credentials.close",
+        "supervisor.close",
+        "real.close",
+        "mock-owner.close",
+        "candidate.close",
+        "external.close",
+        "news.close",
+        "ai.close",
+        "top20.close",
+        "collector.close",
+        "market.close",
+        "broker.close",
+        "vault.close",
+        "store.close",
+        "credentials.close",
+        "supervisor.close",
+        "real.close",
+        "mock-owner.close",
+        "vault.close",
+        "store.close"
+      ],
+      "outcome": "normal",
+      "injected": [],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "trace.recover",
+      "events": [
+        "trace.recover",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-trace.recover",
+      "injected": [
+        "trace.recover"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "broker.start",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-broker.start",
+      "injected": [
+        "broker.start"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "identity.verify",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.close",
+        "broker.close",
+        "store.close",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-identity.verify",
+      "injected": [
+        "identity.verify"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "mock-bundle.start",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "mock-bundle.close",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "external.start",
+        "candidate.start",
+        "yield",
+        "mock-bundle:absent",
+        "bindings:1",
+        "trace.stop:server_shutdown",
+        "candidate.close",
+        "external.close",
+        "news.close",
+        "ai.close",
+        "top20.close",
+        "collector.close",
+        "market.close",
+        "account-query.close",
+        "broker.close",
+        "store.close"
+      ],
+      "outcome": "normal",
+      "injected": [
+        "mock-bundle.start"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "top20.start",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "top20.start",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-top20.start",
+      "injected": [
+        "top20.start"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "market.start",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "top20.start",
+        "market.start",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-market.start",
+      "injected": [
+        "market.start"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "collector.start",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-collector.start",
+      "injected": [
+        "collector.start"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "news.start",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-news.start",
+      "injected": [
+        "news.start"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "external.start",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "external.start",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-external.start",
+      "injected": [
+        "external.start"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "candidate.start",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "external.start",
+        "candidate.start",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-candidate.start",
+      "injected": [
+        "candidate.start"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "yield",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "external.start",
+        "candidate.start",
+        "yield",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-yield",
+      "injected": [
+        "yield"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "trace.stop:server_shutdown",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "external.start",
+        "candidate.start",
+        "yield",
+        "mock-bundle:present",
+        "bindings:1",
+        "trace.stop:server_shutdown",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-trace.stop:server_shutdown",
+      "injected": [
+        "trace.stop:server_shutdown"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "candidate.close",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "external.start",
+        "candidate.start",
+        "yield",
+        "mock-bundle:present",
+        "bindings:1",
+        "trace.stop:server_shutdown",
+        "mock-bundle.close",
+        "candidate.close",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-candidate.close",
+      "injected": [
+        "candidate.close"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "legacy",
+      "failure": "broker.close",
+      "events": [
+        "trace.recover",
+        "broker.start",
+        "identity.verify",
+        "mock-bundle.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "external.start",
+        "candidate.start",
+        "yield",
+        "mock-bundle:present",
+        "bindings:1",
+        "trace.stop:server_shutdown",
+        "mock-bundle.close",
+        "candidate.close",
+        "external.close",
+        "news.close",
+        "ai.close",
+        "top20.close",
+        "collector.close",
+        "market.close",
+        "account-query.close",
+        "broker.close",
+        "mock-bundle.close"
+      ],
+      "outcome": "controlled-broker.close",
+      "injected": [
+        "broker.close"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "vault",
+      "failure": "credentials.start",
+      "events": [
+        "credentials.start",
+        "credentials.close",
+        "supervisor.close",
+        "real.close",
+        "mock-owner.close",
+        "vault.close",
+        "store.close"
+      ],
+      "outcome": "controlled-credentials.start",
+      "injected": [
+        "credentials.start"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "vault",
+      "failure": "real.start",
+      "events": [
+        "credentials.start",
+        "trace.recover",
+        "broker.start",
+        "real.start",
+        "credentials.close",
+        "supervisor.close",
+        "real.close",
+        "mock-owner.close",
+        "vault.close",
+        "store.close"
+      ],
+      "outcome": "controlled-real.start",
+      "injected": [
+        "real.start"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "vault",
+      "failure": "mock-owner.start",
+      "events": [
+        "credentials.start",
+        "trace.recover",
+        "broker.start",
+        "real.start",
+        "mock-owner.start",
+        "credentials.close",
+        "supervisor.close",
+        "real.close",
+        "mock-owner.close",
+        "vault.close",
+        "store.close"
+      ],
+      "outcome": "controlled-mock-owner.start",
+      "injected": [
+        "mock-owner.start"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "vault",
+      "failure": "supervisor.start",
+      "events": [
+        "credentials.start",
+        "trace.recover",
+        "broker.start",
+        "real.start",
+        "mock-owner.start",
+        "supervisor.start",
+        "credentials.close",
+        "supervisor.close",
+        "real.close",
+        "mock-owner.close",
+        "vault.close",
+        "store.close"
+      ],
+      "outcome": "controlled-supervisor.start",
+      "injected": [
+        "supervisor.start"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "vault",
+      "failure": "credentials.close",
+      "events": [
+        "credentials.start",
+        "trace.recover",
+        "broker.start",
+        "real.start",
+        "mock-owner.start",
+        "supervisor.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "external.start",
+        "candidate.start",
+        "yield",
+        "mock-bundle:present",
+        "bindings:0",
+        "trace.stop:server_shutdown",
+        "credentials.close",
+        "credentials.close"
+      ],
+      "outcome": "controlled-credentials.close",
+      "injected": [
+        "credentials.close",
+        "credentials.close"
+      ],
+      "owned_tasks_remaining": 0
+    },
+    {
+      "mode": "vault",
+      "failure": "real.close",
+      "events": [
+        "credentials.start",
+        "trace.recover",
+        "broker.start",
+        "real.start",
+        "mock-owner.start",
+        "supervisor.start",
+        "top20.start",
+        "market.start",
+        "collector.start",
+        "news.start",
+        "external.start",
+        "candidate.start",
+        "yield",
+        "mock-bundle:present",
+        "bindings:0",
+        "trace.stop:server_shutdown",
+        "credentials.close",
+        "supervisor.close",
+        "real.close",
+        "credentials.close",
+        "supervisor.close",
+        "real.close"
+      ],
+      "outcome": "controlled-real.close",
+      "injected": [
+        "real.close",
+        "real.close"
+      ],
+      "owned_tasks_remaining": 0
+    }
+  ]
+}

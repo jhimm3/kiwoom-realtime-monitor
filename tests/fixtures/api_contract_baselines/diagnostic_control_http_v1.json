@@ -1,0 +1,1909 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "input_control": "native SQLite and control CAS/history; fixed native control clock and UUID; trace worker double recording actual options and lifecycle failure states",
+  "results": [
+    [
+      {
+        "name": "unauthorized-GETcapabilities",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "unauthorized-PUTcontrol",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "unauthorized-POSTtrace",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "unauthorized-GETtrace",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "unauthorized-POSTtrace/stop",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "unauthorized-GETtrace/missing",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "unauthorized-GETtrace/id/chunks/name",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "capabilities",
+        "status": 200,
+        "headers": {
+          "content-length": "2148",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "producer_instance": "contract-instance",
+          "control_available": false,
+          "postgres_available": false,
+          "sections": [
+            "postgres",
+            "activity",
+            "news_jobs",
+            "host",
+            "storage"
+          ],
+          "run_kinds": [
+            "measure",
+            "compare",
+            "replay"
+          ],
+          "trace_input_capture": {
+            "schema_version": 3,
+            "options": {
+              "store_inputs": false,
+              "collector_inputs": false,
+              "top20_inputs": false
+            },
+            "top20_input_capture": {
+              "schema_version": 3,
+              "input_version": "top20-ranking-input/v1",
+              "scope": "ranking_validation_only",
+              "downstream_replay_supported": false,
+              "candidate_flow_input_version": "top20-candidate-flow-input/v1",
+              "candidate_flow_scope": "candidate_flow_consumer_and_ingest",
+              "broker_queue_and_cache_scheduling_replayed": false
+            },
+            "causal_input_versions": {
+              "market_request": "market-request-tape/v1",
+              "ranking": "top20-ranking-input/v1",
+              "realtime_lifecycle": "top20-realtime-tape/v1",
+              "delivery": "top20-hub-delivery/v1"
+            },
+            "causal_input_boundaries": [
+              "REST",
+              "catalog",
+              "ranking",
+              "subscription",
+              "lifecycle",
+              "delivery_receipt"
+            ],
+            "source_state_equivalence_verified": false,
+            "capacity_acceptance": "pending_sizing_and_NAS_gates",
+            "delivery_retention": "framed_ram_v1_deferred_only",
+            "store_input_profiles": {
+              "stock-catalog-documents/v1": {
+                "method": "replace_documents",
+                "collection": "stock_catalog",
+                "maximum_copy_bytes": 16777216
+              }
+            },
+            "collector_input_version": "collector-input/v2",
+            "collector_event_types": [
+              "0B",
+              "0w",
+              "0J",
+              "0U"
+            ],
+            "coverage": "observed_paths_only",
+            "overhead_verified": false,
+            "deferred_persistence": {
+              "supported": true,
+              "request_field": "persist_at",
+              "max_delay_seconds": 86400,
+              "memory_limit_bytes": 8589934592,
+              "event_capacity": 5000000,
+              "write_bytes_per_second": 1048576
+            }
+          },
+          "trace_replay_writer_kinds": [
+            "dataset:program_flow",
+            "news_job_claim",
+            "query_minute",
+            "realtime_latest",
+            "realtime_second_bar",
+            "shadow_monitor_state"
+          ],
+          "query_minute_scenarios": [
+            "fresh_page",
+            "one_changed_bar",
+            "recorded_counts",
+            "unchanged_page"
+          ],
+          "limits": {
+            "measure_seconds": 300,
+            "compare_phase_seconds": 1100,
+            "ttl_seconds": 7200,
+            "activity_rows": 200,
+            "query_minute_rows_per_call": 1000,
+            "query_minute_total_input_rows": 30000
+          },
+          "scope_note": "server-process metrics, database-wide counters and host samples; independent PC/importer memory unavailable"
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "invalid-control-model",
+        "status": 422,
+        "headers": {
+          "content-length": "132",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "expected_revision"
+              ],
+              "msg": "Field required",
+              "input": {
+                "target": "master",
+                "enabled": true
+              }
+            }
+          ]
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "strict-trace-model",
+        "status": 422,
+        "headers": {
+          "content-length": "117",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "bool_type",
+              "loc": [
+                "body",
+                "store_inputs"
+              ],
+              "msg": "Input should be a valid boolean",
+              "input": "yes"
+            }
+          ]
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-initial",
+        "status": 200,
+        "headers": {
+          "content-length": "16",
+          "content-type": "application/json"
+        },
+        "body": {
+          "state": "idle"
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-manifest-missing",
+        "status": 404,
+        "headers": {
+          "content-length": "28",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "TRACE_NOT_FOUND"
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [
+          {
+            "action": "status",
+            "trace_id": "missing"
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-chunk-missing",
+        "status": 404,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "TRACE_CHUNK_NOT_FOUND"
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [
+          {
+            "action": "chunk",
+            "trace_id": "id",
+            "chunk_name": "missing"
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-chunk-conflict",
+        "status": 409,
+        "headers": {
+          "content-length": "35",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "trace_chunk_incomplete"
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [
+          {
+            "action": "chunk",
+            "trace_id": "id",
+            "chunk_name": "incomplete"
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-chunk",
+        "status": 200,
+        "headers": {
+          "content-length": "13",
+          "content-type": "application/x-ndjson"
+        },
+        "body": "{\"metric\":1}\n",
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [
+          {
+            "action": "chunk",
+            "trace_id": "id",
+            "chunk_name": "chunk.ndjson"
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "control-unavailable",
+        "status": 501,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_CONTROL_UNAVAILABLE"
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-unavailable",
+        "status": 501,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_CONTROL_UNAVAILABLE"
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      }
+    ],
+    [
+      {
+        "name": "unauthorized-GETcapabilities",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "unauthorized-PUTcontrol",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "unauthorized-POSTtrace",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "unauthorized-GETtrace",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "unauthorized-POSTtrace/stop",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "unauthorized-GETtrace/missing",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "unauthorized-GETtrace/id/chunks/name",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "capabilities",
+        "status": 200,
+        "headers": {
+          "content-length": "2147",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "producer_instance": "contract-instance",
+          "control_available": true,
+          "postgres_available": false,
+          "sections": [
+            "postgres",
+            "activity",
+            "news_jobs",
+            "host",
+            "storage"
+          ],
+          "run_kinds": [
+            "measure",
+            "compare",
+            "replay"
+          ],
+          "trace_input_capture": {
+            "schema_version": 3,
+            "options": {
+              "store_inputs": false,
+              "collector_inputs": false,
+              "top20_inputs": false
+            },
+            "top20_input_capture": {
+              "schema_version": 3,
+              "input_version": "top20-ranking-input/v1",
+              "scope": "ranking_validation_only",
+              "downstream_replay_supported": false,
+              "candidate_flow_input_version": "top20-candidate-flow-input/v1",
+              "candidate_flow_scope": "candidate_flow_consumer_and_ingest",
+              "broker_queue_and_cache_scheduling_replayed": false
+            },
+            "causal_input_versions": {
+              "market_request": "market-request-tape/v1",
+              "ranking": "top20-ranking-input/v1",
+              "realtime_lifecycle": "top20-realtime-tape/v1",
+              "delivery": "top20-hub-delivery/v1"
+            },
+            "causal_input_boundaries": [
+              "REST",
+              "catalog",
+              "ranking",
+              "subscription",
+              "lifecycle",
+              "delivery_receipt"
+            ],
+            "source_state_equivalence_verified": false,
+            "capacity_acceptance": "pending_sizing_and_NAS_gates",
+            "delivery_retention": "framed_ram_v1_deferred_only",
+            "store_input_profiles": {
+              "stock-catalog-documents/v1": {
+                "method": "replace_documents",
+                "collection": "stock_catalog",
+                "maximum_copy_bytes": 16777216
+              }
+            },
+            "collector_input_version": "collector-input/v2",
+            "collector_event_types": [
+              "0B",
+              "0w",
+              "0J",
+              "0U"
+            ],
+            "coverage": "observed_paths_only",
+            "overhead_verified": false,
+            "deferred_persistence": {
+              "supported": true,
+              "request_field": "persist_at",
+              "max_delay_seconds": 86400,
+              "memory_limit_bytes": 8589934592,
+              "event_capacity": 5000000,
+              "write_bytes_per_second": 1048576
+            }
+          },
+          "trace_replay_writer_kinds": [
+            "dataset:program_flow",
+            "news_job_claim",
+            "query_minute",
+            "realtime_latest",
+            "realtime_second_bar",
+            "shadow_monitor_state"
+          ],
+          "query_minute_scenarios": [
+            "fresh_page",
+            "one_changed_bar",
+            "recorded_counts",
+            "unchanged_page"
+          ],
+          "limits": {
+            "measure_seconds": 300,
+            "compare_phase_seconds": 1100,
+            "ttl_seconds": 7200,
+            "activity_rows": 200,
+            "query_minute_rows_per_call": 1000,
+            "query_minute_total_input_rows": 30000
+          },
+          "scope_note": "server-process metrics, database-wide counters and host samples; independent PC/importer memory unavailable"
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "invalid-control-model",
+        "status": 422,
+        "headers": {
+          "content-length": "132",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "body",
+                "expected_revision"
+              ],
+              "msg": "Field required",
+              "input": {
+                "target": "master",
+                "enabled": true
+              }
+            }
+          ]
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "strict-trace-model",
+        "status": 422,
+        "headers": {
+          "content-length": "117",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "bool_type",
+              "loc": [
+                "body",
+                "store_inputs"
+              ],
+              "msg": "Input should be a valid boolean",
+              "input": "yes"
+            }
+          ]
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-initial",
+        "status": 200,
+        "headers": {
+          "content-length": "16",
+          "content-type": "application/json"
+        },
+        "body": {
+          "state": "idle"
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-manifest-missing",
+        "status": 404,
+        "headers": {
+          "content-length": "28",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "TRACE_NOT_FOUND"
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [
+          {
+            "action": "status",
+            "trace_id": "missing"
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-chunk-missing",
+        "status": 404,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "TRACE_CHUNK_NOT_FOUND"
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [
+          {
+            "action": "chunk",
+            "trace_id": "id",
+            "chunk_name": "missing"
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-chunk-conflict",
+        "status": 409,
+        "headers": {
+          "content-length": "35",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "trace_chunk_incomplete"
+        },
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [
+          {
+            "action": "chunk",
+            "trace_id": "id",
+            "chunk_name": "incomplete"
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-chunk",
+        "status": 200,
+        "headers": {
+          "content-length": "13",
+          "content-type": "application/x-ndjson"
+        },
+        "body": "{\"metric\":1}\n",
+        "control_and_history": {
+          "diagnostic.json": null,
+          "diagnostic-history.jsonl": null
+        },
+        "trace_calls": [
+          {
+            "action": "chunk",
+            "trace_id": "id",
+            "chunk_name": "chunk.ndjson"
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "master-enable",
+        "status": 200,
+        "headers": {
+          "content-length": "2069",
+          "content-type": "application/json"
+        },
+        "body": {
+          "diagnostic_tool": {
+            "enabled": true,
+            "expires_at": 2000007200.0,
+            "owner": "manual",
+            "session_id": "00000000000000000000000000000001"
+          },
+          "workloads": {
+            "candidate_monitor": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "external_market": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null,
+              "runtime": {
+                "configured": false,
+                "operational_enabled": false,
+                "running": false,
+                "poll_seconds": null,
+                "collection_attempts": 0,
+                "collection_completions": 0,
+                "collection_saved_rows_total": 0,
+                "last_collection_started_at": null,
+                "last_collection_completed_at": null,
+                "last_collection_saved_rows": 0,
+                "last_collection_error": null
+              }
+            },
+            "historical_news_archive": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "minute_backfill": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "minute_query_metadata": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_jobs": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_market_feed": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_query_set": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_stock_refresh": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "top20_after_close": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            }
+          },
+          "metrics_capture": {
+            "enabled": false,
+            "expires_at": null,
+            "owner": null,
+            "session_id": null
+          },
+          "trace_capture": {
+            "enabled": false,
+            "expires_at": null,
+            "owner": null,
+            "session_id": null
+          },
+          "expires_at": 2000007200.0,
+          "control_revision": 1
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": null, \"control_revision\": 1, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000007200.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "master-repeat-idempotent",
+        "status": 200,
+        "headers": {
+          "content-length": "2069",
+          "content-type": "application/json"
+        },
+        "body": {
+          "diagnostic_tool": {
+            "enabled": true,
+            "expires_at": 2000007200.0,
+            "owner": "manual",
+            "session_id": "00000000000000000000000000000001"
+          },
+          "workloads": {
+            "candidate_monitor": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "external_market": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null,
+              "runtime": {
+                "configured": false,
+                "operational_enabled": false,
+                "running": false,
+                "poll_seconds": null,
+                "collection_attempts": 0,
+                "collection_completions": 0,
+                "collection_saved_rows_total": 0,
+                "last_collection_started_at": null,
+                "last_collection_completed_at": null,
+                "last_collection_saved_rows": 0,
+                "last_collection_error": null
+              }
+            },
+            "historical_news_archive": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "minute_backfill": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "minute_query_metadata": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_jobs": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_market_feed": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_query_set": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_stock_refresh": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "top20_after_close": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            }
+          },
+          "metrics_capture": {
+            "enabled": false,
+            "expires_at": null,
+            "owner": null,
+            "session_id": null
+          },
+          "trace_capture": {
+            "enabled": false,
+            "expires_at": null,
+            "owner": null,
+            "session_id": null
+          },
+          "expires_at": 2000007200.0,
+          "control_revision": 1
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": null, \"control_revision\": 1, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000007200.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "control-invalid-combination",
+        "status": 422,
+        "headers": {
+          "content-length": "45",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_CONTROL_INPUT_INVALID"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": null, \"control_revision\": 1, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000007200.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "child-ttl-bounded",
+        "status": 422,
+        "headers": {
+          "content-length": "47",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_CHILD_TTL_OUT_OF_BOUNDS"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": null, \"control_revision\": 1, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000007200.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "child-session-required",
+        "status": 409,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "diagnostic_control_conflict"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": null, \"control_revision\": 1, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000007200.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "child-stale-revision",
+        "status": 409,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "diagnostic_control_conflict"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": null, \"control_revision\": 1, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000007200.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "child-wrong-instance",
+        "status": 409,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "diagnostic_control_conflict"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": null, \"control_revision\": 1, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000007200.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "capture-enable",
+        "status": 200,
+        "headers": {
+          "content-length": "2110",
+          "content-type": "application/json"
+        },
+        "body": {
+          "diagnostic_tool": {
+            "enabled": true,
+            "expires_at": 2000007200.0,
+            "owner": "manual",
+            "session_id": "00000000000000000000000000000001"
+          },
+          "workloads": {
+            "candidate_monitor": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "external_market": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null,
+              "runtime": {
+                "configured": false,
+                "operational_enabled": false,
+                "running": false,
+                "poll_seconds": null,
+                "collection_attempts": 0,
+                "collection_completions": 0,
+                "collection_saved_rows_total": 0,
+                "last_collection_started_at": null,
+                "last_collection_completed_at": null,
+                "last_collection_saved_rows": 0,
+                "last_collection_error": null
+              }
+            },
+            "historical_news_archive": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "minute_backfill": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "minute_query_metadata": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_jobs": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_market_feed": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_query_set": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_stock_refresh": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "top20_after_close": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            }
+          },
+          "metrics_capture": {
+            "enabled": true,
+            "expires_at": 2000000600.0,
+            "owner": "manual",
+            "session_id": "00000000000000000000000000000001"
+          },
+          "trace_capture": {
+            "enabled": false,
+            "expires_at": null,
+            "owner": null,
+            "session_id": null
+          },
+          "expires_at": 2000007200.0,
+          "control_revision": 2
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 2, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "workload-pause",
+        "status": 200,
+        "headers": {
+          "content-length": "2117",
+          "content-type": "application/json"
+        },
+        "body": {
+          "diagnostic_tool": {
+            "enabled": true,
+            "expires_at": 2000007200.0,
+            "owner": "manual",
+            "session_id": "00000000000000000000000000000001"
+          },
+          "workloads": {
+            "candidate_monitor": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "external_market": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": true,
+              "expires_at": 2000000600.0,
+              "runtime": {
+                "configured": false,
+                "operational_enabled": false,
+                "running": false,
+                "poll_seconds": null,
+                "collection_attempts": 0,
+                "collection_completions": 0,
+                "collection_saved_rows_total": 0,
+                "last_collection_started_at": null,
+                "last_collection_completed_at": null,
+                "last_collection_saved_rows": 0,
+                "last_collection_error": null
+              }
+            },
+            "historical_news_archive": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "minute_backfill": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "minute_query_metadata": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_jobs": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_market_feed": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_query_set": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_stock_refresh": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "top20_after_close": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            }
+          },
+          "metrics_capture": {
+            "enabled": true,
+            "expires_at": 2000000600.0,
+            "owner": "manual",
+            "session_id": "00000000000000000000000000000001"
+          },
+          "trace_capture": {
+            "enabled": false,
+            "expires_at": null,
+            "owner": null,
+            "session_id": null
+          },
+          "expires_at": 2000007200.0,
+          "control_revision": 3
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 3, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {\"external_market\": 2000000600.0}, \"owners\": {\"external_market\": \"manual\"}, \"paused\": [\"external_market\"], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "history-error-after-native-change",
+        "status": 200,
+        "headers": {
+          "content-length": "2141",
+          "content-type": "application/json"
+        },
+        "body": {
+          "diagnostic_tool": {
+            "enabled": true,
+            "expires_at": 2000007200.0,
+            "owner": "manual",
+            "session_id": "00000000000000000000000000000001"
+          },
+          "workloads": {
+            "candidate_monitor": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "external_market": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null,
+              "runtime": {
+                "configured": false,
+                "operational_enabled": false,
+                "running": false,
+                "poll_seconds": null,
+                "collection_attempts": 0,
+                "collection_completions": 0,
+                "collection_saved_rows_total": 0,
+                "last_collection_started_at": null,
+                "last_collection_completed_at": null,
+                "last_collection_saved_rows": 0,
+                "last_collection_error": null
+              }
+            },
+            "historical_news_archive": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "minute_backfill": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "minute_query_metadata": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_jobs": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_market_feed": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_query_set": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_stock_refresh": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "top20_after_close": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": true,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            }
+          },
+          "metrics_capture": {
+            "enabled": true,
+            "expires_at": 2000000600.0,
+            "owner": "manual",
+            "session_id": "00000000000000000000000000000001"
+          },
+          "trace_capture": {
+            "enabled": false,
+            "expires_at": null,
+            "owner": null,
+            "session_id": null
+          },
+          "expires_at": 2000007200.0,
+          "control_revision": 4,
+          "history_error_type": "OSError"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 4, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-stale-session",
+        "status": 409,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "diagnostic_control_conflict"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 4, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-busy-running",
+        "status": 409,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "trace_already_running"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 4, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-busy-stopping",
+        "status": 409,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "trace_already_running"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 4, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-busy-awaiting_persistence",
+        "status": 409,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "trace_already_running"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 4, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-busy-persisting",
+        "status": 409,
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "trace_already_running"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 4, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-failure-rollback",
+        "status": 409,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "injected_trace_start_failure"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 6, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [
+          {
+            "action": "start",
+            "kwargs": {
+              "seconds": 60,
+              "store_inputs": true,
+              "collector_inputs": true,
+              "top20_inputs": true,
+              "persist_at": 2000000100.0
+            }
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-failure-owned-by-another-operation",
+        "status": 409,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "injected_trace_start_failure"
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 7, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": {\"expires_at\": 2000000060.0, \"owner\": \"manual\"}, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [
+          {
+            "action": "start",
+            "kwargs": {
+              "seconds": 60,
+              "store_inputs": true,
+              "collector_inputs": true,
+              "top20_inputs": true,
+              "persist_at": 2000000100.0
+            }
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-start-all-options",
+        "status": 200,
+        "headers": {
+          "content-length": "162",
+          "content-type": "application/json"
+        },
+        "body": {
+          "state": "running",
+          "trace_id": "contract-trace",
+          "options": {
+            "seconds": 60,
+            "store_inputs": true,
+            "collector_inputs": true,
+            "top20_inputs": true,
+            "persist_at": 2000000100.0
+          }
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 8, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": {\"expires_at\": 2000000060.0, \"owner\": \"manual\"}, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [
+          {
+            "action": "start",
+            "kwargs": {
+              "seconds": 60,
+              "store_inputs": true,
+              "collector_inputs": true,
+              "top20_inputs": true,
+              "persist_at": 2000000100.0
+            }
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-current",
+        "status": 200,
+        "headers": {
+          "content-length": "162",
+          "content-type": "application/json"
+        },
+        "body": {
+          "state": "running",
+          "trace_id": "contract-trace",
+          "options": {
+            "seconds": 60,
+            "store_inputs": true,
+            "collector_inputs": true,
+            "top20_inputs": true,
+            "persist_at": 2000000100.0
+          }
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 8, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": {\"expires_at\": 2000000060.0, \"owner\": \"manual\"}, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-manifest",
+        "status": 200,
+        "headers": {
+          "content-length": "162",
+          "content-type": "application/json"
+        },
+        "body": {
+          "state": "running",
+          "trace_id": "contract-trace",
+          "options": {
+            "seconds": 60,
+            "store_inputs": true,
+            "collector_inputs": true,
+            "top20_inputs": true,
+            "persist_at": 2000000100.0
+          }
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 8, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": {\"expires_at\": 2000000060.0, \"owner\": \"manual\"}, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [
+          {
+            "action": "status",
+            "trace_id": "contract-trace"
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "trace-stop",
+        "status": 200,
+        "headers": {
+          "content-length": "163",
+          "content-type": "application/json"
+        },
+        "body": {
+          "state": "complete",
+          "trace_id": "contract-trace",
+          "options": {
+            "seconds": 60,
+            "store_inputs": true,
+            "collector_inputs": true,
+            "top20_inputs": true,
+            "persist_at": 2000000100.0
+          }
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": {\"expires_at\": 2000000600.0, \"owner\": \"manual\"}, \"control_revision\": 8, \"diagnostic_tool\": {\"expires_at\": 2000007200.0, \"monotonic_deadline\": 17200.0, \"owner\": \"manual\", \"session_id\": \"00000000000000000000000000000001\"}, \"expires_at\": 2000000600.0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": {\"expires_at\": 2000000060.0, \"owner\": \"manual\"}, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
+        },
+        "trace_calls": [
+          {
+            "action": "stop"
+          }
+        ],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      },
+      {
+        "name": "master-disable-revokes-children",
+        "status": 200,
+        "headers": {
+          "content-length": "2030",
+          "content-type": "application/json"
+        },
+        "body": {
+          "diagnostic_tool": {
+            "enabled": false,
+            "expires_at": null,
+            "owner": null,
+            "session_id": null
+          },
+          "workloads": {
+            "candidate_monitor": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": false,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "external_market": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": false,
+              "paused_by_diagnostic": false,
+              "expires_at": null,
+              "runtime": {
+                "configured": false,
+                "operational_enabled": false,
+                "running": false,
+                "poll_seconds": null,
+                "collection_attempts": 0,
+                "collection_completions": 0,
+                "collection_saved_rows_total": 0,
+                "last_collection_started_at": null,
+                "last_collection_completed_at": null,
+                "last_collection_saved_rows": 0,
+                "last_collection_error": null
+              }
+            },
+            "historical_news_archive": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": false,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "minute_backfill": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": false,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "minute_query_metadata": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": false,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_jobs": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": false,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_market_feed": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": false,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_query_set": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": false,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "news_stock_refresh": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": false,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            },
+            "top20_after_close": {
+              "configured": false,
+              "effective": false,
+              "diagnostic_switch_available": false,
+              "paused_by_diagnostic": false,
+              "expires_at": null
+            }
+          },
+          "metrics_capture": {
+            "enabled": false,
+            "expires_at": null,
+            "owner": null,
+            "session_id": null
+          },
+          "trace_capture": {
+            "enabled": false,
+            "expires_at": null,
+            "owner": null,
+            "session_id": null
+          },
+          "expires_at": null,
+          "control_revision": 9
+        },
+        "control_and_history": {
+          "diagnostic.json": "{\"capture\": null, \"control_revision\": 9, \"diagnostic_tool\": null, \"expires_at\": 0, \"instance_id\": \"contract-instance\", \"leases\": {}, \"owners\": {}, \"paused\": [], \"schema\": 1, \"trace\": null, \"updated_at\": 2000000000.0}",
+          "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 8}}\n"
+        },
+        "trace_calls": [],
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+      }
+    ]
+  ]
+}

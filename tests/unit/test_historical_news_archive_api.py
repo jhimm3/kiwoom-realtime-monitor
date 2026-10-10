@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+import uuid
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -18,7 +19,72 @@ from tests.unit.historical_news_test_support import (
 )
 
 
+def fixed_archive_contract_fixture(directory):
+    """Freeze inputs before serving HTTP; never normalize returned IDs or times."""
+    with patch("uuid.uuid4", side_effect=(uuid.UUID(int=i) for i in range(1, 1000))), \
+            patch("time.time", return_value=1790300000.0), \
+            patch("kiwoom_monitor.central_server.database_news_revisions.time", return_value=1790300000.0), \
+            patch("kiwoom_monitor.central_server.database_news_sources.time", return_value=1790300000.0), \
+            patch("kiwoom_monitor.central_server.database_news_jobs.time", return_value=1790300000.0):
+        archive = historical_news_archive_fixture(directory)
+        seal_historical_news_archive_fixture(archive)
+    return archive
+
+
+def capture_archive_http_contract(client):
+    """Same requests for the original loopback baseline and ASGI regression."""
+    search = "/api/v1/news/historical-archive/search"
+    headers = {"Authorization": "Bearer test-token"}
+    cases = []
+
+    def capture(name, url, params, expected_status, *, authenticated=True):
+        response = client.get(url, params=params, headers=headers if authenticated else {})
+        if response.status_code != expected_status:
+            raise AssertionError(f"{name}: {response.status_code} != {expected_status}")
+        cases.append({"name": name, "request": {"url": url, "params": params,
+                      "authenticated": authenticated}, "response": {
+            "status": response.status_code,
+            "headers": {key: response.headers[key] for key in ("content-type", "content-length")},
+            "body": response.json(),
+        }})
+        return response.json()
+
+    first = capture("first-page", search, {"stock_code": "005930", "limit": 1}, 200)
+    capture("next-page", search, {"stock_code": "005930", "limit": 1,
+                                 "cursor": first["next_cursor"]}, 200)
+    capture("empty-page", search, {"stock_code": "000660"}, 200)
+    capture("search-unauthorized", search, {"stock_code": "005930"}, 401, authenticated=False)
+    capture("invalid-stock", search, {"stock_code": "bad"}, 422)
+    capture("invalid-limit", search, {"stock_code": "005930", "limit": 0}, 422)
+    capture("invalid-cursor", search, {"stock_code": "005930", "cursor": "invalid"}, 400)
+    article = first["items"][0]
+    detail = "/api/v1/news/historical-archive/articles/" + article["article_revision_id"]
+    dataset = {"dataset_id": first["dataset_id"]}
+    capture("article", detail, {**dataset, "body_revision_id": article["body_revision_id"]}, 200)
+    capture("article-unauthorized", detail, dataset, 401, authenticated=False)
+    capture("missing-article", "/api/v1/news/historical-archive/articles/missing", dataset, 404)
+    capture("changed-dataset", detail, {"dataset_id": "older-generation"}, 409)
+    capture("missing-dataset", detail, {}, 422)
+    capture("wrong-body", detail, {**dataset, "body_revision_id": "missing"}, 400)
+    return cases
+
+
 class HistoricalNewsArchiveApiTests(unittest.TestCase):
+    def test_archive_http_responses_match_pre_extraction_baseline(self) -> None:
+        baseline = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/historical_archive_http_v1.json"
+        expected = json.loads(baseline.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            archive = fixed_archive_contract_fixture(directory)
+            before = hashlib.sha256(archive.read_bytes()).hexdigest()
+            settings = CentralServerSettings(
+                f"sqlite:///{directory / 'monitor.sqlite3'}", "test-token",
+                historical_news_archive_path=str(archive),
+            )
+            with TestClient(create_app(settings)) as client:
+                self.assertEqual(expected["cases"], capture_archive_http_contract(client))
+            self.assertEqual(before, hashlib.sha256(archive.read_bytes()).hexdigest())
+
     def test_unconfigured_or_unsealed_archive_does_not_change_existing_capability(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root)

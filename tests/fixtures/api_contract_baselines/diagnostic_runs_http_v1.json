@@ -1,0 +1,3070 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "input_control": "native SQLite and DiagnosticRuns report/history/status/cancel readers; controlled host/PostgreSQL sampler and run start seams; no PostgreSQL connection or sampling worker; deterministic files and clocks",
+  "results": [
+    [
+      {
+        "name": "unauthorized-snapshot",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-runs",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-runs/missing",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-runs/missing/cancel",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-reports",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-reports/missing",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-history",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-run-model",
+        "status": 422,
+        "headers": {
+          "content-length": "143",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "body",
+                "seconds"
+              ],
+              "msg": "Input should be greater than or equal to 5",
+              "input": 4,
+              "ctx": {
+                "ge": 5
+              }
+            }
+          ]
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "extra-run-field",
+        "status": 422,
+        "headers": {
+          "content-length": "114",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "extra_forbidden",
+              "loc": [
+                "body",
+                "extra"
+              ],
+              "msg": "Extra inputs are not permitted",
+              "input": true
+            }
+          ]
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-scenario",
+        "status": 422,
+        "headers": {
+          "content-length": "288",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "body",
+                "query_minute_scenario"
+              ],
+              "msg": "String should match pattern '^(|unchanged_page|one_changed_bar|fresh_page|recorded_counts)$'",
+              "input": "unknown",
+              "ctx": {
+                "pattern": "^(|unchanged_page|one_changed_bar|fresh_page|recorded_counts)$"
+              }
+            }
+          ]
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'sections': ''}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'sections': 'unknown'}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'sections': 'host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host'}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'pid': 0}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'pid': -1}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-host-storage",
+        "status": 200,
+        "headers": {
+          "content-length": "122",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "sections": {
+            "host": {
+              "cpu_percent": 3
+            },
+            "storage": {
+              "disk": "controlled-disk"
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "host"
+          }
+        ]
+      },
+      {
+        "name": "snapshot-host",
+        "status": 200,
+        "headers": {
+          "content-length": "85",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "sections": {
+            "host": {
+              "cpu_percent": 3
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "host"
+          }
+        ]
+      },
+      {
+        "name": "snapshot-storage",
+        "status": 200,
+        "headers": {
+          "content-length": "97",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "sections": {
+            "storage": {
+              "disk": "controlled-disk"
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "host"
+          }
+        ]
+      },
+      {
+        "name": "invalid-report-mode-before-unavailable",
+        "status": 400,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_REPORT_MODE_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "control-unavailable-runs",
+        "status": 501,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_CONTROL_UNAVAILABLE"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "control-unavailable-runs/missing",
+        "status": 501,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_CONTROL_UNAVAILABLE"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "control-unavailable-runs/missing/cancel",
+        "status": 501,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_CONTROL_UNAVAILABLE"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "control-unavailable-reports",
+        "status": 501,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_CONTROL_UNAVAILABLE"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "control-unavailable-reports/missing",
+        "status": 501,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_CONTROL_UNAVAILABLE"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "control-unavailable-history",
+        "status": 501,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_CONTROL_UNAVAILABLE"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "postgres-unavailable",
+        "status": 501,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "POSTGRES_DIAGNOSTIC_UNAVAILABLE"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      }
+    ],
+    [
+      {
+        "name": "unauthorized-snapshot",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-runs",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-runs/missing",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-runs/missing/cancel",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-reports",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-reports/missing",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-history",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-run-model",
+        "status": 422,
+        "headers": {
+          "content-length": "143",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "body",
+                "seconds"
+              ],
+              "msg": "Input should be greater than or equal to 5",
+              "input": 4,
+              "ctx": {
+                "ge": 5
+              }
+            }
+          ]
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "extra-run-field",
+        "status": 422,
+        "headers": {
+          "content-length": "114",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "extra_forbidden",
+              "loc": [
+                "body",
+                "extra"
+              ],
+              "msg": "Extra inputs are not permitted",
+              "input": true
+            }
+          ]
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-scenario",
+        "status": 422,
+        "headers": {
+          "content-length": "288",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "body",
+                "query_minute_scenario"
+              ],
+              "msg": "String should match pattern '^(|unchanged_page|one_changed_bar|fresh_page|recorded_counts)$'",
+              "input": "unknown",
+              "ctx": {
+                "pattern": "^(|unchanged_page|one_changed_bar|fresh_page|recorded_counts)$"
+              }
+            }
+          ]
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'sections': ''}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'sections': 'unknown'}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'sections': 'host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host'}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'pid': 0}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'pid': -1}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-host-storage",
+        "status": 200,
+        "headers": {
+          "content-length": "122",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "sections": {
+            "host": {
+              "cpu_percent": 3
+            },
+            "storage": {
+              "disk": "controlled-disk"
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "host"
+          }
+        ]
+      },
+      {
+        "name": "snapshot-host",
+        "status": 200,
+        "headers": {
+          "content-length": "85",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "sections": {
+            "host": {
+              "cpu_percent": 3
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "host"
+          }
+        ]
+      },
+      {
+        "name": "snapshot-storage",
+        "status": 200,
+        "headers": {
+          "content-length": "97",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "sections": {
+            "storage": {
+              "disk": "controlled-disk"
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "host"
+          }
+        ]
+      },
+      {
+        "name": "invalid-report-mode-before-unavailable",
+        "status": 400,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_REPORT_MODE_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-postgres-unavailable",
+        "status": 501,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "POSTGRES_DIAGNOSTIC_UNAVAILABLE"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "run-postgres-unavailable",
+        "status": 501,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "POSTGRES_DIAGNOSTIC_UNAVAILABLE"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "summary-measure-report",
+        "status": 200,
+        "headers": {
+          "content-length": "201",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "measure-report",
+          "kind": "measure",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "result": {
+            "kind": "measure",
+            "phase": {
+              "market_bar_saves": {
+                "kinds": {
+                  "minute": {
+                    "rows": 5
+                  }
+                }
+              },
+              "state": "complete"
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "raw-after-summary-measure-report",
+        "status": 200,
+        "headers": {
+          "content-length": "294",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "measure-report",
+          "kind": "measure",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "result": {
+            "kind": "measure",
+            "phase": {
+              "db_calls_raw": {
+                "calls": [
+                  1
+                ]
+              },
+              "db_calls_raw_last_checkpoint": {
+                "calls": [
+                  2
+                ]
+              },
+              "market_bar_saves": {
+                "kinds": {
+                  "minute": {
+                    "rows": 5,
+                    "call_samples": [
+                      3
+                    ]
+                  }
+                }
+              },
+              "state": "complete"
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "summary-compare-report",
+        "status": 200,
+        "headers": {
+          "content-length": "287",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "compare-report",
+          "kind": "compare",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "result": {
+            "kind": "compare",
+            "phases": [
+              {
+                "market_bar_saves": {
+                  "kinds": {
+                    "minute": {
+                      "rows": 5
+                    }
+                  }
+                },
+                "state": "complete"
+              },
+              "non-dict",
+              {
+                "market_bar_saves": {
+                  "kinds": {
+                    "minute": {
+                      "rows": 5
+                    }
+                  }
+                },
+                "state": "complete"
+              }
+            ]
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "raw-after-summary-compare-report",
+        "status": 200,
+        "headers": {
+          "content-length": "473",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "compare-report",
+          "kind": "compare",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "result": {
+            "kind": "compare",
+            "phases": [
+              {
+                "db_calls_raw": {
+                  "calls": [
+                    1
+                  ]
+                },
+                "db_calls_raw_last_checkpoint": {
+                  "calls": [
+                    2
+                  ]
+                },
+                "market_bar_saves": {
+                  "kinds": {
+                    "minute": {
+                      "rows": 5,
+                      "call_samples": [
+                        3
+                      ]
+                    }
+                  }
+                },
+                "state": "complete"
+              },
+              "non-dict",
+              {
+                "db_calls_raw": {
+                  "calls": [
+                    1
+                  ]
+                },
+                "db_calls_raw_last_checkpoint": {
+                  "calls": [
+                    2
+                  ]
+                },
+                "market_bar_saves": {
+                  "kinds": {
+                    "minute": {
+                      "rows": 5,
+                      "call_samples": [
+                        3
+                      ]
+                    }
+                  }
+                },
+                "state": "complete"
+              }
+            ]
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "summary-legacy-report",
+        "status": 200,
+        "headers": {
+          "content-length": "172",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "legacy-report",
+          "kind": "measure",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "phase": {
+            "market_bar_saves": {
+              "kinds": {
+                "minute": {
+                  "rows": 5
+                }
+              }
+            },
+            "state": "complete"
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "raw-after-summary-legacy-report",
+        "status": 200,
+        "headers": {
+          "content-length": "265",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "legacy-report",
+          "kind": "measure",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "phase": {
+            "db_calls_raw": {
+              "calls": [
+                1
+              ]
+            },
+            "db_calls_raw_last_checkpoint": {
+              "calls": [
+                2
+              ]
+            },
+            "market_bar_saves": {
+              "kinds": {
+                "minute": {
+                  "rows": 5,
+                  "call_samples": [
+                    3
+                  ]
+                }
+              }
+            },
+            "state": "complete"
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "status-persisted",
+        "status": 200,
+        "headers": {
+          "content-length": "206",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "measure-report",
+          "kind": "measure",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "status_url": "/api/v1/diagnostics/runs/measure-report",
+          "report_url": "/api/v1/diagnostics/reports/measure-report"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "cancel-completed",
+        "status": 202,
+        "headers": {
+          "content-length": "206",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "measure-report",
+          "kind": "measure",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "status_url": "/api/v1/diagnostics/runs/measure-report",
+          "report_url": "/api/v1/diagnostics/reports/measure-report"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "missing-runs/missing",
+        "status": 404,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_RUN_NOT_FOUND"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "missing-runs/missing/cancel",
+        "status": 404,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_RUN_NOT_FOUND"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "missing-reports/missing",
+        "status": 404,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_REPORT_NOT_FOUND"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "page-reports",
+        "status": 200,
+        "headers": {
+          "content-length": "135",
+          "content-type": "application/json"
+        },
+        "body": {
+          "items": [
+            {
+              "report_id": "measure-report",
+              "kind": "measure",
+              "state": "completed",
+              "schema": 1,
+              "created_at": 2000
+            }
+          ],
+          "offset": 0,
+          "has_more": true
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "page-tail-reports",
+        "status": 200,
+        "headers": {
+          "content-length": "136",
+          "content-type": "application/json"
+        },
+        "body": {
+          "items": [
+            {
+              "report_id": "compare-report",
+              "kind": "compare",
+              "state": "completed",
+              "schema": 1,
+              "created_at": 2000
+            }
+          ],
+          "offset": 2,
+          "has_more": false
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-reports{'limit': 0}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-reports{'limit': 101}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-reports{'offset': -1}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-reports{'offset': 100001}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "page-history",
+        "status": 200,
+        "headers": {
+          "content-length": "92",
+          "content-type": "application/json"
+        },
+        "body": {
+          "items": [
+            {
+              "command": "event-2",
+              "at_utc": "2026-10-10T03:00:00Z"
+            }
+          ],
+          "offset": 0,
+          "has_more": true
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "page-tail-history",
+        "status": 200,
+        "headers": {
+          "content-length": "93",
+          "content-type": "application/json"
+        },
+        "body": {
+          "items": [
+            {
+              "command": "event-0",
+              "at_utc": "2026-10-10T03:00:00Z"
+            }
+          ],
+          "offset": 2,
+          "has_more": false
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-history{'limit': 0}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-history{'limit': 101}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-history{'offset': -1}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-history{'offset': 100001}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      }
+    ],
+    [
+      {
+        "name": "unauthorized-snapshot",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-runs",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-runs/missing",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-runs/missing/cancel",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-reports",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-reports/missing",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "unauthorized-history",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-run-model",
+        "status": 422,
+        "headers": {
+          "content-length": "143",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "body",
+                "seconds"
+              ],
+              "msg": "Input should be greater than or equal to 5",
+              "input": 4,
+              "ctx": {
+                "ge": 5
+              }
+            }
+          ]
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "extra-run-field",
+        "status": 422,
+        "headers": {
+          "content-length": "114",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "extra_forbidden",
+              "loc": [
+                "body",
+                "extra"
+              ],
+              "msg": "Extra inputs are not permitted",
+              "input": true
+            }
+          ]
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-scenario",
+        "status": 422,
+        "headers": {
+          "content-length": "288",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "body",
+                "query_minute_scenario"
+              ],
+              "msg": "String should match pattern '^(|unchanged_page|one_changed_bar|fresh_page|recorded_counts)$'",
+              "input": "unknown",
+              "ctx": {
+                "pattern": "^(|unchanged_page|one_changed_bar|fresh_page|recorded_counts)$"
+              }
+            }
+          ]
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'sections': ''}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'sections': 'unknown'}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'sections': 'host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host,host'}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'pid': 0}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-invalid-{'pid': -1}",
+        "status": 400,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_SECTION_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-host-storage",
+        "status": 200,
+        "headers": {
+          "content-length": "122",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "sections": {
+            "host": {
+              "cpu_percent": 3
+            },
+            "storage": {
+              "disk": "controlled-disk"
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "host"
+          }
+        ]
+      },
+      {
+        "name": "snapshot-host",
+        "status": 200,
+        "headers": {
+          "content-length": "85",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "sections": {
+            "host": {
+              "cpu_percent": 3
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "host"
+          }
+        ]
+      },
+      {
+        "name": "snapshot-storage",
+        "status": 200,
+        "headers": {
+          "content-length": "97",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "sections": {
+            "storage": {
+              "disk": "controlled-disk"
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "host"
+          }
+        ]
+      },
+      {
+        "name": "invalid-report-mode-before-unavailable",
+        "status": 400,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_REPORT_MODE_INVALID"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "snapshot-all",
+        "status": 200,
+        "headers": {
+          "content-length": "220",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "sections": {
+            "activity": {
+              "value": "activity"
+            },
+            "news_jobs": {
+              "value": "news_jobs"
+            },
+            "postgres": {
+              "value": "postgres"
+            },
+            "host": {
+              "cpu_percent": 3
+            },
+            "storage": {
+              "disk": "controlled-disk"
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "postgres",
+            "database_url": "postgresql://contract.invalid/diagnostic_contract",
+            "sections": [
+              "activity",
+              "host",
+              "news_jobs",
+              "postgres",
+              "storage"
+            ],
+            "pid": 17
+          },
+          {
+            "action": "host"
+          }
+        ]
+      },
+      {
+        "name": "snapshot-subset",
+        "status": 200,
+        "headers": {
+          "content-length": "126",
+          "content-type": "application/json"
+        },
+        "body": {
+          "server_build": "2026.10.09-trace-ram-main-v1",
+          "sections": {
+            "activity": {
+              "value": "activity"
+            },
+            "news_jobs": {
+              "value": "news_jobs"
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "postgres",
+            "database_url": "postgresql://contract.invalid/diagnostic_contract",
+            "sections": [
+              "activity",
+              "news_jobs"
+            ],
+            "pid": 18
+          }
+        ]
+      },
+      {
+        "name": "snapshot-failure-sanitized",
+        "status": 503,
+        "headers": {
+          "content-length": "53",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_POSTGRES_SNAPSHOT_UNAVAILABLE"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "postgres",
+            "database_url": "postgresql://contract.invalid/diagnostic_contract",
+            "sections": [
+              "postgres"
+            ],
+            "pid": null
+          }
+        ]
+      },
+      {
+        "name": "summary-measure-report",
+        "status": 200,
+        "headers": {
+          "content-length": "201",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "measure-report",
+          "kind": "measure",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "result": {
+            "kind": "measure",
+            "phase": {
+              "market_bar_saves": {
+                "kinds": {
+                  "minute": {
+                    "rows": 5
+                  }
+                }
+              },
+              "state": "complete"
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "raw-after-summary-measure-report",
+        "status": 200,
+        "headers": {
+          "content-length": "294",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "measure-report",
+          "kind": "measure",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "result": {
+            "kind": "measure",
+            "phase": {
+              "db_calls_raw": {
+                "calls": [
+                  1
+                ]
+              },
+              "db_calls_raw_last_checkpoint": {
+                "calls": [
+                  2
+                ]
+              },
+              "market_bar_saves": {
+                "kinds": {
+                  "minute": {
+                    "rows": 5,
+                    "call_samples": [
+                      3
+                    ]
+                  }
+                }
+              },
+              "state": "complete"
+            }
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "summary-compare-report",
+        "status": 200,
+        "headers": {
+          "content-length": "287",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "compare-report",
+          "kind": "compare",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "result": {
+            "kind": "compare",
+            "phases": [
+              {
+                "market_bar_saves": {
+                  "kinds": {
+                    "minute": {
+                      "rows": 5
+                    }
+                  }
+                },
+                "state": "complete"
+              },
+              "non-dict",
+              {
+                "market_bar_saves": {
+                  "kinds": {
+                    "minute": {
+                      "rows": 5
+                    }
+                  }
+                },
+                "state": "complete"
+              }
+            ]
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "raw-after-summary-compare-report",
+        "status": 200,
+        "headers": {
+          "content-length": "473",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "compare-report",
+          "kind": "compare",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "result": {
+            "kind": "compare",
+            "phases": [
+              {
+                "db_calls_raw": {
+                  "calls": [
+                    1
+                  ]
+                },
+                "db_calls_raw_last_checkpoint": {
+                  "calls": [
+                    2
+                  ]
+                },
+                "market_bar_saves": {
+                  "kinds": {
+                    "minute": {
+                      "rows": 5,
+                      "call_samples": [
+                        3
+                      ]
+                    }
+                  }
+                },
+                "state": "complete"
+              },
+              "non-dict",
+              {
+                "db_calls_raw": {
+                  "calls": [
+                    1
+                  ]
+                },
+                "db_calls_raw_last_checkpoint": {
+                  "calls": [
+                    2
+                  ]
+                },
+                "market_bar_saves": {
+                  "kinds": {
+                    "minute": {
+                      "rows": 5,
+                      "call_samples": [
+                        3
+                      ]
+                    }
+                  }
+                },
+                "state": "complete"
+              }
+            ]
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "summary-legacy-report",
+        "status": 200,
+        "headers": {
+          "content-length": "172",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "legacy-report",
+          "kind": "measure",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "phase": {
+            "market_bar_saves": {
+              "kinds": {
+                "minute": {
+                  "rows": 5
+                }
+              }
+            },
+            "state": "complete"
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "raw-after-summary-legacy-report",
+        "status": 200,
+        "headers": {
+          "content-length": "265",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "legacy-report",
+          "kind": "measure",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "phase": {
+            "db_calls_raw": {
+              "calls": [
+                1
+              ]
+            },
+            "db_calls_raw_last_checkpoint": {
+              "calls": [
+                2
+              ]
+            },
+            "market_bar_saves": {
+              "kinds": {
+                "minute": {
+                  "rows": 5,
+                  "call_samples": [
+                    3
+                  ]
+                }
+              }
+            },
+            "state": "complete"
+          }
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "status-persisted",
+        "status": 200,
+        "headers": {
+          "content-length": "206",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "measure-report",
+          "kind": "measure",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "status_url": "/api/v1/diagnostics/runs/measure-report",
+          "report_url": "/api/v1/diagnostics/reports/measure-report"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "cancel-completed",
+        "status": 202,
+        "headers": {
+          "content-length": "206",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "measure-report",
+          "kind": "measure",
+          "state": "completed",
+          "created_at": 2000,
+          "schema": 1,
+          "status_url": "/api/v1/diagnostics/runs/measure-report",
+          "report_url": "/api/v1/diagnostics/reports/measure-report"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "missing-runs/missing",
+        "status": 404,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_RUN_NOT_FOUND"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "missing-runs/missing/cancel",
+        "status": 404,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_RUN_NOT_FOUND"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "missing-reports/missing",
+        "status": 404,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "DIAGNOSTIC_REPORT_NOT_FOUND"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "page-reports",
+        "status": 200,
+        "headers": {
+          "content-length": "135",
+          "content-type": "application/json"
+        },
+        "body": {
+          "items": [
+            {
+              "report_id": "measure-report",
+              "kind": "measure",
+              "state": "completed",
+              "schema": 1,
+              "created_at": 2000
+            }
+          ],
+          "offset": 0,
+          "has_more": true
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "page-tail-reports",
+        "status": 200,
+        "headers": {
+          "content-length": "136",
+          "content-type": "application/json"
+        },
+        "body": {
+          "items": [
+            {
+              "report_id": "compare-report",
+              "kind": "compare",
+              "state": "completed",
+              "schema": 1,
+              "created_at": 2000
+            }
+          ],
+          "offset": 2,
+          "has_more": false
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-reports{'limit': 0}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-reports{'limit': 101}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-reports{'offset': -1}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-reports{'offset': 100001}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "page-history",
+        "status": 200,
+        "headers": {
+          "content-length": "92",
+          "content-type": "application/json"
+        },
+        "body": {
+          "items": [
+            {
+              "command": "event-2",
+              "at_utc": "2026-10-10T03:00:00Z"
+            }
+          ],
+          "offset": 0,
+          "has_more": true
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "page-tail-history",
+        "status": 200,
+        "headers": {
+          "content-length": "93",
+          "content-type": "application/json"
+        },
+        "body": {
+          "items": [
+            {
+              "command": "event-0",
+              "at_utc": "2026-10-10T03:00:00Z"
+            }
+          ],
+          "offset": 2,
+          "has_more": false
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-history{'limit': 0}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-history{'limit': 101}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-history{'offset': -1}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "invalid-page-history{'offset': 100001}",
+        "status": 400,
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_page"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": []
+      },
+      {
+        "name": "run-all-options",
+        "status": 202,
+        "headers": {
+          "content-length": "45",
+          "content-type": "application/json"
+        },
+        "body": {
+          "run_id": "measure-report",
+          "state": "running"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "start",
+            "kwargs": {
+              "kind": "replay",
+              "seconds": 30,
+              "label": "contract",
+              "workload": "trace_synthetic",
+              "request_id": "request-contract",
+              "profile_report_id": "",
+              "profile_trace_id": "trace-contract",
+              "window_start_seconds": 1.5,
+              "window_end_seconds": 31.5,
+              "include_writer_kinds": [
+                "query_minute"
+              ],
+              "exclude_writer_kinds": [
+                "news_job_claim"
+              ],
+              "query_minute_scenario": "fresh_page",
+              "expected_session": "session-contract",
+              "expected_revision": 7
+            }
+          }
+        ]
+      },
+      {
+        "name": "run-error-invalid_diagnostic_run",
+        "status": 400,
+        "headers": {
+          "content-length": "35",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "invalid_diagnostic_run"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "start",
+            "kwargs": {
+              "kind": "replay",
+              "seconds": 30,
+              "label": "contract",
+              "workload": "trace_synthetic",
+              "request_id": "request-contract",
+              "profile_report_id": "",
+              "profile_trace_id": "trace-contract",
+              "window_start_seconds": 1.5,
+              "window_end_seconds": 31.5,
+              "include_writer_kinds": [
+                "query_minute"
+              ],
+              "exclude_writer_kinds": [
+                "news_job_claim"
+              ],
+              "query_minute_scenario": "fresh_page",
+              "expected_session": "session-contract",
+              "expected_revision": 7
+            }
+          }
+        ]
+      },
+      {
+        "name": "run-error-diagnostic_run_busy",
+        "status": 409,
+        "headers": {
+          "content-length": "32",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "diagnostic_run_busy"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "start",
+            "kwargs": {
+              "kind": "replay",
+              "seconds": 30,
+              "label": "contract",
+              "workload": "trace_synthetic",
+              "request_id": "request-contract",
+              "profile_report_id": "",
+              "profile_trace_id": "trace-contract",
+              "window_start_seconds": 1.5,
+              "window_end_seconds": 31.5,
+              "include_writer_kinds": [
+                "query_minute"
+              ],
+              "exclude_writer_kinds": [
+                "news_job_claim"
+              ],
+              "query_minute_scenario": "fresh_page",
+              "expected_session": "session-contract",
+              "expected_revision": 7
+            }
+          }
+        ]
+      },
+      {
+        "name": "run-error-diagnostic_control_conflict",
+        "status": 409,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "diagnostic_control_conflict"
+        },
+        "files": {
+          "diagnostic-results\\compare-report.json": "a6a54d753a66845af4dcfd036a8182dda0d7aa08c747afeb63e69103d701c5f2",
+          "diagnostic-results\\legacy-report.json": "2baacc2c6e90e020b08907af74d5297488e6e1daa8c88a94e92704d7c436a5e0",
+          "diagnostic-results\\measure-report.json": "3d4ab472d7a7106418add1766a631de0001bda70d290dfc0dca179d1d95dff85",
+          "history": "8f241a67f240f537207453273c66fbdd9a21b8fa5b13c5894479522ef3388ffb"
+        },
+        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "calls": [
+          {
+            "action": "start",
+            "kwargs": {
+              "kind": "replay",
+              "seconds": 30,
+              "label": "contract",
+              "workload": "trace_synthetic",
+              "request_id": "request-contract",
+              "profile_report_id": "",
+              "profile_trace_id": "trace-contract",
+              "window_start_seconds": 1.5,
+              "window_end_seconds": 31.5,
+              "include_writer_kinds": [
+                "query_minute"
+              ],
+              "exclude_writer_kinds": [
+                "news_job_claim"
+              ],
+              "query_minute_scenario": "fresh_page",
+              "expected_session": "session-contract",
+              "expected_revision": 7
+            }
+          }
+        ]
+      }
+    ]
+  ]
+}

@@ -110,7 +110,7 @@ def _bar(
 
 class ExternalMarketAutomaticRollTests(unittest.IsolatedAsyncioTestCase):
     async def test_diagnostic_status_reports_live_collection_activity(self) -> None:
-        collector = _SyntheticCollector(  # type: ignore[arg-type]
+        collector = _SyntheticCollector(
             _MemoryStore(), {"WTI_FUTURES": "CLV26.NYM"}, poll_seconds=60,
         )
         before = collector.diagnostic_status()
@@ -132,7 +132,7 @@ class ExternalMarketAutomaticRollTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_collects_both_contracts_and_persists_forward_roll(self) -> None:
         store = _MemoryStore()
-        collector = _SyntheticCollector(  # type: ignore[arg-type]
+        collector = _SyntheticCollector(
             store, {"WTI_FUTURES": "CLV26.NYM"}, roll_confirmations=2,
         )
         await collector.collect_once(include_daily=True)

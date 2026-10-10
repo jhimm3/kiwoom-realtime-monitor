@@ -3,18 +3,19 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, time as clock_time, timedelta
 from time import monotonic
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from kiwoom_monitor.application.market_session_schedule import KRX_AFTER_MARKET_EFFECTIVE_DATE
 from kiwoom_monitor.application.ranking_schedule import ranking_snapshot_archive_due
 from kiwoom_monitor.domain.market_data_contract import (
+    CoverageObservation,
     DataCompleteness,
     DataValueKind,
+    MarketDataObservation,
     MarketDatasetKind,
     ObservationOrigin,
 )
 
-from .database import QueryStore
 from .market_observations import (
     KST,
     bar_observation_key,
@@ -25,6 +26,43 @@ from .market_observations import (
 
 
 logger = logging.getLogger(__name__)
+
+
+class MarketIngestStore(Protocol):
+    """TR 적재에 필요한 조회·쓰기 계약. native transaction은 저장소가 소유한다."""
+
+    def load_documents(
+        self, collection: str, owner: str = "", limit: int = 1000, offset: int = 0,
+        updated_after: float = 0.0,
+    ) -> list[dict[str, Any]]: ...
+
+    def load_market_data_metadata_range(
+        self, kind: MarketDatasetKind, subject: str, start: datetime, end: datetime,
+    ) -> list[CoverageObservation]: ...
+
+    def load_minute_bars(
+        self, code: str, trading_date: str, market: str = "", *,
+        realtime_deltas: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def replace_daily_bars(
+        self, values: list[dict[str, Any]], *,
+        observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
+    ) -> tuple[tuple[str, str, str], ...]:
+        """commit이 확인된 변경 키를 반환하며 저장 실패는 호출자에게 전파한다."""
+        ...
+
+    def replace_minute_bars(
+        self, values: list[dict[str, Any]], *,
+        observations: list[tuple[str, MarketDataObservation[object]]] | None = None,
+    ) -> None: ...
+
+    def save_dataset_snapshot(
+        self, kind: str, subject: str, snapshot_key: str, payload: dict[str, Any], *,
+        observation: MarketDataObservation[object] | None = None,
+    ) -> None: ...
+
+    def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
 
 
 def fundamentals_document_is_current(
@@ -73,7 +111,7 @@ class MarketDataIngestor:
 
     def __init__(
         self,
-        store: QueryStore,
+        store: MarketIngestStore,
         *,
         now_provider: Callable[[], datetime] | None = None,
         on_daily_change: Callable[[str, str], None] | None = None,

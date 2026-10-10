@@ -198,6 +198,8 @@ class AppController(QObject):
         self._started_writers: set[str] = set()
         self._closing = False
         self._shutdown_stage = "running"
+        self._shutdown_cache_failed = False
+        self._shutdown_cache_batch: dict[str, dict[object, object]] = {}
         self._shutdown_actions: AppShutdownActions | None = None
         self._shutdown_timer = QTimer(self)
         self._shutdown_timer.setSingleShot(True)
@@ -648,6 +650,8 @@ class AppController(QObject):
     def on_minute_cache_failed(
         self, pending: object, market_pending: object, message: str,
     ) -> None:
+        pending = self._shutdown_failed_values("pending_minutes", pending)
+        market_pending = self._shutdown_failed_values("pending_market_minutes", market_pending)
         if isinstance(pending, dict):
             self.pending_minutes = {**pending, **self.pending_minutes}
         if isinstance(market_pending, dict):
@@ -703,6 +707,9 @@ class AppController(QObject):
         self, prices: object, highs: object, market_caps: object,
         _trade_date: object, message: str,
     ) -> None:
+        prices = self._shutdown_failed_values("pending_prices", prices)
+        highs = self._shutdown_failed_values("pending_highs", highs)
+        market_caps = self._shutdown_failed_values("pending_market_caps", market_caps)
         if isinstance(prices, dict):
             self.pending_prices = {**prices, **self.pending_prices}
         if isinstance(highs, dict):
@@ -714,6 +721,20 @@ class AppController(QObject):
         if not self.closing and not self.price_cache_timer.isActive():
             self.price_cache_timer.start()
         logger.warning("현재가 캐시 저장 실패: %s", message)
+
+    def _shutdown_failed_values(self, name: str, values: object) -> object:
+        if not isinstance(values, dict) or not self.closing or self._shutdown_stage not in {
+            "writers", "writer_signals",
+        }:
+            return values
+        # A queued old failure may arrive after the final, newer batch commits.
+        # Its overlapping keys are covered by that batch's own success/failure.
+        latest = self._shutdown_cache_batch.get(name, {})
+        failed = {key: value for key, value in values.items()
+                  if key not in latest or value == latest[key]}
+        if failed:
+            self._shutdown_cache_failed = True
+        return failed
 
     def start_market_cache_writer(self) -> None:
         self._start_writer("market_cache_writer")
@@ -800,6 +821,19 @@ class AppController(QObject):
     def request_close(self) -> bool:
         if self._shutdown_stage == "ready":
             return True
+        if self._shutdown_stage == "cache_failed":
+            writer = self.market_cache_writer
+            assert writer is not None
+            if writer.isRunning():
+                return False
+            # A fresh user close request retries the same stopped writer and RAM
+            # buffers; producers stay stopped and normal save timers stay off.
+            writer.start()
+            self._drain_writers()
+            if not self._running_writers():
+                self._shutdown_stage = "writer_signals"
+            self._shutdown_timer.start(100 if self._running_writers() else 0)
+            return False
         if self.closing:
             return False
         actions = self._shutdown_actions
@@ -858,10 +892,20 @@ class AppController(QObject):
     def _drain_writers(self) -> None:
         actions = self._shutdown_actions
         assert actions is not None
+        retrying_cache = self._shutdown_stage == "cache_failed"
         self._shutdown_stage = "writers"
+        self._shutdown_cache_failed = False
         # Queued producer results can restart a save timer while shutdown is waiting.
         self._stop_timers()
-        actions.flush_partial_top20()
+        if not retrying_cache:
+            actions.flush_partial_top20()
+        # Keep only this final batch, not an unbounded history of cache writes.
+        self._shutdown_cache_batch = {
+            name: dict(getattr(self, name)) for name in (
+                "pending_prices", "pending_highs", "pending_market_caps",
+                "pending_minutes", "pending_market_minutes",
+            )
+        }
         self.flush_price_cache()
         self.flush_minute_cache()
         self.flush_comparisons()
@@ -900,6 +944,16 @@ class AppController(QObject):
     def _complete_shutdown(self, *, notify: bool) -> None:
         actions = self._shutdown_actions
         assert actions is not None
+        if self._shutdown_cache_failed and self.market_cache_writer is not None and (
+            self.pending_prices or self.pending_highs or self.pending_market_caps
+            or self.pending_minutes or self.pending_market_minutes
+        ):
+            self._shutdown_stage = "cache_failed"
+            self.shutdown_progress.emit(
+                "마지막 자료 저장에 실패했습니다. 자료를 유지하고 있습니다. "
+                "문제를 해결한 뒤 닫기를 다시 시도해 주세요."
+            )
+            return
         actions.stop_auxiliaries()
         self._shutdown_stage = "ready"
         if notify:

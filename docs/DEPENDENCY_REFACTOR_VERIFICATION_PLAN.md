@@ -3,6 +3,50 @@
 2026-10-08 · 제품 2.1.0 · 조사 기준 `035af0a37c667aed3171140aa3cb7e424ec15fb3`
 
 기능 사이의 의존성을 좁히되 입력, 출력, 실패, 완료, 수명 의미를 보존한다.
+
+### 2026-10-11 TOP20 0W 저장 경계
+
+실제 경로는 hub program event → TOP20 정규화/enqueue → `ProgramSnapshotWriter` → 기존
+`save_dataset_snapshots` → `central_dataset_snapshots`의 program_flow/subject/snapshot_key →
+기존 dataset 조회 API·replay 소비자다. 순위·구독·준비와 index loop 저장 시계는 서비스에 남기고,
+writer는 pending·실제 owned save·실패 병합·최종 drain을 책임진다. batch SQL/transaction과
+재시도 키를 바꾸지 않는다. QueryStore aggregate는 같은 backend를 조립하며 새 연결 계층은 없다.
+
+전체 저장 흐름의 파일은 service/DB에서 service/writer/DB로 하나 늘지만, 저장 변경은 순위·구독
+메서드 없이 writer/DB에서 이해할 수 있다. 정상 flush의 호출 깊이는 기존
+index loop→flush→save pending→native write와 같다. 종료의 drain 호출은 실제 상태/task owner에
+대한 호출이며 전달만 하는 wrapper를 추가하지 않는다. composite 서비스 저장 계약은 전달받는
+writer의 요구까지 포함한 기존 10개, writer 자체 계약은 1개다.
+
+변경 전 소스와 cold seed를 `tmp/top20-program-writer-before`에 보존했다. 기존 seed v1 문서의
+키/bytes/hash와 native batch 실행 본문은 동일하며 불필요한 compatibility property는 만들지 않았다.
+223건 관련 회귀와 복구 계약 결함 주입 3건의 실제 실패 탐지를 확인했다. owner 경로가 검증 대상인
+기존 테스트만 이동했고 기능 기대값/assertion/CI 목록·실행 순서는 유지한다. 실제 결과와 별도
+최종 `all-local` 3,758/3,758건·272/272 worker는 통과했다. 이 작업 트리의 hosted GitHub CI와
+실제 PostgreSQL 검증은 미실행이며, 범위와 실행 경로는 `CURRENT_STATUS.md`에 구분했다.
+
+### 2026-10-11 PC 수명 경계 검토
+
+현재 AppController는 실제 worker·저장 타이머·시작/교체·종료 대기를 소유하므로 추가 관리 계층을
+만들지 않았다. 수명 계약 검토 중 마지막 분봉/가격 저장 실패가 RAM pending을 복원해도 창이
+닫히는 원인을 임시 DB에서 확정해 기존 owner의 종료 판단만 보완했다. 닫기 재요청은 같은 writer의
+명시 재시도이며 이미 완료한 TOP20 partial·백업·화면 저장은 반복하지 않는다.
+
+오래된 실패 알림과 최신 COMMIT이 교차하는 조건도 분봉/가격에서 재현했다. 종료 때 마지막 batch만
+보관해 새 값으로 대체된 옛 실패 key를 제외하고, 대체되지 않은 peer와 마지막 batch 자체의 실패를
+복원한다. native queue/SQL/transaction·정상 timer/worker 순서는 유지한다. source 파일/관리 계층
+추가는 없으며 보조 함수는 실패 payload의 복원 정책을 실제로 처리한다.
+
+AppController 기존 검사 26개의 본문/assertion은 유지하고 세 개의 고위험 종료 검사를 추가했다.
+내부 메서드를 SimpleNamespace에 얹던 MainWindow fixture 한 개는 실제 owner로 바꾸되 assertion과
+다른 42개 검사를 유지했다. 기존 목록에서 자동 발견되며 테스트 파일/CI 범위·순서 변경은 없다.
+핵심 72건 및 마지막 보완의 직접 영향 29건 통과, 변경 전 동작에 대한 실패 탐지와 raw failed 기록은
+CURRENT_STATUS의 최신 항목에 구분했다. 이번 변경을 포함한 누적 `all-local` 3,758/3,758건·272/272
+worker는 최종 통과했다. hosted CI는 게시 뒤 독립 환경에서 실행하고, 실행 PC의 수동 확인 및 다른 writer job의 실패 완료/
+영속 보존 정책은 이 검증으로 대신하지 않는다.
+
+### 최초 단계 기록
+
 첫 단계는 기존 검사를 빠짐없이 실행하고 실패와 미검증을 구분하는 검증 진입점이다.
 이후 인증된 뉴스 조회 API 세 개를 첫 분리 대상으로 삼는다.
 **1단계 검증 진입점과 2단계 뉴스 조회 경로 분리는 완료했다.** Hosted workflow 자체도 통과했지만,
