@@ -434,6 +434,119 @@ class MarketEventPostgresTests(unittest.TestCase):
         self.assertEqual(signal_time.date().isoformat(),
                          next(row for row in history if row["event_type"] == "D")["session_id"])
 
+    def _cohort_worker_retry(self, kind, mode):
+        import copy
+        code, peer = self.code(), self.code()
+        gate = self.held_writer(mode)
+        event_type = "ENTERED" if kind == "signal" else "ELIGIBILITY"
+        attempts = []
+        native = self.store.record_hot_cohort_revision
+        self.service._cohort_retry_seconds = .01
+        self.service._selected = ("7", "condition")
+        async def request(_api, _path, _body):
+            return SimpleNamespace(payload={"nxtEnable": "Y", "upl_pric": "+130000"})
+        self.service._broker = SimpleNamespace(request=request)
+
+        def record(revision, current):
+            if revision["event_type"] == event_type and revision["stock_code"] == code:
+                attempts.append(copy.deepcopy([revision, current]))
+                with patch.object(self.store, "_connect", side_effect=gate):
+                    return native(revision, current)
+            return native(revision, current)
+
+        async def run():
+            await self.service.start()
+            with patch.object(self.store, "record_hot_cohort_revision", side_effect=record):
+                try:
+                    self.service._queue_signal(code, "I", "REAL", "")
+                    await self.held(gate)
+                    queue = self.service._signal_queue if kind == "signal" else self.service._metadata_queue
+                    self.assertEqual(1, queue._unfinished_tasks)
+                    if kind == "signal":
+                        self.assertNotIn(code, self.service._cohort)
+                    else:
+                        self.assertIsNone(self.service._cohort[code]["nxt_eligible"])
+                    # The state owner does not serialize VI's independent transaction.
+                    await asyncio.wait_for(await self.send(peer), 10)
+                    self.assertEqual(1, len(self.rows()))
+                finally:
+                    gate.release.set()
+                    await asyncio.wait_for(self.service.close(), 30)
+        asyncio.run(run())
+        self.assertEqual(2, len(attempts))
+        self.assertEqual(attempts[0], attempts[1])
+        history = self.store.load_market_event_history("cohort", code=code)
+        self.assertEqual(2, len(history))
+        self.assertEqual({"ENTERED", "ELIGIBILITY"}, {row["event_type"] for row in history})
+        current = next(row for row in self.store.load_hot_cohort(active_only=True) if row["stock_code"] == code)
+        self.assertTrue(current["nxt_eligible"])
+        self.assertTrue(self.service._cohort[code]["nxt_eligible"])
+        calls = [call for call in summarize_db_calls(self.started, time.time(), mode="raw")["calls"]
+                 if call["writer_kind"] == "market_event:hot_cohort" and call["access_mode"] == "write"]
+        self.assertEqual(3, len(calls))
+        self.assertEqual(3, len({call["backend_pid"] for call in calls}))
+        self.assertEqual(1, self.service._cohort_save_failures)
+        self.assertEqual(0, self.service._signal_queue._unfinished_tasks)
+        self.assertEqual(0, self.service._metadata_queue._unfinished_tasks)
+        return calls
+
+    def test_signal_worker_native_statement_rollback_retains_input(self):
+        calls = self._cohort_worker_retry("signal", "statement_error")
+        self.assertEqual(1, sum(call["rollbacks"] for call in calls))
+
+    def test_signal_worker_actual_commit_ack_loss_retries_identical_input(self):
+        calls = self._cohort_worker_retry("signal", "ack_loss")
+        self.assertIn("unknown", {call["outcome"] for call in calls})
+
+    def test_metadata_worker_native_statement_rollback_retains_input(self):
+        calls = self._cohort_worker_retry("metadata", "statement_error")
+        self.assertEqual(1, sum(call["rollbacks"] for call in calls))
+
+    def test_metadata_worker_actual_commit_ack_loss_retries_identical_input(self):
+        calls = self._cohort_worker_retry("metadata", "ack_loss")
+        self.assertIn("unknown", {call["outcome"] for call in calls})
+
+    def test_cohort_cancelled_waiter_and_close_keep_actual_commit_owned(self):
+        code = self.code()
+        gate = self.held_writer()
+        self.service._selected = ("7", "condition")
+        self.service._cohort_drain_warning_seconds = .02
+        async def request(_api, _path, _body):
+            return SimpleNamespace(payload={"nxtEnable": "Y", "upl_pric": "+130000"})
+        self.service._broker = SimpleNamespace(request=request)
+
+        async def run():
+            await self.service.start()
+            with patch.object(self.store, "_connect", side_effect=gate):
+                waiter = asyncio.create_task(self.service.record_condition_signal(code, "I", source="REAL"))
+                closing = None
+                try:
+                    await self.held(gate)
+                    waiter.cancel()
+                    await asyncio.sleep(.01)
+                    waiter.cancel()
+                    closing = asyncio.create_task(self.service.close())
+                    await asyncio.sleep(.05)
+                    closing.cancel()
+                    await asyncio.sleep(.01)
+                    closing.cancel()
+                    self.assertFalse(waiter.done())
+                    self.assertFalse(self.service._close_task.done())
+                    self.assertNotIn(code, self.service._cohort)
+                finally:
+                    gate.release.set()
+                    await asyncio.wait_for(asyncio.gather(waiter, *([closing] if closing else []),
+                                                         return_exceptions=True), 30)
+                    await self.service.close()
+                self.assertTrue(waiter.cancelled())
+                self.assertTrue(closing.cancelled())
+        asyncio.run(run())
+        current = next(row for row in self.store.load_hot_cohort(active_only=True) if row["stock_code"] == code)
+        self.assertTrue(current["nxt_eligible"])
+        self.assertIsNone(self.service._cohort_native)
+        self.assertFalse(self.service._cohort_work)
+        self.assertTrue(all(connection.closed for connection in gate.connections))
+
     def test_upper_fact_capture_preserves_history_and_native_call_identity(self):
         import json
         from pathlib import Path

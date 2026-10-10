@@ -34,6 +34,17 @@ async def owned_to_thread(function, /, *args, **kwargs):
     return await runtime.to_thread(function, *args, **kwargs)
 
 
+def owned_payload_credit():
+    """Share three large-input credits across peers in the same run/loop."""
+    runtime = _RUNTIME.get()
+    if runtime is None:
+        return asyncio.Semaphore(3)
+    runtime.require_active()
+    if runtime._payload_credit is None:
+        runtime._payload_credit = asyncio.Semaphore(3)
+    return runtime._payload_credit
+
+
 class ReplayRuntimeScope:
     """One loop/run owns submissions before an executor thread opens a DB.
 
@@ -58,6 +69,7 @@ class ReplayRuntimeScope:
         self._timed_out = False
         self._drain_task = None
         self._closing = False
+        self._payload_credit = None
 
     @contextmanager
     def activate(self):

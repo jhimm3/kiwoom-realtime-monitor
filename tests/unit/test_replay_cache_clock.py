@@ -187,7 +187,8 @@ class ReplayCacheClockTests(unittest.TestCase):
         lease = ReplayDatabaseLease(URL, TOKEN, baseline_version=2,
                                     cache_clock=Top20FixtureClock(ORIGIN))
         manifest = {'version': 2, 'config': lease.config, 'tables': dict.fromkeys(TABLES_V2, {}),
-                    'cache_clock': lease._clock_contract}
+                    'cache_clock': lease._clock_contract,
+                    'sequences': dict.fromkeys(lease._sequences_scope, {})}
         cursor = MagicMock()
         for mutate, message in (
             (lambda doc: doc['cache_clock'].update(origin_epoch=0), 'clock_mismatch'),

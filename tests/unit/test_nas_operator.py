@@ -70,6 +70,180 @@ def scoped_trace_fixture():
 
 
 class ScopedOperatorTests(unittest.TestCase):
+    def test_capacity_worker_requires_real_headroom_full_window_and_durable_native_counts(self):
+        # The administrator's operator gate has no app/capacity source tree.
+        # Exercise the worker's acceptance bridge without importing app modules.
+        from types import ModuleType, SimpleNamespace
+        capacity = ModuleType('scripts.check_causal_capture_capacity')
+        capacity.operator_capacity_options = lambda profile, work: SimpleNamespace(capture_seconds=60, messages=1200)
+        result = dict(memory_preflight={
+            'required_headroom_bytes': 9 * 1024**3, 'host_available_bytes': 10 * 1024**3,
+            'container_headroom_bytes': 10 * 1024**3}, memory_preflight_exercised=True,
+            actual_capture_wall_seconds=60, messages_completed=1200, trace={'accepted': 21},
+            native_counts={'native_delivery_consumed': 12012, 'native_delivery_supported': 12000,
+                           'native_delivery_uncovered': 12, 'mixed_rounds': 6},
+            account_large_method_counts={'save_shadow_monitor_state': 2},
+            native_store_method_counts={'save_query': 1},
+            persistence=dict(events=21, state='complete', collector_messages=1206, closed_deliveries=12000,
+                native_operation_method_counts={'save_shadow_monitor_state': 2, 'save_query': 1}))
+        request = {'profile': 'recorder-capacity-smoke'}
+        capacity.run = unittest.mock.AsyncMock(return_value=result)
+        with patch.dict(op.sys.modules, {'scripts.check_causal_capture_capacity': capacity}):
+            outcome = worker.recorder_capacity(request)
+            self.assertEqual('60second_smoke', outcome['capacity_gate'])
+            self.assertFalse(outcome['whole_app_performance_accepted'])
+        for field, value, reason in (
+                ('container_headroom_bytes', None, 'real_headroom'),
+                ('actual_capture_wall_seconds', 59, 'real_window'),
+                ('collector_messages', 1199, 'durable_count'),
+                ('closed_deliveries', 11999, 'durable_count'),
+                ('save_shadow_monitor_state', 1, 'native_input_pairs'),
+                ('save_query', 0, 'native_store_pairs')):
+            changed = copy.deepcopy(result)
+            if field == 'container_headroom_bytes':
+                changed['memory_preflight'][field] = value
+            elif field == 'actual_capture_wall_seconds':
+                changed[field] = value
+            elif field in ('collector_messages', 'closed_deliveries'):
+                changed['persistence'][field] = value
+            else:
+                changed['persistence']['native_operation_method_counts'][field] = value
+            capacity.run = unittest.mock.AsyncMock(return_value=changed)
+            with self.subTest(field=field), patch.dict(op.sys.modules, {'scripts.check_causal_capture_capacity': capacity}):
+                with self.assertRaisesRegex(RuntimeError, reason):
+                    worker.recorder_capacity(request)
+
+    def test_worker_v3_forwards_source_clock_and_refuses_another_trace_before_sql(self):
+        # The candidate CLI handles capsule/frontier/baseline verification. This
+        # contract tests the fixed worker's version/trace/clock argument bridge.
+        from types import ModuleType
+        statements = b'["SELECT 1"]'
+        baseline = dict(version=3, owner_token='a' * 32, source_state_equivalent=False,
+            statements_sha256=hashlib.sha256(statements).hexdigest(),
+            source_origin='2026-10-12T09:00:00+09:00', account_context={'trace_id': 'trace'})
+        request = dict(trace='trace', baseline='b' * 64, window_start=0, window_end=1,
+                       mode='recorded_operations', concurrency=2,
+                       include_workload=[], exclude_workload=[], collector_component=[])
+        def execute(args, output):
+            output.write(json.dumps({'state': 'ok', 'result': {'state': 'complete'}}))
+            self.assertEqual('3', args[args.index('--baseline-version') + 1])
+            self.assertEqual(baseline['source_origin'], args[args.index('--source-origin') + 1])
+            return 0
+        package = ModuleType('kiwoom_monitor')
+        central = ModuleType('kiwoom_monitor.central_server')
+        cli = ModuleType('kiwoom_monitor.central_server.diagnostic_replay_database_cli')
+        cli.main = execute
+        central.diagnostic_replay_database_cli = cli
+        package.central_server = central
+        postgres = ModuleType('psycopg')
+        postgres.connect = unittest.mock.MagicMock()
+        with patch.dict(op.sys.modules, {'kiwoom_monitor': package, 'kiwoom_monitor.central_server': central,
+                                        'kiwoom_monitor.central_server.diagnostic_replay_database_cli': cli,
+                                        'psycopg': postgres}), \
+             patch.object(worker.Path, 'read_text', return_value=json.dumps(baseline)), \
+             patch.object(worker.Path, 'read_bytes', return_value=statements), \
+             patch.dict(worker.os.environ):
+            connect = postgres.connect
+            self.assertEqual('passed', worker.replay(request, 'fixture-url')['state'])
+            connect.assert_called_once_with('fixture-url')
+            connect.reset_mock()
+            with self.assertRaisesRegex(RuntimeError, 'baseline_account_trace_mismatch'):
+                worker.replay({**request, 'trace': 'other'}, 'fixture-url')
+            connect.assert_not_called()
+
+    def block_fixture(self):
+        trace_id, manifest, files = scoped_trace_fixture()
+        blocks = [b'a' * 1024, b'b' * 1024]
+        digest = hashlib.sha256(b''.join(blocks)).hexdigest()
+        name = 'block-' + digest + '-000.payloads'
+        parts = [dict(index=index, bytes=len(value), sha256=hashlib.sha256(value).hexdigest(),
+                      name=name, offset=index * 1024) for index, value in enumerate(blocks)]
+        manifest.update(schema_version=4, blobs={digest: dict(format='blocks/v1', bytes=2048, parts=parts)})
+        files.update({'manifest.json': json.dumps(manifest).encode(), name: b''.join(blocks)})
+        return trace_id, manifest, files, digest, name
+
+    def test_block_registration_copies_physical_bundle_and_rechecks_registered_bytes(self):
+        trace_id, manifest, files, digest, name = self.block_fixture()
+        incoming, private = MemoryTree(), MemoryTree()
+        incoming.documents.update(files)
+        operator = op.Operator({'trace_dir': '/incoming', 'allowed_uid': 1000,
+            'input_file_limit': 64 * 1024 ** 2, 'input_total_limit': 1024 ** 3}, private)
+        with patch.object(op, 'Tree', return_value=incoming):
+            result = operator.register('traces', trace_id, 'scoped-operations')
+            self.assertIn(name, result['files'])
+            self.assertNotIn('payload-' + digest + '.json', result['files'])
+            self.assertEqual(result, operator.registered_input('traces', trace_id))
+            private.documents['traces/' + trace_id + '/' + name] = b'changed'
+            with self.assertRaisesRegex(op.Rejected, 'registered_input_changed'):
+                operator.registered_input('traces', trace_id)
+
+    def test_block_corruption_order_offsets_paths_and_root_hash_reject_before_publication(self):
+        mutations = ('bytes', 'order', 'offset', 'path', 'index', 'hash', 'trailing', 'schema', 'bool')
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                trace_id, manifest, files, digest, name = self.block_fixture()
+                root = manifest['blobs'][digest]
+                if mutation == 'bytes':
+                    files[name] = b'!' + files[name][1:]
+                elif mutation == 'order':
+                    root['parts'].reverse()
+                elif mutation == 'offset':
+                    root['parts'][1]['offset'] = 1023
+                elif mutation == 'path':
+                    root['parts'][0]['name'] = '../outside'
+                elif mutation == 'index':
+                    root['parts'][0]['index'] = 1
+                elif mutation == 'hash':
+                    manifest['blobs'] = {'c' * 64: root}
+                elif mutation == 'trailing':
+                    files[name] += b'!'
+                elif mutation == 'schema':
+                    manifest['schema_version'] = 3
+                else:
+                    root['parts'][0]['bytes'] = True
+                files['manifest.json'] = json.dumps(manifest).encode()
+                incoming, private = MemoryTree(), MemoryTree()
+                incoming.documents.update(files)
+                operator = op.Operator({'trace_dir': '/incoming', 'allowed_uid': 1000,
+                    'input_file_limit': 64 * 1024 ** 2, 'input_total_limit': 1024 ** 3}, private)
+                with patch.object(op, 'Tree', return_value=incoming), self.assertRaises(op.Rejected):
+                    operator.register('traces', trace_id, 'scoped-operations')
+                self.assertEqual({}, private.documents)
+
+    def test_v3_baseline_registration_pins_context_and_requires_aware_clock(self):
+        input_id = 'a' * 64
+        statements = b'["SELECT 1"]'
+        manifest = dict(baseline_id=input_id, database='kiwoom_monitor_replay_test', version=3,
+            source_state_equivalent=False, owner_token='f' * 32,
+            statements_sha256=hashlib.sha256(statements).hexdigest(), source_origin='2026-10-12T09:00:00+09:00',
+            account_context=dict(version='account-context/v1', trace_id='trace', sha256='b' * 64,
+                                 owner_bindings_sha256='c' * 64, source_state_equivalent=False))
+        for mutation in ('valid', 'missing', 'naive', 'hash', 'equivalence', 'version'):
+            with self.subTest(mutation=mutation):
+                value = copy.deepcopy(manifest)
+                if mutation == 'missing':
+                    value.pop('account_context')
+                elif mutation == 'naive':
+                    value['source_origin'] = '2026-10-12T09:00:00'
+                elif mutation == 'hash':
+                    value['account_context']['sha256'] = 'invalid'
+                elif mutation == 'equivalence':
+                    value['source_state_equivalent'] = True
+                elif mutation == 'version':
+                    value['version'] = True
+                incoming, private = MemoryTree(), MemoryTree()
+                incoming.documents.update({'baseline.json': value, 'statements.json': statements})
+                operator = op.Operator({'project': '/project', 'allowed_uid': 1000,
+                    'input_file_limit': 64 * 1024 ** 2, 'input_total_limit': 1024 ** 3}, private)
+                with patch.object(op, 'Tree', return_value=incoming):
+                    if mutation == 'valid':
+                        result = operator.register('baselines', input_id)
+                        self.assertFalse(result['source_state_equivalent'])
+                    else:
+                        with self.assertRaises(op.Rejected):
+                            operator.register('baselines', input_id)
+                        self.assertEqual({}, private.documents)
+
     def test_profile_preflight_and_partial_policy_require_explicit_safe_arguments(self):
         config = {'max_concurrency': 16}
         base = ['replay', 'candidate', 'trace', '--baseline-profile', 'empty-v1',
@@ -437,6 +611,55 @@ class NasOperatorTests(unittest.TestCase):
         self.assertFalse(op.parser().parse_args(base).pause_operational)
         self.assertTrue(op.parser().parse_args(base + ['--pause-operational']).pause_operational)
 
+    def test_capacity_profiles_require_pause_and_reject_arbitrary_tests_or_memory(self):
+        config = {'profiles': ['selected', 'storage'], 'max_concurrency': 16}
+        for profile in op.CAPACITY_PROFILES:
+            args = op.parser().parse_args(['test', 'candidate', '--profile', profile])
+            with self.assertRaisesRegex(op.Rejected, 'capacity_requires_operational_pause'):
+                op.validate_args(args, config)
+            args.pause_operational = True
+            op.validate_args(args, config)
+            args.test = ['tests.unit.arbitrary_work']
+            with self.assertRaisesRegex(op.Rejected, 'profile_does_not_accept_test_names'):
+                op.validate_args(args, config)
+        args = op.parser().parse_args(['test', 'candidate', '--profile', 'storage', '--pause-operational'])
+        with self.assertRaisesRegex(op.Rejected, 'test_pause_profile_invalid'):
+            op.validate_args(args, config)
+        with contextlib.redirect_stderr(__import__('io').StringIO()), self.assertRaises(SystemExit):
+            op.parser().parse_args(['test', 'candidate', '--profile', 'recorder-capacity', '--memory', '64g'])
+
+    def test_capacity_resources_are_fixed_and_do_not_mutate_installed_config(self):
+        config = dict(worker_memory=4 * 1024**3, minimum_disk_free=4 * 1024**3, job_timeout=7200)
+        original = dict(config)
+        for profile in op.CAPACITY_PROFILES:
+            args = op.parser().parse_args(['test', 'r', '--profile', profile, '--pause-operational'])
+            self.assertEqual(dict(profile='recorder-capacity', worker_memory=12 * 1024**3,
+                minimum_disk_free=12 * 1024**3, job_timeout=14400), op.job_resources(args, config))
+        args = op.parser().parse_args(['test', 'r', '--profile', 'selected', '--test', 'tests.unit.x'])
+        self.assertEqual(4 * 1024**3, op.job_resources(args, config)['worker_memory'])
+        self.assertEqual(original, config)
+
+    def test_capacity_resource_rejection_happens_before_creating_or_stopping_containers(self):
+        from types import SimpleNamespace
+        operator = ReplayMaintenanceOperator()
+        operator.config.update(worker_memory=4 * 1024**3, pg_memory=768 * 1024**2,
+            minimum_disk_free=4 * 1024**3, worker_cpuset='0,1', pg_cpuset='0', job_timeout=7200)
+        args = op.parser().parse_args(['test', 'candidate', '--profile', 'recorder-capacity', '--pause-operational'])
+        meminfo = unittest.mock.Mock()
+        meminfo.read_text.return_value = 'MemAvailable: 10000000 kB\n'
+        with patch.object(op.os, 'sched_getaffinity', return_value={0, 1}, create=True), \
+             patch.object(op, 'Path', return_value=meminfo), \
+             patch.object(op.shutil, 'disk_usage', return_value=SimpleNamespace(free=20 * 1024**3)):
+            with self.assertRaisesRegex(op.Rejected, 'insufficient_memory_headroom'):
+                operator.run_job(args, {}, 'hash')
+        self.assertEqual([], operator.actions)
+        self.assertTrue(operator.running)
+        with patch.object(op.os, 'sched_getaffinity', return_value={0, 1}, create=True), \
+             patch.object(op.shutil, 'disk_usage', return_value=SimpleNamespace(free=5 * 1024**3)):
+            with self.assertRaisesRegex(op.Rejected, 'insufficient_disk_headroom'):
+                operator.run_job(args, {}, 'hash')
+        self.assertEqual([], operator.actions)
+
     def test_replay_pause_resumes_exact_server_and_never_touches_database(self):
         operator = ReplayMaintenanceOperator()
         job_id = 'a' * 32
@@ -530,8 +753,10 @@ class NasOperatorTests(unittest.TestCase):
         self.assertTrue(operator.running)
 
     def test_replay_job_drains_temporary_containers_before_resume_on_success_and_failure(self):
-        for failure in (None, 'worker', 'cleanup', 'resume'):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+        cases = [(failure, False) for failure in (None, 'data_owner', 'data_mode', 'postgres', 'worker', 'cleanup', 'resume')]
+        cases += [(failure, True) for failure in (None, 'postgres', 'worker', 'cleanup', 'resume')]
+        for failure, capacity in cases:
+            with self.subTest(failure=failure, capacity=capacity), tempfile.TemporaryDirectory() as directory:
                 operator = ReplayMaintenanceOperator()
                 operator.private.path = directory
                 operator.config.update(worker_memory=256 * 1024 ** 2, pg_memory=128 * 1024 ** 2,
@@ -540,18 +765,26 @@ class NasOperatorTests(unittest.TestCase):
                 args = op.parser().parse_args(['replay', 'candidate', 'trace', '--baseline', 'a' * 64,
                                              '--window-start', '0', '--window-end', '1',
                                              '--pause-operational'])
+                if capacity:
+                    args = op.parser().parse_args(['test', 'candidate', '--profile', 'recorder-capacity',
+                                                  '--pause-operational'])
                 output = MemoryTree()
-                output.put_json('result.json', {'state': 'passed', 'memory_limit_bytes': 1024,
+                output.put_json('result.json', {'state': 'passed', 'memory_limit_bytes': op.CAPACITY_WORKER_MEMORY if capacity else 1024,
                                               'cpu_affinity': '0,1'})
                 original_docker, original_inspect = operator.docker, operator.inspect
 
-                def docker(argv, timeout=30, log=None):
+                def docker(argv, timeout=30, log=None, capture_stderr=False):
                     if argv[0] == 'stop' or (argv[0] == 'start' and argv[-1] == 'server-id'):
                         if failure == 'resume' and argv[0] == 'start':
                             raise op.Rejected('injected_resume')
                         return original_docker(argv, timeout, log)
                     operator.actions.append(tuple(argv))
+                    if failure == 'postgres' and argv[0] == 'exec' and 'pg_isready' in argv:
+                        raise op.Rejected('docker_command_failed')
+                    if argv[0] == 'logs':
+                        return b'initdb: error: Permission denied TOKEN=private\n'
                     if argv[:2] == ['start', '-a']:
+                        self.assertEqual(14400 if capacity else 10, timeout)
                         self.assertFalse(operator.running)
                         self.assertTrue(operator.database_running)
                         if failure == 'worker':
@@ -566,8 +799,9 @@ class NasOperatorTests(unittest.TestCase):
                     if name in ('server-id', 'database-id'):
                         return original_inspect(name)
                     job_id = name.rsplit('-', 1)[-1]
+                    limit = (op.CAPACITY_WORKER_MEMORY if 'worker' in name else operator.config['pg_memory']) if capacity else 1024
                     return {'State': {'ExitCode': 0, 'Running': True},
-                            'HostConfig': {'Memory': 1024, 'Privileged': False, 'CpusetCpus': '0,1'},
+                            'HostConfig': {'Memory': limit, 'Privileged': False, 'CpusetCpus': '0,1'},
                             'Config': {'Labels': {op.LABEL: job_id}}}
 
                 def cleanup(job_id):
@@ -577,25 +811,72 @@ class NasOperatorTests(unittest.TestCase):
 
                 operator.docker, operator.inspect, operator.cleanup_job = docker, inspect, cleanup
                 operator.registered_input = lambda *unused: {'source_state_equivalent': False}
-                operator.worker_argv = lambda job, *unused: ['create', 'kiwoom-op-worker-' + job]
+                operator.worker_argv = lambda job, *unused, **options: ['create', 'kiwoom-op-worker-' + job]
                 real_path = Path
                 meminfo = unittest.mock.Mock()
                 meminfo.read_text.return_value = 'MemAvailable: 20000000 kB\n'
+                from types import SimpleNamespace
+                data_stats = [SimpleNamespace(st_uid=70 if failure == 'data_owner' else 0,
+                                              st_mode=0o40700),
+                              SimpleNamespace(st_uid=0, st_mode=0o40700 if failure == 'data_mode' else 0o40711)]
                 with patch.object(op.os, 'sched_getaffinity', return_value={0, 1}, create=True), \
+                        patch.object(op.shutil, 'disk_usage', return_value=SimpleNamespace(free=20 * 1024**3)), \
                         patch.object(op.os, 'chown', create=True), \
+                        patch.object(op.os, 'O_DIRECTORY', 0x10000, create=True), \
+                        patch.object(op.os, 'O_NOFOLLOW', 0x20000, create=True), \
+                        patch.object(op.os, 'open', return_value=707) as data_open, \
+                        patch.object(op.os, 'fstat', side_effect=data_stats), \
+                        patch.object(op.os, 'fchmod', create=True) as data_chmod, \
+                        patch.object(op.os, 'close') as data_close, \
                         patch.object(op, 'Path', side_effect=lambda p: meminfo if p == '/proc/meminfo' else real_path(p)), \
                         patch.object(op, 'fingerprint', return_value='approved-server'), \
                         patch.object(op, 'Tree', side_effect=lambda p, **unused: operator.store if p == '/store' else output), \
-                        patch.object(op, 'verify_cpu_affinity'):
+                        patch.object(op, 'verify_cpu_affinity'), \
+                        (patch.object(op.time, 'monotonic', side_effect=itertools.count(0, 61))
+                         if failure == 'postgres' else contextlib.nullcontext()):
                     if failure:
-                        with self.assertRaisesRegex(op.Rejected, 'injected_' + failure):
+                        expected = {'postgres': 'temporary_postgres_not_ready',
+                                    'data_owner': 'disk_data_parent_identity_invalid',
+                                    'data_mode': 'disk_data_parent_mode_not_applied'}.get(failure, 'injected_' + failure)
+                        with self.assertRaisesRegex(op.Rejected, expected):
                             operator.run_job(args, {}, 'candidate-hash')
                     else:
                         report = operator.run_job(args, {}, 'candidate-hash')
                         self.assertTrue(report['operational_resume']['collection_gap_expected'])
                     starts = [i for i, x in enumerate(operator.actions) if x == ('start', 'server-id')]
                     cleanups = [i for i, x in enumerate(operator.actions) if x[0] == 'cleanup']
-                    if failure == 'cleanup':
+                    if capacity:
+                        data_open.assert_not_called()
+                        data_close.assert_not_called()
+                    else:
+                        data_open.assert_called_once()
+                        self.assertEqual({'dir_fd': 7}, data_open.call_args.kwargs)
+                        self.assertTrue(data_open.call_args.args[0].endswith('/postgres'))
+                        self.assertEqual(op.os.O_RDONLY | op.os.O_DIRECTORY | op.os.O_NOFOLLOW,
+                                         data_open.call_args.args[1])
+                        data_close.assert_called_once_with(707)
+                    if failure in ('data_owner', 'data_mode'):
+                        self.assertFalse(starts)
+                        self.assertTrue(operator.running)
+                        self.assertFalse(any(action[0] == 'create' for action in operator.actions))
+                        if failure == 'data_owner':
+                            data_chmod.assert_not_called()
+                        else:
+                            data_chmod.assert_called_once_with(707, 0o711)
+                    elif failure == 'postgres':
+                        self.assertFalse(starts)
+                        self.assertTrue(operator.running)
+                        logs = [i for i, x in enumerate(operator.actions) if x[0] == 'logs']
+                        self.assertLess(logs[0], cleanups[0])
+                        failed_report = next(value for key, value in operator.private.documents.items()
+                                             if key.startswith('reports/'))
+                        self.assertEqual('postgres_readiness', failed_report['failure_stage'])
+                        self.assertEqual(1, failed_report['postgres_readiness_attempts'])
+                        self.assertEqual(['permission_denied', 'initdb_failed'],
+                                         failed_report['postgres_startup']['log_markers'])
+                        self.assertTrue(failed_report['cleanup_complete'])
+                        self.assertNotIn('TOKEN', repr(failed_report))
+                    elif failure == 'cleanup':
                         self.assertFalse(starts)
                         self.assertFalse(operator.running)
                         self.assertEqual('awaiting_job_cleanup', operator.operational_journal()['state'])
@@ -607,6 +888,15 @@ class NasOperatorTests(unittest.TestCase):
                         self.assertGreater(starts[0], cleanups[0])
                         self.assertEqual('complete', operator.job_journal()['state'])
                     self.assertTrue(operator.database_running)
+
+    def test_disk_parent_fix_grants_only_search_to_postgres_uid(self):
+        # Native failed fixture: root parent0700 and already-created PGDATA uid70/0700.
+        def permissions(mode, owner, caller):
+            return (mode >> 6) & 7 if owner == caller else mode & 7
+        self.assertEqual(0, permissions(0o700, 0, 70) & 1)
+        self.assertEqual(1, permissions(0o711, 0, 70))
+        self.assertEqual(7, permissions(0o700, 70, 70))
+        self.assertEqual(0, permissions(0o700, 0, 70))  # Protected private ancestor unchanged.
 
     def test_final_fence_failure_marks_report_failed_and_never_publishes_gate(self):
         for failure in (False, True):
@@ -749,6 +1039,106 @@ class NasOperatorTests(unittest.TestCase):
             report['worker_result_summary'])
         self.assertNotIn('secret', repr(report))
 
+    def test_worker_failure_reason_preserves_only_controlled_bounded_codes(self):
+        for reason in ('private_persistence_timeout', 'capacity_native_workload_incomplete',
+                       'TOKEN=secret', 'private_password=secret', 'private_' + 'x' * 111, 5):
+            with self.subTest(reason=reason):
+                output = MemoryTree()
+                output.put_json('result.json', {'state': 'failed', 'failure_reason': reason})
+                operator = op.Operator({}, None)
+                operator.inspect = lambda unused: {'State': {'ExitCode': 1, 'OOMKilled': False}}
+                report = {}
+                with patch.object(op, 'Tree', return_value=output):
+                    operator.worker_failure_diagnostics(report, 'a' * 32, '/worker')
+                summary = report['worker_result_summary']
+                if reason in ('private_persistence_timeout', 'capacity_native_workload_incomplete'):
+                    self.assertEqual(reason, summary['failure_reason'])
+                else:
+                    self.assertNotIn('failure_reason', summary)
+                self.assertNotIn('secret', repr(report))
+
+    def test_postgres_startup_diagnostics_are_bounded_and_exclude_logs_env_and_paths(self):
+        job = 'a' * 32
+        operator = op.Operator({}, None)
+        operator.inspect = lambda unused: {'Config': {'Labels': {op.LABEL: job},
+            'Env': ['PASSWORD=private']}, 'State': {'Running': False, 'ExitCode': 1,
+            'OOMKilled': False, 'Status': 'exited', 'Error': 'private /host/path'}}
+        raw = (b'private=' + b'x' * 70000 + b'\ninitdb: error: Permission denied /private/path\n'
+               b'mkdir: can\x27t create directory \x27/var/lib/postgresql/data/pgdata\x27: Permission denied\n')
+        calls = []
+        def docker(args, **kwargs):
+            calls.append((args, kwargs))
+            return b'["name=userns", "name=seccomp,profile=default"]' if args[0] == 'info' else raw
+        operator.docker = docker
+        report = {}
+        operator.postgres_failure_diagnostics(report, job)
+        summary = report['postgres_startup']
+        self.assertEqual(False, summary['Running'])
+        self.assertEqual(1, summary['ExitCode'])
+        self.assertEqual(['permission_denied', 'initdb_failed'], summary['log_markers'])
+        self.assertTrue(summary['log_tail_truncated'])
+        self.assertEqual(hashlib.sha256(raw[-65536:]).hexdigest(), summary['log_tail_sha256'])
+        self.assertTrue(summary['daemon_userns_enabled'])
+        self.assertEqual('image_default', summary['container_user'])
+        self.assertEqual([{'operation': 'other', 'role': 'other'},
+                          {'operation': 'mkdir', 'role': 'pgdata'}], summary['permission_locations'])
+        self.assertEqual([(['info', '--format', '{{json .SecurityOptions}}'], {'timeout': 5}),
+                          (['logs', '--tail', '100', 'kiwoom-op-pg-' + job],
+                           {'timeout': 5, 'capture_stderr': True})], calls)
+        for secret in ('private', 'PASSWORD', '/host/path'):
+            self.assertNotIn(secret, json.dumps(report))
+
+    def test_postgres_diagnostics_report_only_fixed_role_metadata_without_changing_it(self):
+        from types import SimpleNamespace
+        job = 'a' * 32
+        private = MemoryTree()
+        operator = op.Operator({}, private)
+        operator.inspect = lambda unused: {'Config': {'Labels': {op.LABEL: job}, 'User': '70:70'},
+                                           'HostConfig': {'UsernsMode': 'host'}}
+        operator.docker = lambda args, **unused: b'[]' if args[0] == 'info' else b''
+        stats = [SimpleNamespace(st_uid=0, st_gid=0, st_mode=0o40700), FileNotFoundError(),
+                 SimpleNamespace(st_uid=0, st_gid=0, st_mode=0o100600)]
+        report = {}
+        with patch.object(op.os, 'stat', side_effect=stats) as probe, \
+                patch.object(op.os, 'chmod') as chmod, patch.object(op.os, 'chown', create=True) as chown:
+            operator.postgres_failure_diagnostics(report, job)
+        self.assertEqual(['job-' + job + '/' + leaf for leaf in
+                          ('postgres', 'postgres/pgdata', 'postgres-password')],
+                         [call.args[0] for call in probe.call_args_list])
+        self.assertTrue(all(call.kwargs == {'dir_fd': 7, 'follow_symlinks': False}
+                            for call in probe.call_args_list))
+        self.assertEqual({'data_root': {'exists': True, 'uid': 0, 'gid': 0, 'mode': 0o700, 'kind': 'directory'},
+                          'pgdata': {'exists': False},
+                          'password_file': {'exists': True, 'uid': 0, 'gid': 0, 'mode': 0o600, 'kind': 'file'}},
+                         report['postgres_startup']['host_file_metadata'])
+        self.assertEqual('70:70', report['postgres_startup']['container_user'])
+        self.assertEqual('host', report['postgres_startup']['container_userns'])
+        self.assertFalse(report['postgres_startup']['daemon_userns_enabled'])
+        chmod.assert_not_called()
+        chown.assert_not_called()
+
+    def test_postgres_diagnostics_refuse_wrong_job_and_tolerate_missing_logs(self):
+        job = 'a' * 32
+        operator = op.Operator({}, None)
+        operator.docker = unittest.mock.Mock(side_effect=op.Rejected('docker_command_failed'))
+        operator.inspect = lambda unused: {'Config': {'Labels': {op.LABEL: 'b' * 32}}}
+        report = {}
+        operator.postgres_failure_diagnostics(report, job)
+        operator.docker.assert_not_called()
+        self.assertEqual('Rejected', report['postgres_startup']['inspection_error_type'])
+        operator.inspect = lambda unused: {'Config': {'Labels': {op.LABEL: job}}, 'State': {}}
+        operator.postgres_failure_diagnostics(report, job)
+        self.assertEqual('Rejected', report['postgres_startup']['log_error_type'])
+
+    def test_docker_log_capture_includes_stderr_without_exposing_it(self):
+        def run(args, **kwargs):
+            self.assertIs(subprocess.STDOUT, kwargs['stderr'])
+            self.assertEqual(5, kwargs['timeout'])
+            return subprocess.CompletedProcess(args, 0, b'initdb stderr', None)
+        operator = op.Operator({'docker': '/docker'}, None, run=run)
+        self.assertEqual(b'initdb stderr', operator.docker(['logs', '--tail', '100', 'fixture'],
+                                                        timeout=5, capture_stderr=True))
+
     def test_worker_test_summary_reports_failed_case_and_type_without_traceback_text(self):
         class TestCase:
             def __init__(self, name):
@@ -799,6 +1189,12 @@ class NasOperatorTests(unittest.TestCase):
         self.assertEqual(str(config['worker_memory']), args[args.index('--memory') + 1])
         self.assertEqual('0,1', args[args.index('--cpuset-cpus') + 1])
         self.assertNotIn('--cpus', args)
+        capacity = operator.worker_argv('b' * 32, 'pg', 'release', worker_memory=op.CAPACITY_WORKER_MEMORY)
+        self.assertEqual(str(12 * 1024**3), capacity[capacity.index('--memory') + 1])
+        self.assertEqual(str(12 * 1024**3), capacity[capacity.index('--memory-swap') + 1])
+        self.assertEqual(4 * 1024**3, config['worker_memory'])
+        with self.assertRaisesRegex(op.Rejected, 'invalid_worker_resource_profile'):
+            operator.worker_argv('c' * 32, 'pg', 'release', worker_memory=64 * 1024**3)
 
     def test_cpu_lists_are_bounded_and_invalid_or_duplicate_ranges_fail(self):
         self.assertEqual({0, 1, 4}, op.cpu_set('0-1,4'))

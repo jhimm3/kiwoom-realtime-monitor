@@ -12,6 +12,7 @@ import hashlib
 import inspect
 import json
 import time
+from contextlib import asynccontextmanager, nullcontext
 from collections import defaultdict
 from datetime import datetime, timedelta
 from threading import Event
@@ -23,9 +24,11 @@ from .diagnostic_replay_contract import (
     replay_operation_identity, thaw_payload, thaw_operation_arguments, validate_collector_message,
 )
 from .postgres_access import db_call_request_id, db_call_source
+from .diagnostic_trace_payload import BlockPayloadReference
 from .diagnostic_collector_replay import _MeasuredStore, _ReplayClock, _owned_close
 from .realtime_collector import CentralRealtimeCollector
 from .realtime_hub import RealtimeHub
+from .diagnostic_account_input import METHODS as ACCOUNT_METHODS, native_error_receipt, resolve_owner_bindings
 
 
 # Explicit native methods with supplied natural keys. No arbitrary trace dispatch,
@@ -42,12 +45,13 @@ _METHODS = frozenset({
     'replace_documents', 'load_documents', 'load_document',
     'save_shadow_monitor_state', 'load_shadow_monitor_state',
     'save_external_bars', 'load_external_bars',
-    'save_query', 'load_query',
-})
+    'save_query', 'load_query', 'append_vi_events',
+}) | ACCOUNT_METHODS
 
 
 def run_owned_recorded_experiment(database_url, owner_token, baseline_id, events, *,
-                                  config=None, baseline_version=1, cache_clock=None, **selection):
+                                  config=None, baseline_version=1, cache_clock=None,
+                                  collect_activity=False, account_context=None, **selection):
     """Offline worker entry: restore under ownership, execute, drain, unlock.
 
     This is not an API route. The native scheduler owns cancellation draining;
@@ -56,18 +60,30 @@ def run_owned_recorded_experiment(database_url, owner_token, baseline_id, events
     """
     from .diagnostic_replay_baseline import ReplayDatabaseLease, _ReplayStore
 
+    if baseline_version == 3 and (account_context is None or cache_clock is None):
+        raise ValueError('recorded_execution_v3_context_and_native_clock_required')
+    if baseline_version != 3 and account_context is not None:
+        raise ValueError('recorded_execution_account_context_requires_v3')
     if {'_shared_runtime', '_peer_operation_ids'} & selection.keys():
         raise ValueError('recorded_execution_shared_runtime_requires_lifecycle_owner')
+    if type(collect_activity) is not bool:
+        raise ValueError('recorded_execution_activity_flag_invalid')
 
     lease_options = {} if baseline_version == 1 and cache_clock is None else {
         'baseline_version': baseline_version, 'cache_clock': cache_clock}
     lease = ReplayDatabaseLease(database_url, owner_token, config=config, **lease_options)
-    if baseline_version == 2:
+    if baseline_version >= 2:
         from .diagnostic_top20_seed import Top20FixtureClock
         if (not isinstance(cache_clock, Top20FixtureClock) or cache_clock.armed
                 or 'clock' in selection):
             raise ValueError('recorded_execution_v2_requires_fresh_owned_clock')
         selection = {**selection, 'clock': cache_clock}
+    if baseline_version == 3:
+        # Own a validated, bounded copy before any connection or reset.
+        from .diagnostic_account_context import validate_account_context
+        validate_account_context(account_context)
+        account_context = validate_account_context(json.loads(json.dumps(account_context, allow_nan=False)))
+        selection = {**selection, 'account_context': account_context}
     bound = inspect.signature(_execute_recorded_operations).bind(None, events, **selection)
     bound.apply_defaults()
     options = bound.arguments
@@ -77,9 +93,15 @@ def run_owned_recorded_experiment(database_url, owner_token, baseline_id, events
         'started_mono_ns', 'window_start_seconds', 'window_end_seconds',
         'include_workloads', 'exclude_workloads', 'mode', 'collector_components')})
     # Binding/codec/clock errors must not reset even the dedicated test DB.
-    _prepare(_ReplayStore(lease), events, plan)
+    _prepare(_ReplayStore(lease), events, plan, account_context=account_context)
+    if baseline_version == 3:
+        expected_origin = account_context['snapshot_finished_at'] + (
+            options['started_mono_ns'] - account_context['snapshot_finished_mono_ns']) / 1e9
+        if (account_context['snapshot_finished_mono_ns'] > options['started_mono_ns']
+                or abs(cache_clock.origin.timestamp() - expected_origin) > .1):
+            raise ValueError('recorded_execution_account_source_clock_mismatch')
     inputs = _collector_inputs(events, plan)
-    if baseline_version == 2:
+    if baseline_version >= 2:
         # Paired source time and monotonic metadata are sampled separately. The
         # same 100 ms timing budget used in the result bounds their alignment;
         # another source day/clock must fail before any restore or connection.
@@ -90,9 +112,30 @@ def run_owned_recorded_experiment(database_url, owner_token, baseline_id, events
                 if abs((value['source_time'] - expected).total_seconds()) > .1:
                     raise ValueError('recorded_execution_source_clock_mismatch')
     with lease:
+        if baseline_version == 3:
+            # Verify the sealed capsule and exact authority frontier before
+            # resetting even this dedicated DB. A different selection must seal
+            # its own baseline; source tokens are never copied from the source DB.
+            from .diagnostic_replay_baseline import _hash
+            bindings = _account_bindings(account_context, events, plan)
+            expected = {'version': account_context['version'], 'trace_id': account_context['trace_id'],
+                        'sha256': account_context['sha256'], 'source_state_equivalent': False,
+                        'owner_bindings_sha256': _hash({domain + ':' + alias: value.token
+                            for (domain, alias), value in bindings.items()})}
+            with lease.connection.cursor() as cursor:
+                sealed_id, sealed = lease._baseline(cursor)
+            if sealed_id != baseline_id or sealed.get('account_context') != expected:
+                raise ValueError('recorded_execution_account_sealed_context_mismatch')
         baseline = lease.restore(baseline_id)
         try:
-            result = asyncio.run(_execute_recorded_operations(lease.store(), events, **selection))
+            from .diagnostic_replay_sampling import ReplayActivitySampler
+            observer = ReplayActivitySampler(lease.connection) if collect_activity else None
+            # No other management-connection caller runs inside this interval.
+            # Join the observer before status/digest/reset even if native replay fails.
+            with observer if observer is not None else nullcontext():
+                result = asyncio.run(_execute_recorded_operations(lease.store(), events, **selection))
+            if observer is not None:
+                result['postgres_activity'] = observer.report()
             if lease.status()['owned_connections']:
                 raise RuntimeError('recorded_execution_connections_not_drained')
             # Validation occurs after native drain, outside the measured interval.
@@ -110,11 +153,12 @@ def run_owned_recorded_experiment(database_url, owner_token, baseline_id, events
                           baseline_version=baseline_version,
                           database_ownership_verified=True,
                           fidelity='native_operations_on_owned_logical_baseline')
-            if baseline_version == 2:
+            if baseline_version >= 2:
                 result['cache_clock'] = {
                     'policy': cache_clock.policy, 'origin': cache_clock.origin.isoformat(),
                     'start_seconds': 0 if inputs else options['window_start_seconds'],
-                    'scope': 'query_cache_and_selected_collector_only',
+                    'scope': 'query_cache_account_lease_and_selected_collector' if baseline_version == 3
+                             else 'query_cache_and_selected_collector_only',
                     'collector_alignment_tolerance_ms': 100,
                 }
         finally:
@@ -129,7 +173,20 @@ _MAX_OPERATIONS = 4096
 _MAX_ACTORS = 64
 
 
-def _prepare(store, events, plan):
+def _account_bindings(context, events, plan):
+    if context is None:
+        return None
+    from .diagnostic_account_context import validate_account_context
+    validate_account_context(context)
+    selected = set(plan.operation_ids)
+    rows = [row for row in events if row.get('event_type') == 'operation_start'
+            and row.get('operation_id') in selected and row.get('method') in ACCOUNT_METHODS]
+    if any(row.get('account_alias_domain') != context['alias_domain'] for row in rows):
+        raise ValueError('recorded_execution_account_context_domain_mismatch')
+    return resolve_owner_bindings([*context['owner_bindings'], *rows])
+
+
+def _prepare(store, events, plan, *, account_context=None):
     """Validate the entire selected frontier before the first native invocation."""
     starts = {row['operation_id']: row for row in events
               if row.get('event_type') == 'operation_start'}
@@ -137,19 +194,41 @@ def _prepare(store, events, plan):
             if row.get('event_type') == 'operation_end'}
     if len(plan.operation_ids) > _MAX_OPERATIONS:
         raise ValueError('recorded_execution_operation_limit')
+    bindings = _account_bindings(account_context, events, plan)
     actors = defaultdict(list)
     for identifier in plan.operation_ids:
         row = starts[identifier]
         method = row['method']
         if method not in _METHODS:
             raise ValueError(f'recorded_execution_adapter_missing:{method}')
+        if method in ACCOUNT_METHODS or method == 'append_vi_events':
+            if getattr(getattr(store, '_lease', None), 'baseline_version', None) != 3:
+                raise ValueError('recorded_execution_account_vi_requires_v3')
+        if method in ACCOUNT_METHODS:
+            if bindings is None or not callable(getattr(store, '_execution_wall_now', None)):
+                raise ValueError('recorded_execution_account_context_and_clock_required')
+            ending = ends[identifier]
+            if ending.get('outcome') == 'failed':
+                from .diagnostic_account_input import NATIVE_ERROR_CODES
+                if (ending.get('native_error_code') not in NATIVE_ERROR_CODES
+                        or ending.get('exception_type') not in {'ValueError', 'RuntimeError'}):
+                    raise ValueError('recorded_execution_account_failure_receipt_required')
+            elif ending.get('outcome') != 'returned' or not (
+                    'result' in ending and type(ending['result']) in (bool, int, type(None))
+                    or ending.get('result_type') in {'dict', 'list', 'tuple'}
+                    and type(ending.get('result_count')) is int and ending['result_count'] >= 0):
+                raise ValueError('recorded_execution_account_result_receipt_required')
+        if method == 'append_vi_events' and (ends[identifier].get('outcome') != 'returned'
+                or type(ends[identifier].get('result')) is not int):
+            raise ValueError('recorded_execution_vi_result_receipt_required')
         if method in {'save_query', 'load_query'} and not callable(
                 getattr(store, '_query_cache_wall_time', None)):
             raise ValueError('recorded_execution_query_cache_requires_v2')
         native = getattr(store, method, None)
         if not callable(native) or inspect.iscoroutinefunction(native):
             raise ValueError(f'recorded_execution_native_method_missing:{method}')
-        arguments = thaw_operation_arguments(row)
+        arguments = (thaw_operation_arguments(row) if bindings is None
+                     else thaw_operation_arguments(row, owner_bindings=bindings))
         if type(arguments) is not dict:
             raise ValueError('recorded_execution_arguments_invalid')
         if (method in {'upsert_documents', 'replace_documents'}
@@ -167,7 +246,10 @@ def _prepare(store, events, plan):
         sequence = row.get('actor_sequence')
         if not actor or type(sequence) is not int or sequence <= 0:
             raise ValueError('recorded_execution_actor_sequence_invalid')
-        actors[actor].append((row, ends[identifier], native, arguments))
+        # Keep large immutable references, not every decoded window input.
+        retained = row['payload'] if type(row.get('payload')) is BlockPayloadReference else arguments
+        actors[actor].append((row, ends[identifier], native, retained))
+        del arguments
     if len(actors) > _MAX_ACTORS:
         raise ValueError('recorded_execution_actor_limit')
     for values in actors.values():
@@ -279,7 +361,7 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                                        include_workloads=(), exclude_workloads=(),
                                        concurrency=8, stop=None,
                                        mode='recorded_operations', collector_components=(), clock=None,
-                                       _shared_runtime=None, _peer_operation_ids=None):
+                                       _shared_runtime=None, _peer_operation_ids=None, account_context=None):
     """Execute on a caller-owned test store; no baseline/reset/network access.
 
     Intended only for local correctness and a future gated runner. Source wall
@@ -288,7 +370,9 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
     """
     if type(concurrency) is not int or not 1 <= concurrency <= 16:
         raise ValueError('recorded_execution_concurrency_invalid')
-    from .diagnostic_replay_runtime import ReplayRuntimeScope, owned_create_task, owned_to_thread
+    from .diagnostic_replay_runtime import (
+        ReplayRuntimeScope, owned_create_task, owned_to_thread, owned_payload_credit,
+    )
     if _shared_runtime is not None:
         from .diagnostic_top20_seed import Top20FixtureClock
         if (type(_shared_runtime) is not ReplayRuntimeScope or type(clock) is not Top20FixtureClock
@@ -317,11 +401,11 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                                                  if identifier in selected),
                        excluded_operation_ids=(*plan.excluded_operation_ids,
                            *(identifier for identifier in plan.operation_ids if identifier not in selected)))
-    actors = _prepare(store, events, plan)
+    actors = _prepare(store, events, plan, account_context=account_context)
+    bindings = _account_bindings(account_context, events, plan)
     inputs = _collector_inputs(events, plan)
     stop = stop if stop is not None else Event()
     limit = asyncio.Semaphore(concurrency)
-    origin = time.monotonic()
     if inputs and clock is None:
         first, value = next(iter(inputs.values()))[0]
         clock = _ReplayClock(value['source_time'] - timedelta(
@@ -329,6 +413,60 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
     # An owned lifecycle already started at source zero. Peers join that same
     # absolute timeline; they must not reset its clock or shift the window.
     timeline_start = 0 if inputs or _shared_runtime is not None else window_start_seconds
+    if (_shared_runtime is None and clock is not None
+            and callable(getattr(clock, 'arm', None)) and clock.armed):
+        raise ValueError('recorded_execution_clock_already_armed')
+    block_credit = owned_payload_credit()
+    primed = {}
+
+    async def drained_thread(function, *arguments, name):
+        # A cancelled waiter cannot retire the input credit until its actual
+        # decoding or native thread has returned.
+        task = owned_create_task(owned_to_thread(function, *arguments), name=name)
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+                stop.set()
+        result = task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def decode_block(row):
+        started = time.monotonic()
+        decode = (lambda: thaw_operation_arguments(row)) if bindings is None else (
+            lambda: thaw_operation_arguments(row, owner_bindings=bindings))
+        result = await drained_thread(decode, name='recorded-payload-prepare')
+        return result, (time.monotonic() - started) * 1000
+
+    # Prepare at most the first three near-boundary large inputs before starting
+    # a standalone timeline. All selected inputs already passed _prepare; this
+    # phase opens no native connection and retains only the credited frontier.
+    # Peers join an already running clock and must never move its origin.
+    if _shared_runtime is None:
+        first_blocks = sorted((entry for values in actors.values() for entry in values
+                               if type(entry[3]) is BlockPayloadReference),
+                              key=lambda entry: (entry[0]['entered_mono_ns'], entry[0]['seq']))
+        try:
+            for row, _, _, _ in first_blocks[:3]:
+                offset = (row['entered_mono_ns'] - started_mono_ns) / 1e9 - timeline_start
+                if offset > 1:
+                    break
+                await block_credit.acquire()
+                try:
+                    primed[row['operation_id']] = await decode_block(row)
+                except BaseException:
+                    block_credit.release()
+                    raise
+        except BaseException:
+            for _ in primed:
+                block_credit.release()
+            primed.clear()
+            raise
+    origin = time.monotonic()
     # v2's source origin identifies trace zero, while native-operation-only
     # windows skip the prefix. Cache wall time must advance to that window, but
     # scheduling/duration still start at zero. Restoration/preflight never arm.
@@ -355,6 +493,40 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
             delay = min(0.05, max(0, offset - elapsed()))
             await (clock.sleep(delay) if clock is not None else asyncio.sleep(delay))
 
+    # Three 64MiB typed inputs plus the existing 32MiB small-input window fit
+    # within 256MiB typed-copy credit. Physical RSS is measured separately.
+    @asynccontextmanager
+    async def prepared_input(row, arguments, record, offset):
+        if type(arguments) is not BlockPayloadReference:
+            record.update(payload_prepare_ms=0.0, payload_credit_wait_ms=0.0)
+            yield arguments
+            return
+        preloaded = primed.pop(row['operation_id'], None)
+        if preloaded is None:
+            # Do not let far-future actors occupy the bounded credits while
+            # earlier actors need them. Actor predecessor order is unchanged.
+            await until(max(0, offset - 1))
+            if stop.is_set():
+                yield None
+                return
+            credit_started = elapsed()
+            await block_credit.acquire()
+            record['payload_credit_wait_ms'] = (elapsed() - credit_started) * 1000
+        else:
+            record['payload_credit_wait_ms'] = 0.0
+        decoded = None
+        try:
+            decoded, prepare_ms = preloaded if preloaded is not None else await decode_block(row)
+            record['payload_prepare_ms'] = prepare_ms
+            record['payload_prepared_seconds'] = elapsed()
+            yield decoded
+        except BaseException:
+            stop.set()
+            raise
+        finally:
+            decoded = preloaded = None
+            block_credit.release()
+
     async def actor(values):
         predecessor_finished = 0
         for row, ending, native, arguments in values:
@@ -370,57 +542,80 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                 'state': 'not_started',
             }
             records.append(record)
-            await until(offset)
-            if stop.is_set():
-                continue
-            record['ready_seconds'] = elapsed()
-            record['actor_wait_ms'] = max(0, (predecessor_finished - offset) * 1000)
-            record['scheduler_lag_ms'] = max(0, (
-                record['ready_seconds'] - max(offset, predecessor_finished)) * 1000)
-            async with limit:
+            async with prepared_input(row, arguments, record, offset) as invocation_arguments:
+                await until(offset)
                 if stop.is_set():
                     continue
-                record['submitted_seconds'] = elapsed()
-                record['concurrency_wait_ms'] = (
-                    record['submitted_seconds'] - record['ready_seconds']) * 1000
+                record['ready_seconds'] = elapsed()
+                record['actor_wait_ms'] = max(0, (predecessor_finished - offset) * 1000)
+                record['scheduler_lag_ms'] = max(0, (
+                    record['ready_seconds'] - max(offset, predecessor_finished)) * 1000)
+                async with limit:
+                    if stop.is_set():
+                        continue
+                    record['submitted_seconds'] = elapsed()
+                    record['concurrency_wait_ms'] = (
+                        record['submitted_seconds'] - record['ready_seconds']) * 1000
 
-                def invoke():
-                    record['started_seconds'] = elapsed()
-                    record['worker_wait_ms'] = (
-                        record['started_seconds'] - record['submitted_seconds']) * 1000
-                    record['start_lag_ms'] = max(0, (record['started_seconds'] - offset) * 1000)
-                    with (
-                        capture_owner(row['workload_id'], row.get('producer_component', ''),
-                                      row['actor_id'], cause_input_id=row.get('cause_input_id', '')),
-                        replay_operation_identity(record['replay_operation_id']),
-                        db_call_source('diagnostic.recorded_operations'),
-                        db_call_request_id(record['replay_operation_id']),
-                    ):
-                        try:
-                            value = native(**arguments)
-                        except Exception as error:
-                            record.update(state='failed', exception_type=type(error).__name__)
-                            if _shared_runtime is not None:
-                                _shared_runtime._failure('native_operation', type(error).__name__)
-                            stop.set()
-                        else:
-                            record['native_finished_seconds'] = elapsed()
-                            observation_started = time.monotonic()
-                            digest, unavailable = _result_digest(value)
-                            record.update(state='returned', result_digest=digest,
-                                          result_digest_unavailable=unavailable,
-                                          result_observation_ms=(time.monotonic() - observation_started) * 1000)
-                        finally:
-                            record['finished_seconds'] = elapsed()
-                            record['native_elapsed_ms'] = (
-                                record.get('native_finished_seconds', record['finished_seconds'])
-                                - record['started_seconds']) * 1000
-                # Context variables reach the worker; the native method still owns
-                # its connection, rollback, commit and close. Never cancel a worker
-                # and claim that its DB transaction has already stopped.
-                # owned_to_thread installs its native-work token inside the
-                # copied context. A second context.run here would erase it.
-                await owned_to_thread(invoke)
+                    def invoke():
+                        worker_started = elapsed()
+                        record['worker_wait_ms'] = (
+                            worker_started - record['submitted_seconds']) * 1000
+                        record['started_seconds'] = worker_started
+                        record['start_lag_ms'] = max(0, (worker_started - offset) * 1000)
+                        with (
+                            capture_owner(row['workload_id'], row.get('producer_component', ''),
+                                          row['actor_id'], cause_input_id=row.get('cause_input_id', '')),
+                            replay_operation_identity(record['replay_operation_id']),
+                            db_call_source('diagnostic.recorded_operations'),
+                            db_call_request_id(record['replay_operation_id']),
+                        ):
+                            try:
+                                value = native(**invocation_arguments)
+                            except Exception as error:
+                                receipt = native_error_receipt(row['method'], error)
+                                matched = (row['method'] in ACCOUNT_METHODS and ending.get('outcome') == 'failed'
+                                    and receipt.get('native_error_code') is not None
+                                    and receipt['native_error_code'] == ending.get('native_error_code')
+                                    and type(error).__name__ == ending.get('exception_type'))
+                                # Native context managers have already rolled back
+                                # and closed before this receipt can be accepted.
+                                record.update(state='failed', exception_type=type(error).__name__,
+                                              expected_failure_matched=matched, **receipt)
+                                if not matched:
+                                    if _shared_runtime is not None:
+                                        _shared_runtime._failure('native_operation', type(error).__name__)
+                                    stop.set()
+                            else:
+                                record['native_finished_seconds'] = elapsed()
+                                observation_started = time.monotonic()
+                                digest, unavailable = _result_digest(value)
+                                record.update(state='returned', result_digest=digest,
+                                              result_digest_unavailable=unavailable,
+                                              result_observation_ms=(time.monotonic() - observation_started) * 1000)
+                                if row['method'] in ACCOUNT_METHODS or row['method'] == 'append_vi_events':
+                                    from .diagnostic_replay_contract import _result_summary
+                                    summary = _result_summary(row['method'], value)
+                                    record['result_summary'] = summary
+                                    record['source_result_matched'] = ending.get('outcome') == 'returned' and all(
+                                        key in ending and type(ending[key]) is type(item) and ending[key] == item
+                                        for key, item in summary.items())
+                                    if not record['source_result_matched']:
+                                        if _shared_runtime is not None:
+                                            _shared_runtime._failure('native_result', 'SourceResultMismatch')
+                                        stop.set()
+                            finally:
+                                record['finished_seconds'] = elapsed()
+                                record['native_elapsed_ms'] = (
+                                    record.get('native_finished_seconds', record['finished_seconds'])
+                                    - record['started_seconds']) * 1000
+                    # This actor retains both the input and its credit until
+                    # the owned native thread has actually returned.
+                    try:
+                        await drained_thread(invoke, name='recorded-native-worker')
+                    finally:
+                        invoke = None
+                        invocation_arguments = None
                 predecessor_finished = record['finished_seconds']
 
     async def collector_actor(component, values):
@@ -495,6 +690,11 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
             cancelled = True
             stop.set()
     errors = drain.result()
+    # Failed/stopped actors may never reach a primed entry. Retire its retained
+    # arguments before returning, and release the run-wide credit exactly once.
+    for _ in primed:
+        block_credit.release()
+    primed.clear()
     if cancelled:
         if _shared_runtime is not None:
             _shared_runtime._failure('peer_waiter_cancelled', 'CancelledError')
@@ -505,10 +705,15 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
     # when its last operation happens well before the window boundary.
     await until(window_end_seconds - timeline_start)
     records.sort(key=lambda value: (value['scheduled_seconds'], value['source_operation_id']))
-    complete = (all(value['state'] == 'returned' for value in records)
+    complete = (all((value['state'] == 'returned' and value.get('source_result_matched', True)
+                    and value['source_outcome'] == 'returned') or value.get('expected_failure_matched', False)
+                   for value in records)
                 and all(value['state'] == 'complete' and value.get('pending_records_after_drain') == 0
                         and not value.get('call_records_dropped') for value in collector_reports))
-    outcomes_match = all(value['source_outcome'] == value['state'] for value in records)
+    outcomes_match = all(value['source_outcome'] == value['state']
+                        and value.get('source_result_matched', True)
+                        and (value['state'] != 'failed' or value.get('expected_failure_matched', False))
+                        for value in records)
     return {
         'state': 'complete' if complete else 'incomplete', 'calls': records,
         'collector_reports': collector_reports, 'mode': mode,
@@ -530,7 +735,8 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
             and all(value.get('start_lag_ms', float('inf')) <= 100 for value in records)
             and all(value['input_lag_ms_max'] <= 100 for value in collector_reports),
         'source_state_equivalent': False,
-        'source_time_semantics': 'cache_and_selected_collector_source_clock'
+        'source_time_semantics': 'cache_account_lease_and_selected_collector_source_clock'
+            if account_context is not None else 'cache_and_selected_collector_source_clock'
             if getattr(clock, 'policy', None) == 'source_wall_real_elapsed/v1' else
             'collector_trace_clock_and_native_arguments' if inputs else 'arguments_only',
         'baseline_managed': False, 'public_execution_ready': False,

@@ -136,6 +136,12 @@ def replay(request, url):
         baseline = dict(version=1, owner_token=os.urandom(16).hex(), source_state_equivalent=False)
     else:
         baseline = json.loads(Path('/run/baseline/baseline.json').read_text())
+        require(type(baseline.get('version')) is int and baseline['version'] in (1, 2, 3),
+                'invalid_baseline_version')
+        if baseline['version'] == 3:
+            require(baseline.get('source_state_equivalent') is False and
+                    baseline.get('account_context', {}).get('trace_id') == request['trace'],
+                    'baseline_account_trace_mismatch')
         raw = Path('/run/baseline/statements.json').read_bytes()
         require(hashlib.sha256(raw).hexdigest() == baseline['statements_sha256'], 'baseline_statement_hash_mismatch')
         statements = json.loads(raw)
@@ -165,7 +171,7 @@ def replay(request, url):
     if request.get('expected_baseline_id'):
         args += ['--expected-baseline-id', request['expected_baseline_id']]
     args += ['--capture-policy', request.get('capture_policy', 'complete')]
-    if baseline['version'] == 2:
+    if baseline['version'] >= 2:
         args += ['--source-origin', baseline['source_origin']]
     for key, flag in (('include_workload', '--include-workload'), ('exclude_workload', '--exclude-workload'),
                       ('collector_component', '--collector-component')):
@@ -180,6 +186,36 @@ def replay(request, url):
             'source_state_equivalent': baseline['source_state_equivalent']}
 
 
+def recorder_capacity(request):
+    import asyncio
+    from scripts.check_causal_capture_capacity import operator_capacity_options, run
+    options = operator_capacity_options(request['profile'], WORK)
+    result = asyncio.run(run(options))
+    headroom = result.get('memory_preflight') or {}
+    required = 9 * 1024 ** 3
+    require(headroom.get('required_headroom_bytes') == required and
+            all(type(headroom.get(key)) is int and headroom[key] >= required
+                for key in ('host_available_bytes', 'container_headroom_bytes')),
+            'capacity_real_headroom_not_verified')
+    require(result['memory_preflight_exercised'] is True and
+            result['actual_capture_wall_seconds'] >= options.capture_seconds,
+            'capacity_real_window_not_verified')
+    require(result['messages_completed'] == options.messages and
+            result['persistence']['collector_messages'] == options.messages + result['native_counts']['mixed_rounds'] and
+            result['persistence']['closed_deliveries'] == result['native_counts']['native_delivery_supported'] and
+            result['persistence']['events'] == result['trace']['accepted'] and
+            result['persistence']['state'] == 'complete', 'capacity_durable_count_mismatch')
+    for method, count in result['account_large_method_counts'].items():
+        require(result['persistence']['native_operation_method_counts'].get(method) == count,
+                'capacity_native_input_pairs_missing')
+    for method, count in result['native_store_method_counts'].items():
+        require(result['persistence']['native_operation_method_counts'].get(method, 0) == count,
+                'capacity_native_store_pairs_missing')
+    return dict(state='passed', recorder_capacity=result,
+                capacity_gate='60minute_controlled_envelope' if options.capture_seconds == 3600 else '60second_smoke',
+                whole_app_performance_accepted=False, source_state_equivalent=False)
+
+
 def main():
     outcome = {'state': 'failed'}
     try:
@@ -190,7 +226,11 @@ def main():
         request = json.loads((WORK / 'request.json').read_text())
         # Only temporary fixture input is visible. No inherited operational configuration.
         sys.path[:0] = [str(ROOT / 'src'), str(ROOT)]
-        if request['command'] == 'test' and request['profile'] == 'replay-cache':
+        if request['command'] == 'test' and request['profile'] in ('recorder-capacity-smoke', 'recorder-capacity'):
+            require(limit == 12 * 1024 ** 3 and request.get('pause_operational') is True,
+                    'capacity_resource_or_pause_mismatch')
+            outcome = recorder_capacity(request)
+        elif request['command'] == 'test' and request['profile'] == 'replay-cache':
             outcome = test(request, None, None)
         else:
             diagnostic_url, replay_url = database_setup(request)
@@ -200,6 +240,8 @@ def main():
         return 0 if outcome['state'] == 'passed' else 1
     except Exception as error:
         outcome.update(error_type=type(error).__name__)
+        if re.fullmatch(r'(?:capacity|private|trace|top20)_[a-z0-9_]{1,110}', str(error)):
+            outcome['failure_reason'] = str(error)
         return 1
     finally:
         (WORK / 'result.json').write_text(json.dumps(outcome, sort_keys=True))

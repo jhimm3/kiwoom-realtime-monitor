@@ -5,6 +5,7 @@ All mutable source is admitted as data before being mounted in a container.
 """
 import argparse
 import contextlib
+from datetime import datetime
 import hashlib
 import itertools
 import json
@@ -28,6 +29,9 @@ SUDOERS = '/etc/sudoers.d/kiwoom-nas-operator'
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}\Z')
 HEX = re.compile(r'[a-f0-9]{64}\Z')
 TEST = re.compile(r'tests\.(?:unit|integration)\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*\Z')
+CAPACITY_PROFILES = ('recorder-capacity-smoke', 'recorder-capacity')
+CAPACITY_WORKER_MEMORY = 12 * 1024 ** 3
+CAPACITY_DISK_FREE = 12 * 1024 ** 3
 WORD = re.compile(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,99}\Z')
 LABEL = 'com.kiwoom.operator-job'
 CLEAN_ENV = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': '/'}
@@ -172,6 +176,68 @@ def decode(data):
             result[key] = value
         return result
     return json.loads(data.decode('utf-8'), object_pairs_hook=pairs)
+
+
+def trace_blob_files(manifest, incoming, limit):
+    """Validate physical blocks as bounded data; never import candidate code."""
+    files = {}
+    for digest, root in manifest.get('blobs', {}).items():
+        require(type(digest) is str and HEX.fullmatch(digest) and type(root) is dict,
+                'invalid_trace_blob')
+        if root.get('format') != 'blocks/v1':
+            require('format' not in root and 'parts' not in root, 'invalid_trace_blob')
+            files.setdefault(root.get('name') or 'payload-' + digest + '.json', None)
+            continue
+        require(manifest.get('schema_version') == 4 and type(root.get('bytes')) is int and
+                0 < root['bytes'] <= 128 * 1024 ** 2 and type(root.get('parts')) is list and
+                1 <= len(root['parts']) <= 128, 'invalid_trace_blocks')
+        whole, total, previous_name, offset, content = hashlib.sha256(), 0, None, 0, None
+        bundle = -1
+        for index, part in enumerate(root['parts']):
+            require(type(part) is dict and type(part.get('index')) is int and part['index'] == index and
+                    type(part.get('bytes')) is int and 0 < part['bytes'] <= 1024 ** 2 and
+                    type(part.get('sha256')) is str and HEX.fullmatch(part['sha256']) and
+                    type(part.get('name')) is str and
+                    re.fullmatch('block-' + digest + r'-[0-9]{3}\.payloads', part['name']) and
+                    type(part.get('offset')) is int and part['offset'] >= 0 and
+                    part['offset'] + part['bytes'] <= 16 * 1024 ** 2, 'invalid_trace_block_part')
+            if part['name'] != previous_name:
+                require(content is None or offset == len(content), 'trace_block_layout_mismatch')
+                bundle += 1
+                require(part['name'] == 'block-' + digest + '-%03d.payloads' % bundle and
+                        part['offset'] == 0, 'trace_block_layout_mismatch')
+                content = incoming.read(part['name'], min(limit, 16 * 1024 ** 2))
+                require(0 < len(content) <= 16 * 1024 ** 2, 'invalid_trace_block_file')
+                files[part['name']] = hashlib.sha256(content).hexdigest()
+                previous_name, offset = part['name'], 0
+            require(part['offset'] == offset, 'trace_block_layout_mismatch')
+            block = content[offset:offset + part['bytes']]
+            require(len(block) == part['bytes'] and hashlib.sha256(block).hexdigest() == part['sha256'],
+                    'trace_block_checksum_mismatch')
+            whole.update(block)
+            offset += len(block)
+            total += len(block)
+        require(offset == len(content) and total == root['bytes'] and whole.hexdigest() == digest,
+                'trace_block_checksum_mismatch')
+    return files
+
+
+def validate_baseline_clock(manifest):
+    if manifest['version'] >= 2:
+        try:
+            origin = datetime.fromisoformat(manifest.get('source_origin', ''))
+            valid = origin.utcoffset() is not None and math.isfinite(origin.timestamp())
+        except (ValueError, TypeError, OverflowError):
+            valid = False
+        require(valid, 'invalid_baseline_source_origin')
+    if manifest['version'] == 3:
+        context = manifest.get('account_context')
+        require(manifest['source_state_equivalent'] is False and type(context) is dict and
+                context.get('version') in ('account-context/v1', 'account-context/v2') and
+                type(context.get('trace_id')) is str and ID.fullmatch(context['trace_id']) and
+                all(type(context.get(key)) is str and HEX.fullmatch(context[key])
+                    for key in ('sha256', 'owner_bindings_sha256')) and
+                context.get('source_state_equivalent') is False, 'invalid_baseline_account_context')
 
 
 class Tree:
@@ -443,7 +509,7 @@ print(json.dumps({'health':h.get('status'),'server_build':h.get('server_build'),
 def validate_scoped_trace_manifest(manifest, trace_id):
     """Host-only durable admission; the isolated reader verifies the full source."""
     require(type(manifest) is dict and manifest.get('trace_id') == trace_id and
-            type(manifest.get('schema_version')) is int and manifest['schema_version'] in (2, 3) and
+            type(manifest.get('schema_version')) is int and manifest['schema_version'] in (2, 3, 4) and
             manifest.get('state') in ('complete', 'incomplete') and
             manifest.get('coverage') == 'observed_paths_only' and
             manifest.get('input_capture_censored') is False and
@@ -520,7 +586,7 @@ class Operator:
         self.last_docker_action = None
         self.last_docker_failure_class = None
 
-    def docker(self, args, timeout=30, log=None):
+    def docker(self, args, timeout=30, log=None, capture_stderr=False):
         command = [self.config['docker'], '--host', 'unix:///var/run/docker.sock'] + list(args)
         require(all(type(x) is str for x in command), 'non_string_argument')
         self.last_docker_action = args[0] if args else 'unknown'
@@ -528,7 +594,9 @@ class Operator:
         try:
             if log is None:
                 result = self.run_process(command, env=CLEAN_ENV, cwd='/', stdin=subprocess.DEVNULL,
-                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+                                          stdout=subprocess.PIPE,
+                                          stderr=subprocess.STDOUT if capture_stderr else subprocess.PIPE,
+                                          timeout=timeout)
                 require(len(result.stdout) <= 8 * 1024 * 1024, 'docker_response_too_large')
             else:
                 result = self.run_process(command, env=CLEAN_ENV, cwd='/', stdin=subprocess.DEVNULL,
@@ -545,6 +613,92 @@ class Operator:
         result = decode(self.docker(['inspect', container]))
         require(type(result) is list and len(result) == 1, 'container_inspection_invalid')
         return result[0]
+
+    def postgres_failure_diagnostics(self, report, job):
+        """Inspect only this job's PG and report fixed startup markers, never logs."""
+        name = 'kiwoom-op-pg-' + job
+        summary = {}
+        report['postgres_startup'] = summary
+        try:
+            value = self.inspect(name)
+            require(value.get('Config', {}).get('Labels', {}).get(LABEL) == job,
+                    'postgres_diagnostic_identity_mismatch')
+            state = value.get('State', {})
+            for key in ('Running', 'OOMKilled', 'ExitCode'):
+                item = state.get(key)
+                if type(item) is (int if key == 'ExitCode' else bool):
+                    summary[key] = item
+            if state.get('Status') in ('created', 'running', 'paused', 'restarting',
+                                       'removing', 'exited', 'dead'):
+                summary['status'] = state['Status']
+            user = value.get('Config', {}).get('User', '')
+            summary['container_user'] = (user if type(user) is str and
+                (user in ('root', 'postgres') or re.fullmatch(r'[0-9]+(?::[0-9]+)?', user))
+                else 'image_default' if user == '' else 'other')
+            userns = value.get('HostConfig', {}).get('UsernsMode', '')
+            summary['container_userns'] = userns if userns in ('host', 'private') else 'default'
+        except Exception as error:
+            summary['inspection_error_type'] = type(error).__name__
+            return  # A failed identity check must never authorize reading logs.
+        # Fixed roles in the generated private job only; never expose paths or
+        # file content, and do not change ownership/permissions to make probes work.
+        summary['host_file_metadata'] = metadata = {}
+        for role, relative in (
+                ('data_root', 'postgres'), ('pgdata', 'postgres/pgdata'),
+                ('password_file', 'postgres-password')):
+            try:
+                with self.private.parent('job-' + job + '/' + relative) as (parent, leaf):
+                    info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                metadata[role] = {'exists': True, 'uid': info.st_uid, 'gid': info.st_gid,
+                    'mode': stat.S_IMODE(info.st_mode),
+                    'kind': 'directory' if stat.S_ISDIR(info.st_mode) else
+                            'file' if stat.S_ISREG(info.st_mode) else 'other'}
+            except FileNotFoundError:
+                metadata[role] = {'exists': False}
+            except Exception as error:
+                metadata[role] = {'error_type': type(error).__name__}
+        try:
+            options = decode(self.docker(['info', '--format', '{{json .SecurityOptions}}'], timeout=5))
+            require(type(options) is list and all(type(item) is str for item in options),
+                    'docker_security_options_invalid')
+            summary['daemon_userns_enabled'] = any('name=userns' in item for item in options)
+        except Exception as error:
+            summary['security_options_error_type'] = type(error).__name__
+        try:
+            raw = self.docker(['logs', '--tail', '100', name], timeout=5, capture_stderr=True)
+            tail = raw[-65536:]
+            summary.update(log_bytes=len(raw), log_tail_truncated=len(raw) > len(tail),
+                           log_tail_sha256=hashlib.sha256(tail).hexdigest())
+            lowered = tail.lower()
+            markers = {
+                'permission_denied': b'permission denied',
+                'no_space': b'no space left on device',
+                'read_only_filesystem': b'read-only file system',
+                'initdb_failed': b'initdb: error:',
+                'directory_not_empty': b'exists but is not empty',
+                'incompatible_data': b'database files are incompatible with server',
+                'configuration_error': b'configuration file contains errors',
+                'ready_for_connections': b'database system is ready to accept connections',
+                'shutdown_complete': b'database system is shut down',
+                'fatal': b'fatal:',
+                'panic': b'panic:',
+            }
+            summary['log_markers'] = [key for key, marker in markers.items() if marker in lowered]
+            summary['permission_locations'] = []
+            for line in lowered.splitlines():
+                if b'permission denied' not in line:
+                    continue
+                operation = ('mkdir' if line.startswith(b'mkdir:') else
+                             'chmod' if line.startswith(b'chmod:') else
+                             'chown' if line.startswith(b'chown:') else 'other')
+                role = ('pgdata' if b'/var/lib/postgresql/data/pgdata' in line else
+                        'data_root' if b'/var/lib/postgresql/data' in line else
+                        'password_file' if b'/run/operator-password' in line else 'other')
+                item = {'operation': operation, 'role': role}
+                if item not in summary['permission_locations']:
+                    summary['permission_locations'].append(item)
+        except Exception as error:
+            summary['log_error_type'] = type(error).__name__
 
     def worker_failure_diagnostics(self, report, job, worker):
         """Capture bounded, non-sensitive worker outcome details before cleanup."""
@@ -568,6 +722,10 @@ class Operator:
                 report['worker_result_available'] = False
                 return
             summary = {}
+            reason = outcome.get('failure_reason')
+            if (type(reason) is str and
+                    re.fullmatch(r'(?:capacity|private|trace|top20)_[a-z0-9_]{1,110}', reason)):
+                summary['failure_reason'] = reason
             for key in ('state', 'tests', 'skipped', 'failures', 'errors', 'error_type',
                         'memory_limit_bytes', 'cpu_affinity', 'failed_tests',
                         'failed_tests_truncated'):
@@ -900,12 +1058,14 @@ class Operator:
                 'realtime_loss_verified': False, 'paused_at': record.get('paused_at'),
                 'resumed_at': record['resumed_at']}
 
-    def worker_argv(self, job, pg_name, release_id, extra_mounts=()):
+    def worker_argv(self, job, pg_name, release_id, extra_mounts=(), *, worker_memory=None):
         root = self.private.path
+        memory = self.config['worker_memory'] if worker_memory is None else worker_memory
+        require(memory in (self.config['worker_memory'], CAPACITY_WORKER_MEMORY), 'invalid_worker_resource_profile')
         return ['create', '--name', 'kiwoom-op-worker-' + job, '--label', LABEL + '=' + job,
                 '--network', 'container:' + pg_name, '--user', '65534:65534', '--read-only',
                 '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL',
-                '--memory', str(self.config['worker_memory']), '--memory-swap', str(self.config['worker_memory']),
+                '--memory', str(memory), '--memory-swap', str(memory),
                 '--cpuset-cpus', self.config['worker_cpuset'], '--pids-limit', '256',
                 '--tmpfs', '/tmp:rw,nosuid,nodev,size=256m,mode=1777',
                 '--mount', 'type=bind,src=' + root + '/releases/' + release_id + ',dst=/app/candidate,readonly',
@@ -958,11 +1118,12 @@ class Operator:
     def run_job(self, args, manifest, content):
         self.last_docker_action = None
         self.last_docker_failure_class = None
+        resources = job_resources(args, self.config)
         validate_cpu_limits(self.config, set(os.sched_getaffinity(0)))
-        require(shutil.disk_usage(self.private.path).free >= self.config['minimum_disk_free'], 'insufficient_disk_headroom')
+        require(shutil.disk_usage(self.private.path).free >= resources['minimum_disk_free'], 'insufficient_disk_headroom')
         available = next(int(line.split()[1]) * 1024 for line in Path('/proc/meminfo').read_text().splitlines()
                          if line.startswith('MemAvailable:'))
-        require(available >= self.config['worker_memory'] + self.config['pg_memory'] + 1024 ** 3,
+        require(available >= resources['worker_memory'] + self.config['pg_memory'] + 1024 ** 3,
                 'insufficient_memory_headroom')
         with Tree(self.config['store'], owners=(0, self.config['allowed_uid'])) as store:
             active_before = store.read('active.json')
@@ -972,7 +1133,7 @@ class Operator:
         password = secrets.token_hex(32)
         request = vars(args).copy()
         request.update(admin_password=password, job_id=job)
-        pause_operational = args.command == 'replay' and bool(getattr(args, 'pause_operational', False))
+        pause_operational = bool(getattr(args, 'pause_operational', False))
         require(not (pause_operational and getattr(args, 'preflight_only', False)), 'preflight_cannot_pause_operational')
         pg_name = 'kiwoom-op-pg-' + job
         source_state_equivalent = False
@@ -999,6 +1160,7 @@ class Operator:
                   'runtime_image_id': self.config['runtime_image_id'], 'pg_image_id': self.config['pg_image_id'],
                   'worker_cpuset': self.config['worker_cpuset'], 'pg_cpuset': self.config['pg_cpuset'],
                   'pids_support': 'not_yet_verified', 'state': 'failed'}
+        report.update(resource_profile=resources['profile'], worker_memory_requested=resources['worker_memory'])
         stage = 'prepare_job'
         self.private.put_json('job.json', {'state': 'running', 'job_id': job, 'command': args.command,
                                            'operational_pause': 'not_requested' if not pause_operational else 'pending'})
@@ -1010,6 +1172,23 @@ class Operator:
             self.private.write(base + '/postgres-password', (password + '\n').encode(), mode=0o600)
             if storage == 'disk':
                 data.mkdir(mode=0o700)
+                # The image changes PGDATA to its PostgreSQL UID, then restarts
+                # entrypoint as that UID. It must traverse this root-owned parent.
+                # Keep read/write private; only search is granted to other UIDs.
+                # fchmod is required because the supervisor umask strips mkdir's
+                # group/other bits. Anchor the exact generated child, never follow.
+                with self.private.parent(base + '/postgres') as (parent, leaf):
+                    fd = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                    try:
+                        info = os.fstat(fd)
+                        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and
+                                not info.st_mode & 0o022, 'disk_data_parent_identity_invalid')
+                        os.fchmod(fd, 0o711)
+                        require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o711,
+                                'disk_data_parent_mode_not_applied')
+                    finally:
+                        os.close(fd)
+                report['disk_data_parent_mode'] = 0o711
             if args.command == 'replay':
                 registered = self.registered_input('traces', args.trace)
                 policy = getattr(args, 'capture_policy', 'complete')
@@ -1018,6 +1197,11 @@ class Operator:
                               source_manifest_sha256=registered.get('files', {}).get('manifest.json'))
                 if not getattr(args, 'baseline_profile', None):
                     baseline = self.registered_input('baselines', args.baseline)
+                    if baseline.get('baseline_version') == 3:
+                        context = baseline['account_context']
+                        captured = registered.get('account_context', {})
+                        require(context['trace_id'] == args.trace and captured.get('state') == 'captured' and
+                                captured.get('sha256') == context['sha256'], 'baseline_account_trace_mismatch')
                     report['source_state_equivalent'] = baseline['source_state_equivalent']
                     extra_mounts += ['--mount', 'type=bind,src=' + self.private.path + '/baselines/' + args.baseline + ',dst=/run/baseline,readonly']
                 extra_mounts += ['--mount', 'type=bind,src=' + self.private.path + '/traces/' + args.trace + ',dst=/run/trace,readonly',
@@ -1027,14 +1211,18 @@ class Operator:
             stage = 'postgres_start'
             self.docker(['start', pg_name])
             stage = 'postgres_readiness'
-            deadline = time.monotonic() + 60
+            readiness_started = time.monotonic()
+            deadline = readiness_started + 60
+            report['postgres_readiness_attempts'] = 0
             while True:
+                report['postgres_readiness_attempts'] += 1
                 try:
                     self.docker(['exec', pg_name, 'pg_isready', '-d', 'postgres'], timeout=5)
                     break
                 except Rejected:
                     require(time.monotonic() < deadline, 'temporary_postgres_not_ready')
                     time.sleep(.5)
+            report['postgres_readiness_seconds'] = round(time.monotonic() - readiness_started, 3)
             stage = 'postgres_memory_probe'
             actual_limit = self.docker(['exec', pg_name, '/bin/sh', '-c',
                 'if [ -f /sys/fs/cgroup/memory.max ]; then cat /sys/fs/cgroup/memory.max; else cat /sys/fs/cgroup/memory/memory.limit_in_bytes; fi']).decode().strip()
@@ -1045,13 +1233,17 @@ class Operator:
             verify_cpu_affinity(actual_cpu, self.config['pg_cpuset'])
             report['pg_cpu_affinity'] = actual_cpu
             stage = 'worker_create'
-            self.docker(self.worker_argv(job, pg_name, args.release, extra_mounts))
+            self.docker(self.worker_argv(job, pg_name, args.release, extra_mounts,
+                                         worker_memory=resources['worker_memory']))
             stage = 'container_isolation_inspection'
             for name, cpus in ((pg_name, self.config['pg_cpuset']),
                                ('kiwoom-op-worker-' + job, self.config['worker_cpuset'])):
                 value = self.inspect(name)
                 require(value['HostConfig']['Memory'] > 0 and not value['HostConfig']['Privileged'] and
                         value['Config']['Labels'][LABEL] == job, 'job_isolation_invalid')
+                if resources['profile'] == 'recorder-capacity':
+                    expected_memory = self.config['pg_memory'] if name == pg_name else CAPACITY_WORKER_MEMORY
+                    require(value['HostConfig']['Memory'] == expected_memory, 'capacity_memory_limit_not_enforced')
                 verify_cpu_affinity(value['HostConfig'].get('CpusetCpus'), cpus)
             if pause_operational:
                 stage = 'operational_pause'
@@ -1063,7 +1255,7 @@ class Operator:
                     'realtime_loss_verified': False}
             with open(str(Path(self.private.path) / base / 'process.log'), 'xb') as log:
                 stage = 'worker_start_and_run'
-                self.docker(['start', '-a', 'kiwoom-op-worker-' + job], timeout=self.config['job_timeout'], log=log)
+                self.docker(['start', '-a', 'kiwoom-op-worker-' + job], timeout=resources['job_timeout'], log=log)
             stage = 'worker_result_inspection'
             value = self.inspect('kiwoom-op-worker-' + job)
             require(value['State']['ExitCode'] == 0 and not value['State'].get('OOMKilled'), 'worker_failed')
@@ -1072,7 +1264,9 @@ class Operator:
                 outcome = output.json('result.json')
             require(outcome.get('state') == 'passed', 'worker_gate_failed')
             require(type(outcome.get('memory_limit_bytes')) is int and
-                    0 < outcome['memory_limit_bytes'] <= self.config['worker_memory'], 'worker_memory_limit_not_enforced')
+                    0 < outcome['memory_limit_bytes'] <= resources['worker_memory'], 'worker_memory_limit_not_enforced')
+            if resources['profile'] == 'recorder-capacity':
+                require(outcome['memory_limit_bytes'] == CAPACITY_WORKER_MEMORY, 'capacity_memory_limit_not_enforced')
             verify_cpu_affinity(outcome.get('cpu_affinity'), self.config['worker_cpuset'])
             stage = 'final_identity_fence'
             self.identities(running=not pause_operational)
@@ -1094,6 +1288,14 @@ class Operator:
             if str(error) in ('docker_command_failed', 'docker_command_timeout'):
                 report['failed_docker_action'] = self.last_docker_action
                 report['docker_failure_class'] = self.last_docker_failure_class or 'unknown'
+            if stage in ('postgres_start', 'postgres_readiness'):
+                failed_action = self.last_docker_action
+                failed_class = self.last_docker_failure_class
+                if stage == 'postgres_readiness':
+                    report['postgres_readiness_seconds'] = round(time.monotonic() - readiness_started, 3)
+                self.postgres_failure_diagnostics(report, job)
+                self.last_docker_action = failed_action
+                self.last_docker_failure_class = failed_class
             if stage == 'worker_start_and_run':
                 failed_action = self.last_docker_action
                 failed_class = self.last_docker_failure_class
@@ -1160,20 +1362,26 @@ class Operator:
                 names = {'manifest.json'}
                 names.update(x['name'] for x in manifest.get('chunks', []))
                 chunk_hashes = {item['name']: item['sha256'] for item in manifest.get('chunks', [])}
-                for key, blob in manifest.get('blobs', {}).items():
-                    names.add(blob.get('name') or 'payload-' + key + '.json')
+                blob_files = trace_blob_files(manifest, incoming, self.config['input_file_limit'])
+                names.update(blob_files)
                 catalog = {'source_state_equivalent': False, 'capture_policy': capture_policy,
                            'original_capture_state': manifest['state']}
+                if manifest.get('schema_version') == 4:
+                    catalog['account_context'] = manifest.get('account_context', {})
             else:
                 manifest = incoming.json('baseline.json')
                 require(manifest.get('baseline_id') == input_id and HEX.fullmatch(input_id) and
                         manifest.get('database') == 'kiwoom_monitor_replay_test' and
-                        manifest.get('version') in (1, 2) and type(manifest.get('source_state_equivalent')) is bool and
+                        type(manifest.get('version')) is int and manifest['version'] in (1, 2, 3) and type(manifest.get('source_state_equivalent')) is bool and
                         re.fullmatch('[a-f0-9]{32}', manifest.get('owner_token', '')), 'invalid_baseline_bundle')
                 require(type(manifest.get('statements_sha256')) is str and HEX.fullmatch(manifest['statements_sha256']),
                         'invalid_baseline_hash')
+                validate_baseline_clock(manifest)
                 names = {'baseline.json', 'statements.json'}
                 catalog = {'source_state_equivalent': manifest['source_state_equivalent']}
+                if manifest['version'] == 3:
+                    catalog.update(baseline_version=3, account_context=manifest['account_context'],
+                                   source_origin=manifest['source_origin'])
             prefix = kind + '/' + input_id
             try:
                 existing = self.registered_input(kind, input_id)
@@ -1189,6 +1397,8 @@ class Operator:
                 files[name] = hashlib.sha256(data).hexdigest()
                 if kind == 'traces' and name in chunk_hashes:
                     require(files[name] == chunk_hashes[name], 'trace_chunk_checksum_mismatch')
+                if kind == 'traces' and blob_files.get(name) is not None:
+                    require(files[name] == blob_files[name], 'trace_block_changed_during_registration')
                 if existing is None:
                     self.private.write(prefix + '/' + name, data, mode=0o644)
             if kind == 'baselines':
@@ -1360,6 +1570,8 @@ def parser():
     test.add_argument('release', type=identifier)
     test.add_argument('--profile', default='replay-cache')
     test.add_argument('--test', action='append', default=[])
+    test.add_argument('--pause-operational', action='store_true',
+                      help='required only for fixed recorder capacity profiles; resume the approved server after cleanup')
     for name in ('register-trace', 'register-baseline'):
         command = commands.add_parser(name, allow_abbrev=False)
         command.add_argument('input_id', type=identifier)
@@ -1387,11 +1599,25 @@ def parser():
     return result
 
 
+def job_resources(args, config):
+    """Two fixed capacity probes; no caller-controlled Docker resource values."""
+    capacity = args.command == 'test' and args.profile in CAPACITY_PROFILES
+    return {'profile': 'recorder-capacity' if capacity else 'standard',
+            'worker_memory': CAPACITY_WORKER_MEMORY if capacity else config['worker_memory'],
+            'job_timeout': 14400 if capacity else config['job_timeout'],
+            'minimum_disk_free': max(CAPACITY_DISK_FREE, config['minimum_disk_free'])
+                                 if capacity else config['minimum_disk_free']}
+
+
 def validate_args(args, config):
     if args.command == 'report':
         require(re.fullmatch('[a-f0-9]{32}', args.job_id), 'invalid_job_id')
     if args.command == 'test':
-        require(args.profile in config['profiles'], 'unknown_test_profile')
+        # Fixed built-in profiles extend only the helper code. The installed
+        # root-owned configuration, sudo rule and standard 4GiB jobs stay intact.
+        require(args.profile in config['profiles'] or args.profile in CAPACITY_PROFILES, 'unknown_test_profile')
+        require(bool(getattr(args, 'pause_operational', False)) == (args.profile in CAPACITY_PROFILES),
+                'capacity_requires_operational_pause' if args.profile in CAPACITY_PROFILES else 'test_pause_profile_invalid')
         require(args.profile == 'selected' or not args.test, 'profile_does_not_accept_test_names')
         require(args.profile != 'selected' or 0 < len(args.test) <= 100, 'selected_tests_required')
         require(all(TEST.fullmatch(x) for x in args.test), 'invalid_test_name')

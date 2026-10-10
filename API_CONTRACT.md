@@ -1,5 +1,51 @@
 # NAS API 계약
 
+2026-10-10 local block capture candidate: `POST /api/v1/diagnostics/trace` adds strict boolean
+`large_inputs` (defaultfalse), requiring `store_inputs=true` and deferred `persist_at`. Invalid
+type is422; missing prerequisites are409 with child-control rollback and master preserved.
+This opt-in selects trace schema4 with `large-store-input/v1` for daily/minute replacements,
+second bars and Shadow checkpoints. Capabilities adds `large_input_capture` while retaining
+the legacy schema/options fields: typed accounting64MiB, encoded blocks1MiB, encoded input128MiB.
+All parts must pass checksums before offline native replay; public payload download does not
+concatenate block roots. Window reports distinguish verified block bytes from retained legacy
+decoded bytes. NAS capacity acceptance is pending; no deployment or Monday registration claim.
+
+The same local candidate adds strict boolean `account_inputs` (defaultfalse), requiring
+`store_inputs=true` and deferred `persist_at`; type/prerequisite errors use422/409.
+Capabilities adds `account_input_capture` with schema4 and `native_replay_ready=false`.
+Account recovery/events/snapshots and execution lease/ledger arguments use explicit typed
+codecs. Only authority-bearing owner tokens become session HMAC aliases; UUIDs, revisions,
+run IDs and order IDs remain native values. The HMAC key and source tokens are not persisted.
+Actor attribution follows actual account writers/heartbeat/start/stop and VI live/backfill.
+Account opt-in now captures account-context/v2: registry/binding, initial runtime leases,
+execution intents/events/account snapshots and settings/control/recovery/event documents
+before input admission. The next execution-event sequence preserves observed gaps; its
+transactional RESTART shares the v3 seal rollback. v1 capsules retain their original scope.
+PostgreSQL uses READ ONLY
+REPEATABLE READ with a named cursor, bounded fetch/row/document/total size and a read deadline.
+The context has32MiB copy accounting/50,000 row bounds and its own block profile; it is
+atomically admitted before native producers and persisted with the existing deferred writer.
+Status exposes only checksum/count/timing; full projected values use the authenticated
+recorded-file reader. Source authority aliases share the input session key; original
+fingerprints/tokens/vault data are absent. Child renewal checks the same control revision
+and preparation does not shorten the requested input duration. A v3 seal can apply the
+detached capsule after verifying its v1 parent, in the same management transaction.
+Account/VI scheduler wiring and expected-failure execution passed the78-test native
+PostgreSQL gate. Offline CLI v3 seal/run now reads the pinned capsule and validates the
+explicit native frontier/source clock before acquiring a DB lease. Block-aware privileged
+registration and v3 worker bridging are implemented locally; root helper installation is
+separate. Actual offline CLI seal/run passed107 NAS PostgreSQL tests, including two runs
+of the same12 controlled inputs/initial DB with matching content, native outcomes and restore.
+Public `native_replay_ready` remains false: this API does not dispatch native
+Replay or promise source-state equivalence. NAS60minute acceptance/deployment remains pending.
+
+Latest context/v2 gate passed138 NAS tests: same17 controlled native inputs/initial DB
+replayed twice,14 COMMIT/3 rollback per run, preserved initial ledger duplicates and
+source ledger/document contents and next sequence. An encoded-over8MiB Shadow input
+reconstructs into one actual PostgreSQL call/COMMIT with matching JSON. Failed seal
+rolls back rows/sequence and final restore drains all owned connections. This is offline
+acceptance; the latest root helper/registered-bundle path and60minute deployment remain pending.
+
 2026-10-09 recorded input trace source (`2026.10.09-trace-ram-main-v1`): authenticated
 `GET /api/v1/diagnostics/capabilities` advertises `trace_input_capture` schema 3, observed-path-only
 coverage, causal REST/catalog/ranking/subscription/lifecycle/delivery-receipt boundaries, and
@@ -247,6 +293,15 @@ CNSRREQ를 보내고 전체 초기 결과/페이지를 확인한 뒤 새 조건�
 미완료 요청이 있는 중간 변경은 이전 응답/후보 정리를 마친 뒤 최신 정책만 등록한다.
 OFF는 신규 조건 신호를 무시하고 등록 해제를 요청하되 기존 코호트·VI·체결·hub·일자 보존 정책은 유지한다.
 queue에 접수된 신호는 당시 조건식 seq/name을 보존한다. 조건 교체로 과거 접수 신호의 이름을 바꾸지 않는다.
+접수 시각·거래일도 queue/잠금/저장 재시도 동안 고정한다. signal/metadata worker는 저장 실패를
+완료로 소비하지 않고 같은 native revision/current 입력을 ACK까지 재시도한다. NXT 여부는 ACK 뒤
+RAM과 구독에 반영한다. 정상 종료는 접수 signal→파생 metadata→실제 native 작업을 drain하며,
+10초 경고 뒤에도 대기를 유지한다. 지속 DB 오류에서는 종료 성공을 반환하지 않는다.
+`condition_status.cohort_collection`은 현재 process의 queue queued/unfinished, owned_tasks,
+native_inflight, save_failures/worker_failures, last_error_types, dropped_inputs, state와
+recovery_required/admission_closed를 제공한다. database_ack_only이며 restart_coverage는 unverified다.
+기존 bounded queue의 overflow는 dropped_inputs로 드러나며 강제 종료 전 미확정 RAM 입력의
+재시작 복구를 보장하지 않는다. 조건 REG의 apply_status와 별도 상태다.
 `/api/v1/market/events?kind=cohort`의 condition.runtime도 저장 목록 진단에 현재 메모리 상태를 합쳐 반환한다.
 PC는 지원 flag가 true이고 세 필드가 있을 때만 입력을 활성화/전송한다. 새 endpoint/SQL/연결 owner 없음.
 

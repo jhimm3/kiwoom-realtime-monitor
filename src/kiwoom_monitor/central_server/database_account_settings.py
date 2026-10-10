@@ -56,7 +56,7 @@ def _verify_real_account_write(cursor, binding, settings_revision, p):
     return scope
 
 
-def _save_real_account_recovery(cursor, binding, recovery, received_at, settings_revision, p):
+def _save_real_account_recovery(cursor, binding, recovery, received_at, settings_revision, p, *, wall_time=None):
     """REST evidence, never a mock execution-ledger reconciliation."""
     from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import AccountRecovery
     if (not isinstance(recovery, AccountRecovery) or not isinstance(received_at, datetime)
@@ -82,11 +82,12 @@ def _save_real_account_recovery(cursor, binding, recovery, received_at, settings
     key = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     cursor.execute("INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
                    f"VALUES({','.join([p] * 5)}) ON CONFLICT(collection,owner,document_key) DO NOTHING",
-                   ("real_account_recovery", _account_settings_owner(scope), key, time(), serialized))
+                   ("real_account_recovery", _account_settings_owner(scope), key,
+                    time() if wall_time is None else wall_time(), serialized))
     return json.loads(serialized)
 
 
-def _save_real_account_event(cursor, binding, event_type, event, received_at, settings_revision, p):
+def _save_real_account_event(cursor, binding, event_type, event, received_at, settings_revision, p, *, wall_time=None):
     from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import AccountBalanceChange, OrderExecution
     expected = {"order_execution": OrderExecution, "account_balance": AccountBalanceChange}.get(event_type)
     if (expected is None or type(event) is not expected or not isinstance(received_at, datetime)
@@ -105,7 +106,8 @@ def _save_real_account_event(cursor, binding, event_type, event, received_at, se
     key = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     cursor.execute("INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
                    f"VALUES({','.join([p] * 5)}) ON CONFLICT(collection,owner,document_key) DO NOTHING",
-                   ("real_account_event", _account_settings_owner(scope), key, time(), serialized))
+                   ("real_account_event", _account_settings_owner(scope), key,
+                    time() if wall_time is None else wall_time(), serialized))
     return document
 
 
@@ -257,13 +259,15 @@ class SQLiteAccountSettingsStoreMixin:
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             return _save_real_account_recovery(connection.cursor(), binding, recovery, received_at,
-                                              settings_revision, "?")
+                                              settings_revision, "?",
+                                              wall_time=getattr(self, '_account_input_wall_time', None))
 
     def save_real_account_event(self, binding, event_type, event, received_at, *, settings_revision):
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             return _save_real_account_event(connection.cursor(), binding, event_type, event, received_at,
-                                            settings_revision, "?")
+                                            settings_revision, "?",
+                                            wall_time=getattr(self, '_account_input_wall_time', None))
 
     def save_account_settings(self, value: dict[str, Any], *, expected_revision: int) -> dict[str, Any]:
         with self._lock, self._connection() as connection:
@@ -300,7 +304,8 @@ class PostgresAccountSettingsStoreMixin:
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
-            return _save_real_account_recovery(cursor, binding, recovery, received_at, settings_revision, "%s")
+            return _save_real_account_recovery(cursor, binding, recovery, received_at, settings_revision, "%s",
+                                              wall_time=getattr(self, '_account_input_wall_time', None))
 
     def save_real_account_event(self, binding, event_type, event, received_at, *, settings_revision):
         from .postgres_access import DBWriterContext, open_observed_connection
@@ -311,7 +316,8 @@ class PostgresAccountSettingsStoreMixin:
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
-            return _save_real_account_event(cursor, binding, event_type, event, received_at, settings_revision, "%s")
+            return _save_real_account_event(cursor, binding, event_type, event, received_at, settings_revision, "%s",
+                                           wall_time=getattr(self, '_account_input_wall_time', None))
 
     def save_account_settings(self, value: dict[str, Any], *, expected_revision: int) -> dict[str, Any]:
         from .postgres_access import DBWriterContext, open_observed_connection

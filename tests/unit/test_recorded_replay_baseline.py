@@ -3,6 +3,7 @@
 SQL rollback/sequence behavior belongs to the separate real-PostgreSQL gates.
 """
 from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 from types import SimpleNamespace
 import unittest
@@ -32,6 +33,87 @@ class Connection:
 
 
 class ReplayBaselineLeaseTests(unittest.TestCase):
+    def v3(self):
+        from kiwoom_monitor.central_server.diagnostic_top20_seed import Top20FixtureClock
+        return baseline.ReplayDatabaseLease(URL, TOKEN, baseline_version=3,
+            cache_clock=Top20FixtureClock(datetime(2026, 10, 12, tzinfo=timezone.utc)))
+
+    def test_v3_expands_exact_reset_scope_without_changing_v1_v2(self):
+        old = baseline.ReplayDatabaseLease(URL, TOKEN)
+        lease = self.v3()
+        self.assertEqual(baseline.TABLES, old.tables)
+        self.assertEqual(baseline.SEQUENCES, old._sequences_scope)
+        self.assertEqual(12, len(set(lease.tables) - set(baseline.TABLES_V2)))
+        self.assertEqual(6, len(lease._sequences_scope))
+        self.assertEqual('replay_baseline_v3', lease._snapshot_schema)
+        self.assertEqual('baseline_v3', lease._metadata_table)
+        self.assertNotIn('central_execution_account_snapshots_accepted_sequence_seq', lease._sequences_scope)
+        self.assertFalse(any('credential' in name or 'news' in name for name in lease.tables))
+        with self.assertRaisesRegex(ValueError, 'clock_required'):
+            baseline.ReplayDatabaseLease(URL, TOKEN, baseline_version=3)
+
+    def test_v3_sequence_inventory_matches_native_schema_and_parent_is_v1_only(self):
+        lease = self.v3()
+        statements = '\n'.join(statement for migration in baseline.central_schema_migrations()
+                              for statement in migration.postgres_statements)
+        for name in lease._sequences_scope:
+            table = name.removesuffix('_accepted_sequence_seq')
+            self.assertIn('CREATE TABLE IF NOT EXISTS ' + table + ' (accepted_sequence BIGSERIAL', statements)
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [(1, 1, 9223372036854775807, 1, 1, False), (10, True)] * 6
+        self.assertEqual(set(lease._sequences_scope), set(lease._sequences(cursor)))
+        cursor.reset_mock()
+        cursor.fetchone.side_effect = [(1, 1, 9223372036854775807, 1, 1, False), (10, False)]
+        self.assertEqual(baseline.SEQUENCES, tuple(lease._sequences(cursor, sequences=baseline.SEQUENCES)))
+        self.assertEqual(2, cursor.execute.call_count)
+
+    def test_v3_recorded_execution_stays_gated_before_any_database_connection(self):
+        from kiwoom_monitor.central_server.diagnostic_recorded_execution import run_owned_recorded_experiment
+        with patch.object(baseline, '_maintenance_connection') as connect:
+            with self.assertRaisesRegex(ValueError, 'v3_context_and_native_clock_required'):
+                run_owned_recorded_experiment(URL, TOKEN, '0' * 64, [], baseline_version=3)
+            connect.assert_not_called()
+
+    def test_v3_native_clock_requires_arm_and_keeps_generation_and_origin_fences(self):
+        lease = self.v3()
+        lease._active, lease._run_ready, lease._generation = True, True, 1
+        store = lease.store()
+        with self.assertRaisesRegex(RuntimeError, 'armed_v3'):
+            store._execution_wall_now()
+        lease._cache_clock.arm(start_seconds=2)
+        self.assertLess(abs((store._execution_wall_now() - lease._cache_clock.now()).total_seconds()), .1)
+        self.assertLess(abs(store._account_input_wall_time() - lease._cache_clock.wall_time()), .1)
+        lease._cache_clock._origin += timedelta(days=1)
+        with self.assertRaisesRegex(RuntimeError, 'clock_changed'):
+            store._execution_wall_now()
+        lease._cache_clock._origin -= timedelta(days=1)
+        lease._generation += 1
+        with self.assertRaisesRegex(RuntimeError, 'retired'):
+            store._account_input_wall_time()
+        for version in (1, 2):
+            options = {} if version == 1 else {'baseline_version': 2, 'cache_clock': lease._cache_clock}
+            old = baseline.ReplayDatabaseLease(URL, TOKEN, **options)
+            self.assertFalse(hasattr(baseline._ReplayStore(old), '_execution_wall_now'))
+
+    def test_native_lease_uses_owned_time_after_row_lock_without_extending_expiry(self):
+        from kiwoom_monitor.central_server.database_execution import _require_execution_ownership
+        now = datetime(2026, 10, 12, tzinfo=timezone.utc)
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ('run:alias', now + timedelta(seconds=1))
+        ownership = {'owner_key': 'mock:account', 'owner_token': 'run:alias', 'run_id': 'run'}
+        value = {'environment': 'mock', 'account_ref': 'account'}
+        def at_source():
+            self.assertEqual(1, cursor.execute.call_count)
+            self.assertIn('FOR UPDATE', cursor.execute.call_args.args[0])
+            return now
+        _require_execution_ownership(cursor, ownership, value, '%s', now_provider=at_source)
+        with self.assertRaisesRegex(RuntimeError, 'OWNERSHIP_LOST'):
+            _require_execution_ownership(cursor, ownership, value, '%s',
+                                         now_provider=lambda: now + timedelta(seconds=1))
+        with self.assertRaisesRegex(RuntimeError, 'OWNER_SCOPE_MISMATCH'):
+            _require_execution_ownership(cursor, {**ownership, 'owner_token': 'wrong'}, value, '%s',
+                                         now_provider=lambda: now)
+
     def ready(self):
         lease = baseline.ReplayDatabaseLease(URL, TOKEN)
         lease._active, lease._run_ready, lease._generation = True, True, 1

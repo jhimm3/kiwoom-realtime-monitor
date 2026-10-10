@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -29,6 +30,46 @@ from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
 
 
 class RecordedExecutionPostgresTests(unittest.TestCase):
+    def test_activity_probe_sees_native_deferred_commit_and_drains_before_restore(self):
+        from kiwoom_monitor.central_server.diagnostic_replay_sampling import (
+            ReplayActivitySampler, correlate_replay_commits)
+        with baseline.ReplayDatabaseLease(self.url, self.token) as lease:
+            lease.restore(self.baseline_id)
+            started_at = time.time()
+            connection = lease.connect_store(lease._generation)
+            try:
+                pid = connection.info.backend_pid
+                with connection.cursor() as cursor:
+                    cursor.execute('CREATE TEMP TABLE replay_probe_commit (id integer)')
+                    cursor.execute("CREATE FUNCTION pg_temp.replay_probe_wait() RETURNS trigger "
+                        "LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.25); RETURN NEW; END $$")
+                    cursor.execute('CREATE CONSTRAINT TRIGGER replay_probe_deferred '
+                        'AFTER INSERT ON replay_probe_commit DEFERRABLE INITIALLY DEFERRED '
+                        'FOR EACH ROW EXECUTE FUNCTION pg_temp.replay_probe_wait()')
+                    cursor.execute('INSERT INTO replay_probe_commit VALUES (1)')
+                with ReplayActivitySampler(lease.connection) as observer:
+                    commit_started = time.time()
+                    connection.commit()
+                    commit_finished = time.time()
+                activity = observer.report()
+                self.assertEqual('complete', activity['state'], activity)
+                self.assertTrue(activity['observer_drained'])
+                call = dict(call_id='controlled-commit', backend_pid=pid, started_at=started_at,
+                    commit_started_at=commit_started, commit_finished_at=commit_finished,
+                    commit_ms=(commit_finished-commit_started)*1000,
+                    writer_family='controlled', writer_kind='deferred-commit')
+                correlated = correlate_replay_commits({'calls': [call]}, activity)['calls'][0]
+                self.assertGreater(correlated['wait_samples'].get('Timeout:PgSleep', 0), 0, correlated)
+                self.assertEqual({'active'}, set(correlated['backend_states']))
+            finally:
+                connection.close()
+            self.assertEqual(0, lease.status()['owned_connections'])
+            with lease.connection.cursor() as cursor:
+                cursor.execute('SHOW default_transaction_read_only')
+                self.assertEqual('off', cursor.fetchone()[0])
+            lease.restore(self.baseline_id)
+        self._assert_clean()
+
     @contextmanager
     def _candidate_flow_fixture(self):
         from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service

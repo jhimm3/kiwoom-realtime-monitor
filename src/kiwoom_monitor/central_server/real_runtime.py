@@ -24,6 +24,7 @@ from .account_query import AccountQuerySessionManager
 from .credential_runtime import CredentialOperationError, CredentialRuntimeHooks, ValidatedCredential
 from .market_observations import as_kst
 from .rest_broker import CentralRestBroker, ACCOUNT_RECOVERY_ENDPOINTS
+from .diagnostic_replay_contract import captured_workload
 
 
 # Account WebSocket reception includes the after-hours market until 20:00.
@@ -358,6 +359,7 @@ class RealCredentialOwner:
                     self._monitor_now(context)):
                 context.monitor_wake.set()
 
+    @captured_workload('account', 'real_account_events', actor_per_invocation=True)
     async def _write_account_events(self, context):
         stop = context.monitor_stop
         while context.pending_event is not None or not context.event_queue.empty() or not stop.is_set():
@@ -405,6 +407,7 @@ class RealCredentialOwner:
             if realtime is not None:
                 await realtime.close()
 
+    @captured_workload('account', 'real_account_recovery', actor_per_invocation=True)
     async def _monitor_account_cycles(self, profile_id, context):
         # Leave bootstrap's first ranking request ahead of supplemental account reads.
         stop, wake, binding, revision = context.monitor_stop, context.monitor_wake, context.binding, context.monitor_revision

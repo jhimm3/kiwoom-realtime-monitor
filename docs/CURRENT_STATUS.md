@@ -1,3 +1,529 @@
+2026-10-10 recorder DEPLOYED, Monday60minute capture ARMED; saved-file verification PASSED:
+Active NAS release2026.10.10-recorder-account-large-v1-6390e0b7de1a5189;
+actual health=ok/build2026.10.10-recorder-account-large-v1/source path verified, operating PG unchanged.
+Monday2026-10-12 08:59:50-09:59:50 KST capture/20:10 KST persistence is armed, PID2815.
+All five input flags selected. Source/plan hashes and same PID after SSH disconnect verified.
+Current master/capture/trace are OFF; native starter enables them only near the target.
+Starter survives SSH disconnect, not NAS reboot. Status/lock use the existing operator scheduler fence.
+Post-deploy mode0600 selector made old normal-user preflight fail. The standalone scheduler now uses
+the approved read-only status interface only on PermissionError for the fixed NAS root; no permission/
+sudoers change.16local gates and actual deployed API preflight passed. The immutable app release is unchanged.
+Final evidence: artifacts/recorder-monday-readiness-final-20261010.json.
+Remaining: actual Monday capture/persistence result, public registered v3 baseline Replay,
+P1 actual10-20second COMMIT waits and whole-app2-5x acceptance. The following lines retain stage evidence.
+Job9262267814daf923ac68e69f2754438d ended with docker_command_timeout at the fixed4hour limit.
+The supervisor confirms cleanup complete, original release resumed, production PG unchanged;
+live status confirms health=ok, diagnostics idle and recording off. Lifecycle complete is not gate passed.
+Administrator numeric-only evidence confirms phase=verify, accepted/written2329089/2329089,
+reject/drop0, all retained/pending counters0 and2,887,371,179bytes written. Persistence took5034.166s
+including4014.368s deliberate throttle. Chunk/payload fsync totals348.575/345.455s; maxima611/620ms.
+The exact saved trace20261010T084214Z-9286b6be5d0b was privately preserved before cleanup:
+3534files/2,898,666,063bytes, manifest54b36264b5f64fed52859b5ea422382fbcdef1a400fec7e2e71429a868f87885.
+The original and operating controls were unchanged. This copy is not power-loss durability acceptance.
+Read-only native verification of these same files passed184.287s on NAS:2,329,089events,
+1,706checksummed chunks,72,360collector messages,721,080closed deliveries,120large inputs,
+one5,000row catalog operation and complete native operation pairs. Manifest hash stayed identical.
+No re-recording/native writer/network/live controls/operating DB access; verifier container removed.
+This accepts the fixed60minute20Hz x10row/account/VI/large recording and saved-file envelope;
+it does not accept full causal Replay, market maximum, power-loss recovery or whole-app2-5x performance.
+Confirmed local verifier cost: with72001 index entries, per-payload public status copy13.467-14.986ms
+versus existing pinned-manifest checksum reader0.256-0.309ms (3 rounds,30 reads each, same bytes).
+Private durable checker now pins the terminal disk manifest for existing checksum/bounds readers and
+rejects any manifest-byte change across verification.11 related tests passed21.379s, including native
+account/large pairs, changed-manifest rejection and reuse of identical saved files with start/stop forbidden.
+The fixed administrator verifier binds this checker and the original admitted native source by hash,
+mounts the preserved capture read-only and blocks network access. Same-file NAS verification is complete;
+the finished immutable job and published operating candidate were not changed.
+Evidence: artifacts/recorder-verifier-index-proof-20261010.json,
+artifacts/recorder-saved-native-verification-20261010.json.
+Administrator update80 tests passed. Installed supervisor/worker hashes match bundleb83ab32e6f3a1697
+(859e35a64ca47e831aaa3c32a353099661fa18bc974fcd80a371b6fa3d90f16c /
+27a7c5510d4b919b4538811ac5adbb8e5aeea2884b39aabdf3f7873f942e1d3b).
+Actual NAS A/B with identical1200 trade+6 mixed+2 account/large native calls and initial private
+SQLite state: persistence117.021 ->88.379seconds (24.476% reduction), deliberate waits95.824 ->64.631s.
+Confirmed cause: mandatory1MiB/s write pacing was counted again in post-flush cooldown.
+Minimal recorder change subtracts that paid pacing from additional backoff;1MiB/s and.25-5s bounds
+remain. Both runs saved38827/38827, reject/drop0, released RAM/queue0, identical account contents
+and revisions hash,45 native BEGIN/COMMIT, verified block/checksum/sequence/native operation/delivery pairs.
+Receiverp95 was5.949/5.950ms; this is a persistence improvement, not a SQL/COMMIT improvement.
+Both short jobs cleaned up and resumed the exact original operating release with production PG unchanged.
+Exact local operating candidatef44802190bd70570 passed101 tests70.914s, errors/failures/skips0.
+Its NAS storage gate ran105 tests and failed3 (job414c38340fbacbb21091e23d8bb9b035), with no skips,
+OOM or operating change. The failures all used class patches that missed installed instance wrappers:
+minute-bar read, news body save/read and news rule reads. The original-bound call path was reproduced.
+Five fixture lines now patch the actual store instance, matching the existing fixes in main; no assertion
+or test was removed. New immutable candidate6390e0b7de1a5189 changes only that integration test file,
+with identical app src_hash1a051f5426be9820c8806885ad9f43c57692c08a4c739f9e405f67f1be3e22f3.
+It and a matching Monday plan are published inactive; exact NAS storage gate passed105/105,
+errors/failures/skips0, job9484fe27233a77d06297e806ba68ad4e with cleanup/fence and operating app/DB
+preservation. Prior failed gate is retained. Related current-main observation-frontier tests were not mixed
+into this recorder source. Native account/lease/VI/large replay passed on the byte-identical application
+and unchanged account test in f448 (job2259e757280b384a4599fed7dbc05d0f), preserving6390's storage gate.
+The native case seals baselinev3 and runs the same17inputs twice;14COMMIT/3rollback each,
+large blocks restore one native call/one COMMIT, documents/revision/ledger/sequence/restore match.
+These are controlled disposable inputs, not reconstructed October8 account data or full source equivalence.
+An earlier20-error run mixed workspace test support into the frozen candidate; its failure proof is
+retained. Candidate test support paths are now pinned and verified; no product fix for that harness error.
+Changed-code full job9262267814daf923ac68e69f2754438d timed out in the old verifier after recording
+and persistence completed. Cleanup and original server restoration passed; same saved files passed
+the improved read-only verifier above. The failed original job remains failed; no new recording was needed.
+The first jobc9def RuntimeError cause remains historical/unconfirmed, not retroactively marked passed.
+Monday operating deployment/preflight/arming completed as above. Actual future capture and persistence,
+P1 COMMIT10-20s and2-5x whole-app acceptance remain open.
+The exact operating candidatef44802190bd70570 and Monday plan are now published INACTIVE on NAS;
+954 code files/manifest and plan hashes verified, active pointer/runtime unchanged. Nothing is armed.
+Publication evidence: artifacts/recorder-operating-cooldown-publication-20261010.json.
+Evidence: artifacts/recorder-cooldown-ab-proof-20261010.json,
+artifacts/recorder-operating-cooldown-regression-20261010.json,
+artifacts/recorder-cooldown-full-start-status-20261010.json.
+
+2026-10-10 previous full capacity FAILED; exact operating server restored after that job:
+Official report for jobc9def38d8077b4880e7853ffb0f3ef48 records worker exit1/RuntimeError,
+OOM=false and successful cleanup/resume. Operating health=ok, diagnostics idle,
+original release restored and production database container unchanged. Pause was13213.998seconds
+(3h40m14s); expected collection gap and realtime loss remains unverified.
+This is a failed test, even though the job lifecycle is complete. Exact persistence progress
+and the RuntimeError code are unavailable in the public report: the supervisor dropped the
+worker's sanitized failure_reason before deleting its result directory. Local minimal fix and
+related71 tests passed15.163seconds; helper was unchanged at that point and is now updated above. User's root numeric reader
+found the final capture sample:71001 messages/119 large batches,2296849 events,2886621767 retained
+bytes, delivery queue0, cgroup headroom9406976000bytes. No final result was printed. This supports
+healthy capacity at the last sample, not completion of the entire capture/persistence.
+Private checker now logs seal/persist/verify phases and bounded counters, exits immediately if
+already failed/interrupted, and polls scalars instead of cloning the growing full index every50ms.
+Related68 tests passed40.909seconds, plus the newly added interruption test passed0.001seconds
+(overlapping regression runs). Controlled72k-index A/B3 rounds:14.143-14.995ms ->0.035-0.047ms
+per poll with identical scalar values. This is observer cost; the separate actual recorder A/B gain is above.
+Full cumulative gate was repeated once after that confirmed recorder fix, with phase/error evidence preserved.
+Frozen operating candidate scheduler->authenticated ASGI->native account/lease/VI/large capture
+and persistence passed1 test14.880seconds:24/24 events, reject/drop0, released RAM0,
+one8MiB+ native Shadow call and account-context/v2. This uses a private injected SQLite store,
+no lifespan, and does not prove actual NAS/PG/60minute capacity or whole-app performance.
+Evidence: artifacts/recorder-capacity-60minute-report-20261010.json,
+artifacts/recorder-post-failure-status-20261010.json,
+artifacts/recorder-scheduler-path-proof-20261010.json.
+Root/polling evidence: artifacts/recorder-capacity-root-log-evidence-20261010.json and
+artifacts/recorder-probe-polling-proof-20261010.json. The earlier no-repeat state is superseded above.
+Monday deployment/preflight/arming, full capacity acceptance and P1 COMMIT10-20s remain open.
+Failure-code helper bundleb83ab32e6f3a1697 is now installed and hash verified above. Exact inactive candidate
+f8b5ec1d6f44d410 passed NAS58 tests with errors/failures/skips0, cleanup/fence and operating
+release/containers unchanged(job31df1001576192365da01ced4f631af3). An earlier selected request
+incorrectly named an absent packaging module and failed loading; retained reportjob87f688286953381e973cca8a4ba2f84a
+is not counted as a pass. Packaging2 tests passed locally. Administrator bootstrap:
+sudo sh /volume1/docker/kiwoom-monitor/artifacts/nas-operator-update-replay-pause-b83ab32e6f3a1697.sh
+Bootstrap SHA2563098b6f734f10095bdf19207c593907b4136aa178b937fa314956bce0ee05906.
+Restricted launcher cannot replace root-owned helpers. Administrator installed them; private observer
+candidatedc53163063baf0f0 passed the actual short NAS A trial above.
+Evidence: artifacts/recorder-failure-correction-proof-20261010.json.
+
+2026-10-10 Monday scheduler opt-ins fixed locally (pre-failure preparation):
+The old scheduler posted only store/collector/top20 flags, omitting account/large capture.
+Explicit plan capture_flags now validates both capabilities/account-context-v2 before controls
+change, sends all five flags once and verifies schema4/selected flags in the response. Legacy
+schema3 and no retry after uncertain POST are retained. Twelve tests passed0.079seconds.
+The frozen local candidate is2026.10.10-recorder-account-large-v1-d2855d3c9bf52a86; its app source
+hash78d8cef5d5f3ede5e731fa6c46804e5865062ed3a2ff3f3da0fc99c581b50229 is unchanged after99-test gate.
+Validated local plan targets10/12 08:59:50-09:59:50 KST and20:10 persistence with all five flags.
+NAS publication/deployment/preflight/arming remain pending; no reservation has been activated.
+Capacity job was running at04:33:54UTC; its subsequent failure/restoration is recorded above. Evidence:
+artifacts/recorder-monday-preparation-proof-20261010.json.
+
+2026-10-10 installed capacity helpers and real NAS60second gate passed;3600second gate started:
+Installed supervisor66e26a049a998aed14a6b0d9962c42f5f20e10d6dabeadc5e91262a3657a6ce8 and
+worker27a7c5510d4b919b4538811ac5adbb8e5aeea2884b39aabdf3f7873f942e1d3b match bundle90ddfbb1e58cf999.
+Actual12GiB smoke job745ce2885c2df2f43885a78bd7ad9fa6 passed:60.000856seconds,
+1200trade messages +6mixed/12,000trades,38,827/38,827 durable events,reject/drop0,
+2distinct encoded8MiB+ native large inputs,12,018 closed supported deliveries/all store pairs.
+Real required9GiB start preflight passed(host18,410,115,072/cgroup12,825,763,840bytes).
+Receiver p95/max5.953/30.524ms; capture CPU11.954seconds; peakRSS240,496,640bytes;
+sampled delivery queue0. Retained charge49,611,769bytes. Persistence109.064seconds,
+49,248,600file bytes with original1MiB/s write pace. Cleanup/fence/exact operating server
+resume and healthy status passed; operational pause181.888seconds, expected collection gap.
+Input scheduling lateness p95/max451.803/1187.940ms includes inline mixed-fixture preparation;
+it does not prove steady live WebSocket/full-consumer performance. Whole causal/P1/2-5x remain open.
+The same final candidate has now started the actual3600second profile, jobc9def38d8077b4880e7853ffb0f3ef48;
+total duration also
+includes full paced storage/verification. Evidence: artifacts/recorder-capacity-smoke-installed-20261010.json.
+Operating recorder deployment/Monday reservation and registered v3 baseline Replay remain pending.
+
+Exact operating recorder overlay was prepared locally from the verified active/capacity sources.
+Its API account/large flags, context-store wiring and real/mock account/VI actor annotations are
+scoped; other active routes and market queues are retained. src78d8cef5d5f3ede5e731fa6c46804e5865062ed3a2ff3f3da0fc99c581b50229.
+99 pinned-source API/blocks/context/account/lease/VI regressions passed74.062seconds.
+This is a local candidate, not NAS publication/deployment or Monday reservation.
+Evidence: artifacts/recorder-operating-overlay-proof-20261010.json and regression log.
+
+2026-10-10 fixed recorder capacity resource profiles implemented, NAS gates pending:
+The standard4GiB worker cannot satisfy the8GiB recorder's real9GiB free start gate.
+Only recorder-capacity-smoke/recorder-capacity tests receive fixed12GiB worker,
+12GiB disk guard and14400second job timeout; installed config and ordinary profiles stay
+unchanged. Approved server pause → isolated drain/cleanup → exact resume is required.
+Fixed native offline SQLite/collector/account/lease/VI/large workload:20Hz×10trade rows,
+REST10second/account-large30second intervals; actual60second or3600second input window.
+Full gate:72,000messages/720,000trades/120distinct encoded8MiB+ large calls;8GiB/5M events.
+Actual Linux host/cgroup preflight, RSS/CPU/queue/latency and streaming durable content/pairs
+are required. Existing1MiB/s persistence remains; drain/verification adds time after60min.
+Related97 tests and final65 passed (overlap), including private2large-input native roundtrip
+and capacity success/failure cleanup/resume.
+Final additional durable-count gates64 passed25.830s (overlap): actual trade+mixed input,
+receipt-supported delivery and native account/store counts must match durable counts.
+Unsupported market_state receipt coverage is reported separately; its source message is recorded.
+Whole causal Replay/Postgres latency/all-app2-5x acceptance is not established.
+Final inactive candidate `2026.10.10-recorder-capacity-v1-90b3b846dd902ace` and helper bundle
+`90ddfbb1e58cf999` are prepared; source/bundle/bootstrap hashes match. Administrator
+installation was subsequently verified by actual two-file hashes. Its operator gate is app-source independent (local57 passed).
+Earlier candidate e468a09478119b5a passed NAS97, job51e0b01c66678fc5bf60ad0c7f2cdff0,
+with cleanup/fence/operating app/DB preserved. Final candidate64 passed NAS with errors/failures/
+skips0, job59cffb65d3ecffe6288c0cbb26d57aa0, source90b3b846dd902acec14cf47fbaf41a170d64e6bc4eaa5ca1ecd85c95232e404c.
+Cleanup/fence and unchanged operating app/DB were verified. This standard4GiB regression
+does not exercise the new12GiB capacity profile. Evidence: artifacts/recorder-capacity-resource-proof-20261010.json;
+actual NAS60second/3600second execution, exact recorder deployment and Monday reservation
+remain pending. Active app/DB unchanged; P1 intraday10-20second COMMIT remains unresolved.
+
+2026-10-10 mixed recorder cost and installed trace admission checked:
+Latest f51813928279b3c3 helpers were installed by the administrator (reported75 tests);
+both actual NAS helper hashes match the prepared bundle. Installed register-trace admitted
+controlled schema4 trace20261010T011742Z-8f7b68bdab84 with account-context/v2, account/lease/VI
+and encoded8,583,262-byte Shadow input:21/21 durable events, reject/drop0, original authority
+absent, physical block/file hashes verified. Registered v3 baseline/native Replay remains pending.
+PC OFF/ON account-large fixtures at10/20/50 trade rows per100Hz message (short1/3/3second
+samples, two rounds each) preserve native contents/revisions/results and32/72/72 BEGIN/COMMIT.
+Related regressions52 passed40.388s. ON receiver p95 ranges1.3922-1.4174/1.8211-4.8225/
+3.7920-4.0336ms; reject/drop0. This is neither NAS60minute nor whole-app2-5x acceptance.
+A one-MiB block-yield candidate was implemented and compared with a pinned before source:
+native Shadow p50 changed88.3158/92.7574 to91.2899/89.2175ms, without consistent writer or
+receiver improvement, so the candidate was completely reverted. No product optimization
+is claimed. Evidence: artifacts/recorder-mixed-probe-proof-20261010.json.
+Existing isolated operator worker has4GiB, while the8GiB recorder requires9GiB real free
+headroom; current jobs cannot prove the60minute capacity gate. Add a fixed isolated capacity
+resource profile and run actual3600second paced capture/deferred persistence with real
+headroom/RSS/CPU/queue checks. Active app/DB unchanged, healthy/diagnostics idle; no recorder
+deployment or Monday reservation. P1 intraday10-20second COMMIT remains unresolved.
+
+2026-10-10 recorder initial-ledger and large PostgreSQL input gate passed:
+The previous pinned account-context/v1 reproduces three incorrect duplicate results
+(source false/false/false vs replay true/true/true). Account-context/v2 now preserves
+preexisting execution intents/events/account snapshots, recovery/event documents and
+the observed next execution-event sequence, including gaps. Legacy v1 retains its scope.
+Local143 passed (47.075s); NAS138 passed with errors/failures/skips0 on inactive candidate
+`2026.10.10-recorder-ledger-v2-b6d75e275e4872ba`, job `fec0547f032c6132151070c39cedbc0a`.
+The same controlled17 native inputs and initial DB were replayed twice:14 COMMIT/3 rollback
+per run, three matched revision/lease failures, original duplicate results, final ledger
+content/sequence and account document contents match the source. An encoded input over8MiB
+uses multiple blocks but one actual PostgreSQL Shadow native call/COMMIT, with complete
+stored JSON matching the source. Failed seal rolls back rows and sequence; final baseline
+restore/owned connections0, cleanup/fence and unchanged operating app/DB were verified.
+The first138-test NAS gate (`2bc05839aa72d49af3cdbd8a3c4685f1`) had one verification-code
+KeyError: the offline reader replaces payload_ref with its pinned descriptor. It was
+cleaned; the corrected descriptor test also passed locally1 and the second NAS gate passed.
+Evidence: `artifacts/recorder-ledger-postgres-proof-20261010.json`.
+No operating recorder deployment or Monday reservation. Source-state equivalence, SQL/COMMIT
+p95/CPU/RSS improvements and whole-app20second COMMIT resolution are not claimed.
+Latest prepared helper bundle `f51813928279b3c3` supersedes `dbec3df99022816a` and supports
+context v2; administrator root gate/installation and registered-bundle execution are pending.
+Next: NAS60minute mixed account/lease/VI/large-input capacity/overhead, exact recorder
+deployment, October12 08:59:50-09:59:50 KST registration. Mid-capture credential activation
+and broader causal coverage remain explicit limitations; P1 remains unresolved.
+
+2026-10-10 recorder preparation priority (capture/native Replay gates passed; NAS capacity/deploy pending):
+The user set October12 08:59:50-09:59:50 KST (60minutes) as the next recording target
+and explicitly added execution leases, real-account recovery/events, account snapshots
+and VI to future capture/replay. The implementation contract is in
+[the recorder design](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md#2026-10-10-월요일-녹화-보완-설계--구현-전).
+It specifies a bounded immutable copy followed by block encoding/storage and one native
+call after verified reconstruction, explicit account/token capture boundaries, baselinev3,
+source clocks, real actors and expected-failure replay. Account UUIDs already exclude raw
+account numbers; keep them and alias only authority-bearing owner tokens. The context
+capsule does not prove a source-equivalent whole-DB baseline. Proposed size limits need
+NAS capacity/overhead acceptance. Opt-in strict `large_inputs` now selects schema4 with
+64MiB typed accounting and 1MiB encoded blocks (128MiB encoded ceiling), while legacy
+capture remains unchanged. Reader verifies block/order/hash and invokes the original
+native method once. Reserved copies and operation receipts drain after input close;
+copy failures stay incomplete. Replay shares three large-input credits across runtime
+peers, prepares the near-boundary frontier before its standalone clock, and retains
+credits until actual thread completion. Local block/legacy/scheduler/runtime regressions
+passed62. The controlled large fixture was rejected at8MiB accounting and restored from
+8blocks with matching contents/one native call; this is not proof for the missing original
+inputs or actual PostgreSQL transaction/capacity acceptance. API options and registered
+block/account regression fixtures are implemented. Account opt-in requires deferred store
+capture and preserves typed native values while substituting only private authority tokens.
+Controlled same-input/initial-SQLite A/B reduced rejected lease/snapshot inputs3->0 with
+identical stored contents and BEGIN/COMMIT3/3 on both sides. Original tokens are absent from
+trace files; the private key retires with the worker. Actual account and VI task actors are
+recorded. Baselinev3 adds12 explicit tables and5 real BIGSERIAL sequences to v2; account
+snapshots have a natural snapshot_id and no invented sequence. Native lease/recovery clock
+hooks are private to v3; operational UTC and per-call transactions stay unchanged. Account
+context capsule is locally implemented: one read-only source snapshot covers registry,
+binding, initial lease and settings/control documents; original fingerprints/tokens and
+credentials are excluded. It uses a named PostgreSQL cursor, bounded fetch/row/document/
+projection limits and a read deadline. A32MiB typed block profile is admitted before native
+producers and follows deferred persistence. Status records checksum/count/preparation and
+snapshot/admission gap. Child renewal uses control-revision CAS after preparation. The v3
+seal applies the detached capsule after the restored-v1 parent check, inside its existing
+transaction. The offline v3 runner now dispatches seven recorded account methods and VI
+append. It requires a validated capsule, a fresh aligned source clock and exact sealed
+context/authority-frontier hashes before restore. Stable expected account failures
+continue only after the same native exception class/code; result/count mismatches stop
+admission and drain. Actual PostgreSQL native acceptance passed78 with zero skips,
+errors/failures on inactive candidate `2026.10.10-recorder-account-native-v1-ceee5007484ab444`,
+job `e08f3c39f54dac078536bf65c9df069c`. Alias-frontier
+resolution is wired into preflight and dispatch (one token across nested valid runs and
+unbound release, conflicting prefixes fail closed). Related
+regressions passed140, then27 follow-up account/lease tests passed after the resolver changes;
+these groups overlap. Capsule correctness includes same native recovery/snapshot results,
+stored content and retained revision/lease-expiry failures in SQLite fixtures. This does not
+alone prove PostgreSQL restore rollback. The latest capsule/reader/
+API/clock regressions passed102 (52.817s), followed by38 control/context/baseline gates
+(18.654s), with overlapping groups. A904-row synthetic context exceeded legacy8MiB typed
+accounting and was recorded as1 logical event/8 blocks: typed13,056,944bytes,
+encoded8,247,904bytes, max block1MiB, rejects/drops0, source DB unchanged. Evidence:
+`artifacts/recorder-account-context-proof-20261010.json`. Local native-dispatch regressions
+passed55; follow-up35 context/block/cache gates and38 runtime/CLI/API/repository gates
+passed (overlapping groups). The real PostgreSQL gate captures12 controlled native calls,
+replays the same recording twice from one sealed v3 state, and verifies9 COMMIT/3 rollback
+per run, three matched revision/lease failures, source document contents, final account/VI
+contents and sequences, atomic failed-seal rollback and final baseline restore/drain.
+The first candidate gate failed because its inventory omitted the comparison module and
+repository owner context; it was cleaned and is not counted as passed. The corrected exact
+candidate passed. Proof: `artifacts/recorder-account-native-postgres-proof-20261010.json`.
+Missing account context/clock still rejects before DB connection. Offline CLI v3 seal/run,
+schema4 block-aware root registration and v3 worker clock bridging are implemented locally.
+The CLI validates the pinned capsule/selected native frontier before a DB lease; input hash
+uses the immutable block descriptor without hydrating large inputs. Local105 passed and
+the additional refusal/worker contract gate72 passed (overlapping groups); final local107
+passed and a separate real durable-reader boundary test passed1. First candidate
+`2026.10.10-recorder-cli-v3-v1-9e016ef928c82626` failed its104-test NAS gate at job
+`26bb300fb69e4194ebb859f57e0059a5`: the fixture requested150ms beyond capture end and
+omitted two support files (three loading errors). Cleanup completed and source stayed active.
+The durable-reader boundary test reproduces rejection of that extra time and accepts the
+actual capture end before DB connection. Corrected inactive candidate
+`2026.10.10-recorder-cli-v3-v1-ccdb7b28a75e9f47` passed107 NAS tests with errors/failures/skips0
+at job `ec1dc3a8650f88be3e9b98f194283a85`. Actual CLI seal/run replays the same12 inputs
+twice: each run has9 COMMIT/3 rollback, three matched native failures, complete observed-call
+mapping, source document content and repeated account/VI content/sequence equality,
+atomic failed-seal rollback and final baseline restore/owned connections0. Cleanup/final
+fence and unchanged operating release/containers were verified. Evidence:
+`artifacts/recorder-cli-postgres-proof-20261010.json`.
+Helper bundle `dbec3df99022816a` is prepared
+without operational source/active changes; administrator installation/root Linux gate and
+actual registered-bundle execution remain pending. Large PostgreSQL native-call proof,
+prior ledger/intermediate activation and broader causal coverage,
+NAS60minute capacity/overhead and exact recorder deployment/schedule remain pending.
+No operating source deployment, server restart or Monday schedule registration. The original10-20s COMMIT
+remains P1 open. User routing override: no Luna; Sol work uses actual GPT-6.1 Sol.
+
+2026-10-10 P1/P2 optimization cycles (PC source + inactive NAS candidates):
+Execution requires hypothesis/discriminator -> safe minimal change -> same Oct8
+input/baseline A/B -> retain improvement or reject the change. Root-cause uncertainty
+does not block confirmed redundant-cost improvements. Original10-20s COMMIT stays P1 open.
+The nominal minute-batch comparison was invalid: function AST proves baseline already
+has identical minute/finalize methods; only second-bar storage differed. Candidate
+24c484231f61bc1f gave SQL253->256/execute sum514.280->811.065ms and was not accepted.
+It is not minute-batch improvement evidence. Existing second-bar source was preserved
+in subsequent candidates; unrelated PC HEAD changes were not reverted.
+Dataset change batches distinct canonical/metadata keys in one existing transaction.
+Duplicate identities/history/cache invalidation/large text retain sequential behavior;
+saved_at freshness, independent COMMIT/rollback and source metadata are preserved.
+Local related100 passed; exact candidateb586790528cf4470 NAS job
+0eb9c97d8b7f7e4918aceebda14fbe40 passed53 (errors/failures/skips0, cleanup/fence/active preserved).
+Same realtime23/disk/empty-v1/concurrency8 comparison: baseline job
+c3e72bb55fc36ac2a862ef5ad5d1e43d vs dataset job28ac4182f961ad935cf2f8bd64773028.
+SQL253->231; dataset SQL55->33, execute sum41.350->34.710ms/p95=max4.383->3.477ms.
+All23 COMMITs/no rollback remain; input/baseline/selection/images/resources/content/revision
+lineage/sequences match; both input timing gates pass. Dataset total102.484->106.570ms,
+so end-to-end throughput improvement is not established. SQL cost improvement is retained.
+Whole COMMIT p95/max289.721/290.021->250.629/495.464ms; max worsened, not P1 resolution.
+Worker CPU6997.828->7003.529ms (observer included); RSS141225984->141357056 bytes;
+process-lifetime peak236101632->236257280 bytes. No CPU/memory improvement claim.
+Actor wait0; max worker wait0.427->0.370ms/start lag2.647->2.651ms. Full app queues/UI
+and operating DB CPU are outside this partial replay. Baseline reset/cleanup/fence and
+same release resume confirmed; approved pauses223.007/222.464s, collection gap expected,
+realtime loss unverified. Evidence: artifacts/commit-wait-dataset-batch-proof-20261010.json.
+Activity probe reuses only offline lease management connection and drains before reset.
+Initial NULL backend_start stopped sampling; fixed probes continue and report incomplete
+with unidentifiable fields. Correlation uses backend_start <= COMMIT start because call
+starts before connect; immutable raw samples are re-evaluated after drain.
+Baseline: WalSync41/WalInitSync4/NONE1; dataset: WalSync20/WalInitWrite1/WalInitSync7/NONE10;
+12 sampled COMMITs each, no blocker PID, actual native overlap peak1. These show scoped
+WAL synchronization waits, not physical device attribution or original20s causality.
+Next confirmed repeated cost is per-scope stock/day and research source/subject advisory
+lock SQL. Same ordered keys/seed/xact lifetime now use bounded ordinal requests in the
+shared helper; local lock/store/revision/observability152 passed. Exact inactive candidate
+2026.10.10-replay-scope-lock-batch-v1-d3701beb8cf796df native gate job
+dc6e9dd46cf85aaeabc8058573c04a43 passed76 (errors/failures/skips0, cleanup/fence/active
+preserved), including real blocking order, chunk ownership/rollback and parallel revision.
+The only writer-function differences from the dataset candidate are the two scope callers
+and their common helper; dataset/second-bar writers and activity sampler are unchanged.
+New unit-module registration passed (4 new modules including earlier P0); reviewed core
+order fingerprint and runner assertions updated, runner19 passed.
+Same realtime23/disk/empty-v1/concurrency8 A/B jobfe5ee2e7a4b87343fb53cc5ef9acffeb
+passed: dataset candidate -> common scope candidate SQL231->75 (-67.53%); combined
+from original SQL253->75 (-70.36%). Stock/day scope requests160->4; actual minute
+SQL96->18/finalize94->16. Their4 calls execute sum159.746->138.532ms (-13.28%),
+p95=max42.236->37.246ms. All contents/revision lineage/sequences, input hash/baseline/
+selection/resources and input timing match; COMMIT23/rollback0 unchanged. Retained
+as a scoped SQL-stage improvement, not original20s resolution or whole-app throughput.
+Whole SQL execute sum502.327->481.739ms/p95138.961->137.814/max150.101->151.106;
+whole COMMIT p95250.629->265.810/max495.464->344.431ms; native wall sum1663.267->2100.012ms.
+Busy native service rate13.828->10.952call/s, input schedule remains23/120s; no overall
+latency/throughput improvement. Target4-call wall1021.080->1048.964ms also does not improve.
+Worker CPU7003.529->6946.474ms (observer included), RSS141357056->141201408 bytes,
+lifetime peak236257280->236359680 bytes: no meaningful resource improvement claim.
+Actor wait0; worker wait p95/max0.318/0.370->0.327/0.882ms, start lag p95/max2.208/2.651
+->1.601/1.764ms. Whole-app queue/CPU and sustained2~5x load remain unmeasured.
+Scope candidate observer4442 probes/error0/drop0/drained, unidentified backend_start38
+(incomplete);8 sampled COMMITs: WalSync44/WalInitSync6/NONE1, blocker PID0/overlap peak1.
+No lock-candidate rejection or physical-device attribution. Cleanup/baseline/fence and
+same healthy operating release resume confirmed; pause224.361s, expected collection gap
+and realtime-loss-unverified retained. Final status diagnostics idle/journal idle/no blocker.
+Evidence: artifacts/commit-wait-scope-lock-batch-proof-20261010.json.
+Next discriminator uses only actual recorded realtime+rest_market inputs. Empty-v1
+preflight job4034e00b1379e265cae0f0d01d976d37 passed53 operations/31 actors, selected
+omitted0, native executed0/no operating pause, cleanup/fence/active preserved. Original
+REST causal actor is unconfirmed (actor_known=false; generic clock/reference warning).
+No query-cache/source-clock guard violation was found in this window; query-cache
+methods elsewhere still require v2 owned source clock and restored cache state.
+Actual53/disk/baseline execution job8899a124482f2ed48fce8ddae307215f passed native53,
+SQL261/COMMIT53/rollback0, no omitted/unobserved operation. Method-level result proves
+all30 REST calls are read.document_collection/load_documents; write count remains23.
+Native total overlap2 includes readers; write overlap and write-COMMIT overlap both1.
+The hypothesis that these REST inputs add missing writers is rejected. A second run
+with the scope candidate is unnecessary; the actual scoped change already has the
+valid realtime23 A/B above. This is a discriminator result, not a new improvement gate.
+Write-only COMMIT p95/max459.643/696.772ms, no original10~20s reproduction. Mixed53
+COMMIT p9533.981ms includes30 cheap read COMMITs and must not be used as write improvement.
+Actor_known=false makes input_timing_preserved=false despite max start lag4.373ms;
+no source actor/timing equivalence claim. Observer4440/error0/drop0/drained, identity
+missing backend_start23 (incomplete),9 sampled COMMITs: WalSync30/WalInitSync18/NONE2,
+blocker PID0. Worker CPU8280.810ms/RSS141381632/lifetime peak236392448 bytes; no causal
+resource or throughput improvement claim. Baseline reset/cleanup/fence/operating DB
+preserved and same healthy release resumed; pause225.819s, collection gap/loss-unverified.
+Evidence: artifacts/commit-wait-realtime-rest-discriminator-20261010.json and raw baseline.
+P1 remains open. Next target is method-level eligibility of actual captured additional
+writers (shadow/market_events), not selection by workload name alone. Missing lease/VI/
+rejected inputs and original DB/background load are not reconstructed; no lock candidate
+is excluded by missing samples. Host time or historical saved results are not seeded.
+No app deployment.
+
+2026-10-10 P1 temporary PostgreSQL startup repair (disk acceptance passed):
+Before cleanup, a failed isolated PG start/readiness now verifies the job label and
+records container state, readiness attempts/time and bounded fixed startup markers.
+No raw logs, environment, host paths or passwords are published. The existing60s
+readiness deadline and cleanup-before-resume order remain unchanged. Local operator/
+packaging49 passed. Later identity evidence and the narrow disk-parent fix are below.
+Operator-only candidate: 2026.10.08-trace-ram-8g-5m-v1-60873560aea7b34a;
+app source/hash/build and active are unchanged. Portable NAS job
+93a1063c8dc30612f7837be7bb8ba9c5 passed47, errors/failures/skips0,
+cleanup/post-job fence/active and container preservation confirmed. This exercises
+simulated failures; it is not the admin Linux fd/ACL gate or an actual disk startup.
+Prepared admin bundle d93e3d717ccc6d4705859e45f5dc756549aaa0b4bc0b158757441ff9283a8161,
+bootstrap /volume1/docker/kiwoom-monitor/artifacts/nas-operator-update-replay-pause-d93e3d717ccc6d47.sh.
+Administrator supplied Linux gate68 OK and helpers_updated/passwordless_status_verified=true,
+original revoke backups/sudoers/database preserved and server_restarted=false.
+Live status is healthy/idle on the same active release. Installed supervisor SHA256
+matches the prepared bundle: fae8714f50cf29b2180a667a529b4e2eb28fb07113c8af28cf0314f9e5b119ec.
+Identical realtime23/empty-v1/concurrency8 disk job50d3a349dd961f0eb5fb8b8723d88c12
+failed at postgres_readiness:117 attempts/60.490s, PG exited1, OOM=false,
+permission_denied marker, log83 bytes/untruncated/hash
+02c107853777eb0491de9c248334e246a4630483dbbf9e3585407a9b38bf193a.
+The exact83-byte expected mkdir-PGDATA permission message reproduces this hash.
+This confirms directory creation failed; denying UID/owner/ACL/userns is unconfirmed.
+Cleanup completed; replay and operational pause were not reached, server_restarted=false,
+active remains healthy. No disk performance comparison or application deployment.
+Further diagnostic candidate records container user/userns, daemon userns flag and
+fixed-role private file UID/GID/mode without content, paths or permission changes;
+permission lines yield only operation/role enums. Local operator/packaging50 passed.
+The initial v1 helper did not report these identity fields; the reviewed follow-up
+has now been installed by the administrator.
+Prepared identity-diagnostic candidate: 2026.10.08-trace-ram-8g-5m-v1-56a2a41cf1be83b9,
+bundle e4aed8ab8bd264423d4bb4d05c9de360977fc24d72e41dcdad9325084b9ca133,
+bootstrap /volume1/docker/kiwoom-monitor/artifacts/nas-operator-update-replay-pause-e4aed8ab8bd26442.sh.
+Application source/active unchanged; NAS portable identity-diagnostic job
+f6f414a7bb60c0e08f6e3f59341b9d16 passed48, errors/failures/skips0,
+cleanup/post-job fence/active and container preservation confirmed. Its RAM PG became
+ready in4 attempts/1.767s. This is a simulated diagnostic contract gate, not a disk
+ownership repair or actual startup-identity evidence. Administrator supplied Linux69 OK,
+helpers_updated/passwordless_status_verified=true, backups/sudoers/database preserved,
+server_restarted=false. Installed supervisor SHA256 matches the identity bundle:
+05eb4b11b470dbc7ff24588ccbe75d1f33a939b44edf633d218773df1e20dbf1.
+Same-input disk job29286678b2c75e5f90aa9667e5a0dff5 reproduced the same mkdir denial,
+117 readiness attempts/60.422s, PG exit1/OOM=false, cleanup=true/server_restarted=false.
+Actual metadata: data_root root:root/0700; pgdata UID70/GID0/0700 already exists;
+password root:root/0600. Container uses image default user; daemon userns=false.
+The outer root0700 directory denies search to UID70 even though PGDATA belongs to70.
+Fix candidate uses anchored no-follow fd on only the generated disk data parent:
+verify root owner/non-writable-by-others, fchmod0711 (mkdir mode alone is stripped by
+umask077), verify applied mode, close fd. Root ownership stays, group/other gain only
+search, private ancestors/password0600/PGDATA0700 remain protected. Local51 passed,
+including wrong-owner/mode-not-applied rejection and cleanup-before-resume cases.
+Prepared fix candidate: 2026.10.08-trace-ram-8g-5m-v1-95f22a1d0c5913af;
+bundle 6e7efb301580f54182fc30ffb6de96a87b582be064b82a1b75d7bf4495db12c4,
+bootstrap /volume1/docker/kiwoom-monitor/artifacts/nas-operator-update-replay-pause-6e7efb301580f541.sh.
+Expected supervisor SHA256: 34c861fe8747a6cecd595a97caa28d8705490b93d97b745de45e0a6bbc06dbc4.
+Portable NAS fix job60c99d718bf5d055f082c525fe2cce05 passed49, errors/failures/skips0;
+cleanup/post-job fence/active and container preservation confirmed. This RAM-backed
+gate checks simulated disk permission contracts, not actual disk startup acceptance.
+Administrator supplied Linux70 OK, helpers_updated/passwordless_status_verified=true,
+original backups/sudoers/database preserved, server_restarted=false. Installed supervisor
+SHA256 matches 34c861fe8747a6cecd595a97caa28d8705490b93d97b745de45e0a6bbc06dbc4;
+Same-input disk job42e7cb83fe64b0f0a33a7264c0946ddc passed: parent0711, PG ready in
+13 attempts/6.780s; realtime23/native23/SQL253, omitted inputs0, source outcomes match,
+DB observation complete. Cleanup/baseline reset/post-job fence and same active healthy
+resume confirmed; operational pause223.929s, collection gap expected/loss unverified.
+Source/input/baseline/selection match earlier RAM joba5208bed012d72e3705be7471e8ceceb.
+Stored content/revision lineage and final sequences match; exact hashes differ on the
+four tables containing generated times/UUIDs. Functional/timing equivalence stays false.
+COMMIT p50/p95/max: disk20.531/401.139/684.007ms versus RAM0.255/0.559/6.083ms;
+writer wall sum2960.836ms versus690.174ms. Disk input_timing_preserved=false: actor56
+starts113.875ms late (100ms gate), with113.490ms waiting for actor55 document native
+completion; predecessor COMMIT329.084ms. This failed timing gate is retained, not waived.
+Same-environment RAM repeat39e14ae7a90c3c9a74980c3e7aba0423 passed:23 inputs/native23/SQL253,
+COMMIT p50/p95/max0.245/0.567/5.820ms, writer wall sum680.536ms,
+input_timing_preserved=true (max start lag2.119ms). Source/input/baseline/selection,
+stored content/lineage/sequences match; baseline/cleanup/fence/resume confirmed,
+operational pause221.078s. Final disk repeat75f42889e6609715480e43050bfc2f83 passed:
+PG10 attempts/5.251s, same23/native23/SQL253 and source/input/baseline/selection;
+COMMIT p50/p95/max20.722/284.048/1189.255ms, writer wall sum2659.420ms,
+input_timing_preserved=true (max start lag1.770ms), same content/lineage/sequences,
+baseline/cleanup/fence/resume confirmed, operational pause224.521s.
+Disk→RAM→disk completed; images/CPU affinity/worker memory also match. Both disk runs
+have longer observed COMMIT than RAM, but the initial disk timing failure stays recorded.
+Only the repeated RAM/disk pair passes both input timing gates; full functional/timing
+equivalence remains unverified. Total approved pause669.528s across3 runs; collection
+gap expected/realtime loss unverified. No WAL/wait-owner/I/O attribution;
+selected realtime only, original source_state_equivalent=false, original10-20s stalls
+not reproduced. Evidence: artifacts/common-bottleneck-disk-ram-proof-20261010.json.
+No app deployment or P1 production COMMIT-delay attribution.
+
+2026-10-10 cohort worker P0 follow-up (PC main, inactive candidate):
+Signal/metadata workers now retain admitted input through retry and actual native ACK.
+Signal admission freezes invocation time/session/condition. Frozen revision/current
+is retried under the existing state lock; eligibility is published to RAM after ACK.
+Close drains signal descendants in order, keeps waiting after its 10s warning and
+provides missing queue owners for pre-start direct calls. Persistent DB errors keep
+close pending. Queue overflow and forced-stop pre-ACK recovery remain explicit gaps.
+Same six SQLite/fake-REST gates fail on the exact original 4efd672 source (6 failures,
+0 errors) and pass on the correction. Worker/market/fact local38 and capture/REST/
+runtime/collector79 passed; registered P0 profile41 passed (overlaps, 136 unique local
+tests). No whole-app replay/performance or production occurrence claim.
+Existing 4efd672 CI: PostgreSQL success, Windows failure at new-module registration
+for four earlier P0 modules. Registered those plus the new worker module; the exact
+base-ref module-coverage gate passed for all5. GitHub CI for this uncommitted change
+has not run. No httpx2 or dependency version change.
+Inactive candidate: 2026.10.10-cohort-worker-ack-v2-cd91306e1afce7dc.
+NAS repeated full gate job b78c7dbd91ff6688b3c463c85f70cc98 passed67,
+errors/failures/skips0, cleanup/post-job fence passed, active/both containers unchanged.
+Separate worker9, native14 and adjacent44 gates also passed (overlap, not extra tests).
+The candidate retains the base fact suite14 and capture suite14; PC fact13/capture18
+are different test scopes. Do not combine their counts as unique or source parity.
+v1 job2215dfe5b18ce975cb1fa31eebfbe71b was interrupted after the pre-start metadata
+owner gap; cleanup_complete=true. It is not a passing gate. The same gap was reproduced
+locally before the v2 correction. Initial v2 job117cdd3c8fef55765afb558b8b14acdf
+also did not finish and was interrupted; cleanup_complete=true, no test result.
+Its wait cause remains unconfirmed; the subsequent passing run is not proof of
+eliminating that wait. Active remains the verified 2026.10.08 release.
+Source build: 2026.10.10-cohort-worker-ack-v2. No active release switch or deployment.
+
 2026-10-09 upper-limit P0 implementation (worktree 91b3, inactive candidate):
 MarketEventService now owns frozen JSON facts, per-key shared ACK futures, a bounded
 pending map and one retrying native writer. Reception normally waits only for RAM

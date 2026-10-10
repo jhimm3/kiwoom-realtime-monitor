@@ -13,6 +13,140 @@ mount source·destination·RW나 네트워크가 실제로 바뀌면 계속 거�
 
 ## 목적과 선택
 
+2026-10-10 최종 recorder 릴리즈6390e0b7de1a5189의 exact storage gate105/105 통과,
+같은 앱 코드의 account/lease/VI/large native Replay17입력 x2와 baseline restore 통과 후 배포 완료.
+운영 PG 보존, 실제 health/build/source path를 확인했다. 기존 f448 storage3오류는 클래스 patch가
+설치된 instance wrapper를 지나치던 테스트5줄로 수정했고 실패 기록은 보존했다.
+root deploy의 active.json mode0600 때문에 기존 일반 계정 예약 preflight가 PermissionError를
+냈다. 현재 scheduler는 고정 NAS root에서 이 오류만 승인된 읽기 전용 kiwoom-nas status로
+대체한다. 파일/권한/sudoers는 바꾸지 않았다.16관련 검사와 실제 NAS 읽기 preflight가 통과했다.
+현재 standalone 예약 소스: artifacts/nas-scheduled-trace-operator-status-20261010.py,
+고정 시작 파일: artifacts/arm-recorder-monday-status-20261010.py,
+계획: artifacts/nas-trace-start-20261012-storage-fixtures.plan.json.
+상태/lock은 기존 operator fence가 인식하는 nas-trace-start-20261012.status.json[.lock]이다.
+실제 NAS preflight와 예약 활성화 완료: PID2815,10/12 08:59:50~09:59:50 KST/20:10 저장,
+5개 capture flag·코드/계획 hash·SSH 종료 후 동일 PID 확인. 현재 제어/trace OFF, 서버 정상이다.
+NAS 재부팅 뒤에는 이 one-shot 프로세스가 유지되지 않는다. helper test/deploy는 예약 lock을
+존중하므로 예약 중 우회 실행하지 않는다. 실제 미래 녹화/저장 결과는 별도 수용 판정한다.
+이하의 과거 비활성/미설치/진행 중 상태는 해당 시점 기록이며 현재 실행 지시가 아니다.
+
+2026-10-10 capacity jobc9def38d8077b4880e7853ffb0f3ef48은 실패했다(worker exit1,
+RuntimeError/OOM=false). cleanup/정확한 운영 서버 복구/health=ok/운영 PG 보존은 확인됐다.
+아래 실행 중 기록은 이전 표본이다. lifecycle complete를 gate 합격으로 해석하지 않는다.
+worker의 제한 failure_reason을 supervisor report에 보존하는 수정은 관련71건 통과했고,
+이후 관리자80건 갱신 및 실제 설치 hash 확인을 완료했다. 고정 root 전용 숫자 로그 명령:
+`sudo python3 /volume1/docker/kiwoom-monitor/artifacts/read-recorder-failure-20261010.py`.
+운영 제어나 로그 원문 공개 없이 마지막 capture 건수/메모리와 최종 결과 출력 유무를 확인한다.
+권한 제한 때문에 이 읽기는 관리자 실행이 필요하다. 원인 판별 전60분 반복은 하지 않는다.
+해당 관리자 읽기는 완료됐다: 마지막71,001메시지/대형119회/큐0·정상 여유,
+최종 결과 출력 없음. 실패-code helper 후보f8b5ec1d6f44d410는 NAS58건을 통과하고
+정리/fence/운영 보존을 확인했다(job31df1001576192365da01ced4f631af3).
+부재 packaging module을 지정한 이전 로딩 실패는 따로 보존하며 합격으로 세지 않는다.
+갱신 번들b83ab32e6f3a1697는 root-owned helper에 적용됐고 실제 hash를 확인했다.
+아래 bootstrap/hash는 설치 근거이며 반복 갱신 지시가 아니다.
+Bootstrap SHA2563098b6f734f10095bdf19207c593907b4136aa178b937fa314956bce0ee05906.
+supervisor 예상 hash859e35a64ca47e831aaa3c32a353099661fa18bc974fcd80a371b6fa3d90f16c,
+worker 예상 hash27a7c5510d4b919b4538811ac5adbb8e5aeea2884b39aabdf3f7873f942e1d3b.
+private observer 후보2026.10.10-recorder-capacity-v1-dc53163063baf0f0는 실제 앱 src 그대로,
+checker/test만 갱신해 게시했다. 설치 hash 확인 뒤 짧은 영속화 단계 판별에 사용한다.
+이 후보의 실제 NAS A와 recorder cooldown B의 짧은 A/B는 통과했다(저장24.476% 개선).
+누적 job9262267814daf923ac68e69f2754438d는2329089건 저장 완료 후 기존 verify 단계에서
+4시간 제한으로 종료됐고 정리/동일 서버 복구/health/운영 PG 보존을 확인했다.
+동일 저장본은 관리자 전용으로 보존했다. 고정 읽기 전용 재검증 명령:
+`sudo python3 /volume1/docker/kiwoom-monitor/artifacts/verify-saved-recorder-92622678-20261010.py`.
+hash로 묶은 검사기/기존 source/runtime만 사용한다. 네트워크 차단·read-only mount·4GiB/CPU0,1/
+30분 제한이며 생성한 컨테이너 ID/label이 일치할 때만 정리한다. 운영 제어/DB/설정은 접근하지 않는다.
+위 고정 읽기 검증은 같은 보존본으로 NAS184.287초에 통과했다. 2,329,089events/
+72,360collector messages/721,080closed deliveries/120large inputs와 manifest 동일성을 확인했다.
+native writer/운영 DB 접근 없음, 검증 컨테이너 정리 완료. 원래 timeout job은 실패 기록을 유지한다.
+운영 배포/월요일 예약·전체 causal Replay는 미완료다. 새60분 녹화는 하지 않는다.
+
+월요일 one-shot plan은 capture_flags에 store_inputs/collector_inputs/top20_inputs와
+large_inputs/account_inputs를 명시한다. 기존 세 옵션 plan은 schema3를 유지한다.
+새 옵션은 schema4 capability 및 account-context/v2를 제어 변경 전에 검사하고,
+한 번의 POST 응답에서 실제 옵션·schema·릴리즈·instance/session을 확인한다.
+불확실 ACK나 응답 불일치에서 자동 재시도/임의 capture stop은 하지 않는다.
+이번 수정12건 통과; 운영 후보/계획은 로컬 준비 상태이며 실제 예약 활성화는 미완료다.
+
+### 2026-10-10 고정 녹화기 용량 시험 후보
+
+`test RELEASE --profile recorder-capacity-smoke --pause-operational`은 실제60초,
+`--profile recorder-capacity`는 실제3600초 입력 창을 사용한다. 관리자 helper 갱신과
+정확한 후보 gate 이후 사용한다. 일반 test/replay의 설치 자원 설정은 그대로다.
+고정 worker12GiB/swap12GiB, 디스크 여유12GiB 이상, 시작 전 host 여유
+worker+PG+1GiB, recorder 시작 전 실제 host/cgroup 여유9GiB 이상을 요구한다.
+임의 memory/duration/script 인수나 selected test 이름을 이 profile에 전달할 수 없다.
+CPU/비root/read-only/cap-drop/network 격리는 기존과 같다. 운영 서버만 승인된 절차로
+정지하며 임시 작업 정리 후 같은 서버/릴리즈를 복구한다. 운영 PG는 계속 실행한다.
+
+제어 입력은20Hz×10행(초당200체결), REST/구독/저장10초마다, 계좌/lease/VI 및
+서로 다른 encoded8MiB 초과 Shadow30초마다다. 60분은72,000메시지/720,000체결/
+대형120입력이다. RAM8GiB/500만 이벤트를 유지한다. 기존1MiB/s 영속화 속도를
+높이지 않고 전용 작업 deadline만14400초, private persistence9600초로 고정한다.
+따라서 전체 시험에는 녹화60분 외 저장/검증 시간이 추가된다. private 저장 시각만
+입력 창 종료 후 앞당기며 운영20:10 KST 예약의 실제 벽시계 실행은 별도 검증이다.
+
+모든 파일/블록 checksum, seq, native operation/구독/전달 쌍과 계좌 context/v2,
+대형 입력 전체 내용을 순차 검사한다. 전체 payload를 한꺼번에 펼치지 않는다.
+실제 처리된 체결+혼합 메시지 수와 durable 원본 수, receipt 지원 전달 수와 closed
+전달 수, 계좌/일반 저장 호출 수와 durable native 쌍 수가 각각 같아야 한다.
+기존 receipt 대상 밖 market_state 전달은 별도 native_delivery_uncovered 수로
+표시한다(원본 혼합 메시지 자체는 녹화된다). 전체 causal coverage로 확대하지 않는다.
+이는 용량 시험이며 whole causal compiler/Replay, 원본 DB 동등성, PostgreSQL
+COMMIT/전체 앱2~5배 부하 승인이 아니다. 로컬 관련97건 및 최종65건 통과(중복 포함),
+설치 hash 확인 및 실제 NAS60초 gate는 통과했고3600초 gate는 실행 중이다.
+60초 시험은38,827/38,827 사건·reject/drop0·대형2개·지원전달12,018쌍과 실제9GiB
+시작 여유·전체 영속화/정리/같은 운영 서버 복구를 확인했다. 수신p95/max5.953/30.524ms.
+별도 입력 스케줄 지연p95/max451.803/1187.940ms에는 inline 혼합 준비 대기가 포함된다.
+3600초 jobc9def38d8077b4880e7853ffb0f3ef48의 전체 저장/복구와 운영 배포·월요일 예약은 미완료다.
+
+최종 후보 `2026.10.10-recorder-capacity-v1-90b3b846dd902ace`의 변경64건 NAS 회귀는
+job59cffb65d3ecffe6288c0cbb26d57aa0에서 통과(오류/실패/skip0), 정리/운영 보존을
+확인했다. 신규 helper bundle90ddfbb1e58cf999는 설치 전이다. root 소유 helper의
+교체는 기존 제한 NOPASSWD 명령에 포함되지 않으므로 관리자 bootstrap이 필요하다:
+`sudo sh /volume1/docker/kiwoom-monitor/artifacts/nas-operator-update-replay-pause-90ddfbb1e58cf999.sh`.
+Bootstrap SHA256은c0156235a4ad9a574c86235535b1e3b94d0d59415ca59b79bea7b78192091252이다.
+설치 뒤 두 helper hash를 확인하고 고정60초/3600초 profile을 순서대로 실행한다.
+
+### 2026-10-10 PostgreSQL 시작 실패 진단 후보
+
+임시 PG의 start/readiness 실패는 cleanup 전에 해당 job label을 검사한 컨테이너만
+읽는다. Running/OOMKilled/ExitCode/status와 마지막 100줄 중 최대 64 KiB의 hash,
+고정 오류 표식(permission/no-space/initdb 등)을 보고한다. 로그 원문, 환경변수,
+host 경로, PostgreSQL 비밀번호는 report에 넣지 않는다. 표식은 수집된 증거이며
+단독으로 근본 원인을 확정하지 않는다. 읽기 실패도 error type으로 남긴다.
+readiness 시도 수/경과 시간을 기록하며 기존 60초 deadline과 cleanup/resume 순서를
+유지한다. 로컬 operator/packaging49 및 비활성 후보 NAS portable47 통과;
+사용자의 관리자 실행 결과 Linux68 OK와 helper 갱신·무암호 status 검증을 확인했다.
+설치된 supervisor hash는 준비 번들의 fae8714f50cf29b2180a667a529b4e2eb28fb07113c8af28cf0314f9e5b119ec와
+일치한다. 동일 disk 대조 job50d3a349dd961f0eb5fb8b8723d88c12에서 PG exit1/OOM=false/
+permission_denied와 cleanup을 확인했다.83바이트 전체 로그 hash가 PGDATA mkdir 권한
+거부 문장과 같아 실패 작업까지 확정했지만, 거부 UID/owner/ACL/userns는 미확정이다.
+
+후속 후보는 job label 확인 뒤 고정 data_root/pgdata/password_file 역할의 UID/GID/mode,
+container user/userns와 daemon userns 사용 여부만 기록한다. parent fd/no-follow 검사로
+다른 경로를 열지 않고 file content/host path/환경변수를 내보내지 않는다. 권한/소유권은
+변경하지 않는다. permission 로그는 작업/역할 enum만 반환한다. 로컬50/NAS portable48 통과,
+후속 번들e4aed8ab8bd26442의 관리자 Linux69 OK/helper 갱신과 설치 hash 일치를 확인했다.
+NAS 모의 진단 검사 통과와 실제 disk 원인 확인은 구분한다.
+
+동일 disk job29286678b2c75e5f90aa9667e5a0dff5는 root:root/0700 data_root와
+UID70/GID0/0700 pgdata를 보고했다(userns=false, 같은 mkdir 권한 거부). root0700 상위는
+UID70의 통과를 막는다. 수정 후보는 생성된 이 data_root의 root 소유권과 non-writable
+검사를 유지하고, anchored O_DIRECTORY/O_NOFOLLOW fd에 fchmod0711 및 적용 확인을 한다.
+0711은 group/other 통과만 허용하며 읽기/쓰기 권한을 주지 않는다. protected private 상위,
+비밀번호0600, PostgreSQL이 소유한 PGDATA0700은 유지한다. umask077에 의해 mkdir의
+통과 비트가 제거될 수 있으므로 fchmod를 사용한다. 로컬51 통과; 동일 실제 disk replay 검증은
+완료됐다. 운영 데이터나 원래 권한 전체에 chmod/chown하지 않는다.
+수정 후보95f22a1d0c5913af/번들6e7efb301580f541의 NAS portable49 통과
+(job60c99d718bf5d055f082c525fe2cce05, 오류/실패/skip0, cleanup/fence/운영 보존 확인).
+이는 RAM 기반 모의 권한 계약 검사이며 실제 disk startup 검증과 구분한다.
+관리자 bootstrap은 `/volume1/docker/kiwoom-monitor/artifacts/nas-operator-update-replay-pause-6e7efb301580f541.sh`다.
+사용자의 관리자 Linux70 OK/helper 갱신과 설치 supervisor hash34c861fe8747a6ce 일치를 확인했다.
+실제 disk job42e7cb83fe64b0f0a33a7264c0946ddc는 PG13회/6.780초 준비와 replay23건,
+baseline/cleanup/fence 및 같은 운영 앱 재개를 확인했다. 정지223.929초의 수집 공백과
+무손실 미검증을 명시한다. input_timing_preserved=false인 성능 대조는 별도 한계다.
+
 ### 2026-10-09 scoped store replay 후보 계약
 
 아래 옵션은 NAS 비활성 후보 `2026.10.09-partial-store-replay-v2-61eabc1096dd4940`에 게시되었으며

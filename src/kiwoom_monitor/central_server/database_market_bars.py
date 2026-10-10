@@ -328,15 +328,35 @@ def _load_postgres_minute_query_authorities(
             authorities[(str(subject), str(observation_key))] = str(completeness)
     return authorities
 
+def _lock_postgres_advisory_scopes(cursor: Any, scopes: list[str], *, seed: int) -> None:
+    """Acquire the caller's ordered scopes on its existing transaction."""
+    if seed not in (0, 1):
+        raise ValueError("unsupported observation lock seed")
+    for offset in range(0, len(scopes), POSTGRES_MULTIROW_UPSERT_ROWS):
+        batch = scopes[offset:offset + POSTGRES_MULTIROW_UPSERT_ROWS]
+        if len(batch) == 1:
+            cursor.execute(
+                f"SELECT pg_advisory_xact_lock(hashtextextended(%s,{seed}))", (batch[0],),
+            )
+        else:
+            # Sort only the input ordinal, never the lock expression. PostgreSQL
+            # evaluates this volatile output after sorting (SELECT List rule).
+            # No LIMIT: every scope is acquired before execute returns.
+            cursor.execute(
+                f"SELECT pg_advisory_xact_lock(hashtextextended(scope,{seed})) "
+                "FROM unnest(%s::text[]) WITH ORDINALITY AS requested(scope,ordinal) "
+                "ORDER BY requested.ordinal",
+                (batch,),
+            )
+
+
 def _lock_postgres_minute_day_scopes(cursor: Any, values: list[dict[str, Any]]) -> None:
     """Serialize query replacement and late 0B writes for the same stock/day."""
     scopes = sorted({(str(value["trading_date"]), str(value["code"]), str(value.get("market", "KRX")))
                      for value in values})
-    for scope in scopes:
-        cursor.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s,1))",
-            (json.dumps(scope, ensure_ascii=False, separators=(",", ":")),),
-        )
+    _lock_postgres_advisory_scopes(cursor, [
+        json.dumps(scope, ensure_ascii=False, separators=(",", ":")) for scope in scopes
+    ], seed=1)
 
 def _postgres_realtime_minute_upsert_suffix(*, replace_query: bool) -> str:
     if replace_query:
@@ -435,11 +455,9 @@ def _load_postgres_latest_revisions(
     lock_started = monotonic()
     scopes = sorted({(source.kind, source.subject, source.source_id)
                      for source in sources}) if lock_scopes else ()
-    for kind, subject, source_id in scopes:
-        cursor.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-            (json.dumps((kind, subject, source_id), ensure_ascii=False, separators=(",", ":")),),
-        )
+    _lock_postgres_advisory_scopes(cursor, [
+        json.dumps(scope, ensure_ascii=False, separators=(",", ":")) for scope in scopes
+    ], seed=0)
     if timings is not None:
         timings["lock_seconds"] = monotonic() - lock_started
     lookup_started = monotonic()

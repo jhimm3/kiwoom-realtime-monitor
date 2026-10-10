@@ -1,3 +1,50 @@
+## 2026-10-10 녹화 시험 실패 보고와 실제 예약 시작 경로 검증
+
+- worker의 제한된 오류 코드가 실패 report에서 누락되는 문제를 로컬 수정했다. 임의 오류 문장·비밀은 계속 제외하며 운영 helper는 아직 미반영이다.
+- private 시험의 봉인·저장·검증 진행 숫자를 기록하고 실패·중단을 즉시 판정한다. 큰 인덱스의 반복 복사를 숫자 조회로 바꿨으며 동일72k index A/B3회에서 약14~15ms→0.035~0.047ms/조회. 실제 NAS 저장 개선과 원래60분 실패 원인은 아직 미검증이다.
+- 실제 예약함수→인증 API→native 계좌·lease·VI·8MiB+입력→영속화 회귀를 추가했다. frozen 운영 후보에서24/24·거부/누락0·RAM반환0, 단일 대형 native 호출/context-v2 확인. private SQLite/no lifespan 범위다.
+- 실제 NAS60분 시험은 RuntimeError로 실패했고 운영 정상 복구를 확인했다. 원인 판별·60분 합격·월요일 배포/예약은 미완료로 유지한다.
+
+## 2026-10-10 녹화 시작 전 원장·대형 PostgreSQL 입력 검증
+
+- account-context/v2는 기존 주문/체결/계좌 스냅샷과 계좌 복구/이벤트 문서, 실제 다음 체결 순번의 공백을 보존한다. v1 범위와 source-state-equivalent=false를 유지하며 원본 권한 token은 저장하지 않는다.
+- 같은 녹화17입력/초기 DB의 PostgreSQL CLI2회에서 중복 판정·원본 원장/문서/sequence, COMMIT14/rollback3·기대 실패3건, seal 실패 rows/sequence rollback과 최종 복원을 확인했다.
+- encoded8MiB 초과 Shadow 입력을 여러 블록에서 실제 native1call/COMMIT1회로 복원하고 저장 JSON 일치를 확인했다. 로컬143/NAS138 통과. helper 설치·등록 경로·60분 수용·운영 배포/예약은 미완료다.
+
+## 2026-10-10 월요일 예약 입력 옵션 연결 (로컬 수정)
+
+- 기존 예약기가 계좌·대형 입력 옵션을 보내지 않던 경로를 보완했다. 명시 계획에서 다섯 옵션을 요청하고 새 녹화 형식·계좌 초기 상태 계약과 실제 시작 응답을 검사한다.
+- 기존 세 옵션 예약과 불확실 응답 무재시도 규칙을 유지한다. 관련12건 통과; 운영 반영과 월요일 예약 활성화는 아직 미완료다.
+
+## 2026-10-10 월요일 녹화 준비: 블록·계좌 입력 (로컬 후보)
+
+- strict large_inputs에서 bounded typed copy와1MiB 블록으로 원래 한 번의 native 호출을 기록·복원한다. part/root 검사, 종료 접수분 drain, 실제 thread 종료까지 Replay credit 소유를 연결했다.
+- strict account_inputs는 typed 계좌 복구/이벤트/스냅샷·실행 lease/원장 입력을 기록한다. 실제 authority token은 세션 HMAC alias로만 보존하고 실제 account/VI task actor를 연결했다. 동일 초기SQLite/입력 A/B에서 거부3→0, 저장 내용 및 COMMIT3회 유지.
+- baselinev3는12개 추가 표와5개 실제 sequence, private native lease/계좌 source clock hook을 갖는다. 계좌7종/VI native scheduler는 검증한 capsule/clock과 봉인 context/token hash를 요구하며 source 실패 class/code 및 반환 type/count 불일치에서 drain한다. offline CLI v3 seal/run과 block-aware operator 등록을 연결했다. root helper 반영과 public 실행 연결은 별도다.
+- 계좌 초기 상태를 bounded readonly snapshot으로 보존하고32MiB 블록 profile·기존 지연 writer로 기록한다. capsule은 native 입력 전에 등록하며 준비 시간이 녹화 길이를 줄이지 않게 하고 중단/갱신 경쟁을 control revision으로 차단한다. NAS 실제 PostgreSQL gate78 통과: 동일 녹화12건/동일 baseline2회, 매회 COMMIT9/rollback3·원본 문서 및 반복 내용/sequence 일치·atomic seal rollback·마지막 baseline 복원을 검증했다. 운영 배포는 하지 않았다.
+- API/회귀 등록은 로컬 구현했다. NAS60분 수용·배포·월요일 예약은 미완료이며 기존 장중 COMMIT10~20초는 P1 미해결이다.
+- v3 CLI seal/run의 실제 NAS PostgreSQL gate107 통과: 동일 녹화12건을2회 실행해 매회 COMMIT9/rollback3·기대 실패3건·원본/반복 내용과 sequence·관측 누락0·baseline 복구를 확인했다. 초기 fixture 구간/파일 누락 실패는 별도로 보존했다. root helper 갱신 번들dbec3df99022816a는 관리자 반영 대기이며 운영 녹화기 배포와 구분한다.
+
+## 2026-10-10 실제 녹화 입력의 SQL 비용 최적화 (비활성 검증 후보)
+
+- 확인된 반복 비용을 최소 수정하고 동일 입력·초기 DB A/B로 판정하도록 실행 원칙을 보완했다. 장중 COMMIT10~20초는 해결/개선 확인 전까지 P1 미해결로 유지한다.
+- 공통 dataset 저장에서 독립 snapshot/metadata 키를 같은 트랜잭션 안에서 묶는다. saved_at 갱신, 중복 키 순서, research revision, cache invalidation, rollback/retry는 보존한다. 같은23건에서 dataset SQL55→33, execute p95/max4.383→3.477ms를 확인했다. 전체 앱 지연/CPU 개선과 구분한다.
+- offline replay는 기존 관리 연결로 bounded wait/blocker 표본과 worker CPU/RSS를 수집하고 복구 전에 drain한다. 누락 backend_start와 sampling incomplete를 공개하며 같은 backend/COMMIT 구간으로만 연결한다. WalSync 표본은 확인했지만 원래 다중 Writer20초의 직접 원인은 확정하지 않았다.
+- 공통 advisory scope의 건별 SQL 요청을 정렬된 ordinal 배치로 줄였다. 잠금 키/seed/소유 트랜잭션을 유지하고 native 회귀76건을 통과했다. 동일23건에서 전체 SQL231→75, 분봉/확정 SQL 실행 합159.746→138.532ms를 확인했다. 전체 wall/COMMIT 지연 개선은 확인되지 않았으며 P1은 미해결이다. 운영 배포는 하지 않았다.
+
+## 2026-10-10 임시 PostgreSQL 시작 실패 진단 및 디스크 권한 수정 후보
+
+- NAS 격리 검사의 PostgreSQL 시작 실패에 readiness 시도 수·시간과 job 신원을 확인한 컨테이너 상태·제한된 오류 표식을 남긴다. 로그 원문·비밀번호·환경변수는 보고하지 않는다.
+- 관리자 반영한 신원 진단으로 임시 상위 디렉터리 root:root/0700이 PostgreSQL UID70의 통과를 막는 구조를 확인했다. 생성된 임시 상위만 root 소유0711로 설정하고 적용을 검증한다. 로컬51/NAS portable49·관리자 Linux70 통과 및 설치 hash 일치, 같은 디스크 재실행23건·정리·운영 재개를 확인했다. 성능 대조의 입력 timing gate 실패와 장중 원인 미확정은 별도로 유지한다.
+- 기존 readiness 제한과 정리·운영 재개 순서를 유지한다. 디스크 대조의 원인 확정과 설치 상태는 CURRENT_STATUS를 따른다.
+- 같은23건 입력의 disk→RAM→disk 대조와 저장 내용/revision 연결·정리·같은 릴리즈 재개를 확인했다. 반복 COMMIT p95는 RAM0.567ms/disk284.048ms지만 장중10~20초 stall은 재현하지 못했다. 최초 disk의 입력 timing gate 실패도 보존하며 WAL/장치 대기 원인은 미확정이다.
+
+## 2026-10-10 조건 신호·metadata 저장 실패 보존 (비활성 검증 후보)
+
+- signal/metadata worker가 저장 실패 입력을 보존하고 동일 native revision/current를 ACK까지 재시도한다. NXT eligibility는 DB ACK 뒤 RAM에 반영하며, 접수한 신호의 시각·날짜·조건은 queue 대기에도 유지한다.
+- 정상 종료는 signal과 후속 metadata 및 실제 thread 작업을 순서대로 기다린다. 10초는 경고 기준이며 worker를 취소해 미확정 입력을 버리지 않는다. 현재 process의 pending/실패/overflow 상태를 별도 cohort_collection으로 표시한다.
+- 강제 종료 전 미확정 RAM 입력의 재시작 복구와 전체 장중 성능 개선은 검증 범위에 포함되지 않는다. 운영 적용 상태는 CURRENT_STATUS를 따른다.
+
 ## 2026-10-09 Recorded trace deferred RAM integration (PC main)
 
 - Integrated the NAS-validated deferred trace recorder's framed RAM blocks and bounded packing into PC main, with schema-3 capability fields and the 8 GiB / 5,000,000 event limits. Existing main changes and legacy capability fields are preserved. This updates source only; it does not switch the active NAS release.

@@ -10,7 +10,7 @@ import hashlib
 import json
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Condition, Lock, RLock
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -28,8 +28,8 @@ _ADVISORY_KEY = 0x4B5752504C415931
 _PROCESS_RUN_LOCK = Lock()
 MAX_BASELINE_BYTES = 64 * 1024 * 1024
 MAX_BASELINE_ROWS = 250_000
-# Exact reset scope for the current natural-key operation allowlist. No CASCADE,
-# news, execution, credentials, account bindings or schema migrations are reset.
+# v1/v2 retain their original exact reset scope. v3 explicitly extends account,
+# execution and market-event tables; credentials/news/migrations stay excluded.
 TABLES = (
     'central_realtime_latest', 'central_minute_bars', 'central_second_trade_bars',
     'central_daily_bars', 'central_five_minute_bars', 'central_dataset_snapshots',
@@ -39,8 +39,23 @@ TABLES = (
     'central_shadow_checkpoint_frames',
 )
 TABLES_V2 = TABLES + ('central_api_query_cache',)
+TABLES_V3 = TABLES_V2 + (
+    'central_vi_event_revisions', 'central_hot_cohort_current',
+    'central_hot_cohort_revisions', 'central_upper_limit_fact_revisions',
+    'central_account_registry', 'central_account_binding_revisions',
+    'central_execution_runtime_leases', 'central_execution_intents',
+    'central_execution_events', 'central_execution_account_snapshots',
+    'central_shadow_decisions', 'central_shadow_candidate_events',
+)
 CACHE_CLOCK_POLICY = 'source_wall_real_elapsed/v1'
 SEQUENCES = ('central_observation_revisions_accepted_sequence_seq',)
+SEQUENCES_V3 = SEQUENCES + (
+    'central_vi_event_revisions_accepted_sequence_seq',
+    'central_hot_cohort_revisions_accepted_sequence_seq',
+    'central_upper_limit_fact_revisions_accepted_sequence_seq',
+    'central_execution_events_accepted_sequence_seq',
+    'central_shadow_candidate_events_accepted_sequence_seq',
+)
 DEFAULT_CONFIG = {'observation_history_enabled': True, 'shadow_checkpoint_frames_enabled': False}
 
 
@@ -118,12 +133,21 @@ class _ReplayStore(PostgresQueryStore):
         super().__init__(lease.database_url, **lease.config)
         self._lease = lease
         self._generation = lease._generation
-        if lease.baseline_version == 2:
+        if lease.baseline_version >= 2:
             self._query_cache_wall_time = self._owned_query_cache_wall_time
+        if lease.baseline_version == 3:
+            self._account_input_wall_time = self._owned_account_input_wall_time
+            self._execution_wall_now = self._owned_execution_wall_now
 
     def _owned_query_cache_wall_time(self):
         # Keep the lease/generation fence on cache reads as well as connections.
         return self._lease.cache_wall_time(self._generation)
+
+    def _owned_account_input_wall_time(self):
+        return self._lease.account_wall_time(self._generation)
+
+    def _owned_execution_wall_now(self):
+        return datetime.fromtimestamp(self._owned_account_input_wall_time(), timezone.utc)
 
     def _connect(self):
         return self._lease.connect_store(self._generation)
@@ -144,17 +168,18 @@ class ReplayDatabaseLease:
         if type(owner_token) is not str or not re.fullmatch('[a-f0-9]{32}', owner_token):
             raise ValueError('replay_owner_token_invalid')
         self.owner_token, self._config = owner_token, _config(config)
-        if type(baseline_version) is not int or baseline_version not in (1, 2):
+        if type(baseline_version) is not int or baseline_version not in (1, 2, 3):
             raise ValueError('replay_baseline_version_unsupported')
         if (baseline_version == 1 and cache_clock is not None
-                or baseline_version == 2 and cache_clock is None):
+                or baseline_version >= 2 and cache_clock is None):
             raise ValueError('replay_baseline_cache_clock_required_only_for_v2')
         self._baseline_version = baseline_version
-        self._tables = TABLES if baseline_version == 1 else TABLES_V2
-        self._snapshot_schema = 'replay_baseline' if baseline_version == 1 else 'replay_baseline_v2'
-        self._metadata_table = 'baseline' if baseline_version == 1 else 'baseline_v2'
+        self._tables = {1: TABLES, 2: TABLES_V2, 3: TABLES_V3}[baseline_version]
+        self._sequences_scope = SEQUENCES_V3 if baseline_version == 3 else SEQUENCES
+        self._snapshot_schema = 'replay_baseline' if baseline_version == 1 else f'replay_baseline_v{baseline_version}'
+        self._metadata_table = 'baseline' if baseline_version == 1 else f'baseline_v{baseline_version}'
         self._cache_clock = cache_clock
-        self._clock_contract = self._read_clock_contract() if baseline_version == 2 else None
+        self._clock_contract = self._read_clock_contract() if baseline_version >= 2 else None
         self.connection = None
         self._condition = Condition()
         self._management_lock = RLock()
@@ -195,11 +220,19 @@ class ReplayDatabaseLease:
         with self._condition:
             if (not self._active or not self._run_ready or generation != self._generation):
                 raise RuntimeError('replay_lease_not_ready_or_retired')
-        if self.baseline_version != 2 or self._read_clock_contract() != self._clock_contract:
+        if self.baseline_version < 2 or self._read_clock_contract() != self._clock_contract:
             raise RuntimeError('replay_baseline_cache_clock_changed')
         value = self._cache_clock.wall_time()
         if type(value) not in (int, float) or not math.isfinite(value):
             raise RuntimeError('replay_baseline_cache_clock_invalid')
+        return value
+
+    def account_wall_time(self, generation):
+        # Native lease expiry is checked after its row lock, using real elapsed
+        # replay time. No global clock patch or extension of recorded leases.
+        value = self.cache_wall_time(generation)
+        if self.baseline_version != 3 or not self._cache_clock.armed:
+            raise RuntimeError('replay_account_clock_requires_armed_v3')
         return value
 
     def __enter__(self):
@@ -318,9 +351,9 @@ class ReplayDatabaseLease:
         return _hash({'columns': columns, 'indexes': indexes, 'constraints': constraints,
                       'table_options': table_options, 'migrations': migrations})
 
-    def _sequences(self, cursor):
+    def _sequences(self, cursor, *, sequences=None):
         result = {}
-        for name in SEQUENCES:
+        for name in self._sequences_scope if sequences is None else sequences:
             cursor.execute('SELECT seqincrement,seqmin,seqmax,seqstart,seqcache,seqcycle '
                            'FROM pg_sequence WHERE seqrelid=to_regclass(%s)', ('public.' + name,))
             definition = cursor.fetchone()
@@ -351,8 +384,8 @@ class ReplayDatabaseLease:
         return result
 
     def _baseline_row(self, cursor):
-        if self.baseline_version == 2:
-            cursor.execute('SELECT to_regclass(%s)', ('replay_meta.baseline_v2',))
+        if self.baseline_version >= 2:
+            cursor.execute('SELECT to_regclass(%s)', ('replay_meta.' + self._metadata_table,))
             if cursor.fetchone()[0] is None:
                 return None
         cursor.execute(sql.SQL('SELECT baseline_id,manifest FROM {} WHERE singleton').format(
@@ -362,31 +395,51 @@ class ReplayDatabaseLease:
     def _baseline(self, cursor):
         row = self._baseline_row(cursor)
         if (not row or row[0] != _hash(row[1]) or row[1].get('version') != self.baseline_version
-                or set(row[1].get('tables', {})) != set(self.tables)):
+                or set(row[1].get('tables', {})) != set(self.tables)
+                or set(row[1].get('sequences', {})) != set(self._sequences_scope)):
             raise RuntimeError('replay_baseline_missing_or_invalid')
         if row[1].get('config') != self.config:
             raise RuntimeError('replay_baseline_config_mismatch')
-        if self.baseline_version == 2:
+        if self.baseline_version >= 2:
             if (self._read_clock_contract() != self._clock_contract
                     or row[1].get('cache_clock') != self._clock_contract):
                 raise RuntimeError('replay_baseline_cache_clock_mismatch')
         return row
 
-    def seal(self):
+    def seal(self, *, account_context=None, owner_rows=()):
         """Seal existing test fixture once. No production snapshot is taken."""
         with self._management_lock:
             if not self._active:
                 raise RuntimeError('replay_lease_not_ready_or_retired')
-            return self._seal()
+            if type(owner_rows) not in (tuple, list) or len(owner_rows) > 4096:
+                raise ValueError('replay_account_owner_frontier_invalid')
+            if account_context is not None:
+                if self.baseline_version != 3:
+                    raise ValueError('replay_account_context_requires_v3')
+                from .diagnostic_account_context import validate_account_context
+                from .diagnostic_account_input import resolve_owner_bindings
+                # Own a detached validated copy; a caller cannot mutate the
+                # capsule between parent verification and INSERTs.
+                validate_account_context(account_context)
+                context = validate_account_context(json.loads(json.dumps(account_context, allow_nan=False)))
+                if any('execution_owner_binding' in row
+                       and row.get('account_alias_domain') != context['alias_domain'] for row in owner_rows):
+                    raise ValueError('replay_account_context_alias_domain_mismatch')
+                owners = resolve_owner_bindings([*context['owner_bindings'], *owner_rows])
+            else:
+                if owner_rows:
+                    raise ValueError('replay_account_context_required_for_owner_rows')
+                context, owners = None, None
+            return self._seal(account_context=context, owner_bindings=owners)
 
-    def _seal(self):
+    def _seal(self, *, account_context=None, owner_bindings=None):
         with self.connection.transaction(), self.connection.cursor() as cursor:
             self._maintenance(cursor)
             self._lock_tables(cursor)
             if self._baseline_row(cursor) is not None:
                 raise RuntimeError('replay_baseline_already_sealed')
             parent_id = None
-            if self.baseline_version == 2:
+            if self.baseline_version >= 2:
                 if self._read_clock_contract() != self._clock_contract or self._cache_clock.armed:
                     raise RuntimeError('replay_baseline_cache_clock_must_be_frozen')
                 cursor.execute('SELECT baseline_id,manifest FROM replay_meta.baseline WHERE singleton')
@@ -395,13 +448,17 @@ class ReplayDatabaseLease:
                         or parent[1].get('config') != self.config
                         or self._schema(cursor, tables=TABLES) != parent[1].get('schema_sha256')
                         or self._tables_digest(cursor, 'public', tables=TABLES) != parent[1].get('tables')
-                        or self._sequences(cursor) != parent[1].get('sequences')):
-                    raise RuntimeError('replay_v2_requires_restored_v1_parent_fixture')
+                        or self._sequences(cursor, sequences=SEQUENCES) != parent[1].get('sequences')):
+                    raise RuntimeError(f'replay_v{self.baseline_version}_requires_restored_v1_parent_fixture')
                 parent_id = parent[0]
-                cursor.execute('CREATE SCHEMA replay_baseline_v2')
-                cursor.execute('CREATE TABLE replay_meta.baseline_v2 '
+                cursor.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(self._snapshot_schema)))
+                cursor.execute(sql.SQL('CREATE TABLE {} '
                                '(singleton boolean PRIMARY KEY CHECK(singleton), '
-                               'baseline_id text NOT NULL, manifest jsonb NOT NULL)')
+                               'baseline_id text NOT NULL, manifest jsonb NOT NULL)').format(
+                                   sql.Identifier('replay_meta', self._metadata_table)))
+            if account_context is not None:
+                from .diagnostic_account_context import _apply_account_context
+                _apply_account_context(cursor, account_context, bindings=owner_bindings)
             schema_hash = self._schema(cursor)
             for name in self.tables:
                 cursor.execute(sql.SQL('CREATE TABLE {} AS TABLE {}').format(
@@ -410,8 +467,14 @@ class ReplayDatabaseLease:
                         'source_state_equivalent': False, 'config': self.config,
                         'schema_sha256': schema_hash, 'tables': self._tables_digest(cursor, self._snapshot_schema),
                         'sequences': self._sequences(cursor)}
-            if self.baseline_version == 2:
+            if self.baseline_version >= 2:
                 manifest.update(cache_clock=self._clock_contract, parent_baseline_id=parent_id)
+            if account_context is not None:
+                manifest.update(origin='controlled_fixture_with_projected_account_context',
+                    account_context={'version': account_context['version'], 'trace_id': account_context['trace_id'],
+                        'sha256': account_context['sha256'], 'source_state_equivalent': False,
+                        'owner_bindings_sha256': _hash({domain + ':' + alias: value.token
+                                                       for (domain, alias), value in owner_bindings.items()})})
             baseline_id = _hash(manifest)
             cursor.execute(sql.SQL('INSERT INTO {}(singleton,baseline_id,manifest) '
                                   'VALUES(true,%s,%s::jsonb)').format(
@@ -439,14 +502,14 @@ class ReplayDatabaseLease:
                 raise RuntimeError('replay_baseline_snapshot_changed')
             sequence_before = self._sequences(cursor)
             if any(sequence_before[name]['definition'] != manifest['sequences'][name]['definition']
-                   for name in SEQUENCES):
+                   for name in self._sequences_scope):
                 raise RuntimeError('replay_baseline_sequence_definition_changed')
             cursor.execute(sql.SQL('TRUNCATE {}').format(sql.SQL(',').join(
                 sql.Identifier('public', name) for name in self.tables)))
             for name in self.tables:
                 cursor.execute(sql.SQL('INSERT INTO {} SELECT * FROM {}').format(
                     sql.Identifier('public', name), sql.Identifier(self._snapshot_schema, name)))
-            for name in SEQUENCES:
+            for name in self._sequences_scope:
                 # Preserve the next observable value, with RESTART's rollback and
                 # locking semantics. Do not use nontransactional setval().
                 cursor.execute(sql.SQL('ALTER SEQUENCE {} RESTART WITH {}').format(

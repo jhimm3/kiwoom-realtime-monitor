@@ -24,10 +24,26 @@ from kiwoom_monitor.domain.market_data_contract import (
     MarketDataMetadata, MarketDataObservation, MarketDatasetKind, ObservationOrigin, TradingVenue,
 )
 from .database_query_cache import StoredQuery
+from .diagnostic_account_input import METHODS as ACCOUNT_METHODS
+from kiwoom_monitor.domain.order_contract import (
+    AccountBinding, AccountEnvironment, AccountScope, AccountSnapshot,
+    BrokerFill, BrokerOrderSnapshot, OrderState,
+)
+from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import AccountRecovery
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import OrderExecution, AccountBalanceChange
 
 CODEC_VERSION = "store-input/v1"
 CATALOG_COPY_PROFILE = "stock-catalog-documents/v1"
 CATALOG_MAX_COPY_BYTES = 16 * 1024 * 1024
+LARGE_COPY_PROFILE = "large-store-input/v1"
+LARGE_MAX_COPY_BYTES = 64 * 1024 * 1024
+LARGE_MAX_NODES = 960_000
+ACCOUNT_CONTEXT_PROFILE = 'account-context-input/v1'
+ACCOUNT_CONTEXT_COPY_BYTES = 32 * 1024 * 1024
+LARGE_INPUT_METHODS = frozenset({
+    "replace_daily_bars", "replace_minute_bars", "save_second_trade_bars",
+    "save_shadow_monitor_state",
+})
 _UNSET_PAYLOAD = object()
 COLLECTOR_INPUT_VERSION = "collector-input/v2"
 LEGACY_COLLECTOR_INPUT_VERSION = "collector-input/v1"
@@ -69,9 +85,12 @@ MAX_STRING_CHARS = 1_048_576
 _ENUMS = {value.__name__: value for value in (
     CandidateUniverse, DataCompleteness, DataUnit, DataValueKind, MarketDatasetKind,
     ObservationOrigin, TradingVenue,
+    AccountEnvironment, OrderState,
 )}
 _OBJECTS = {value.__name__: value for value in (
     CoverageObservation, MarketDataMetadata, MarketDataObservation, StoredQuery,
+    AccountBinding, AccountScope, AccountSnapshot, BrokerFill, BrokerOrderSnapshot,
+    AccountRecovery, OrderExecution, AccountBalanceChange,
 )}
 
 # Explicit names, never an arbitrary method supplied by a trace or request.
@@ -104,18 +123,17 @@ _METHOD_GROUPS = {
     "shadow": ("save_shadow_monitor_state", "save_shadow_evaluation"),
     "market_events": ("append_vi_events", "record_hot_cohort_revision", "append_upper_limit_facts"),
     "external_market": ("save_external_bars",),
+    "account": tuple(sorted(ACCOUNT_METHODS)),
 }
 OPERATIONS = {name: group for group, names in _METHOD_GROUPS.items() for name in names}
 EXCLUDED_METHODS = frozenset({
     "initialize", "close", "find_credential_activation", "list_credential_profiles",
     "create_credential_profile", "archive_credential_profile", "rename_credential_profile",
     "register_credential_profile", "finalize_credential_activation", "load_credential_activations",
-    "save_real_account_recovery", "save_real_account_event", "save_account_settings", "load_account_settings",
+    "save_account_settings", "load_account_settings",
     "save_market_profile_settings", "load_market_profile_settings", "set_news_job_wakeup",
-    "create_execution_intent", "append_execution_event", "save_execution_account_snapshot",
     "save_mock_automation_control", "register_account_identity", "append_account_binding",
     "register_account_scope_alias", "resolve_account_scope", "load_account_bindings",
-    "acquire_execution_runtime", "release_execution_runtime",
 })
 _DOCUMENT_COLLECTIONS = frozenset({
     "stock_fundamentals", "stock_nxt_eligibility", "stock_price_references", "stock_catalog",
@@ -127,6 +145,9 @@ _DOCUMENT_COLLECTIONS = frozenset({
     "news_article", "news_ai", "news_ai_shared", "news_original_publication", "news_assessment",
     "news_request_usage", "news_sync", "news_watchlist", "news_automation_settings",
     "theme_profile", "theme_stock", "theme_metadata",
+})
+_READ_DOCUMENT_COLLECTIONS = frozenset({
+    'app_settings', 'app_column_settings', 'journal_news_link', 'journal_v2_news_links',
 })
 _DATASET_KINDS = frozenset({
     "market_state", "new_high", "program_flow", "ranking", "top20_membership", "top20_index",
@@ -155,19 +176,20 @@ class FrozenPayload:
 def freeze_payload(value: Any, *, maximum_bytes: int = MAX_COPY_BYTES) -> FrozenPayload:
     """Bounded immutable copy. No JSON, hash, I/O, user conversion, or generator consumption."""
     charge = nodes = 0
+    maximum_nodes = LARGE_MAX_NODES if maximum_bytes in (LARGE_MAX_COPY_BYTES, ACCOUNT_CONTEXT_COPY_BYTES) else MAX_NODES
     active: set[int] = set()
 
     def reserve(size: int) -> None:
         nonlocal charge, nodes
         nodes += 1
         charge += size
-        if charge > maximum_bytes or nodes > MAX_NODES:
+        if charge > maximum_bytes or nodes > maximum_nodes:
             raise InputRejected("payload_budget_exceeded", details={
                 "budget": "bytes" if charge > maximum_bytes else "nodes",
                 "observed_bytes": charge,
                 "observed_nodes": nodes,
                 "maximum_bytes": maximum_bytes,
-                "maximum_nodes": MAX_NODES,
+                "maximum_nodes": maximum_nodes,
             })
 
     def visit(item: Any, depth: int) -> Any:
@@ -228,13 +250,14 @@ def freeze_payload(value: Any, *, maximum_bytes: int = MAX_COPY_BYTES) -> Frozen
 
 def thaw_payload(node: Any, *, maximum_bytes: int = MAX_COPY_BYTES) -> Any:
     """Decode only explicit tags/types, with the same bounds as capture."""
-    if maximum_bytes not in (MAX_COPY_BYTES, CATALOG_MAX_COPY_BYTES):
+    if maximum_bytes not in (MAX_COPY_BYTES, CATALOG_MAX_COPY_BYTES, LARGE_MAX_COPY_BYTES, ACCOUNT_CONTEXT_COPY_BYTES):
         raise InputRejected("invalid_payload_copy_limit")
+    maximum_nodes = LARGE_MAX_NODES if maximum_bytes in (LARGE_MAX_COPY_BYTES, ACCOUNT_CONTEXT_COPY_BYTES) else MAX_NODES
     budget = [0]
 
     def decode(value: Any, depth: int) -> Any:
         budget[0] += 1
-        if depth > MAX_DEPTH or budget[0] > MAX_NODES:
+        if depth > MAX_DEPTH or budget[0] > maximum_nodes:
             raise InputRejected("invalid_payload_bounds")
         if value is None or type(value) in (bool, int, float, str):
             return value
@@ -280,9 +303,22 @@ def thaw_payload(node: Any, *, maximum_bytes: int = MAX_COPY_BYTES) -> Any:
 
 
 def payload_copy_limit(event_type: str, fields: dict, value: Any = _UNSET_PAYLOAD) -> int:
-    """Select the single named exception; never infer it from payload size."""
+    """Select explicit operation profiles; never infer them from payload size."""
     if "payload_profile" not in fields:
         return MAX_COPY_BYTES
+    if fields['payload_profile'] == ACCOUNT_CONTEXT_PROFILE:
+        from .diagnostic_account_context import VERSIONS
+        if event_type != 'account_context' or fields.get('account_context_version') not in VERSIONS:
+            raise InputRejected('invalid_payload_profile')
+        if value is not _UNSET_PAYLOAD and type(value) is not dict:
+            raise InputRejected('invalid_account_context_payload')
+        return ACCOUNT_CONTEXT_COPY_BYTES
+    if fields["payload_profile"] == LARGE_COPY_PROFILE:
+        if event_type != "operation_start" or fields.get("method") not in LARGE_INPUT_METHODS:
+            raise InputRejected("invalid_payload_profile")
+        if value is not _UNSET_PAYLOAD and type(value) is not dict:
+            raise InputRejected("invalid_large_payload_arguments")
+        return LARGE_MAX_COPY_BYTES
     if (fields["payload_profile"] != CATALOG_COPY_PROFILE
             or event_type != "operation_start"
             or fields.get("method") != "replace_documents"
@@ -293,12 +329,21 @@ def payload_copy_limit(event_type: str, fields: dict, value: Any = _UNSET_PAYLOA
     return CATALOG_MAX_COPY_BYTES
 
 
-def thaw_operation_arguments(row: dict) -> dict:
+def thaw_operation_arguments(row: dict, *, owner_bindings=None) -> dict:
     """Validate the operation envelope and decoded binding before native execution."""
     limit = payload_copy_limit(row.get("event_type"), row)
     if row.get("codec_version") != CODEC_VERSION:
         raise InputRejected("invalid_operation_codec")
-    arguments = thaw_payload(row.get("payload"), maximum_bytes=limit)
+    from .diagnostic_trace_payload import BlockPayloadReference
+    payload = row.get('payload')
+    if type(payload) is BlockPayloadReference:
+        if row.get('payload_profile') != LARGE_COPY_PROFILE:
+            raise InputRejected('invalid_payload_profile')
+        payload = payload.load()
+    arguments = thaw_payload(payload, maximum_bytes=limit)
+    if row.get('method') in ACCOUNT_METHODS:
+        from .diagnostic_account_input import restore_account_arguments
+        arguments = restore_account_arguments(row, arguments, bindings=owner_bindings)
     payload_copy_limit(row.get("event_type"), row, arguments)
     if "collection" in row and (type(arguments) is not dict
                                 or arguments.get("collection") != row["collection"]):
@@ -327,7 +372,9 @@ def validate_operation(method: str, arguments: dict) -> str:
                     or arguments.get("offset", 0) != 0 or arguments.get("updated_after", 0) != 0):
                 raise InputRejected("unsupported_document_collection")
             return "top20"
-        if type(collection) is not str or collection not in _DOCUMENT_COLLECTIONS:
+        read_only = (type(collection) is str and method in {'load_documents', 'load_document'}
+                     and collection in _READ_DOCUMENT_COLLECTIONS)
+        if type(collection) is not str or collection not in _DOCUMENT_COLLECTIONS and not read_only:
             raise InputRejected("unsupported_document_collection")
         if collection.startswith("news_"):
             return "news"
@@ -389,14 +436,14 @@ def capture_owner(workload_id: str, producer_component: str, actor_id: str, *, c
         _OWNER.reset(token)
 
 
-def captured_workload(workload_id: str, component: str):
+def captured_workload(workload_id: str, component: str, *, actor_per_invocation: bool = False):
     """Give an actual owned task a stable actor before asyncio.to_thread copies context."""
     def decorate(function):
         @wraps(function)
         async def run(self, *args, **kwargs):
             task = asyncio.current_task()
             producer = f"{component}:{id(self):x}"
-            actor = f"{producer}:{id(task):x}"
+            actor = f"{producer}:{uuid4().hex}" if actor_per_invocation else f"{producer}:{id(task):x}"
             from .diagnostic_trace import input_token
             high_water = getattr(self, "_recorded_input_high_water", (None, ""))
             cause = high_water[1] if high_water[0] == input_token("collector_inputs") else ""
@@ -471,7 +518,8 @@ def install_store_capture(store: Any) -> None:
             arguments = None
             try:
                 fields["actor_sequence"] = _actor_sequence(trace_id, fields["actor_id"])
-                if __name in EXCLUDED_METHODS:
+                if (__name in EXCLUDED_METHODS or __name in ACCOUNT_METHODS
+                        and trace.input_token('account_inputs') != trace_id):
                     raise InputRejected("excluded_operation")
                 if __name not in OPERATIONS:
                     raise InputRejected("unsupported_operation")
@@ -486,9 +534,14 @@ def install_store_capture(store: Any) -> None:
                 fields["workload_id"] = owner.workload_id if owner else group
                 from .postgres_access import current_db_call_tags
                 fields.update(current_db_call_tags())
+                if __name in ACCOUNT_METHODS:
+                    arguments, metadata = trace.project_account_input(trace_id, __name, arguments)
+                    fields.update(metadata)
                 if __name == "replace_documents" and arguments.get("collection") == "stock_catalog":
                     fields["collection"] = "stock_catalog"
                     fields["payload_profile"] = CATALOG_COPY_PROFILE
+                elif __name in LARGE_INPUT_METHODS and trace.input_token('large_inputs') == trace_id:
+                    fields['payload_profile'] = LARGE_COPY_PROFILE
                 trace.emit_payload(trace_id, "operation_start", fields, arguments)
             except Exception as error:
                 reason = str(error) if isinstance(error, InputRejected) else "capture_boundary_error"
@@ -504,8 +557,10 @@ def install_store_capture(store: Any) -> None:
                 result = __original(*args, **kwargs)
             except BaseException as error:
                 try:
+                    from .diagnostic_account_input import native_error_receipt
                     trace.emit(trace_id, "operation_end", {**fields, "outcome": "failed",
-                               "exception_type": type(error).__name__, "finished_mono_ns": time.monotonic_ns()})
+                               "exception_type": type(error).__name__, "finished_mono_ns": time.monotonic_ns(),
+                               **native_error_receipt(__name, error)})
                 except Exception:
                     pass
                 raise

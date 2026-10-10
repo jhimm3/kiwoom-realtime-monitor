@@ -18,7 +18,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
 )
 
 from .database import QueryStore
-from .diagnostic_replay_contract import capture_owner, operation_identity
+from .diagnostic_replay_contract import capture_owner, operation_identity, captured_workload
 from .diagnostic_replay_runtime import owned_create_task, owned_to_thread
 from .diagnostic_trace import input_token
 from .realtime_hub import RealtimeHub, RealtimeSubscriber
@@ -92,7 +92,15 @@ class MarketEventService:
         self._vi_inflight: dict[str, asyncio.Future[bool]] = {}
         self._state_lock = asyncio.Lock()
         self._metadata_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=2000)
-        self._signal_queue: asyncio.Queue[tuple[str, str, str, str, tuple[str, str] | None]] = asyncio.Queue(maxsize=5000)
+        self._signal_queue: asyncio.Queue[tuple[str, str, str, str, tuple[str, str] | None, datetime]] = asyncio.Queue(maxsize=5000)
+        self._cohort_work: set[asyncio.Task[Any]] = set()
+        self._cohort_native: asyncio.Task[Any] | None = None
+        self._cohort_retry_seconds = 1.0
+        self._cohort_drain_warning_seconds = 10.0
+        self._cohort_save_failures = 0
+        self._cohort_worker_failures = 0
+        self._cohort_errors: dict[str, str] = {}
+        self._cohort_drops = {"signal": 0, "metadata": 0}
         self._cohort: dict[str, dict[str, Any]] = {}
         self._upper_limits: dict[str, int] = {}
         self._last_ticks: dict[tuple[str, str], TradeTick] = {}
@@ -177,13 +185,14 @@ class MarketEventService:
                         await self._process_event(subscriber.queue.get_nowait())
                     except Exception as error:
                         errors.append(error)
-            if self._tasks:
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(self._metadata_queue.join(), self._signal_queue.join()), timeout=10,
-                    )
-                except TimeoutError:
-                    logger.warning("hot cohort 메타데이터 종료 대기가 시간 제한을 넘었습니다")
+            draining = asyncio.create_task(self._drain_cohort_workers())
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(draining), timeout=self._cohort_drain_warning_seconds,
+                )
+            except TimeoutError:
+                logger.warning("hot cohort 종료 대기 지연(접수 입력과 실제 저장 완료까지 대기 유지)")
+                await draining
         finally:
             for task in self._tasks:
                 if task not in event_tasks:
@@ -208,6 +217,22 @@ class MarketEventService:
         if errors:
             raise errors[0]
 
+    async def _drain_cohort_workers(self) -> None:
+        # Public signal calls can admit metadata before start(), and an idle
+        # worker may have been cancelled. Give every admitted queue a live owner.
+        for method, name in ((self._signal_loop, "hot-cohort-signals"),
+                             (self._metadata_loop, "hot-cohort-metadata")):
+            if not any(not task.done() and task.get_coro().__name__ == method.__name__ for task in self._tasks):
+                self._tasks.append(owned_create_task(method(), name=name, shutdown=True))
+        # A signal can admit metadata after metadata.join() has already returned.
+        # Stop admission first, then drain the producer queue before its descendants.
+        await self._signal_queue.join()
+        while self._cohort_work:
+            await asyncio.gather(*tuple(self._cohort_work), return_exceptions=True)
+        await self._metadata_queue.join()
+        if self._cohort_native is not None:
+            raise RuntimeError("market_event_cohort_native_not_drained")
+
     async def on_ws_connected(self, websocket: Any) -> None:
         """연결마다 목록부터 다시 받아 seq 변경을 안전하게 반영한다."""
         self._selected = None
@@ -229,7 +254,21 @@ class MarketEventService:
             "enabled": self._condition_enabled, "active": list(self._selected) if self._selected else None,
             "active_policy_revision": self._active_condition_revision,
             "configured_exact_name": self._exact_name, "configured_substring": self._substring,
-            "coverage": "KRX", "fact_collection": self._fact_collection_status()}
+            "coverage": "KRX", "fact_collection": self._fact_collection_status(),
+            "cohort_collection": {
+                "scope": "current_process_admitted_inputs_only", "durability": "database_ack_only",
+                "restart_coverage": "unverified", "admission_closed": self._event_draining,
+                "recovery_required": bool(self._cohort_errors or any(self._cohort_drops.values())),
+                "state": "retrying" if self._cohort_errors else
+                         "pending" if self._cohort_work or self._signal_queue._unfinished_tasks or
+                         self._metadata_queue._unfinished_tasks else "idle",
+                "signal_unfinished": self._signal_queue._unfinished_tasks,
+                "metadata_unfinished": self._metadata_queue._unfinished_tasks,
+                "signal_queued": self._signal_queue.qsize(), "metadata_queued": self._metadata_queue.qsize(),
+                "owned_tasks": len(self._cohort_work), "native_inflight": self._cohort_native is not None,
+                "save_failures": self._cohort_save_failures, "worker_failures": self._cohort_worker_failures,
+                "last_error_types": dict(self._cohort_errors), "dropped_inputs": dict(self._cohort_drops),
+            }}
 
     def _remember_fact_drops(self, subscriber: RealtimeSubscriber) -> None:
         self._fact_dropped_events = max(self._fact_dropped_events, subscriber.dropped_events)
@@ -366,11 +405,17 @@ class MarketEventService:
 
     async def record_condition_signal(self, code: str, signal: str, *, source: str,
                                       stock_name: str = "", condition: tuple[str, str] | None = None) -> None:
-        # Preserve the original invocation time/condition before any lock wait.
-        now = self._now()
+        if self._event_draining:
+            raise RuntimeError("market_event_cohort_admission_closed")
+        await self._run_cohort_work(self._record_condition_signal(
+            code, signal, source, stock_name, condition or self._selected, self._now()), "hot-cohort-signal")
+
+    async def _record_condition_signal(self, code: str, signal: str, source: str, stock_name: str,
+                                       condition: tuple[str, str] | None, now: datetime) -> None:
+        # The admitted time and condition remain fixed through queue/lock/retry waits.
         timestamp = now.timestamp()
         session_id = now.date().isoformat()
-        selected_seq, selected_name = condition or self._selected or ("", "")
+        selected_seq, selected_name = condition or ("", "")
         # Eligibility/expiry writers already own this lock. Keep the snapshot,
         # native ACK and RAM publication under the same owner so an older
         # metadata snapshot cannot restore the previous signal after this write.
@@ -389,7 +434,7 @@ class MarketEventService:
             }
             revision = self._revision(code, "ENTERED" if is_new else signal, selected_name, selected_seq,
                                       session_id, timestamp, {"source": source, "signal": signal})
-            await asyncio.to_thread(self._store.record_hot_cohort_revision, revision, current)
+            await self._save_cohort_revision(revision, current)
             self._cohort[code] = current
             await self._update_subscription()
             if is_new:
@@ -573,25 +618,26 @@ class MarketEventService:
         try:
             self._metadata_queue.put_nowait(code)
         except asyncio.QueueFull:
+            self._cohort_drops["metadata"] += 1
             logger.warning("hot cohort 메타데이터 대기열이 가득 찼습니다: %s", code)
 
     def _queue_signal(self, code: str, signal: str, source: str, stock_name: str,
                       *, condition: tuple[str, str] | None = None) -> None:
+        if self._event_draining:
+            raise RuntimeError("market_event_cohort_admission_closed")
         try:
-            self._signal_queue.put_nowait((code, signal, source, stock_name, condition or self._selected))
+            self._signal_queue.put_nowait((code, signal, source, stock_name, condition or self._selected, self._now()))
         except asyncio.QueueFull:
+            self._cohort_drops["signal"] += 1
             logger.error("hot cohort 조건 신호 대기열이 가득 찼습니다: %s %s", code, signal)
 
     async def _signal_loop(self) -> None:
         while True:
-            code, signal, source, stock_name, condition = await self._signal_queue.get()
+            value = await self._signal_queue.get()
             try:
-                await self.record_condition_signal(code, signal, source=source, stock_name=stock_name,
-                                                   condition=condition)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.warning("hot cohort 조건 신호 저장 실패(수집 계속): %s %s", code, error)
+                await self._run_cohort_work(self._retry_cohort_input(
+                    "signal", lambda: self._record_condition_signal(*value)),
+                    "hot-cohort-signal", propagate_cancel=False)
             finally:
                 self._signal_queue.task_done()
 
@@ -599,30 +645,85 @@ class MarketEventService:
         while True:
             code = await self._metadata_queue.get()
             try:
-                await self._load_metadata(code)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.warning("hot cohort 종목 메타데이터 조회 실패(수집 계속): %s %s", code, error)
+                await self._run_cohort_work(self._retry_cohort_input(
+                    "metadata", lambda: self._load_metadata_owned(code)),
+                    "hot-cohort-metadata-input", propagate_cancel=False)
             finally:
                 self._metadata_queue.task_done()
 
+    async def _retry_cohort_input(self, kind: str, prepare: Callable[[], Any]) -> None:
+        while True:
+            try:
+                await prepare()
+                self._cohort_errors.pop(kind, None)
+                return
+            except Exception as error:
+                self._cohort_worker_failures += 1
+                self._cohort_errors[kind] = type(error).__name__
+                logger.warning("hot cohort %s 처리 실패(입력 보존, 재시도): %s", kind, type(error).__name__)
+                await asyncio.sleep(self._cohort_retry_seconds)
+
     async def _load_metadata(self, code: str) -> None:
-        rows = await asyncio.to_thread(self._store.load_documents, "stock_nxt_eligibility", code, 1)
+        await self._run_cohort_work(self._load_metadata_owned(code), "hot-cohort-metadata-input")
+
+    async def _run_cohort_work(self, coroutine: Any, name: str, *, propagate_cancel: bool = True) -> Any:
+        # This owner covers native work AND its ACK publication/descendant admission.
+        task = owned_create_task(coroutine, name=name, shutdown=self._event_draining)
+        self._cohort_work.add(task)
+        cancelled = False
+        try:
+            while True:
+                try:
+                    result = await asyncio.shield(task)
+                    break
+                except asyncio.CancelledError:
+                    if task.cancelled():
+                        raise
+                    cancelled = True
+        finally:
+            self._cohort_work.discard(task)
+        if cancelled and propagate_cancel:
+            raise asyncio.CancelledError
+        return result
+
+    async def _save_cohort_revision(self, revision: dict[str, Any], current: dict[str, Any]) -> None:
+        # Called under the existing state lock; preserve one native transaction per
+        # attempt, exact revision identity and current snapshot across ACK loss.
+        payload = json.dumps([revision, current], ensure_ascii=False)
+        while True:
+            try:
+                self._cohort_native = owned_create_task(owned_to_thread(
+                    self._store.record_hot_cohort_revision, *json.loads(payload)),
+                    name="hot-cohort-commit", shutdown=self._event_draining)
+                try:
+                    await asyncio.shield(self._cohort_native)
+                finally:
+                    self._cohort_native = None
+                self._cohort_errors.pop("save", None)
+                return
+            except Exception as error:
+                self._cohort_save_failures += 1
+                if self._cohort_errors.get("save") != type(error).__name__:
+                    logger.warning("hot cohort 저장 실패(입력 보존, ACK까지 재시도): %s", type(error).__name__)
+                self._cohort_errors["save"] = type(error).__name__
+                await asyncio.sleep(self._cohort_retry_seconds)
+
+    async def _load_metadata_owned(self, code: str) -> None:
+        rows = await owned_to_thread(self._store.load_documents, "stock_nxt_eligibility", code, 1)
         payload = _nested_payload(rows)
         if not payload:
             payload = (await self._broker.request("ka10100", "/api/dostk/stkinfo", {"stk_cd": code})).payload
         eligible = str(payload.get("nxtEnable", payload.get("nxt_enable", ""))).upper() == "Y"
         async with self._state_lock:
             if code in self._cohort:
-                self._cohort[code]["nxt_eligible"] = eligible
-                current = self._cohort[code]
+                current = dict(self._cohort[code], nxt_eligible=eligible)
                 now = self._now().timestamp()
                 revision = self._revision(code, "ELIGIBILITY", str(current.get("condition_name", "")), "",
                                           str(current["entry_session"]), now, {"nxt_eligible": eligible})
-                await asyncio.to_thread(self._store.record_hot_cohort_revision, revision, current)
+                await self._save_cohort_revision(revision, current)
+                self._cohort[code] = current
                 await self._update_subscription()
-        rows = await asyncio.to_thread(
+        rows = await owned_to_thread(
             self._store.load_documents, "stock_price_references", code, 1,
         )
         reference = rows[0].get("document", {}) if rows else {}
@@ -630,7 +731,7 @@ class MarketEventService:
             _positive_int(reference.get("upper_limit_price"))
             if isinstance(reference, dict) else None
         )
-        rows = await asyncio.to_thread(self._store.load_documents, "stock_fundamentals", code, 1)
+        rows = await owned_to_thread(self._store.load_documents, "stock_fundamentals", code, 1)
         payload = _nested_payload(rows)
         if price is None:
             price = _positive_int(payload.get("upl_pric")) if payload else None
@@ -817,6 +918,7 @@ class MarketEventService:
                 self._fact_last_error = type(error).__name__
                 await asyncio.sleep(self._fact_retry_seconds)
 
+    @captured_workload('market_events', 'vi_backfill', actor_per_invocation=True)
     async def _backfill_vi(self) -> None:
         body = {
             "mrkt_tp": "000", "bf_mkrt_tp": "0", "stk_cd": "", "motn_tp": "0",
@@ -841,6 +943,7 @@ class MarketEventService:
         except Exception as error:
             logger.warning("VI 누락 보완 실패(실시간 수집 계속): %s", error)
 
+    @captured_workload('market_events', 'vi_live_save', actor_per_invocation=True)
     async def _save_live_vi_events(self, values: list[dict[str, Any]]) -> None:
         # DB와 같은 불변 event_key만 합친다. 완료된 키는 캐시하지 않는다.
         remaining = {}

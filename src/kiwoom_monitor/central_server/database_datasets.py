@@ -39,6 +39,9 @@ COMMON_OBSERVED_DATASET_KINDS = frozenset({
     "investor_flow", "stock_fundamentals", "nxt_eligibility",
 })
 
+# Bound the combined text bound into a statement, including UTF-8 expansion.
+POSTGRES_DATASET_BATCH_TEXT_CHARS = 1_048_576
+
 def _uses_async_dataset_commit(values: list[DatasetSnapshotWrite]) -> bool:
     return bool(values) and all(value[0] in ASYNC_COMMIT_DATASET_KINDS for value in values)
 
@@ -156,28 +159,68 @@ class PostgresDatasetStoreMixin:
                         "SELECT pg_advisory_xact_lock(%s,%s)",
                         (902025, int(day.replace("-", ""))),
                     )
-                for kind, subject, snapshot_key, payload_json, payload, observation in serialized:
-                    cache_day = _top20_statistics_cache_day(kind, subject)
-                    cursor.execute(
-                        "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
-                        "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
-                        "saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json",
-                        (kind, subject, snapshot_key, saved_at, payload_json),
+                keys = [(kind, subject, key) for kind, subject, key, *_ in serialized]
+                can_batch = (
+                    len(serialized) > 1 and len(snapshot_kinds) == 1
+                    and all(type(part) is str for key in keys for part in key)
+                    and not (self._observation_history_enabled
+                             and snapshot_kinds & RESEARCH_OBSERVATION_KINDS)
+                    and not any(_top20_statistics_cache_day(kind, subject) for kind, subject, _ in keys)
+                )
+                if can_batch:
+                    metadata_keys = [(observation.kind.value, observation.subject, key.strip())
+                                     for _, _, key, _, _, observation in serialized
+                                     if observation is not None]
+                    can_batch = (
+                        len(set(keys)) == len(keys)
+                        and len(set(metadata_keys)) == len(metadata_keys)
+                        and sum(len(kind) + len(subject) + len(key) + len(payload_json)
+                                for kind, subject, key, payload_json, *_ in serialized)
+                            <= POSTGRES_DATASET_BATCH_TEXT_CHARS
                     )
-                    if cache_day:
+                if can_batch:
+                    from .database_market_bars import (
+                        POSTGRES_MULTIROW_UPSERT_ROWS, _execute_multirow_upsert,
+                        _save_postgres_metadata,
+                    )
+                    _execute_multirow_upsert(
+                        cursor,
+                        "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) VALUES",
+                        [(kind, subject, key, saved_at, payload_json)
+                         for kind, subject, key, payload_json, *_ in serialized],
+                        "ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
+                        "saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json",
+                        placeholder="%s", batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
+                    )
+                    _save_postgres_metadata(cursor, [
+                        (key, observation) for _, _, key, _, _, observation in serialized
+                        if observation is not None
+                    ], multirow=True)
+                else:
+                    # Duplicate identities, research history and cache invalidation
+                    # retain their sequential read/write/revision behavior.
+                    for kind, subject, snapshot_key, payload_json, payload, observation in serialized:
+                        cache_day = _top20_statistics_cache_day(kind, subject)
                         cursor.execute(
-                            "DELETE FROM central_dataset_snapshots WHERE kind='top20_statistics_day' "
-                            "AND subject=%s", (cache_day,),
+                            "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
+                            "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
+                            "saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json",
+                            (kind, subject, snapshot_key, saved_at, payload_json),
                         )
-                    if observation is not None:
-                        cursor.execute(
-                            _market_metadata_upsert_sql("%s", "EXCLUDED"),
-                            market_metadata_storage_values(snapshot_key, observation),
-                        )
-                        if self._observation_history_enabled and kind in RESEARCH_OBSERVATION_KINDS:
-                            _append_postgres_observation_revision(
-                                cursor, kind, subject, snapshot_key, payload, observation,
+                        if cache_day:
+                            cursor.execute(
+                                "DELETE FROM central_dataset_snapshots WHERE kind='top20_statistics_day' "
+                                "AND subject=%s", (cache_day,),
                             )
+                        if observation is not None:
+                            cursor.execute(
+                                _market_metadata_upsert_sql("%s", "EXCLUDED"),
+                                market_metadata_storage_values(snapshot_key, observation),
+                            )
+                            if self._observation_history_enabled and kind in RESEARCH_OBSERVATION_KINDS:
+                                _append_postgres_observation_revision(
+                                    cursor, kind, subject, snapshot_key, payload, observation,
+                                )
                 snapshot_at = monotonic()
                 metadata_at = snapshot_at
                 revision_at = snapshot_at

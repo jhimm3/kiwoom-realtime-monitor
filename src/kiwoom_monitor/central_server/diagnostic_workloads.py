@@ -330,10 +330,13 @@ def _set_capture(path: Path, enabled: bool, lease_seconds: int,
 
 
 def _set_trace(path: Path, enabled: bool, lease_seconds: int, *,
-               expected_session: str) -> dict:
+               expected_session: str, expected_revision: int | None = None) -> dict:
     """Trace is a distinct master child; restart and master OFF revoke it."""
     with _control_lock(path):
         current = _payload(path)
+        if expected_revision is not None and (type(expected_revision) is not int
+                or current.get('control_revision', 0) != expected_revision):
+            raise ValueError('diagnostic_control_conflict')
         tool = evaluate_diagnostic_control(current)["diagnostic_tool"]
         if not tool["enabled"] or tool["session_id"] != expected_session:
             raise ValueError("diagnostic_control_conflict")

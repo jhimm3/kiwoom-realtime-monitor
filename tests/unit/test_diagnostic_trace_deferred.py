@@ -30,7 +30,7 @@ def recorder_storage_headroom():
 
 
 @contextmanager
-def deferred_capture():
+def deferred_capture(*, large_inputs=False, account_inputs=False, account_context_store=None):
     with tempfile.TemporaryDirectory() as root:
         control = Path(root) / 'control.json'
         with recorder_storage_headroom(), patch.object(trace, 'control_path', return_value=control), patch(
@@ -39,6 +39,8 @@ def deferred_capture():
             master = _set_tool(control, True, 300)['diagnostic_tool']['session_id']
             _set_trace(control, True, 120, expected_session=master)
             active = trace.start(seconds=60, store_inputs=True, collector_inputs=True,
+                                 large_inputs=large_inputs, account_inputs=account_inputs,
+                                 account_context_store=account_context_store,
                                  persist_at=time.time() + 3600)
             try:
                 yield active['trace_id'], control
@@ -153,6 +155,14 @@ class DeferredTraceTests(unittest.TestCase):
             trace._write(output, b'z' * 64 * 1024, session)
             self.assertEqual(64 / 1024, sleep.call_args.args[0])
         self.assertEqual(content + b'z' * 64 * 1024, output.getvalue())
+
+    def test_persistence_backoff_excludes_only_already_paid_write_pacing(self):
+        # Fast writes retain a floor; slow real I/O/encoding still adds backoff.
+        for elapsed_ms, paced_seconds, expected in (
+                (4000, 3.5, .5), (1000, 1.0, .25), (9000, 1.0, 5.0),
+                (6000, 0.0, 5.0), (4000, 1.0, 3.0), (0, 1.0, .25)):
+            with self.subTest(elapsed_ms=elapsed_ms, paced_seconds=paced_seconds):
+                self.assertEqual(expected, trace._persistence_cooldown(elapsed_ms, paced_seconds))
 
     def test_invalid_deadline_is_rejected_before_memory_or_control_access(self):
         with patch.object(trace, '_deferred_memory_check') as check:

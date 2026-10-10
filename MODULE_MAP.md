@@ -6,6 +6,50 @@
 
 ## 앱·시장·저장
 
+`scripts/nas_scheduled_trace.py` owns the one-shot NAS-local capture start. A plan may
+explicitly select account/large opt-ins in addition to the original three flags. It checks
+schema4 capability/context contracts before controls change and verifies all selected flags
+in the single POST response. Old plans retain schema3. No retry after uncertain acknowledgement;
+the process survives SSH disconnect but not NAS reboot. After a root-owned deploy protects active.json,
+the scheduler uses the installed read-only kiwoom-nas status interface on PermissionError for the fixed
+NAS root; malformed/readable or missing selectors are not silently bypassed. Sixteen scheduler gates
+passed and the actual deployed NAS preflight passed without control changes. No permission/sudoers edit.
+
+`scripts/check_causal_capture_capacity.py` owns two fixed offline operator envelopes:
+60second smoke and actual3600second capture with a private native SQLite account/lease/VI
+fixture, distinct large blocks and streaming durable verification. It never accesses the
+operating DB/network or establishes whole causal Replay eligibility. The existing operator
+owns their fixed12GiB worker/12GiB disk preflight/14400second deadline and approved server
+pause → isolated drain/cleanup → exact server resume; installed configuration is unchanged.
+Real Linux host/cgroup9GiB start headroom is mandatory. Installed helpers and the actual
+NAS60second gate passed; the3600second gate failed with worker RuntimeError, without OOM.
+The exact operating server is restored/healthy. The private checker logs bounded seal/persist/
+verify progress, rejects failed/interrupted capture immediately and polls scalars without
+copying the full blob/chunk index. Its local durable verifier also pins a terminal manifest for the
+existing checksum/bounds readers, then rejects changed manifest bytes; it avoids public status copies
+per payload. Eleven related gates passed, including reuse of the same saved files with start/stop forbidden.
+The immutable full job timed out after persistence completed; cleanup and exact server restoration passed.
+Its2,329,089events were privately preserved. The extracted read-only verify_persisted_capture path verifies
+that same saved capture with native checksum/sequence/pair/block readers; NAS verification passed184.287s,
+including72,360collector messages/721,080closed deliveries/120large calls. No re-recording or writer ran.
+The fixed artifact launcher has no network or operating app/DB mounts, and uses read-only saved files.
+The actual recorder retains1MiB/s pacing and.25-5s backoff; paid pacing is now excluded from extra
+cooldown. Same short NAS A/B preserved38827 events/45 transactions and reduced persistence24.476%.
+An exact local operating overlay exposes account/large API opt-ins and records actual
+real/mock account and VI actors. It retains the active app's other routes and market queues;
+101 pinned-source API/account/lease/VI/recording regressions passed. A new actual scheduler->ASGI->
+native SQLite account/VI/large persistence path passed on that frozen source (24/24 events,
+reject/drop0/RAM0). Exact NAS storage105/105 and the same-source native account/v3 replay case passed;
+operating6390e0b7de1a5189 is deployed/healthy, PG preserved, Monday60minute five-flag plan armed.
+This is not full app-lifespan/causal Replay or2-5x performance acceptance. The standalone NAS starter
+uses the updated scheduler artifact while the admitted app release stays immutable.
+
+`central_server/diagnostic_account_context.py` owns the bounded account-context/v2
+projection, initial execution ledger/documents, authority aliases and observed next
+event sequence. It validates JSON/column scope and event lineage before native replay.
+The existing v3 baseline applies rows and transactional sequence RESTART in one seal;
+v1 capsules retain their four-table/two-document scope. No writer transaction changes.
+
 `central_server/market_events.py` owns upper-limit fact decisions and immutable RAM
 admission separately from native ACK waits. One feature-owned worker retries frozen
 one-fact calls; the existing store owns each connection/transaction. Public observations
@@ -14,6 +58,12 @@ fact_collection reports saturation/gaps separately from condition REG. RAM admis
 does not provide crash recovery. VI ownership and the shared hub drop policy are unchanged.
 Condition signals share metadata/expiry's existing state lock through snapshot, native
 ACK and RAM publication; invocation time/session/condition are frozen before lock wait.
+Signal queue admission also freezes time/session/condition. Existing workers retain
+failed inputs; the same frozen native revision/current is retried under the state lock.
+Metadata publishes eligibility after ACK. An owned input task covers retry, actual
+native completion and descendant admission; close drains signals before metadata and
+keeps waiting after its warning threshold. cohort_collection reports pending/failure/drop
+state separately from condition registration. No new service/store or persistence schema.
 
 `central_server/observation_frame_recovery.py` owns ephemeral legacy checkpoint
 prefix progress and frames-only repair. CandidateMonitor and MockAutomationRunner
@@ -23,6 +73,15 @@ writer. Shared frame trim functions preserve each consumer's existing horizon po
 no historical decision/order path is invoked. Cancellation drains owned native repair
 work before consumer close returns. NAS deployment and migration cost acceptance are
 separate from this correctness gate.
+
+`central_server/database_datasets.py` batches distinct snapshot/metadata identities
+inside the existing per-call transaction; shared multirow SQL helpers stay in
+`database_market_bars.py`. Duplicate identities, research revision chains, cache
+invalidation and large text use the original sequential path; saved_at freshness stays.
+`database_market_bars.py` also owns bounded advisory scope requests used by stock/day
+and research source/subject locking. Caller sort, serialized keys, hash seeds and
+transaction ownership remain; no separate lock service/connection/pool is added.
+Native blocking-order/rollback checks and same-recording A/B are required for retention.
 
 `src/kiwoom_monitor/` 기준 경로다.
 
@@ -36,8 +95,21 @@ worker live in `scripts/nas_operator_install.py` and `scripts/nas_operator_worke
 administrator-only `--update` replaces just the installed helper pair while retaining the original
 revoke backups and permission surface. `scripts/prepare_nas_operator_update.py` prepares an inactive
 operator-only overlay on the verified active NAS app plus an immutable checksum-pinned admin bundle.
+PG start/readiness failure diagnostics belong to this existing operator: verify the temporary
+job label, preserve bounded startup markers/state before cleanup, and report no raw logs/env.
+The 2026-10-10 local49/NAS portable47 gates passed. The administrator reported Linux68 and
+helper update success; the installed supervisor hash matches the prepared bundle.
+Follow-up diagnostic-only candidate adds fixed-role UID/GID/mode, container/daemon userns
+and permission operation/role enums to distinguish the confirmed PGDATA mkdir denial;
+local50/NAS portable48 passed, with no permission/ownership repair and no new command surface.
 `deploy/synology/check-nas-operator.sh` gate tests Linux fd/ACL behavior in a disposable offline
-container. PC unit tests pass; the Linux gate and NAS install have not run. See
+container. The follow-up identity diagnostic passed administrator Linux69 and is installed.
+The disk-parent repair stays in this operator: root-owned generated data parent only,
+anchored no-follow fd/fchmod0711, verify applied mode and close fd. Local51/NAS portable49 passed;
+candidate95f22a1d0c5913af passed administrator Linux70 and its helper hash is installed;
+actual disk replay42e7cb83fe64b0f0a33a7264c0946ddc passed with cleanup/resume.
+The partial workload timing gate failed (one113.875ms actor wait); startup repair and
+whole-app performance attribution remain separate. See
 [the operator contract](docs/NAS_OPERATOR_COMMANDS.md) before changing this boundary.
 
 0B collector 통합 진단은 `central_server/diagnostic_collector_replay.py`가 고정 입력,
@@ -47,9 +119,35 @@ container. PC unit tests pass; the Linux gate and NAS install have not run. See
 지연 저장 모드는 `diagnostic_trace_ram.py`의 framed RAM block으로 bounded raw queue를 압축하고,
 기존 writer가 순서대로 persistence한다. 메모리/event quota 및 packing backlog도 capture 상태로 공개한다.
 기본 schema-3 limits는 8 GiB / 5,000,000 events이며, 실제 RSS·장중 전체 부하 수용을 뜻하지 않는다.
+Opt-in `large_inputs` selects schema4: the same capture owner freezes one bounded typed input,
+`diagnostic_trace_ram.py` encodes it into1MiB blocks, and the existing trace writer publishes
+all parts before one logical reference. `diagnostic_trace_payload.py` owns immutable offline
+descriptors and checksummed reconstruction. The recorded scheduler validates each selected
+input before native execution, shares three decode credits via `diagnostic_replay_runtime.py`,
+prepares a bounded frontier and drains actual threads before releasing credit. These local
+contracts passed62 regressions. `diagnostic_account_input.py` owns explicit typed account
+projection and session HMAC authority aliases; the source repository supplies opaque run IDs.
+Account event/recovery, heartbeat/start/stop and VI live/backfill retain actual task actors.
+Baselinev3 extends only12 named tables and5 actual sequences; v1/v2 are preserved. Private
+v3 clocks serve native lease expiry and real-account updated_at without changing operational
+time or transactions. The pure alias-frontier resolver preserves nested valid prefixes and
+unbound release identity; native scheduler wiring is implemented. `diagnostic_account_context.py`
+owns explicit bounded source prerequisites, read-only MVCC projection, checksummed
+recorded context reading and the private v3 capsule application. Capture admission places
+one frozen capsule before native producers. The existing v3 lease verifies its v1 parent
+then applies and seals within one transaction. Source time/identity projection gaps remain
+explicit; the capsule is not a whole-DB baseline. Native expected-failure Replay passed the
+78-test PostgreSQL/NAS gate. Missing context/clock still rejects before DB connection.
 `diagnostic_replay_contract.py`가 허용 메서드·codec·workload 선택과
 collector descendant 제외 계획을 검사한다. `diagnostic_recorded_execution.py`는 명시된
 store allowlist를 caller-owned test store에서 실행하며 actor 순서·동시성·replay ID를 기록한다.
+`diagnostic_replay_sampling.py`는 opt-in offline replay 중 기존 lease 관리 연결을
+독점 사용해 읽기 전용 PostgreSQL activity 표본과 worker CPU/RSS를 수집한다.
+`diagnostic_recorded_execution.py`가 native 실행과 observer drain을 소유하고 관리
+연결 재사용/복구 전에 종료를 기다린다. `diagnostic_replay_database_cli.py`가 같은
+backend/COMMIT 구간에 표본을 연결한다. writer 트랜잭션/공개 API/운영 계측은 바꾸지 않는다.
+표본은 SQL 원문 없이 bounded 상태/wait/blocker만 담으며 물리 장치 원인이나 미관측 대기를
+확정하지 않는다. 정확한 후보 소스의 PostgreSQL gate와 동일 입력 A/B를 별도로 기록한다.
 `diagnostic_replay_comparison.py`는 소유한 replay DB의 native drain 이후 네 결과 표의
 내용·revision 연결 비교값을 만든다. 기존 전체 hash/reset 판정은 그대로이며, 저장 시각과
 UUID 차이는 명시적으로 분리하고 source 시각·payload·revision 순서는 유지한다.
@@ -87,6 +185,13 @@ T4 controlled PostgreSQL acceptance는 통과했으며, 장중 상태 등가 및
 전달한다. `diagnostic_replay_baseline.py`는 고정 replay DB의 역할·소유권·run lock, baseline v1 14개
 허용 테이블/sequence 및 별도 opt-in v2 15개 테이블(`central_api_query_cache` 포함) snapshot,
 atomic restore와 native connection drain을 소유한다. 로컬 offline replay `run`도 v2를 선택할 수 있다.
+v3 native recorded runner는 계좌7종/VI를 명시적으로 실행하며 검증한 context capsule,
+동일 owner alias frontier, 봉인된 context/token hash와 실제 경과를 반영하는 lease-owned
+source clock을 요구한다. 예상 실패는 정확한 class/code로만 수락하고 결과 불일치는 drain한다.
+offline CLI의 v3 seal/run 선택은 녹화 context와 명시 window/owner frontier를 preflight한다.
+`scripts/nas_operator.py`는 schema4 block bundle을 bounded stdlib로 검사·등록하고 등록 후
+파일 hash를 재검사한다. v3 baseline과 trace context 연결 및 worker source-origin 전달을
+검사한다. root helper 반영, public 실행 선택과 NAS 녹화 운영 배포는 별도 단계다.
 v2 query-cache store 호출은 lease의 source clock을 사용하며 v1에서 거부한다. `rest_broker.py`의 선택적
 source wall clock과 `database_query_cache.py`의
 per-store clock hook은 v2 lease에서만 연결되고 운영 기본값에는 변화가 없다.

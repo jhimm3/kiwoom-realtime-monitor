@@ -59,6 +59,26 @@ class NasOperatorLinuxTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 tree.write('parent-link/data', b'x')
 
+    def test_block_registration_uses_anchored_files_and_pins_registered_bundle(self):
+        from tests.unit.test_nas_operator import ScopedOperatorTests
+        trace_id, manifest, files, digest, name = ScopedOperatorTests().block_fixture()
+        incoming_root = self.directory / 'incoming'
+        incoming = incoming_root / trace_id
+        incoming.mkdir(parents=True, mode=0o700)
+        for filename, data in files.items():
+            (incoming / filename).write_bytes(data)
+        with self.tree('private', protected=True) as private:
+            operator = op.Operator({'trace_dir': str(incoming_root), 'allowed_uid': 0,
+                'input_file_limit': 64 * 1024 ** 2, 'input_total_limit': 1024 ** 3}, private)
+            result = operator.register('traces', trace_id, 'scoped-operations')
+            self.assertEqual(result, operator.registered_input('traces', trace_id))
+            self.assertEqual(files[name], private.read('traces/' + trace_id + '/' + name))
+            self.assertEqual(0o644, stat.S_IMODE((Path(private.path) / 'traces' / trace_id / name).stat().st_mode))
+            (incoming / name).unlink()
+            os.symlink('000001.jsonl', incoming / name)
+            with self.assertRaises(OSError):
+                operator.register('traces', trace_id, 'scoped-operations')
+
     def test_parent_replacement_does_not_redirect_anchored_reads(self):
         with self.tree('input') as tree:
             tree.write('value', b'old')

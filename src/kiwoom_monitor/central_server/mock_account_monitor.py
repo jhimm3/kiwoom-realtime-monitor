@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from .diagnostic_replay_contract import captured_workload
 import json
 import logging
 from datetime import datetime, time as clock_time, timezone
@@ -289,6 +290,7 @@ class MockAccountMonitor:
             self._start_task = asyncio.create_task(self._start(initial_read), name="mock-monitor-start")
         await asyncio.shield(self._start_task)
 
+    @captured_workload('account', 'execution_start', actor_per_invocation=True)
     async def _start(self, initial_read: bool) -> None:
         if self._task is not None:
             return
@@ -310,6 +312,7 @@ class MockAccountMonitor:
             self._close_task = asyncio.create_task(self._close(), name="mock-monitor-close")
         await asyncio.shield(self._close_task)
 
+    @captured_workload('account', 'execution_stop', actor_per_invocation=True)
     async def _close(self) -> None:
         if self._start_task is not None:
             await asyncio.gather(asyncio.shield(self._start_task), return_exceptions=True)
@@ -361,6 +364,7 @@ class MockAccountMonitor:
             self._recovery_queued = True
             self._queue.put_nowait(("recover", None))
 
+    @captured_workload('account', 'execution_heartbeat', actor_per_invocation=True)
     async def _heartbeat(self) -> None:
         while not self._heartbeat_stop.is_set():
             try:
@@ -395,6 +399,7 @@ class MockAccountMonitor:
     async def _recover(self) -> MockAccountRecovery:
         return await self._owned(self._recover_once)
 
+    @captured_workload('account', 'mock_account_recovery', actor_per_invocation=True)
     async def _recover_once(self) -> MockAccountRecovery:
         async with self._recovery_lock:
             query_started_at = self._aware_now()
@@ -491,6 +496,7 @@ class MockAccountMonitor:
     async def _reconcile_execution(self, execution: OrderExecution) -> None:
         await self._owned(lambda: self._reconcile_execution_once(execution))
 
+    @captured_workload('account', 'mock_account_event', actor_per_invocation=True)
     async def _reconcile_execution_once(self, execution: OrderExecution) -> None:
         record = await asyncio.to_thread(
             self._repository.find_by_broker_order_id,

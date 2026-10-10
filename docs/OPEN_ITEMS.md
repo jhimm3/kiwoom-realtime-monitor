@@ -1,9 +1,245 @@
 # 남은 작업과 보류 사항
 
+**2026-10-10 녹화기 배포·월요일 예약 완료:** NAS active6390e0b7de1a5189의 실제 health/build/source
+정상과 운영 PG 보존을 확인했다.10/12 08:59:50~09:59:50 KST60분 녹화/20:10 저장을
+5개 input flag로 예약했다. PID2815·계획/소스 hash·SSH 종료 후 동일 프로세스 확인, 현재 제어 OFF.
+배포 후 root-owned active.json의 일반 계정 PermissionError는 기존 승인된 read-only status
+인터페이스를 쓰도록 보완했다.16검사와 실제 NAS preflight 통과, 권한/sudoers 변경 없음.
+standalone starter는 SSH 종료 후 유지되지만 NAS 재부팅 뒤 유지되지 않는다.
+같은 source의 native account/lease/VI/large Replay case도 통과했다(17입력 x2,
+14COMMIT/3rollback·내용/revision/원장/순번/복원·큰 블록1native call/1COMMIT).
+남음: 실제 월요일 녹화/20:10 저장 결과, 등록 v3 baseline의 public operator Replay,
+P1 실제10~20초 COMMIT 개선과 앱 전체2~5배 검증. 이 준비 완료로 해당 항목을 닫지 않는다.
+현재 준비 상태 근거: `artifacts/recorder-monday-readiness-final-20261010.json`.
+이하 미배포/미예약/진행 중 표현은 단계별 과거 근거이며 현재 완료 상태는 위를 따른다.
+
+**운영 후보 NAS 저장 검사 보완:** f448의105건 중3오류(job414c38340fbacbb21091e23d8bb9b035)는
+테스트의 클래스 patch가 객체에 설치된 녹화 래퍼를 지나 실제 호출을 가로채지 못해 발생했다.
+기존 바인딩으로 호출되는 것을 재현했다. 현재 메인에 있는5줄 instance patch만 반영한 불변
+후보6390e0b7de1a5189를 비활성 게시했고 같은105건 전부 통과했다(오류/실패/skip0,
+job9484fe27233a77d06297e806ba68ad4e). 앱 source/나머지953파일 동일, assertion/검사 생략 없음,
+정리/fence/운영 앱·DB 보존 확인. 실패 gate는 보존하며 통과로 세지 않는다.
+월요일 계획은 `nas-trace-start-20261012-storage-fixtures.plan.json`으로 새 release만 맞췄다.
+증거: `artifacts/recorder-storage-fixture-preparation-20261010.json`,
+`artifacts/recorder-operating-NAS-storage-failed-20261010.json`.
+통과 근거: `artifacts/recorder-operating-NAS-storage-passed-20261010.json`.
+
+**현재 동일60분 녹화본 전체 영속 검증 통과 / 운영 후보 NAS 검사 진행:** job9262267814daf923ac68e69f2754438d는
+4시간 제한 docker_command_timeout으로 종료됐다. 정리·원래 릴리즈 재개·운영 PG 보존과
+실제 health=ok/diagnostics idle을 확인했다. lifecycle complete는 시험 합격이 아니다.
+관리자 숫자로 저장2329089/2329089건·거부/누락0·RAM/대기0·phase=verify,
+저장5034.166초(강제대기4014.368초)를 확인했다. 기존 전체 검사 완료는 미확인이다.
+동일 녹화본3534파일/2,898,666,063bytes를 관리자 전용으로 보존했다. 원본/운영 제어 불변.
+개선 검사기·원래 native source를 hash로 고정한 읽기 전용 실행 파일을 게시했다.
+추가60분 녹화 없이 같은 보존본의 전체 checksum/sequence/전달/operation/block 검증이
+실제 NAS184.287초에 통과했다. 2,329,089건/1,706chunk,72,360수신/721,080전달쌍,
+대형120건/카탈로그5000행1호출, manifest 동일. native writer 실행/운영 DB 접근 없음·컨테이너 정리.
+검사기에서 payload마다 전체 index를 복사하는 별도 비용은 확인해 로컬 최소 수정했다.
+72,001 index·같은 바이트3회 비교13.467~14.986→0.256~0.309ms/읽기, 관련11건21.379초 통과.
+기존 checksum/bounds reader와 검증 전후 terminal manifest 바이트 동일성 확인을 사용한다.
+종료된 불변 후보나 운영 후보는 수정하지 않았다. 같은 저장본의 start/stop 금지 재검증도 통과했다.
+기존 검사의 시간 제한 실패→같은 저장본184.287초 통과를 확인했다. 원래 실패 job은 실패로 유지한다.
+고정20Hz x10행·실제60분 recorder 수용/저장/검증 범위는 확인됐지만 전체 causal Replay,
+시장 최대·전원 손실 복구·앱2~5배/P1 COMMIT은 미완료다. 월요일 NAS storage 검사/배포/예약을 이어간다.
+
+**2026-10-10 녹화기 저장 개선 확인 / 긴 종료 gate 시간 제한 실패:** helper 관리자80건 갱신과 실제
+설치 hash를 확인했다. 같은60초 입력·초기 private native SQLite A/B에서 저장117.021→88.379초
+(24.476% 감소), 강제대기95.824→64.631초. 원인은1MiB/s 쓰기 대기를 후속 cooldown에
+다시 포함하는 비용이며, 이미 지불한 pacing만 빼고 실제 추가 작업/지연 backoff는 유지했다.
+양쪽38,827/38,827건·거부/누락0·RAM/큐0, 계좌 내용/revision hash·native 호출·45트랜잭션
+동일, 블록/내용/checksum/seq/전달/operation 쌍 검증 및 동일 운영 릴리즈 복구 완료.
+SQL/COMMIT 성능 개선은 측정하지 않았다. 운영 후보f44802190bd70570의 정확한 소스와
+테스트 보조 경로를 고정해101건70.914초 통과; 앞선 혼합 테스트 경로20오류 기록은 보존했다.
+개선 코드의 누적60분/full durable job9262267814daf923ac68e69f2754438d는 저장 완료 후
+기존 검사 단계에서 시간 제한으로 종료됐다. 정리·원래 서버 재개·health 확인은 완료했다.
+이전c9def RuntimeError의 정확한 원인은 미확정으로 보존한다. 현재 녹화/저장/검증은 위에서 확인했다.
+월요일 배포/실제 preflight/예약, 등록 v3 baseline Replay, P1 COMMIT10~20초는 아직 미완료.
+정확한 운영 후보/월요일 계획의 NAS 비활성 게시는 완료(954 code 파일 hash 확인),
+active/runtime 유지. 긴 gate 종료 후 정확한 NAS storage gate→배포→실제 preflight→예약 순서다.
+증거: `artifacts/recorder-saved-native-verification-20261010.json`,
+`artifacts/recorder-cooldown-ab-proof-20261010.json`,
+`artifacts/recorder-cooldown-full-start-status-20261010.json`.
+
+**2026-10-10 실제60분 시험 실패/운영 정상 복구:** jobc9def38d8077b4880e7853ffb0f3ef48은
+worker exit1/RuntimeError, OOM=false로 실패했다. 정리/동일 운영 릴리즈 재개/health=ok/
+운영 PG 보존은 확인됐다(정지13213.998초). lifecycle complete는 시험 합격이 아니다.
+정확한 오류 코드는 supervisor가 worker의 sanitized failure_reason을 누락해 소실됐다.
+이 보고 결함은 로컬 최소 수정했고 관련71건 통과; 이후 관리자80건 갱신/hash 확인으로 설치됐다.
+관리자 숫자 읽기로 마지막71,001메시지/대형119회·2,296,849사건·RAM2,886,621,767bytes/
+큐0·cgroup여유9,406,976,000bytes를 확인했다. 최종 결과 출력은 없었으며 마지막 표본까지
+용량은 정상이다. 최종 녹화/저장 완료 여부와 실제 RuntimeError 코드는 미확정이다.
+private 시험의 봉인/저장/검증 단계 숫자 로그와 실패·중단 즉시 종료를 추가했다.
+매50ms 전체 index 복사를 고정 크기 숫자 조회로 바꿨다. 동일72k index3회 A/B에서
+조회14.143~14.995→0.035~0.047ms; 관련68건+중단1건 통과(중복 회귀 합산 금지).
+이는 시험 관측 비용 개선이다. 별도 실제 녹화기 저장 A/B 개선은 위와 같고60분 실패 해결은 미검증이다.
+단계 구분을 사용한 짧은 영속화 A/B는 위 결과로 완료했다. 누적 gate 종료 후 같은 보존본을 재검증한다.
+실패 코드 보존 helper 번들b83ab32e6f3a1697는 정확한 비활성 후보의 NAS58건을 통과했다
+(job31df1001576192365da01ced4f631af3, 오류/실패/skip0·정리/fence/운영 유지).
+제가 후보에 없는 packaging module을 지정한 앞선 로딩 실패는 별도 보존했고 합격으로
+세지 않는다. 로컬 packaging2건 통과. root helper 교체는 제한 launcher 권한 밖이므로
+관리자 bootstrap 실행/실제 hash 확인을 완료했다. 비활성 private probe 후보dc53163063baf0f0로
+짧은 NAS A를 통과했다. 운영 recorder·월요일 예약은 아직 미반영이다.
+동일 가설의60분 재시험은 원인 판별 없이 반복하지 않는다.
+정확한 운영 후보의 예약함수→인증 ASGI→native 계좌/lease/VI/8MiB+입력→영속화 검증은
+24/24·거부/누락0·RAM반환0으로 통과(1건14.880초). private SQLite/no lifespan 범위이며
+실제 NAS/PG/60분 검증을 대신하지 않는다. 배포·월요일 예약·P1 COMMIT10~20초는 미완료.
+
+**2026-10-10 월요일 예약 옵션 누락 보완:** 기존 예약기가 새 account_inputs/large_inputs를
+보내지 않는 호출 경로를 확인해 명시 capture_flags와 schema4/context 사전·응답 검증을
+추가했다. 기존 schema3/한 번 POST/불확실 ACK 무재시도 유지;12건 통과0.079초.
+로컬 후보d2855d3c9bf52a86와10/12 08:59:50~09:59:50/20:10 계획을 hash 고정했다.
+앱 소스는 기존99건 검증 후 그대로다. NAS 게시/배포/실제 preflight/예약 활성화는 미완료.
+60분 capacity job은 이후 실패했고 운영 복구는 완료됐다. 위 실패 판별 작업을 먼저 진행한다.
+
+**2026-10-10 실제 NAS60초 gate 통과/3600초 gate 실행 시작:** helper90ddfbb1e58cf999
+두 실제 설치 hash 일치. job745ce2885c2df2f43885a78bd7ad9fa6는 actual60.000856초,
+1200체결메시지+6혼합/12,000체결,38,827/38,827·거부/누락0·대형2입력·지원전달
+12,018쌍·모든 저장쌍/내용/hash·실제host/cgroup9GiB preflight를 통과했다.
+수신p95/max5.953/30.524ms, CPU11.954초, peakRSS240,496,640bytes, 표본큐0.
+1MiB/s 영속화109.064초 후cleanup/fence/같은 운영서버 정상복구 확인(정지181.888초).
+스케줄 지연p95/max451.803/1187.940ms에는 inline 혼합 준비를 기다리는 시험 구조가
+포함되어 전체 live 수신 성능으로 해석하지 않는다. 같은 최종 후보의 실제3600초
+profile을 시작했다(jobc9def38d8077b4880e7853ffb0f3ef48). 전체 영속화/복구 뒤 판정하며 실패/포화면 원인별 최소 개선한다.
+별도로 운영 기준 recorder API·계좌/VI actor 최소 overlay를 로컬에서 준비했고 정확한
+후보 소스의 관련99건이74.062초에 통과했다. 실제 NAS 게시/배포는 아직 하지 않았다.
+**남음:** 3600초 종료·전체 영속화 검증·복구, 등록 v3 baseline Replay, 정확한 recorder
+배포 및10/12 08:59:50~09:59:50/20:10 KST 예약. P1/전체2~5배·causal 범위 미완료 유지.
+
+**2026-10-10 고정 용량 profile 구현 완료/실제 실행 미완료:** 기존4GiB worker의
+9GiB 실제 여유 차단은 전용12GiB worker/12GiB disk guard/14400초 job으로 보완했다.
+일반 profile·설치 config·운영 녹화 RAM8GiB/500만 event/1MiB/s 저장은 유지한다.
+60초/실제3600초 고정 제어 입력(20Hz×10행·대형30초 간격)과 실제 Linux preflight,
+RSS/CPU/큐·수신 p95/max·streaming durable checksum/내용/쌍 검사를 연결했다.
+작은 capture는 대형2입력·모든 native 계좌 쌍/누락0을 검사, 관련97/최종65 통과
+(중복 포함)이며 용량 profile 성공/실패 뒤 정리·같은 운영 서버 복구도 검사했다.
+추가 durable count gate64 통과25.830초(중복 포함): 실제 체결+혼합 원본·지원 전달·
+계좌/일반 저장 호출 수가 durable 수와 같아야 한다. 원본이 있는 market_state의
+receipt 미지원 범위는 별도 건수로 표시하며 전체 causal coverage를 주장하지 않는다.
+**남음:** 신규 helper 관리자 설치·NAS60초 및3600초/전체 영속화 gate, 등록 v3 baseline
+Replay, 정확한 recorder 배포와10/12 08:59:50~09:59:50/20:10 KST 예약.
+최종 비활성 후보90b3b846dd902ace/helper90ddfbb1e58cf999 준비·hash 일치 확인.
+이전 후보의 NAS97 통과(job51e0b01c66678fc5bf60ad0c7f2cdff0)는 정리/운영 보존을
+확인했지만 추가 count gate 전이다. 최종 변경64건도 NAS 통과(오류/실패/skip0),
+job59cffb65d3ecffe6288c0cbb26d57aa0에서 cleanup/fence/운영 앱·DB 보존을 확인했다.
+이 표준4GiB 회귀와 실제12GiB capacity profile 실행은 별개다. helper 설치 전이다.
+관리자 번들과 같은 앱 없는 사본의 operator57건도 통과했다.
+시장 최대/전체 causal Replay·앱2~5배·P1 장중10~20초 COMMIT은 여전히 미해결이다.
+
+**2026-10-10 혼합 녹화 비용·실제 trace 등록 후속:** 관리자 설치75건 결과 후 f518 helper
+두 파일의 실제 해시가 준비 번들과 일치했다. schema4 제어 trace20261010T011742Z-8f7b68bdab84는
+계좌/lease/VI/encoded8,583,262-byte Shadow·context/v2를 포함해 실제 register-trace에서
+21/21·reject/drop0·파일/블록 hash로 등록됐다. v3 baseline bundle/native Replay는 미완료다.
+PC 짧은 OFF/ON10/20/50행 입력2회씩은 내용/revision/결과·32/72/72독립 BEGIN/COMMIT이 같고
+누락0이다. 관련 회귀52건 통과. 1MiB block yield 최소 수정을 A/B했으나 일관된 개선이 없어
+완전히 철회했다. 상세: `artifacts/recorder-mixed-probe-proof-20261010.json`.
+**차단 해소 다음 작업:** 고정 격리 capacity 자원 profile을 추가한다. 기존 worker4GiB는
+8GiB recorder의 실제 free9GiB 시작 gate를 만족할 수 없다. preflight를 mock한 짧은 검사로
+대신 승인하지 않는다. 실제 NAS3600초·RAM retain·20:10 정책의 paced 영속화/RSS/CPU/큐를
+검증하고 정확한 녹화기 배포·10/12예약으로 이어간다. 운영/DB는 유지, P1은 미해결이다.
+
+**2026-10-10 녹화기 후속 gate 완료:** 기존 원장 누락을 직전 고정 코드로 재현했고
+account-context/v2에 기존 주문/체결/계좌 스냅샷·복구/이벤트 문서·실제 다음 체결 순번을
+포함했다. 로컬143/NAS138 통과, NAS job fec0547f032c6132151070c39cedbc0a.
+동일 녹화17입력/초기 DB2회에서 COMMIT14/rollback3, 기대 실패3건, 기존 중복 판정,
+원본 원장 내용/순번·계좌 문서, seal 실패의 rows/sequence rollback·baseline 복원을 확인했다.
+encoded8MiB 초과 Shadow 입력은 여러 블록에서 실제 native1call/COMMIT1회로 복원했고
+저장 JSON이 같다. 최초 NAS138은 검사 코드의 descriptor 필드 오류1건으로 실패/정리했고
+성공 수치에 포함하지 않는다. 상세: `artifacts/recorder-ledger-postgres-proof-20261010.json`.
+**남음:** 최신 helper f51813928279b3c3는 설치/해시 확인 완료; 등록 v3 baseline/native Replay 실행,
+계좌/lease/VI/대형 입력을 포함한 NAS60분 수용/부하, 정확한 녹화기 배포와 월요일 예약.
+기존 dbec3df99022816a 번들은 최신 버전으로 대체한다. 중간 credential activation/전체
+초기 상태 동등성/확장 causal 범위는 미검증이다. 장중 COMMIT10~20초 P1은 미해결이며
+녹화기 정합성 gate를 앱 성능 개선이나 2~5배 부하 합격으로 사용하지 않는다.
+
+**2026-10-10 실행 원칙 보완:** 확인된 병목은 안전한 최소 코드 개선과 동일 녹화/초기 DB
+A/B까지 진행한다. 근본 원인 미확정은 수정 전체를 보류하거나 완료 처리할 사유가 아니다.
+동일 가설 반복은2~3회 이내로 제한하고 실험은 개선 확인/효과 없는 변경 철회/
+구체적인 안전성 차단 해소로 연결한다. **P1 실제 장중 COMMIT10~20초는 미해결 유지**다.
+현재 판별은 같은 backend COMMIT의 WAL/I/O/Lock/blocker 관측이다. 최초 분봉 비교는
+기준선에도 같은 구현이 있어 무효였고 초봉 변경 후보는 채택하지 않았다.
+dataset 독립 키 SQL 배치는 동일 realtime23/disk/empty-v1에서 SQL55→33,
+execute p95/max4.383→3.477ms, 내용/revision/COMMIT23·입력 일정 보존으로 유지한다.
+dataset 전체 시간102.484→106.570ms/전체 COMMIT max290.021→495.464ms이므로
+앱 처리량/장기 COMMIT 해결 완료는 아니다. NAS native53/error·failure·skip0 및 복구 확인.
+다음은 공통 advisory scope 요청의 왕복 감소다. 정렬/키/seed/xact 수명 보존,
+native 차단 순서/rollback/동시 writer·revision 회귀76건과 동일 입력 A/B를 통과했다.
+공통 scope 요청160→4, 전체 SQL231→75, 분봉/확정4call execute합159.746→138.532ms
+(-13.28%)/p95·최대42.236→37.246ms로 SQL 단계 개선을 유지한다. 내용/revision/sequence/
+COMMIT23/입력 일정은 보존했다. 전체 wall1663.267→2100.012ms, COMMITp95250.629→265.810ms라
+전체 지연/처리량 개선은 아니며 **P1 장중10~20초 미해결**이다. CPU/RSS 개선 주장도 없다.
+복구/cleanup/fence/기존 릴리즈 재개 확인; 운영 배포는 하지 않았다.
+다음 판별은 실제 realtime23+REST30의 multi-writer 재생 자격이다. 운영 정지 없이
+empty-v1 preflight53건 뒤 실제53건/disk/동일 baseline을 실행했다. REST30건은 모두
+load_documents READ여서 추가 writer0, 실제 write/COMMIT 동시성 최대1이다. 이 REST가
+빠진 Writer 경합을 재현한다는 가설을 기각하고 불필요한 수정 후 반복은 생략한다.
+write COMMITp95/max459.643/696.772ms로 원래20초는 재현하지 못했다. REST actor 미확정으로
+timing gate=false다(시작 지연 최대4.373ms여도 원래 actor 의미는 검증하지 못함).
+baseline/cleanup/fence/운영 복구 확인. 다음은 workload 이름이 아닌 실제 method 기준의
+녹화된 shadow/market_events 추가 writer 자격·필수 상태 판별이다. 누락 lease/VI/거부 입력,
+원래 DB·background 부하는 복원하지 않는다. P1 및 전체 앱2~5배 검증은 미해결로 유지한다.
+원래 없는 Shadow/lease/VI 입력은 재구성하지 않는다. 상세 가설/판정/완료 지표는
+RECORDED_WORKLOAD_EXPERIMENT_DESIGN 최신 절을 따른다. 전체 앱2~5배 안정성은 후속 gate다.
+
 **2026-10-09 전체 앱 최적화 P0/P1 진행:** 사용자가 지정한 P0 정합성·복구 → P1 공통
 장기 지연 → P2 중복 → P3 개별 → P4 확대 부하 순서를 따른다. 10/8 불완전 capture는
 부분 비교만 허용하며 저장 주기/batch/concurrency 변경이나 전체 완료 근거로 쓰지 않는다.
 각 변경은 동일 입력/초기 상태/조건에서 기능·성능·타 경로 영향과 미측정 지표를 기록한다.
+
+2026-10-10 signal/metadata worker 보완: 실제 HEAD 사본의 동일 실패/ACK 유실/취소 gate6이
+모두 red(검사 오류0)이며, 수정 후 worker/시장/상한가38 및 관련 capture/REST/replay/collector79,
+정규 P0 profile41이 통과했다(중복 제외 로컬136). 실패 입력 보존, 같은 native 입력 재시도,
+ACK 뒤 eligibility RAM 반영, signal→파생 metadata 순차 drain과 취소 뒤 실제 thread 완료를
+보호한다. start 전 직접 호출이 남긴 metadata owner 공백도 재현·수정했다. v1 NAS gate는
+중단/cleanup했고 성공에 포함하지 않는다. v2-cd91306e1afce7dc 전체 NAS gate67은
+job b78c7dbd91ff6688b3c463c85f70cc98에서 통과(실패/오류/skip0, cleanup/fence 확인)했다.
+그 전 v2 job117cdd3c8fef55765afb558b8b14acdf도 미완료로 중단/cleanup했다.
+이 대기 원인은 미확정이며 후속 통과를 원인 제거 증거로 사용하지 않는다.
+기존 main Windows CI는 이전 P0 모듈4개 등록 누락으로 실패했고 PostgreSQL은 통과했다.
+신규 worker 포함5개 등록/정확한 base-ref 등록 gate 통과; 새 GitHub CI는 실행 전이다.
+**남음:** 초기 v2 검사 대기 원인, 강제 종료 pre-ACK RAM 복구, bounded queue overflow 복구/consumer별
+원본 전달 범위, P1 공통 지연 attribution. 운영 active는 변경하지 않았다.
+
+P1 디스크 대조의 PG readiness 실패 진단을 기존 operator에 추가했다. 해당 job label을
+확인한 컨테이너 상태·제한된 로그 표식/hash·시도 수/시간을 cleanup 전에 남기며 원문/비밀은
+출력하지 않는다. 기존 deadline/cleanup/resume 계약은 유지한다. 로컬49 통과.
+비활성 operator 후보60873560aea7b34a/관리자 번들d93e3d717ccc6d47 준비 완료.
+NAS portable47도 통과(job93a1063c8dc30612f7837be7bb8ba9c5, 실패/오류/skip0,
+cleanup/fence/운영 보존 확인). 실제 startup 실패를 실행한 결과는 아니다.
+관리자 실행 결과 Linux68 OK/helper 갱신·무암호 status 검증 완료를 받았고 설치된 supervisor
+hash가 준비 번들과 같으며 기존 active가 정상임을 확인했다. 동일 disk 대조 job
+50d3a349dd961f0eb5fb8b8723d88c12는 PG readiness에서 실패했다(117회/60.490초,
+PG exit1/OOM=false/permission_denied). 83바이트 전체 로그 hash가 PGDATA mkdir 권한
+거부 문장과 일치해 실패 작업을 확정했다. 원래 로그나 DB는 변경하지 않았다.
+cleanup=true, replay/운영 pause 전에 실패, server_restarted=false와 정상 active를 확인했다.
+**남음:** 거부된 UID/소유권/ACL/userns 판별 및 동일 disk 대조. 이를 확인할 고정 역할
+UID/GID/mode·container user/userns 진단 후보를 추가했고 로컬50 통과했다. 권한 수정은 하지
+않았다. 이 단계는 P1 장중 공통 COMMIT 지연 원인 해결이 아니다.
+후속 비활성 후보56a2a41cf1be83b9/번들e4aed8ab8bd26442 준비 완료, NAS portable48 통과
+(jobf6f414a7bb60c0e08f6e3f59341b9d16, 실패/오류/skip0, cleanup/fence/운영 보존 확인).
+사용자가 후속 관리자 Linux69 OK/helper 갱신 완료를 제공했고, 설치 hash와 정상 active를
+재확인했다. 동일 disk job29286678b2c75e5f90aa9667e5a0dff5가 같은 권한 거부를 재현했다.
+data_root는 root:root/0700, 이미 생성된 pgdata는 UID70/GID0/0700이며 userns=false다.
+UID70은 root0700 상위를 통과할 수 없다. 생성된 임시 disk 상위만 root 소유0711로 설정하는
+최소 수정 후보를 만들었다. private 상위/비밀번호0600/PGDATA0700과 소유권은 유지한다.
+umask077 때문에 mkdir 인자만 바꾸지 않고 anchored no-follow fd/fchmod와 적용 확인을 쓴다.
+로컬51 통과(소유자/적용 실패 거부, 정리/재개 회귀 포함).
+수정 후보95f22a1d0c5913af/관리자 번들6e7efb301580f541 준비 완료, NAS portable49 통과
+(job60c99d718bf5d055f082c525fe2cce05, 오류/실패/skip0, cleanup/fence/운영 보존 확인).
+RAM 기반 모의 권한 계약 검사이며 실제 disk startup/replay 검증과 구분한다.
+사용자가 관리자 Linux70 OK/helper 갱신 완료를 제공했고 설치 hash와 정상 active를 확인했다.
+동일 disk job42e7cb83fe64b0f0a33a7264c0946ddc는 성공했다(PG13회/6.780초, parent0711).
+23입력/native23/SQL253, 생략0, source outcome/DB 계측 정상; baseline/cleanup/fence와
+같은 운영 릴리즈 정상 재개를 확인했다(정지223.929초, 수집 공백 예상/무손실 미검증).
+이전 RAM과 소스/입력/초기상태/조건·저장 내용/revision 연결·sequence가 일치한다.
+COMMIT p95는 disk401.139ms/RAM0.559ms였지만 disk actor56 시작113.875ms 지연으로
+input_timing_preserved=false다(직전 document COMMIT329.084ms, actor wait113.490ms).
+실패 timing gate를 유지했다. RAM 반복39e14ae7a90c3c9a74980c3e7aba0423/disk 반복
+75f42889e6609715480e43050bfc2f83도 각23/native23/SQL253과 저장 내용·연결·sequence가 같다.
+COMMIT p95/max: RAM0.567/5.820ms, disk284.048/1189.255ms; 두 반복의 input timing은 통과.
+baseline/cleanup/fence/같은 릴리즈 재개 확인. 세 실행 승인 정지 합669.528초/수집 공백 예상,
+실시간 무손실 미검증. Disk→RAM→disk 부분 비교 완료이며 P1 전체 합격 판정은 아니다.
+**남음:** WAL/wait owner/I/O 등 P1 공통10~20초 지연 attribution. 현재 부분 입력은
+원래 DB 상태/다른 writer를 포함하지 않으며 장중 공통 지연을 재현하거나 해결한 결과가 아니다.
 
 P0 native 동시 reader/fast-path 잠금 이전 gate를 추가했다. 비활성
 `2026.10.09-observation-concurrency-v1-2d67e2620004fa7d`, job
@@ -224,6 +460,48 @@ canonical minute/metadata의 전체 hash는 같았다. 같은 후보의 반복�
 남은 것: 같은 비교 경계를 pre-batch reference에도 적용해 동일 recorded 입력으로 후보/기준선
 내용·revision 연결을 대조한다. `functional_equivalence_verified`, `timing_equivalence_verified`,
 `source_state_equivalent`는 아직 false이며 전체 앱 부하 개선으로 일반화하지 않는다.
+
+**2026-10-10 사용자 우선순위 변경 — 월요일 녹화기 준비:** 10월12일08:59:50~09:59:50
+60분을 유지하고 lease·계좌 복구/이벤트/스냅샷·VI의 미래 capture/replay를 포함한다.
+[구현 전 설계](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md#2026-10-10-월요일-녹화-보완-설계--구현-전)는
+큰 입력의 bounded immutable copy→블록 저장→원래 한 번의 native 호출, baselinev3와 계좌
+전제조건·시간·actor·기대 실패 계약을 정의한다. 모델은 실제 Astra High로 확인해 설계했고,
+블록 capture/reader 및 종료·취소 경계는 로컬 구현하고 관련62건을 통과했다. API/회귀 등록과
+typed 계좌·lease 입력 및 실제 계좌/VI actor capture를 구현했다. 동일 초기SQLite/입력의
+거부3→0, 동일 저장 내용과 COMMIT3회 유지를 검증했다. baselinev3의12개 추가 표/5개 실제
+sequence와 native source clock hook은 구현했다. alias frontier를 native scheduler에 연결하고
+계좌7종/VI의 v3 명시적 실행, source clock/봉인 context/token hash 검사 및 정확한
+failure class/code·반환 type/count 비교를 구현했다. 관련140건 및 이후 겹치는 후속27건
+통과. context capsule은
+명시적 readonly source snapshot→32MiB block profile→checksummed reader 및 parent 확인 뒤
+같은 v3 seal transaction의 적용을 로컬 구현했다. 기존 revision/lease 만료 실패와 native
+복구·스냅샷 결과/내용 일치를 SQLite fixture에서 검증했다. 기대 실패 뒤 continuation과
+불일치 admission 중단을 로컬 검증했다. 실제 PostgreSQL native gate78이 비활성
+후보ceee5007484ab444/job e08f3c39f54dac078536bf65c9df069c에서 오류/실패/skip0으로
+통과했다. 통제 녹화12건의 동일 baseline2회 Replay에서 매회 COMMIT9/rollback3,
+revision/lease 실패3건, 원본 문서 내용·반복 저장 내용·sequence 일치 및 seal 실패의 atomic
+rollback/마지막 baseline 복원을 확인했다. 첫 후보의 비교 모듈/owner 호출부 누락 실패는
+정리 후 후보에 추가했고 성공 수치에 포함하지 않는다. 운영 앱/DB는 변경하지 않았다.
+증거는 `artifacts/recorder-account-native-postgres-proof-20261010.json`이다. NAS60분
+수용·배포·예약은 미완료다. v3 CLI seal/run과 schema4 block-aware operator 등록/worker clock
+전달을 로컬 구현했다. capsule/clock/선택한 native frontier는 lease 획득 전에 검사하며 입력 hash에
+큰 payload를 다시 펼치지 않는다. 관련105 및 후속72/최종107 로컬 검사 통과(겹침).
+첫 NAS104 검사는 실제 capture 밖150ms를 요청한 fixture와 지원 파일2개 누락으로 실패했다.
+cleanup/운영 보존 확인. 실제 durable reader로 초과 구간 거부/정상 구간 허용을 로컬1건으로
+재현했다. 수정 후보 `2026.10.10-recorder-cli-v3-v1-ccdb7b28a75e9f47`는 NAS107개를
+job ec1dc3a8650f88be3e9b98f194283a85에서 실패/오류/skip0으로 통과했다. CLI seal과 run2회를
+실제 PostgreSQL에 연결해 동일12입력/동일 초기 DB, 매회 COMMIT9/rollback3·기대 실패3건,
+관측 누락0·원본 문서 및 반복 계좌/VI 내용/sequence 일치·atomic rollback·마지막 복원을
+확인했다. cleanup/fence/운영 보존 확인. 증거: `artifacts/recorder-cli-postgres-proof-20261010.json`.
+helper bundle dbec3df99022816a는 준비했으며 관리자 root Linux
+검사/설치와 실제 등록 bundle 경로 실행, 대형 PostgreSQL native 호출은 남았다.
+capsule 밖의 기존 원장 상태 및 중간
+설정/credential activation 범위도 남았으며 source-state 동등성을 주장하지 않는다. 사용자는
+Luna를 제외하고 Sol 구현에는6.1버전을 사용하도록 지정했다. 기존 입력 거부와
+장중10~20초COMMIT을 완료 처리하지 않으며, 원본에 없는 인자를 복원하지 않는다.
+후속 capsule 관련102건/제어·context·baseline38건(겹치는 검사) 통과. synthetic904행은
+typed13,056,944bytes/encoded8,247,904bytes를8개 블록/논리1건으로 기록·복원했다.
+reject/drop0 및 원본 DB 무변경. 이 수치는 장중 성능·실제 PostgreSQL acceptance와 구분한다.
 
 **2026-10-09 녹화 입력 거부 원인과 복사 경합 감사:** 원본 trace `20261007T235957Z-e8cb574bf964`의
 1,490 chunks/2,033,667 events를 checksum·sequence와 함께 재검증했다. 거부 692건은 모두 호출별

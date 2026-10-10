@@ -44,38 +44,95 @@ def _parser():
     seal = commands.add_parser('seal', help='seal the current controlled fixture as immutable baseline')
     restore = commands.add_parser('restore', help='restore the specified baseline atomically')
     restore.add_argument('--baseline-id', required=True)
-    run = commands.add_parser('run', help='offline replay of a bounded, checksummed schema-2 trace')
+    run = commands.add_parser('run', help='offline replay of a bounded, checksummed recorded trace')
     for command in (status, seal, restore, run):
-        command.add_argument('--baseline-version', type=int, choices=(1, 2), default=1)
-        command.add_argument('--source-origin', help='aware ISO trace-start time; required only for cache baseline v2')
+        command.add_argument('--baseline-version', type=int, choices=(1, 2, 3), default=1)
+        command.add_argument('--source-origin', help='aware ISO trace-start time; required for baseline v2/v3')
     baseline = run.add_mutually_exclusive_group(required=True)
     baseline.add_argument('--baseline-id')
     baseline.add_argument('--baseline-profile', choices=('empty-v1',))
     run.add_argument('--expected-baseline-id')
     run.add_argument('--preflight-only', action='store_true')
-    run.add_argument('--capture-policy', choices=('complete', 'scoped-operations', 'partial-operations'), default='complete')
-    run.add_argument('--trace-id', required=True)
-    run.add_argument('--window-start', type=float, required=True)
-    run.add_argument('--window-end', type=float, required=True)
-    run.add_argument('--include-workload', action='append', default=[])
-    run.add_argument('--exclude-workload', action='append', default=[])
-    run.add_argument('--mode', choices=('recorded_operations', 'collector_with_background'),
-                     default='recorded_operations')
-    run.add_argument('--collector-component', action='append', default=[])
-    run.add_argument('--concurrency', type=int, default=8)
+    for command in (seal, run):
+        command.add_argument('--capture-policy', choices=('complete', 'scoped-operations', 'partial-operations'), default='complete')
+        command.add_argument('--trace-id', required=command is run)
+        command.add_argument('--window-start', type=float, required=command is run)
+        command.add_argument('--window-end', type=float, required=command is run)
+        command.add_argument('--include-workload', action='append', default=[])
+        command.add_argument('--exclude-workload', action='append', default=[])
+        command.add_argument('--mode', choices=('recorded_operations', 'collector_with_background'), default='recorded_operations')
+        command.add_argument('--collector-component', action='append', default=[])
+        command.add_argument('--concurrency', type=int, default=8)
     return parser
 
 
 def _baseline_options(args):
-    if args.baseline_version == 2:
+    if args.baseline_version >= 2:
         if not args.source_origin:
-            raise ValueError('replay_v2_source_origin_required')
+            raise ValueError(f'replay_v{args.baseline_version}_source_origin_required')
         from .diagnostic_top20_seed import Top20FixtureClock
-        return {'baseline_version': 2,
+        return {'baseline_version': args.baseline_version,
                 'cache_clock': Top20FixtureClock(datetime.fromisoformat(args.source_origin))}
     if args.source_origin is not None:
         raise ValueError('replay_v1_does_not_accept_source_origin')
     return {}
+
+
+def _input_hash(events):
+    from .diagnostic_trace_payload import BlockPayloadReference
+
+    def reference(value):
+        if not isinstance(value, BlockPayloadReference):
+            raise TypeError('recorded_input_not_json')
+        return {'block_reference': {'trace_id': value.trace_id, 'sha256': value.digest,
+                                    'descriptor': json.loads(value.descriptor)}}
+    return hashlib.sha256(json.dumps(events, sort_keys=True, separators=(',', ':'),
+        ensure_ascii=False, allow_nan=False, default=reference).encode('utf-8')).hexdigest()
+
+
+def _read_selection(args, baseline_options):
+    from . import diagnostic_trace as trace
+    reader_options = {} if args.capture_policy == 'complete' else dict(
+        capture_policy=args.capture_policy, include_workloads=tuple(args.include_workload),
+        exclude_workloads=tuple(args.exclude_workload))
+    manifest, events = trace.recorded_window_events(
+        args.trace_id, window_start_seconds=args.window_start,
+        window_end_seconds=args.window_end, mode=args.mode,
+        collector_components=tuple(args.collector_component), **reader_options)
+    if baseline_options:
+        started_at = manifest.get('started_at')
+        if (type(started_at) not in (int, float) or not math.isfinite(started_at)
+                or abs(started_at - baseline_options['cache_clock'].origin.timestamp()) > .1):
+            raise ValueError('recorded_execution_trace_source_origin_mismatch')
+    selection = dict(started_mono_ns=manifest['started_mono_ns'],
+                     window_start_seconds=args.window_start, window_end_seconds=args.window_end,
+                     include_workloads=tuple(args.include_workload),
+                     exclude_workloads=tuple(args.exclude_workload), mode=args.mode,
+                     collector_components=tuple(args.collector_component), concurrency=args.concurrency)
+    return manifest, events, selection
+
+
+def _v3_context(url, token, args, options, events, selection):
+    """Resolve the exact native frontier without acquiring a DB lease."""
+    from .diagnostic_account_context import read_recorded_account_context
+    from .diagnostic_account_input import METHODS
+    from .diagnostic_recorded_execution import _prepare
+    from .diagnostic_replay_contract import compile_recorded_plan
+    from .diagnostic_replay_baseline import _ReplayStore
+    context = read_recorded_account_context(args.trace_id)
+    expected = context['snapshot_finished_at'] + (
+        selection['started_mono_ns'] - context['snapshot_finished_mono_ns']) / 1e9
+    if (context['snapshot_finished_mono_ns'] > selection['started_mono_ns']
+            or abs(options['cache_clock'].origin.timestamp() - expected) > .1):
+        raise ValueError('recorded_execution_account_source_clock_mismatch')
+    if type(args.concurrency) is not int or not 1 <= args.concurrency <= 16:
+        raise ValueError('recorded_execution_concurrency_invalid')
+    plan = compile_recorded_plan(events, **{key: value for key, value in selection.items() if key != 'concurrency'})
+    _prepare(_ReplayStore(ReplayDatabaseLease(url, token, **options)), events, plan, account_context=context)
+    selected = set(plan.operation_ids)
+    owners = [row for row in events if row.get('event_type') == 'operation_start'
+              and row.get('operation_id') in selected and row.get('method') in METHODS]
+    return context, owners
 
 
 def _run_trace(url, token, args):
@@ -95,23 +152,12 @@ def _run_trace(url, token, args):
         raise ValueError('recorded_expected_baseline_required')
     if not profile and args.expected_baseline_id:
         raise ValueError('recorded_expected_baseline_requires_profile')
-    reader_options = {} if args.capture_policy == 'complete' else dict(
-        capture_policy=args.capture_policy, include_workloads=tuple(args.include_workload),
-        exclude_workloads=tuple(args.exclude_workload))
-    manifest, events = trace.recorded_window_events(
-        args.trace_id, window_start_seconds=args.window_start,
-        window_end_seconds=args.window_end, mode=args.mode,
-        collector_components=tuple(args.collector_component), **reader_options)
-    if baseline_options:
-        started_at = manifest.get('started_at')
-        if (type(started_at) not in (int, float) or not math.isfinite(started_at)
-                or abs(started_at - baseline_options['cache_clock'].origin.timestamp()) > .1):
-            raise ValueError('recorded_execution_trace_source_origin_mismatch')
-    selection = dict(started_mono_ns=manifest['started_mono_ns'],
-                     window_start_seconds=args.window_start, window_end_seconds=args.window_end,
-                     include_workloads=tuple(args.include_workload),
-                     exclude_workloads=tuple(args.exclude_workload), mode=args.mode,
-                     collector_components=tuple(args.collector_component), concurrency=args.concurrency)
+    manifest, events, selection = _read_selection(args, baseline_options)
+    input_hash = _input_hash(events)
+    native_options = dict(baseline_options)
+    if args.baseline_version == 3:
+        context, _ = _v3_context(url, token, args, baseline_options, events, selection)
+        native_options['account_context'] = context
     baseline_id = args.baseline_id
     if profile:
         # Reject payload/method/concurrency before even provisioning the empty
@@ -153,8 +199,11 @@ def _run_trace(url, token, args):
             refresh_capture_state(force=True)
             started = time.time()
             result = run_owned_recorded_experiment(url, token, baseline_id, events,
-                                                  **baseline_options, **selection)
+                                                  collect_activity=True, **native_options, **selection)
             observed = summarize_db_calls(started, time.time(), mode='raw', limit=10_000)
+            if 'postgres_activity' in result:
+                from .diagnostic_replay_sampling import correlate_replay_commits
+                result['commit_activity'] = correlate_replay_commits(observed, result['postgres_activity'])
             by_operation = {}
             for call in observed.get('calls', ()):
                 by_operation.setdefault(call.get('input_operation_id'), []).append(call['call_id'])
@@ -182,8 +231,7 @@ def _run_trace(url, token, args):
     source = Path(__file__).resolve().parents[3]
     result.update(trace_id=args.trace_id, capture_source_release=manifest.get('source_release'),
                   replay_source=str(source), window_read=manifest['window_read'],
-                  input_sha256=hashlib.sha256(json.dumps(events, sort_keys=True,
-                      separators=(',', ':'), ensure_ascii=False).encode('utf-8')).hexdigest(),
+                  input_sha256=input_hash,
                   selection=selection, statistics_scope='observed_replay_connections_only',
                   wal_attribution_available=False)
     if profile:
@@ -209,11 +257,23 @@ def main(argv=None, *, environ=None, output=None):
             result = _run_trace(url, token, args)
         else:
             options = _baseline_options(args)
+            seal_options = {}
+            if args.command == 'seal':
+                if args.baseline_version == 3:
+                    if args.trace_id is None or args.window_start is None or args.window_end is None:
+                        raise ValueError('replay_v3_seal_requires_trace_selection')
+                    _, events, selection = _read_selection(args, options)
+                    context, owners = _v3_context(url, token, args, options, events, selection)
+                    seal_options = dict(account_context=context, owner_rows=owners)
+                elif (args.trace_id is not None or args.window_start is not None or args.window_end is not None
+                      or args.include_workload or args.exclude_workload or args.collector_component
+                      or args.mode != 'recorded_operations' or args.capture_policy != 'complete'):
+                    raise ValueError('replay_seal_trace_selection_requires_v3')
             with ReplayDatabaseLease(url, token, **options) as lease:
                 if args.command == 'status':
                     result = lease.status()
                 elif args.command == 'seal':
-                    result = lease.seal()
+                    result = lease.seal(**seal_options)
                 else:
                     result = lease.restore(args.baseline_id)
         print(json.dumps({'state': 'ok', 'command': args.command, 'result': result},

@@ -2,8 +2,10 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("nas_scheduled_trace", Path(__file__).resolve().parents[2] / "scripts/nas_scheduled_trace.py")
 scheduler = importlib.util.module_from_spec(SPEC)
@@ -37,6 +39,8 @@ class ScheduledTraceTests(unittest.TestCase):
         class FakeApi:
             fail_post = False
             corrupt_post = False
+            schema_override = None
+            missing_post_flag = None
             def request(self, path, body=None, method="GET"):
                 owner.calls.append((path, method, copy.deepcopy(body)))
                 if method == "PUT":
@@ -44,10 +48,14 @@ class ScheduledTraceTests(unittest.TestCase):
                 if method == "POST":
                     if self.fail_post:
                         raise TimeoutError("uncertain acknowledgement")
-                    return {"state": "running", "schema_version": 3,
+                    schema = 4 if any(body.get(x) for x in scheduler.EXTRA_FLAGS) else 3
+                    options = {x: body.get(x, False) for x in scheduler.FLAGS + scheduler.EXTRA_FLAGS}
+                    if self.missing_post_flag:
+                        options[self.missing_post_flag] = False
+                    return {"state": "running", "schema_version": self.schema_override or schema,
                             "source_release": "wrong" if self.corrupt_post else "test-release",
                             "instance_id": "instance", "master_session": "session",
-                            "payload_capture": {x: True for x in scheduler.FLAGS},
+                            "payload_capture": options,
                             "persistence_mode": "deferred_ram", "persist_at": body["persist_at"],
                             "started_at": owner.now, "expires_at": owner.now + body["seconds"],
                             "trace_id": "trace", **{k: owner.plan[k] for k in
@@ -116,6 +124,101 @@ class ScheduledTraceTests(unittest.TestCase):
     def test_preflight_is_read_only(self):
         scheduler.preflight(self.api, self.root, self.plan)
         self.assertTrue(all(x[1] == "GET" for x in self.calls))
+
+    def test_protected_selector_uses_fixed_read_only_status_client(self):
+        root = Path('/volume1/docker/kiwoom-monitor')
+        response = SimpleNamespace(returncode=0, stdout=json.dumps({
+            'state': 'ok', 'result': {'active_release': self.plan['release']}}).encode())
+        with patch.object(Path, 'read_text', side_effect=PermissionError), \
+                patch.object(scheduler.subprocess, 'run', return_value=response) as run:
+            scheduler.preflight(self.api, root, self.plan)
+        self.assertEqual(['/usr/local/bin/kiwoom-nas', 'status'], run.call_args.args[0])
+        self.assertEqual(20, run.call_args.kwargs['timeout'])
+        self.assertNotIn('shell', run.call_args.kwargs)
+        self.assertTrue(all(x[1] == 'GET' for x in self.calls))
+
+    def test_failed_or_invalid_status_is_not_accepted_or_followed_by_control_changes(self):
+        root = Path('/volume1/docker/kiwoom-monitor')
+        for response in (SimpleNamespace(returncode=1, stdout=b'{}'),
+                         SimpleNamespace(returncode=0, stdout=b'not-json'),
+                         SimpleNamespace(returncode=0, stdout=b'{"state":"ok","result":{"active_release":12}}'),
+                         SimpleNamespace(returncode=0, stdout=b'{"state":"ok","result":{"active_release":"wrong"}}')):
+            with self.subTest(response=response), \
+                    patch.object(Path, 'read_text', side_effect=PermissionError), \
+                    patch.object(scheduler.subprocess, 'run', return_value=response):
+                with self.assertRaises(RuntimeError):
+                    scheduler.preflight(self.api, root, self.plan)
+        self.assertEqual([], self.calls)
+
+    def test_permission_fallback_is_limited_to_the_fixed_NAS_root(self):
+        with patch.object(Path, 'read_text', side_effect=PermissionError), \
+                patch.object(scheduler.subprocess, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'unexpected_NAS_status_fallback_root'):
+                scheduler.active_release(self.root)
+        run.assert_not_called()
+
+    def test_invalid_readable_selector_does_not_fall_back_to_status(self):
+        (self.root / 'source-runtime/active.json').write_text('not-json')
+        with patch.object(scheduler.subprocess, 'run') as run:
+            with self.assertRaises(ValueError):
+                scheduler.active_release(self.root)
+        run.assert_not_called()
+
+    def enable_account_large_plan(self):
+        self.plan["capture_flags"] = list(scheduler.FLAGS + scheduler.EXTRA_FLAGS)
+        for flag, key in (("large_inputs", "large_input_capture"),
+                          ("account_inputs", "account_input_capture")):
+            self.caps["trace_input_capture"][key] = {
+                "schema_version": 4, "request_field": flag, "default": False,
+                "requires": ["store_inputs", "persist_at"],
+                "context_capture": {"version": "account-context/v2"}}
+
+    def test_monday_account_large_plan_posts_five_flags_and_verifies_schema4(self):
+        self.enable_account_large_plan()
+        result = self.run_start()
+        self.assertEqual(4, result["trace"]["schema_version"])
+        post = next(body for _, method, body in self.calls if method == "POST")
+        self.assertTrue(all(post[x] is True for x in scheduler.FLAGS + scheduler.EXTRA_FLAGS))
+        self.assertEqual(1, sum(method == "POST" for _, method, _ in self.calls))
+
+    def test_legacy_plan_preserves_schema3_and_omits_new_opt_ins(self):
+        result = self.run_start()
+        self.assertEqual(3, result["trace"]["schema_version"])
+        post = next(body for _, method, body in self.calls if method == "POST")
+        self.assertTrue(all(x not in post for x in scheduler.EXTRA_FLAGS))
+
+    def test_unknown_duplicate_or_incomplete_flags_fail_before_api_calls(self):
+        for flags in (True, [*scheduler.FLAGS, "unknown"], [*scheduler.FLAGS, "store_inputs"],
+                      ["account_inputs"], [*scheduler.FLAGS, 1]):
+            with self.subTest(flags=flags):
+                self.plan["capture_flags"] = flags
+                with self.assertRaisesRegex(RuntimeError, "invalid_capture_flags"):
+                    self.run_start()
+                self.assertEqual([], self.calls)
+
+    def test_missing_new_capability_or_context_fails_before_controls_change(self):
+        for fault in ("missing", "default", "context", "schema"):
+            with self.subTest(fault=fault):
+                self.setUp()
+                self.enable_account_large_plan()
+                option = self.caps["trace_input_capture"]["account_input_capture"]
+                if fault == "missing": del self.caps["trace_input_capture"]["large_input_capture"]
+                if fault == "default": option["default"] = True
+                if fault == "context": option["context_capture"]["version"] = "account-context/v1"
+                if fault == "schema": option["schema_version"] = 3
+                with self.assertRaises(RuntimeError): self.run_start()
+                self.assertTrue(all(method == "GET" for _, method, _ in self.calls))
+
+    def test_schema_or_flag_mismatch_is_reported_after_one_post_without_retry(self):
+        for fault in ("schema", "account_inputs", "large_inputs"):
+            with self.subTest(fault=fault):
+                self.setUp()
+                self.enable_account_large_plan()
+                if fault == "schema": self.api.schema_override = 3
+                else: self.api.missing_post_flag = fault
+                with self.assertRaises(RuntimeError): self.run_start()
+                self.assertEqual(1, sum(method == "POST" for _, method, _ in self.calls))
+                self.assertEqual(1, sum(method == "PUT" for _, method, _ in self.calls))
 
 
 if __name__ == "__main__":

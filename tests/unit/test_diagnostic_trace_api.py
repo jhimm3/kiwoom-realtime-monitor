@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -84,7 +85,7 @@ def trace_api():
             try:
                 yield app, store, control, session
             finally:
-                trace.stop()
+                trace.stop('server_shutdown', timeout=15)
                 _set_tool(control, False)
                 store.close()
 
@@ -163,7 +164,7 @@ class DiagnosticTraceApiTests(unittest.TestCase):
                 self.assertEqual(401, request_api(app, "POST", "/api/v1/diagnostics/trace", json=body).status_code)
                 self.assertEqual(409, request_api(app, "POST", "/api/v1/diagnostics/trace", headers=HEADERS,
                                                 json={**body, "expected_session": "wrong"}).status_code)
-                for key in ("store_inputs", "collector_inputs"):
+                for key in ("store_inputs", "collector_inputs", "large_inputs", "account_inputs"):
                     for value in (1, "true", None):
                         with self.subTest(key=key, value=value):
                             self.assertEqual(422, request_api(app, "POST", "/api/v1/diagnostics/trace", headers=HEADERS,
@@ -171,6 +172,45 @@ class DiagnosticTraceApiTests(unittest.TestCase):
                 start.assert_not_called()
             self.assertEqual(before, control.read_bytes())
             self.assertFalse(control_snapshot(control)["trace_capture"]["enabled"])
+
+    def test_large_inputs_require_deferred_store_capture_and_restore_one_input(self):
+        from tests.unit.test_diagnostic_trace_deferred import recorder_storage_headroom, wait_state
+        from kiwoom_monitor.central_server.diagnostic_replay_contract import thaw_operation_arguments
+        from kiwoom_monitor.central_server.diagnostic_trace_payload import BlockPayloadReference
+
+        with trace_api() as (app, store, control, session):
+            body = {"seconds": 60, "expected_session": session, "large_inputs": True}
+            for options in ({}, {"store_inputs": True}, {"persist_at": time.time() + 3600}):
+                response = request_api(app, "POST", "/api/v1/diagnostics/trace", headers=HEADERS,
+                                       json={**body, **options})
+                self.assertEqual(409, response.status_code, response.text)
+                self.assertEqual('large_inputs_require_deferred_store_capture', response.json()['detail'])
+                self.assertFalse(control_snapshot(control)['trace_capture']['enabled'])
+                self.assertEqual(session, control_snapshot(control)['diagnostic_tool']['session_id'])
+            with recorder_storage_headroom(), patch.object(trace, '_deferred_memory_check',
+                                                           return_value={'test_headroom': True}):
+                response = request_api(app, "POST", "/api/v1/diagnostics/trace", headers=HEADERS,
+                                       json={**body, 'store_inputs': True, 'persist_at': time.time() + 3600})
+                self.assertEqual(200, response.status_code, response.text)
+                started = response.json()
+                self.assertEqual(4, started['schema_version'])
+                self.assertTrue(started['payload_capture']['large_inputs'])
+                self.assertEqual('blocks_v1_and_chunk_bundle_v1', started['payload_storage'])
+                with capture_owner('shadow', 'fixture', 'actor'):
+                    store.save_shadow_monitor_state('m', {'frames': [1, 2, 3]})
+                response = request_api(app, "POST", "/api/v1/diagnostics/trace/stop", headers=HEADERS)
+                self.assertEqual(200, response.status_code, response.text)
+                wait_state('awaiting_persistence')
+                with trace._LOCK:
+                    trace._SESSION['persist_at'] = time.time() - 1
+                trace._WAKE.set()
+                wait_state('complete', 10)
+            manifest, rows = trace.recorded_events(started['trace_id'])
+            operations = [row for row in rows if row['event_type'] == 'operation_start']
+            self.assertEqual(1, len(operations))
+            self.assertIsInstance(operations[0]['payload'], BlockPayloadReference)
+            self.assertEqual({'frames': [1, 2, 3]}, thaw_operation_arguments(operations[0])['document'])
+            self.assertEqual(0, manifest['input_rejected'])
 
     def test_failed_start_clears_child_without_disabling_master(self):
         with trace_api() as (app, _, control, session):
@@ -193,6 +233,29 @@ class DiagnosticTraceApiTests(unittest.TestCase):
             self.assertFalse(snapshot["trace_capture"]["enabled"])
             self.assertTrue(snapshot["diagnostic_tool"]["enabled"])
 
+    def test_account_capture_has_separate_opt_in_and_deferred_prerequisites(self):
+        from tests.unit.test_diagnostic_trace_deferred import recorder_storage_headroom
+        with trace_api() as (app, _, control, session):
+            body = {'seconds': 60, 'expected_session': session, 'account_inputs': True}
+            for options in ({}, {'store_inputs': True}, {'persist_at': time.time() + 3600}):
+                response = request_api(app, 'POST', '/api/v1/diagnostics/trace', headers=HEADERS,
+                                       json={**body, **options})
+                self.assertEqual(409, response.status_code, response.text)
+                self.assertEqual('account_inputs_require_deferred_store_capture', response.json()['detail'])
+                self.assertFalse(control_snapshot(control)['trace_capture']['enabled'])
+            with recorder_storage_headroom(), patch.object(trace, '_deferred_memory_check',
+                                                           return_value={'test_headroom': True}):
+                response = request_api(app, 'POST', '/api/v1/diagnostics/trace', headers=HEADERS,
+                                       json={**body, 'store_inputs': True, 'persist_at': time.time() + 3600})
+                self.assertEqual(200, response.status_code, response.text)
+                self.assertEqual(4, response.json()['schema_version'])
+                self.assertTrue(response.json()['payload_capture']['account_inputs'])
+                self.assertNotIn('_ACCOUNT_PROJECTION', response.text)
+                capabilities = request_api(app, 'GET', '/api/v1/diagnostics/capabilities', headers=HEADERS)
+                account = capabilities.json()['trace_input_capture']['account_input_capture']
+                self.assertEqual(['store_inputs', 'persist_at'], account['requires'])
+                self.assertFalse(account['native_replay_ready'])
+
     def test_capabilities_require_auth_and_advertise_scope_without_claiming_overhead_acceptance(self):
         with trace_api() as (app, _, control, _):
             before = control.read_bytes()
@@ -209,4 +272,11 @@ class DiagnosticTraceApiTests(unittest.TestCase):
             self.assertFalse(capture["top20_input_capture"]["downstream_replay_supported"])
             self.assertEqual("observed_paths_only", capture["coverage"])
             self.assertFalse(capture["overhead_verified"])
+            large = capture['large_input_capture']
+            self.assertEqual((4, 'large_inputs', False),
+                             (large['schema_version'], large['request_field'], large['default']))
+            self.assertEqual(['store_inputs', 'persist_at'], large['requires'])
+            self.assertEqual((64 * 1024**2, 1024**2, 128 * 1024**2),
+                             (large['copy_limit_bytes'], large['block_bytes'], large['encoded_limit_bytes']))
+            self.assertEqual('pending', large['capacity_acceptance'])
             self.assertEqual(before, control.read_bytes())

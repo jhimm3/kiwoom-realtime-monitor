@@ -85,13 +85,17 @@ class RunRegressionTests(unittest.TestCase):
 
         self.assertEqual(["desktop-and-server", "journal-and-news"],
                          [batch["name"] for batch in core])
-        self.assertEqual(143, len(modules))
-        self.assertEqual(142, len(set(modules)))
-        self.assertEqual("36dae599f514ec9356b7dc3eab9c7b4f1033c4a27076eb8a7fcd931fbeb1810a",
+        self.assertEqual(146, len(modules))
+        self.assertEqual(145, len(set(modules)))
+        self.assertEqual("97aed95abebce786ec2b07c947c565ed3e9136307f3a50218b7fc6d5de2117a3",
                          run_regression._core_order_sha256(core))
-        self.assertEqual("tests.unit.test_main_window_layout", modules[83])
-        self.assertEqual("tests.unit.test_theme_color_repository", modules[84])
-        self.assertEqual("tests.unit.test_theme_color_repository", modules[142])
+        self.assertEqual("tests.unit.test_main_window_layout", modules[86])
+        self.assertEqual("tests.unit.test_theme_color_repository", modules[87])
+        self.assertEqual("tests.unit.test_theme_color_repository", modules[145])
+        for module in ("tests.unit.test_dataset_batch_postgres",
+                       "tests.unit.test_postgres_scope_locks",
+                       "tests.unit.test_diagnostic_replay_sampling"):
+            self.assertEqual(1, modules.count(module))
         pc_modules = [module for batch in run_regression._planned_batches(
             manifest, "pc-lifecycle",
         ) for module in batch["modules"]]

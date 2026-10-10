@@ -255,16 +255,21 @@ class ExecutionRepository:
             raise ValueError("execution runtime supports only mock")
         owner_key = f"{environment}:{account_ref}"
         lease_owner = f"{run_id}:{owner_token}"
-        return self._store.acquire_execution_runtime(
-            owner_key, lease_owner, now.isoformat(),
-            (now + timedelta(seconds=max(1, lease_seconds))).isoformat(),
-        )
+        from kiwoom_monitor.central_server.diagnostic_account_input import source_execution_owner
+        with source_execution_owner(owner_key, run_id):
+            return self._store.acquire_execution_runtime(
+                owner_key, lease_owner, now.isoformat(),
+                (now + timedelta(seconds=max(1, lease_seconds))).isoformat(),
+            )
 
 
     def release_runtime(self, environment: str, account_ref: str, run_id: str, owner_token: str) -> bool:
         if environment != "mock" or not all(value.strip() for value in (account_ref, run_id, owner_token)):
             raise ValueError("mock environment, account_ref, run_id and owner_token are required")
-        return self._store.release_execution_runtime(f"{environment}:{account_ref}", f"{run_id}:{owner_token}")
+        from kiwoom_monitor.central_server.diagnostic_account_input import source_execution_owner
+        owner_key = f"{environment}:{account_ref}"
+        with source_execution_owner(owner_key, run_id):
+            return self._store.release_execution_runtime(owner_key, f"{run_id}:{owner_token}")
 
 
 def _record_document(record: ExecutionRecord) -> dict[str, Any]:

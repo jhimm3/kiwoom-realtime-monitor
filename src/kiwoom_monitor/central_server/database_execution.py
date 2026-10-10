@@ -13,7 +13,7 @@ from typing import Any
 from kiwoom_monitor.central_server.database_codec import _event_document, _json_document
 
 def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
-                                 value: dict[str, Any], p: str) -> None:
+                                 value: dict[str, Any], p: str, *, now_provider=None) -> None:
     if ownership is None:
         return  # Offline ledger/import callers keep the existing unowned contract.
     if (not ownership["owner_token"].startswith(f"{ownership['run_id']}:")
@@ -24,7 +24,8 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
                    f"WHERE owner_key={p}" + (" FOR UPDATE" if p == "%s" else ""), (ownership["owner_key"],))
     row = cursor.fetchone()
     expiry = row[1] if row and isinstance(row[1], datetime) else datetime.fromisoformat(str(row[1])) if row else None
-    if not row or row[0] != ownership["owner_token"] or expiry <= datetime.now(timezone.utc):
+    if not row or row[0] != ownership["owner_token"] or expiry <= (
+            datetime.now(timezone.utc) if now_provider is None else now_provider()):
         raise RuntimeError("EXECUTION_OWNERSHIP_LOST")
     control_revision = ownership.get("control_revision")
     if control_revision is not None:
@@ -85,7 +86,8 @@ class SQLiteExecutionStoreMixin:
         document = _event_document(value)
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            _require_execution_ownership(connection.cursor(), ownership, value, "?")
+            _require_execution_ownership(connection.cursor(), ownership, value, "?",
+                                         now_provider=getattr(self, '_execution_wall_now', None))
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO central_execution_intents("
                 "intent_id,run_id,environment,account_ref,state,broker_order_id,last_broker_as_of,"
@@ -99,7 +101,8 @@ class SQLiteExecutionStoreMixin:
         event_document = _event_document(event)
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            _require_execution_ownership(connection.cursor(), ownership, intent, "?")
+            _require_execution_ownership(connection.cursor(), ownership, intent, "?",
+                                         now_provider=getattr(self, '_execution_wall_now', None))
             if connection.execute(
                 "SELECT 1 FROM central_execution_events WHERE event_id=?", (str(event["event_id"]),),
             ).fetchone() is not None:
@@ -173,7 +176,8 @@ class SQLiteExecutionStoreMixin:
     def save_execution_account_snapshot(self, value: dict[str, Any], *, ownership: dict[str, str] | None = None) -> bool:
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            _require_execution_ownership(connection.cursor(), ownership, value, "?")
+            _require_execution_ownership(connection.cursor(), ownership, value, "?",
+                                         now_provider=getattr(self, '_execution_wall_now', None))
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO central_execution_account_snapshots("
                 "snapshot_id,environment,account_ref,as_of,received_at,document_json) VALUES(?,?,?,?,?,?)",
@@ -270,7 +274,8 @@ class PostgresExecutionStoreMixin:
             operation="create_execution_intent", rows_attempted=1,
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            _require_execution_ownership(cursor, ownership, value, "%s")
+            _require_execution_ownership(cursor, ownership, value, "%s",
+                                         now_provider=getattr(self, '_execution_wall_now', None))
             cursor.execute(
                 "INSERT INTO central_execution_intents("
                 "intent_id,run_id,environment,account_ref,state,broker_order_id,last_broker_as_of,"
@@ -288,7 +293,8 @@ class PostgresExecutionStoreMixin:
             operation="append_execution_event", rows_attempted=1,
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            _require_execution_ownership(cursor, ownership, intent, "%s")
+            _require_execution_ownership(cursor, ownership, intent, "%s",
+                                         now_provider=getattr(self, '_execution_wall_now', None))
             cursor.execute(
                 "INSERT INTO central_execution_events("
                 "event_id,intent_id,state,occurred_at,received_at,broker_execution_id,document_json) "
@@ -391,7 +397,8 @@ class PostgresExecutionStoreMixin:
             operation="save_execution_account_snapshot", rows_attempted=1,
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            _require_execution_ownership(cursor, ownership, value, "%s")
+            _require_execution_ownership(cursor, ownership, value, "%s",
+                                         now_provider=getattr(self, '_execution_wall_now', None))
             cursor.execute(
                 "INSERT INTO central_execution_account_snapshots("
                 "snapshot_id,environment,account_ref,as_of,received_at,document_json) "

@@ -13,7 +13,10 @@ import time
 from collections import deque
 from pathlib import Path
 from uuid import uuid4
-from .diagnostic_trace_ram import PackedRow, pack_records
+from .diagnostic_trace_ram import (
+    PackedRow, BlockRow, pack_records, encode_payload_blocks,
+    PAYLOAD_BLOCK_BYTES, MAX_BLOCK_PAYLOAD_BYTES, MAX_PAYLOAD_BLOCKS,
+)
 from .diagnostic_delivery_record import (
     Context, DeliveryIdentity, DeliveryStage, SOURCE_NAMES, CONTROL_SOURCE_NAMES,
     SUBSCRIBER_NAMES, IDENTITY_NAMES, UNTRACKED_NAMES, MISSING, additional_charge, retain, release,
@@ -26,12 +29,17 @@ from .diagnostic_workloads import (
 _LOCK = threading.Lock()
 _QUEUE: deque[dict | DeliveryStage] = deque()
 _PACKED = deque()
+_ACTIVE_OPERATIONS: set[str] = set()
+_OPERATION_DRAIN_SECONDS = 120
 _RAW_LIMIT = 64 * 1024 * 1024
+_BLOCK_RAW_LIMIT = 256 * 1024 * 1024
 _RAW_CAPACITY = 32_768
 _PACK_WORKER_RESERVE = 128 * 1024 * 1024
+_BLOCK_PACK_WORKER_RESERVE = 256 * 1024 * 1024
 _CAPACITY = 5_000_000
 _MAX_TOP20_WINDOW_ROWS = 50_000
 _SESSION: dict | None = None
+_ACCOUNT_PROJECTION = None  # Private session key; never part of status/manifest.
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 _ABORT = threading.Event()
@@ -98,12 +106,19 @@ def _deferred_memory_check() -> dict:
 
 
 def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = False,
-          top20_inputs: bool = False,
+          top20_inputs: bool = False, large_inputs: bool = False,
+          account_inputs: bool = False,
+          account_context_store=None,
           persist_at: float | None = None) -> dict:
-    global _SESSION, _THREAD
+    global _SESSION, _THREAD, _ACCOUNT_PROJECTION
     if (not 60 <= seconds <= 7200 or type(store_inputs) is not bool
-            or type(collector_inputs) is not bool or type(top20_inputs) is not bool):
+            or type(collector_inputs) is not bool or type(top20_inputs) is not bool
+            or type(large_inputs) is not bool or type(account_inputs) is not bool):
         raise ValueError("trace_duration_out_of_bounds")
+    if large_inputs and (not store_inputs or persist_at is None):
+        raise ValueError('large_inputs_require_deferred_store_capture')
+    if account_inputs and (not store_inputs or persist_at is None):
+        raise ValueError('account_inputs_require_deferred_store_capture')
     now = time.time()
     if persist_at is not None and (type(persist_at) not in (int, float)
             or not math.isfinite(persist_at) or not now + seconds <= persist_at <= now + 86400):
@@ -125,6 +140,28 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
             or shutil.disk_usage(directory).free < 256 * 1024 * 1024):
         raise ValueError("trace_storage_quota_exceeded")
     identifier = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid4().hex[:12]
+    from .diagnostic_account_input import AccountInputProjection
+    projection = AccountInputProjection(identifier) if account_inputs else None
+    context = None
+    frozen_context = None
+    source_root = Path(__file__).resolve().parents[3]
+    source_release = source_root.name if source_root.parent.name == 'releases' else 'image_or_local'
+    if account_inputs and account_context_store is not None:
+        from .diagnostic_account_context import read_account_context
+        context = read_account_context(account_context_store, projection, source_release=source_release)
+        from .diagnostic_replay_contract import freeze_payload, ACCOUNT_CONTEXT_COPY_BYTES
+        frozen_context = freeze_payload(context, maximum_bytes=ACCOUNT_CONTEXT_COPY_BYTES)
+        # Snapshot preparation must not consume the requested input duration or
+        # revive a master/child control that was stopped during the read.
+        from .diagnostic_workloads import control_snapshot
+        fresh = control_snapshot(control_path())
+        fresh_tool, fresh_child = fresh['diagnostic_tool'], fresh['trace_capture']
+        if (not fresh_tool['enabled'] or fresh_tool['session_id'] != tool['session_id']
+                or not fresh_child['enabled'] or fresh_child['session_id'] != tool['session_id']):
+            raise ValueError('diagnostic_trace_child_off')
+        _set_trace(control_path(), True, seconds + 5, expected_session=tool['session_id'],
+                   expected_revision=fresh['control_revision'])
+    # Snapshot work must stay outside the lock used by operational capture callers.
     with _LOCK:
         if (_SESSION is not None and _SESSION["state"] in {"running", "stopping"}
                 or _THREAD is not None and _THREAD.is_alive()):
@@ -142,18 +179,30 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
         _STOP.clear()
         _ABORT.clear()
         _WAKE.clear()
+        _ACTIVE_OPERATIONS.clear()
         from .diagnostic_replay_contract import reset_actor_sequences
         reset_actor_sequences()
+        _ACCOUNT_PROJECTION = projection
         source_root = Path(__file__).resolve().parents[3]
         _SESSION = {"trace_id": identifier, "producer_id": uuid4().hex,
-                    "schema_version": 3 if top20_inputs else 2 if store_inputs or collector_inputs else 1,
+                    "schema_version": 4 if large_inputs or account_inputs else 3 if top20_inputs else 2 if store_inputs or collector_inputs else 1,
                     "coverage": "observed_paths_only",
                     "payload_capture": {"store_inputs": store_inputs, "collector_inputs": collector_inputs,
-                                        **({"top20_inputs": True} if top20_inputs else {})},
+                                        **({"top20_inputs": True} if top20_inputs else {}),
+                                        **({"large_inputs": True} if large_inputs else {}),
+                                        **({"account_inputs": True} if account_inputs else {})},
                     "source_release": source_root.name if source_root.parent.name == "releases" else "image_or_local",
                     "instance_id": instance_id(),
                     "master_session": tool["session_id"], "state": "running",
                     "started_at": time.time(), "started_mono_ns": time.monotonic_ns(),
+                    **({'account_context': {'state': 'prepared' if context is not None else 'not_supplied',
+                        'source_state_equivalent': False,
+                        **({'sha256': context['sha256'], 'rows': context['row_count'],
+                            'snapshot_finished_mono_ns': context['snapshot_finished_mono_ns'],
+                            'preparation_ms': (context['snapshot_finished_mono_ns'] - context['snapshot_started_mono_ns']) / 1e6,
+                            'snapshot_to_admission_ms': (time.monotonic_ns() - context['snapshot_finished_mono_ns']) / 1e6}
+                           if context is not None else {})}}
+                       if account_inputs else {}),
                     "expires_at": time.time() + seconds,
                     "last_seq": 0, "accepted": 0, "written": 0,
                     "known_dropped": 0, "drop_reasons": {}, "bytes_written": 0, "chunks": [],
@@ -162,8 +211,9 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
                     "queue_high_water": 0, "pending_events": 0, "reason": None,
                     "charged_bytes": 0, "scalar_charged_bytes": 0, "copy_reserved_bytes": 0,
                     "memory_high_water": 0, "blobs": {}, "payload_accepted": 0,
+                    "operation_inflight": 0,
                     "copy_inflight": {"store": 0, "collector": 0},
-                    "copy_slot_limits": {"store": 2, "collector": 1},
+                    "copy_slot_limits": {"store": None if large_inputs else 2, "collector": 1},
                     "memory_limit_bytes": _DEFERRED_MEMORY_LIMIT if persist_at is not None else _MEMORY_LIMIT,
                     "event_capacity": _CAPACITY,
                     "persistence_mode": 'deferred_ram' if persist_at is not None else 'streaming',
@@ -171,10 +221,11 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
                     "persist_at": persist_at, "memory_preflight": memory_preflight,
                     "write_bytes_per_second": _DEFERRED_WRITE_BYTES_PER_SECOND if persist_at is not None else None,
                     "persistence_throttle_seconds": 0.0,
-                    "payload_storage": "chunk_bundle_v1",
+                    "payload_storage": "blocks_v1_and_chunk_bundle_v1" if large_inputs else "chunk_bundle_v1",
                     "payload_batch_limit_bytes": _MAX_PAYLOAD_BATCH_BYTES,
                     "payload_fsync_count": 0,
-                    "worker_reserved_bytes": _PACK_WORKER_RESERVE if persist_at is not None else _WORKER_RESERVE,
+                    "worker_reserved_bytes": (_BLOCK_PACK_WORKER_RESERVE if large_inputs else
+                                              _PACK_WORKER_RESERVE) if persist_at is not None else _WORKER_RESERVE,
                     "raw_charged_bytes": 0, "packing_events": 0,
                     "packed_events": 0, "packed_bytes": 0, "packed_segments": 0,
                     "raw_high_water_bytes": 0, "pack_ms_total": 0.0, "pack_ms_max": 0.0,
@@ -189,6 +240,21 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
             run_lock.__exit__(None, None, None)
             raise ValueError('trace_storage_quota_exceeded')
         _SESSION.update(copy_ms_total=0.0, copy_ms_max=0.0, payload_fsync_ms_total=0.0, payload_fsync_ms_max=0.0)
+        if frozen_context is not None:
+            # Admit the one prerequisite capsule before releasing this lock to
+            # native producers. It cannot lose a startup race to both copy lanes.
+            fields = {'account_context_version': context['version'],
+                      'payload_profile': 'account-context-input/v1', 'workload_id': 'account',
+                      'producer_component': 'account_context'}
+            event = {'wall_ns': time.time_ns(), 'mono_ns': time.monotonic_ns(),
+                     'event_type': 'account_context', **fields, 'payload': frozen_context.value}
+            if not _enqueue(_SESSION, event, frozen_context.charge + 1024 + _field_charge(fields), payload=True):
+                _SESSION['state'] = 'failed'
+                run_lock.__exit__(None, None, None)
+                raise ValueError('account_context_capture_failed')
+            _SESSION['payload_accepted'] += 1
+            _SESSION['input_coverage']['account'] = {'accepted': 1, 'rejected': 0}
+            _SESSION['account_context']['state'] = 'captured'
         _THREAD = threading.Thread(target=_drain, args=(_SESSION, run_lock),
                                    name="diagnostic-trace", daemon=True)
         try:
@@ -197,7 +263,7 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
             _SESSION["state"] = "failed"
             run_lock.__exit__(None, None, None)
             raise
-        return _public(_SESSION)
+    return status()
 
 
 def _public(session: dict) -> dict:
@@ -208,7 +274,9 @@ def _public(session: dict) -> dict:
             "input_coverage": {key: dict(value) for key, value in session.get("input_coverage", {}).items()},
             "input_rejected_reasons": dict(session.get("input_rejected_reasons", {})),
             "drop_reasons": dict(session.get('drop_reasons', {})),
-            "blobs": {key: dict(value) for key, value in session.get("blobs", {}).items()},
+            "blobs": {key: {**value, **({'parts': [dict(part) for part in value['parts']]}
+                                       if 'parts' in value else {})}
+                      for key, value in session.get('blobs', {}).items()},
             "event_counts": dict(session.get('event_counts', {})),
             "admitted_raw_bytes_by_event": dict(session.get('admitted_raw_bytes_by_event', {})),
             "queued": _retained_events(session)}
@@ -222,6 +290,15 @@ def _retained_events(session):
 
 def _worker_reserve(session):
     return session.get('worker_reserved_bytes', _WORKER_RESERVE)
+
+
+def _raw_limit(session):
+    return _BLOCK_RAW_LIMIT if session.get('payload_capture', {}).get('large_inputs') else _RAW_LIMIT
+
+
+def _owned_input_capture(session):
+    flags = session.get('payload_capture', {})
+    return flags.get('large_inputs') is True or flags.get('account_inputs') is True
 
 
 def _close_admission(session, reason):
@@ -328,13 +405,32 @@ def recover_interrupted() -> int:
 def token() -> str | None:
     # The background worker owns control-file polling.  No file I/O here.
     session = _SESSION
-    return session["trace_id"] if session is not None and session["state"] == "running" else None
+    if session is not None and session['state'] == 'running':
+        return session['trace_id']
+    if session is not None and _owned_input_capture(session):
+        from .diagnostic_replay_contract import operation_identity
+        with _LOCK:
+            if (session is _SESSION and session['state'] in {'stopping', 'awaiting_persistence'}
+                    and operation_identity()['input_operation_id'] in _ACTIVE_OPERATIONS and not _ABORT.is_set()):
+                return session['trace_id']
+    return None
 
 
 def input_token(kind: str) -> str | None:
     session = _SESSION
     return (session["trace_id"] if session is not None and session["state"] == "running"
             and session.get("payload_capture", {}).get(kind) is True else None)
+
+
+def project_account_input(trace_id, method, arguments):
+    with _LOCK:
+        if (_SESSION is None or _SESSION['trace_id'] != trace_id
+                or _SESSION['payload_capture'].get('account_inputs') is not True
+                or _ACCOUNT_PROJECTION is None):
+            raise ValueError('account_input_capture_disabled')
+        projection = _ACCOUNT_PROJECTION
+    # A start/stop cannot replace this owned session object underneath the call.
+    return projection.project(method, arguments)
 
 
 def _field_charge(value, depth=0) -> int:
@@ -363,7 +459,7 @@ def _enqueue(session: dict, event: dict | DeliveryStage, charge: int, *, payload
         reason = 'payload_memory_budget'
     elif session.get('persist_at') is not None and (
             len(_QUEUE) + session['packing_events'] >= _RAW_CAPACITY
-            or session['raw_charged_bytes'] + session['copy_reserved_bytes'] + charge > _RAW_LIMIT):
+            or session['raw_charged_bytes'] + session['copy_reserved_bytes'] + charge > _raw_limit(session)):
         reason = 'raw_staging_budget'
     if reason is not None:
         session["known_dropped"] += 1
@@ -480,17 +576,36 @@ def emit(trace_id: str | None, event_type: str, fields: dict) -> None:
     charge = 1024 + _field_charge(fields)
     with _LOCK:
         session = _SESSION
-        if session is None or session["trace_id"] != trace_id or session["state"] != "running":
+        if session is None or session["trace_id"] != trace_id:
+            return
+        operation = fields.get('operation_id') if event_type == 'operation_end' else fields.get('input_operation_id')
+        closing_receipt = (_owned_input_capture(session)
+                           and operation in _ACTIVE_OPERATIONS
+                           and event_type in {'operation_end', 'call_start', 'call_end'}
+                           and session['state'] in {'stopping', 'awaiting_persistence'} and not _ABORT.is_set())
+        if session['state'] != 'running' and not closing_receipt:
             return
         event = {"wall_ns": now_wall, "mono_ns": now_mono, "event_type": event_type}
         event.update(fields)
         _enqueue(session, event, charge, payload=False)
+        if event_type == 'operation_end' and operation in _ACTIVE_OPERATIONS:
+            _ACTIVE_OPERATIONS.remove(operation)
+            session['operation_inflight'] = len(_ACTIVE_OPERATIONS)
+            _WAKE.set()
 
 
-def reject_input(trace_id: str, fields: dict) -> None:
+def reject_input(trace_id: str, fields: dict, *, owned_copy=False) -> None:
+    event = {'wall_ns': time.time_ns(), 'mono_ns': time.monotonic_ns(),
+             'event_type': 'input_rejected', **fields}
+    charge = 1024 + _field_charge(fields)
     with _LOCK:
         session = _SESSION
-        if session is None or session["trace_id"] != trace_id or session["state"] != "running":
+        if session is None or session["trace_id"] != trace_id:
+            return
+        closing = (owned_copy and _owned_input_capture(session)
+                   and session['copy_reserved_bytes'] > 0
+                   and session['state'] in {'stopping', 'awaiting_persistence'} and not _ABORT.is_set())
+        if session['state'] != 'running' and not closing:
             return
         reason = fields.get("reason", "capture_error")
         session["input_rejected"] += 1
@@ -499,14 +614,21 @@ def reject_input(trace_id: str, fields: dict) -> None:
         group = fields.get("workload_id", "unsupported")
         bucket = session["input_coverage"].setdefault(group, {"accepted": 0, "rejected": 0})
         bucket["rejected"] += 1
-    emit(trace_id, "input_rejected", fields)
+        # Keep the receipt and coverage counters atomic with the reserved copy;
+        # the persistence owner cannot publish a complete trace between them.
+        _enqueue(session, event, charge, payload=False)
 
 
 def emit_payload(trace_id: str, event_type: str, fields: dict, value) -> bool:
     """Try a bounded immutable copy; all encoding/hash/file work stays in the worker."""
     lane = "collector" if event_type == "collector_input" else "store"
     gate = _COLLECTOR_COPY_GATE if lane == "collector" else _COPY_GATE
-    if not gate.acquire(blocking=False):
+    with _LOCK:
+        byte_admission = (lane == 'store' and _SESSION is not None
+                          and _SESSION.get('trace_id') == trace_id
+                          and _SESSION.get('payload_capture', {}).get('large_inputs') is True)
+    gate_owned = False if byte_admission else gate.acquire(blocking=False)
+    if not byte_admission and not gate_owned:
         with _LOCK:
             current = _SESSION if _SESSION and _SESSION["trace_id"] == trace_id else {}
             detail = {"copy_lane": lane, "lane_capacity": 1 if lane == "collector" else 2,
@@ -523,16 +645,32 @@ def emit_payload(trace_id: str, event_type: str, fields: dict, value) -> bool:
         except InputRejected as error:
             reject_input(trace_id, {**fields, "reason": str(error)})
             return False
+        from .diagnostic_replay_contract import LARGE_COPY_PROFILE, ACCOUNT_CONTEXT_PROFILE
+        with _LOCK:
+            large_enabled = (_SESSION is not None and _SESSION.get('trace_id') == trace_id
+                             and _SESSION.get('payload_capture', {}).get('large_inputs') is True)
+        if fields.get('payload_profile') == LARGE_COPY_PROFILE and not large_enabled:
+            reject_input(trace_id, {**fields, 'reason': 'large_input_capture_disabled'})
+            return False
+        if fields.get('payload_profile') == ACCOUNT_CONTEXT_PROFILE:
+            with _LOCK:
+                context_enabled = (_SESSION is not None and _SESSION.get('trace_id') == trace_id
+                                   and _SESSION.get('payload_capture', {}).get('account_inputs') is True)
+            if not context_enabled:
+                reject_input(trace_id, {**fields, 'reason': 'account_input_capture_disabled'})
+                return False
         with _LOCK:
             session = _SESSION
             if session is None or session["trace_id"] != trace_id or session["state"] != "running":
                 if session is not None and session["trace_id"] == trace_id and session["state"] == "stopping":
                     session["input_capture_censored"] = True
                 return False
+            collector_credit = _COPY_RESERVATION if lane == 'store' and byte_admission else 0
             if (session["charged_bytes"] + session["copy_reserved_bytes"] + reservation_bytes
-                    > session["memory_limit_bytes"] - _worker_reserve(session) - _SCALAR_RESERVE
+                    > session["memory_limit_bytes"] - _worker_reserve(session) - _SCALAR_RESERVE - collector_credit
                     or session.get('persist_at') is not None and
-                    session['raw_charged_bytes'] + session['copy_reserved_bytes'] + reservation_bytes > _RAW_LIMIT):
+                    session['raw_charged_bytes'] + session['copy_reserved_bytes'] + reservation_bytes
+                        > _raw_limit(session) - collector_credit):
                 budget_available = False
             else:
                 budget_available = True
@@ -541,6 +679,7 @@ def emit_payload(trace_id: str, event_type: str, fields: dict, value) -> bool:
                 session["memory_high_water"] = max(session["memory_high_water"],
                                                     session["charged_bytes"] + session["copy_reserved_bytes"])
                 reservation = True
+                admitted_wall, admitted_mono = time.time_ns(), time.monotonic_ns()
         if not budget_available:
             reject_input(trace_id, {**fields, "reason": "capture_memory_full"})
             with _LOCK:
@@ -556,7 +695,7 @@ def emit_payload(trace_id: str, event_type: str, fields: dict, value) -> bool:
             details = getattr(error, "details", None)
             if isinstance(details, dict) and details:
                 rejection["rejection_detail"] = details
-            reject_input(trace_id, rejection)
+            reject_input(trace_id, rejection, owned_copy=True)
             return False
         with _LOCK:
             # Charge remains reserved if stop/worker is draining; its finally waits for copies.
@@ -566,13 +705,21 @@ def emit_payload(trace_id: str, event_type: str, fields: dict, value) -> bool:
             session["copy_ms_total"] += copy_ms
             session["copy_ms_max"] = max(session["copy_ms_max"], copy_ms)
             reservation = False
-            if session is not _SESSION or session["state"] != "running":
+            owned_closing = (_owned_input_capture(session)
+                             and session['state'] in {'stopping', 'awaiting_persistence'} and not _ABORT.is_set())
+            if session is not _SESSION or session['state'] != 'running' and not owned_closing:
                 session["input_capture_censored"] = True
                 return False
             event = {"wall_ns": time.time_ns(), "mono_ns": time.monotonic_ns(),
                      "event_type": event_type, **fields, "payload": frozen.value}
+            if session.get('payload_capture', {}).get('large_inputs'):
+                event.update(wall_ns=admitted_wall, mono_ns=admitted_mono, capture_copy_ms=copy_ms)
             accepted = _enqueue(session, event, frozen.charge + 1024 + _field_charge(fields), payload=True)
             if accepted:
+                if (_owned_input_capture(session)
+                        and event_type == 'operation_start' and type(fields.get('operation_id')) is str):
+                    _ACTIVE_OPERATIONS.add(fields['operation_id'])
+                    session['operation_inflight'] = len(_ACTIVE_OPERATIONS)
                 session["payload_accepted"] += 1
                 group = fields.get("workload_id", "unsupported")
                 bucket = session["input_coverage"].setdefault(group, {"accepted": 0, "rejected": 0})
@@ -585,20 +732,53 @@ def emit_payload(trace_id: str, event_type: str, fields: dict, value) -> bool:
                 session["copy_inflight"][lane] -= 1
             if session.get('persist_at') is None or session['state'] != 'running':
                 _WAKE.set()
-        gate.release()
+        if gate_owned:
+            gate.release()
 
 
 def payload_bytes(trace_id: str, digest: str) -> bytes:
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         raise KeyError("invalid_payload_hash")
     manifest = status(trace_id)
+    if manifest.get('blobs', {}).get(digest, {}).get('format') == 'blocks/v1':
+        raise KeyError('block_payload_requires_recorded_reader')
     return _payload_bytes_from_manifest(trace_id, digest, manifest)
+
+
+def _load_window_payload(trace_id, digest, manifest, cache, loaded_bytes):
+    if digest in cache:
+        return loaded_bytes
+    root = manifest.get('blobs', {}).get(digest)
+    if type(root) is dict and root.get('format') == 'blocks/v1':
+        from .diagnostic_trace_payload import block_reference
+        cache[digest] = block_reference(trace_id, digest, root)
+        return loaded_bytes
+    content = _payload_bytes_from_manifest(trace_id, digest, manifest)
+    loaded_bytes += len(content)
+    if loaded_bytes > _MAX_WINDOW_PAYLOAD_BYTES:
+        raise ValueError('recorded_window_payload_limit_exceeded')
+    try:
+        cache[digest] = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError('recorded_payload_json_invalid') from error
+    return loaded_bytes
+
+
+def _block_window_report(cache):
+    from .diagnostic_trace_payload import BlockPayloadReference
+    references = [value for value in cache.values() if type(value) is BlockPayloadReference]
+    return {'block_payloads_verified': len(references),
+            'block_payload_bytes_verified': sum(json.loads(value.descriptor)['bytes'] for value in references),
+            'block_payload_retention': 'immutable_references',
+            'payload_bytes_loaded_scope': 'legacy_decoded_payloads_only'}
 
 
 def _payload_bytes_from_manifest(trace_id: str, digest: str, manifest: dict) -> bytes:
     if type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
         raise KeyError("invalid_payload_hash")
     part = manifest.get("blobs", {}).get(digest)
+    if type(part) is dict and part.get('format') == 'blocks/v1':
+        return b''.join(_payload_blocks_from_manifest(trace_id, digest, manifest))
     if not part or type(part.get("bytes")) is not int or not 0 < part["bytes"] <= _MAX_BLOB_BYTES:
         raise KeyError("payload_not_committed")
     name = part.get("name")
@@ -625,6 +805,93 @@ def _payload_bytes_from_manifest(trace_id: str, digest: str, manifest: dict) -> 
     return content
 
 
+def _payload_blocks_from_manifest(trace_id, digest, manifest):
+    """Verify bounded physical parts and the exact logical hash before returning bytes."""
+    if not _valid_id(trace_id) or type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
+        raise KeyError('invalid_payload_hash')
+    root = manifest.get('blobs', {}).get(digest)
+    if (manifest.get('schema_version') != 4 or type(root) is not dict
+            or root.get('format') != 'blocks/v1' or type(root.get('bytes')) is not int
+            or not 0 < root['bytes'] <= MAX_BLOCK_PAYLOAD_BYTES
+            or type(root.get('parts')) is not list or not 1 <= len(root['parts']) <= MAX_PAYLOAD_BLOCKS):
+        raise KeyError('invalid_payload_blocks')
+    blocks, total, whole = [], 0, hashlib.sha256()
+    for index, part in enumerate(root['parts']):
+        if (type(part) is not dict or type(part.get('index')) is not int or part['index'] != index
+                or type(part.get('bytes')) is not int or not 0 < part['bytes'] <= PAYLOAD_BLOCK_BYTES
+                or type(part.get('sha256')) is not str
+                or re.fullmatch(r'[0-9a-f]{64}', part['sha256']) is None
+                or type(part.get('name')) is not str
+                or re.fullmatch(r'block-' + digest + r'-[0-9]{3}\.payloads', part['name']) is None
+                or type(part.get('offset')) is not int or part['offset'] < 0
+                or part['offset'] + part['bytes'] > _MAX_PAYLOAD_BATCH_BYTES):
+            raise KeyError('invalid_payload_block_part')
+        path = _directory() / trace_id / part['name']
+        if (path.parent.is_symlink() or path.is_symlink() or not path.is_file()
+                or path.stat().st_size > _MAX_PAYLOAD_BATCH_BYTES):
+            raise KeyError('payload_missing_or_oversized')
+        with path.open('rb') as file:
+            file.seek(part['offset'])
+            block = file.read(part['bytes'])
+        if len(block) != part['bytes'] or hashlib.sha256(block).hexdigest() != part['sha256']:
+            raise ValueError('payload_checksum_mismatch')
+        total += len(block)
+        if total > root['bytes']:
+            raise ValueError('payload_checksum_mismatch')
+        whole.update(block)
+        blocks.append(block)
+    if total != root['bytes'] or whole.hexdigest() != digest:
+        raise ValueError('payload_checksum_mismatch')
+    return tuple(blocks)
+
+
+def _write_payload_blocks(directory, digest, blocks, session):
+    """Publish complete bounded bundles; the caller publishes their root with the event."""
+    if (not 1 <= len(blocks) <= MAX_PAYLOAD_BLOCKS
+            or any(type(block) is not bytes or not 0 < len(block) <= PAYLOAD_BLOCK_BYTES for block in blocks)
+            or sum(len(block) for block in blocks) > MAX_BLOCK_PAYLOAD_BYTES):
+        raise OSError('trace_event_too_large')
+    parts, bundle, offset, file = [], 0, 0, None
+    temporary = target = None
+
+    def finish():
+        nonlocal file
+        if file is None:
+            return
+        file.flush()
+        started = time.perf_counter()
+        os.fsync(file.fileno())
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        file.close()
+        file = None
+        os.replace(temporary, target)
+        with _LOCK:
+            session['payload_fsync_count'] += 1
+            session['payload_fsync_ms_total'] += elapsed_ms
+            session['payload_fsync_ms_max'] = max(session['payload_fsync_ms_max'], elapsed_ms)
+
+    try:
+        for index, block in enumerate(blocks):
+            if file is not None and offset + len(block) > _MAX_PAYLOAD_BATCH_BYTES:
+                finish()
+                bundle += 1
+                offset = 0
+            if file is None:
+                name = f'block-{digest}-{bundle:03d}.payloads'
+                target = directory / name
+                temporary = directory / (name + '.partial')
+                file = temporary.open('wb')
+            _write(file, block, session)
+            parts.append({'index': index, 'bytes': len(block), 'sha256': hashlib.sha256(block).hexdigest(),
+                          'name': name, 'offset': offset})
+            offset += len(block)
+        finish()
+    finally:
+        if file is not None:
+            file.close()
+    return {'format': 'blocks/v1', 'bytes': sum(len(block) for block in blocks), 'parts': parts}
+
+
 def validate_top20_capture_manifest(manifest: dict, events: list[dict], *, trace_id: str) -> None:
     """Strict whole-capture preflight; generic partial replay keeps its own policy.
 
@@ -637,7 +904,7 @@ def validate_top20_capture_manifest(manifest: dict, events: list[dict], *, trace
 def _validate_top20_capture_manifest(manifest, events, *, trace_id, hydrated):
     if (type(manifest) is not dict or manifest.get("trace_id") != trace_id
             or type(manifest.get("schema_version")) is not int
-            or manifest["schema_version"] != 3 or manifest.get("state") != "complete"
+            or manifest["schema_version"] not in {3, 4} or manifest.get("state") != "complete"
             or manifest.get("coverage") != "observed_paths_only"
             or manifest.get("input_capture_censored") is not False):
         raise ValueError("top20_capture_manifest_incomplete")
@@ -835,15 +1102,7 @@ def recorded_top20_window_frontier(trace_id: str, *, component: str,
             raise ValueError("top20_window_metadata_limit_exceeded")
         digest = row.pop("payload_ref", None)
         if digest is not None:
-            if digest not in payload_cache:
-                payload = _payload_bytes_from_manifest(trace_id, digest, manifest)
-                loaded_bytes += len(payload)
-                if loaded_bytes > _MAX_WINDOW_PAYLOAD_BYTES:
-                    raise ValueError("recorded_window_payload_limit_exceeded")
-                try:
-                    payload_cache[digest] = json.loads(payload)
-                except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                    raise ValueError("recorded_payload_json_invalid") from error
+            loaded_bytes = _load_window_payload(trace_id, digest, manifest, payload_cache, loaded_bytes)
             row["payload"] = payload_cache[digest]
         row["source_seq"] = row["seq"]
         rows.append(row)
@@ -862,6 +1121,7 @@ def recorded_top20_window_frontier(trace_id: str, *, component: str,
         "window_read": {
         "events_verified": manifest["written"], "events_retained": len(rows),
         "payload_bytes_loaded": loaded_bytes, "scalar_bytes_retained": scalar_bytes,
+        **_block_window_report(payload_cache),
         "payload_blobs_verified": len(blobs), "delivery_prefix_end_seconds": window_end_seconds,
         "source_sequences": tuple(row["source_seq"] for row in rows),
         "scope": "queue_frontier_preflight_only", "warm_state_equivalent": False}}
@@ -869,7 +1129,7 @@ def recorded_top20_window_frontier(trace_id: str, *, component: str,
 
 def recorded_events(trace_id: str) -> tuple[dict, list[dict]]:
     manifest = status(trace_id)
-    if (manifest.get("schema_version") not in {2, 3} or manifest.get("state") != "complete"
+    if (manifest.get("schema_version") not in {2, 3, 4} or manifest.get("state") != "complete"
             or manifest.get("known_dropped") or manifest.get("input_capture_censored")):
         raise ValueError("recorded_capture_incomplete_or_old_schema")
     # Internal bounded reader; the future public window reader must stream a long capture.
@@ -877,6 +1137,7 @@ def recorded_events(trace_id: str) -> tuple[dict, list[dict]]:
         raise ValueError("recorded_window_reader_required")
     rows = []
     loaded_bytes = 0
+    payload_cache = {}
     for part in manifest["chunks"]:
         chunk_start = len(rows)
         for line in chunk_bytes(trace_id, part["name"]).splitlines():
@@ -886,11 +1147,13 @@ def recorded_events(trace_id: str) -> tuple[dict, list[dict]]:
                 raise ValueError("recorded_capture_sequence_invalid")
             digest = row.pop("payload_ref", None)
             if digest is not None:
-                content = payload_bytes(trace_id, digest)
-                loaded_bytes += len(content)
-                if loaded_bytes > 32 * 1024 * 1024:
-                    raise ValueError("recorded_window_reader_required")
-                row["payload"] = json.loads(content)
+                try:
+                    loaded_bytes = _load_window_payload(trace_id, digest, manifest, payload_cache, loaded_bytes)
+                except ValueError as error:
+                    if str(error) == 'recorded_window_payload_limit_exceeded':
+                        raise ValueError('recorded_window_reader_required') from error
+                    raise
+                row['payload'] = payload_cache[digest]
             rows.append(row)
         if (len(rows) == chunk_start or type(part.get("count")) is not int
                 or type(part.get("first_seq")) is not int or type(part.get("last_seq")) is not int
@@ -939,7 +1202,7 @@ def recorded_window_events(trace_id: str, *, window_start_seconds: float,
                  or len(set(collector_components)) != len(collector_components)))):
         raise ValueError("recorded_window_out_of_bounds")
     manifest = status(trace_id)
-    if (manifest.get("schema_version") not in {2, 3} or manifest.get("state") != "complete"
+    if (manifest.get("schema_version") not in {2, 3, 4} or manifest.get("state") != "complete"
             or manifest.get("known_dropped") or manifest.get("input_capture_censored")):
         raise ValueError("recorded_capture_incomplete_or_old_schema")
     started_mono_ns = manifest.get("started_mono_ns")
@@ -996,15 +1259,8 @@ def recorded_window_events(trace_id: str, *, window_start_seconds: float,
             )
             digest = row.pop("payload_ref", None)
             if needs_payload and digest is not None:
-                if digest not in payload_cache:
-                    payload = payload_bytes(trace_id, digest)
-                    if payload_bytes_loaded + len(payload) > _MAX_WINDOW_PAYLOAD_BYTES:
-                        raise ValueError("recorded_window_payload_limit_exceeded")
-                    try:
-                        payload_cache[digest] = json.loads(payload)
-                    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                        raise ValueError("recorded_payload_json_invalid") from error
-                    payload_bytes_loaded += len(payload)
+                payload_bytes_loaded = _load_window_payload(
+                    trace_id, digest, manifest, payload_cache, payload_bytes_loaded)
                 row["payload"] = payload_cache[digest]
             chunk_rows.append(row)
             rows.append(row)
@@ -1030,6 +1286,7 @@ def recorded_window_events(trace_id: str, *, window_start_seconds: float,
         "events_verified": written,
         "payload_blobs_loaded": len(payload_cache),
         "payload_bytes_loaded": payload_bytes_loaded,
+        **_block_window_report(payload_cache),
         "collector_prefix_seconds": window_end_seconds if mode == "collector_with_background" else 0,
         "market_input_events_in_window": market_input_window_events,
         "market_input_cycles_touched": len(market_input_cycles_touched),
@@ -1040,7 +1297,7 @@ def recorded_window_events(trace_id: str, *, window_start_seconds: float,
 def _scoped_capture_manifest(manifest, trace_id):
     """Durable source admission only; selected inputs still need their own gate."""
     if (type(manifest) is not dict or manifest.get('trace_id') != trace_id
-            or type(manifest.get('schema_version')) is not int or manifest['schema_version'] not in {2, 3}
+            or type(manifest.get('schema_version')) is not int or manifest['schema_version'] not in {2, 3, 4}
             or manifest.get('state') not in {'complete', 'incomplete'}
             or manifest.get('coverage') != 'observed_paths_only'
             or manifest.get('input_capture_censored') is not False
@@ -1269,15 +1526,7 @@ def _recorded_store_window(trace_id, *, window_start_seconds, window_end_seconds
     for row in sorted(rows_by_seq.values(), key=lambda item: item['seq']):
         digest = row.pop('payload_ref', None)
         if digest is not None:
-            if digest not in cache:
-                payload = _payload_bytes_from_manifest(trace_id, digest, manifest)
-                loaded_bytes += len(payload)
-                if loaded_bytes > _MAX_WINDOW_PAYLOAD_BYTES:
-                    raise ValueError('recorded_window_payload_limit_exceeded')
-                try:
-                    cache[digest] = json.loads(payload)
-                except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                    raise ValueError('recorded_payload_json_invalid') from error
+            loaded_bytes = _load_window_payload(trace_id, digest, manifest, cache, loaded_bytes)
             row['payload'] = cache[digest]
         row['source_seq'] = row['seq']
         rows.append(row)
@@ -1293,6 +1542,7 @@ def _recorded_store_window(trace_id, *, window_start_seconds, window_end_seconds
         start_seconds=window_start_seconds, end_seconds=window_end_seconds, mode=mode,
         events_verified=manifest['written'], events_retained=len(rows), scalar_bytes_retained=scalar_bytes,
         payload_blobs_loaded=len(cache), payload_bytes_loaded=loaded_bytes,
+        **_block_window_report(cache),
         selected_payload_hashes=sorted(cache), selected_workloads=list(plan.selected_workloads),
         excluded_workloads=sorted(observed_workloads - selected), window_workloads=window_counts,
         actor_known=plan.actor_known, source_state_equivalent=False,
@@ -1334,6 +1584,11 @@ def _write(file, content, session: dict) -> None:
         file.write(block)
         with _LOCK:
             session['persistence_throttle_seconds'] += delay
+
+
+def _persistence_cooldown(flush_ms: float, write_pace_seconds: float) -> float:
+    """Back off for additional work/stalls; mandatory write pacing is already paid."""
+    return min(5.0, max(0.25, flush_ms / 1000 - write_pace_seconds))
 
 
 def _release_credit(records):
@@ -1429,7 +1684,8 @@ def _hold_deferred(session: dict) -> bool:
     if session['state'] == 'stopping':
         with _LOCK:
             session.update(state='awaiting_persistence', captured_at=time.time(),
-                           captured_mono_ns=time.monotonic_ns())
+                           captured_mono_ns=time.monotonic_ns(),
+                           operation_drain_deadline=time.monotonic() + _OPERATION_DRAIN_SECONDS)
         path = control_path()
         if path is not None:
             try:
@@ -1445,6 +1701,11 @@ def _hold_deferred(session: dict) -> bool:
     if session['state'] == 'running':
         return False
     with _LOCK:
+        if session.get('operation_inflight'):
+            if time.monotonic() < session.get('operation_drain_deadline', float('inf')):
+                return False
+            session.update(input_capture_censored=True, operation_drain_timed_out=True, operation_inflight=0)
+            _ACTIVE_OPERATIONS.clear()
         if _QUEUE or session['packing_events'] or session['copy_reserved_bytes']:
             if _QUEUE:
                 _WAKE.set()
@@ -1461,6 +1722,7 @@ def _hold_deferred(session: dict) -> bool:
 
 
 def _drain(session: dict, run_lock) -> None:
+    global _ACCOUNT_PROJECTION
     directory = None
     pending: deque[dict] = deque()
     stored_blobs: dict[str, dict] = {}
@@ -1524,6 +1786,7 @@ def _drain(session: dict, run_lock) -> None:
                     session["pending_events"] = len(pending)
             if pending:
                 flush_started = time.perf_counter()
+                flush_pace_started = session.get('persistence_throttle_seconds', 0.0)
                 # Encoding stays in this worker. Keep the uncommitted suffix here
                 # so one periodic flush stays bounded without reordering the queue.
                 lines: list[bytes] = []
@@ -1534,12 +1797,18 @@ def _drain(session: dict, run_lock) -> None:
                 bundle_temporary = directory / f"{bundle_name}.partial"
                 bundle_file = None
                 batch_bytes = 0
+                block_bytes = 0
                 try:
                     for row in pending:
                         encoded = {key: value for key, value in row.items()
                                    if key not in {"payload", "_memory_charge", "_scalar_charge"}}
-                        digest, payload = None, None
-                        if isinstance(row, PackedRow):
+                        digest, payload, blocks = None, None, None
+                        if isinstance(row, BlockRow):
+                            blocks = row.payload_blocks()
+                        elif (row.get('payload_profile') in {'large-store-input/v1', 'account-context-input/v1'}
+                              and 'payload' in row):
+                            blocks = encode_payload_blocks(row['payload'])
+                        elif isinstance(row, PackedRow):
                             payload = row.payload_bytes()
                         elif "payload" in row:
                             payload = json.dumps(row["payload"], ensure_ascii=False,
@@ -1549,30 +1818,41 @@ def _drain(session: dict, run_lock) -> None:
                                 raise OSError("trace_event_too_large")
                             digest = hashlib.sha256(payload).hexdigest()
                             encoded["payload_ref"] = digest
+                        if blocks is not None:
+                            whole = hashlib.sha256()
+                            for block in blocks:
+                                whole.update(block)
+                            digest = whole.hexdigest()
+                            encoded['payload_ref'] = digest
                         line = json.dumps(encoded, ensure_ascii=False, separators=(",", ":"),
                                           default=str).encode("utf-8") + b"\n"
                         new_blob = digest is not None and digest not in stored_blobs and digest not in chunk_blobs
-                        added_bytes = len(payload) if new_blob else 0
+                        added_bytes = (sum(len(block) for block in blocks) if blocks is not None
+                                       else len(payload)) if new_blob else 0
                         if (content_bytes + len(line) > _MAX_CHUNK_BYTES
-                                or batch_bytes + added_bytes > _MAX_PAYLOAD_BATCH_BYTES):
+                                or blocks is None and batch_bytes + added_bytes > _MAX_PAYLOAD_BATCH_BYTES):
                             if not lines:
                                 raise OSError("trace_event_too_large")
                             break
-                        if (blob_bytes + chunk_bytes_written + batch_bytes + added_bytes
+                        if (blob_bytes + chunk_bytes_written + batch_bytes + block_bytes + added_bytes
                                 + content_bytes + len(line) > session["storage_limit_bytes"]):
                             raise OSError("trace_file_limit")
                         if new_blob:
-                            if bundle_file is None:
-                                bundle_file = bundle_temporary.open("wb")
-                            _write(bundle_file, payload, session)
-                            chunk_blobs[digest] = {"bytes": len(payload), "name": bundle_name,
-                                                   "offset": batch_bytes}
-                            batch_bytes += len(payload)
+                            if blocks is not None:
+                                chunk_blobs[digest] = _write_payload_blocks(directory, digest, blocks, session)
+                                block_bytes += added_bytes
+                            else:
+                                if bundle_file is None:
+                                    bundle_file = bundle_temporary.open("wb")
+                                _write(bundle_file, payload, session)
+                                chunk_blobs[digest] = {"bytes": len(payload), "name": bundle_name,
+                                                       "offset": batch_bytes}
+                                batch_bytes += len(payload)
                         elif digest is not None and digest in stored_blobs:
                             chunk_blobs[digest] = stored_blobs[digest]
                         lines.append(line)
                         content_bytes += len(line)
-                        del payload
+                        del payload, blocks
                     if bundle_file is not None:
                         bundle_file.flush()
                         sync_started = time.perf_counter()
@@ -1598,10 +1878,13 @@ def _drain(session: dict, run_lock) -> None:
                     fsync_ms = (time.perf_counter() - fsync_started) * 1000
                 os.replace(temporary, directory / name)
                 flush_ms = (time.perf_counter() - flush_started) * 1000
+                # Capture before any checkpoint writes: only pacing inside this
+                # flush is included in flush_ms. One recorder worker owns both.
+                flush_write_pace_seconds = session.get('persistence_throttle_seconds', 0.0) - flush_pace_started
                 count = len(lines)
                 checksum = hashlib.sha256(content).hexdigest()
                 chunk_bytes_written += len(content)
-                blob_bytes += batch_bytes
+                blob_bytes += batch_bytes + block_bytes
                 stored_blobs.update(chunk_blobs)
                 with _LOCK:
                     session["chunk_flush_ms_total"] += flush_ms
@@ -1624,9 +1907,9 @@ def _drain(session: dict, run_lock) -> None:
                     _manifest(directory, session)
                     next_manifest = time.monotonic() + 60
                 if session.get('persist_at') is not None:
-                    # Back off further after slow durable writes; never catch up
-                    # by flooding the device following an I/O stall.
-                    cooldown = min(5.0, max(0.25, flush_ms / 1000))
+                    # Keep the per-block rate cap and backoff for slow durable
+                    # writes; do not charge the same mandatory pacing twice.
+                    cooldown = _persistence_cooldown(flush_ms, flush_write_pace_seconds)
                     time.sleep(cooldown)
                     with _LOCK:
                         session['persistence_throttle_seconds'] += cooldown
@@ -1689,4 +1972,7 @@ def _drain(session: dict, run_lock) -> None:
                 _set_trace(path, False, 60, expected_session=session["master_session"])
         except (OSError, ValueError):
             pass
+        with _LOCK:
+            if session is _SESSION:
+                _ACCOUNT_PROJECTION = None
         run_lock.__exit__(None, None, None)

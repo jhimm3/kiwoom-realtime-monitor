@@ -11,6 +11,38 @@ _FRAME = struct.Struct('>II')
 _MAGIC = b'KTRACE01'
 _ABSENT = 0xffffffff
 _INTERNAL = frozenset(('payload', '_memory_charge', '_scalar_charge'))
+PAYLOAD_BLOCK_BYTES = 1024 * 1024
+MAX_BLOCK_PAYLOAD_BYTES = 128 * 1024 * 1024
+MAX_PAYLOAD_BLOCKS = 128
+
+
+def encode_payload_blocks(value, *, block_bytes=PAYLOAD_BLOCK_BYTES,
+                          maximum_bytes=MAX_BLOCK_PAYLOAD_BYTES):
+    """Encode exact legacy JSON into bounded bytes blocks, never a whole JSON string."""
+    if type(block_bytes) is not int or not 1 <= block_bytes <= PAYLOAD_BLOCK_BYTES:
+        raise ValueError('trace_payload_block_size_invalid')
+    blocks, buffer, total = [], bytearray(), 0
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(',', ':'))
+    for piece in encoder.iterencode(value):
+        # iterencode may yield a whole escaped string. Bound its UTF-8 conversion too.
+        for start in range(0, len(piece), 16384):
+            encoded = piece[start:start + 16384].encode('utf-8')
+            total += len(encoded)
+            if total > maximum_bytes:
+                raise OSError('trace_event_too_large')
+            offset = 0
+            while offset < len(encoded):
+                length = min(block_bytes - len(buffer), len(encoded) - offset)
+                buffer.extend(encoded[offset:offset + length])
+                offset += length
+                if len(buffer) == block_bytes:
+                    blocks.append(bytes(buffer))
+                    buffer.clear()
+    if buffer:
+        blocks.append(bytes(buffer))
+    if not blocks or len(blocks) > MAX_PAYLOAD_BLOCKS:
+        raise OSError('trace_event_too_large')
+    return tuple(blocks)
 
 
 class Segment:
@@ -71,6 +103,10 @@ class PackedRow(Mapping):
             return None
         return self.segment.data[self.payload_offset:self.end]
 
+    def payload_blocks(self):
+        value = self.payload_bytes()
+        return () if value is None else (value,)
+
     def __iter__(self):
         return iter(self.metadata)
 
@@ -79,6 +115,52 @@ class PackedRow(Mapping):
 
     def __getitem__(self, key):
         return self.metadata[key]
+
+
+class BlockSegment:
+    """One logical event owns multiple byte blocks and the same commit cursor contract."""
+    __slots__ = ('metadata', 'blocks', 'count', 'first_seq', 'last_seq', 'charge',
+                 'scalar_charge', 'issued', 'committed')
+
+    def __init__(self, metadata, blocks):
+        self.metadata, self.blocks = metadata, blocks
+        self.count = 1
+        self.first_seq = self.last_seq = json.loads(metadata)['seq']
+        self.charge = (sys.getsizeof(self) + sys.getsizeof(metadata) + sys.getsizeof(blocks)
+                       + sum(sys.getsizeof(block) for block in blocks) + 128)
+        self.scalar_charge = self.charge - sum(len(block) for block in blocks)
+        self.issued = self.committed = 0
+
+    def take(self):
+        if self.issued:
+            return None
+        self.issued = 1
+        return BlockRow(self)
+
+    def commit(self, row):
+        if row.segment is not self or self.committed or not self.issued:
+            raise RuntimeError('trace_ram_commit_out_of_order')
+        self.committed = 1
+
+    def rewind(self):
+        self.issued = self.committed
+
+
+class BlockRow(PackedRow):
+    __slots__ = ()
+
+    def __init__(self, segment):
+        self.segment = segment
+        self.metadata = json.loads(segment.metadata)
+        self.offset, self.end = 0, 1
+        self.payload_offset = len(segment.metadata)
+        self.payload_size = sum(len(block) for block in segment.blocks)
+
+    def payload_bytes(self):
+        raise RuntimeError('trace_block_payload_requires_block_reader')
+
+    def payload_blocks(self):
+        return self.segment.blocks
 
 
 def pack_records(records, *, target_bytes=1024 * 1024,
@@ -104,6 +186,12 @@ def pack_records(records, *, target_bytes=1024 * 1024,
             raise ValueError('trace_ram_sequence_invalid')
         previous = seq
         encoded = json.dumps(metadata, ensure_ascii=False, separators=(',', ':'), default=str).encode('utf-8')
+        if len(encoded) > max_metadata_bytes:
+            raise OSError('trace_event_too_large')
+        if record.get('payload_profile') in {'large-store-input/v1', 'account-context-input/v1'} and 'payload' in record:
+            seal()
+            segments.append(BlockSegment(encoded, encode_payload_blocks(record['payload'])))
+            continue
         payload = (json.dumps(record['payload'], ensure_ascii=False, separators=(',', ':')).encode('utf-8')
                    if 'payload' in record else None)
         if len(encoded) > max_metadata_bytes or payload is not None and len(payload) > max_payload_bytes:

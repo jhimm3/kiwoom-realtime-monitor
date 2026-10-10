@@ -42,7 +42,7 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.infrastructure.news_ai import NewsAIProviderError
 
 
-SERVER_BUILD = "2026.10.09-trace-ram-main-v1"
+SERVER_BUILD = "2026.10.10-cohort-worker-ack-v2"
 logger = logging.getLogger(__name__)
 
 
@@ -596,6 +596,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         store_inputs: bool = Field(default=False, strict=True)
         collector_inputs: bool = Field(default=False, strict=True)
         top20_inputs: bool = Field(default=False, strict=True)
+        large_inputs: bool = Field(default=False, strict=True)
+        account_inputs: bool = Field(default=False, strict=True)
         persist_at: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     class QueryRequest(BaseModel):
@@ -1291,6 +1293,23 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                 "trace_input_capture": {
                     "schema_version": 3,
                     "options": {"store_inputs": False, "collector_inputs": False, "top20_inputs": False},
+                    "large_input_capture": {
+                        "schema_version": 4, "request_field": "large_inputs", "default": False,
+                        "requires": ["store_inputs", "persist_at"],
+                        "profile": "large-store-input/v1", "copy_limit_bytes": 64 * 1024 * 1024,
+                        "block_bytes": 1024 * 1024, "encoded_limit_bytes": 128 * 1024 * 1024,
+                        "capacity_acceptance": "pending",
+                    },
+                    "account_input_capture": {
+                        "schema_version": 4, "request_field": "account_inputs", "default": False,
+                        "requires": ["store_inputs", "persist_at"],
+                        "input_version": "account-store-input/v1", "scope": "typed_native_db_arguments",
+                        "authority_tokens": "session_hmac_aliases", "native_replay_ready": False,
+                        "context_baseline_acceptance": "pending",
+                        "context_capture": {"version": "account-context/v2", "copy_limit_bytes": 32 * 1024 * 1024,
+                                            "row_limit": 50_000, "source_state_equivalent": False,
+                                            "postgres_snapshot": "repeatable_read_read_only"},
+                    },
                     "top20_input_capture": {"schema_version": 3,
                         "input_version": "top20-ranking-input/v1",
                         "scope": "ranking_validation_only", "downstream_replay_supported": False,
@@ -1390,6 +1409,9 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                                           store_inputs=body.store_inputs,
                                           collector_inputs=body.collector_inputs,
                                           top20_inputs=body.top20_inputs,
+                                          large_inputs=body.large_inputs,
+                                          account_inputs=body.account_inputs,
+                                          account_context_store=store if body.account_inputs else None,
                                           persist_at=body.persist_at)
         except ValueError as error:
             if trace_state().get("state") not in busy_states:

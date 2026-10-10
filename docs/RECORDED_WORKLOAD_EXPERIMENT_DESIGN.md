@@ -1,5 +1,576 @@
 # 장중 사건 기록을 이용한 반복 부하 실험
 
+### 2026-10-10 같은60분 저장본으로 검증 병목 수정 확인
+
+가설: payload마다 public status가 전체 blob/chunk index를 복사해 검증 비용이 입력 수와
+index 크기 양쪽에 비례해 늘어난다. 판정은 같은 terminal manifest/동일 파일의 checksum,
+sequence, 입력·전달·operation 쌍·대형 블록 내용을 유지하면서 검증을 제한 안에 마치는 것이다.
+기존 native checksum/bounds reader에 terminal manifest를 한 번 전달하는 최소 수정을 적용하고,
+검증 전후 manifest 바이트 불변성을 확인했다. 공개 다운로드 API·writer·트랜잭션은 바꾸지 않았다.
+
+72,001 index의 같은 바이트3회 비교는13.467~14.986→0.256~0.309ms/읽기였다.
+실제3600초 녹화 job9262267814daf923ac68e69f2754438d는2329089건 저장 완료 후 기존 verify에서
+4시간 총 제한으로 실패했다. 관리자 전용으로 같은 저장본을 보존한 뒤 개선된 읽기 검증은
+NAS184.287초에 통과했다. 1706chunk/72,360수신/721,080전달쌍/대형120건/카탈로그5000행1호출,
+동일 manifest와 전체 checksum/sequence/내용/저장 쌍을 확인했다. 추가 녹화나 native writer는 없었다.
+기존 verifier는 완료하지 못했으므로 전체 검증 속도 향상률을 정확한 비율로 계산하지 않는다.
+원래 시험은 실패로 보존하되 고정60분20Hz x10행 recorder 수용/저장/검증 범위는 확인했다.
+전체 causal Replay·시장 최대·전원 손실 복구·앱2~5배와P1 COMMIT은 완료가 아니다.
+증거: `artifacts/recorder-saved-native-verification-20261010.json`.
+
+### 2026-10-10 녹화기 중복 저장 대기 제거와 같은 입력 A/B
+
+가설:1MiB/s 단위 쓰기에서 이미 기다린 pacing 시간을 flush 경과시간 기반 cooldown에
+다시 포함해 불필요한 추가 대기가 생긴다. 판정은 같은60초 입력/초기 private native SQLite,
+동일 내용·revision·native 호출/트랜잭션·무누락·checksum/전달/operation 쌍 유지와 저장시간
+감소다. 최소 수정은 flush 구간의 실제 pacing counter 증가분만 후속 backoff 산정에서 뺀다.
+1MiB/s, stall 후 credit 무누적, 추가 I/O/처리 지연 backoff와.25~5초 상하한을 유지한다.
+
+실제 NAS A/B는117.021→88.379초(24.476% 감소), 대기95.824→64.631초,38,827건 전부 저장,
+거부/누락0·RAM/큐0·45 BEGIN/COMMIT·계좌 내용/revision hash 및 native 호출 동일로 통과했다.
+수신p95는5.949/5.950ms이며 SQL/COMMIT 개선을 뜻하지 않는다. 최소 수정을 유지한다.
+이전 긴 실패의 직접 원인을 이 결과로 확정하지 않는다. 변경된 코드의 누적3600초 gate를
+한 번 진행하며 seal/persist/verify 단계와 제한 실패 코드로 부족했던 증거를 보존한다.
+72000메시지·120서로 다른8MiB+입력과 전체 영속화/정리/운영 복구까지 통과해야 긴 수용
+gate를 완료한다. 실패하면 확인된 단계/코드에서 다음 최소 수정과 판별을 진행한다.
+증거는 `artifacts/recorder-cooldown-ab-proof-20261010.json`이다.
+
+### 2026-10-10 실제60분 시험 실패 후 판별
+
+공식 report는 worker exit1/RuntimeError, OOM=false와 cleanup/동일 운영 서버 복구를
+확인했다. 정확한 오류 코드는 worker가 제한 코드로 기록했지만 supervisor summary에서
+누락됐다. 이 확인된 보고 결함만 최소 수정했고 로컬 관련71건이 통과했다.
+관리자 고정 숫자 읽기는 마지막71,001메시지/대형119회·2,296,849사건·RAM2.69GiB/
+전달큐0·cgroup여유약8.76GiB와 최종 결과 출력 없음을 확인했다.
+소실된 result와 임시 trace를 성공 또는 전체 저장 완료로 추정하지 않는다.
+
+다음 가설/판정: 마지막 입력 건수와 자원 stop 증거로 capture 용량 실패를 구분하고,
+영속화 완료 결과 출력 유무로 persistence/후속 검증 실패를 좁힌다. 숫자만으로 원인이
+확정되지 않으면 제한 오류 코드와 written/bytes/phase가 보존되는 짧은 재현을 먼저 실행한다.
+원인이 지지될 때만 해당 RAM 보존/저장 또는 검증 경로를 최소 수정하고 같은 입력·초기
+상태로 비교한다. 긴 시험 deadline 상향이나 저장 속도 상향부터 적용하지 않는다.
+
+private checker는 seal/persist/verify 단계와 written/bytes/RAM/inflight/강제대기/fsync 숫자를
+로그에 남긴다. 이미 failed/interrupted이면9600초 deadline까지 기다리지 않고 실패한다.
+확인된 관측 비용도 줄였다: 매50ms status()가 전체 blob/chunk index를 복사하던 대신
+같은 lock에서 숫자만 읽는다. 동일72k index3회·각100조회 A/B는14.143~14.995ms에서
+0.035~0.047ms/조회로 줄고 scalar값은 동일했다. 실제 NAS 저장 개선/원래 긴 시험의
+직접 원인은 미검증이다. 관련68건40.909초+새 중단 판정1건0.001초 통과(중복 포함).
+운영 recorder 쓰기 속도·추가 backoff·manifest/checksum/완료 판정은 변경하지 않았다.
+
+예약 옵션 누락의 actual start wiring 회귀는 정확한 frozen operating app으로 추가했다.
+예약함수/인증 ASGI/실제 recorder와 private native SQLite 계좌·lease·VI·8MiB+단일 호출,
+계좌 초기context/v2 및 영속화를 연결해24/24·reject/drop0·RAM반환0으로 통과했다.
+실제60초 NAS gate와 별도로1건14.880초이며 no lifespan/PG-configured injected SQLite
+범위다. 전체 앱 성능 개선 수치 또는60분 합격으로 해석하지 않는다.
+
+### 2026-10-10 월요일 예약기의 새 입력 옵션 연결
+
+확인된 원인은 기존 one-shot 예약기가 store/collector/top20 세 옵션만 POST한다는 것이다.
+새 account/large API가 있어도 기존 예약 호출로는 두 입력이 켜지지 않는다. 명시 plan
+capture_flags를 추가해 capability4/account-context-v2를 먼저 확인하고, 단일 POST에
+다섯 옵션을 보내며 schema4와 실제 선택 옵션을 응답에서 확인한다. 기존 plan은 schema3,
+응답 유실/불일치 후 재시도·임의 stop은 없다.12건이0.079초에 통과했다. 이는 예약 호출
+정확성 개선이며 CPU/지연 개선 수치가 아니다. NAS 운영 반영과 실제 예약은 아직 미완료.
+고정 후보d2855d3c9bf52a86·계획·source/scheduler hash는
+artifacts/recorder-monday-preparation-proof-20261010.json에 있다.
+
+### 2026-10-10 실제 60분 용량 시험 차단 해소
+
+이번 실제3600초 gate는 새 account/large 입력을 포함한 최초 누적 용량 검증이다.
+모든 작은 수정마다 반복하는 gate가 아니다. 예약 필드 같은 수정은 짧은 판별/회귀를
+사용하며, RAM·사건 한도·대형 입력 보존·장시간 drain 계약에 영향을 주거나 기존 결과가
+실패한 경우에만 긴 검증 재실행 필요성을 판단한다. 실제20:10까지 RAM 대기하는 벽시계
+동작 및 실제 장중 모든 workload의 수신/저장 성능은 이 고정 fixture의 검증 범위 밖이다.
+
+확인된 원인은 고정4GiB 격리 worker가8GiB recorder의 실제9GiB 시작 여유를
+확보할 수 없다는 자원 계약 충돌이다. 전용 고정 profile에만 worker12GiB와
+디스크 여유12GiB, 전체 작업14400초를 적용했다. 설치 config/일반 profile/운영
+녹화기8GiB 및1MiB/s 지연 저장 속도는 유지한다. NAS host의 이번 여유 표본은
+17GiB였으며 이후 실행 시 host/cgroup preflight를 다시 실제 검사해야 한다.
+
+가설은 지정된 제어 입력을 실제3600초 받으면서 계좌/lease/VI·대형 입력을 모두
+RAM에 보존하고 순차 영속화할 수 있다는 것이다. 판정은72,000메시지/720,000체결,
+독립 native 계좌/lease/VI 및 서로 다른8MiB 초과 입력120회, reject/drop0,
+accepted=written, 파일/블록/내용/seq/구독/전달/operation 쌍 검사와 RSS/CPU/큐,
+수신 지연 p95/max 및 실제 wall>=3600초다. 60초 동일 구조 사전 gate를 먼저 쓴다.
+과도한 최초50행×40Hz 설계는 전달3단계만으로500만 event 한도를 넘으므로
+20Hz×10행, REST10초/계좌·대형30초 간격으로 고정했다. 시장 최대/2~5배 부하로
+해석하지 않는다. full causal compiler 및 PostgreSQL 지연 측정은 별도 gate다.
+
+작은 실제 capture fixture는 서로 다른 대형2입력과 모든 native 계좌 호출 쌍,
+context/v2·누락0 영속화를 검사했다. 관련97건과 최종65건 통과(중복 합산 금지).
+구독 start/end가 같은 input ID를 쓰는 기존 계약에 맞춰 streaming checker를
+수정했으며 중복 end/다른 owner/열린 쌍은 계속 거부한다. 모든 큰 payload를
+한꺼번에 복원하지 않는다. 성공/실패/정리 실패/재개 실패의 기존 복구 원장도
+용량 profile에서 검사했다. NAS 실제 gate는 설치 helper 변경 이후 실행한다.
+추가 count gate는 실제 처리된 체결+혼합 원본, receipt 지원 전달, 모든 native
+계좌/일반 저장 호출을 durable 수와 대조한다. 녹화 종료 뒤 처리만 완료한 누락은
+합격이 아니다. market_state 전달은 기존 receipt 미지원 수를 따로 보고하고 원본
+혼합 메시지는 보존한다. 이 추가 검사64건 통과25.830초(위 검사와 중복 포함).
+최종 고정 후보90b3b846dd902ace는 NAS 변경64건도 오류/실패/skip0로 통과했다
+(job59cffb65d3ecffe6288c0cbb26d57aa0, 정리/fence/운영 보존). 표준4GiB 검사이므로
+실제9GiB free/12GiB capacity/3600초 합격이 아니다. helper90ddfbb1e58cf999의
+관리자 설치는 실제 두 helper hash로 확인했다. 실제60초 gate는38,827/38,827사건,
+reject/drop0·대형2입력·지원전달12,018쌍·계좌/저장 쌍과 실제9GiB 시작 여유,
+전체 영속화/정리/정확한 운영 서버 복구를 통과했다. 수신p95/max5.953/30.524ms,
+CPU11.954초·peakRSS240,496,640bytes·표본큐0. 입력 스케줄 지연p95/max451.803/
+1187.940ms에는 inline 혼합 준비가 포함되어 전체 live 성능으로 확대하지 않는다.
+동일 최종 후보의3600초 jobc9def38d8077b4880e7853ffb0f3ef48는 실행 중이다.
+전체 저장/복구 및 recorder 배포/예약이 남는다. 원장:
+`artifacts/recorder-capacity-resource-proof-20261010.json`.
+효과가 없거나 포화되면 원인을 charge/event/실제 RSS/packing backlog로 분리해
+최소 수정하고 같은 입력을 비교한다. 원본10/8 누락을 복원하지 않는다.
+
+운영 승인된 정지 → private capture/drain/cleanup → 같은 서버 재개를 유지한다.
+입력 창 뒤 private persistence 시각만 앞당기는 시험으로, 실제20:10 예약 동작과
+월요일 배포 완료를 대신하지 않는다. P1 장중10~20초 COMMIT은 미해결 유지다.
+
+### 2026-10-10 혼합 입력 녹화 비용 판별
+
+가설은 계좌/lease/VI·대형 저장의 capture 복사와 background 인코딩이 수신·Writer 대기를
+늘린다는 것이다. 기존 private OFF/ON 도구에 account-large만 추가했다. 실제 SQLite native
+7개 계좌/lease 메서드, VI 신규/중복2회, encoded8,583,262-byte Shadow1회를 한 batch로
+실시간 입력과 함께 실행한다. 계좌 registry/binding/settings 초기 상태와 native wall clock은
+고정 fixture다. raw authority는 alias만 남으며 원본10/8 입력을 임의 복원하지 않는다.
+
+판정은 같은 초기 DB/입력의 내용·revision·결과·BEGIN/COMMIT 일치와 reject/drop0를 먼저
+요구하고, 수신 p95/max·event loop 대기·native 호출·CPU/RSS·raw/packing 적체를 비교한다.
+시장은 가정하지 않는다. 10/20/50행100Hz WS-shaped 입력을 각각 짧은1/3/3초2회씩 실행했다.
+내용/revision/결과·32/72/72BEGIN/COMMIT이 같고 거부/누락0, 관련 회귀52통과다. 2배 최초
+표본은 다른 회귀 프로세스와 겹쳐 성능 판단에서 제외하고 단독 표본을 따로 보존했다.
+
+대형 호출 지연 증가에 대해 1MiB block마다 background thread가 실행을 양보하는 최소
+후보를 실제 구현했다. 변경 전352개 Python 파일을 hash와 함께 고정하고 같은 초기 상태/
+입력·순서 교대로2회 A/B했다. Shadow p50은88.3158/92.7574→91.2899/89.2175ms,
+수신 p95는2.9874/1.9147→1.9608/1.9654ms로 일관된 개선이 없어 후보를 철회했다.
+GIL을 근본 원인으로 확정하지 않으며 원인 후보 전체를 종료하지 않는다. 추가 비교는 같은
+yield 반복 대신 실제 NAS 인코딩 CPU·native DB wait·큐 대기를 구분하는 계측을 사용한다.
+
+f518 helper 실제 설치/해시 확인 뒤 제어 trace21/21과 context/v2·대형 blocks를 실제
+register-trace 경로로 등록했다. registered v3 baseline/native replay는 별도 미완료다.
+현재 worker4GiB에서 필요한9GiB free headroom을 얻을 수 없으므로 고정 isolated capacity
+자원 profile이 다음 차단 해소 작업이다. 실제 preflight를 통과한3600초 pacing/RAM retain/
+full durable drain을 실행해야 NAS60분 합격으로 판정한다. 기존 small probe의 preflight mock,
+PC SQLite·OFF/ON·미리 종료한 녹화를 이 기준의 대체 증거로 사용하지 않는다.
+증거: `artifacts/recorder-mixed-probe-proof-20261010.json`. 앱2~5배/P1은 미해결 유지다.
+
+### 2026-10-10 녹화 시작 전 원장 보존 보완
+
+가설: 기존 account-context/v1은 설정·binding·lease만 옮기므로 녹화 전에 있던
+주문·체결·계좌 스냅샷의 중복 판정과 후속 체결 저장이 달라진다. 직전 고정 릴리즈의
+같은 SQLite 초기 상태/입력에서 원본 중복 결과 false/false/false가 Replay에서
+true/true/true로 바뀌는 결함을 재현했다. 증거는
+`artifacts/recorder-ledger-before-20261010.json`이다.
+
+account-context/v2는 기존 투영에 명시 execution intents/events/account snapshots와
+real_account_recovery/real_account_event 문서만 추가한다. 기존 50,000행/32MiB/개별
+문서8MiB/10초 읽기 한도를 유지하며 초과를 조용히 생략하지 않는다. 원본 권한 token,
+fingerprint, vault는 그대로 제외한다. JSON/컬럼의 계좌·원장 식별 및 시간 의미, 사건의
+부모 주문, 사건 ID/순번 중복을 DB 적용 전에 검사한다. v1은 원래 범위로 읽으며
+누락된 원장을 만들어 넣지 않는다.
+
+체결 sequence는 최대 저장 순번으로 다시 만들지 않고 관측한 다음 값까지 보존한다.
+PostgreSQL은 increment1/cache1/noncycling만 허용하고 v3 seal 트랜잭션의 ALTER SEQUENCE
+RESTART로 적용한다. seal 실패 시 자료와 sequence가 함께 rollback된다. sequence 값은
+MVCC 대상이 아니므로 읽기 중 다른 Writer의 sequence 소비와 source snapshot/admission
+사이 변경은 전체 원본 상태 동등성을 보장하지 않는다. source_state_equivalent=false와
+녹화 범위 한계는 유지한다.
+
+판정 조건은 동일 초기 상태/녹화본으로 CLI 재생2회, 기존 중복 결과·후속 체결·실패
+rollback·최종 원장/sequence 원본 일치·baseline 복구다. 추가로 encoded8MiB를 넘는
+제어 Shadow 입력을 block 기록 후 실제 PostgreSQL native 호출1회/COMMIT1회로 복원하고
+저장 JSON 전체를 원본과 비교한다. 로컬143/특정 reader 재검사1(겹침), NAS138 통과
+(job fec0547f032c6132151070c39cedbc0a, 오류/실패/skip0). 동일17입력/초기 DB2회에서
+COMMIT14/rollback3, 기대 실패3건, 원본 원장/sequence/계좌 문서·Shadow JSON 일치 및
+atomic seal rollback/최종 baseline 복원을 확인했다. 최초 NAS138의 검사 코드 오류1건은
+정리 후 descriptor로 수정했고 성공에 포함하지 않는다. root helper/등록 bundle 실행,
+NAS60분 부하/용량 및 배포/예약은 별도 미완료다. 전체 원본 상태/20초 COMMIT/CPU·RSS
+개선 완료로 확대하지 않는다. 증거: `artifacts/recorder-ledger-postgres-proof-20261010.json`.
+
+## 2026-10-10 월요일 녹화 보완 설계 — 구현 전
+
+사용자 우선순위는 **10월 12일 08:59:50~09:59:50 KST, 60분 녹화**다.
+기존 지연 저장 정책(장중 RAM 보관, 20:10 KST부터 제한 속도로 영속화)을 유지한다.
+이 절은 설계 결정이며 구현·NAS 적용·예약 완료를 뜻하지 않는다. 원래 장중 COMMIT
+10~20초는 계속 P1 미해결이다. 녹화기 준비가 끝나면 동일 입력 A/B 최적화로 복귀한다.
+
+### 현재 구현 상태 — 2026-10-10
+
+1단계 블록 저장·reader·stop/drain은 PC에 구현했다. strict `large_inputs=false`가 기본이며
+true는 `store_inputs`와 `persist_at`을 요구하고 schema4를 선택한다. 복사64MiB accounting,
+encoded1MiB 블록/128MiB 상한, raw256MiB/packer reserve256MiB를 사용한다. legacy 모드와
+전체8GiB/5,000,000 사건 한도는 유지한다. `diagnostic_trace_payload.py`는 immutable
+descriptor를 갖는 offline reference와 전체 part/root 검증 후 한 입력의 decode를 소유한다.
+worker는 전체 encoded payload를 join하지 않는다. reader의 decode는 한 입력 단위이며
+실제 RSS는 아직 NAS에서 측정하지 않았다.
+
+Replay는 runtime별 공통3개 large-input credit을 사용한다. standalone clock 시작 전에
+시작 경계1초 안의 첫3개를 준비하고, 이후에는 실제 actor 선행 작업 뒤 최대1초 전에
+준비한다. 다른 peer의 source clock은 이동하지 않는다. 복원이 늦으면100ms timing gate가
+실패한다. decode/native thread의 실제 종료 전에 credit을 반환하지 않는다.
+
+관련 로컬62건을 통과했다. 시험 입력은 frozen accounting11,596,860bytes로 기존8MiB에서
+거부됐고, encoded8,138,779bytes/8blocks를 거쳐 동일 내용과 native 호출1회를 확인했다.
+기존 거부 원문이 아니며 실제 PostgreSQL COMMIT·lease·계좌·VI·60분 수용 검증은 별도다.
+API/회귀 등록과 typed 계좌·lease capture 및 실제 계좌/VI actor 연결을 구현했다. 동일 초기
+SQLite/입력 A/B에서 거부3→0, 저장 내용 동일 및 BEGIN/COMMIT3/3을 확인했다. 원문 실행
+token은 파일에 없으며 HMAC key는 실제 worker 종료 때 제거된다. baselinev3의 명시 표와
+sequence, lease 만료·계좌 updated_at의 private source clock hook도 구현했다. context capsule은
+readonly snapshot→32MiB block profile→checksummed reader→parent 확인 뒤 같은 v3 seal
+transaction의 적용을 구현했다. PostgreSQL source는 named server cursor/16행 fetch,
+doc8MiB SQL 상한/전체50,000행·32MiB/10초 read deadline으로 제한한다. source SELECT에는
+fingerprint/vault/credential profile 표를 넣지 않는다. 초기 DB lease는 run을 추측하지 않고
+동일 세션의 opaque alias로 남기며 frontier와 결합할 때만 실제 관측 관계를 해결한다.
+32MiB typed copy는 input admission 전에 준비하고 캡슐 한 건을 native producer보다 먼저
+등록한다. 초기 capsule이 store copy lane 경합으로 누락되는 경로를 만들지 않는다.
+준비 후 child 갱신은 같은 control revision의 CAS를 요구하며 입력 창은 준비 뒤 시작한다.
+snapshot/admission 시간 차이를 공개하고 전체 source-state-equivalent라고 표시하지 않는다.
+alias frontier의 순수 판별은 구현했고 native scheduler 연결은 남았다. 기대 실패 실행 및 PostgreSQL
+acceptance 전에는 v3 실행을 사전 차단한다. 관련 회귀140건 및 이후 account/baseline 후속27건
+(서로 겹치는 검사)을 통과했다. source token을 공유하는 nested run prefix·미귀속 release는
+한 테스트 소유권으로 복원하며 모순된 prefix는 사전 거부한다.
+후속 context/reader/API/clock102건 및 제어·context·baseline38건(겹치는 검사)을 통과했다.
+synthetic904행의 typed13,056,944bytes는 기존8MiB accounting에서 거부됐고,
+encoded8,247,904bytes/8blocks/논리1건으로 복원했다. 최대 block1MiB, reject/drop0,
+원본 DB 변경0이다. 계좌 native 복구/스냅샷 결과·내용·revision/lease 거부는 SQLite에서
+비교했으며, PostgreSQL readonly MVCC/원자 rollback 및 full scheduler gate는 아직 남았다.
+NAS 배포·월요일 예약은 하지 않았다. 아래2~5단계는 계속 부분 구현/미완료다.
+사용자 모델 지정은 Luna 제외, Sol은 실제GPT-6.1 Sol이다.
+
+### 확인한 경계와 선택
+
+- 이전 입력 거부 692건은 `freeze_payload()`의 **복사 accounting 8MiB** 초과다.
+  파일 크기 제한과 다르다. 거부된 원문 전체 크기는 없으므로 64MiB면 모두 수용한다고
+  주장할 수 없다. 대상은 일봉386/Shadow checkpoint220/분봉84/초봉2 호출이다.
+- 현재 worker는 전체 frozen payload를 `json.dumps(...).encode()`한 뒤 RAM frame 및
+  최대16MiB payload bundle에 넣는다. 복사 한도만 높이면 이 뒤 단계에서 다시 실패한다.
+- 실행 lease·계좌 복구/이벤트/스냅샷은 capture 제외 목록에 있다. VI 저장은 capture
+  목록에 있으나 `_METHODS` 및 baseline/reset 범위에는 없다. 양쪽을 함께 열어야 한다.
+- `_verify_real_account_write()`는 계좌 registry, 설정 revision/monitor flag,
+  최신 profile binding을 실제 조회한다. `_require_execution_ownership()`는 lease 행을
+  `FOR UPDATE`로 읽고 token/만료/선택적 automation control revision을 검사한다.
+  함수 이름을 allowlist에 넣는 것만으로 올바른 replay가 되지 않는다.
+
+**결정:** 기존 typed immutable copy를 한 호출 단위로 유지하고, worker의 직렬화·RAM
+보관·파일 저장을 블록화한다. producer에서 일반적인 streaming token codec을 새로
+만들거나 원본 mutable 객체를 worker에 넘기지 않는다. 전자는 이번 문제에 필요한
+변경보다 크고, 후자는 호출 뒤 변경된 데이터가 녹화되는 문제를 만든다. 한도만 올리는
+방식은 후단 단일 blob 제한과 일시적인 대형 allocation을 남긴다.
+
+### 1. 한 입력, 여러 저장 블록, 한 native 호출
+
+1. `diagnostic_replay_contract.py`의 새 **명시적 large-input profile**로 위 네 메서드를
+   먼저 허용한다. 복사는 native 호출 전에 한 번 수행한다. 초기 구현 후보 한도는
+   frozen accounting64MiB/node960,000이며 depth32/string1,048,576자 검사는 유지한다.
+   일반 입력8MiB 및 기존 catalog16MiB profile은 유지한다. 큰 입력을 먼저8MiB로 복사하다
+   실패한 뒤 다시 복사하는 경로는 두지 않는다. 전체 인자, list/tuple 구분, 항목 순서,
+   중복 key의 입력 순서, `observations` 및 checkpoint를 모두 그대로 보존한다.
+2. 새 trace schema4에서 `payload_ref`는 하나의 논리 입력을 가리킨다. manifest의
+   `payload_format=blocks/v1` 항목은 순서 있는 part 목록(index/hash/bytes/bundle/offset),
+   전체 bytes 및 전체 SHA-256을 가진다. 초기 후보는 encoded block1MiB,
+   encoded input128MiB/128parts 상한이다. 블록의 동일 hash 반복은 정상 데이터일 수
+   있으므로 허용하되 index 중복/누락은 거부한다. hash는 연결된 정확한 encoded bytes에
+   대해 계산한다. 호출 ID·codec/profile·actor·start/end 대응은 별도 envelope 검증을 유지한다.
+3. worker에서 `JSONEncoder.iterencode`를 사용하고 큰 encoder 조각도 bounded slice로
+   처리한다. 전체 encoded 문자열/bytes를 한꺼번에 만들거나 `join`해 RAM에 다시 보관하지
+   않는다. 작은 사건은 기존 compact frame을 유지한다. 큰 입력용 RAM 표현은 metadata와
+   immutable bytes blocks를 소유하고 기존 segment의 issue/commit/rewind 수명을 따른다.
+   이 표현의 책임은 `diagnostic_trace_ram.py`에 둔다. event seq와 accepted/written은
+   **논리 사건 한 건** 기준이며 physical block 수와 구분한다.
+4. producer 복사 예약, frozen raw, encoded blocks, worker 일시 메모리, scalar reserve를
+   모두 기존 전체8GiB 예산에 포함한다. 초기 raw staging 후보256MiB/packer reserve256MiB는
+   기존64/128MiB보다 크므로 NAS RSS·cgroup·혼합 burst 검증 전에는 운영 승인값이 아니다.
+   store의 고정2개 복사 슬롯은 byte-credit admission으로 바꾸고 collector 전용 credit을
+   보호한다. 남는 예산이 있는데 세 번째 store 복사라는 이유만으로 거부하지 않는다.
+   충분한 credit이 없으면 생산자를 무기한 기다리게 하지 않고 정확한 한도/거부를 기록한다.
+   전체 한도 소진·copy 오류를 정상 완료로 숨기지 않는다.
+5. payload의 모든 part를 저장·fsync한 뒤에만 해당 event/manifest reference를 공개한다.
+   중간 저장 실패·종료는 incomplete/failed이며 native 저장 결과를 변경하지 않는다.
+   세션 정지 후에도 이미 예약한 복사의 실제 종료 및 원래 operation_end까지 drain한다.
+   입력 창 마지막에 시작한 호출은 종료 receipt가 창 뒤에 생길 수 있으므로 drain 구간을
+   입력60분과 구분한다. close timeout이면 censored로 남긴다.
+6. reader는 schema2/3 기존 단일 payload와 schema4 blocks를 명시적으로 구분한다.
+   선택한 모든 입력의 경로·symlink·크기·part 개수·순서·hash·전체hash·typed bounds·native
+   signature를 **첫 DB 호출 전에** 검사한다. 한 입력씩 decode/검사/해제하고 preflight가
+   모든 큰 인자를 누적 보관하지 않게 한다. 실행도 byte 예산으로 제한한 선행 decode를
+   사용하며 encode/decode 시간을 native SQL/COMMIT 시간과 별도로 보고한다. decode 때문에
+   일정·동시성을 놓치면 timing gate 실패다. decode 총량 상한은 기존32MiB window 제한과
+   별개로 명시하며, 초기 live decoded credit256MiB를 넘는 입력 조합은 preflight에서 거부한다.
+7. 모든 블록을 검증하고 원래 인자 하나를 조립한 뒤 native 저장 함수를 **한 번** 호출한다.
+   블록별 저장·COMMIT·재시도나 일부 블록만 실행하는 경로는 없다. 실행 취소도 실제 native
+   연결이 닫히기 전까지 baseline을 restore하지 않는다. 파일 검증과 실행 사이 파일 변경은
+   private immutable trace snapshot 또는 재검증된 열린 파일로 차단한다.
+
+위 숫자는 구현·부하검증을 시작할 후보값이다. 실제 producer의 최대 지원 형태와
+8MiB 초과 사례, 동시에 겹친 큰 저장, 전체60분 누적량을 측정해 필요한 값만 조정한다.
+블록화는 입력 총량이나 immutable snapshot 비용 자체를 없애지 않는다. mutable 인자가
+호출 중 다른 thread에서 수정될 수 있는 경로는 producer 소유권부터 확인하며, GIL이나
+container length 재검사만으로 일관된 snapshot을 보장했다고 주장하지 않는다.
+
+### 2. 실행 lease·계좌 복구·VI의 capture/replay 범위
+
+| 범위 | 추가할 native 실행 및 근거 | 필요한 상태 |
+| --- | --- | --- |
+| 실행 소유권 | acquire/release_execution_runtime; 갱신은 acquire의 기존 UPSERT | runtime_leases, owner/run 대응, source clock |
+| 실계좌 관측 저장 | save_real_account_recovery, save_real_account_event | registry, binding revisions, server_account_settings 및 실제 typed 입력 |
+| 실행 계좌 저장 | save_execution_account_snapshot | account_snapshots, ownership가 있으면 lease/control |
+| 같은 lease의 원장 쓰기 | create_execution_intent, append_execution_event의 DB 저장 경계 | intents/events 및 sequence, lease/control; 외부 주문 API는 실행 경로에 없음 |
+| 시장 사건 | append_vi_events, record_hot_cohort_revision, append_upper_limit_facts 및 관련 기존 reader | VI/cohort/current/upper-limit 표와 각 accepted_sequence |
+| 기존 Shadow 누락 보완 | 큰 checkpoint 및 save_shadow_evaluation/관련 reader | 기존 checkpoint 표와 decisions/candidate_events 및 sequence |
+
+계좌 capture는 새 strict boolean `account_inputs`(기본false, store_inputs=true와 persist_at 필요)로
+범위를 명시한다. 이번 사용자는 포함을 요청했으므로 월요일 계획에는 true를 넣는다.
+capabilities/API/operator/scheduler에서 지원·실제 적용을 서로 확인한다.
+
+`AccountScope/AccountBinding/AccountRecovery/AccountSnapshot/BrokerOrderSnapshot/BrokerFill`,
+`OrderExecution/AccountBalanceChange` 및 실제 필요한 enum만 explicit typed codec에 추가한다.
+원문 REAL00/04 전체나 REST 계좌 응답을 임의 serialize하지 않는다. 현재 이 typed 입력의
+`account_ref`는 원문 계좌번호와 분리된 UUID다. UUID/profile/run/order ID와 수치·시간은
+native 의미를 보존하기 위해 유지한다. 이전 답변의 모든 계좌 식별자 치환 제안은 이 실제
+경계를 확인해 축소한다. 원문 계좌번호·API key·vault·인증 token은 계속 금지한다.
+
+실제 `owner_token`만 녹화 세션의 random HMAC key로 opaque alias로 변환한다. HMAC key와
+원문 token은 저장하지 않는다. 저장 envelope는 token 문자열 대신 별도의 `owner_alias`
+필드를 쓰고, 전용 adapter만 테스트 token을 복원한다. 원래 `run_id:` prefix 관계를
+검증한 후 같은 관계를 테스트 token에도 보존하며, prefix가 틀린 입력은 유효하게 고치지
+않고 동일 실패를 재현할 수 있는 형태로 기록한다. baseline lease와 모든 ownership 입력에
+같은 alias 규칙을 쓴다. 임의 payload의 `owner_token`을 허용하도록 secret guard를 풀지 않는다.
+`run_id`는 token을 colon으로 잘라 추측하지 않는다. `ExecutionRepository.claim_runtime/
+release_runtime/bind_runtime_owner`에 이미 존재하는 인자와 runtime bootstrap의 실제 소유자에서
+capture context로 전달하고 native wrapper가 일치를 검사한다. capsule은 token alias reference를
+저장하며 replay preflight가 같은 alias의 run binding을 해결한 뒤 테스트 token을 만든다.
+초기 외부 소유자처럼 run binding이 관측되지 않은 alias는 opaque 경쟁 소유자로 보존한다.
+그 alias로 owned write까지 해야 하는데 binding이 없거나 모순되면 해당 실행을 사전 거부한다.
+
+실제 task/queue 경계에서 actor를 부여한다. `real_runtime.py`의 계좌 event writer와
+recovery loop, `execution_runtime.py`의 heartbeat/소유자 경로, `market_events.py`의
+live VI 및 backfill 경로를 확인한다. 같은 계좌라는 이유만으로 병렬 task를 하나의 actor로
+합치지 않는다. sync 경로는 실제 caller/task/thread owner를 이어받고, 객체 ID 재사용을
+피하는 세션 내 발급 ID를 쓴다. unknown actor를 임의 복원해 timing gate를 통과시키지 않는다.
+VI의 첫 구현은 **녹화된 native DB 호출 재생**이다. 원본 VI WebSocket parser부터의
+causal replay를 제공한다고 표시하지 않으며, collector mode와 같은 sink를 이중 실행하지 않는다.
+
+### 3. baseline v3와 시간·실패 계약
+
+`diagnostic_replay_baseline.py`에 별도 version3을 추가하고 v1/v2는 그대로 읽는다.
+TABLES_V2에 위 시장사건4표, registry/binding2표, execution lease/intent/event/snapshot4표,
+Shadow decision/candidate2표를 추가한다. 추가 BIGSERIAL sequence5개도 reset/hash/grant/restore
+목록에 명시한다. 이름이 비슷하다는 이유로 전체 execution/credential 표를 허용하지 않는다.
+account snapshot은 snapshot_id 자연 키이며 accepted_sequence가 없다. v1/v2의 reset/sequence
+목록은 유지한다. v3 seal은 먼저 복구된 v1 parent를 검증해야 하므로 capsule 적용은 이
+검증 뒤의 같은 관리 트랜잭션에 연결했다. v1/v2 seal 및 capsule 없는 controlled v3 fixture는
+유지하며 capsule 있는 v3의 manifest에는 context checksum/alias binding hash를 고정한다.
+운영 DB에 적용하는 API는 없으며 실제 PostgreSQL transaction rollback acceptance는 남았다.
+`central_documents`에는 필요한 account settings/control/복구 결과가 포함된다.
+
+계좌 prerequisite와 초기 lease는 녹화 준비 시 별도 read-only REPEATABLE READ snapshot으로
+읽는 작은 `account-context/v1` capsule로 보존한다. 원래 계좌 registry 전체를 공개하지 않고
+UUID/broker/environment/status, 필요한 binding 및 settings/control을 명시적으로 투영한다.
+계좌 fingerprint는 테스트 전용 결정적 값으로 대체한다. credential vault/키는 읽지 않는다.
+캡슐의 source release·snapshot 시각·trace ID·projection version·alias domain·checksum을
+고정한다. 초기 후보 한도는32MiB/50,000행이다. 같은 capsule과 나머지 controlled baseline을
+매 A/B 앞뒤에 restore하고 초기/최종 table 및 sequence hash를 비교한다.
+
+이 capsule은 **계좌 전제조건의 관측본**이며 시장 전체 초기 DB 또는 녹화 시작 순간과의
+동등성을 증명하지 않는다. 녹화 전후의 설정·binding/control 변경과 경계에 걸친 transaction을
+metadata로 남긴다. 필요한 상태 전이가 capture 범위 밖이면 affected window는 source-equivalent
+replay로 승인하지 않는다. 입력에서 계좌 설정·lease 존재 여부·누락 VI를 추측해 만들어 넣지 않는다.
+v3 controlled A/B와 source 결과 일치 여부를 각각 보고한다. `empty-v1`만으로 계좌 복구를
+정상 실행 가능한 것처럼 승인하지 않는다. 설정/credential activation 자체의 재생 확대는 이번
+native writer 범위에 포함하지 않고 영향이 생긴 구간을 명시한다.
+
+source clock은 기존 `source_wall_real_elapsed/v1`을 확장한다. native 인자의 now/expiry/
+received_at은 유지한다. `_require_execution_ownership()`의 현재 UTC 읽기는 store 소유
+clock callable로 주입할 수 있게 하며 운영 기본은 실제 UTC, v3 `_ReplayStore`만 lease/generation
+검사 후 source clock을 제공한다. 전역 datetime monkeypatch나 실제 lease 만료 연장은 금지한다.
+복구 document updated_at 등 내부 시각도 해당 기존 store 경계에서 명시적으로 주입한다.
+lock 대기 뒤 검사 시각은 실제 경과를 반영한다. A/B의 처리속도 차이가 lease 만료 결과를
+바꾸면 숨기지 않고 결과 불일치로 보고한다. 각 작업의 ownership/SQL/독립 transaction을 유지한다.
+
+원본 recovery에서 ValueError10건이 관측됐다. native 예외를 무조건 전체 replay 중단으로
+처리하면 이 구간도 재생하지 못한다. schema4 종료 receipt에는 허용된 안정적인 오류 code와
+반환 bool/count를 기록한다(임의 exception text는 제외). 기대한 failure는 실제 rollback/연결
+종료까지 확인하고 다음 녹화 호출로 진행한다. 성공↔실패, 오류 code, 반환값이 달라지면
+source outcome mismatch다. 인프라/연결/소유권 상실이나 예상 밖 실패는 즉시 admission을
+닫고 실제 in-flight를 drain한 뒤 복구한다. 동일 class의 모든 ValueError를 같은 실패로 보지 않는다.
+
+### 4. 구현 순서와 월요일 준비 완료 기준
+
+2026-10-10 native account/VI 연결: offline v3 실행기는 녹화된 계좌7종과
+`append_vi_events`만 명시적으로 추가한다. 원본 capsule의 trace/alias domain과 봉인된
+checksum, 선택한 owner frontier의 복원 token hash를 restore 전에 비교한다. 준비한
+capsule의 wall/monotonic pair로 trace 시작 clock을 검증하며100ms 밖이면 DB 연결 전에
+거부한다. 초기 lease와 이후 acquire/write/release는 같은 frontier 해석을 사용한다.
+원본 failure receipt의 allowlisted code와 정확한 exception class가 모두 일치해야
+native unwind 뒤 다음 호출을 진행한다. 성공/실패 및 bool/count/type 불일치는 admission을
+닫고 drain한다. 계좌 dict 반환은 type/count 관측이며 내용 검증은 최종 저장 비교가 별도로
+필요하다. capsule에 없는 기존 intent/event/snapshot, 중간 설정/credential activation과
+WS 원인 전달은 만들어 넣지 않는다. 동일 초기 fixture의 A/B와 source 결과 일치 여부를
+구분하며, 초기 상태가 부족하면 실패/불일치를 미완료로 보고한다. offline CLI의 v3 선택은
+아래 연결 단계에서 구현했으며 public 실행 API와 native scheduler gate는 구분한다.
+
+검증 결과: 비활성 후보 `2026.10.10-recorder-account-native-v1-ceee5007484ab444`의
+NAS job `e08f3c39f54dac078536bf65c9df069c`에서 관련78개가 오류/실패/skip0으로
+통과했다. source readonly capsule→실제 계좌7종/VI 통제 호출12건→지연 영속화/reader→
+봉인한 같은 v3 baseline의2회 native Replay를 연결했다. 매회 COMMIT9/rollback3 및
+revision/lease 기대 실패3건, 원본 문서 내용과 반복 계좌/VI 내용·sequence 일치, seal 중
+실패의 atomic rollback과 마지막 baseline/connection drain을 검사했다. 첫 후보는 비교
+모듈과 repository owner context가 누락돼 실패했고 cleanup 뒤 exact inventory를 보완했다.
+운영 앱/DB/활성 소스는 보존했다. 증거:
+`artifacts/recorder-account-native-postgres-proof-20261010.json`. 이 gate는 통제 입력의
+정확성이며 기존 장중 누락분 복원, 전체 앱 causal Replay 또는60분 수용 완료가 아니다.
+
+2026-10-10 Replay 등록/명령 연결 단계:
+
+- 확인된 원인: operator가 block root를 기존 단일 payload 파일로 해석했고 CLI가 baseline1/2만
+  받았다. CLI의 입력 hash 생성도 BlockPayloadReference를 JSON으로 직접 직렬화했다.
+  검증 기준은 실제 physical bundle 등록/재검사, 손상·순서·경로·offset 거부, context/clock/미지원
+  method의 DB 전 거부 및 같은 capsule/frontier로 seal→명령 run2회→내용/sequence/복구 일치다.
+- 최소 수정: root stdlib 경로는 후보 코드를 import하지 않고1MiB part/16MiB physical file/
+  128parts·128MiB logical bounds와 연속 layout, part/root hash를 검사한다. 복사한 파일도 사전
+  hash와 비교하고 등록 후 immutable hash를 유지한다. schema2/3 legacy 파일은 유지한다.
+  v3 baseline은 aware origin·context checksum/frontier hash와 trace 신원을 등록하고 worker는
+  v3에도 source-origin을 전달한다. v3 seal은 명시 trace/window/선택을 요구하며 context 및
+  selected native owner frontier를 검증한 뒤 기존 seal transaction을 사용한다. run도 같은
+  검사를 수행하고 기존 내부 실행기가 봉인 hash/복구를 다시 확인한다. empty-v1 의미는 그대로다.
+- 블록 참조 입력 hash는 descriptor/trace/logical hash만 직렬화한다. hashing 때문에 대형
+  payload를 다시 펼치거나 실제 호출을 나누지 않는다. 관련 로컬105건 통과 뒤 추가 거부/worker
+  계약을 포함한72건/최종107건 통과(겹치는 그룹). 실제 durable reader의 capture-end 경계
+  별도1건 통과. 첫 NAS104 검사는 fixture가 capture 밖150ms를 요청하고 지원 파일2개가
+  빠져 실패했다(loading errors3); 정리 후 실제 capture end와 exact inventory로 보완했다.
+  수정 후보ccdb7b28a75e9f47/job ec1dc3a8650f88be3e9b98f194283a85는 NAS107개를
+  오류/실패/skip0으로 통과했다. CLI seal→run2회에서 매회 native12/COMMIT9/rollback3,
+  기대 실패3건·관측 누락0·원본 문서 및 반복 계좌/VI 내용/sequence 일치·atomic failed seal
+  rollback·마지막 baseline 복원/owned connections0을 검증했다. cleanup/final fence와 운영
+  보존도 확인했다. `artifacts/recorder-cli-postgres-proof-20261010.json`에 원본 실패와 최종
+  통과를 함께 보존한다. 이 시험은 전체 운영 writer 경합이나20초 지연 개선 증거가 아니다.
+- root helper 갱신 번들 `dbec3df99022816a`는 운영 source/active를 보존하는 후보와 고정
+  checksum bootstrap으로 준비했다. 기존 제한 권한은 root helper 교체를 허용하지 않으므로
+  관리자 실행이 필요하다. bootstrap은 root Linux gate 뒤 기존 installer로 helper만 갱신한다.
+  초기 ledger/mid-activation, 실제 PostgreSQL 대형 native 호출,60분 CPU/RSS/queue·수신 비용,
+  녹화 운영 후보 적용과 월요일 one-shot은 이 단계의 성공만으로 완료하지 않는다.
+
+1. bounded large-copy/블록 RAM·영속 저장·reader 및 stop/drain을 함께 구현한다.
+   typed 왕복, 복사 후 원본 변경, 단일 호출/단일 transaction, 블록 누락·순서·hash·한도,
+   저장 중 실패와 마지막 시각의 호출을 검사한다. 기존2/3 reader도 회귀한다.
+2. typed account/lease projection, 실제 actor, context capsule, baseline v3와 source clock,
+   VI/Shadow/native 실행 목록 및 기대 failure 처리를 연결한다. raw token 부재, 같은 alias,
+   경쟁 소유자·갱신·만료·wrong-owner release·control revision 실패·복구 rollback·VI 중복과
+   accepted_sequence를 실제 전용 PostgreSQL에서 검증한다.
+3. 동일 녹화 인자·동일 초기 DB를 direct native와 capture→durable→reader→native 두 경로로
+   비교한다. 호출/COMMIT/rollback 수, 내용·revision·결과·순서가 같아야 한다. 입력 재생
+   기능의 정확성 시험과 운영 병목 개선 수치를 구분한다. lease 시간 기반 시험의 clock도 같다.
+4. 두 store 큰 복사 중 collector 수신, store3개 이상 겹침, 실제 호출 형태의 큰 봉/Shadow,
+   회복/lease/VI가 섞인60분 및 burst를 검증한다. 10월8일 원문이 없는 구간은 fixture라고
+   명시한다. 가속된60분 입력은 capacity 검사이며 실제60분 연속 운전·TTL·종료 시험과 다르다.
+   rejects/drops/censored=0, 원래 입력 창 유지, CPU/RSS/cgroup/packing backlog 및 producer
+   지연을 OFF/ON으로 비교한다. 계좌·lease 추가가 recorder 때문에 수신을 끊지 않는지 확인한다.
+5. 녹화기 범위만 포함한 immutable NAS 후보를 만들고 exact-source gate→적용→health/
+   capabilities/idle 복구를 확인한 후 NAS one-shot을 등록한다. 다른 미배포 SQL/P0 변경을
+   전체 HEAD 복사로 섞지 않는다. `nas_scheduled_trace.py`는 schema4/account_inputs/limits/
+   exact build를 검사하고, master TTL은 입력 길이+시작 여유+drain 여유로 산정한다.
+   불명확한 POST 응답에 재시작/재시도를 하지 않는 기존 규칙을 유지한다.
+
+설계/codec 통과, 실제 NAS 수용, 배포, 예약, 월요일 수집, 장후 영속화 및 replay reader
+통과는 별개 상태다. NAS 수용·배포·예약까지 확인해야 **녹화 준비 완료**, 실제 수집과
+영속화·reader까지 확인해야 **녹화 성공**이다. 준비 완료를 실제 녹화 성공으로 보고하지 않는다.
+
+## 2026-10-10 실행 원칙: 수정과 동일 입력 A/B까지 한 사이클
+
+확인된 병목은 근본 원인 전체가 확정되기 전에도 안전한 최소 개선을 시도한다.
+실험 전에 가설, 지지/기각 관측값, 수정 대상, 증거가 부족할 때 실행할 다음 판별을
+정한다. 동일 가설 반복은 원칙적으로 2~3회 이내다. 결과가 일관되면 수정/다음
+판별로 진행한다. 각 실험은 개선 확인, 효과 없는 변경 철회와 다음 가설 검증,
+또는 구체적인 안전성 차단 요인과 해소 작업으로 끝낸다. `미확정`은 완료 상태가 아니다.
+
+현재 장중 COMMIT 10~20초는 **P1 미해결**이다. realtime 23건의 디스크 p95
+284~401ms/RAM 약0.57ms는 저장 비용 차이를 보이지만 원래 장기 지연을 재현하지 못했다.
+추가 RAM/디스크 재비교 대신 아래 판별과 이미 구현된 최소 SQL 개선의 A/B를 진행한다.
+
+| 가설 | 지지/기각 기준 | 수정 또는 다음 행동 |
+| --- | --- | --- |
+| COMMIT에서 WAL/I/O 대기 | 동일 PID/backend 시작시각의 COMMIT 구간 내부 activity 표본에 IO WALWrite/WALSync 등 관측 | 저장량/불필요한 쓰기를 줄일 후보 검토. 장치별 원인과 원래20초의 직접 원인은 별도 증거 필요 |
+| 잠금/Writer 경합 | 동일 COMMIT 구간 Lock/LWLock 및 blocking PID, 실제 native 호출 중첩 관측 | 해당 소유자/공통 경계 추적. 미관측은 기각이 아니며 기록에 없는 Shadow/lease/VI를 복원하지 않음 |
+| 분봉 배치 비교의 최초 가설 (기각) | 실제 함수 AST 차이와 SQL 감소 확인 | 기준선에도 같은 분봉 배치가 있었다. 후보 차이는 초봉 저장이므로 분봉 개선 A/B로 사용할 수 없음 |
+| 독립 dataset 행의 반복 SQL | market_state 2행/call의 SQL5→3, execute/대기 감소와 내용/metadata/saved_at 보존 | 같은 트랜잭션 안의 독립 키만 bounded multirow로 저장. 중복 canonical/metadata 키, research revision, cache invalidation, 큰 text는 순차 경로 유지 |
+| 공통 advisory scope 요청 왕복 | 분봉 저장/확정4회에서160개 scope SQL를 같은 키/정렬/seed로4개까지 감소, execute 감소 | stock/day·research source/subject 공통 helper만 bounded ordinal 배열로 변경. 실제 첫 scope 차단 순서·모든 잠금의 COMMIT/rollback 수명·동시 revision 정합성을 검증 후 같은 입력 A/B |
+
+관측 기준선은 `2026.10.10-replay-commit-observer-v5-c6ef7b891d08a86f`다.
+최초 비교 후보 `2026.10.10-replay-minute-batch-observer-v3-24c484231f61bc1f`는
+채택하지 않았다. 실제 차이는 초봉 VALUES 분할 UPSERT였고 SQL253→256,
+execute 합514.280→811.065ms였다. 분봉 두 함수는 기준선과 AST가 같았다.
+이 결과를 분봉 개선으로 해석하지 않는다. 이후 dataset 후보는 원래 초봉 코드를 보존한다.
+둘 다 기존 replay lease 관리 연결을 native 실행 동안 읽기 전용 activity 관측에 사용한다.
+관측 thread를 완전히 drain한 후에만 관리 연결/초기 DB 복구를 재사용한다.
+관측 SQL/시간은 native writer SQL과 분리하며 동일 관측 비용을 A/B 양쪽에 적용한다.
+표본 누락/상한/실패를 공개하고 NULL wait를 CPU 대기로 해석하지 않는다.
+초기 observer는 backend_start NULL에서 중단돼 WAL/lock 판정이 불완전했다.
+NULL 식별 행을 건너뛰되 필드별 수와 incomplete를 유지하도록 보완했다. 후속 기준선은
+4,441 probe/error0/drain 완료, 식별 불가 backend_start56행을 보고했다.
+같은 PID/COMMIT 구간에 WalSync41/WalInitSync4/NONE1 표본, 차단 PID0,
+실제 native 동시성 최대1이었다. 점 표본 수는 대기 시간/기여율이 아니다.
+원래 장중 다중 writer20초를 확정하거나 lock 후보를 기각할 자료는 부족하다.
+잠금 요청 배치는 잠금 대기 원인을 제거했다고 주장하지 않는다. 같은 잠금을 획득하는
+클라이언트 왕복 비용만 줄인다. 입력 ordinal만 ORDER BY에 쓰고 잠금 표현식은 정렬
+키에 넣지 않으며 LIMIT도 쓰지 않는다. [PostgreSQL17 SELECT list 규칙](https://www.postgresql.org/docs/17/sql-select.html#SQL-SELECT-LIST)
+과 실제 첫 잠금 차단/후속 잠금 미획득/해제 전 소유권 검사를 함께 근거로 사용한다.
+호출은 connect 이전에 시작하므로 backend_start 검사는 COMMIT 시작 시각을 기준으로
+보완했다. 이미 저장된 원시 표본을 수정하지 않고 drain 후 PC에서 같은 evaluator로
+양쪽 재분석한다. 해당 평가 함수의 hash와 실행 후보 hash를 별도로 남긴다.
+
+조건은 Oct8 trace `20261007T235957Z-e8cb574bf964`, realtime 23건,
+window `[242.89889192581177,362.89889192581177)`, empty-v1 baseline,
+concurrency8/disk/recorded_operations다. baseline ID/입력 hash/선택/이미지/리소스/
+최종 내용과 revision 연결/sequence를 비교한다. 운영 일시정지→전용 DB 실행→baseline
+복구/정리→동일 운영 release 정상 재개를 확인한다. 운영 배포와 구분한다.
+
+완료 지표는 native SQL/COMMIT 수와 단계별 p95/최대값, native 작업 시간/처리량,
+actor/worker 대기와 입력 시작 지연, worker CPU/RSS, 저장 내용/revision 정합성,
+관련 native PostgreSQL 회귀다. RSS 최고값은 프로세스 생애 최고값이며 실행 중
+전체 앱 큐/PC UI/운영 프로세스 CPU는 이 부분 replay로 측정하지 못한다.
+SQL 감소만 있고 지연 효과가 불분명하면 SQL 비용 개선만 한정해 보고하며 P1은 유지한다.
+효과가 없거나 계약이 깨지면 해당 변경을 철회한다. 미확정 장기 대기 조사 때문에
+확인된 반복 비용 개선을 무기한 보류하지 않는다. 전체 앱과2~5배 안정성은 별도 후속 gate다.
+
+### 완료한 두 SQL 비용 개선과 다음 판별
+
+dataset 후보 `b586790528cf4470`는 baseline 대비 SQL55→33,
+execute합41.350→34.710ms/p95·최대4.383→3.477ms다. 공통 scope 후보
+`d3701beb8cf796df`는 dataset 후보 대비 stock/day 요청160→4,
+분봉 SQL96→18/확정94→16, 전체SQL231→75다. 대상4call execute합
+159.746→138.532ms(-13.28%)/p95·최대42.236→37.246ms를 확인했다.
+각각의 정확한 후보 native gate53/76건(오류·실패·skip0), 최종 내용/revision 연결/
+sequence와 동일 입력·baseline·일정 보존으로 두 변경을 유지한다. COMMIT는 각각23회다.
+전체 wall1663.267→2100.012ms, COMMITp95250.629→265.810ms/최대495.464→344.431ms로
+원래10~20초 해결이나 전체 처리량 개선을 주장하지 않는다. CPU/RSS/작업 대기 전체값은
+CURRENT_STATUS와 `artifacts/commit-wait-scope-lock-batch-proof-20261010.json`에 남겼다.
+대상4call만의 wall도1021.080→1048.964ms로 줄지 않았다. 고정23/120s 일정과 busy-service
+rate를 구분한다. 운영 pause224.361s 뒤 baseline/정리/동일 release 재개를 확인했다.
+
+다음 가설은 현재 realtime-only의 native 중첩 최대1이 원래 COMMIT중첩8의 경합 조건을
+빠뜨린다는 것이다. source window에는 실제 REST30건도 있다. 없는 입력은 복원하지 않고
+realtime23+rest_market30의 실행 자격을 먼저 검사한다. 선택 인자의 무결성/지원 method/
+초기 상태·source clock 계약을 통과하면 동일 입력을 함께 실행해 native중첩, SQL/COMMIT
+구간의 WAL/Lock/blocker를 단독 결과와 비교한다. 경합 관측이 있으면 해당 공통 소유자를
+추적하고, 지연이 없으면 원래 DB 내용·제외 producer·디스크 부하 차이를 구체화한다.
+preflight는 성능 실험이 아니며 native operation0/운영 일시정지 없음이다.
+query cache의 안전한 실행에는 v2 복원 상태와 소유 source clock이 필요하다. host wall time,
+옛 저장 결과 seed, fabricated lease로 우회하지 않는다. 해당 조건이 차단되면 구체적인
+오류/정리/필요한 source-clock 경계를 남기고 P1을 미해결로 유지한다.
+
+실제 preflight53건과 기준선 job8899a124482f2ed48fce8ddae307215f를 실행한 결과,
+REST30건은 모두 `load_documents` READ였다. workload 이름을 Writer 증거로 삼은 가설은
+기각한다. writer23/동시 write·COMMIT 최대1, 전체 native 중첩2는 reader 포함이다.
+write COMMITp95/max459.643/696.772ms, WAL 표본30 WalSync/18 WalInitSync/2 NONE,
+blocking PID0, sampling identity 누락23행/incomplete다. 원래20초 원인은 미해결이다.
+53건 전체 COMMITp9533.981ms는30 read COMMIT 포함으로 분모가 바뀌므로 개선 수치가 아니다.
+REST actor 미확정 때문에 timing gate=false이고, 시각 시작 지연 최대4.373ms와 구분한다.
+입력 누락0/관측53/rollback0, baseline/cleanup/fence/동일 운영 재개(pause225.819s)를 확인했다.
+추가 writer 조건이 없으므로 이53건의 수정 후 반복은 생략한다. 이미 완료한23건 scope
+A/B는 유지한다. 다음은 녹화된 shadow/market_events를 실제 method·필수 상태별로 검토해
+추가 writer가 존재하는 조건을 선택하는 것이다. 없는 lease/VI/거부된 입력은 복원하지 않는다.
+
 ## 2026-10-09 전체 앱 최적화의 우선순위와 현재 판정
 
 사용자가 지정한 순서는 P0 전달·정합성·복구 → P1 여러 workload의 공통 장기 지연 →
@@ -250,6 +821,44 @@ metadata queue unfinished0이었다. 결과는 `market-event-worker-failure-proo
 원본 녹화/운영 DB/실제 API·주문은 사용하지 않았다. 이 증거는 현재 worker의 단일
 저장 실패 처리만 입증하며 재연결/후행 신호 복구·실제 장중 발생·성능까지 일반화하지 않는다.
 
+### 2026-10-10 signal/metadata worker ACK와 실패 보존
+
+현재 PC main에 기존 worker의 접수 입력/재시도 소유권을 추가했다. signal의 시각·조건을
+queue admission에서 고정하고, 기존 state lock 안에서 한 번 만든 revision/current를 JSON으로
+동결해 native 실패/COMMIT ACK 유실 뒤 같은 입력으로 재시도한다. 각 attempt의 기존 독립
+store connection/transaction 및 revision key/first-write-wins는 유지한다. metadata는 사본을
+저장하고 ACK 뒤 RAM·구독을 공개한다. REST/읽기 실패도 접수 queue 작업을 유지한다.
+
+owned input task는 실제 thread 완료, RAM publication, metadata admission까지 소유한다.
+활성 worker의 취소는 현재 입력을 버리지 않으며 public 호출자는 완료 뒤 취소를 전달한다.
+close는 admission 차단→signal queue→직접/worker 소유 작업→metadata queue→native=0을
+확인한다. 10초는 경고이며 지속 DB 오류에서는 종료 성공을 반환하지 않는다. start 전 직접
+signal 호출이나 취소된 idle worker 때문에 큐 owner가 없으면 close 소유자가 제공한다.
+이것은 정상 process drain의 보완이며 강제 종료/전원 장애의 RAM 입력 복구는 아니다.
+cohort_collection은 queued/unfinished/owned/native 및 실패·overflow 상태를 조건 REG와 별도로
+공개한다. 기존 bounded queue/hub drop 정책은 유지하며 overflow를 무손실로 표시하지 않는다.
+
+기능을 이해하는 production 파일은 기존 market_events/store/replay runtime 경계에 머문다.
+queue→판정→native 호출에 owned-input/retry helper가 추가됐으며 이들은 취소·재시도·ACK
+publication 수명을 소유한다. 새 manager/service, DB schema, pool, 영속 outbox는 만들지 않았다.
+원본 4efd672 Git blob과 당시 checkout은 EOL만 다르고 소스 내용/hash를 검증했다.
+동일6개 SQLite/fake-REST 실패/ACK 유실/취소 gate는 원본에서 failures6/errors0, 수정 후 통과다.
+추가 gate는 queued midnight, active-worker cancel, 지속 DB 장애와 pre-start drain을 포함한다.
+PC 직접38 + capture/REST/runtime/collector79 + 등록 P0 profile41은 중복 제외136개다.
+잘못 지정한 module3개의 로딩 실패는 성공에 포함하지 않고 실제 module로79개를 재실행했다.
+기존 main CI의 누락된 P0 test module4개와 새 worker를 정규 profile에 등록했고 실제 이전
+CI base-ref의 coverage gate가5개 전부 통과했다. 새 remote CI는 아직 아니다.
+NAS v1 gate는 pre-start owner 공백으로 중단했고 cleanup_complete=true다. 그 공백을 실제
+SQLite로 재현 후 수정한 비활성 v2-cd91306e1afce7dc에서 전체67 gate가 통과했다.
+job b78c7dbd91ff6688b3c463c85f70cc98: failures/errors/skips0,
+cleanup_complete/post_job_fence_verified/active_release_and_containers_unchanged=true.
+분리 gate worker9/native14/인접44도 통과했으며 전체67과 중복이다. NAS 후보는
+base fact14/capture14를 유지하고 PC fact13/capture18과 같은 검사 범위로 간주하지 않는다.
+앞선 v2 job117cdd3c8fef55765afb558b8b14acdf는 미완료로 중단했으며 cleanup=true,
+worker_result_available=false다. 대기 원인은 미확정이다. 재실행 통과는 이 대기의
+원인 제거/재현 검증을 뜻하지 않는다. 운영 발생이나 전체 앱 성능 승인으로 일반화하지 않는다.
+원본 trace/운영 DB/활성 release와 두 운영 container는 이번 gate의 수정 대상이 아니다.
+
 #### 검토한 대안과 기각 이유
 
 현재 책임은 hub delivery → MarketEventService의 순차 수신/판정/DB ack → 사실 원장이다.
@@ -308,6 +917,68 @@ VI와 lease는 scalar 대기는 관측되지만 현재 recorded-operation 실행
 없었으며 cleanup을 확인했다. 실제 PG 시작 원인은 보고서에 없어 미확정이다.
 이는 최적화 결과가 아니다. 로그/상태 근거 없이 권한·대기 시간 설정을 임의 수정하지 않는다.
 
+2026-10-10 최소 진단 보완: 기존 operator가 PG start/readiness 실패 시 cleanup 전에
+job label을 확인하고 Running/OOMKilled/ExitCode/status, readiness 시도 수/경과 시간,
+마지막100줄·최대64KiB의 hash와 고정 오류 표식을 남긴다. 로그 원문/환경/비밀번호/host
+경로는 반환하지 않는다. 표식만으로 원인을 단정하지 않는다. 기존60초 제한과 정리/재개
+순서를 유지하며 로컬 operator/packaging49 통과다. 비활성 operator 후보60873560aea7b34a,
+관리자 번들d93e3d717ccc6d47을 준비했고 앱 source/build/active는 바꾸지 않았다.
+후보 NAS portable gate job93a1063c8dc30612f7837be7bb8ba9c5는47건 통과(오류/실패/skip0),
+cleanup/post-job fence/운영 보존을 확인했다. 이는 모의 실패·진단 계약 검사이며 실제 disk
+시작 실패 원인을 얻은 결과나 관리자 Linux fd/ACL gate 통과가 아니다.
+관리자 Linux68 OK/helper 갱신 결과와 설치 supervisor hash 일치를 확인하고 동일 선택
+disk 대조를 재실행했다. job50d3a349dd961f0eb5fb8b8723d88c12: readiness117회/60.490초,
+PG exit1/OOM=false/permission_denied, cleanup=true/server_restarted=false다.
+전체83바이트 로그 hash02c107853777eb0491de9c248334e246a4630483dbbf9e3585407a9b38bf193a는
+PGDATA mkdir 권한 거부 문장과 정확히 같았다. 실패 작업은 확인했으나 거부 UID/소유권/ACL/
+userns는 아직 구분되지 않는다. replay/운영 pause에 도달하지 않았고 운영 active는 정상이다.
+후속 고정 역할 UID/GID/mode·container user/userns 진단을 추가해 로컬50과 NAS portable48
+(jobf6f414a7bb60c0e08f6e3f59341b9d16, 오류/실패/skip0, cleanup/fence/운영 보존)을 통과했다.
+후속 번들e4aed8ab8bd26442/후보56a2a41cf1be83b9는 권한/소유권이나 timeout을 바꾸지 않는
+진단 후보였으며, 사용자의 관리자 Linux69 OK/helper 갱신과 설치 hash 일치를 확인했다.
+동일 disk job29286678b2c75e5f90aa9667e5a0dff5가 같은83바이트 mkdir 권한 거부를 재현했다.
+117회/60.422초, PG exit1/OOM=false, data_root root:root/0700, pgdata UID70/GID0/0700
+존재, password root:root/0600, userns=false다. cleanup=true/server_restarted=false를 확인했다.
+UID70이 root0700 상위를 통과할 수 없는 권한 구조를 확인해 생성된 임시 data_root만
+root 소유0711로 설정하는 후보를 만들었다. private 상위/비밀번호/PGDATA와 소유권은 유지한다.
+fd/no-follow·root owner·non-writable 검사 뒤 fchmod와 모드 적용 확인을 한다(mkdir 인자는
+umask077 때문에 충분하지 않음). 로컬51 통과; 실제 같은 disk 전후 비교는 관리자 반영 후다.
+수정 후보95f22a1d0c5913af/번들6e7efb301580f541 준비 완료; NAS portable49 통과
+(job60c99d718bf5d055f082c525fe2cce05, 오류/실패/skip0, cleanup/fence/운영 보존 확인).
+RAM 기반 모의 계약 검사이며 실제 같은 disk 재실행의 성공 증거로 사용하지 않는다.
+disk 성능 대조 및 P1 공통 COMMIT 지연 attribution은 여전히 미완료다.
+
+관리자 Linux70/helper 갱신과 설치 hash34c861fe8747a6ce 일치를 확인했다. 동일 disk
+job42e7cb83fe64b0f0a33a7264c0946ddc는 parent0711, PG13회/6.780초 준비 뒤 성공했다.
+realtime23/native23/SQL253, 입력 생략0, source outcomes match/DB observation complete다.
+baseline/cleanup/post-job fence와 같은 active 정상 재개를 확인했다. 정지223.929초의
+수집 공백을 예상하며 실시간 무손실은 미검증이다. 이 결과로 임시 PG startup 수정을 검증했다.
+이전 RAM과 동일 소스/input/baseline/selection, 저장 내용/revision 연결과 sequence가 같다.
+COMMIT p50/p95/max는 disk20.531/401.139/684.007ms, RAM0.255/0.559/6.083ms다.
+writer wall 합계는 disk2960.836ms/RAM690.174ms지만 독립 실행 단일 표본이다.
+disk input_timing_preserved=false를 유지한다: actor56 dataset 시작113.875ms 지연이
+100ms gate를 초과했고, actor55 document의 native336.475ms/COMMIT329.084ms 종료를
+기다린 actor_wait113.490ms가 대부분이다. concurrency/worker/scheduler 대기는 작았다.
+동일 환경 RAM 반복 job39e14ae7a90c3c9a74980c3e7aba0423 성공:23입력/native23/SQL253,
+COMMIT p50/p95/max0.245/0.567/5.820ms, writer 합680.536ms, timing preserved=true,
+max start lag2.119ms다. 내용/revision 연결/sequence와 입력·초기상태·선택 조건이 같다.
+baseline/cleanup/fence/운영 재개를 확인했다(정지221.078초).
+최종 disk 반복 job75f42889e6609715480e43050bfc2f83도 성공했다: PG10회/5.251초 준비,
+23입력/native23/SQL253, COMMIT p50/p95/max20.722/284.048/1189.255ms,
+writer 합2659.420ms, execute 합493.905ms, COMMIT 합1975.591ms다.
+input_timing_preserved=true(max start lag1.770ms), 저장 내용/revision 연결/sequence와
+소스·입력·baseline·선택 조건 일치를 확인했다. baseline/cleanup/fence/같은 active 재개,
+정지224.521초를 기록했다. 세 실행의 승인 정지 합669.528초며 수집 공백/무손실 미검증을 유지한다.
+Disk→RAM→disk에서 두 disk의 관측 COMMIT이 RAM보다 길었고, 마지막 RAM/disk 쌍은
+입력 timing gate를 모두 통과한다. 최초 disk 실패 timing gate와 최대 start lag113.875ms도
+보존한다. 반복 측정은2회 disk/2회 RAM(이전 RAM 포함)로 장기 부하 분포가 아니다.
+같은 PG/worker 이미지·CPU affinity·worker 메모리4GiB 조건도 확인했다. 격리 PG는
+shared_buffers16MB/max_connections20이며 운영 DB 설정/원래 행 상태를 재현한 조건이 아니다.
+타이밍 gate를 완화하거나 실패 표본을 제외하지 않는다.
+WAL attribution/wait owner/host I/O 증거가 없고 전체 writer/원래 DB 상태도 빠져 있어
+공통10~20초 stall 원인을 확정하거나 해결한 결과가 아니다.
+증거: `artifacts/common-bottleneck-disk-ram-proof-20261010.json`.
+
 동일 선택의 RAM 대조는 job `a5208bed012d72e3705be7471e8ceceb`에서 완료됐다.
 input hash `2de64361e2511724da8afb5954e82f503935e3a4df3f16a18a2ad27980a1bf07`,
 empty-v1 baseline `56e88db7bc556afdd8a64a5800a47a1f6663f339aa299cb9f462a4fb804b56a3`,
@@ -318,7 +989,7 @@ source outcomes match, DB raw 계측 유실·잘림 0이다. COMMIT p50/p95/max�
 무손실을 주장하지 않는다. 증거: `artifacts/common-bottleneck-realtime-ram-proof-20261009.json`.
 
 이는 해당 store 입력 단독의 RAM 조건 대조일 뿐 새 최적화의 before/after가 아니다.
-디스크 대조가 실패했고 다른 writer와 원래 DB 상태도 빠져 있으므로 장중 10~20초 대기의
+당시 디스크 대조가 실패했고 다른 writer와 원래 DB 상태도 빠져 있으므로 장중 10~20초 대기의
 원인을 배제하거나 해결했다고 해석하지 않는다. collector 로직은 재생하지 않았고
 source_state_equivalent=false, baseline clock/reference adapters warning도 유지된다.
 
