@@ -413,7 +413,10 @@ class FinalExecutionTests(unittest.TestCase):
         with patch.object(rp, 'research_implementation_hash', return_value='f'*64):
             with self.assertRaisesRegex(ValueError, 'changed before execution'): self.execute()
         changed = replace(self.prepared, candidates=(replace(self.request,
-                          evaluation=self.fixture.fixture.batch.request.evaluation),))
+                          evaluation=replace(
+                              self.request.evaluation,
+                              warmup_seconds=self.request.evaluation.warmup_seconds + 1,
+                          )),))
         with self.assertRaises(ValueError):
             rp.execute_final_holdout_evaluation(changed,owner_token=self.owner)
         self.assertEqual((),self.repo.load_final_holdout_executions(self.prepared.batch.batch_id))

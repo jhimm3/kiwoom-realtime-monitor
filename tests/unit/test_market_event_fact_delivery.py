@@ -58,7 +58,7 @@ class MarketEventFactDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         self.temp.cleanup()
 
-    def held_save(self, *, ack_loss=False, failure=False):
+    def held_save(self, *, ack_loss=False, failure=False, hold_timeout=10):
         entered, release = threading.Event(), threading.Event()
         self.releases.append(release)
         append, attempts = self.store.append_upper_limit_facts, []
@@ -66,7 +66,7 @@ class MarketEventFactDeliveryTests(unittest.IsolatedAsyncioTestCase):
             attempts.append(json.loads(json.dumps(values)))
             if len(attempts) == 1:
                 entered.set()
-                if not release.wait(10):
+                if not release.wait(hold_timeout):
                     raise TimeoutError("held fact was never released")
                 if failure:
                     raise OSError("injected statement failure")
@@ -86,7 +86,9 @@ class MarketEventFactDeliveryTests(unittest.IsolatedAsyncioTestCase):
         fixture = [event("000660", 130000)] + [event("005930", 120000) for _ in range(1000)]
         digest = hashlib.sha256(json.dumps(fixture, sort_keys=True).encode()).hexdigest()
         self.assertEqual("93d721686645c21262f8021b29ffe9f25f474a3b2eea4f2b23e8e18a1dec3498", digest)
-        patcher, entered, release, attempts = self.held_save()
+        # Hosted Windows may round each 1ms yield to a timer tick. Keep the
+        # commit held throughout all 1,001 inputs without injecting a timeout.
+        patcher, entered, release, attempts = self.held_save(hold_timeout=60)
         with patcher:
             self.publish("005930", 120000)
             await until(entered.is_set)
@@ -97,6 +99,8 @@ class MarketEventFactDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(.001)
             await until(self.subscriber.queue.empty)
             self.assertEqual(0, self.subscriber.dropped_events)
+            self.assertEqual(0, self.service._fact_failures)
+            self.assertEqual(1, len(attempts))
             self.assertEqual(3, len(self.service._pending_facts))
             self.assertEqual([], self.rows("000660"))
             self.assertFalse(self.service._tasks[0].done())

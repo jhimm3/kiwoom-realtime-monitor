@@ -56,10 +56,10 @@ class Top20ProgramPostgresTests(unittest.IsolatedAsyncioTestCase):
             Mock(), RealtimeHub(), blocked,
             now_provider=lambda: datetime.fromisoformat("2026-10-06T10:01:00+09:00"),
         )
-        service._pending_program_snapshots[first] = _snapshot(first)
+        service._program_snapshots._pending[first] = _snapshot(first)
         service._tasks = [asyncio.create_task(service._index_loop())]
         self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 2))
-        service._pending_program_snapshots[newer] = _snapshot(newer, "100101", 77)
+        service._program_snapshots._pending[newer] = _snapshot(newer, "100101", 77)
         closing = asyncio.create_task(service.close())
         try:
             await asyncio.sleep(0.05)
@@ -78,7 +78,7 @@ class Top20ProgramPostgresTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1, len(rows))
             self.assertEqual(_snapshot(code, clock, amount)["payload"], rows[0]["payload"])
         self.assertEqual(peer_before, self.store.load_dataset_snapshots("program_flow", peer, 10))
-        self.assertEqual({}, service._pending_program_snapshots)
+        self.assertEqual({}, service._program_snapshots._pending)
 
     async def test_close_drains_commit_ack_loss_and_preserves_independent_peer(self) -> None:
         await self._run_shutdown("after_commit")

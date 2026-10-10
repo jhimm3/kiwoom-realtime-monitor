@@ -1,5 +1,14 @@
 # 남은 작업과 보류 사항
 
+**2026-10-11 Git main integration:** recorder e78739e and upstream aac495b are
+integrated; source build2026.10.11-recorder-route-merge-v1. Related local API, scheduler,
+recorder, market-event, audit and CI inventory gates passed (CURRENT_STATUS has counts).
+Actual NAS/PostgreSQL/hosted acceptance of this combined source remains unrun. Git
+integration does not replace the deployed recorder or alter Monday's existing plan.
+Native account/activity integration requires the explicit disposable NAS operator job;
+its separate nas_operator_owned catalog route is not counted as a hosted CI pass.
+
+
 **2026-10-10 녹화기 배포·월요일 예약 완료:** NAS active6390e0b7de1a5189의 실제 health/build/source
 정상과 운영 PG 보존을 확인했다.10/12 08:59:50~09:59:50 KST60분 녹화/20:10 저장을
 5개 input flag로 예약했다. PID2815·계획/소스 hash·SSH 종료 후 동일 프로세스 확인, 현재 제어 OFF.
@@ -180,6 +189,624 @@ baseline/cleanup/fence/운영 복구 확인. 다음은 workload 이름이 아닌
 원래 없는 Shadow/lease/VI 입력은 재구성하지 않는다. 상세 가설/판정/완료 지표는
 RECORDED_WORKLOAD_EXPERIMENT_DESIGN 최신 절을 따른다. 전체 앱2~5배 안정성은 후속 gate다.
 
+**2026-10-11 현재 마감 상태:** API 라우트/WebSocket, 서버 수명 A+B, 저장 계약, TOP20 writer,
+PC 종료 시 마지막 저장 실패 보완을 포함한 현재 구조 변경은 사용자 Windows 환경의 최종
+`all-local` 3,758/3,758건·272/272 worker 통과로 로컬 회귀까지 완료했다. 실패·오류·skip·미실행·
+잔류 자손은 0이다. 이번 작업 트리의 hosted GitHub CI, 실제 PostgreSQL, 실행 PC 앱 수동 확인은
+아직 하지 않았다. 변경은 미커밋이며 main 병합·NAS 배포도 별도다. 다른 writer job의 실패 보존 정책과
+간헐적 Windows rename 원인 조사는 별도 보류다. 상세 실행 증거는 `CURRENT_STATUS.md`의 최신 항목이다.
+아래 날짜별 진행 기록의 “남은 경계/전체 회귀 대기” 문구는 당시 상태를 보존한 이력이다. 현재
+미완료 항목으로 읽지 않으며, 최신 완료·잔여 판정은 이 요약과 `CURRENT_STATUS.md`를 따른다.
+
+**2026-10-11 PC 수명 owner 유지·확인된 종료 실패 보완:** 추가 controller/공용 저장 계층을 만들지
+않고 기존 AppController의 최종 분봉/가격 저장 실패 판단을 보완했다. 마지막 실패가 복원한 pending이
+남으면 close를 보류하고 새 닫기 요청에서 같은 writer로 재시도한다. 정상/실패 native 재현과 변경 전
+동작에 대한 새 검사의 실패 탐지를 확인했고, 오래된 실패/최신 COMMIT 경합은 마지막 batch 범위의
+필터로 보완했다. SimpleNamespace/unbound 메서드에 결합된 fixture는 실제 owner로 바꾸고 assertion을
+유지했다. AppController/MainWindow 72/72 통과 후 TOP20 partial 재호출 차단의 직접 영향도
+AppController 29/29로 재확인했다. 상세 근거는 CURRENT_STATUS의 최신 기록을 따른다.
+당시 작성 시점 이후 최종 `all-local`은 위 최신 마감 상태처럼 통과했다. hosted gate와 실행 앱
+수동 확인은 남는다. 다른 writer job의 실패 종료/영속 보존 정책은 별도 범위로 남기고 이번 수정의 성공으로
+표시하지 않는다. main 병합·NAS 배포는 별도다.
+
+**2026-10-11 TOP20 0W 저장 owner 분리 완료(로컬):** writer가 pending·실제 저장 task·실패 병합과
+drain을 소유하고 단일 저장 메서드 계약을 사용한다. 서비스의 순위/구독/준비·저장 주기·전체 종료는
+유지했다. 관련 223/223, 기존 cold seed bytes/hash 일치, 결함 주입 3/3 탐지 및 consumer 감사 통과.
+상세 근거는 `CURRENT_STATUS.md`의 최신 기록을 따른다. 누적 전체 회귀 3,755건은 이 분리 전이며,
+TOP20 분리와 이후 PC 종료 보완을 포함한 최종 `all-local` 3,758건은 최신 마감 상태에서 통과했다.
+hosted CI·실제 PostgreSQL 검증은 아직 미실행이다.
+현재 API 라우트/WebSocket와 명시적 서버 수명 A+B는 앞선 단계에서 이미 구현·검증했으므로
+과거 handoff 표현을 새 미완료로 다시 실행하지 않는다. NAS 배포와 main 병합은 별도다.
+
+**2026-10-11 운영 설정 조립부 최소 저장 계약 적용:** 직접 저장뿐 아니라 후보 bootstrap/checkpoint/평가와
+safe-prefix 복구 page 조회까지 포함한 7개 메서드 `OperationalSettingsStore`로 마지막 운영 QueryStore
+타입 의존을 좁혔다. 기존 native backend와 실행 순서는 유지했다. 관련 API·후보·복구 회귀 105/105,
+기존 실행 본문 4개·계약 서명 7개 동일 및 consumer 정적 감사 통과. 누적 저장 계약 작업의 전체 회귀와
+`all-local` 3,755/3,755·272/272 worker를 통과했다. 실패·오류·skip·미실행·잔류 자손 0, 시작/종료
+지문 및 검사 전후 변경 파일 hash가 일치했다. GitHub hosted CI와 실제 PostgreSQL/NAS는 별도 미실행이다.
+진단 도구의 구체 backend 선택/상속·동일 타입
+검사와 database.py의 aggregate/backend 조립은 필요한 구현 의존성으로 유지한다.
+
+**2026-10-11 TOP20 최소 저장 계약 적용:** 직접 사용하는 10개 메서드 `AutonomousTop20Store`로
+서비스의 QueryStore 타입 의존을 좁혔다. 순위·구독·준비 정책과 native 저장·실제 drain·최종 flush는
+유지했고 TOP20/종료 회귀 74/74, 실행 본문 74개·계약 서명 10개 동일 및 consumer 정적 감사 통과.
+당시 남은 운영 설정 조립부도 위 후속 기록처럼 후보 복구 계약까지 확인해 축소했다.
+전체/환경 검증 상태는 `CURRENT_STATUS.md`에 기록했다.
+
+**2026-10-11 뉴스 서비스 전달 계약 확인·축소 완료:** 직접 호출과 세 하위 작업자의 저장 요구를
+합친 19개 메서드 `CentralNewsStore`를 선언해 서비스의 QueryStore 타입 의존을 좁혔다. job wakeup의
+선택적 감지, worker lifecycle·native transaction/revision·quota/cursor 흐름은 유지했다. 기존 함수
+본문 79개·서명 19개 동일, 네 관련 회귀 모듈 61/61 및 consumer 정적 감사 통과. 하위 worker의
+기존 Any 선언은 유지했으며 새 공용 계층·파일·전달 호출은 추가하지 않았다. 상세 검증 범위와
+실행하지 않은 환경 검증은 `CURRENT_STATUS.md`에 기록했다.
+
+**2026-10-11 MarketDataIngestor 최소 저장 계약 적용:** 실제 사용하는 7개 메서드의
+`MarketIngestStore` 계약을 같은 모듈에 선언했다. 기존 실행 본문 23개와 QueryStore 계약 서명 7개가
+동일함을 확인하고 TR 적재·일봉 coverage 회귀 35/35 및 정적 consumer 감사를 통과했다. native 저장과
+rollback/ACK 유실 후 재검증 의미는 유지했다. 다음 뉴스 서비스 검토에서는 직접 호출하는 7개 외에
+하위 작업자에게 전달하는 저장소 계약을 함께 확인하며, 직접 호출 개수만으로 최소 계약을 정하지 않는다.
+전체 회귀·hosted CI·PostgreSQL/NAS 환경 검증 상태는 `CURRENT_STATUS.md`에 구분해 기록했다.
+
+**2026-10-11 실시간 collector 최소 저장 계약 적용:** `CentralRealtimeCollector`는 사용하는 7개
+snapshot·bar·문서 메서드의 `RealtimeCollectorStore` Protocol을 받도록 했다. flush 순서, failed write
+보존·재시도, minute finalization·second-trade 저장 의미는 그대로다. 관련 회귀 37/37과 정적 consumer
+감사가 통과했다. 상세 수치 및 PostgreSQL/NAS 미검증 범위는 `CURRENT_STATUS.md`에 기록한다. 다른 DB
+consumer나 QueryStore aggregate는 변경하지 않았다.
+
+**2026-10-11 MarketEventService 최소 저장 계약 적용:** `QueryStore` 대신 서비스가 사용하는 6개
+메서드를 `MarketEventStore` Protocol로 명시했다. 상한가 저장 ACK·재시도·cohort/VI revision·DB
+transaction은 변경하지 않았다. 관련 회귀 29/29, skip·오류·미실행 0과 정적 consumer 감사가 통과했다.
+worker/자손 종료도 확인했다. 세부 수치와 미실행 환경 검증은 `CURRENT_STATUS.md`에 기록한다.
+QueryStore aggregate와 다른 소비자는 계속 유지한다.
+
+**2026-10-11 CentralAIService 최소 저장 계약 적용:** 넓은 `QueryStore` 타입 대신 실제 호출하는
+6개 메서드를 선언한 `CentralAIStore` Protocol을 사용하도록 했다. 저장 SQL·revision/usage 원자성·
+실패 rollback·서비스 수명은 변경하지 않았다. `test_central_ai_service` 6/6 및 QueryStore consumer
+정적 감사 통과; 상세 수치는 `CURRENT_STATUS.md`에 기록했다. 이는 다른 QueryStore 소비자나 aggregate
+계약까지 축소 완료했다는 뜻은 아니다.
+
+**2026-10-11 DB 소비자 최소 계약 첫 적용:** Yahoo delayed market collector의 `QueryStore` 의존을
+실제 필요한 3개 메서드의 `ExternalMarketCollectorStore`로 좁혔다. collector 모듈 8건, source compile,
+QueryStore consumer audit이 통과했고 DB aggregate와 저장 의미는 유지했다. 다른 직접 `QueryStore`
+소비자 전체를 이 변경만으로 완료 처리하지 않는다. 다음 후보는 호출 메서드 수와 교체/수명 경계를
+확인해 독립적으로 선정하며, 좁은 Protocol이 유지보수 비용을 줄이지 않는 경우 추가하지 않는다.
+
+**2026-10-11 서버 API 라우트 이동 후 Docker build guard 보완:** `server.Dockerfile`의 route 검사
+여섯 개가 이제 실제 `operational_settings_routes.py`, `diagnostic_read_routes.py`,
+`diagnostic_control_routes.py`, `market_read_routes.py`를 확인하고 현재 app build marker를 검사한다.
+현재 source에 대한 guard 전체 대조와 diff whitespace 검사는 통과했다. Docker 실행 파일이 없어 실제
+image build는 미실행이다. Compose image tag·NAS source/image 게시·운영 반영은 하지 않았으며, 최종
+게시 시 build marker/이미지 tag를 함께 검토한다.
+
+**2026-10-11 재부팅 후 review dialog 모듈 재검증:** 이전 전체 회귀에서 오류가 난
+`test_historical_news_review_dialog` 단독 실행은 Windows Job 기반 worker와 사용자 TEMP에서 2/2 통과,
+skip·오류·미실행 0, worker/자손 종료 확인, 현재 worktree source import를 확인했다. 기록은
+`C:\Users\pc-1\AppData\Local\Temp\kiwoom-review-dialog-reboot-20261011\`에 있다. 별도의 sandbox TEMP
+실행은 권한 오류로 테스트 전 실패했으므로 통과로 세지 않았다. 전체 회귀를 반복하지 않았다. 실제 코드
+경로의 현재 회귀는 통과했지만 간헐 native rename 오류의 원인은 확정되지 않아 별도 기록으로 보류한다.
+
+**2026-10-11 동일 길이 복사본 반복 rename 재현:** 원본 `repro-1`을 보존한 채 같은 159자 경로인
+`repro-3`에서 같은 JSON payload를 쓰고 stream을 닫은 directory `Path.rename()`을 반복했다. 32회 성공 뒤
+iteration 32에서 WinError 5가 다시 났고 source는 남고 destination은 없었다. 즉시 같은 stage를 재시도하자
+약 1.92ms 만에 성공했다. 근거: `tmp/regression/windows-rename-trace-20261010T170303Z/repro-3/`
+의 `result.json`과 `immediate_retry.json`. 재현 성공은 확인했으나 점유 프로세스·filter driver는 여전히
+미확정이다. Stack은 재현에 필수는 아니지만 원인 판별에는 유용하다. PML은 다시 열지 않았다.
+
+**2026-10-11 동일 길이 복사본에서 directory rename 재시도:** 원본 증거를 보존하고 `repro-1`의
+`directory_with_closed_json`을 같은 길이 경로인 `repro-2`에 복사해 실패했던 `.stage-0058`을 Python
+`Path.rename()`으로 한 번 재시도했다. 159자 source 경로에서 약 1.89ms 만에 성공했고, 더 긴 복사 경로의
+재시도도 성공했다. `repro-1`은 그대로 남았다. 이것은 58회 성공 뒤 59번째에 발생한 간헐 실패를 설명하지
+않으며 반복 재현 여부는 미확인이다. PML Stack은 추가 증거가 필요할 때 원인 판별에 사용한다.
+
+**2026-10-11 Procmon 재실행 중 추가 캡처 사고 / Stack 판독 미완료:** 재부팅 뒤 Procmon을 인자 없이
+다시 여는 과정에서 캡처가 재개되거나 시작된 것으로 보이나 정확한 원인은 미확정이다. 사용자가 승인한
+추적 범위는 20초였지만 기록이 계속 누적됐다. 마지막 읽기 전용 확인에서 Procmon 프로세스 0개,
+`trace*.pml` 16개, 총 69,331,800,467바이트였고 최신 `trace-15.pml`은 3,380,344,883바이트,
+마지막 수정 시각은 2026-10-11 03:31:36이었다. 기존 `trace.pml`도 변경됐을 수 있으며 PML 무결성과
+기록 완전성은 확인하지 않았다. `/Terminate`는 작동하지 않았고 창 닫기 요청 뒤 프로세스가 사라졌다.
+강제 종료 승인은 프로세스가 이미 없어진 뒤 도착했으므로 강제 종료는 하지 않았다. PML을 삭제하거나
+변환하지 않고 보존했다. 높은 Windows 무결성 수준 때문에 Computer Use helper에서 Stack UI를 조작할 수
+없어 native event stack과 원인은 미확정이다. Procmon을 다시 평소 방식으로 열지 말고, 기존 PML을
+보존한 상태에서 안전한 UI 접근 경로를 마련해 Stack을 확인한다. 대용량 파일은 사용자 별도 요청 전까지
+삭제하지 않는다. 제품·테스트 코드는 이 사고에 대응해 변경하지 않았다.
+
+**2026-10-11 기존 Procmon PML 이벤트 검토 / 원인 미확정:** 실패한 `.stage-0058`은 capture 시작 후 생성되어 그 stage 경로의 capture 전 기존 handle은 이 기록으로 뒷받침되지 않는다. 실패 0.81ms 전 ChatGPT.exe가 `observations.jsonl`의 속성을 읽었으나 실패 약 0.97ms 전에 `IRP_MJ_CLOSE`가 기록됐고, 실패 후 재조회 handle도 닫혔다. Python의 목적지 상위 디렉터리 handle은 rename 시도 뒤 닫혔다. 확인한 CSV/XML event 필드에는 thread stack이 포함되지 않아 이 자료만으로 filesystem filter 호출 stack을 판별할 수 없다. 워크트리 `tmp/regression/sysinternals-procmon-20261011/Procmon64.exe`의 Microsoft 서명 `Valid`를 확인했고, 사용자의 명시적 동의 뒤 `-accepteula /OpenLog`로 기존 PML을 열었다. 창 제목으로 `trace.pml` 로딩은 확인했지만 Procmon 창이 minimized 상태여서 computer-use `get_window_state`가 두 번 모두 같은 오류로 실패했다. 복구 절차를 한 차례 재시도한 뒤 UI 조작을 멈췄다. 이후 프로세스 조회에서 Procmon 실행이 보이지 않아 Stack 탭은 읽지 못했고 현재 창도 열려 있지 않다. 추가 추적은 실행하지 않았다. 다음은 UI 제어가 가능한 세션에서 PML을 다시 열어 native event의 Stack을 확인하는 것이다.
+
+**2026-10-11 최신 all-local 외부 TEMP 검증 완료:** 같은 현재 source tree를 Windows 사용자 TEMP output으로
+실행해 272/272 worker, 3,755/3,755 tests를 통과했다. 실패·오류·skip·expected/unexpected success·
+zero-test·미실행 0, timeout 0, worker/process tree exit 272/272, source origin 오류 0, 시작/끝 fingerprint
+일치 및 source 변경 false다. 앞서 실패한 3개 게시 테스트는 외부 TEMP에서 9/9 통과했고, 이전 3,734건
+isolated all-local 성공도 기록돼 있다. 이전 workspace output 기반 3,755건 failed 원본은 지우거나
+성공으로 덮지 않는다. 로컬 Codex 세션의 전체 실행은 `--output $env:TEMP\<unique-run-dir>`를 사용한다.
+GitHub Actions 경로는 Codex watcher가 없어 바꾸지 않았다. 실제 hosted CI·PostgreSQL/NAS는 아직 별도다.
+Procmon bare repro는 Codex handle이 rename 거부 전 닫힌 것을 보여줘 직접 원인으로 확정할 수 없다.
+priority.csv의 과거 ETW overlap은 별도 관측이다. Windows-native 원인 미확정은 보류하되 이 감사 단계의
+로컬 전체 회귀 완료 기준은 충족했다. run.json: `C:\Users\pc-1\AppData\Local\Temp\kiwoom-all-local-external-temp-20261011\run.json`.
+
+**2026-10-11 최신 시간순 확인 / 외부 TEMP 집중 재검증 진행:** bare JSON 재현의 Procmon 기록에서
+Codex child-file handle의 IRP_MJ_CLOSE는 native rename ACCESS DENIED보다 약 0.97ms 먼저였다.
+실패 뒤 다시 열린 handle도 약 0.80ms 뒤 닫혔다. 그러므로 이 재현에서 Codex handle이 계속 열려
+rename을 막았다는 주장은 근거가 없다. 이전 priority.csv ETW의 실제 겹침은 별도 사건으로 보존한다.
+현재 all-local 실패 세 모듈을 동일 Windows Job 격리 runner로 작업 폴더 밖 사용자 TEMP에서 실행해
+9/9 통과, 실패/오류/skip 0, worker/process tree 종료를 확인했다. 과거 isolated all-local 3,734건도
+통과한 기록이 있어 workspace 밖 출력은 재현 가능한 운영 대책 후보다. 최신 3,755건 전체의 성공 및
+근본 원인 확정과는 구분한다. 현재 최신 전체 외부 TEMP 검증을 진행 중이다.
+
+**2026-10-11 승인된 20초 Procmon 추적 완료 / 직접 원인은 계속 미확정:** 별도 일반 사용자
+최소 재현의 59번째 directory rename이 WinError 5로 실패했고 native ACCESS DENIED 이벤트를
+확보했다. Codex 패키지의 ChatGPT.exe PID 27496이 같은 child 파일의 속성을 읽었지만,
+관측된 handle은 ACCESS DENIED 이벤트 전에 CloseFile과 IRP_MJ_CLOSE가 기록됐다. 실패 후 다시
+열린 것도 확인했다. 그러므로 Codex handle이 직접 rename을 막았다는 근거는 없다. 동일 child handle을
+계속 유지한 별도 통제 실험에서만 rename 실패/handle 해제 뒤 성공을 재현했다. 이 결과는 그 조건의
+가능성만 보여준다. 다른 프로세스의 capture 시작 전 handle이나 filesystem filter는 여전히 미확정이다.
+다음은 기존 PML에서 preexisting handle 또는 filesystem filter의 증거를 확인하는 것이다.
+Codex 종료·보안 예외·제품 재시도·TEMP 이동은 적용하지
+않았다. 관측 구간 약 19.75초, capture helper exit_code=1은 그대로 기록하되 PML을 실제 변환해
+57개 관련 event를 읽었고 잔류 Procmon 없음. 로컬 원본과 failure-evidence.json은
+tmp/regression/windows-rename-trace-20261010T170303Z/에 있다. 전체 회귀는 failed 유지,
+제품/테스트/CI 수정 및 전체 재실행·커밋/게시/병합/배포 없음.
+
+**2026-10-11 최신 정정 / Windows rename 원인 미확정:** 아래 과거 '배타적으로 열림' 관측은
+attribute-only probe 성공이며 handle 부재를 뜻하지 않는다. 통제된 child handle이 폴더 rename을
+막으면서 probe가 통과하는 것을 재현했다. attribute-only holder는 RM 빈 목록에서도 남을 수 있다.
+directory RM code 5는 Microsoft 문서상 지원되지 않는 입력이다. require_escalated도 실제 UAC
+관리자가 아니며, 기본/제한 밖 토큰은 각각 AppContainer true/false, elevated는 둘 다 false였다.
+파일만 등록한 제한 밖 RM 대조는 알려진 read holder PID를 확인했다. 기존 code 29/5를 근거로
+특정 보안 제품·ACL·handle 유무를 단정하지 않는다.
+앱 import 없이 닫힌 JSON 파일의 폴더 rename에서도 두 토큰 모두 WinError 5를 재현했다.
+그러나 경로 길이를 맞춘 workspace/사용자 TEMP 대조는 각각 1,200회 모두 통과해 특정 경로가
+원인이라는 결론은 없다. 관측기 v2의 추가 6 worker/18 tests는 17통과·1 assertion 실패:
+retry 테스트 status-file replace에 실제 오류가 한 번 추가돼 attempts=3이 됐다. snapshot 오류와
+구분한다. 기존 all-local 3,755건/3오류는 failed 유지, 제품 수정/검증 완화/전체 재실행 없음.
+다음은 승인된 20초 관리자 Procmon 추적에서 native 실패 시각과 다른 프로세스의 파일 접근을
+대조하는 것이다. 실제 실패를 포착하지 못하면 원인 미확정으로 유지한다. 상세 근거는
+CURRENT_STATUS 최신 정정 및 tmp/regression/windows-probe-calibration-20261011/ 참조.
+
+**2026-10-11 최신 A+B 전체 검증도 실패 / 원인 미확정:** 관측 경로를 보완한 all-local 결과는
+272/272 worker, 3,755건 실행, 3,752 통과·3 오류·assertion 실패 0·skip 0·미실행 0이다.
+historical_news_method_evaluation, historical_research_split, run_naver_stock_market_news의
+원자적 게시 단계에서 WinError 5가 났다. 두 디렉터리 오류 직후 source/parent/child를 배타적으로
+열 수 있었고 Restart Manager는 디렉터리 조회에 code 5를 반환해 소유자를 확인하지 못했다.
+세 번째 os.replace는 계측기 범위 밖이라 handle 관측이 없다. 세 모듈의 별도 9건 재실행은 통과했지만
+전체 실패를 green으로 바꾸지 않는다. code tree 시작/종료 hash 동일, source 변경 없음, worker와
+자손 종료 확인. transient handle·보안 필터·파일시스템 등 원인은 가설로 남아 있으며 확정된 것이
+없다. 제품/테스트 수정이나 자동 재시도는 하지 않는다. 기록: CURRENT_STATUS 최신 항목과
+tmp/regression/lifespan-AB-final-observed-recheck-20261010/ 및
+tmp/regression/lifespan-AB-targeted-confirmation-20261011/.
+
+**2026-10-11 os.replace 재현 확보, 소유자 미확인:** 같은 news snapshot 모듈을 isolated worker로
+60회(180 tests) 실행해 59 worker 통과 후 60번째에서 원래 전체 회귀와 같은 staging→runs
+`os.replace` WinError 5를 재현했다. 실패 순간 source/parent/child files는 배타적으로 열리고
+destination은 없었다. 경로 길이는 238/229자이며 TEMP root에 현재 사용자 FullControl이 있다.
+Restart Manager 시작이 code 29로 실패해 lock owner/ACL/filter를 판별하지 못했다. 이를 근거로
+특정 원인을 단정하지 않는다. 반복 테스트는 전체 회귀를 대체하지 않고 원래 실패 기록도 유지한다.
+다음 조사에는 `os.replace` 전후 Windows filesystem filter/handle 증거가 필요하다. 관측기·증거는
+`tmp/regression/lifespan-AB-osreplace-probe-20261011/` 아래에 있다.
+
+추가 27회에서 같은 오류가 한 번 더 재현됐다. 실패 직후 source/parent owner SID는 현재 사용자였고,
+기록된 DACL에 SYSTEM/Administrators/Owner Rights 상속 FullControl만 있어 정적 deny ACE는 없었다.
+경로도 260자 미만이고 파일은 배타적으로 열렸다. 단, SACL/mandatory integrity와 커널 filter 상태는
+수집하지 못했다. Restart Manager start code 29, `fltmc` access denied, Procmon/Handle 미발견으로
+외부 소유자·filter를 확인할 수 없다. 원인은 계속 미확정이며 제품 우회/재시도는 보류한다. 이후
+필요한 증거는 권한 있는 filesystem filter/handle trace다. 상세 ACL 캡처는
+`tmp/regression/lifespan-AB-osreplace-acl-probe-20261011/027.directory-observation.json`.
+읽기 전용 `fltmc filters`를 elevated 실행으로도 요청했으나 Windows가 0x80070005 access denied를
+반환해 이 환경에서는 해당 inventory를 얻지 못했다.
+레지스트리에는 AhnLab Safe Transaction의 여러 Start=3 minifilter와 `f_protflt`가 등록돼 있으나
+loaded 여부는 확인되지 않았다. Windows `WdFilter`는 Start=0이다. `sc query`/CIM도 access denied라
+이 항목들은 조사 후보일 뿐 원인으로 지목하지 않는다.
+
+**2026-10-10 서버 수명 보완 A+B 구현·관련 검증 완료 / 전체 검증 오류 1건:** B의 진단 parent와
+replay child·trace writer 실제 종료 대기 및 supervisor runner 저장 실패 전파/재호출 완료 보존을
+보완했다. 관련 8개 모듈 147건 통과, native 저장/lease 유지·자손 종료·취소 전달 확인, 결함
+4종 각각 assertion 실패로 탐지, DB 감사/catalog 통과. 수동 timeout·API/DB/주문 계약은 유지한다.
+최종 all-local 3,755/3,755건·272 worker 실행(1,673.941초), 오류 1건으로 failed 종료했다.
+assertion 실패/skip/미실행/잔류 자손 0, worker/자손 종료·실행 전후 tree 동일·수정 테스트 12개
+포함을 확인했다. historical-news review queue의 실제 staging.replace(destination)가 WinError 5를
+냈다. 해당 dialog와 blind-validation 모듈 별도 재실행 4건은 통과했지만 전체 오류를 성공으로
+대체하지 않는다. 직전 blind-validation rename과 같은 유형일 뿐 같은 원인인지는 미확정이다.
+다음은 실패 직전 목적지 상태와 handle 소유자 증거 확보이며 이번 수명 단계의 최종 종료 판정은
+보류한다. 무조건 재시도/잠금 우회/검증 완화는 하지 않았다. hosted CI/실제 PostgreSQL/운영 NAS,
+커밋/게시/main 병합/배포는 별도다. 기존 A/B 미완료 문구는 아래 과거 시점 기록이다.
+후속 재현은 dialog 순차 40 worker(80건)와 16 worker 동시 80 worker(160건) 모두 통과했고
+worker/자손 종료를 확인했다. native rename 오류는 재현되지 않았다. 이전 실패는 queue·decision·
+development-input·research-split의 각기 다른 임시 게시 경로에서 발생해 단일 경로 원인으로
+좁혀지지 않았으며 잠금 소유자/ACL 증거도 미확정이다. 이 재검사는 전체 회귀 실패를 대체하지 않는다.
+현재 worker TEMP ACL은 사용자 FullControl이며 Defender 이벤트 1123/1124도 없었다. 지속적 권한
+부족/CFA 차단은 뒷받침되지 않지만 실패 순간의 transient handle 원인은 여전히 확인되지 않았다.
+queue/dialog·review decisions·development inputs·research split 혼합 동시 실행 64 workers/208 tests도
+모두 통과했고 rename 오류는 재현되지 않았다. 원인 확정 전까지 저장 동작을 변경하지 않고,
+다음 재발 시 수집된 directory/child/Restart Manager 관측에서 소유자 증거를 확인한다.
+관측 all-local 3,755/3,755를 완료했으나 관측기 경로 설정으로 `test_kiwoom_storage_audit` 2건이
+import 오류가 났다. 관측기를 고친 뒤 정상 runner 경로로 해당 2건은 통과했지만 원본 all-local
+기록은 failed이며 green 판정하지 않는다. 관측된 다른 두 WinError 5는 통과한 reader-conflict/
+retry 테스트에서 발생한 통제된 충돌이었다. 원래 queue 이동 오류는 이번 전체 실행에서 재현되지 않았다.
+실측/실험 환경·수정 전 실패·새 테스트 setup 오류와 재검증 근거는 CURRENT_STATUS 첫 기록 참조.
+
+**2026-10-10 서버 수명 보완 A 완료 / B가 다음 대상:** app의 단일 종료 경로·부분 시작/본문
+실패·반복 취소 보호와 오류 우선순위를 구현했다. 관련 6개 모듈 141건 통과, native TOP20
+저장 대기·COMMIT/값·vault 유지/재획득·취소/원래 오류 전달 검증 및 메모리 결함 3종 탐지 완료.
+기존 v1 23조건은 재실행해 보존하고 현재 정책을 별도로 대조했다. 최초 117건의 fixture 실패
+3건/import 오류 2건은 원인 보완 후 재확인했고 이전 기록은 유지한다. 감사/catalog pass.
+**전체 수명 개선은 미완료:** B의 DiagnosticRuns parent/replay child, diagnostic trace thread의
+실제 종료 확인과 MockAutomationSupervisor runner close 오류 전달이 남았다. 현재 bounded
+close/stop 반환을 완전한 drain으로 승인하지 않는다. A+B 뒤 전체 회귀, hosted CI/실제 PostgreSQL/
+NAS 검증·게시/병합/배포는 별도다. 설계와 A 증거는 SERVER_LIFESPAN_FAILURE_PLAN/CURRENT_STATUS 참조.
+
+**2026-10-10 서버 수명 설계 확정 / 다음 구현 대상:**
+[서버 수명 실패 보완 계획](SERVER_LIFESPAN_FAILURE_PLAN.md)에 따라 app 수명 소유권을 유지한다.
+새 추상화/파일 분리 대신 A: 단일 정리 경로·시작/본문 예외·취소 보장, B: 진단 parent/child와
+trace 실제 종료 및 supervisor close 실패 판정 보완을 순차 구현한다. 현재 제품 수정 전이다.
+close 실패 시 아직 사용하는 의존 자원은 강제 해제하지 않으며 종료 실패를 명시한다.
+v1 기준선 보존, native 지연/실패/취소 검증, 관련 회귀 후 A+B 완료 시 전체 회귀를 실행한다.
+아래의 ASTRA 재검토 요청은 이 설계로 결정됐고 구현은 미완료다. 새 저장/주문 정책은 범위 밖이다.
+
+**최종 소스 게시 시 추가 확인:** `deploy/synology/server.Dockerfile`은 옮겨진 settings/diagnostics/
+market API 문자열을 여전히 app.py에서 grep하고 이전 빌드 문자열을 요구한다. 정적 내용으로
+확인했으며 이미지 빌드는 이번에 실행하지 않았다. 기존 빌드 식별자 3곳 동시 갱신 항목과 함께
+실제 등록 경로를 검증하도록 정비한다. 수명 설계 중 Dockerfile/배포는 변경하지 않는다.
+
+**2026-10-10 서버 수명 검토 / 기존 실패 정리 공백 확인:** 정상·시작 실패·본문 예외·종료 실패
+23개 수명 시나리오를 원래 main에서 보존/반복하고 현재 앱 80건 통과. 제품 수명 코드는 수정하지 않았다.
+통과는 기존 순서 일치이며 정리 완전성 승인이 아니다. legacy 부분 시작/본문 예외에서 close 호출
+누락을 확인했다. vault 환경 credentials.close/real.close의 지속 실패는 바깥 finally를 중단해
+vault/store 정리를 건너뛴다. main/현재 각각 정상+실패 2조건의 native vault 재획득 6조건에서
+정상 2조건 acquired/실패 4조건 VAULT_ALREADY_OWNED로 재현했다. 실제 네트워크 작업은 통제했으며
+worker drain/데이터 보존/주문 영향은 미검증이다. 결함 3종 탐지·catalog·worker/자손 종료 확인.
+**ASTRA 설계 재검토 필요:** app에 수명을 유지하고 정리만 보완할지, 동적 owner pointer 단일 소유권을
+유지한 실제 수명 경계로 분리할지 결정한다. 부분 시작·취소·반복 close 실패의 정리 대상과 오류
+우선순위·DB/vault 해제 순서가 핵심이다. GPT-6 Astra High 권고, 단순 전달 manager는 추가하지 않는다.
+상세 시나리오/한계/실패 도구 보완/증거는 CURRENT_STATUS 첫 기록과 server_lifespan_v1.json 참조.
+전체 all-local/hosted CI/실제 PostgreSQL·NAS/게시/병합/배포는 미실행이고 기존 rename 오류는 별도 유지.
+
+**2026-10-10 앱 구조 개선 열아홉 번째 경계 완료:** 클라이언트 실시간 WebSocket 정책을
+realtime_routes.py로 옮겼다. 같은 app 소유 hub/collector/토큰 검사와 한 메서드 DB reader를 사용하고
+native 수신/집계/저장/서버 수명은 유지한다. handler와 lifespan AST 보존, 원래 main 반복/이동 전후
+ASGI 프레임 49개·SQLite 저장 행·전체 명세/HTTP 경로 순서 동일. 관련 184건의 최초 실행은
+경로 inventory 1건 실패였으며 중첩 등록 열거만 보완해 app 79건 재검사 통과. 다른 관련 105건은
+최초 실행에서 통과했고 변경 없음. 결함 3종은 각각 assertion으로 탐지, worker/자손 종료 확인.
+DB 감사/catalog pass. 전체 all-local/hosted CI/실제 PostgreSQL·키움 연결은 이번 단계에서 미실행.
+남은 구조 검토는 **서버 조립/시작·종료와 실패 시 정리**다. 최종 NAS 소스 게시 변경에서 빌드
+식별자 3곳 동시 갱신·최종 전체 검증이 필요하다. 직전 전체의 Windows rename 오류는 원인 미확정으로
+유지한다. 커밋/게시/main 병합/NAS 배포는 별도이며 초기 도구 실패와 검증 한계는 CURRENT_STATUS 참조.
+
+**2026-10-10 Windows rename 오류 진단 보완 / 원인 미확정:** 기존 두 테스트를 보완 전후 각각
+100회/200건 반복했으나 최초 접근 거부는 재현되지 않았다. 목적 폴더 생성과 staging 내부 파일
+핸들이 같은 WinError 5를 만들 수 있음을 통제 실험으로 확인했으며 최초 원인/소유자는 미확정이다.
+해당 테스트의 첫 저장에만 정리 전 staging/목적 상태를 원래 예외 note로 기록했다. 제품/저장 계약/
+assertion/실행기/CI는 유지하고 재시도하지 않는다. 통제 오류 4종은 각각 error로 유지되었고
+관련 3개 모듈 7건 통과, worker/자손 종료 확인. 이전 전체 all-local 3,743건은 여전히 failed(error 1);
+이 진단 변경 후 전체는 미실행이다. 재발 시 상태 증거로 원인을 좁히고 다음 의미 있는 묶음/최종
+판정에 전체 검증한다. 무변경 전체 실행을 반복하지 않는다. **서버 조립/시작·종료와 실시간
+WebSocket 계약 보존 검토**는 독립적으로 계속할 수 있다. 상세 증거/제약은 CURRENT_STATUS 첫 기록.
+
+**2026-10-10 앱 구조 개선 열여덟 번째 경계 분리·관련 검증 완료 / 전체 회귀 오류 1건:** 진단 snapshot/실행/상태/취소/보고서/이력
+7개 API를 diagnostic_run_routes.py로 옮겼다. 같은 native run owner·require-runs·sampler와
+worker/취소/보고서/이력/조립/수명 계약을 보존했다. HTTP 119건·DB/보고서/이력 hash·전달 인자·
+전체 명세/순서 일치. 이동 전 78건·이동 후 관련 9개 모듈 144건 통과, 결함 3종은 assertion으로 탐지.
+누적 변경 전체 all-local 3,743건/272 workers 실행, 판정 failed(error 1, assertion failure/skip 0).
+과거 뉴스 blind validation의 staging 디렉터리 rename에서 WinError 5가 발생했다. 제품/테스트는
+누적 변경 대상이 아니며 같은 source/fixture의 사용자 temp 1회·workspace temp 3회 재검사는
+각 2건 통과했다. 원인 미확정이며 재검사 성공을 전체 통과로 처리하지 않는다. 우회 코드/기대값
+변경은 없고 원인 재현/확인은 별도 후속이다. 미실행·잔류 자손 0, 모든 worker/자손 종료 확인.
+변경된 모든 unit 모듈의 실행 목록 포함과 source/fixture fingerprint·raw 복사 hash 확인.
+DB 소비자 감사·CI catalog·새 테스트 누락 검사 pass. 누적 API 69개/제품 모듈 17개 분리.
+남은 검증은 **Windows rename 오류 재현/원인 확인과 전체 회귀 성공 판정**이며,
+남은 구조 검토는 **서버 조립/시작·종료와 실시간 WebSocket 처리 경계**다. hosted GitHub CI/
+실제 PostgreSQL·커밋/게시/main 병합/NAS 배포는 별도다. sampler/start seam과 sandbox 실패·
+미완료 시도는 성공에서 구분했으며 상세 범위/실행 증거는 CURRENT_STATUS 최신 경계를 따른다.
+
+**2026-10-10 앱 구조 개선 열일곱 번째 경계 완료:** 진단 스위치/capabilities/trace 7개 API를
+diagnostic_control_routes.py로 옮겼다. native 제어 CAS·session/instance·TTL·이력·trace 수집/저장/
+종료 소유권은 유지한다. app의 run 조립/수명·require-runs와 동일 workload reader를 전달한다.
+원래 main 반복/이동 후 HTTP 54건·응답/헤더/SQLite hash/제어 파일/이력/전달 인자/명세/등록 순서
+동일. 이동 전 API 77건·이동 후 관련 8개 모듈 141건 통과, 실패·오류·skip·미실행·잔류 자손 0.
+worker/자손 종료·worktree import·fingerprint·native/실행기/CI 해시 일치. CAS/rollback/busy fence
+누락 결함을 각각 assertion failure로 탐지했다. HTTP 도구의 수명 실패 판정을 보완하고 실제
+server_shutdown 결함을 주입해 실패 거부와 기준선 보존을 검증했다. 초기 실패/초안은 성공에서 제외했다.
+DB consumer 감사/CI catalog/새 테스트 누락 검사 pass. 누적 API 62개/제품 모듈 16개 분리.
+남은 경계는 **진단 snapshot/실행/보고서/이력 7개 API·서버 조립/시작·종료**다. 전체 all-local/
+hosted CI/실제 PostgreSQL·커밋/게시/main 병합/NAS 배포는 별도로 남는다. native/격리 범위와
+초기 fixture/negative probe 실패·실행 증거는 CURRENT_STATUS 최신 경계를 따른다.
+
+**2026-10-10 앱 구조 개선 열여섯 번째 경계 완료:** 진단 조회 7개를 diagnostic_read_routes.py로
+옮겼다. 동일 workload reader를 HTTP/control update/run sampling이 사용하고 후보 상태는 현재
+pointer getter로 읽는다. storage size/breakdown 두 메서드와 명시적 optional PostgreSQL 기능만
+조회하며 app/native DB·metrics·control/run·작업 수명은 유지한다. HTTP/내부 sampler/제어/lifespan
+AST와 전체 명세/등록 순서를 보존했다. 원래 main 반복/이동 후 HTTP 71건·DB hash 동일,
+이동 전 API 76건·이동 후 8개 모듈 113건 통과. 실패·오류·skip·미실행·잔류 자손 0,
+worker/자손 종료·현재 worktree import·fingerprint·native/실행기/CI 해시 일치.
+대형 plan 한도 누락·일시정지 무시·후보 pointer 고정 결함을 각각 assertion failure로 탐지했다.
+DB 감사/CI catalog/새 테스트 누락 검사 pass. 누적 API 55개/제품 모듈 15개 분리.
+남은 경계는 **진단 제어/trace/실행/보고서 API·서버 조립/시작·종료**다. 전체 all-local/hosted CI/
+실제 PostgreSQL·커밋/게시/main 병합/NAS 배포는 별도로 남는다. 통제 입력/optional PostgreSQL
+double/초기 fixture 실패와 증거는 CURRENT_STATUS 최신 경계를 따른다.
+
+**2026-10-10 앱 구조 개선 열다섯 번째 경계 완료:** 모의 주문·취소·조회와 계좌별 실행 사건
+7개 API의 모델/HTTP 정책/응답을 mock_order_routes.py로 옮겼다. 공유 계좌 모델·선택·publication·
+수명은 app/기존 owner에 유지하고 요청에서 선택한 gateway를 응답까지 유지한다. 실제 DB 원장·
+lease·멱등·unknown·취소·계좌/ref/revision/run fence와 native transaction/종료를 변경하지 않았다.
+원래 main 반복/이동 후 실제 HTTP 62건의 응답/헤더/SQLite hash/전송 인자/명세/등록 순서 동일.
+이동 전 API 75건·이동 후 8개 모듈 135건 통과, 실패·오류·skip·미실행·잔류 자손 0.
+worker/자손 종료·code/fixture fingerprint·native/실행기/CI 해시 일치 확인. 응답 gateway 재선택·
+이전 run fence 누락·scoped 멱등 namespace 누락은 각각 assertion failure로 탐지했다.
+기존 응답 테스트의 closure cell 의존성만 owner publication seam으로 교체하고 기대값은 유지했다.
+DB 감사/CI catalog/새 모듈 누락 검사 pass. 누적 API 48개/제품 모듈 14개 분리.
+남은 경계는 **진단 API·서버 조립/시작·종료**다. 현재 전체 all-local/hosted CI/실제 PostgreSQL은
+미실행이며 다음 의미 있는 묶음/최종 판정에 전체 검증한다. 커밋·게시·main 병합·NAS 배포는 별도다.
+실행 증거·fixture 격리 범위·초기 시도 실패는 CURRENT_STATUS의 최신 경계를 따른다.
+
+**2026-10-10 앱 구조 개선 열네 번째 경계 완료:** 운영 설정 GET/PUT의 입력 모델·저장/적용/
+재시도 정책을 operational_settings_routes.py로 옮겼다. per-app state의 revision/후보 pointer/lock은
+기존 closure 슬롯을 대체하며 새 작업/수명 계층은 없다. app 시작/종료·진단·연구가 같은 현재 후보를 읽는다.
+원래 main 반복/이동 후 HTTP 56개·응답/헤더/SQLite hash/저장·적용·close/start 순서/명세·등록 순서 동일.
+이동 전 API 74건·이동 후 관련 155+23=178건 통과, 실패·오류·skip·미실행·zero-test·잔류 자손 0,
+worker/자손 종료·현재 소스 import·code/fixture fingerprint·native/CI 해시 일치 확인.
+적용 실패 ACTIVE 표시·재시도 revision 증가·기존 후보 close 누락은 모두 assertion failure로 탐지했다.
+새 fixture의 native checkpoint 시각을 입력으로 고정했으며 HTTP/저장·적용 이벤트는 그대로다.
+초기 실패 로그·74건/failure 1·untracked trial을 보존하고 기존 커밋 assertion/기대값은 유지했다.
+Native SQLite/후보 생성과 HTTP lifecycle double, 별도 native 작업 검사를 구분한다. DB consumer 감사/
+CI catalog/새 테스트 누락 검사 pass. 누적 API 41개/제품 모듈 13개 분리. 남은 경계는 모의 주문/취소·
+진단 API·서버 조립/시작·종료다. 전체 all-local/hosted CI/실제 PostgreSQL은 다음 의미 있는 묶음/최종
+판정까지 미실행으로 구분한다. 커밋·게시·main 병합·NAS 배포는 별도다. 증거는 CURRENT_STATUS를 따른다.
+
+**2026-10-10 앱 구조 개선 열세 번째 경계 완료:** 계좌 목록 GET v3·query POST v2/v3를
+account_query_routes.py로 옮겼다. 계좌/주문 공유 선택 정책·동일 AccountTarget 타입·현재 binding/session
+공개/해제·native owner/작업 수명은 유지한다. 구성 시 값을 고정하지 않는 getter로 요청마다 현재값을 읽는다.
+원래 main 반복/이동 후 실제 HTTP 84개·응답/헤더/조회·broker 인자/SQLite hash/전체 명세·순서 일치,
+이동 전 API 73건·이동 후 관련 8개 모듈 146건 통과. 실패·오류·skip·미실행·zero-test·잔류 자손 0,
+worktree import·worker/자손 종료·시작/종료 code/fixture fingerprint·native/CI 해시 일치 확인.
+세션 고정·revision fencing 누락·후착 context 차단 누락은 각각 assertion failure로 탐지했다.
+HTTP owner/broker double은 native SQLite/session 및 별도 native owner/종료 검사와 구분한다.
+DB consumer 감사·CI catalog·새 테스트 모듈 누락 검사 pass. 초기 sandbox 실행 중단은 성공으로 집계하지 않는다.
+누적 API 39개/제품 모듈 12개 분리. 남은 경계는 운영 설정·모의 주문/취소·진단 API·서버 시작/종료다.
+이번 경계 전체 all-local/hosted CI/실제 PostgreSQL은 미실행이며 다음 의미 있는 묶음/최종 판정 때 전체를
+실행한다. 커밋·게시·main 병합·NAS 배포는 별도다. 증거는 CURRENT_STATUS 최신 기록을 따른다.
+
+**2026-10-10 앱 구조 개선 열두 번째 경계 완료:** 일반 키움 query와 저장 응답 재사용 helper를
+market_query_routes.py로 함께 옮겼다. 입력·본문 AST·계좌 API 우회 차단·완료/최신성·continuation·
+재연결 gate·인증/등록 순서·실제 DB/broker/collector 수명 의미를 유지했다. 원본 반복/이동 후 HTTP 75개,
+조회·broker 인자/SQLite hash/명세·순서 일치. 이동 전 API 72건·이동 후 관련 147건 통과,
+실패·오류·skip·미실행·잔류 자손 0 및 모든 실행 프로세스 종료 확인. 세 안전/재사용 결함도 assertion 실패로 탐지했다.
+module-only 실행기 발견 실패(0건)·기존 mock gateway 테스트 route wrapper 탐색 오류(72건/error 1)의
+raw 결과는 보존한다. 경로 탐색·clock 주입 위치만 보완했고 assertion/제품 동작/기존 커밋 기대값은 유지했다.
+정적 감사/CI catalog/새 모듈 누락 pass. API 36개/제품 모듈 11개 분리. 남은 경계는 운영 설정·
+계좌별 조회/목록·모의 주문·진단 API·서버 시작/종료다. 이번 단계 전체 all-local/hosted CI/실제 PostgreSQL은
+미실행이며 다음 의미 있는 묶음/최종 판정 때 전체를 실행한다. 커밋·게시·main 병합·NAS 배포는 별도다.
+
+**2026-10-10 앱 구조 개선 열한 번째 경계 완료:** 시장 역할 GET/PUT·계좌 설정 GET을
+account_settings_routes.py로 이동했다. 입력/본문 AST·인증/등록 순서·저장/적용 revision·owner 선택과
+기존 역할 변경/DB/작업 수명 의미를 유지한다. 원본 반복 및 이동 후 HTTP 78개/인자/SQLite hash/명세·순서 일치,
+이동 전 해당 모듈 18건·이동 후 관련 98건 통과, 실패·오류·skip·미실행·잔류 자손 0 및 전체 프로세스 종료 확인.
+HTTP owner double과 기존 native owner의 CAS/rollback/barrier/종료 검증을 구분한다. 두 revision 결함은 실패로 탐지했다.
+새 fixture의 초기화 시각 문제로 실패한 최초 raw 결과를 보존하고, 시각 입력 고정 후 원본 main 반복 결과로
+새 기준선을 확정했다. 기존 커밋 기대값/제품 동작은 변경하지 않았다. DB 정적 감사/CI catalog/새 모듈 누락 검사 pass.
+현재 API 35개/제품 모듈 10개 분리. 남은 경계는 운영 설정·계좌 조회·모의 주문·진단 API·서버 시작/종료다.
+이번 단계의 전체 all-local/GitHub CI/실제 PostgreSQL은 미실행이며, 전체는 다음 의미 있는 묶음/최종 판정 때 실행한다.
+커밋·게시·main 병합·NAS 배포는 별도다.
+
+**2026-10-10 앱 구조 개선 열 번째 경계 완료:** 시장 이벤트 API 하나를 기존 시장 조회 모듈로 이동했다.
+세 메서드의 조회 계약과 원래 app-owned 조건 서비스만 사용하며 처리 본문·등록 순서는 동일하다.
+원본 HTTP 45개/조회 인자/SQLite hash/명세·순서 일치, 전후 관련 회귀 166건씩 통과,
+실패·오류·skip·미실행·잔류 자손 0, 모든 worker/자손 종료 확인. 두 메모리 결함도 실패로 탐지했다.
+정적 감사/CI catalog/새 모듈 누락 검사는 통과했고 DB·서비스·수집기·실행기·CI 범위는 유지한다.
+현재 같은 아홉 제품 모듈의 API 32개를 분리했다. 남은 경계는 설정·계좌 조회·모의 주문·진단 API와
+서버 시작/종료 관리다. 직전 묶음의 all-local 3,734건 통과와 이번 단계의 관련 회귀 결과를 구분한다.
+새 변경을 포함한 전체 all-local은 다음 의미 있는 묶음/최종 판정 때 실행한다.
+GitHub hosted CI/실제 PostgreSQL, 커밋·게시·main 병합·NAS 배포는 이번 단계에서 미실행이다.
+
+**2026-10-10 Windows 게시 실패 조사 갱신:** 두 이전 실패를 독립 worker에서 재현했다.
+최초 40 worker는 failed 4/incomplete timeout 1/실제 118건이며, 경고창 대기로 미실행된 두 검사를
+성공으로 처리하지 않는다. staging rename/replace WinError 5가 queue/decision/development/train
+여러 게시 경로에 발생하고 destination은 미존재·source/file 속성은 정상인 것을 확인했다.
+뉴스 화면의 누락도 같은 replace 오류다. 차단 owner는 아직 미확정이며 RM 파일 조회는 디렉터리/
+minifilter 소유자를 판별하지 못했다. 해당 시각 CFA 차단 이벤트는 없었으나 백신 개입 반증은 아니다.
+test_historical_news_review_dialog의 예상치 않은 경고는 즉시 assertion failure로 기록하도록 보완했고
+기존 성공 assertion은 유지한다. 저장 실패 주입으로 즉시 실패하는 것을 확인했다.
+보완 후 40 worker/120건 TEMP 교차 비교는 worktree 60건에서 실패 1건, user TEMP 60건 통과,
+timeout·미실행·잔류 자손 0. 별도 관련 15건 실행도 실제 실패 1건을 유지한다.
+사용자 승인 후 관리자 추적/일반 사용자 재현 40 worker/120건에서 failed worker 5개(failure 2/error 3),
+skip/timeout/미실행/잔류 자손 0을 기록했다. 첫 실패에서 종료하는 추가 좁은 추적은 5 worker/14건 중
+error 1건이며 priority.csv 임시 파일 replace도 같은 WinError 5다. 두 추적 저장/종료는 확인했지만
+이벤트 유실은 각각 190,876,081/604,132건이므로 주체 기록 부재를 반증으로 쓰지 않는다.
+ETW RenamePath→동일 요청 OperationEnd의 ACCESS_DENIED와 테스트 읽기/쓰기 핸들의 사전 종료를
+확인했다. 추가 분석은 이 Codex 앱 ChatGPT.exe의 priority.csv 읽기 성공→동일 파일 열린 중
+rename ACCESS_DENIED→읽기 Cleanup/Close의 겹친 구간을 확인했다. 50사례 통제 실험에서도
+삭제 공유 0x7의 읽기 핸들이 이 PC의 폴더 rename/기존 파일 replace를 막았고, 실험 소유 핸들을
+닫자 같은 경로의 30회 변경이 모두 성공했다. 공유 옵션만으로 경합 후보를 제외하지 않는다.
+기존 --output 옵션으로 테스트 출력과 worker TEMP를 작업 폴더 밖 Windows 사용자 TEMP에 격리해
+동일 두 모듈 120건 및 관련 다섯 모듈 15건 모두 통과했다. 원시 진단의 worktree_temp 고정 라벨은
+실제 외부 경로와 달라 별도 기록에서 보정하며 원시 결과는 유지한다. 같은 all-local 전체의 격리
+실행은 412개 모듈/3,734건/272 worker 모두 통과했다. 실패·오류·skip·미실행·zero-test·timeout·잔류
+자손 0, 모든 worker/자손 종료와 worktree 소스 import를 확인했다. 시작/종료 1,005개 코드·fixture
+fingerprint와 이전 profile/catalog/runner hash·모듈/worker 순서가 같다. 결과 복사 565개 파일의
+SHA256 일치를 확인했으며 기존 3,734건 raw failed는 유지한다.
+최초 두 디렉터리 실패의 개별 차단 owner/커널 결정 주체는 trace 유실 때문에 미확정으로 남긴다.
+제품 저장/재시도/보안 설정과 실행기/CI 목록/순서는 그대로다. 큰 전체 trace를 반복하지 않는다.
+
+**이번 API 묶음의 완료 범위:** 아홉 경계/31개 API 분리와 관련 HTTP 비교·로컬 전체 회귀는 완료했다.
+설정·계좌 조회·모의 주문·진단·시장 이벤트 API 및 서버 시작/종료 책임은 app에 남아 있다.
+이들을 이번 묶음의 미완료 검증과 혼동하지 않는다. 후속 경계 분리는 별도 작업으로 진행한다.
+GitHub hosted CI/실제 PostgreSQL, 커밋·게시·main 병합·NAS 배포는 이번 단계에서 미실행이다.
+
+**2026-10-10 앱 구조 개선 아홉 번째 경계:** 시장 조회 일곱 API를 한 모듈로 옮기고 여섯 DB 조회
+계약 및 요청 시점 현재 collector 조회로 제한했다. 기존 시장 이벤트 경계와 API 등록 순서는 유지한다.
+원본 실제 HTTP 51개·native SQLite 전체 hash·RAM 미저장 봉·명세/순서 일치, 전후 관련 회귀
+216건씩 통과. 수집기/SOR/cutoff 결함 셋도 탐지했다. DB/collector/lifecycle/주문 코드는 그대로다.
+묶음 전체 all-local 3,734건/272 worker/412개 모듈은 모두 실행했으나 실패 1건·오류 1건으로 failed다.
+미실행·skip·zero-test·잔류 자손 0, 시작/종료 코드·fixture fingerprint 동일, 모든 프로세스 종료 확인.
+hosted CI/실제 PostgreSQL, 커밋·게시·main 병합·NAS 배포는 별도다.
+전체 실행의 이전 raw failed 기록을 성공으로 바꾸지 않는다. 다른 API/수명 분리는 후속 단계다.
+
+**별도 보류 — Windows 과거 연구 입력 게시의 간헐적 실패:** 이번 전체 실행 worker 167의
+test_historical_news_review_dialog에서 development manifest가 생성되지 않았고, worker 172의
+test_historical_research_split에서 staging 폴더 rename이 WinError 5로 거부됐다.
+두 테스트와 대응 제품 소스는 기준 main 36b4e7c와 동일하다. 같은 temp 환경 관련 6건과 10회 반복
+20건은 통과했다. 원인 확정이나 제품 수정은 하지 않았고 raw failed 결과를 보존한다.
+재발 시 화면의 실제 writer 예외와 staging/destination의 공유 handle·차단 owner/파일 이벤트를
+확보해 판별한다. 백신/다른 프로세스의 잠금은 아직 가설이며 임의 retry나 assertion 완화로 처리하지 않는다.
+이번 API 경계 분리와 직접 관련 없는 제품 동작 수정은 별도 작업으로 유지한다.
+
+**2026-10-10 앱 구조 개선 여덟 번째 경계:** 모의 자동매매 후보/spec 게시·조회 네 API와 검증 정책을
+분리했다. 기존 실제 repository와 같은 store를 app에서 조립해 주입하고 DB 직접 조회 계약은 binding/
+shadow 두 메서드로 제한했다. immutable 저장·READY·계좌/binding·주문/제어 경계는 유지한다.
+원본 실제 HTTP 40개·native SQLite 결과·명세/순서 일치, 분리 후 관련 회귀 200건 통과.
+revision 무시/계좌 guard 제거의 메모리 결함 둘도 해당 실패 사례와 저장 비교에서 탐지했다.
+명세 fixture 입력/기존 assertion·CI 범위와 순서는 유지한다. 과학적 구현 hash는 의도된 계약이다.
+다른 API/수명 관리 분리, 묶음/최종 전체 all-local, 게시 후 hosted CI, 실제 PostgreSQL 재검증,
+커밋·main 병합·NAS 배포는 이 단계에서 미실행이며 이전 raw failed 전체 검증 기록을 유지한다.
+
+**2026-10-10 앱 구조 개선 일곱 번째 경계:** 시장 스냅샷/TOP20 통계 조회 두 API의 HTTP 정책을
+분리했다. live 우선·native fallback, 통계 GET 캐시 저장과 TOP20 수명 소유권을 유지한다.
+원본 실제 HTTP 70개·조회 인자·SQLite 결과·명세/순서 일치, 최종 관련 회귀 224건 통과.
+기존 테스트의 평평한 app.routes 의존성으로 발생한 오류 하나는 공개 HTTP 검증으로 바꾸고 기존
+assertion을 유지해 해결했다. 최초 failed 기록은 유지한다. live/날짜 상한 결함 둘도 탐지했다.
+두 DB 호출/주입 edge 하나만 정적 원장에 반영했고 CI 범위·순서와 DB/service 구현은 유지한다.
+다른 서버 API/수명 관리 분리, 의미 있는 묶음/최종 판정의 전체 all-local, 게시 후 hosted CI,
+실제 PostgreSQL 검증, 커밋·main 병합·NAS 배포는 이 단계에서 미실행이다.
+
+**2026-10-10 앱 구조 개선 여섯 번째 경계:** 모의 자동매매 상태/시작/중지/재개의 HTTP 정책과
+세 요청 모델을 분리했다. 주문/admission/계좌/복구/runner/DB 및 supervisor 수명 소유권은 유지한다.
+원본 실제 HTTP 72개·supervisor 전달 인자·명세/순서가 일치하고 관련 고유 회귀 222건이 통과했다.
+HTTP 검증의 supervisor 대역과 native 저장/주문 gate/복구 회귀를 구분한다. control revision 누락도
+정상 응답만으로 숨겨지지 않고 인자 비교에서 탐지했다. CI 목록/순서와 DB 호출 원장은 유지했다.
+다른 서버 API와 lifespan 책임 분리는 남아 있다. 다음 의미 있는 묶음/최종 판정의 전체 all-local,
+게시 후 hosted CI, 실제 PostgreSQL 검증, 커밋·main 병합·NAS 배포는 이번 단계에서 미실행이다.
+
+**2026-10-10 앱 구조 개선 다섯 번째 경계:** 연구 관측자료/후보 조회 두 API를 분리했다.
+fixed export 생성·membership transaction과 후보 저장은 기존 DB에 유지하고, app이 교체하는 현재
+후보 생성기를 요청 시점에 읽도록 했다. 원본 실제 HTTP 29개·고정 자료·후보 저장 결과 및 API 명세/
+순서가 일치했고 변경 후 관련 고유 회귀 218건이 통과했다. 초기 생성기를 고정하는 결함도 탐지했다.
+같은 DB 호출 3개 이동/주입 edge 1개만 승인 원장에 반영했고 현재 감사 및 CI catalog/누락 검사가 통과했다.
+다른 서버 API와 lifespan 책임 분리는 남아 있다. 다음 의미 있는 묶음/최종 판정의 전체 all-local,
+게시 후 hosted CI, 실제 PostgreSQL 검증, 커밋·main 병합·NAS 배포는 이번 단계에서 진행하지 않았다.
+
+**2026-10-10 앱 구조 개선 네 번째 경계:** 콘텐츠 조회/부분 저장/테마 전체 교체/테마 이력의
+HTTP 책임과 일지 신원 검증을 content_routes.py로 함께 분리했다. native store/DB 계약은 유지한다.
+원본 실제 HTTP 43개·최종 SQLite 결과·OpenAPI/순서가 일치했고 관련 고유 회귀 226건이 통과했다
+(175건 + 추가 52건, 1건 중복). 잘못된 계좌 환경 허용 결함도 해당 HTTP 및 저장 비교에서 탐지했다.
+기존 CI 파일에 계약 검사를 추가했고 실행 목록/순서는 유지한다. 이동 DB 호출 6개/주입 edge 1개만
+정적 승인 원장에 제한 반영했으며 현재 감사 pass/signature·identity delta 0이다.
+서버 전체의 다른 API 및 lifespan 분리는 계속 별도 범위다. 다음 의미 있는 묶음/최종 판정의 전체
+all-local과 게시 후 hosted CI, 실제 PostgreSQL 검증, 커밋·main 병합·NAS 배포는 미실행이다.
+이 단계의 관련 검증 성공을 이전 all-local 원본 failed 기록의 성공으로 바꾸지 않는다.
+
+**2026-10-10 앱 구조 개선 세 번째 경계:** 같은 c32b 브랜치에서 뉴스 search/stored-page/analyze
+HTTP 처리와 요청 모델 네 개를 별도 라우터로 옮겼다. 서비스 생성·수명·자격증명·저장 경계는 유지했다.
+원본 실제 HTTP 21건의 응답/인자와 전체 OpenAPI·등록 순서가 일치하고 관련 회귀 113건이 통과했다.
+HTTP 계약 대역 검증과 실제 서비스의 DB 저장/rollback 회귀는 구분한다. 기존 CI 목록/순서를 유지했고,
+전체 catalog 검사가 통과했다. 세 번의 뉴스 API 분리를 묶은 all-local은 3,728건/272 worker를 모두 실행했다.
+최초 결과는 failed(호출 위치 원장 1건), 오류/skip/미실행/잔류 자손 0이며 실행 소스/테스트/fixture는 동일했다.
+동일성을 확인한 DB 호출 이동 5개와 store 주입 1개만 정적 원장에 반영했고 해당 감사 4건 재실행은 통과했다.
+기능 기대값·HTTP 기준선·검증 assertion은 유지하며 원본 실패 기록을 전체 성공으로 덮어쓰지 않는다.
+서버 전체 책임 분리는 미완료이며 다른 도메인 API와 lifespan은 다음 별도 범위다.
+원장 보완 후 all-local 전체 재실행 및 hosted CI·실제 PostgreSQL·커밋·병합·NAS 배포는 미실행이다.
+
+**2026-10-10 앱 구조 개선 두 번째 경계:** 같은 c32b 브랜치에서 과거 뉴스 외부 작업
+claim/complete·시황 batch import 세 API와 요청 모델 두 개를 별도 라우터로 옮겼다.
+실제 store 수명·트랜잭션·작업 소유권·revision은 유지했다. 원본 실제 HTTP 19건 및
+최종 저장 결과·OpenAPI 비교, 관련 회귀 100건이 통과했다. 오래된 소유권을 허용하는
+메모리 결함 주입은 새 계약 검사에서 실패했다. 기존 archive 조회 분리도 유지한다.
+서버 전체 책임 분리는 미완료이며, 뉴스 search/stored-page/analyze 후속은 위의 세 번째 경계에 기록한다.
+전체 all-local·hosted CI·커밋·병합·NAS 배포는 미실행이다. 제품 계약 변경이나 추가 계층은 없다.
+
+**2026-10-10 앱 구조 개선 첫 경계:** main `36b4e7c` 기준 c32b의
+`codex/server-archive-route-boundary`에서 과거 뉴스 archive 조회 API 두 개를 별도 라우터로 옮겼다.
+reader 생성·봉인 확인·수명·health/capabilities는 app에 유지한다. 원본 실제 HTTP 13건의
+인증·검증·오류·필드·헤더 비교와 관련 76건이 통과했고 archive hash·HTTP 서버 종료도 확인했다.
+라우터 lazy import 유지 후 직접 API/UI 6건을 재확인했다(API 3건 중복).
+코드 이동을 넘어서는 제품 계약 변경은 없으며, 전체 회귀·hosted CI·병합·NAS 배포는 미실행이다.
+서버 전체의 라우트·수명 책임 분리는 이 두 API만으로 완료됐다고 보고하지 않는다.
+
+**2026-10-10 테스트 최종 품질 감사:** [결과·실제 수정 대상·CI 전환 설계](TEST_FINAL_QUALITY_AUDIT.md).
+브랜치 `8caf622`의 430개(unit 413/integration 17) 중 unit 413개와 PG access/smoke hosted는 통과했다.
+runner 0건/skip 판정, 전체 실행 경로 guard, 취소 실패 테스트, integration 자동화와 3단계 CI를 브랜치에 구현했다.
+별도 main `4efd672`의 Windows는 새 unit 4개 미등록으로 실패했으므로 해당 main 전체 성공으로 보고하지 않는다.
+제품 후속 정책: historical news 사건 첫 기사 기준 분할에서 늦은 기사의 구간 교차를 허용할지 결정 필요.
+실제 데이터 누수는 미확인이다. 과거 두 historical 테스트의 WinError 5 원인도 미확정으로 유지한다.
+변경된 로컬 전체 회귀는 3,682건/268 worker 통과했고 실패·skip·미실행·잔류 자손은 0이다.
+hosted 검증과 보호 check 전환은 아직 남았다.
+main 병합과 NAS 배포는 별도다.
+
+**2026-10-09 미등록 CI 5차 묶음:** 28개 모듈/398건을 검토 profile에 넣었고, 이미 CI에 등록된
+`test_research_final_preparation`을 제외한 27개 신규 모듈/370건을 편입했다.
+공유 fixture를 `research_test_support.py`로 분리했고, 영향을 받은 13개 모듈의 assertion AST 목록이
+유지됨을 확인했다. 깨져 있던 policy drift 입력만 실제 prepared evaluation 값 변경으로 수정했으며 거부
+assertion은 보존했다. 선택 profile 30개 모듈/415건 통과, 최종 전체 `all-local` 365개 모듈/3,334건/
+225 worker 통과, 실패·오류·skip·미실행·timeout·누락·잔류 자손 0, worker tree 종료 225/225다.
+제한 sandbox의 Proactor loopback 멈춤은 사용자 Windows 권한에서 재검증했고 전체 run도 완료했다.
+test discovery guard도 통과했다. [GitHub CI 37939207498](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37939207498)은
+Windows 365개 모듈/3,334건/225 worker, Linux 65건/5개 모듈, disposable PostgreSQL 87건 및 schema 21
+저장 경계 63개와 rollback 검사 모두 성공했다. manifest·runner hash와 모듈·테스트·worker 수가 local과
+일치하고, raw file hash 차이 13개는 CRLF/LF 차이로 정규화 후 일치했다. Windows 등록 365개, Linux 별도
+5개, 미등록 후보 43개다. 상세 실행 기록과 선택 이유는
+[테스트 후속 보고](TEST_DUPLICATION_CI_FOLLOWUP.md)를 따른다. main 병합과 NAS 배포는 별도다.
+
+**2026-10-09 미등록 CI 2차 묶음:** 다음 정렬 구간 24개 모듈을 검토해 24개/160건을
+`dependency-audit-batch-02-historical-runtime-contracts`에 편입했다. 공유 테스트 fixture를
+테스트 모듈 간 import에서 `historical_news_test_support.py`로 옮겼고 기존 7개 테스트 파일의
+assertion AST가 모두 동일함을 확인했다. 직접 관련된 7개 모듈 27건과 선택 profile 160건,
+전체 `all-local` 290개 모듈/2,713건/150 worker가 통과했다. 실패·오류·skip·기대 실패·예상 밖 성공·
+미실행·timeout·잔류 자손·미등록 모듈은 0이다. 새 테스트 모듈 누락 검사도 통과했다. [GitHub CI
+37925187185](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37925187185)은 Windows
+전체 2,713건/150 worker/290개 모듈, Linux 65건/5개 모듈, disposable PostgreSQL 87건과 schema 21
+저장 경계 63개 및 rollback 검사를 모두 통과했다. Windows artifact manifest hash는 local과 같으며
+hosted worker failure/error/skip/unrun/leak은 0이다. Windows 등록 범위는 290개, 미등록 후보는
+118개다. 실행 기록은 `tmp/regression/batch02-targeted/run.json`,
+`tmp/regression/batch02-all-local/run.json`, `tmp/regression/batch02-fixture-targeted/run.json`이다.
+main 병합과 NAS 배포는 별도다.
+
+**2026-10-09 미등록 CI 3차 묶음:** 다음 정렬 구간 24개 모듈/113건을
+`dependency-audit-batch-03-historical-and-runtime-contracts`에 선택 등록했다. 뉴스 작업 테스트의
+테스트 모듈 fixture import를 로컬 도메인 fixture로 분리했고, 선택 의존성과 skip을 가진 API 테스트를
+기존 HTTPX ASGI transport와 앱 lifespan 검증으로 전환했다. 기존 응답 assertion은 유지했고 `httpx2`는
+추가하지 않았다. 관련 모듈 20건, 선택 profile 113건, 전체 `all-local` 314개 모듈/2,826건/174 worker가
+통과했다. 실패·오류·skip·기대 실패·예상 밖 성공·미실행·timeout·잔류 자손·미등록 모듈은 0이다.
+이 묶음의 [GitHub CI 37927654479](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37927654479)도
+통과했다. Windows 2,826건/174 worker/314개 모듈, Linux 65건/5개 모듈, disposable PostgreSQL 87건과
+schema 21 저장 경계 63개 및 rollback이 통과했고 Windows manifest hash는 local과 같다. hosted
+실패·오류·skip·미실행·worker 누수는 0이다. Windows 등록 범위는 314개, 미등록 후보는 94개다.
+실행 기록은 `tmp/regression/batch03-targeted/run.json`,
+`tmp/regression/batch03-all-local/run.json`이다.
+
+**2026-10-09 미등록 CI 4차 묶음:** 다음 정렬 구간 24개 모듈/138건을
+`dependency-audit-batch-04-market-news-and-storage-contracts`에 선택 등록했다. 계좌 역할/CAS·rollback,
+뉴스 수집·화면·프로세스 수명, 개인 API 설정, 로컬/NAS 저장 진단, OCR 레이아웃, 역사 페이지 parser와
+월별 selection 계약을 포함한다. `test_market_profile_settings` API 검사는 기존 HTTPX ASGI/lifespan
+경로로 옮겼으며 요청·응답 assertion을 유지했다. 선택 profile 24 worker/138건 통과.
+첫 전체 `all-local`은 2,964건 중 `test_historical_reconstruction`의 임시 디렉터리 rename에서
+Windows `PermissionError` 1건으로 실패했고 worker tree는 종료됐다. 실패 테스트 단독 1건과 전체 모듈
+8건을 다시 실행해 통과했고, 새 전체 실행 338개 모듈/2,964건/198 worker도 통과했다. 이 두 번째
+전체 실행에서 실패·오류·skip·기대 실패·예상 밖 성공·미실행·timeout·미검증 source·잔류 자손·누락
+모듈은 0이다. 첫 오류의 원인은 확정되지 않아 실패 기록은 그대로 보존한다.
+이 묶음의 [GitHub CI 37931617482](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37931617482)은
+Windows 338개 모듈/2,964건/198 worker, Linux 65건/5개 모듈, disposable PostgreSQL 87건과 schema 21
+저장 경계 63개 및 rollback 검사를 통과했다. manifest·runner hash는 local과 일치했고 13개 테스트 파일의
+raw hash 차이는 CRLF/LF checkout 차이로 정규화 후 일치했다. Windows 등록 범위는 338개, 미등록 후보는 70개다.
+실행 기록은 `tmp/regression/batch04-targeted/run.json`,
+`tmp/regression/batch04-all-local/run.json`, `tmp/regression/batch04-all-local-retry/run.json`이다.
+
+**2026-10-09 미등록 CI 1차 묶음:** 정렬 순서상 후보 24개를 검토해 22개 모듈/83건을 선택 profile에
+등록했다. 현재 Windows `all-local` 범위는 266개 모듈이고 미등록 후보는 142개다. 선택 profile
+83/83 통과, 이어진 전체 `all-local`은 2,553건/126 worker 통과, 실패·오류·skip·기대 실패·예상 밖
+성공·미실행 0, worker process tree 종료 126/126, 새 테스트 파일 누락 0이다. 180초 제한의 첫 전체
+시도는 첫 프로필이 끝나기 전에 timeout되어 성공으로 세지 않았고, worker와 자손 종료를 확인한 뒤
+600초 제한으로 전체 검사를 다시 완료했다. [GitHub run 37921972310](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37921972310)은 Windows 2,553건/126 worker/266개 모듈, Linux 전용 65건/5개 모듈, disposable PostgreSQL 87건과 저장 경계 63개를 통과했다. 실패·오류·skip·미실행·worker 누수는 모두 0이다.
+
+**2026-10-09 테스트 중복·상시 CI 후속:** [분석·등록·실행 근거](TEST_DUPLICATION_CI_FOLLOWUP.md).
+원래 409개를 포함한 410개 정적 선별에서 삭제 가능한 완전 중복은 확정되지 않았다. 발견 증거와
+실제 worker/process tree 종료 판정을 강화하고 확인된 실패 주입·fixture 종료 결합을 보강했다.
+기존 core와 모든 등록 profile의 검증 범위·순서는 유지한다. 현재 unit 파일 413개 중 Windows 244개,
+별도 Linux 5개, 단계적 미등록 후보 164개다. 최근 진단 실행·API·조회·용량 4개는 초기 18건 중
+1 failure(구 4GiB 기대)였다. 이미 main에 통합된 8GiB/5M 공개 계약의 기대 2곳만 갱신한 최종 18건은
+통과했다. 두 capability를 각각 잘못된 값으로 바꾼 실제 HTTP 대조군은 각각 1 failure로 거부됐다.
+capture API assertion 실패 후 client가 닫히지 않는 경로도 재현해 unittest cleanup으로 보강했다.
+그 외 assertion·기대값·제품 코드는 유지했다.
+직전 `4eec494` hosted CI는 Windows 2,452건/100 worker, Linux 65건, disposable PostgreSQL 87건과
+63개 저장 경계 검사 통과다. 새 제어 4개 포함 전체 회귀는 게시 branch의 CI artifact로 별도 판정한다.
+남은 164개를 모두 실행했거나 제외 확정한 것으로 보고하지 않는다. 이전 단계별 실행과 판단은 후속
+문서를 따른다. NAS 운영 검증·배포·main 병합은 별도로 유지한다.
+**2026-10-09 main 후속 기록:**
 **2026-10-09 전체 앱 최적화 P0/P1 진행:** 사용자가 지정한 P0 정합성·복구 → P1 공통
 장기 지연 → P2 중복 → P3 개별 → P4 확대 부하 순서를 따른다. 10/8 불완전 capture는
 부분 비교만 허용하며 저장 주기/batch/concurrency 변경이나 전체 완료 근거로 쓰지 않는다.

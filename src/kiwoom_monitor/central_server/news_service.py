@@ -5,7 +5,7 @@ import logging
 from time import perf_counter
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.application.news_analysis import NewsAssessment, assess_stock_news
@@ -18,7 +18,6 @@ from kiwoom_monitor.infrastructure.naver_news import (
 from kiwoom_monitor.infrastructure.news_ai import ANALYSIS_PROMPT_VERSION
 from kiwoom_monitor.infrastructure.naver_stock_news import NaverStockNewsClient
 
-from .database import QueryStore
 from .news_jobs import NewsJobRunner
 from .diagnostic_workloads import is_paused
 from .market_news_sources import MarketFeedNewsCollector
@@ -28,13 +27,77 @@ from .news_sources import DEFAULT_NEWS_QUERY_SET, QuerySetNewsCollector
 LOGGER = logging.getLogger(__name__)
 
 
+class CentralNewsStore(Protocol):
+    """뉴스 서비스와 동일 저장소를 받는 세 하위 작업자의 저장 계약.
+
+    NewsJobRunner의 선택적 set_news_job_wakeup 감지는 별도로 유지한다.
+    """
+
+    def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
+
+    def load_documents(
+        self, collection: str, owner: str = "", limit: int = 1000, offset: int = 0,
+        updated_after: float = 0.0,
+    ) -> list[dict[str, Any]]: ...
+
+    def load_dataset_snapshots(
+        self, kind: str, subject: str = "", limit: int = 100,
+    ) -> list[dict[str, Any]]: ...
+
+    def load_stock_news_articles(
+        self, stock_code: str, *, limit: int = 1000,
+    ) -> list[dict[str, Any]]: ...
+
+    def load_confirmed_news_articles(
+        self, stock_code: str, *, limit: int = 1000,
+    ) -> list[dict[str, Any]]: ...
+
+    def claim_news_request(
+        self, scope: str, *, scope_limit: int, hard_limit: int, budget_date: str,
+    ) -> bool: ...
+
+    def news_request_count(self, budget_date: str) -> int: ...
+
+    def load_news_source_cursor(self, source_id: str) -> dict[str, Any] | None: ...
+
+    def save_news_source_page(self, value: dict[str, Any]) -> dict[str, Any]: ...
+
+    def enqueue_news_ai_jobs(self, values: list[dict[str, Any]]) -> int: ...
+
+    def claim_news_jobs(
+        self, *, limit: int = 1, now: float | None = None,
+        priority_stock_code: str = "", preferred_stage: str = "",
+    ) -> list[dict[str, Any]]: ...
+
+    def finish_news_job(self, job_key: str, output_ref: str) -> None: ...
+
+    def retry_news_job(
+        self, job_key: str, error: str, next_retry_at: float, output_ref: str = "",
+    ) -> None: ...
+
+    def save_news_body_revision(self, value: dict[str, Any]) -> str: ...
+
+    def load_latest_news_body(self, article_revision_id: str) -> dict[str, Any] | None: ...
+
+    def load_news_body_revision(self, body_revision_id: str) -> dict[str, Any] | None: ...
+
+    def load_news_article_revision(self, article_revision_id: str) -> dict[str, Any] | None: ...
+
+    def load_news_history(
+        self, kind: str, *, target: str = "", identity: str = "",
+        available_at: float | None = None, limit: int = 100,
+    ) -> list[dict[str, Any]]: ...
+
+    def save_news_event_revision(self, value: dict[str, Any]) -> str: ...
+
+
 class CentralNewsService:
     """동일 종목의 동시 뉴스 요청을 하나의 네이버 호출로 합친다."""
 
     SELECTED_STOCK_CACHE_SECONDS = 60
 
     def __init__(
-        self, client: NaverNewsClient | None, store: QueryStore,
+        self, client: NaverNewsClient | None, store: CentralNewsStore,
         dart_client: DartDisclosureClient | None = None, *, refresh_seconds: int = 300,
         jobs_enabled: bool = True, query_set_enabled: bool = True,
         query_set: tuple[str, ...] = DEFAULT_NEWS_QUERY_SET, query_set_refresh_seconds: int = 300,

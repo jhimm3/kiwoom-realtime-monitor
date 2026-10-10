@@ -17,7 +17,7 @@ from dataclasses import asdict
 from datetime import date, datetime, time as clock_time, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from kiwoom_monitor.application.minute_trade_value import MinuteTradeValueAggregator
 from kiwoom_monitor.application.market_session_schedule import (
@@ -35,15 +35,16 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
 )
 from kiwoom_monitor.infrastructure.krx.stock_catalog import fetch_krx_stock_catalog
 from kiwoom_monitor.domain.ranking import normalize_stock_code
+from kiwoom_monitor.domain.market_data_contract import MarketDataObservation
 from kiwoom_monitor.application.ranking_schedule import ranking_snapshot_archive_due
 
-from .database import QueryStore
 from .diagnostic_workloads import is_paused
 from .market_ingest import (
     fundamentals_document_is_current, fundamentals_refresh_key, nxt_eligibility_document_is_current,
 )
 from .market_observations import ranking_observation, top20_index_observation
 from .persistent_outbox import JsonRecordOutbox
+from .program_snapshot_writer import ProgramSnapshotWriter
 from .realtime_hub import RealtimeHub, RealtimeSubscriber
 from .rest_broker import CentralRestBroker
 
@@ -52,13 +53,57 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 
 
+class AutonomousTop20Store(Protocol):
+    """TOP20 순위·준비·지수·프로그램 자료의 조회 및 native 저장 계약."""
+
+    def load_documents(
+        self, collection: str, owner: str = "", limit: int = 1000, offset: int = 0,
+        updated_after: float = 0.0,
+    ) -> list[dict[str, Any]]: ...
+
+    def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
+
+    def replace_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
+
+    def load_hot_cohort(self, *, active_only: bool = False) -> list[dict[str, Any]]: ...
+
+    def load_daily_bars(
+        self, code: str, market: str = "", limit: int = 250,
+    ) -> list[dict[str, Any]]: ...
+
+    def load_minute_bars(
+        self, code: str, trading_date: str, market: str = "", *,
+        realtime_deltas: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def load_dataset_snapshots(
+        self, kind: str, subject: str = "", limit: int = 100,
+    ) -> list[dict[str, Any]]: ...
+
+    def load_observation_revisions(
+        self, kind: str, subject: str = "", limit: int = 100,
+    ) -> list[dict[str, Any]]: ...
+
+    def save_dataset_snapshot(
+        self, kind: str, subject: str, snapshot_key: str, payload: dict[str, Any], *,
+        observation: MarketDataObservation[object] | None = None,
+    ) -> None: ...
+
+    def save_dataset_snapshots(
+        self,
+        values: list[tuple[
+            str, str, str, dict[str, Any], MarketDataObservation[object] | None,
+        ]],
+    ) -> None: ...
+
+
 class AutonomousTop20Service:
     """24시간 순위와 08:00~20:00 0B 수집, 장후 차트 보완을 담당한다."""
 
     STALE_RANKING_RETRY_LIMIT = 20
 
     def __init__(
-        self, broker: CentralRestBroker, hub: RealtimeHub, store: QueryStore,
+        self, broker: CentralRestBroker, hub: RealtimeHub, store: AutonomousTop20Store,
         *, now_provider: Callable[[], datetime] | None = None,
         catalog_loader: Callable[[], tuple[tuple[str, str, str], ...]] = fetch_krx_stock_catalog,
         outbox_path: Path | None = None,
@@ -120,8 +165,7 @@ class AutonomousTop20Service:
         self._account_entry_codes: tuple[str, ...] = ()
         self._pending_index_records: dict[str, dict[str, Any]] = {}
         self._index_outbox_lock = asyncio.Lock()
-        self._pending_program_snapshots: dict[str, dict[str, Any]] = {}
-        self._program_save_task: asyncio.Task[None] | None = None
+        self._program_snapshots = ProgramSnapshotWriter(store)
         self._close_task: asyncio.Task[None] | None = None
         self._latest_membership_snapshot: dict[str, Any] | None = None
 
@@ -195,12 +239,7 @@ class AutonomousTop20Service:
             self._subscriber = None
         # The index-loop waiter may have been cancelled while to_thread was still
         # committing. Drain its owner before retrying failures or flushing newer input.
-        if self._program_save_task is not None:
-            try:
-                await asyncio.shield(self._program_save_task)
-            except Exception as error:
-                logger.warning("NAS TOP20 프로그램수급 종료 저장 재시도: %s", error)
-        await self._flush_program_snapshots()
+        await self._program_snapshots.drain()
 
     async def _select_ranking_response(self, now: datetime):
         """Shared live/offline ranking validation; no subscription or store effects."""
@@ -776,7 +815,7 @@ class AutonomousTop20Service:
                     except TypeError:
                         continue
                     observed_at = self._now()
-                    self._pending_program_snapshots[tick.code] = {
+                    self._program_snapshots.enqueue({
                         "subject": tick.code,
                         "snapshot_key": (
                             f"{observed_at:%Y%m%d}:REALTIME:"
@@ -790,7 +829,7 @@ class AutonomousTop20Service:
                             "net_buy_amount_million_won": tick.net_buy_amount_million_won,
                             "net_buy_amount_change_million_won": tick.net_buy_amount_change_million_won,
                         }]},
-                    }
+                    })
                     continue
                 if event.get("type") != "trade":
                     continue
@@ -806,7 +845,7 @@ class AutonomousTop20Service:
         while True:
             try:
                 await self._flush_pending_indexes()
-                await self._flush_program_snapshots()
+                await self._program_snapshots.flush()
                 now = self._now()
                 async with self._collector_lock:
                     update = self._advance(now)
@@ -817,42 +856,6 @@ class AutonomousTop20Service:
             except Exception as error:
                 logger.warning("NAS TOP20 지수 수집 실패(계속 실행): %s", error)
             await asyncio.sleep(0.25)
-
-    async def _flush_program_snapshots(self) -> None:
-        task = self._program_save_task
-        if task is None or task.done():
-            if not self._pending_program_snapshots:
-                return
-            task = owned_create_task(
-                self._save_pending_program_snapshots(), name="nas-top20-program-save",
-            )
-            self._program_save_task = task
-            task.add_done_callback(
-                lambda done: done.exception() if not done.cancelled() else None,
-            )
-        # A cancelled caller leaves the same owned save running; another flush
-        # joins it rather than writing the detached batch concurrently.
-        await asyncio.shield(task)
-
-    async def _save_pending_program_snapshots(self) -> None:
-        pending, self._pending_program_snapshots = self._pending_program_snapshots, {}
-        if not pending:
-            return
-        try:
-            await owned_to_thread(self._write_program_snapshots, tuple(pending.values()))
-        except Exception:
-            for code, value in pending.items():
-                self._pending_program_snapshots.setdefault(code, value)
-            raise
-
-    def _write_program_snapshots(self, values: tuple[dict[str, Any], ...]) -> None:
-        self._store.save_dataset_snapshots([
-            (
-                "program_flow", str(value["subject"]), str(value["snapshot_key"]),
-                dict(value["payload"]), None,
-            )
-            for value in values
-        ])
 
     def _advance(self, now: datetime):
         subscriber = self._subscriber

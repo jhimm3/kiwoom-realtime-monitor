@@ -23,7 +23,7 @@ from kiwoom_monitor.research_process import execute_process_request, load_resear
 from scripts.run_research import execute_research, PaperExecutionEngine, ResearchRunCancelled, main as research_main
 from test_research_bundle_execution import rows_for, child, KST, PROFILE
 from test_research_execution import _execution as base_execution, _strategy
-from test_research_process import _request_document
+from research_test_support import research_request_document as _request_document
 
 
 def _execution():

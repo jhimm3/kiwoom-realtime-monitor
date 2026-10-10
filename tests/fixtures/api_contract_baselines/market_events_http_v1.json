@@ -1,0 +1,2453 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "input_control": "native SQLite history/current cohort; fixed migration/document clocks; network producers isolated; original native read methods observed without replacing their behavior",
+  "results": [
+    [
+      {
+        "name": "vi-auth",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "vi"
+          },
+          "authenticated": false
+        },
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "vi-all",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "vi"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "659"
+        },
+        "body": {
+          "kind": "vi",
+          "code": "",
+          "history": [
+            {
+              "event_id": "vi-3",
+              "event_key": "vi-key-3",
+              "stock_code": "005930",
+              "event_kind": "ACTIVATED",
+              "vi_type": "DYNAMIC",
+              "price": 75000,
+              "effective_at": 1003.0,
+              "received_at": 1003.0,
+              "available_at": 1003.0,
+              "source": "fixture"
+            },
+            {
+              "event_id": "vi-2",
+              "event_key": "vi-key-2",
+              "stock_code": "000660",
+              "event_kind": "ACTIVATED",
+              "vi_type": "DYNAMIC",
+              "price": 75000,
+              "effective_at": 1002.0,
+              "received_at": 1002.0,
+              "available_at": 1002.0,
+              "source": "fixture"
+            },
+            {
+              "event_id": "vi-1",
+              "event_key": "vi-key-1",
+              "stock_code": "005930",
+              "event_kind": "ACTIVATED",
+              "vi_type": "DYNAMIC",
+              "price": 75000,
+              "effective_at": 1001.0,
+              "received_at": 1001.0,
+              "available_at": 1001.0,
+              "source": "fixture"
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "vi"
+              ],
+              "kwargs": {
+                "code": "",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "vi-filter-limit",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "vi",
+            "code": "005930",
+            "limit": 1
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "249"
+        },
+        "body": {
+          "kind": "vi",
+          "code": "005930",
+          "history": [
+            {
+              "event_id": "vi-3",
+              "event_key": "vi-key-3",
+              "stock_code": "005930",
+              "event_kind": "ACTIVATED",
+              "vi_type": "DYNAMIC",
+              "price": 75000,
+              "effective_at": 1003.0,
+              "received_at": 1003.0,
+              "available_at": 1003.0,
+              "source": "fixture"
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "vi"
+              ],
+              "kwargs": {
+                "code": "005930",
+                "limit": 1
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "vi-missing",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "vi",
+            "code": "999999"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "42"
+        },
+        "body": {
+          "kind": "vi",
+          "code": "999999",
+          "history": []
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "vi"
+              ],
+              "kwargs": {
+                "code": "999999",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "vi-inactive",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "vi",
+            "code": "000660"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "249"
+        },
+        "body": {
+          "kind": "vi",
+          "code": "000660",
+          "history": [
+            {
+              "event_id": "vi-2",
+              "event_key": "vi-key-2",
+              "stock_code": "000660",
+              "event_kind": "ACTIVATED",
+              "vi_type": "DYNAMIC",
+              "price": 75000,
+              "effective_at": 1002.0,
+              "received_at": 1002.0,
+              "available_at": 1002.0,
+              "source": "fixture"
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "vi"
+              ],
+              "kwargs": {
+                "code": "000660",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "cohort-auth",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort"
+          },
+          "authenticated": false
+        },
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "cohort-all",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "1025"
+        },
+        "body": {
+          "kind": "cohort",
+          "code": "",
+          "history": [
+            {
+              "revision_id": "cohort-3",
+              "revision_key": "cohort-key-3",
+              "stock_code": "005930",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1003.0,
+              "available_at": 1003.0
+            },
+            {
+              "revision_id": "cohort-2",
+              "revision_key": "cohort-key-2",
+              "stock_code": "000660",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1002.0,
+              "available_at": 1002.0
+            },
+            {
+              "revision_id": "cohort-1",
+              "revision_key": "cohort-key-1",
+              "stock_code": "005930",
+              "event_type": "ENTER",
+              "session_id": "2026-10-09",
+              "effective_at": 1001.0,
+              "available_at": 1001.0
+            }
+          ],
+          "current": [
+            {
+              "stock_code": "000660",
+              "stock_name": "000660",
+              "first_seen_at": 1002.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1002.0,
+              "active": false,
+              "expired_at": 1002.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            },
+            {
+              "stock_code": "005930",
+              "stock_name": "005930",
+              "first_seen_at": 1003.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1003.0,
+              "active": false,
+              "expired_at": 1003.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            }
+          ],
+          "condition": {
+            "status": "NOT_OBSERVED"
+          }
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "cohort"
+              ],
+              "kwargs": {
+                "code": "",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [
+            {
+              "args": [],
+              "kwargs": {
+                "active_only": false
+              }
+            }
+          ],
+          "condition": [
+            {
+              "args": [
+                "condition_search_status",
+                "hot_cohort",
+                1
+              ],
+              "kwargs": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "cohort-filter-limit",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort",
+            "code": "005930",
+            "limit": 1
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "478"
+        },
+        "body": {
+          "kind": "cohort",
+          "code": "005930",
+          "history": [
+            {
+              "revision_id": "cohort-3",
+              "revision_key": "cohort-key-3",
+              "stock_code": "005930",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1003.0,
+              "available_at": 1003.0
+            }
+          ],
+          "current": [
+            {
+              "stock_code": "005930",
+              "stock_name": "005930",
+              "first_seen_at": 1003.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1003.0,
+              "active": false,
+              "expired_at": 1003.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            }
+          ],
+          "condition": {
+            "status": "NOT_OBSERVED"
+          }
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "cohort"
+              ],
+              "kwargs": {
+                "code": "005930",
+                "limit": 1
+              }
+            }
+          ],
+          "current": [
+            {
+              "args": [],
+              "kwargs": {
+                "active_only": false
+              }
+            }
+          ],
+          "condition": [
+            {
+              "args": [
+                "condition_search_status",
+                "hot_cohort",
+                1
+              ],
+              "kwargs": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "cohort-missing",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort",
+            "code": "999999"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "97"
+        },
+        "body": {
+          "kind": "cohort",
+          "code": "999999",
+          "history": [],
+          "current": [],
+          "condition": {
+            "status": "NOT_OBSERVED"
+          }
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "cohort"
+              ],
+              "kwargs": {
+                "code": "999999",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [
+            {
+              "args": [],
+              "kwargs": {
+                "active_only": false
+              }
+            }
+          ],
+          "condition": [
+            {
+              "args": [
+                "condition_search_status",
+                "hot_cohort",
+                1
+              ],
+              "kwargs": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "cohort-inactive",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort",
+            "code": "000660"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "478"
+        },
+        "body": {
+          "kind": "cohort",
+          "code": "000660",
+          "history": [
+            {
+              "revision_id": "cohort-2",
+              "revision_key": "cohort-key-2",
+              "stock_code": "000660",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1002.0,
+              "available_at": 1002.0
+            }
+          ],
+          "current": [
+            {
+              "stock_code": "000660",
+              "stock_name": "000660",
+              "first_seen_at": 1002.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1002.0,
+              "active": false,
+              "expired_at": 1002.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            }
+          ],
+          "condition": {
+            "status": "NOT_OBSERVED"
+          }
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "cohort"
+              ],
+              "kwargs": {
+                "code": "000660",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [
+            {
+              "args": [],
+              "kwargs": {
+                "active_only": false
+              }
+            }
+          ],
+          "condition": [
+            {
+              "args": [
+                "condition_search_status",
+                "hot_cohort",
+                1
+              ],
+              "kwargs": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "upper_limit-auth",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "upper_limit"
+          },
+          "authenticated": false
+        },
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "upper_limit-all",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "upper_limit"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "656"
+        },
+        "body": {
+          "kind": "upper_limit",
+          "code": "",
+          "history": [
+            {
+              "fact_id": "limit-3",
+              "fact_key": "limit-key-3",
+              "stock_code": "005930",
+              "session_id": "2026-10-09",
+              "status": "OBSERVED",
+              "upper_limit_price": 78000,
+              "effective_at": 1003.0,
+              "available_at": 1003.0,
+              "source": "fixture"
+            },
+            {
+              "fact_id": "limit-2",
+              "fact_key": "limit-key-2",
+              "stock_code": "000660",
+              "session_id": "2026-10-09",
+              "status": "OBSERVED",
+              "upper_limit_price": 78000,
+              "effective_at": 1002.0,
+              "available_at": 1002.0,
+              "source": "fixture"
+            },
+            {
+              "fact_id": "limit-1",
+              "fact_key": "limit-key-1",
+              "stock_code": "005930",
+              "session_id": "2026-10-09",
+              "status": "OBSERVED",
+              "upper_limit_price": 78000,
+              "effective_at": 1001.0,
+              "available_at": 1001.0,
+              "source": "fixture"
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "upper_limit"
+              ],
+              "kwargs": {
+                "code": "",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "upper_limit-filter-limit",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "upper_limit",
+            "code": "005930",
+            "limit": 1
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "254"
+        },
+        "body": {
+          "kind": "upper_limit",
+          "code": "005930",
+          "history": [
+            {
+              "fact_id": "limit-3",
+              "fact_key": "limit-key-3",
+              "stock_code": "005930",
+              "session_id": "2026-10-09",
+              "status": "OBSERVED",
+              "upper_limit_price": 78000,
+              "effective_at": 1003.0,
+              "available_at": 1003.0,
+              "source": "fixture"
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "upper_limit"
+              ],
+              "kwargs": {
+                "code": "005930",
+                "limit": 1
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "upper_limit-missing",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "upper_limit",
+            "code": "999999"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "51"
+        },
+        "body": {
+          "kind": "upper_limit",
+          "code": "999999",
+          "history": []
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "upper_limit"
+              ],
+              "kwargs": {
+                "code": "999999",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "upper_limit-inactive",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "upper_limit",
+            "code": "000660"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "254"
+        },
+        "body": {
+          "kind": "upper_limit",
+          "code": "000660",
+          "history": [
+            {
+              "fact_id": "limit-2",
+              "fact_key": "limit-key-2",
+              "stock_code": "000660",
+              "session_id": "2026-10-09",
+              "status": "OBSERVED",
+              "upper_limit_price": 78000,
+              "effective_at": 1002.0,
+              "available_at": 1002.0,
+              "source": "fixture"
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "upper_limit"
+              ],
+              "kwargs": {
+                "code": "000660",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "missing-kind",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {},
+          "authenticated": true
+        },
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "90"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "kind"
+              ],
+              "msg": "Field required",
+              "input": null
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "invalid-kind",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "invalid"
+          },
+          "authenticated": true
+        },
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "198"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "kind"
+              ],
+              "msg": "String should match pattern '^(vi|cohort|upper_limit)$'",
+              "input": "invalid",
+              "ctx": {
+                "pattern": "^(vi|cohort|upper_limit)$"
+              }
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "long-code",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "vi",
+            "code": "xxxxxxxxxxxxx"
+          },
+          "authenticated": true
+        },
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "159"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_too_long",
+              "loc": [
+                "query",
+                "code"
+              ],
+              "msg": "String should have at most 12 characters",
+              "input": "xxxxxxxxxxxxx",
+              "ctx": {
+                "max_length": 12
+              }
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "zero-limit",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort",
+            "limit": 0
+          },
+          "authenticated": true
+        },
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "144"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "query",
+                "limit"
+              ],
+              "msg": "Input should be greater than or equal to 1",
+              "input": "0",
+              "ctx": {
+                "ge": 1
+              }
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "large-limit",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "upper_limit",
+            "limit": 1001
+          },
+          "authenticated": true
+        },
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "147"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "less_than_equal",
+              "loc": [
+                "query",
+                "limit"
+              ],
+              "msg": "Input should be less than or equal to 1000",
+              "input": "1001",
+              "ctx": {
+                "le": 1000
+              }
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "unknown-path",
+        "request": {
+          "path": "/api/v1/market/events/unknown",
+          "params": {},
+          "authenticated": true
+        },
+        "status": 404,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "22"
+        },
+        "body": {
+          "detail": "Not Found"
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "stored-condition",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "1058"
+        },
+        "body": {
+          "kind": "cohort",
+          "code": "",
+          "history": [
+            {
+              "revision_id": "cohort-3",
+              "revision_key": "cohort-key-3",
+              "stock_code": "005930",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1003.0,
+              "available_at": 1003.0
+            },
+            {
+              "revision_id": "cohort-2",
+              "revision_key": "cohort-key-2",
+              "stock_code": "000660",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1002.0,
+              "available_at": 1002.0
+            },
+            {
+              "revision_id": "cohort-1",
+              "revision_key": "cohort-key-1",
+              "stock_code": "005930",
+              "event_type": "ENTER",
+              "session_id": "2026-10-09",
+              "effective_at": 1001.0,
+              "available_at": 1001.0
+            }
+          ],
+          "current": [
+            {
+              "stock_code": "000660",
+              "stock_name": "000660",
+              "first_seen_at": 1002.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1002.0,
+              "active": false,
+              "expired_at": 1002.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            },
+            {
+              "stock_code": "005930",
+              "stock_name": "005930",
+              "first_seen_at": 1003.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1003.0,
+              "active": false,
+              "expired_at": 1003.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            }
+          ],
+          "condition": {
+            "status": "OBSERVED",
+            "condition_name": "fixture-condition"
+          }
+        },
+        "database_sha256": "01ec9e346aaada983535f1c699262aaa12427e6d0a93e562dac4993a6936c5f7",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "cohort"
+              ],
+              "kwargs": {
+                "code": "",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [
+            {
+              "args": [],
+              "kwargs": {
+                "active_only": false
+              }
+            }
+          ],
+          "condition": [
+            {
+              "args": [
+                "condition_search_status",
+                "hot_cohort",
+                1
+              ],
+              "kwargs": {}
+            }
+          ]
+        }
+      }
+    ],
+    [
+      {
+        "name": "vi-auth",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "vi"
+          },
+          "authenticated": false
+        },
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "vi-all",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "vi"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "659"
+        },
+        "body": {
+          "kind": "vi",
+          "code": "",
+          "history": [
+            {
+              "event_id": "vi-3",
+              "event_key": "vi-key-3",
+              "stock_code": "005930",
+              "event_kind": "ACTIVATED",
+              "vi_type": "DYNAMIC",
+              "price": 75000,
+              "effective_at": 1003.0,
+              "received_at": 1003.0,
+              "available_at": 1003.0,
+              "source": "fixture"
+            },
+            {
+              "event_id": "vi-2",
+              "event_key": "vi-key-2",
+              "stock_code": "000660",
+              "event_kind": "ACTIVATED",
+              "vi_type": "DYNAMIC",
+              "price": 75000,
+              "effective_at": 1002.0,
+              "received_at": 1002.0,
+              "available_at": 1002.0,
+              "source": "fixture"
+            },
+            {
+              "event_id": "vi-1",
+              "event_key": "vi-key-1",
+              "stock_code": "005930",
+              "event_kind": "ACTIVATED",
+              "vi_type": "DYNAMIC",
+              "price": 75000,
+              "effective_at": 1001.0,
+              "received_at": 1001.0,
+              "available_at": 1001.0,
+              "source": "fixture"
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "vi"
+              ],
+              "kwargs": {
+                "code": "",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "vi-filter-limit",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "vi",
+            "code": "005930",
+            "limit": 1
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "249"
+        },
+        "body": {
+          "kind": "vi",
+          "code": "005930",
+          "history": [
+            {
+              "event_id": "vi-3",
+              "event_key": "vi-key-3",
+              "stock_code": "005930",
+              "event_kind": "ACTIVATED",
+              "vi_type": "DYNAMIC",
+              "price": 75000,
+              "effective_at": 1003.0,
+              "received_at": 1003.0,
+              "available_at": 1003.0,
+              "source": "fixture"
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "vi"
+              ],
+              "kwargs": {
+                "code": "005930",
+                "limit": 1
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "vi-missing",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "vi",
+            "code": "999999"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "42"
+        },
+        "body": {
+          "kind": "vi",
+          "code": "999999",
+          "history": []
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "vi"
+              ],
+              "kwargs": {
+                "code": "999999",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "vi-inactive",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "vi",
+            "code": "000660"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "249"
+        },
+        "body": {
+          "kind": "vi",
+          "code": "000660",
+          "history": [
+            {
+              "event_id": "vi-2",
+              "event_key": "vi-key-2",
+              "stock_code": "000660",
+              "event_kind": "ACTIVATED",
+              "vi_type": "DYNAMIC",
+              "price": 75000,
+              "effective_at": 1002.0,
+              "received_at": 1002.0,
+              "available_at": 1002.0,
+              "source": "fixture"
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "vi"
+              ],
+              "kwargs": {
+                "code": "000660",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "cohort-auth",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort"
+          },
+          "authenticated": false
+        },
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "cohort-all",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "1081"
+        },
+        "body": {
+          "kind": "cohort",
+          "code": "",
+          "history": [
+            {
+              "revision_id": "cohort-3",
+              "revision_key": "cohort-key-3",
+              "stock_code": "005930",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1003.0,
+              "available_at": 1003.0
+            },
+            {
+              "revision_id": "cohort-2",
+              "revision_key": "cohort-key-2",
+              "stock_code": "000660",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1002.0,
+              "available_at": 1002.0
+            },
+            {
+              "revision_id": "cohort-1",
+              "revision_key": "cohort-key-1",
+              "stock_code": "005930",
+              "event_type": "ENTER",
+              "session_id": "2026-10-09",
+              "effective_at": 1001.0,
+              "available_at": 1001.0
+            }
+          ],
+          "current": [
+            {
+              "stock_code": "000660",
+              "stock_name": "000660",
+              "first_seen_at": 1002.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1002.0,
+              "active": false,
+              "expired_at": 1002.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            },
+            {
+              "stock_code": "005930",
+              "stock_name": "005930",
+              "first_seen_at": 1003.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1003.0,
+              "active": false,
+              "expired_at": 1003.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            }
+          ],
+          "condition": {
+            "status": "NOT_OBSERVED",
+            "runtime": {
+              "apply_status": "ACTIVE",
+              "policy_revision": 3
+            }
+          }
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 1,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "cohort"
+              ],
+              "kwargs": {
+                "code": "",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [
+            {
+              "args": [],
+              "kwargs": {
+                "active_only": false
+              }
+            }
+          ],
+          "condition": [
+            {
+              "args": [
+                "condition_search_status",
+                "hot_cohort",
+                1
+              ],
+              "kwargs": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "cohort-filter-limit",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort",
+            "code": "005930",
+            "limit": 1
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "534"
+        },
+        "body": {
+          "kind": "cohort",
+          "code": "005930",
+          "history": [
+            {
+              "revision_id": "cohort-3",
+              "revision_key": "cohort-key-3",
+              "stock_code": "005930",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1003.0,
+              "available_at": 1003.0
+            }
+          ],
+          "current": [
+            {
+              "stock_code": "005930",
+              "stock_name": "005930",
+              "first_seen_at": 1003.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1003.0,
+              "active": false,
+              "expired_at": 1003.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            }
+          ],
+          "condition": {
+            "status": "NOT_OBSERVED",
+            "runtime": {
+              "apply_status": "ACTIVE",
+              "policy_revision": 3
+            }
+          }
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 1,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "cohort"
+              ],
+              "kwargs": {
+                "code": "005930",
+                "limit": 1
+              }
+            }
+          ],
+          "current": [
+            {
+              "args": [],
+              "kwargs": {
+                "active_only": false
+              }
+            }
+          ],
+          "condition": [
+            {
+              "args": [
+                "condition_search_status",
+                "hot_cohort",
+                1
+              ],
+              "kwargs": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "cohort-missing",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort",
+            "code": "999999"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "153"
+        },
+        "body": {
+          "kind": "cohort",
+          "code": "999999",
+          "history": [],
+          "current": [],
+          "condition": {
+            "status": "NOT_OBSERVED",
+            "runtime": {
+              "apply_status": "ACTIVE",
+              "policy_revision": 3
+            }
+          }
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 1,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "cohort"
+              ],
+              "kwargs": {
+                "code": "999999",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [
+            {
+              "args": [],
+              "kwargs": {
+                "active_only": false
+              }
+            }
+          ],
+          "condition": [
+            {
+              "args": [
+                "condition_search_status",
+                "hot_cohort",
+                1
+              ],
+              "kwargs": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "cohort-inactive",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort",
+            "code": "000660"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "534"
+        },
+        "body": {
+          "kind": "cohort",
+          "code": "000660",
+          "history": [
+            {
+              "revision_id": "cohort-2",
+              "revision_key": "cohort-key-2",
+              "stock_code": "000660",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1002.0,
+              "available_at": 1002.0
+            }
+          ],
+          "current": [
+            {
+              "stock_code": "000660",
+              "stock_name": "000660",
+              "first_seen_at": 1002.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1002.0,
+              "active": false,
+              "expired_at": 1002.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            }
+          ],
+          "condition": {
+            "status": "NOT_OBSERVED",
+            "runtime": {
+              "apply_status": "ACTIVE",
+              "policy_revision": 3
+            }
+          }
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 1,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "cohort"
+              ],
+              "kwargs": {
+                "code": "000660",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [
+            {
+              "args": [],
+              "kwargs": {
+                "active_only": false
+              }
+            }
+          ],
+          "condition": [
+            {
+              "args": [
+                "condition_search_status",
+                "hot_cohort",
+                1
+              ],
+              "kwargs": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "upper_limit-auth",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "upper_limit"
+          },
+          "authenticated": false
+        },
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "63"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "upper_limit-all",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "upper_limit"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "656"
+        },
+        "body": {
+          "kind": "upper_limit",
+          "code": "",
+          "history": [
+            {
+              "fact_id": "limit-3",
+              "fact_key": "limit-key-3",
+              "stock_code": "005930",
+              "session_id": "2026-10-09",
+              "status": "OBSERVED",
+              "upper_limit_price": 78000,
+              "effective_at": 1003.0,
+              "available_at": 1003.0,
+              "source": "fixture"
+            },
+            {
+              "fact_id": "limit-2",
+              "fact_key": "limit-key-2",
+              "stock_code": "000660",
+              "session_id": "2026-10-09",
+              "status": "OBSERVED",
+              "upper_limit_price": 78000,
+              "effective_at": 1002.0,
+              "available_at": 1002.0,
+              "source": "fixture"
+            },
+            {
+              "fact_id": "limit-1",
+              "fact_key": "limit-key-1",
+              "stock_code": "005930",
+              "session_id": "2026-10-09",
+              "status": "OBSERVED",
+              "upper_limit_price": 78000,
+              "effective_at": 1001.0,
+              "available_at": 1001.0,
+              "source": "fixture"
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "upper_limit"
+              ],
+              "kwargs": {
+                "code": "",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "upper_limit-filter-limit",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "upper_limit",
+            "code": "005930",
+            "limit": 1
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "254"
+        },
+        "body": {
+          "kind": "upper_limit",
+          "code": "005930",
+          "history": [
+            {
+              "fact_id": "limit-3",
+              "fact_key": "limit-key-3",
+              "stock_code": "005930",
+              "session_id": "2026-10-09",
+              "status": "OBSERVED",
+              "upper_limit_price": 78000,
+              "effective_at": 1003.0,
+              "available_at": 1003.0,
+              "source": "fixture"
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "upper_limit"
+              ],
+              "kwargs": {
+                "code": "005930",
+                "limit": 1
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "upper_limit-missing",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "upper_limit",
+            "code": "999999"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "51"
+        },
+        "body": {
+          "kind": "upper_limit",
+          "code": "999999",
+          "history": []
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "upper_limit"
+              ],
+              "kwargs": {
+                "code": "999999",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "upper_limit-inactive",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "upper_limit",
+            "code": "000660"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "254"
+        },
+        "body": {
+          "kind": "upper_limit",
+          "code": "000660",
+          "history": [
+            {
+              "fact_id": "limit-2",
+              "fact_key": "limit-key-2",
+              "stock_code": "000660",
+              "session_id": "2026-10-09",
+              "status": "OBSERVED",
+              "upper_limit_price": 78000,
+              "effective_at": 1002.0,
+              "available_at": 1002.0,
+              "source": "fixture"
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "upper_limit"
+              ],
+              "kwargs": {
+                "code": "000660",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "missing-kind",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {},
+          "authenticated": true
+        },
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "90"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "kind"
+              ],
+              "msg": "Field required",
+              "input": null
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "invalid-kind",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "invalid"
+          },
+          "authenticated": true
+        },
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "198"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "kind"
+              ],
+              "msg": "String should match pattern '^(vi|cohort|upper_limit)$'",
+              "input": "invalid",
+              "ctx": {
+                "pattern": "^(vi|cohort|upper_limit)$"
+              }
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "long-code",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "vi",
+            "code": "xxxxxxxxxxxxx"
+          },
+          "authenticated": true
+        },
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "159"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_too_long",
+              "loc": [
+                "query",
+                "code"
+              ],
+              "msg": "String should have at most 12 characters",
+              "input": "xxxxxxxxxxxxx",
+              "ctx": {
+                "max_length": 12
+              }
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "zero-limit",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort",
+            "limit": 0
+          },
+          "authenticated": true
+        },
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "144"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "query",
+                "limit"
+              ],
+              "msg": "Input should be greater than or equal to 1",
+              "input": "0",
+              "ctx": {
+                "ge": 1
+              }
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "large-limit",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "upper_limit",
+            "limit": 1001
+          },
+          "authenticated": true
+        },
+        "status": 422,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "147"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "less_than_equal",
+              "loc": [
+                "query",
+                "limit"
+              ],
+              "msg": "Input should be less than or equal to 1000",
+              "input": "1001",
+              "ctx": {
+                "le": 1000
+              }
+            }
+          ]
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "unknown-path",
+        "request": {
+          "path": "/api/v1/market/events/unknown",
+          "params": {},
+          "authenticated": true
+        },
+        "status": 404,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "22"
+        },
+        "body": {
+          "detail": "Not Found"
+        },
+        "database_sha256": "67c87f4db61ac1f2f60c0deddebb34dba45b9939996a40995eaf208b6ebfbe13",
+        "runtime_calls": 0,
+        "store_calls": {
+          "history": [],
+          "current": [],
+          "condition": []
+        }
+      },
+      {
+        "name": "stored-condition",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "1114"
+        },
+        "body": {
+          "kind": "cohort",
+          "code": "",
+          "history": [
+            {
+              "revision_id": "cohort-3",
+              "revision_key": "cohort-key-3",
+              "stock_code": "005930",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1003.0,
+              "available_at": 1003.0
+            },
+            {
+              "revision_id": "cohort-2",
+              "revision_key": "cohort-key-2",
+              "stock_code": "000660",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1002.0,
+              "available_at": 1002.0
+            },
+            {
+              "revision_id": "cohort-1",
+              "revision_key": "cohort-key-1",
+              "stock_code": "005930",
+              "event_type": "ENTER",
+              "session_id": "2026-10-09",
+              "effective_at": 1001.0,
+              "available_at": 1001.0
+            }
+          ],
+          "current": [
+            {
+              "stock_code": "000660",
+              "stock_name": "000660",
+              "first_seen_at": 1002.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1002.0,
+              "active": false,
+              "expired_at": 1002.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            },
+            {
+              "stock_code": "005930",
+              "stock_name": "005930",
+              "first_seen_at": 1003.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1003.0,
+              "active": false,
+              "expired_at": 1003.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            }
+          ],
+          "condition": {
+            "status": "OBSERVED",
+            "condition_name": "fixture-condition",
+            "runtime": {
+              "apply_status": "ACTIVE",
+              "policy_revision": 3
+            }
+          }
+        },
+        "database_sha256": "01ec9e346aaada983535f1c699262aaa12427e6d0a93e562dac4993a6936c5f7",
+        "runtime_calls": 1,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "cohort"
+              ],
+              "kwargs": {
+                "code": "",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [
+            {
+              "args": [],
+              "kwargs": {
+                "active_only": false
+              }
+            }
+          ],
+          "condition": [
+            {
+              "args": [
+                "condition_search_status",
+                "hot_cohort",
+                1
+              ],
+              "kwargs": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "changed-runtime-condition",
+        "request": {
+          "path": "/api/v1/market/events",
+          "params": {
+            "kind": "cohort"
+          },
+          "authenticated": true
+        },
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "1125"
+        },
+        "body": {
+          "kind": "cohort",
+          "code": "",
+          "history": [
+            {
+              "revision_id": "cohort-3",
+              "revision_key": "cohort-key-3",
+              "stock_code": "005930",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1003.0,
+              "available_at": 1003.0
+            },
+            {
+              "revision_id": "cohort-2",
+              "revision_key": "cohort-key-2",
+              "stock_code": "000660",
+              "event_type": "EXIT",
+              "session_id": "2026-10-09",
+              "effective_at": 1002.0,
+              "available_at": 1002.0
+            },
+            {
+              "revision_id": "cohort-1",
+              "revision_key": "cohort-key-1",
+              "stock_code": "005930",
+              "event_type": "ENTER",
+              "session_id": "2026-10-09",
+              "effective_at": 1001.0,
+              "available_at": 1001.0
+            }
+          ],
+          "current": [
+            {
+              "stock_code": "000660",
+              "stock_name": "000660",
+              "first_seen_at": 1002.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1002.0,
+              "active": false,
+              "expired_at": 1002.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            },
+            {
+              "stock_code": "005930",
+              "stock_name": "005930",
+              "first_seen_at": 1003.0,
+              "entry_session": "2026-10-09",
+              "last_signal_at": 1003.0,
+              "active": false,
+              "expired_at": 1003.0,
+              "condition_name": "",
+              "last_signal": "",
+              "nxt_eligible": null
+            }
+          ],
+          "condition": {
+            "status": "OBSERVED",
+            "condition_name": "fixture-condition",
+            "runtime": {
+              "apply_status": "RECOVERY_REQUIRED",
+              "policy_revision": 4
+            }
+          }
+        },
+        "database_sha256": "01ec9e346aaada983535f1c699262aaa12427e6d0a93e562dac4993a6936c5f7",
+        "runtime_calls": 1,
+        "store_calls": {
+          "history": [
+            {
+              "args": [
+                "cohort"
+              ],
+              "kwargs": {
+                "code": "",
+                "limit": 100
+              }
+            }
+          ],
+          "current": [
+            {
+              "args": [],
+              "kwargs": {
+                "active_only": false
+              }
+            }
+          ],
+          "condition": [
+            {
+              "args": [
+                "condition_search_status",
+                "hot_cohort",
+                1
+              ],
+              "kwargs": {}
+            }
+          ]
+        }
+      }
+    ]
+  ]
+}

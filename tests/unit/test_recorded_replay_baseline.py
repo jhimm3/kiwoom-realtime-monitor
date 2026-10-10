@@ -207,6 +207,7 @@ class ReplayBaselineLeaseTests(unittest.TestCase):
             finally:
                 release.set()
                 thread.join(2)
+                self.assertFalse(thread.is_alive(), 'opening worker did not terminate')
         self.assertEqual(1, len(errors))
         self.assertEqual(0, lease._open_count)
 
@@ -236,6 +237,7 @@ class ReplayBaselineLeaseTests(unittest.TestCase):
             finally:
                 connection.close()
                 thread.join(2)
+                self.assertFalse(thread.is_alive(), 'retirement worker did not terminate')
         self.assertTrue(done.is_set())
         self.assertIsNone(lease.connection)
 

@@ -595,19 +595,19 @@ class MainWindowTest(unittest.TestCase):
         old_bar = MinuteOhlcv(old_minute, 100, 102, 99, 101, 10, 0.5)
         newer_bar = MinuteOhlcv(old_minute, 100, 103, 99, 102, 20, 1.0)
         minute_timer = Timer()
-        owner = SimpleNamespace(
-            pending_minutes={("005930", old_minute): newer_bar},
-            pending_market_minutes={},
-            pending_prices={"005930": 102},
-            pending_market_caps={"005930": 2_100_000.0},
-            pending_highs={"005930": 103},
-            minute_cache_timer=minute_timer,
-            price_cache_timer=Timer(),
-            closing=False,
-        )
+        owner = AppController()
+        def dispose_owner() -> None:
+            owner.deleteLater()
+            QCoreApplication.sendPostedEvents(owner, QEvent.Type.DeferredDelete)
+        self.addCleanup(dispose_owner)
+        owner.pending_minutes = {("005930", old_minute): newer_bar}
+        owner.pending_prices = {"005930": 102}
+        owner.pending_market_caps = {"005930": 2_100_000.0}
+        owner.pending_highs = {"005930": 103}
+        owner.minute_cache_timer = minute_timer
+        owner.price_cache_timer = Timer()
 
-        AppController.on_minute_cache_failed(
-            owner,
+        owner.on_minute_cache_failed(
             {
                 ("005930", old_minute): old_bar,
                 ("000660", new_minute): MinuteOhlcv(
@@ -617,8 +617,7 @@ class MainWindowTest(unittest.TestCase):
             {("kospi", old_minute): (2800.0, 2801.0, 2799.0, 2800.5, 100.0)},
             "temporary failure",
         )
-        AppController.on_price_cache_failed(
-            owner,
+        owner.on_price_cache_failed(
             {"005930": 101, "000660": 203},
             {"005930": 102, "000660": 204},
             {"005930": 2_000_000.0, "000660": 900_000.0},

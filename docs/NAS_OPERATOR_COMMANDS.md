@@ -466,3 +466,13 @@ test/replay/deploy 실행 acceptance는 아직 별도다.
 근거: [sudo 공식 sudoers 문서](https://github.com/sudo-project/sudo/blob/main/docs/sudoers.man.in),
 [Docker 공식 보안 문서](https://docs.docker.com/engine/security/).
 NAS에 실제 설치된 버전/ACL/cgroup 지원은 설치 acceptance에서 별도로 확인한다.
+## 2026-10-11 통합 소스의 테스트 등록
+
+`tests/ci_groups.json`의 `nas_operator_owned`는
+`test_recorded_account_postgres`와 `test_replay_activity_operator`의 수동 NAS
+전용 실행 목록이다. 실제 disposable operator job, 고정 loopback 역할과
+fixture identity가 필요하므로 hosted offline Linux/일반 sealed Replay CI에서는
+실행하거나 통과로 계산하지 않는다. `kiwoom-nas test`의 기존 승인된 전용 DB
+경로로 실행하고 개별 job 결과를 확인한다. CI 목록 검사는 이 구분과 중복·누락을
+검사하며 실제 NAS 실행을 대신하지 않는다. Dataset batch/scope-lock 통합 검사는
+일반 전용 diagnostic DB를 쓰는 `postgres_required`에 등록한다.

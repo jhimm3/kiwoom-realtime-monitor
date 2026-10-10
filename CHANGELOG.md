@@ -44,6 +44,12 @@
 - signal/metadata worker가 저장 실패 입력을 보존하고 동일 native revision/current를 ACK까지 재시도한다. NXT eligibility는 DB ACK 뒤 RAM에 반영하며, 접수한 신호의 시각·날짜·조건은 queue 대기에도 유지한다.
 - 정상 종료는 signal과 후속 metadata 및 실제 thread 작업을 순서대로 기다린다. 10초는 경고 기준이며 worker를 취소해 미확정 입력을 버리지 않는다. 현재 process의 pending/실패/overflow 상태를 별도 cohort_collection으로 표시한다.
 - 강제 종료 전 미확정 RAM 입력의 재시작 복구와 전체 장중 성능 개선은 검증 범위에 포함되지 않는다. 운영 적용 상태는 CURRENT_STATUS를 따른다.
+## 2026-10-11 PC 마지막 분봉·가격 저장 실패 보완 (로컬)
+
+- 종료 중 마지막 분봉/가격 저장 실패로 대기 자료가 복원되면 창을 닫지 않고 자료를 유지한다.
+  문제 해결 뒤 닫기를 다시 요청하면 같은 writer로 재시도하고 저장을 마친 후 종료한다.
+  늦게 도착한 옛 저장 실패가 최신 저장 값을 덮지 않도록 하고, 완료한 TOP20 마감/백업은 반복하지 않는다.
+  정상 종료 순서와 DB 저장 형식은 유지한다. 실행 중인 테스트 앱의 수동 확인은 아직 하지 않았다.
 
 ## 2026-10-09 Recorded trace deferred RAM integration (PC main)
 

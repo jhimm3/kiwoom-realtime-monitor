@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 import unittest
@@ -10,28 +9,9 @@ from unittest.mock import patch
 from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy
 from kiwoom_monitor.application.research_resources import ResearchResourceBlocked
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
-from kiwoom_monitor.research_process import execute_campaign_cycle, load_research_process_request, run_campaign_worker
+from kiwoom_monitor.research_process import execute_campaign_cycle, run_campaign_worker
 from scripts.run_research import ResearchRunCancelled, execute_research
-from test_research_process import _request_document, _write_empty_dataset
-
-
-def write_campaign_request(root: Path, *, max_trials=4):
-    _write_empty_dataset(root)
-    document = _request_document()
-    document['mode'] = 'limited_search'
-    document['search'] = {
-        'version': 'limited_search/v2', 'hypothesis_refs': ['h1'],
-        'dataset_id': 'empty', 'dataset_hash': hashlib.sha256(b'').hexdigest(),
-        'family_allowlist': ['krx_bar_close_breakout/v1'],
-        'factor_allowlist': ['rolling_high_breakout/v1'],
-        'parameter_space': {'target_bps': [400, 500]},
-        'objective': {'net_pnl_won': 'maximize'}, 'constraints': {},
-        'split_version': 'chronological_holdout/v1', 'max_trials': max_trials,
-        'max_seconds': 60, 'seed': 11,
-    }
-    path = root / 'request.json'
-    path.write_text(json.dumps(document), encoding='utf-8')
-    return path, load_research_process_request(path)
+from research_test_support import write_campaign_request
 
 
 class CampaignExecutionTests(unittest.TestCase):

@@ -109,6 +109,79 @@ class _Events:
 
 
 class MockAutomationRunnerTests(unittest.TestCase):
+    def test_supervisor_propagates_native_checkpoint_failure_and_retains_failed_owner(self):
+        import asyncio
+        from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
+
+        async def exercise():
+            runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+            before = self.store.load_documents("execution_mock_automation_runner_current")
+            runner._bootstrap_pending = False  # Exercise the existing ready-runner final checkpoint.
+            runner._task = asyncio.create_task(asyncio.Event().wait())
+            supervisor = MockAutomationSupervisor(self.store, SimpleNamespace())
+            supervisor._runners[ACCOUNT_REF] = runner
+            failure = OSError("controlled checkpoint failure")
+            with patch.object(self.store, "upsert_documents", side_effect=failure) as write:
+                with self.assertRaises(OSError) as first:
+                    await supervisor.close()
+                with self.assertRaises(OSError) as second:
+                    await supervisor.close()
+                self.assertIs(failure, first.exception)
+                self.assertIs(first.exception, second.exception)
+                self.assertEqual(1, write.call_count)
+                self.assertIs(runner, supervisor._runners[ACCOUNT_REF])
+            self.assertEqual(before, self.store.load_documents("execution_mock_automation_runner_current"))
+        asyncio.run(exercise())
+
+    def test_supervisor_repeat_close_joins_actual_checkpoint_after_waiter_cancellation(self):
+        import asyncio
+        import threading
+        from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
+
+        async def exercise():
+            runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+            runner._bootstrap_pending = False
+            runner._task = asyncio.create_task(asyncio.Event().wait())
+            supervisor = MockAutomationSupervisor(self.store, SimpleNamespace())
+            supervisor._runners[ACCOUNT_REF] = runner
+            entered, release, committed = threading.Event(), threading.Event(), threading.Event()
+            native_write = self.store.upsert_documents
+            def blocked_write(*args, **kwargs):
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("test checkpoint not released")
+                native_write(*args, **kwargs)
+                committed.set()
+            tasks = []
+            try:
+                with patch.object(self.store, "upsert_documents", side_effect=blocked_write) as write:
+                    first = asyncio.create_task(supervisor.close())
+                    tasks.append(first)
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                    first.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await first
+                    joined = asyncio.create_task(supervisor.close())
+                    tasks.append(joined)
+                    for _ in range(3):
+                        await asyncio.sleep(0)
+                    self.assertFalse(joined.done(), "repeat close returned while checkpoint thread was writing")
+                    self.assertFalse(committed.is_set())
+                    release.set()
+                    await asyncio.wait_for(joined, 2)
+                    await supervisor.close()
+                    self.assertTrue(committed.is_set())
+                    self.assertEqual(1, write.call_count)
+                    self.assertEqual({}, supervisor._runners)
+                    document = self.store.load_documents("execution_mock_automation_runner_current")[0]["document"]
+                    self.assertEqual(self.run_id, document["execution_run_id"])
+                    self.assertEqual(self.spec.spec_id, document["spec_id"])
+                    self.assertEqual(0, document["input_cursor"])
+            finally:
+                release.set()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        asyncio.run(exercise())
+
     def setUp(self):
         self.store = SQLiteQueryStore(Path(":memory:")); self.store.initialize()
         self.addCleanup(self.store.close)

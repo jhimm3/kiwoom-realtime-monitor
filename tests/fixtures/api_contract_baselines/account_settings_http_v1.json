@@ -1,0 +1,2128 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "input_control": "native SQLite account identity, activation and settings; original native reader spies; existing owner constructor seams supply HTTP delegation doubles; native role admission tested separately",
+  "results": [
+    [
+      {
+        "name": "unauthorized-market-GET",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "unauthorized-market-PUT",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-persisted-and-applied",
+        "status": 200,
+        "headers": {
+          "content-length": "131",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "market_profile_id": "contract-real",
+            "legacy_real_profile_id": "nas-real-default",
+            "revision": 1
+          },
+          "applied_revision": null
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [
+          [
+            [],
+            {}
+          ]
+        ],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-invalid-empty",
+        "status": 422,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_INVALID"
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-invalid-missing-binding",
+        "status": 422,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_INVALID"
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-invalid-extra-key",
+        "status": 422,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_INVALID"
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-invalid-non-object",
+        "status": 422,
+        "headers": {
+          "content-length": "102",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "dict_type",
+              "loc": [
+                "body"
+              ],
+              "msg": "Input should be a valid dictionary",
+              "input": []
+            }
+          ]
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-owner-delegation",
+        "status": 503,
+        "headers": {
+          "content-length": "38",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "PROFILE_RUNTIME_NOT_READY"
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-real-unauthorized",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-real-applied",
+        "status": 200,
+        "headers": {
+          "content-length": "239",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "scope": {
+              "broker": "kiwoom",
+              "environment": "real",
+              "account_ref": "00000000-0000-0000-0000-000000000001"
+            },
+            "active_profile_id": "contract-real",
+            "monitor_enabled": true,
+            "mock_order_enabled": false,
+            "revision": 1
+          },
+          "applied_revision": null
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-real-explicit-broker",
+        "status": 200,
+        "headers": {
+          "content-length": "239",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "scope": {
+              "broker": "kiwoom",
+              "environment": "real",
+              "account_ref": "00000000-0000-0000-0000-000000000001"
+            },
+            "active_profile_id": "contract-real",
+            "monitor_enabled": true,
+            "mock_order_enabled": false,
+            "revision": 1
+          },
+          "applied_revision": null
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-real-wrong-environment",
+        "status": 404,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-mock-unauthorized",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-mock-applied",
+        "status": 200,
+        "headers": {
+          "content-length": "239",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "scope": {
+              "broker": "kiwoom",
+              "environment": "mock",
+              "account_ref": "00000000-0000-0000-0000-000000000002"
+            },
+            "active_profile_id": "contract-mock",
+            "monitor_enabled": true,
+            "mock_order_enabled": false,
+            "revision": 1
+          },
+          "applied_revision": null
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-mock-explicit-broker",
+        "status": 200,
+        "headers": {
+          "content-length": "239",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "scope": {
+              "broker": "kiwoom",
+              "environment": "mock",
+              "account_ref": "00000000-0000-0000-0000-000000000002"
+            },
+            "active_profile_id": "contract-mock",
+            "monitor_enabled": true,
+            "mock_order_enabled": false,
+            "revision": 1
+          },
+          "applied_revision": null
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-mock-wrong-environment",
+        "status": 404,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-missing-environment",
+        "status": 422,
+        "headers": {
+          "content-length": "97",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "environment"
+              ],
+              "msg": "Field required",
+              "input": null
+            }
+          ]
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-invalid-environment",
+        "status": 422,
+        "headers": {
+          "content-length": "179",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "environment"
+              ],
+              "msg": "String should match pattern '^(mock|real)$'",
+              "input": "other",
+              "ctx": {
+                "pattern": "^(mock|real)$"
+              }
+            }
+          ]
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-invalid-broker",
+        "status": 422,
+        "headers": {
+          "content-length": "164",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "broker"
+              ],
+              "msg": "String should match pattern '^kiwoom$'",
+              "input": "other",
+              "ctx": {
+                "pattern": "^kiwoom$"
+              }
+            }
+          ]
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-invalid-identity",
+        "status": 400,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_SETTINGS_SCOPE_INVALID"
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "not-a-uuid"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-unknown-identity",
+        "status": 404,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-0000000003e7"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-recovery-required",
+        "status": 409,
+        "headers": {
+          "content-length": "47",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_SETTINGS_RECOVERY_REQUIRED"
+        },
+        "storage_hash": "e97ed116cc97cc55680bea3afb441f0c525e64feed591dc2e4db48c152cf45fa",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-recovery-required",
+        "status": 409,
+        "headers": {
+          "content-length": "54",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_RECOVERY_REQUIRED"
+        },
+        "storage_hash": "b8572a4ca9f3015ddc2669a0f0ed59309842e2064fe47f34eacf57668ee78015",
+        "market_reads": [
+          [
+            [],
+            {}
+          ]
+        ],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      }
+    ],
+    [
+      {
+        "name": "unauthorized-market-GET",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "unauthorized-market-PUT",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-persisted-and-applied",
+        "status": 200,
+        "headers": {
+          "content-length": "131",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "market_profile_id": "contract-real",
+            "legacy_real_profile_id": "nas-real-default",
+            "revision": 1
+          },
+          "applied_revision": null
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [
+          [
+            [],
+            {}
+          ]
+        ],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-invalid-empty",
+        "status": 422,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_INVALID"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-invalid-missing-binding",
+        "status": 422,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_INVALID"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-invalid-extra-key",
+        "status": 422,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_INVALID"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-invalid-non-object",
+        "status": 422,
+        "headers": {
+          "content-length": "102",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "dict_type",
+              "loc": [
+                "body"
+              ],
+              "msg": "Input should be a valid dictionary",
+              "input": []
+            }
+          ]
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-owner-delegation",
+        "status": 503,
+        "headers": {
+          "content-length": "38",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "PROFILE_RUNTIME_NOT_READY"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-real-unauthorized",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-real-applied",
+        "status": 200,
+        "headers": {
+          "content-length": "237",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "scope": {
+              "broker": "kiwoom",
+              "environment": "real",
+              "account_ref": "00000000-0000-0000-0000-000000000001"
+            },
+            "active_profile_id": "contract-real",
+            "monitor_enabled": true,
+            "mock_order_enabled": false,
+            "revision": 1
+          },
+          "applied_revision": 17
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": [
+          [
+            "applied_settings_revision",
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ]
+      },
+      {
+        "name": "account-real-explicit-broker",
+        "status": 200,
+        "headers": {
+          "content-length": "237",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "scope": {
+              "broker": "kiwoom",
+              "environment": "real",
+              "account_ref": "00000000-0000-0000-0000-000000000001"
+            },
+            "active_profile_id": "contract-real",
+            "monitor_enabled": true,
+            "mock_order_enabled": false,
+            "revision": 1
+          },
+          "applied_revision": 17
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": [
+          [
+            "applied_settings_revision",
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ]
+      },
+      {
+        "name": "account-real-wrong-environment",
+        "status": 404,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-mock-unauthorized",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-mock-applied",
+        "status": 200,
+        "headers": {
+          "content-length": "237",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "scope": {
+              "broker": "kiwoom",
+              "environment": "mock",
+              "account_ref": "00000000-0000-0000-0000-000000000002"
+            },
+            "active_profile_id": "contract-mock",
+            "monitor_enabled": true,
+            "mock_order_enabled": false,
+            "revision": 1
+          },
+          "applied_revision": 17
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": [
+          [
+            "applied_settings_revision",
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ]
+      },
+      {
+        "name": "account-mock-explicit-broker",
+        "status": 200,
+        "headers": {
+          "content-length": "237",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "scope": {
+              "broker": "kiwoom",
+              "environment": "mock",
+              "account_ref": "00000000-0000-0000-0000-000000000002"
+            },
+            "active_profile_id": "contract-mock",
+            "monitor_enabled": true,
+            "mock_order_enabled": false,
+            "revision": 1
+          },
+          "applied_revision": 17
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": [
+          [
+            "applied_settings_revision",
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ]
+      },
+      {
+        "name": "account-mock-wrong-environment",
+        "status": 404,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-missing-environment",
+        "status": 422,
+        "headers": {
+          "content-length": "97",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "environment"
+              ],
+              "msg": "Field required",
+              "input": null
+            }
+          ]
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-invalid-environment",
+        "status": 422,
+        "headers": {
+          "content-length": "179",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "environment"
+              ],
+              "msg": "String should match pattern '^(mock|real)$'",
+              "input": "other",
+              "ctx": {
+                "pattern": "^(mock|real)$"
+              }
+            }
+          ]
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-invalid-broker",
+        "status": 422,
+        "headers": {
+          "content-length": "164",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "broker"
+              ],
+              "msg": "String should match pattern '^kiwoom$'",
+              "input": "other",
+              "ctx": {
+                "pattern": "^kiwoom$"
+              }
+            }
+          ]
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-invalid-identity",
+        "status": 400,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_SETTINGS_SCOPE_INVALID"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "not-a-uuid"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-unknown-identity",
+        "status": 404,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-0000000003e7"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-recovery-required",
+        "status": 409,
+        "headers": {
+          "content-length": "47",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_SETTINGS_RECOVERY_REQUIRED"
+        },
+        "storage_hash": "2b56a47314c9252a699e709078dababe8d3aa69e12122a78adbe9ce734c10276",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-recovery-required",
+        "status": 409,
+        "headers": {
+          "content-length": "54",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_RECOVERY_REQUIRED"
+        },
+        "storage_hash": "17e94d1a123f57fc4979294fd818439b153753f72124e543e5f1870940337a98",
+        "market_reads": [
+          [
+            [],
+            {}
+          ]
+        ],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      }
+    ],
+    [
+      {
+        "name": "unauthorized-market-GET",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "unauthorized-market-PUT",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-persisted-and-applied",
+        "status": 200,
+        "headers": {
+          "content-length": "128",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "market_profile_id": "contract-real",
+            "legacy_real_profile_id": "nas-real-default",
+            "revision": 1
+          },
+          "applied_revision": 7
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [
+          [
+            [],
+            {}
+          ]
+        ],
+        "account_reads": [],
+        "real_calls": [
+          [
+            "applied_market_role_revision",
+            [],
+            {}
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "market-invalid-empty",
+        "status": 422,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_INVALID"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-invalid-missing-binding",
+        "status": 422,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_INVALID"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-invalid-extra-key",
+        "status": 422,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_INVALID"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-invalid-non-object",
+        "status": 422,
+        "headers": {
+          "content-length": "102",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "dict_type",
+              "loc": [
+                "body"
+              ],
+              "msg": "Input should be a valid dictionary",
+              "input": []
+            }
+          ]
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-owner-delegation",
+        "status": 200,
+        "headers": {
+          "content-length": "128",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "market_profile_id": "contract-real",
+            "legacy_real_profile_id": "nas-real-default",
+            "revision": 1
+          },
+          "applied_revision": 7
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [
+          [
+            [],
+            {}
+          ]
+        ],
+        "account_reads": [],
+        "real_calls": [
+          [
+            "change_market_role",
+            [
+              "contract-real"
+            ],
+            {
+              "expected_revision": 1,
+              "expected_binding_revision": 1
+            }
+          ],
+          [
+            "applied_market_role_revision",
+            [],
+            {}
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "market-owner-error-MARKET_PROFILE_SETTINGS_INVALID",
+        "status": 422,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_INVALID"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [
+          [
+            "change_market_role",
+            [
+              "contract-real"
+            ],
+            {
+              "expected_revision": 1,
+              "expected_binding_revision": 1
+            }
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "market-owner-error-MARKET_PROFILE_SETTINGS_REVISION_CONFLICT",
+        "status": 409,
+        "headers": {
+          "content-length": "54",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_REVISION_CONFLICT"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [
+          [
+            "change_market_role",
+            [
+              "contract-real"
+            ],
+            {
+              "expected_revision": 1,
+              "expected_binding_revision": 1
+            }
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "market-owner-error-MARKET_ROLE_BUSY",
+        "status": 423,
+        "headers": {
+          "content-length": "29",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_ROLE_BUSY"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [
+          [
+            "change_market_role",
+            [
+              "contract-real"
+            ],
+            {
+              "expected_revision": 1,
+              "expected_binding_revision": 1
+            }
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "market-owner-error-RECOVERY_REQUIRED",
+        "status": 503,
+        "headers": {
+          "content-length": "38",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "PROFILE_RUNTIME_NOT_READY"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [
+          [
+            "change_market_role",
+            [
+              "contract-real"
+            ],
+            {
+              "expected_revision": 1,
+              "expected_binding_revision": 1
+            }
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "market-owner-error-ACCOUNT_CONTEXT_MISMATCH",
+        "status": 409,
+        "headers": {
+          "content-length": "37",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_CONTEXT_MISMATCH"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [
+          [
+            "change_market_role",
+            [
+              "contract-real"
+            ],
+            {
+              "expected_revision": 1,
+              "expected_binding_revision": 1
+            }
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "market-owner-error-ACCOUNT_IDENTITY_UNVERIFIED",
+        "status": 409,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [
+          [
+            "change_market_role",
+            [
+              "contract-real"
+            ],
+            {
+              "expected_revision": 1,
+              "expected_binding_revision": 1
+            }
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "market-owner-error-ACCOUNT_SETTINGS_RECOVERY_REQUIRED",
+        "status": 409,
+        "headers": {
+          "content-length": "47",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_SETTINGS_RECOVERY_REQUIRED"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [
+          [
+            "change_market_role",
+            [
+              "contract-real"
+            ],
+            {
+              "expected_revision": 1,
+              "expected_binding_revision": 1
+            }
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "market-owner-error-MARKET_PROFILE_SETTINGS_RECOVERY_REQUIRED",
+        "status": 409,
+        "headers": {
+          "content-length": "54",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_RECOVERY_REQUIRED"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [
+          [
+            "change_market_role",
+            [
+              "contract-real"
+            ],
+            {
+              "expected_revision": 1,
+              "expected_binding_revision": 1
+            }
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "market-owner-error-unknown-detail",
+        "status": 409,
+        "headers": {
+          "content-length": "38",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_ROLE_CHANGE_FAILED"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [
+          [
+            "change_market_role",
+            [
+              "contract-real"
+            ],
+            {
+              "expected_revision": 1,
+              "expected_binding_revision": 1
+            }
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "account-real-unauthorized",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-real-applied",
+        "status": 200,
+        "headers": {
+          "content-length": "307",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "scope": {
+              "broker": "kiwoom",
+              "environment": "real",
+              "account_ref": "00000000-0000-0000-0000-000000000001"
+            },
+            "active_profile_id": "contract-real",
+            "monitor_enabled": true,
+            "mock_order_enabled": false,
+            "revision": 1
+          },
+          "applied_revision": 13,
+          "monitor_status": {
+            "status": "RECOVERING",
+            "reason": "fixture-admission"
+          }
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [
+          [
+            "applied_settings_revision",
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ],
+          [
+            "account_monitor_status",
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "account-real-explicit-broker",
+        "status": 200,
+        "headers": {
+          "content-length": "307",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "scope": {
+              "broker": "kiwoom",
+              "environment": "real",
+              "account_ref": "00000000-0000-0000-0000-000000000001"
+            },
+            "active_profile_id": "contract-real",
+            "monitor_enabled": true,
+            "mock_order_enabled": false,
+            "revision": 1
+          },
+          "applied_revision": 13,
+          "monitor_status": {
+            "status": "RECOVERING",
+            "reason": "fixture-admission"
+          }
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [
+          [
+            "applied_settings_revision",
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ],
+          [
+            "account_monitor_status",
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "mock_calls": []
+      },
+      {
+        "name": "account-real-wrong-environment",
+        "status": 404,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-mock-unauthorized",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-mock-applied",
+        "status": 200,
+        "headers": {
+          "content-length": "237",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "scope": {
+              "broker": "kiwoom",
+              "environment": "mock",
+              "account_ref": "00000000-0000-0000-0000-000000000002"
+            },
+            "active_profile_id": "contract-mock",
+            "monitor_enabled": true,
+            "mock_order_enabled": false,
+            "revision": 1
+          },
+          "applied_revision": 17
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": [
+          [
+            "applied_settings_revision",
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ]
+      },
+      {
+        "name": "account-mock-explicit-broker",
+        "status": 200,
+        "headers": {
+          "content-length": "237",
+          "content-type": "application/json"
+        },
+        "body": {
+          "settings": {
+            "scope": {
+              "broker": "kiwoom",
+              "environment": "mock",
+              "account_ref": "00000000-0000-0000-0000-000000000002"
+            },
+            "active_profile_id": "contract-mock",
+            "monitor_enabled": true,
+            "mock_order_enabled": false,
+            "revision": 1
+          },
+          "applied_revision": 17
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": [
+          [
+            "applied_settings_revision",
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "mock",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ]
+      },
+      {
+        "name": "account-mock-wrong-environment",
+        "status": 404,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000002"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-missing-environment",
+        "status": 422,
+        "headers": {
+          "content-length": "97",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "environment"
+              ],
+              "msg": "Field required",
+              "input": null
+            }
+          ]
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-invalid-environment",
+        "status": 422,
+        "headers": {
+          "content-length": "179",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "environment"
+              ],
+              "msg": "String should match pattern '^(mock|real)$'",
+              "input": "other",
+              "ctx": {
+                "pattern": "^(mock|real)$"
+              }
+            }
+          ]
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-invalid-broker",
+        "status": 422,
+        "headers": {
+          "content-length": "164",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_pattern_mismatch",
+              "loc": [
+                "query",
+                "broker"
+              ],
+              "msg": "String should match pattern '^kiwoom$'",
+              "input": "other",
+              "ctx": {
+                "pattern": "^kiwoom$"
+              }
+            }
+          ]
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-invalid-identity",
+        "status": 400,
+        "headers": {
+          "content-length": "43",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_SETTINGS_SCOPE_INVALID"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "not-a-uuid"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-unknown-identity",
+        "status": 404,
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_IDENTITY_UNVERIFIED"
+        },
+        "storage_hash": "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-0000000003e7"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "account-recovery-required",
+        "status": 409,
+        "headers": {
+          "content-length": "47",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "ACCOUNT_SETTINGS_RECOVERY_REQUIRED"
+        },
+        "storage_hash": "2b56a47314c9252a699e709078dababe8d3aa69e12122a78adbe9ce734c10276",
+        "market_reads": [],
+        "account_reads": [
+          [
+            [
+              {
+                "broker": "kiwoom",
+                "environment": "real",
+                "account_ref": "00000000-0000-0000-0000-000000000001"
+              }
+            ],
+            {}
+          ]
+        ],
+        "real_calls": [],
+        "mock_calls": []
+      },
+      {
+        "name": "market-recovery-required",
+        "status": 409,
+        "headers": {
+          "content-length": "54",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "MARKET_PROFILE_SETTINGS_RECOVERY_REQUIRED"
+        },
+        "storage_hash": "17e94d1a123f57fc4979294fd818439b153753f72124e543e5f1870940337a98",
+        "market_reads": [
+          [
+            [],
+            {}
+          ]
+        ],
+        "account_reads": [],
+        "real_calls": [],
+        "mock_calls": []
+      }
+    ]
+  ]
+}

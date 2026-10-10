@@ -22,7 +22,7 @@ from kiwoom_monitor.infrastructure.research_data_source import (
     prepare_development_partition, prepare_final_holdout_partition,
 )
 from test_research_bundle_execution import KST, PROFILE, child, rows_for
-from test_research_process import _request_document
+from research_test_support import research_request_document as _request_document
 
 
 class FinalPreparationTests(unittest.TestCase):

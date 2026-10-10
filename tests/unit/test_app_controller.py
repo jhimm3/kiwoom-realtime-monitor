@@ -666,6 +666,160 @@ class AppControllerTests(unittest.TestCase):
             QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
             self.windows.remove(window)
 
+    def test_final_minute_failure_blocks_close_and_retries_without_duplicate_commit(self):
+        for after_commit in (False, True):
+            with self.subTest(after_commit=after_commit), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "monitor.sqlite3"
+                database = Database(path)
+                database.initialize()
+                with closing(sqlite3.connect(path)) as connection:
+                    connection.execute("INSERT INTO stocks(code,name) VALUES('005930','probe')")
+                    connection.commit()
+                events = []
+                controller = self.controller(events, monitor_database_path=path,
+                    minute_bar_repository=MinuteBarRepository(path))
+                controller.start_market_cache_writer()
+                writer = controller.market_cache_writer
+                now = datetime(2026, 10, 6, 10, 0)
+                bar = MinuteOhlcv(now, 100, 100, 100, 100, 1)
+                controller.queue_minute_bar("005930", bar)
+                original = MinuteBarRepository.upsert_many
+                calls = []
+                def save(repository, values):
+                    calls.append(values)
+                    if len(calls) == 1:
+                        if after_commit:
+                            original(repository, values)
+                        raise OSError("injected final save failure")
+                    return original(repository, values)
+                with patch.object(MinuteBarRepository, "upsert_many", save):
+                    self.assertFalse(controller.request_close())
+                    self.wait_until(lambda: controller._shutdown_stage == "cache_failed")
+                    self.assertNotIn("ready", events)
+                    self.assertNotIn("auxiliaries", events)
+                    self.assertFalse(writer.isRunning())
+                    self.assertEqual({("005930", now): bar}, controller.pending_minutes)
+                    self.assertFalse(controller.minute_cache_timer.isActive())
+                    with closing(sqlite3.connect(path)) as connection:
+                        count = connection.execute("SELECT COUNT(*) FROM minute_bars WHERE stock_code='005930'").fetchone()[0]
+                    self.assertEqual(int(after_commit), count)
+                    self.assertFalse(controller.request_close())
+                    self.wait_until(controller.request_close)
+                self.assertIs(writer, controller.market_cache_writer)
+                self.assertEqual(2, len(calls))
+                self.assertEqual({}, controller.pending_minutes)
+                with closing(sqlite3.connect(path)) as connection:
+                    rows = connection.execute("SELECT close_price,volume FROM minute_bars WHERE stock_code='005930'").fetchall()
+                self.assertEqual([(100, 1)], rows)
+                self.assertEqual(1, events.count("ready"))
+                self.assertEqual(1, events.count("top20"))
+                self.assertEqual(1, events.count("backup"))
+                self.assertEqual(1, events.count("view"))
+
+    def test_window_keeps_failed_final_price_and_allows_explicit_retry_after_recovery(self):
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("INSERT INTO stocks(code,name) VALUES('005930','probe')")
+                connection.commit()
+            window = MainWindow(database.settings, monitor_database_path=path,
+                minute_bar_repository=MinuteBarRepository(path))
+            self.windows.append(window)
+            controller = window._app_controller
+            writer = controller.market_cache_writer
+            controller.queue_price_cache("005930", price=71200)
+            with patch.object(StockRepository, "update_last_prices", side_effect=OSError("injected price save failure")) as save:
+                for _ in range(2):
+                    event = QCloseEvent()
+                    window.closeEvent(event)
+                    self.assertFalse(event.isAccepted())
+                    self.wait_until(lambda: controller._shutdown_stage == "cache_failed")
+                    self.assertEqual({"005930": 71200}, controller.pending_prices)
+                    self.assertFalse(writer.isRunning())
+                    self.assertFalse(controller.price_cache_timer.isActive())
+                self.assertEqual(2, save.call_count)
+            event = QCloseEvent()
+            window.closeEvent(event)
+            self.assertFalse(event.isAccepted())
+            self.wait_until(controller.request_close)
+            self.assertIs(writer, controller.market_cache_writer)
+            self.assertEqual({}, controller.pending_prices)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(71200, connection.execute("SELECT last_price FROM stocks WHERE code='005930'").fetchone()[0])
+            event = QCloseEvent()
+            window.closeEvent(event)
+            self.assertTrue(event.isAccepted())
+
+    def test_shutdown_late_old_failure_retries_only_unsaved_peer_and_keeps_newer_commit(self):
+        from threading import Timer
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        for kind in ("minute", "price"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "monitor.sqlite3"
+                database = Database(path)
+                database.initialize()
+                with closing(sqlite3.connect(path)) as connection:
+                    connection.executemany("INSERT INTO stocks(code,name) VALUES(?,?)", [("005930","first"),("000660","peer")])
+                    connection.commit()
+                controller = self.controller([], monitor_database_path=path,
+                    minute_bar_repository=MinuteBarRepository(path))
+                controller.start_market_cache_writer()
+                now = datetime(2026, 10, 6, 10, 0)
+                old = MinuteOhlcv(now, 100, 100, 100, 100, 1)
+                latest = MinuteOhlcv(now, 100, 103, 100, 103, 3)
+                entered, release = Event(), Event()
+                calls = []
+                repository_type = MinuteBarRepository if kind == "minute" else StockRepository
+                method = "upsert_many" if kind == "minute" else "update_last_prices"
+                original = getattr(repository_type, method)
+                def save(repository, values):
+                    calls.append(dict(values))
+                    if len(calls) == 1:
+                        entered.set()
+                        if not release.wait(3):
+                            raise TimeoutError("probe did not release old batch")
+                        raise OSError("injected old batch failure")
+                    return original(repository, values)
+                with patch.object(repository_type, method, save):
+                    if kind == "minute":
+                        controller.queue_minute_bar("005930", old)
+                        controller.queue_minute_bar("000660", old)
+                        controller.flush_minute_cache()
+                    else:
+                        controller.queue_price_cache("005930", price=100)
+                        controller.queue_price_cache("000660", price=90)
+                        controller.flush_price_cache()
+                    self.assertTrue(entered.wait(1))
+                    if kind == "minute":
+                        controller.queue_minute_bar("005930", latest)
+                    else:
+                        controller.queue_price_cache("005930", price=103)
+                    releaser = Timer(.05, release.set)
+                    releaser.start()
+                    try:
+                        self.assertFalse(controller.request_close())
+                    finally:
+                        release.set()
+                        releaser.join(1)
+                        self.assertFalse(releaser.is_alive())
+                    self.wait_until(lambda: controller._shutdown_stage == "cache_failed")
+                    expected = {("000660", now): old} if kind == "minute" else {"000660": 90}
+                    pending = controller.pending_minutes if kind == "minute" else controller.pending_prices
+                    self.assertEqual(expected, pending)
+                    query = ("SELECT close_price,volume FROM minute_bars WHERE stock_code='005930'"
+                        if kind == "minute" else "SELECT last_price FROM stocks WHERE code='005930'")
+                    with closing(sqlite3.connect(path)) as connection:
+                        self.assertEqual((103, 3) if kind == "minute" else (103,), connection.execute(query).fetchone())
+                    self.assertFalse(controller.request_close())
+                    self.wait_until(controller.request_close)
+                    self.assertEqual({"000660"}, set(calls[-1]))
+                    self.assertEqual(3, len(calls))
+                    with closing(sqlite3.connect(path)) as connection:
+                        self.assertEqual((103, 3) if kind == "minute" else (103,), connection.execute(query).fetchone())
+
     def test_close_waits_for_late_trade_to_reach_app_buffers_and_real_database(self):
         now = datetime(2026, 10, 6, 10, 0)
         with tempfile.TemporaryDirectory() as directory:

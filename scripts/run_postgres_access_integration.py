@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -62,7 +64,13 @@ def main() -> int:
         default=[],
         help="fully qualified unittest name; repeat to run a grouped pilot batch",
     )
+    parser.add_argument("--ci-group", choices=("postgres_required", "postgres_extended"),
+                        help="run one reviewed PostgreSQL group from tests/ci_groups.json")
+    parser.add_argument("--report", type=Path,
+                        help="write a machine-readable result without database credentials")
     arguments = parser.parse_args()
+    if arguments.ci_group and arguments.test:
+        parser.error("choose --ci-group or --test")
 
     live_url = os.environ.get("KIWOOM_SERVER_DATABASE_URL", "").strip()
     explicit_url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "").strip()
@@ -99,15 +107,71 @@ def main() -> int:
 
     root = Path(__file__).resolve().parents[1]
     _install_project_import_paths(root)
+    from scripts.run_regression import _code_tree_identity
+
+    source_start = _code_tree_identity()
+    names = list(arguments.test)
+    if arguments.ci_group:
+        catalog = json.loads((root / "tests" / "ci_groups.json").read_text(encoding="utf-8"))
+        if catalog.get("version") != 1 or not isinstance(catalog.get(arguments.ci_group), list):
+            raise RuntimeError("invalid PostgreSQL CI group")
+        names = catalog[arguments.ci_group]
+        if not names or len(names) != len(set(names)) or any(
+            not isinstance(name, str) or not name.startswith("tests.integration.test_")
+            for name in names
+        ):
+            raise RuntimeError("invalid PostgreSQL CI group modules")
     loader = unittest.defaultTestLoader
-    suite = (
-        unittest.TestSuite(loader.loadTestsFromName(name) for name in arguments.test)
-        if arguments.test
-        else loader.discover(str(root / "tests" / "integration"),
-                             pattern="test_postgres_access_postgres.py")
-    )
+    if names:
+        modules = [(name, loader.loadTestsFromName(name)) for name in names]
+    else:
+        modules = [("tests.integration.test_postgres_access_postgres", loader.discover(
+            str(root / "tests" / "integration"), pattern="test_postgres_access_postgres.py"))]
+    discovered = {name: module_suite.countTestCases() for name, module_suite in modules}
+    suite = unittest.TestSuite(module_suite for _, module_suite in modules)
+    planned = suite.countTestCases()
+    if planned == 0 or any(count == 0 for count in discovered.values()):
+        print(f"PostgreSQL integration: no tests discovered: {discovered}", file=sys.stderr)
+        return 1
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    return 0 if result.wasSuccessful() else 1
+    source_end = _code_tree_identity()
+    complete = (
+        result.wasSuccessful()
+        and result.testsRun == planned
+        and not result.skipped
+        and not result.expectedFailures
+        and not result.unexpectedSuccesses
+        and source_start["lf_sha256"] == source_end["lf_sha256"]
+    )
+    if not complete:
+        print(
+            "PostgreSQL integration incomplete: "
+            f"planned={planned} ran={result.testsRun} failures={len(result.failures)} "
+            f"errors={len(result.errors)} skipped={len(result.skipped)} "
+            f"expected_failures={len(result.expectedFailures)} "
+            f"unexpected_successes={len(result.unexpectedSuccesses)}",
+            file=sys.stderr,
+        )
+    if arguments.report:
+        if arguments.report.exists():
+            raise FileExistsError(f"Refusing to overwrite existing report: {arguments.report}")
+        arguments.report.parent.mkdir(parents=True, exist_ok=True)
+        arguments.report.write_text(json.dumps({
+            "status": "passed" if complete else "failed",
+            "group": arguments.ci_group or "explicit" if names else "postgres-access-default",
+            "modules": list(discovered), "discovered": discovered,
+            "planned": planned, "ran": result.testsRun,
+            "failures": len(result.failures), "errors": len(result.errors),
+            "skipped": len(result.skipped), "expected_failures": len(result.expectedFailures),
+            "unexpected_successes": len(result.unexpectedSuccesses),
+            "git_commit": subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True,
+                text=True, check=True,
+            ).stdout.strip(),
+            "source_root": str(root / "src"),
+            "source_start": source_start, "source_end": source_end,
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return 0 if complete else 1
 
 
 if __name__ == "__main__":

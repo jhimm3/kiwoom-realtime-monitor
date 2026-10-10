@@ -20,6 +20,7 @@ from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationR
 from kiwoom_monitor.domain.market_data_contract import DataCompleteness, DataValueKind, ObservationOrigin
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository
+from tests.integration.postgres_test_support import isolated_observation_schema
 
 
 class ObservationBootstrapPostgresTests(unittest.TestCase):
@@ -32,6 +33,7 @@ class ObservationBootstrapPostgresTests(unittest.TestCase):
             raise unittest.SkipTest('dedicated diagnostic PostgreSQL URL is required')
         if urlsplit(cls.url).path != '/kiwoom_monitor_diagnostic_test':
             raise RuntimeError('consumer gate requires diagnostic database')
+        cls.url = cls.enterClassContext(isolated_observation_schema(cls.url))
         cls.store = PostgresQueryStore(cls.url)
         cls.store.initialize()
 

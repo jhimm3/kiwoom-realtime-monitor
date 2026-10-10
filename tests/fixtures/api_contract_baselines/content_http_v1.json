@@ -1,0 +1,766 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "input_control": "fixed document clock and UUID sequence; transport date/server headers disabled",
+  "result": {
+    "cases": [
+      {
+        "name": "unauthorized-read",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      },
+      {
+        "name": "unauthorized-write",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      },
+      {
+        "name": "unauthorized-replace",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      },
+      {
+        "name": "unknown-read",
+        "status": 404,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "지원하지 않는 중앙 자료 종류입니다."
+        }
+      },
+      {
+        "name": "unknown-write",
+        "status": 404,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "지원하지 않는 중앙 자료 종류입니다."
+        }
+      },
+      {
+        "name": "unsupported-replace",
+        "status": 405,
+        "headers": {
+          "content-length": "80",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "전체 교체를 지원하지 않는 중앙 자료 종류입니다."
+        }
+      },
+      {
+        "name": "invalid-limit",
+        "status": 422,
+        "headers": {
+          "content-length": "144",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "query",
+                "limit"
+              ],
+              "msg": "Input should be greater than or equal to 1",
+              "input": "0",
+              "ctx": {
+                "ge": 1
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "invalid-offset",
+        "status": 422,
+        "headers": {
+          "content-length": "146",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "query",
+                "offset"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": "-1",
+              "ctx": {
+                "ge": 0
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "empty-batch",
+        "status": 422,
+        "headers": {
+          "content-length": "197",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "too_short",
+              "loc": [
+                "body",
+                "documents"
+              ],
+              "msg": "List should have at least 1 item after validation, not 0",
+              "input": [],
+              "ctx": {
+                "field_type": "List",
+                "min_length": 1,
+                "actual_length": 0
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "invalid-key",
+        "status": 422,
+        "headers": {
+          "content-length": "157",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "string_too_short",
+              "loc": [
+                "body",
+                "documents",
+                0,
+                "key"
+              ],
+              "msg": "String should have at least 1 character",
+              "input": "",
+              "ctx": {
+                "min_length": 1
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "settings-write",
+        "status": 200,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "app_settings",
+          "saved": 2
+        }
+      },
+      {
+        "name": "identical-write",
+        "status": 200,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "app_settings",
+          "saved": 2
+        }
+      },
+      {
+        "name": "settings-page",
+        "status": 200,
+        "headers": {
+          "content-length": "124",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "app_settings",
+          "owner": "pc",
+          "documents": [
+            {
+              "owner": "pc",
+              "key": "b",
+              "updated_at": 1110.0,
+              "document": {
+                "value": 2
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "settings-changed",
+        "status": 200,
+        "headers": {
+          "content-length": "39",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "app_settings",
+          "saved": 1
+        }
+      },
+      {
+        "name": "settings-delta",
+        "status": 200,
+        "headers": {
+          "content-length": "124",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "app_settings",
+          "owner": "pc",
+          "documents": [
+            {
+              "owner": "pc",
+              "key": "b",
+              "updated_at": 1140.0,
+              "document": {
+                "value": 3
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "verified-alias",
+        "status": 200,
+        "headers": {
+          "content-length": "53",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "journal_v2_group_overrides",
+          "saved": 1
+        }
+      },
+      {
+        "name": "missing-scope",
+        "status": 422,
+        "headers": {
+          "content-length": "52",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "검증 계좌 scope가 필요합니다."
+        }
+      },
+      {
+        "name": "invalid-uuid",
+        "status": 422,
+        "headers": {
+          "content-length": "61",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "검증 계좌 UUID가 올바르지 않습니다."
+        }
+      },
+      {
+        "name": "wrong-broker",
+        "status": 422,
+        "headers": {
+          "content-length": "69",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "검증 계좌 scope 연결이 올바르지 않습니다."
+        }
+      },
+      {
+        "name": "wrong-environment",
+        "status": 422,
+        "headers": {
+          "content-length": "55",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "검증된 계좌 alias가 필요합니다."
+        }
+      },
+      {
+        "name": "unverified-alias",
+        "status": 422,
+        "headers": {
+          "content-length": "55",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "검증된 계좌 alias가 필요합니다."
+        }
+      },
+      {
+        "name": "wrong-owner",
+        "status": 422,
+        "headers": {
+          "content-length": "69",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "검증 계좌 scope 연결이 올바르지 않습니다."
+        }
+      },
+      {
+        "name": "mixed-invalid-batch",
+        "status": 422,
+        "headers": {
+          "content-length": "69",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "검증 계좌 scope 연결이 올바르지 않습니다."
+        }
+      },
+      {
+        "name": "journal-read",
+        "status": 200,
+        "headers": {
+          "content-length": "398",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "journal_v2_group_overrides",
+          "owner": "22222222-2222-4222-8222-222222222222",
+          "documents": [
+            {
+              "owner": "22222222-2222-4222-8222-222222222222",
+              "key": "fill-1",
+              "updated_at": 1160.0,
+              "document": {
+                "origin_broker": "kiwoom",
+                "origin_environment": "mock",
+                "origin_account_ref": "22222222-2222-4222-8222-222222222222",
+                "canonical_account_ref": "11111111-1111-4111-8111-111111111111",
+                "group_id": "group-1"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "legacy-link",
+        "status": 200,
+        "headers": {
+          "content-length": "44",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "journal_news_link",
+          "saved": 1
+        }
+      },
+      {
+        "name": "legacy-wrong-key",
+        "status": 422,
+        "headers": {
+          "content-length": "73",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "legacy 뉴스 연결 owner/key가 올바르지 않습니다."
+        }
+      },
+      {
+        "name": "legacy-wrong-scope",
+        "status": 422,
+        "headers": {
+          "content-length": "65",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "v1 일지 문서는 legacy scope만 허용합니다."
+        }
+      },
+      {
+        "name": "v2-link",
+        "status": 200,
+        "headers": {
+          "content-length": "48",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "journal_v2_news_links",
+          "saved": 1
+        }
+      },
+      {
+        "name": "v2-link-wrong-key",
+        "status": 422,
+        "headers": {
+          "content-length": "69",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "뉴스 연결 key와 scope가 일치하지 않습니다."
+        }
+      },
+      {
+        "name": "v2-deletion-state",
+        "status": 200,
+        "headers": {
+          "content-length": "49",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "journal_v2_sync_states",
+          "saved": 1
+        }
+      },
+      {
+        "name": "v2-state-wrong-namespace",
+        "status": 422,
+        "headers": {
+          "content-length": "73",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "일지 삭제 상태 namespace가 올바르지 않습니다."
+        }
+      },
+      {
+        "name": "v2-state-unverified-alias",
+        "status": 422,
+        "headers": {
+          "content-length": "55",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "검증된 계좌 alias가 필요합니다."
+        }
+      },
+      {
+        "name": "legacy-deletion-state",
+        "status": 200,
+        "headers": {
+          "content-length": "46",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "journal_sync_states",
+          "saved": 1
+        }
+      },
+      {
+        "name": "legacy-state-wrong-owner",
+        "status": 422,
+        "headers": {
+          "content-length": "73",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "일지 삭제 상태 namespace가 올바르지 않습니다."
+        }
+      },
+      {
+        "name": "unauthorized-history",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      },
+      {
+        "name": "invalid-history-date",
+        "status": 422,
+        "headers": {
+          "content-length": "147",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "query",
+                "as_of"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": "-1",
+              "ctx": {
+                "ge": 0.0
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "theme-snapshot",
+        "status": 200,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "theme_metadata",
+          "saved": 1
+        }
+      },
+      {
+        "name": "theme-repeat",
+        "status": 200,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "theme_metadata",
+          "saved": 1
+        }
+      },
+      {
+        "name": "theme-revision",
+        "status": 200,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "theme_metadata",
+          "saved": 1
+        }
+      },
+      {
+        "name": "theme-history",
+        "status": 200,
+        "headers": {
+          "content-length": "817",
+          "content-type": "application/json"
+        },
+        "body": {
+          "as_of": null,
+          "known": true,
+          "snapshots": [
+            {
+              "snapshot_id": "00000000000000000000000000000002",
+              "profile_id": "second",
+              "content_hash": "e5d2d9239eefadd4a8fddc74142709bd0d19a886905ca9669662ddd834042cb9",
+              "effective_at": null,
+              "received_at": 1390.0,
+              "available_at": 1390.0,
+              "origin_device": "unknown",
+              "revision_of": "00000000000000000000000000000001",
+              "document": {
+                "format": "kiwoom-realtime-monitor-theme-db",
+                "version": 1,
+                "profiles": [],
+                "active_profile": "second"
+              }
+            },
+            {
+              "snapshot_id": "00000000000000000000000000000001",
+              "profile_id": "default",
+              "content_hash": "d318b31e14b9b42624f60b00c61ae424d2f67ffe635e337dff00a51a3627495a",
+              "effective_at": null,
+              "received_at": 1370.0,
+              "available_at": 1370.0,
+              "origin_device": "unknown",
+              "revision_of": null,
+              "document": {
+                "format": "kiwoom-realtime-monitor-theme-db",
+                "version": 1,
+                "profiles": [],
+                "active_profile": "default"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "theme-history-before",
+        "status": 200,
+        "headers": {
+          "content-length": "45",
+          "content-type": "application/json"
+        },
+        "body": {
+          "as_of": 1000.0,
+          "known": false,
+          "snapshots": []
+        }
+      },
+      {
+        "name": "theme-clear",
+        "status": 200,
+        "headers": {
+          "content-length": "41",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "theme_metadata",
+          "saved": 0
+        }
+      },
+      {
+        "name": "theme-read-empty",
+        "status": 200,
+        "headers": {
+          "content-length": "57",
+          "content-type": "application/json"
+        },
+        "body": {
+          "collection": "theme_metadata",
+          "owner": "",
+          "documents": []
+        }
+      }
+    ],
+    "stored": {
+      "app_settings": [
+        {
+          "owner": "pc",
+          "key": "b",
+          "updated_at": 1140.0,
+          "document": {
+            "value": 3
+          }
+        },
+        {
+          "owner": "pc",
+          "key": "a",
+          "updated_at": 1110.0,
+          "document": {
+            "value": 1
+          }
+        }
+      ],
+      "journal_v2_group_overrides": [
+        {
+          "owner": "22222222-2222-4222-8222-222222222222",
+          "key": "fill-1",
+          "updated_at": 1160.0,
+          "document": {
+            "origin_broker": "kiwoom",
+            "origin_environment": "mock",
+            "origin_account_ref": "22222222-2222-4222-8222-222222222222",
+            "canonical_account_ref": "11111111-1111-4111-8111-111111111111",
+            "group_id": "group-1"
+          }
+        }
+      ],
+      "journal_news_link": [
+        {
+          "owner": "group-1",
+          "key": "005930|article-1",
+          "updated_at": 1250.0,
+          "document": {
+            "group_id": "group-1",
+            "stock_code": "005930",
+            "identity": "article-1"
+          }
+        }
+      ],
+      "journal_v2_news_links": [
+        {
+          "owner": "22222222-2222-4222-8222-222222222222",
+          "key": "journal-news-link:v2:a19df6b9e49bdf07a61faaf11b0880dc63972ab63cb8091dea739d6e4847139e",
+          "updated_at": 1280.0,
+          "document": {
+            "origin_broker": "kiwoom",
+            "origin_environment": "mock",
+            "origin_account_ref": "22222222-2222-4222-8222-222222222222",
+            "canonical_account_ref": "11111111-1111-4111-8111-111111111111",
+            "group_id": "group-1",
+            "stock_code": "005930",
+            "identity": "article-1"
+          }
+        }
+      ],
+      "journal_v2_sync_states": [
+        {
+          "owner": "22222222-2222-4222-8222-222222222222",
+          "key": "fill-1",
+          "updated_at": 1300.0,
+          "document": {
+            "origin_broker": "kiwoom",
+            "origin_environment": "mock",
+            "origin_account_ref": "22222222-2222-4222-8222-222222222222",
+            "canonical_account_ref": "11111111-1111-4111-8111-111111111111",
+            "collection": "journal_v2_group_overrides",
+            "owner": "22222222-2222-4222-8222-222222222222",
+            "document_key": "fill-1",
+            "is_deleted": true
+          }
+        }
+      ],
+      "journal_sync_states": [
+        {
+          "owner": "legacy",
+          "key": "fill-1",
+          "updated_at": 1330.0,
+          "document": {
+            "collection": "journal_group_overrides",
+            "owner": "legacy",
+            "document_key": "fill-1"
+          }
+        }
+      ],
+      "theme_metadata": [],
+      "theme_history": [
+        {
+          "snapshot_id": "00000000000000000000000000000002",
+          "profile_id": "second",
+          "content_hash": "e5d2d9239eefadd4a8fddc74142709bd0d19a886905ca9669662ddd834042cb9",
+          "effective_at": null,
+          "received_at": 1390.0,
+          "available_at": 1390.0,
+          "origin_device": "unknown",
+          "revision_of": "00000000000000000000000000000001",
+          "document": {
+            "format": "kiwoom-realtime-monitor-theme-db",
+            "version": 1,
+            "profiles": [],
+            "active_profile": "second"
+          }
+        },
+        {
+          "snapshot_id": "00000000000000000000000000000001",
+          "profile_id": "default",
+          "content_hash": "d318b31e14b9b42624f60b00c61ae424d2f67ffe635e337dff00a51a3627495a",
+          "effective_at": null,
+          "received_at": 1370.0,
+          "available_at": 1370.0,
+          "origin_device": "unknown",
+          "revision_of": null,
+          "document": {
+            "format": "kiwoom-realtime-monitor-theme-db",
+            "version": 1,
+            "profiles": [],
+            "active_profile": "default"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -19,6 +19,7 @@ class CausalCaptureApiTests(unittest.TestCase):
             settings = CentralServerSettings(f'sqlite:///{Path(temp)/"store.sqlite3"}', 'fixture-token')
             with patch.dict(os.environ, {'KIWOOM_DIAGNOSTIC_WORKLOAD_PATH': str(control)}):
                 client = TestClient(create_app(settings))
+                self.addCleanup(client.close)
                 session = _set_tool(control, True, 4000)['diagnostic_tool']['session_id']
                 deadline = time.time()+7200
                 with patch('kiwoom_monitor.central_server.diagnostic_trace.status', return_value={'state':'off'}), \
@@ -29,4 +30,3 @@ class CausalCaptureApiTests(unittest.TestCase):
                     self.assertEqual(200, response.status_code, response.text)
                     start.assert_called_once_with(seconds=3900, store_inputs=True, collector_inputs=True,
                                                   top20_inputs=True, persist_at=deadline)
-                client.close()

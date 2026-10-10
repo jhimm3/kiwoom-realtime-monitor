@@ -134,7 +134,9 @@ def run(path, *, top20_lifecycle=False):
     for name, expected in suites:
         result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromName(name))
         outcomes.append({'suite': name, 'tests': result.testsRun, 'skipped': len(result.skipped),
-                         'passed': result.wasSuccessful() and result.testsRun == expected and not result.skipped})
+                         'passed': (result.wasSuccessful() and result.testsRun == expected
+                                    and not result.skipped and not result.expectedFailures
+                                    and not result.unexpectedSuccesses)})
     mark_stage('verify_v1_snapshot_and_v2_baseline_after_suites')
     with baseline.ReplayDatabaseLease(url, value['owner_token'], baseline_version=2, cache_clock=clock) as lease:
         lease.restore(second['baseline_id'])

@@ -345,7 +345,7 @@ def _chunk_bytes_from_manifest(trace_id: str, name: str, manifest: dict) -> byte
     return content
 
 
-def stop(reason: str = "manual", timeout: float = 10) -> dict:
+def stop(reason: str = "manual", timeout: float | None = 10) -> dict:
     with _LOCK:
         session = _SESSION
         if session is None:

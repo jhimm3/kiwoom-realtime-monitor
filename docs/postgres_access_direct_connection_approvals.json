@@ -1,7 +1,15 @@
 {
   "schema": 1,
-  "reviewed_on": "2026-10-05",
+  "reviewed_on": "2026-10-11",
   "approved_sites": [
+    {
+      "file": "tests/integration/postgres_test_support.py",
+      "owner": "isolated_observation_schema",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "Owned fixture administration connection: verifies the diagnostic-only URL and actual database identity, creates one UUID schema, sets a bounded lock timeout, and drops only that schema in finally. Fixture unit tests reject non-diagnostic targets and propagate cleanup failures."
+    },
     {
       "file": "scripts/check_replay_cache_baseline.py",
       "owner": "run",
@@ -401,6 +409,30 @@
       "count": 1,
       "category": "test_integration",
       "reason": "Dedicated-database-only schema contract test uses a generated isolated schema for the downgrade case."
+    },
+    {
+      "file": "tests/integration/test_dataset_batch_postgres.py",
+      "owner": "DatasetBatchPostgresTests.test_later_chunk_failure_rolls_back_without_undoing_independent_peer",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "Independent peer test connection in the explicit diagnostic database: setUpClass rejects any other database name. The context closes on success/failure; it verifies rollback does not undo the separately committed peer."
+    },
+    {
+      "file": "tests/integration/test_postgres_scope_locks.py",
+      "owner": "PostgresScopeLockTests.setUp",
+      "call": "psycopg.connect",
+      "count": 3,
+      "category": "test_integration",
+      "reason": "Three fixture-owned owner/worker/probe connections after explicit diagnostic database-name validation. Each has addCleanup(close) and a bounded statement timeout; verifies real blockers and transaction lock ownership."
+    },
+    {
+      "file": "tests/integration/test_replay_activity_operator.py",
+      "owner": "ReplayActivityOperatorTests.setUpClass",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "Read-only fixture identity probe after non-root, fixed loopback/port/database/role and 32-hex operator job validation. Context manager closes it; rejects any non-owned job before fixture bootstrap."
     }
   ]
 }

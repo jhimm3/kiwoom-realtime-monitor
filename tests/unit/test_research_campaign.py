@@ -14,7 +14,7 @@ from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy, bu
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository, RESEARCH_SCHEMA_VERSION
 from kiwoom_monitor.infrastructure.persistence.research_repository import _MIGRATIONS
 from kiwoom_monitor.infrastructure.persistence.schema_migrations import SQLiteMigrationRunner
-from test_research_queue import _spec
+from research_test_support import research_search_spec as _spec
 
 BASE = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
 

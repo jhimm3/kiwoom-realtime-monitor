@@ -209,6 +209,7 @@ class DiagnosticRuns:
         owner = f"run:{run_id}"
         seconds = run["requested_seconds"]
         capture_owned = False
+        replay_child: threading.Thread | None = None
         try:
             if not capture_was_enabled:
                 lease = seconds + 60 if run["kind"] in {"measure", "replay"} else seconds * 3 + 120
@@ -245,6 +246,7 @@ class DiagnosticRuns:
 
                 worker = threading.Thread(target=replay_worker,
                                           name=f"replay-{run_id}", daemon=True)
+                replay_child = worker
                 worker.start()
                 try:
                     if not ready.wait(timeout=15) or replay_outcome.get("error_type"):
@@ -441,6 +443,11 @@ class DiagnosticRuns:
             run["state"] = "failed"
             run["error_type"] = type(error).__name__
         finally:
+            # A bounded replay join can expire while its native DB work continues.
+            # Keep this run's capture/report/lease owned until that child really exits.
+            if replay_child is not None and replay_child.is_alive():
+                self._stop.set()
+                replay_child.join()
             try:
                 if capture_owned:
                     _set_capture(self.path, False, 600, owner=owner,
@@ -495,7 +502,7 @@ class DiagnosticRuns:
             self._stop.set()
             return self.status(run_id)
 
-    def close(self, timeout: float = 10.0) -> None:
+    def close(self, timeout: float | None = 10.0) -> None:
         self._stop.set()
         worker = self._worker
         if worker is not None and worker.is_alive():

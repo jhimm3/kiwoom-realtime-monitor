@@ -1,0 +1,1121 @@
+{
+  "schema_version": 1,
+  "transport": "uvicorn-loopback-http-with-lifespan",
+  "baseline_source": "36b4e7ce7e07f30c86c5f79508a9c3375873752f",
+  "input_control": "fixed observation clocks and UUID sequence; monitor lifecycle boundary doubles; transport date/server headers disabled",
+  "result": {
+    "cases": [
+      {
+        "name": "observations-unauthorized",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      },
+      {
+        "name": "missing-parameters",
+        "status": 422,
+        "headers": {
+          "content-length": "247",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "start"
+              ],
+              "msg": "Field required",
+              "input": null
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "end"
+              ],
+              "msg": "Field required",
+              "input": null
+            },
+            {
+              "type": "missing",
+              "loc": [
+                "query",
+                "kinds"
+              ],
+              "msg": "Field required",
+              "input": null
+            }
+          ]
+        }
+      },
+      {
+        "name": "invalid-limit",
+        "status": 422,
+        "headers": {
+          "content-length": "147",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "less_than_equal",
+              "loc": [
+                "query",
+                "limit"
+              ],
+              "msg": "Input should be less than or equal to 1000",
+              "input": "1001",
+              "ctx": {
+                "le": 1000
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "negative-cursor",
+        "status": 422,
+        "headers": {
+          "content-length": "146",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "query",
+                "cursor"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": "-1",
+              "ctx": {
+                "ge": 0
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "naive-time",
+        "status": 400,
+        "headers": {
+          "content-length": "62",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "research export timestamps must be timezone-aware"
+        }
+      },
+      {
+        "name": "reversed-range",
+        "status": 400,
+        "headers": {
+          "content-length": "53",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "research export start must be before end"
+        }
+      },
+      {
+        "name": "unknown-kind",
+        "status": 400,
+        "headers": {
+          "content-length": "83",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "research export kinds must be ranking, top20_membership, or minute_bar"
+        }
+      },
+      {
+        "name": "empty-kinds",
+        "status": 400,
+        "headers": {
+          "content-length": "83",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "research export kinds must be ranking, top20_membership, or minute_bar"
+        }
+      },
+      {
+        "name": "cursor-without-watermark",
+        "status": 400,
+        "headers": {
+          "content-length": "46",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "cursor requires a fixed watermark"
+        }
+      },
+      {
+        "name": "unknown-watermark",
+        "status": 404,
+        "headers": {
+          "content-length": "46",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "unknown research export watermark"
+        }
+      },
+      {
+        "name": "first-page",
+        "status": 200,
+        "headers": {
+          "content-length": "1554",
+          "content-type": "application/json"
+        },
+        "body": {
+          "watermark": "00000000-0000-0000-0000-000000000003",
+          "manifest": {
+            "dataset_id": "00000000-0000-0000-0000-000000000003",
+            "schema_version": 1,
+            "captured_range": {
+              "start": "2026-09-12T00:00:00+00:00",
+              "end": "2026-09-13T00:00:00+00:00"
+            },
+            "recorded_from": "2026-09-12T00:00:00+00:00",
+            "exported_at": "2026-10-10T00:00:00+00:00",
+            "source_ids": [
+              "fixture"
+            ],
+            "fixed_watermark": "00000000-0000-0000-0000-000000000003",
+            "revision_count": 2,
+            "revision_ids_hash": "7a70c782c5d30f61a8f57b905eaa11c41ec8ffeafaa3a0e99c4fca60044a28d4",
+            "kinds": [
+              "ranking"
+            ],
+            "subject": "5",
+            "universe_rule": "top20_membership-v1",
+            "timezone": "UTC",
+            "order_policy_version": "available_at-ingest_sequence-revision_id-v1",
+            "quality_summary": {
+              "flags": [
+                "coverage_not_evaluated"
+              ],
+              "recording_gap": "unknown"
+            },
+            "replay_profile": "observed_replay"
+          },
+          "observations": [
+            {
+              "accepted_sequence": 1,
+              "revision_id": "00000000-0000-0000-0000-000000000001",
+              "observation_key": "2026-09-12T09:00:00",
+              "schema_version": 1,
+              "source_id": "fixture",
+              "source_session_id": "",
+              "source_sequence": "",
+              "kind": "ranking",
+              "subject": "5",
+              "venue": "COMBINED",
+              "effective_at": "2026-09-12T00:00:00+00:00",
+              "received_at": "2026-10-10T00:00:00+00:00",
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "revision_of": null,
+              "payload_hash": "b2055231a1e3b2dd8ac52959545802da497a35104e676a09441570a21f0aed76",
+              "unit": "count",
+              "value_kind": "actual",
+              "completeness": "complete",
+              "origin": "query",
+              "candidate_universe": "ranking_top20",
+              "clock_quality": "source_timezone_confirmed",
+              "quality_flags": [],
+              "source_ref": {},
+              "payload": {
+                "items": [
+                  {
+                    "stk_cd": "005930"
+                  }
+                ],
+                "query_type": "5"
+              },
+              "ordinal": 1
+            }
+          ],
+          "next_cursor": 1
+        }
+      },
+      {
+        "name": "second-page-after-new-observation",
+        "status": 200,
+        "headers": {
+          "content-length": "1557",
+          "content-type": "application/json"
+        },
+        "body": {
+          "watermark": "00000000-0000-0000-0000-000000000003",
+          "manifest": {
+            "dataset_id": "00000000-0000-0000-0000-000000000003",
+            "schema_version": 1,
+            "captured_range": {
+              "start": "2026-09-12T00:00:00+00:00",
+              "end": "2026-09-13T00:00:00+00:00"
+            },
+            "recorded_from": "2026-09-12T00:00:00+00:00",
+            "exported_at": "2026-10-10T00:00:00+00:00",
+            "source_ids": [
+              "fixture"
+            ],
+            "fixed_watermark": "00000000-0000-0000-0000-000000000003",
+            "revision_count": 2,
+            "revision_ids_hash": "7a70c782c5d30f61a8f57b905eaa11c41ec8ffeafaa3a0e99c4fca60044a28d4",
+            "kinds": [
+              "ranking"
+            ],
+            "subject": "5",
+            "universe_rule": "top20_membership-v1",
+            "timezone": "UTC",
+            "order_policy_version": "available_at-ingest_sequence-revision_id-v1",
+            "quality_summary": {
+              "flags": [
+                "coverage_not_evaluated"
+              ],
+              "recording_gap": "unknown"
+            },
+            "replay_profile": "observed_replay"
+          },
+          "observations": [
+            {
+              "accepted_sequence": 2,
+              "revision_id": "00000000-0000-0000-0000-000000000002",
+              "observation_key": "2026-09-12T09:00:30",
+              "schema_version": 1,
+              "source_id": "fixture",
+              "source_session_id": "",
+              "source_sequence": "",
+              "kind": "ranking",
+              "subject": "5",
+              "venue": "COMBINED",
+              "effective_at": "2026-09-12T00:00:30+00:00",
+              "received_at": "2026-10-10T00:00:00+00:00",
+              "available_at": "2026-09-12T00:00:30+00:00",
+              "revision_of": null,
+              "payload_hash": "33974785485f0ebade165b40418cedb1b334e387724b68f5f2c4031c4d236479",
+              "unit": "count",
+              "value_kind": "actual",
+              "completeness": "complete",
+              "origin": "query",
+              "candidate_universe": "ranking_top20",
+              "clock_quality": "source_timezone_confirmed",
+              "quality_flags": [],
+              "source_ref": {},
+              "payload": {
+                "items": [
+                  {
+                    "stk_cd": "000660"
+                  }
+                ],
+                "query_type": "5"
+              },
+              "ordinal": 2
+            }
+          ],
+          "next_cursor": null
+        }
+      },
+      {
+        "name": "exhausted-page",
+        "status": 200,
+        "headers": {
+          "content-length": "810",
+          "content-type": "application/json"
+        },
+        "body": {
+          "watermark": "00000000-0000-0000-0000-000000000003",
+          "manifest": {
+            "dataset_id": "00000000-0000-0000-0000-000000000003",
+            "schema_version": 1,
+            "captured_range": {
+              "start": "2026-09-12T00:00:00+00:00",
+              "end": "2026-09-13T00:00:00+00:00"
+            },
+            "recorded_from": "2026-09-12T00:00:00+00:00",
+            "exported_at": "2026-10-10T00:00:00+00:00",
+            "source_ids": [
+              "fixture"
+            ],
+            "fixed_watermark": "00000000-0000-0000-0000-000000000003",
+            "revision_count": 2,
+            "revision_ids_hash": "7a70c782c5d30f61a8f57b905eaa11c41ec8ffeafaa3a0e99c4fca60044a28d4",
+            "kinds": [
+              "ranking"
+            ],
+            "subject": "5",
+            "universe_rule": "top20_membership-v1",
+            "timezone": "UTC",
+            "order_policy_version": "available_at-ingest_sequence-revision_id-v1",
+            "quality_summary": {
+              "flags": [
+                "coverage_not_evaluated"
+              ],
+              "recording_gap": "unknown"
+            },
+            "replay_profile": "observed_replay"
+          },
+          "observations": [],
+          "next_cursor": null
+        }
+      },
+      {
+        "name": "different-subject",
+        "status": 409,
+        "headers": {
+          "content-length": "64",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "watermark parameters do not match its fixed dataset"
+        }
+      },
+      {
+        "name": "different-kinds",
+        "status": 409,
+        "headers": {
+          "content-length": "64",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "watermark parameters do not match its fixed dataset"
+        }
+      },
+      {
+        "name": "different-range",
+        "status": 409,
+        "headers": {
+          "content-length": "64",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "watermark parameters do not match its fixed dataset"
+        }
+      },
+      {
+        "name": "equivalent-timezone-and-duplicate-kind",
+        "status": 200,
+        "headers": {
+          "content-length": "1554",
+          "content-type": "application/json"
+        },
+        "body": {
+          "watermark": "00000000-0000-0000-0000-000000000003",
+          "manifest": {
+            "dataset_id": "00000000-0000-0000-0000-000000000003",
+            "schema_version": 1,
+            "captured_range": {
+              "start": "2026-09-12T00:00:00+00:00",
+              "end": "2026-09-13T00:00:00+00:00"
+            },
+            "recorded_from": "2026-09-12T00:00:00+00:00",
+            "exported_at": "2026-10-10T00:00:00+00:00",
+            "source_ids": [
+              "fixture"
+            ],
+            "fixed_watermark": "00000000-0000-0000-0000-000000000003",
+            "revision_count": 2,
+            "revision_ids_hash": "7a70c782c5d30f61a8f57b905eaa11c41ec8ffeafaa3a0e99c4fca60044a28d4",
+            "kinds": [
+              "ranking"
+            ],
+            "subject": "5",
+            "universe_rule": "top20_membership-v1",
+            "timezone": "UTC",
+            "order_policy_version": "available_at-ingest_sequence-revision_id-v1",
+            "quality_summary": {
+              "flags": [
+                "coverage_not_evaluated"
+              ],
+              "recording_gap": "unknown"
+            },
+            "replay_profile": "observed_replay"
+          },
+          "observations": [
+            {
+              "accepted_sequence": 1,
+              "revision_id": "00000000-0000-0000-0000-000000000001",
+              "observation_key": "2026-09-12T09:00:00",
+              "schema_version": 1,
+              "source_id": "fixture",
+              "source_session_id": "",
+              "source_sequence": "",
+              "kind": "ranking",
+              "subject": "5",
+              "venue": "COMBINED",
+              "effective_at": "2026-09-12T00:00:00+00:00",
+              "received_at": "2026-10-10T00:00:00+00:00",
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "revision_of": null,
+              "payload_hash": "b2055231a1e3b2dd8ac52959545802da497a35104e676a09441570a21f0aed76",
+              "unit": "count",
+              "value_kind": "actual",
+              "completeness": "complete",
+              "origin": "query",
+              "candidate_universe": "ranking_top20",
+              "clock_quality": "source_timezone_confirmed",
+              "quality_flags": [],
+              "source_ref": {},
+              "payload": {
+                "items": [
+                  {
+                    "stk_cd": "005930"
+                  }
+                ],
+                "query_type": "5"
+              },
+              "ordinal": 1
+            }
+          ],
+          "next_cursor": 1
+        }
+      },
+      {
+        "name": "new-export-includes-late-observation",
+        "status": 200,
+        "headers": {
+          "content-length": "3053",
+          "content-type": "application/json"
+        },
+        "body": {
+          "watermark": "00000000-0000-0000-0000-000000000005",
+          "manifest": {
+            "dataset_id": "00000000-0000-0000-0000-000000000005",
+            "schema_version": 1,
+            "captured_range": {
+              "start": "2026-09-12T00:00:00+00:00",
+              "end": "2026-09-13T00:00:00+00:00"
+            },
+            "recorded_from": "2026-09-12T00:00:00+00:00",
+            "exported_at": "2026-10-10T00:00:00+00:00",
+            "source_ids": [
+              "fixture"
+            ],
+            "fixed_watermark": "00000000-0000-0000-0000-000000000005",
+            "revision_count": 3,
+            "revision_ids_hash": "4aee8821eac62690a7db0aec366e55ab224c838f46c1ae82d48e87bef8cbf10e",
+            "kinds": [
+              "ranking"
+            ],
+            "subject": "5",
+            "universe_rule": "top20_membership-v1",
+            "timezone": "UTC",
+            "order_policy_version": "available_at-ingest_sequence-revision_id-v1",
+            "quality_summary": {
+              "flags": [
+                "coverage_not_evaluated"
+              ],
+              "recording_gap": "unknown"
+            },
+            "replay_profile": "observed_replay"
+          },
+          "observations": [
+            {
+              "accepted_sequence": 1,
+              "revision_id": "00000000-0000-0000-0000-000000000001",
+              "observation_key": "2026-09-12T09:00:00",
+              "schema_version": 1,
+              "source_id": "fixture",
+              "source_session_id": "",
+              "source_sequence": "",
+              "kind": "ranking",
+              "subject": "5",
+              "venue": "COMBINED",
+              "effective_at": "2026-09-12T00:00:00+00:00",
+              "received_at": "2026-10-10T00:00:00+00:00",
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "revision_of": null,
+              "payload_hash": "b2055231a1e3b2dd8ac52959545802da497a35104e676a09441570a21f0aed76",
+              "unit": "count",
+              "value_kind": "actual",
+              "completeness": "complete",
+              "origin": "query",
+              "candidate_universe": "ranking_top20",
+              "clock_quality": "source_timezone_confirmed",
+              "quality_flags": [],
+              "source_ref": {},
+              "payload": {
+                "items": [
+                  {
+                    "stk_cd": "005930"
+                  }
+                ],
+                "query_type": "5"
+              },
+              "ordinal": 1
+            },
+            {
+              "accepted_sequence": 2,
+              "revision_id": "00000000-0000-0000-0000-000000000002",
+              "observation_key": "2026-09-12T09:00:30",
+              "schema_version": 1,
+              "source_id": "fixture",
+              "source_session_id": "",
+              "source_sequence": "",
+              "kind": "ranking",
+              "subject": "5",
+              "venue": "COMBINED",
+              "effective_at": "2026-09-12T00:00:30+00:00",
+              "received_at": "2026-10-10T00:00:00+00:00",
+              "available_at": "2026-09-12T00:00:30+00:00",
+              "revision_of": null,
+              "payload_hash": "33974785485f0ebade165b40418cedb1b334e387724b68f5f2c4031c4d236479",
+              "unit": "count",
+              "value_kind": "actual",
+              "completeness": "complete",
+              "origin": "query",
+              "candidate_universe": "ranking_top20",
+              "clock_quality": "source_timezone_confirmed",
+              "quality_flags": [],
+              "source_ref": {},
+              "payload": {
+                "items": [
+                  {
+                    "stk_cd": "000660"
+                  }
+                ],
+                "query_type": "5"
+              },
+              "ordinal": 2
+            },
+            {
+              "accepted_sequence": 3,
+              "revision_id": "00000000-0000-0000-0000-000000000004",
+              "observation_key": "2026-09-12T09:00:45",
+              "schema_version": 1,
+              "source_id": "fixture",
+              "source_session_id": "",
+              "source_sequence": "",
+              "kind": "ranking",
+              "subject": "5",
+              "venue": "COMBINED",
+              "effective_at": "2026-09-12T00:00:45+00:00",
+              "received_at": "2026-10-10T00:00:00+00:00",
+              "available_at": "2026-09-12T00:00:45+00:00",
+              "revision_of": null,
+              "payload_hash": "53cc5e6e9855a6e59a72421dfe63f1d059dd6695d5c6abe1b1b0f48014f3eabb",
+              "unit": "count",
+              "value_kind": "actual",
+              "completeness": "complete",
+              "origin": "query",
+              "candidate_universe": "ranking_top20",
+              "clock_quality": "source_timezone_confirmed",
+              "quality_flags": [],
+              "source_ref": {},
+              "payload": {
+                "items": [
+                  {
+                    "stk_cd": "035420"
+                  }
+                ],
+                "query_type": "5"
+              },
+              "ordinal": 3
+            }
+          ],
+          "next_cursor": null
+        }
+      },
+      {
+        "name": "empty-export",
+        "status": 200,
+        "headers": {
+          "content-length": "809",
+          "content-type": "application/json"
+        },
+        "body": {
+          "watermark": "00000000-0000-0000-0000-000000000006",
+          "manifest": {
+            "dataset_id": "00000000-0000-0000-0000-000000000006",
+            "schema_version": 1,
+            "captured_range": {
+              "start": "2026-09-12T00:00:00+00:00",
+              "end": "2026-09-13T00:00:00+00:00"
+            },
+            "recorded_from": null,
+            "exported_at": "2026-10-10T00:00:00+00:00",
+            "source_ids": [],
+            "fixed_watermark": "00000000-0000-0000-0000-000000000006",
+            "revision_count": 0,
+            "revision_ids_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "kinds": [
+              "ranking"
+            ],
+            "subject": "empty",
+            "universe_rule": "top20_membership-v1",
+            "timezone": "UTC",
+            "order_policy_version": "available_at-ingest_sequence-revision_id-v1",
+            "quality_summary": {
+              "flags": [
+                "coverage_not_evaluated",
+                "no_recorded_observations"
+              ],
+              "recording_gap": "unknown"
+            },
+            "replay_profile": "observed_replay"
+          },
+          "observations": [],
+          "next_cursor": null
+        }
+      },
+      {
+        "name": "candidates-unauthorized",
+        "status": 401,
+        "headers": {
+          "content-length": "63",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": "유효한 서버 접속 토큰이 필요합니다."
+        }
+      },
+      {
+        "name": "candidates-invalid-limit",
+        "status": 422,
+        "headers": {
+          "content-length": "144",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "query",
+                "limit"
+              ],
+              "msg": "Input should be greater than or equal to 1",
+              "input": "0",
+              "ctx": {
+                "ge": 1
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "candidates-negative-sequence",
+        "status": 422,
+        "headers": {
+          "content-length": "154",
+          "content-type": "application/json"
+        },
+        "body": {
+          "detail": [
+            {
+              "type": "greater_than_equal",
+              "loc": [
+                "query",
+                "after_sequence"
+              ],
+              "msg": "Input should be greater than or equal to 0",
+              "input": "-1",
+              "ctx": {
+                "ge": 0
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "candidates-disabled",
+        "status": 200,
+        "headers": {
+          "content-length": "635",
+          "content-type": "application/json"
+        },
+        "body": {
+          "high_watermark": 3,
+          "events": [
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-1",
+              "stock_code": "005930",
+              "accepted_sequence": 1,
+              "expires_at": "2000-01-01T00:00:00+00:00",
+              "status": "EXPIRED"
+            },
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-2",
+              "stock_code": "005930",
+              "accepted_sequence": 2,
+              "expires_at": "2100-01-01T00:00:00+00:00",
+              "status": "ACTIVE"
+            },
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-3",
+              "stock_code": "005930",
+              "accepted_sequence": 3,
+              "expires_at": "invalid",
+              "status": "EXPIRED"
+            }
+          ],
+          "next_cursor": 3,
+          "has_more": false,
+          "quality": {
+            "status": "DISABLED",
+            "reason": "shadow_candidate_generation_disabled"
+          }
+        }
+      },
+      {
+        "name": "candidates-first-page",
+        "status": 200,
+        "headers": {
+          "content-length": "313",
+          "content-type": "application/json"
+        },
+        "body": {
+          "high_watermark": 3,
+          "events": [
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-1",
+              "stock_code": "005930",
+              "accepted_sequence": 1,
+              "expires_at": "2000-01-01T00:00:00+00:00",
+              "status": "EXPIRED"
+            }
+          ],
+          "next_cursor": 1,
+          "has_more": true,
+          "quality": {
+            "status": "DISABLED",
+            "reason": "shadow_candidate_generation_disabled"
+          }
+        }
+      },
+      {
+        "name": "candidates-next-page",
+        "status": 200,
+        "headers": {
+          "content-length": "312",
+          "content-type": "application/json"
+        },
+        "body": {
+          "high_watermark": 3,
+          "events": [
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-2",
+              "stock_code": "005930",
+              "accepted_sequence": 2,
+              "expires_at": "2100-01-01T00:00:00+00:00",
+              "status": "ACTIVE"
+            }
+          ],
+          "next_cursor": 2,
+          "has_more": true,
+          "quality": {
+            "status": "DISABLED",
+            "reason": "shadow_candidate_generation_disabled"
+          }
+        }
+      },
+      {
+        "name": "candidates-exhausted",
+        "status": 200,
+        "headers": {
+          "content-length": "148",
+          "content-type": "application/json"
+        },
+        "body": {
+          "high_watermark": 3,
+          "events": [],
+          "next_cursor": null,
+          "has_more": false,
+          "quality": {
+            "status": "DISABLED",
+            "reason": "shadow_candidate_generation_disabled"
+          }
+        }
+      },
+      {
+        "name": "candidates-generation-one",
+        "status": 200,
+        "headers": {
+          "content-length": "642",
+          "content-type": "application/json"
+        },
+        "body": {
+          "high_watermark": 3,
+          "events": [
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-1",
+              "stock_code": "005930",
+              "accepted_sequence": 1,
+              "expires_at": "2000-01-01T00:00:00+00:00",
+              "status": "EXPIRED"
+            },
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-2",
+              "stock_code": "005930",
+              "accepted_sequence": 2,
+              "expires_at": "2100-01-01T00:00:00+00:00",
+              "status": "ACTIVE"
+            },
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-3",
+              "stock_code": "005930",
+              "accepted_sequence": 3,
+              "expires_at": "invalid",
+              "status": "EXPIRED"
+            }
+          ],
+          "next_cursor": 3,
+          "has_more": false,
+          "quality": {
+            "status": "WARMUP",
+            "reason": "fixture-generation-1",
+            "monitor_id": "monitor-1"
+          }
+        }
+      },
+      {
+        "name": "candidates-generation-two",
+        "status": 200,
+        "headers": {
+          "content-length": "642",
+          "content-type": "application/json"
+        },
+        "body": {
+          "high_watermark": 3,
+          "events": [
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-1",
+              "stock_code": "005930",
+              "accepted_sequence": 1,
+              "expires_at": "2000-01-01T00:00:00+00:00",
+              "status": "EXPIRED"
+            },
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-2",
+              "stock_code": "005930",
+              "accepted_sequence": 2,
+              "expires_at": "2100-01-01T00:00:00+00:00",
+              "status": "ACTIVE"
+            },
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-3",
+              "stock_code": "005930",
+              "accepted_sequence": 3,
+              "expires_at": "invalid",
+              "status": "EXPIRED"
+            }
+          ],
+          "next_cursor": 3,
+          "has_more": false,
+          "quality": {
+            "status": "WARMUP",
+            "reason": "fixture-generation-2",
+            "monitor_id": "monitor-2"
+          }
+        }
+      },
+      {
+        "name": "candidates-disabled-again",
+        "status": 200,
+        "headers": {
+          "content-length": "635",
+          "content-type": "application/json"
+        },
+        "body": {
+          "high_watermark": 3,
+          "events": [
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-1",
+              "stock_code": "005930",
+              "accepted_sequence": 1,
+              "expires_at": "2000-01-01T00:00:00+00:00",
+              "status": "EXPIRED"
+            },
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-2",
+              "stock_code": "005930",
+              "accepted_sequence": 2,
+              "expires_at": "2100-01-01T00:00:00+00:00",
+              "status": "ACTIVE"
+            },
+            {
+              "available_at": "2026-09-12T00:00:00+00:00",
+              "event_id": "event-3",
+              "stock_code": "005930",
+              "accepted_sequence": 3,
+              "expires_at": "invalid",
+              "status": "EXPIRED"
+            }
+          ],
+          "next_cursor": 3,
+          "has_more": false,
+          "quality": {
+            "status": "DISABLED",
+            "reason": "shadow_candidate_generation_disabled"
+          }
+        }
+      }
+    ],
+    "stored": {
+      "fixed_export": {
+        "watermark": "00000000-0000-0000-0000-000000000003",
+        "manifest": {
+          "dataset_id": "00000000-0000-0000-0000-000000000003",
+          "schema_version": 1,
+          "captured_range": {
+            "start": "2026-09-12T00:00:00+00:00",
+            "end": "2026-09-13T00:00:00+00:00"
+          },
+          "recorded_from": "2026-09-12T00:00:00+00:00",
+          "exported_at": "2026-10-10T00:00:00+00:00",
+          "source_ids": [
+            "fixture"
+          ],
+          "fixed_watermark": "00000000-0000-0000-0000-000000000003",
+          "revision_count": 2,
+          "revision_ids_hash": "7a70c782c5d30f61a8f57b905eaa11c41ec8ffeafaa3a0e99c4fca60044a28d4",
+          "kinds": [
+            "ranking"
+          ],
+          "subject": "5",
+          "universe_rule": "top20_membership-v1",
+          "timezone": "UTC",
+          "order_policy_version": "available_at-ingest_sequence-revision_id-v1",
+          "quality_summary": {
+            "flags": [
+              "coverage_not_evaluated"
+            ],
+            "recording_gap": "unknown"
+          },
+          "replay_profile": "observed_replay"
+        },
+        "observations": [
+          {
+            "accepted_sequence": 1,
+            "revision_id": "00000000-0000-0000-0000-000000000001",
+            "observation_key": "2026-09-12T09:00:00",
+            "schema_version": 1,
+            "source_id": "fixture",
+            "source_session_id": "",
+            "source_sequence": "",
+            "kind": "ranking",
+            "subject": "5",
+            "venue": "COMBINED",
+            "effective_at": "2026-09-12T00:00:00+00:00",
+            "received_at": "2026-10-10T00:00:00+00:00",
+            "available_at": "2026-09-12T00:00:00+00:00",
+            "revision_of": null,
+            "payload_hash": "b2055231a1e3b2dd8ac52959545802da497a35104e676a09441570a21f0aed76",
+            "unit": "count",
+            "value_kind": "actual",
+            "completeness": "complete",
+            "origin": "query",
+            "candidate_universe": "ranking_top20",
+            "clock_quality": "source_timezone_confirmed",
+            "quality_flags": [],
+            "source_ref": {},
+            "payload": {
+              "items": [
+                {
+                  "stk_cd": "005930"
+                }
+              ],
+              "query_type": "5"
+            },
+            "ordinal": 1
+          },
+          {
+            "accepted_sequence": 2,
+            "revision_id": "00000000-0000-0000-0000-000000000002",
+            "observation_key": "2026-09-12T09:00:30",
+            "schema_version": 1,
+            "source_id": "fixture",
+            "source_session_id": "",
+            "source_sequence": "",
+            "kind": "ranking",
+            "subject": "5",
+            "venue": "COMBINED",
+            "effective_at": "2026-09-12T00:00:30+00:00",
+            "received_at": "2026-10-10T00:00:00+00:00",
+            "available_at": "2026-09-12T00:00:30+00:00",
+            "revision_of": null,
+            "payload_hash": "33974785485f0ebade165b40418cedb1b334e387724b68f5f2c4031c4d236479",
+            "unit": "count",
+            "value_kind": "actual",
+            "completeness": "complete",
+            "origin": "query",
+            "candidate_universe": "ranking_top20",
+            "clock_quality": "source_timezone_confirmed",
+            "quality_flags": [],
+            "source_ref": {},
+            "payload": {
+              "items": [
+                {
+                  "stk_cd": "000660"
+                }
+              ],
+              "query_type": "5"
+            },
+            "ordinal": 2
+          }
+        ],
+        "next_cursor": null
+      },
+      "raw_candidates": {
+        "high_watermark": 3,
+        "events": [
+          {
+            "available_at": "2026-09-12T00:00:00+00:00",
+            "event_id": "event-1",
+            "stock_code": "005930",
+            "accepted_sequence": 1,
+            "expires_at": "2000-01-01T00:00:00+00:00"
+          },
+          {
+            "available_at": "2026-09-12T00:00:00+00:00",
+            "event_id": "event-2",
+            "stock_code": "005930",
+            "accepted_sequence": 2,
+            "expires_at": "2100-01-01T00:00:00+00:00"
+          },
+          {
+            "available_at": "2026-09-12T00:00:00+00:00",
+            "event_id": "event-3",
+            "stock_code": "005930",
+            "accepted_sequence": 3,
+            "expires_at": "invalid"
+          }
+        ],
+        "next_cursor": 3,
+        "has_more": false
+      },
+      "monitor_lifecycle": [
+        {
+          "start": 1,
+          "close": 1
+        },
+        {
+          "start": 1,
+          "close": 1
+        }
+      ]
+    }
+  }
+}

@@ -93,6 +93,8 @@ class Top20FixtureSeedTests(unittest.TestCase):
         lease._baseline_id = proof['baseline_id']
         store = lease.store()
         service._store = store
+        from kiwoom_monitor.central_server.program_snapshot_writer import ProgramSnapshotWriter
+        service._program_snapshots = ProgramSnapshotWriter(store)
         service._broker._store = store
         with self.assertRaisesRegex(ValueError, 'not_bound'):
             seal_top20_cold_fixture(service, clock, baseline=proof, source_manifest=self.manifest)
@@ -118,7 +120,7 @@ class Top20FixtureSeedTests(unittest.TestCase):
             lambda s: s._daily_input_versions.update({("005930", "KRX"): 1}),
             lambda s: setattr(s._collector, "active_codes", ("005930",)),
             lambda s: s._trade_values._last_cumulative_volume.update({("005930", "SOR"): 100}),
-            lambda s: s._pending_program_snapshots.update({"p": {"value": 1}}),
+            lambda s: s._program_snapshots._pending.update({"p": {"value": 1}}),
             lambda s: setattr(s, "_last_ranking_slot", "2026-10-06T08:55:00"),
             lambda s: s._fundamentals_pending.add("005930"),
         )
@@ -133,6 +135,7 @@ class Top20FixtureSeedTests(unittest.TestCase):
     def test_completed_task_close_lock_or_shared_subscription_is_not_a_safe_cold_start(self):
         changes = (
             lambda s: setattr(s, "_close_task", object()),
+            lambda s: setattr(s._program_snapshots, "_save_task", object()),
             lambda s: s._daily_input_lock.acquire(),
             lambda s: s._hub.connect(),
             lambda s: setattr(s._hub, "_upstream_ready", True),
@@ -148,6 +151,10 @@ class Top20FixtureSeedTests(unittest.TestCase):
                     self.seal(service, clock)
 
     def test_persistent_cache_or_outbox_cannot_be_silently_disabled_or_ignored(self):
+        service, clock = self.fixture()
+        service._program_snapshots._store = ForbiddenIO()
+        with self.assertRaisesRegex(ValueError, "program_writer_missing_or_shared"):
+            self.seal(service, clock)
         service, clock = self.fixture()
         service._broker._store = None
         with self.assertRaisesRegex(ValueError, "persistent_cache_store_missing"):

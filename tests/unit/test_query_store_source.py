@@ -90,9 +90,9 @@ class QueryStoreSourceTests(unittest.TestCase):
     def test_repository_aggregate_retains_all_inherited_protocol_methods(self) -> None:
         root = Path(__file__).resolve().parents[2]
         sources = method_sources(root)
-        self.assertEqual(99, len(sources["QueryStore"]))
-        self.assertEqual(103, sum(name != "__init__" for name in sources["SQLiteQueryStore"]))
-        self.assertEqual(104, sum(name != "__init__" for name in sources["PostgresQueryStore"]))
+        self.assertEqual(101, len(sources["QueryStore"]))
+        self.assertEqual(105, sum(name != "__init__" for name in sources["SQLiteQueryStore"]))
+        self.assertEqual(107, sum(name != "__init__" for name in sources["PostgresQueryStore"]))
         self.assertEqual("QueryCacheStore",
                          sources["QueryStore"]["load_query"].class_name)
 

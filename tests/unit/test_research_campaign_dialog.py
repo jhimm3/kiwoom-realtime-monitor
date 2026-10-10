@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 from kiwoom_monitor.presentation.research_dialog import ResearchDialog
 from kiwoom_monitor.application.research_families import BREAKOUT_FAMILY_ID
 from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy
-from test_research_campaign_execution import write_campaign_request
+from research_test_support import write_campaign_request
 
 
 class CampaignDialogTests(unittest.TestCase):

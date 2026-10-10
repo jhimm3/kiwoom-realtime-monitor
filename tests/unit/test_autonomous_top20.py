@@ -1130,12 +1130,12 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
             service = AutonomousTop20Service(_Broker(), RealtimeHub(), store)
-            service._pending_program_snapshots["005930"] = {
+            service._program_snapshots._pending["005930"] = {
                 "subject": "005930", "snapshot_key": "20260914:REALTIME:100100",
                 "payload": {"market": "KRX", "rows": [{"trade_time": "100100"}]},
             }
 
-            await service._flush_program_snapshots()
+            await service._program_snapshots.flush()
             values = store.load_dataset_snapshots("program_flow", "005930", 10)
             store.close()
 

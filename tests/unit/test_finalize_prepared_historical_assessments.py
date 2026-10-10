@@ -9,13 +9,13 @@ import unittest
 
 from scripts.finalize_prepared_historical_article_bodies import finalize as finalize_bodies
 from scripts.finalize_prepared_historical_assessments import finalize
-from tests.unit.test_finalize_prepared_historical_article_bodies import _fixtures
+from tests.unit.historical_news_test_support import prepared_article_body_fixture
 
 
 class PreparedAssessmentFinalizerTests(unittest.TestCase):
     def test_assessment_resume_keeps_seed_and_creates_no_jobs_or_events(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            prepared, archive, raw, digest = _fixtures(Path(directory))
+            prepared, archive, raw, digest = prepared_article_body_fixture(Path(directory))
             finalize_bodies(prepared, archive, raw, digest, 2)
             first = finalize(prepared, archive, digest, max_rows=1)
             self.assertEqual(1, first["processed_now"])
@@ -50,7 +50,7 @@ class PreparedAssessmentFinalizerTests(unittest.TestCase):
 
     def test_failure_rolls_back_document_rule_input_and_progress(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            prepared, archive, raw, digest = _fixtures(Path(directory))
+            prepared, archive, raw, digest = prepared_article_body_fixture(Path(directory))
             finalize_bodies(prepared, archive, raw, digest, 2)
             finalize(prepared, archive, digest, max_rows=1)
             with closing(sqlite3.connect(archive)) as db:
@@ -71,7 +71,7 @@ class PreparedAssessmentFinalizerTests(unittest.TestCase):
 
     def test_seed_assessment_conflict_is_not_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            prepared, archive, raw, digest = _fixtures(Path(directory))
+            prepared, archive, raw, digest = prepared_article_body_fixture(Path(directory))
             finalize_bodies(prepared, archive, raw, digest, 2)
             with closing(sqlite3.connect(archive)) as db:
                 db.execute(
