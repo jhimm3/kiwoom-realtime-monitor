@@ -16,7 +16,7 @@ RUN grep -q '/api/v1/settings/operations' /app/src/kiwoom_monitor/central_server
     && grep -q '/api/v1/diagnostics/capabilities' /app/src/kiwoom_monitor/central_server/diagnostic_control_routes.py \
     && grep -q '/api/v1/diagnostics/db-calls' /app/src/kiwoom_monitor/central_server/diagnostic_read_routes.py \
     && grep -q 'def update_operational_settings' /app/src/kiwoom_monitor/central_server/news_service.py \
-    && grep -q '2026.10.09-trace-ram-main-v1' /app/src/kiwoom_monitor/central_server/app.py \
+    && grep -q '2026.10.11-recorder-route-merge-v1' /app/src/kiwoom_monitor/central_server/app.py \
     && test -f /app/src/kiwoom_monitor/central_server/credential_store.py \
     && test -f /app/src/kiwoom_monitor/central_server/credential_runtime.py \
     && test -f /app/src/kiwoom_monitor/central_server/schema_migrations.py \

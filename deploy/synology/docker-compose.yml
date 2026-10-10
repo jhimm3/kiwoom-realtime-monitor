@@ -15,7 +15,7 @@ services:
       retries: 10
 
   server:
-    image: kiwoom-monitor-server:2026.10.08-news-read-routes-v1
+    image: kiwoom-monitor-server:2026.10.11-recorder-route-merge-v1
     build:
       context: ../..
       dockerfile: deploy/synology/server.Dockerfile
