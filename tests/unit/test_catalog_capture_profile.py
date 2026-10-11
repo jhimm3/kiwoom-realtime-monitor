@@ -97,7 +97,7 @@ class CatalogCaptureProfileTests(unittest.TestCase):
         small = freeze_payload({'ok': (1, 2)}).value
         self.assertEqual({'ok': (1, 2)}, thaw_payload(small))
         with self.assertRaises(InputRejected):
-            thaw_payload(small, maximum_bytes=CATALOG_MAX_COPY_BYTES * 2)
+            thaw_payload(small, maximum_bytes=CATALOG_MAX_COPY_BYTES + 1)
 
     def test_native_call_once_off_and_on_then_durable_exact_restore(self):
         arguments = catalog_arguments()
