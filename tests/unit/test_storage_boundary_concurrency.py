@@ -23,6 +23,7 @@ from kiwoom_monitor.central_server.market_observations import bar_observation_ke
 from kiwoom_monitor.domain.market_data_contract import (
     DataCompleteness, DataValueKind, MarketDatasetKind, ObservationOrigin,
 )
+from kiwoom_monitor.infrastructure.market_data_metadata_codec import market_metadata_document
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -54,7 +55,11 @@ class StorageBoundaryConcurrencyTests(unittest.TestCase):
         # The RAM snapshot was copied before COMMIT; a later read must not add it twice.
         self.store.save_minute_bars([pending])
         [after] = self.store.load_minute_bars('005930', base['trading_date'], 'KRX', realtime_deltas=deltas)
-        self.assertEqual(live, after)
+        self.assertEqual({'completeness': 'unconfirmed', 'origin': 'realtime',
+                          'source': 'NAS-realtime-overlay'}, live['metadata'])
+        self.assertEqual({'completeness': 'unconfirmed'}, after['metadata'])
+        self.assertEqual({**live, 'metadata': after['metadata']}, after)
+        self.assertEqual(2, self._operation_count())
 
     def test_live_overlay_preserves_closed_query_and_replaces_partial_query_once(self) -> None:
         for completeness in (DataCompleteness.COMPLETE, DataCompleteness.IN_PROGRESS):
@@ -78,7 +83,20 @@ class StorageBoundaryConcurrencyTests(unittest.TestCase):
                 self.store.save_minute_bars(pending, observations=[
                     (bar_observation_key(value), value) for value in realtime_observations
                 ])
-                self.assertEqual(live, self.store.load_minute_bars('005930', base['trading_date'], 'KRX'))
+                saved = self.store.load_minute_bars('005930', base['trading_date'], 'KRX')
+                self.assertEqual(
+                    [{key: value for key, value in bar.items() if key != 'metadata'} for bar in live],
+                    [{key: value for key, value in bar.items() if key != 'metadata'} for bar in saved],
+                )
+                [saved_row] = [bar for bar in saved if bar['minute'] == minute]
+                if completeness == DataCompleteness.COMPLETE:
+                    expected_metadata = market_metadata_document(observation.metadata)
+                    self.assertEqual(expected_metadata, row['metadata'])
+                else:
+                    self.assertEqual({'completeness': 'unconfirmed', 'origin': 'realtime',
+                                      'source': 'NAS-realtime-overlay'}, row['metadata'])
+                    expected_metadata = market_metadata_document(realtime_observations[-1].metadata)
+                self.assertEqual(expected_metadata, saved_row['metadata'])
 
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()

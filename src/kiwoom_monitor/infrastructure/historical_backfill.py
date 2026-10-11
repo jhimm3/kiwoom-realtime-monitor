@@ -97,6 +97,13 @@ class NewsBackfillJob:
     target_end_date: str = ""
     range_id: str = ""
     member_count: int = 1
+    next_search_page: int = 1
+    previous_items: int = 0
+    search_continuation: bool = False
+    previous_page_keys: tuple[tuple[str, str], ...] = ()
+    previous_usable: int = 0
+    previous_unreadable: int = 0
+    previous_missing_time: int = 0
 
 
 @dataclass(frozen=True)
@@ -439,6 +446,7 @@ def claim_news_backfill_job(output_database: Path) -> NewsBackfillJob | None:
                 SELECT code, target_date, query_text, name_source, name_source_ref, attempts
                 FROM news_backfill_jobs
                 WHERE state IN ('pending', 'failed') AND attempts < 3
+                  AND search_continuation=0
                 ORDER BY target_date DESC, code
                 LIMIT 1
                 """
@@ -578,6 +586,7 @@ def claim_news_range_job(output_database: Path) -> NewsBackfillJob | None:
                        attempts, member_count
                 FROM news_range_jobs
                 WHERE state IN ('pending','failed') AND attempts < 3
+                  AND search_continuation=0
                 ORDER BY end_date DESC, code
                 LIMIT 1
                 """
@@ -599,6 +608,71 @@ def claim_news_range_job(output_database: Path) -> NewsBackfillJob | None:
                 "range_group", str(row["range_id"]), int(row["attempts"]) + 1,
                 str(row["end_date"]), str(row["range_id"]), int(row["member_count"]),
             )
+
+
+def claim_truncated_news_job(output_database: Path) -> NewsBackfillJob | None:
+    """Claim only capped searches or their interrupted continuation; never reset the ledger."""
+    initialize_probe_database(output_database)
+    now = datetime.now(UTC)
+    with closing(_connect_database(output_database)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("BEGIN IMMEDIATE")
+        with connection:
+            for table in ("news_range_jobs", "news_backfill_jobs"):
+                connection.execute(
+                    f"UPDATE {table} SET state='failed', updated_at=? "
+                    "WHERE search_continuation=1 AND state='running' AND updated_at<?",
+                    (now.isoformat(), (now - timedelta(hours=2)).isoformat()),
+                )
+                row = connection.execute(
+                    f"SELECT * FROM {table} WHERE ("
+                    "(state='truncated' AND last_error='page_limit_reached' AND pages_observed>0) "
+                    "OR (search_continuation=1 AND state IN ('pending','failed') AND attempts<3)) "
+                    + ("AND start_date=end_date " if table == "news_range_jobs" else "") +
+                    "ORDER BY updated_at LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    continue
+                is_range = table == "news_range_jobs"
+                start_date = str(row["start_date"] if is_range else row["target_date"])
+                end_date = str(row["end_date"] if is_range else start_date)
+                next_page = (int(row["next_search_page"]) if row["search_continuation"]
+                             else int(row["pages_observed"]) + 1)
+                key_clause = "range_id=?" if is_range else "code=? AND target_date=? AND query_text=?"
+                key = ((row["range_id"],) if is_range else
+                       (row["code"], row["target_date"], row["query_text"]))
+                attempts = 1 if row["state"] == "truncated" else int(row["attempts"]) + 1
+                connection.execute(
+                    f"UPDATE {table} SET state='running', search_continuation=1, "
+                    f"next_search_page=?, attempts=?, last_error='', updated_at=? WHERE {key_clause}",
+                    (next_page, attempts, now.isoformat(), *key),
+                )
+                previous_keys = ()
+                if next_page > 1:
+                    request_key = (f"code={row['code']}&from={start_date}&to={end_date}"
+                                   f"&query={row['query_text']}&start={(next_page - 2) * 10 + 1}")
+                    saved = connection.execute(
+                        "SELECT payload_json FROM source_pages WHERE provider=? AND request_key=? "
+                        "ORDER BY observed_at DESC LIMIT 1",
+                        (NAVER_HISTORICAL_SEARCH_PROVIDER, request_key),
+                    ).fetchone()
+                    if saved:
+                        page = parse_naver_historical_search_page(
+                            str(row["code"]), str(row["query_text"]), start_date,
+                            (next_page - 2) * 10 + 1, json.loads(saved[0]), target_end_date=end_date,
+                        )
+                        previous_keys = tuple((item.office_id, item.article_id) for item in page.items)
+                return NewsBackfillJob(
+                    str(row["code"]), start_date, str(row["query_text"]),
+                    "range_group" if is_range else str(row["name_source"]),
+                    str(row["range_id"] if is_range else row["name_source_ref"]), attempts,
+                    end_date, str(row["range_id"]) if is_range else "",
+                    int(row["member_count"]) if is_range else 1,
+                    next_page, int(row["items_observed"]), True, previous_keys,
+                    int(row["usable_articles"]), int(row["unreadable_articles"]),
+                    int(row["missing_time_articles"]),
+                )
+    return None
 
 
 def release_news_range_job(
@@ -696,6 +770,8 @@ def finish_news_range_job(
                 (state, pages_observed, items_observed, usable_articles,
                  unreadable_articles, missing_time_articles, error, now, job.range_id),
             )
+            if job.search_continuation and state == "truncated" and error == "page_limit_reached":
+                connection.execute("UPDATE news_range_jobs SET attempts=0 WHERE range_id=?", (job.range_id,))
             if state != "failed":
                 for value in member_dates:
                     counts = connection.execute(
@@ -721,11 +797,12 @@ def finish_news_range_job(
                         UPDATE news_backfill_jobs SET state=?, pages_observed=?,
                             items_observed=?, usable_articles=?, unreadable_articles=?,
                             missing_time_articles=?, last_error=?, updated_at=?
-                        WHERE code=? AND target_date=? AND query_text=? AND state='grouped'
+                        WHERE code=? AND target_date=? AND query_text=?
+                          AND (state='grouped' OR (? AND state='truncated'))
                         """,
                         (state, 0, item_count, usable_count,
                          max(0, item_count - usable_count - missing_count), missing_count,
-                         error, now, job.code, value, job.query_text),
+                         error, now, job.code, value, job.query_text, int(job.search_continuation)),
                     )
 
 
@@ -758,6 +835,11 @@ def finish_news_backfill_job(
                     datetime.now(UTC).isoformat(), job.code, job.target_date, job.query_text,
                 ),
             )
+            if job.search_continuation and state == "truncated" and error == "page_limit_reached":
+                connection.execute(
+                    "UPDATE news_backfill_jobs SET attempts=0 WHERE code=? AND target_date=? AND query_text=?",
+                    (job.code, job.target_date, job.query_text),
+                )
 
 
 def release_news_backfill_job(
@@ -1622,12 +1704,18 @@ def initialize_probe_database(path: Path) -> None:
             job_additions = {
                 "name_source": "TEXT NOT NULL DEFAULT 'stocks.current'",
                 "name_source_ref": "TEXT NOT NULL DEFAULT ''",
+                "next_search_page": "INTEGER NOT NULL DEFAULT 1",
+                "search_continuation": "INTEGER NOT NULL DEFAULT 0",
             }
             for column, declaration in job_additions.items():
                 if column not in job_columns:
                     connection.execute(
                         f"ALTER TABLE news_backfill_jobs ADD COLUMN {column} {declaration}"
                     )
+            range_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(news_range_jobs)")}
+            for column in ("next_search_page", "search_continuation"):
+                if column not in range_columns:
+                    connection.execute(f"ALTER TABLE news_range_jobs ADD COLUMN {column} {job_additions[column]}")
             pipeline_columns = {
                 str(row[1]) for row in connection.execute(
                     "PRAGMA table_info(news_article_pipeline)"
@@ -1718,7 +1806,10 @@ def news_job_key(job: NewsBackfillJob) -> str:
 
 def store_naver_historical_search_page(
     path: Path, page: NaverHistoricalNewsPage, *, deferred_job_key: str = "",
+    continuation_job: NewsBackfillJob | None = None, items_observed: int = 0,
 ) -> None:
+    if continuation_job is not None and deferred_job_key != news_job_key(continuation_job):
+        raise ValueError("search continuation requires its durable article queue")
     initialize_probe_database(path)
     end_date = page.target_end_date or page.target_date
     request_key = (
@@ -1811,6 +1902,30 @@ def store_naver_historical_search_page(
                         page.observed_at,
                     ),
                 )
+
+            if continuation_job is not None:
+                _checkpoint_news_search_page(connection, continuation_job, page, items_observed)
+
+
+def _checkpoint_news_search_page(
+    connection: sqlite3.Connection, job: NewsBackfillJob,
+    page: NaverHistoricalNewsPage, items_observed: int,
+) -> None:
+    if (page.code != job.code or page.query != job.query_text or page.target_date != job.target_date
+            or (page.target_end_date or page.target_date) != (job.target_end_date or job.target_date)
+            or (page.start - 1) % 10):
+        raise ValueError("search continuation page does not match its job")
+    page_number = (page.start - 1) // 10 + 1
+    table = "news_range_jobs" if job.range_id else "news_backfill_jobs"
+    key_clause = "range_id=?" if job.range_id else "code=? AND target_date=? AND query_text=?"
+    key = (job.range_id,) if job.range_id else (job.code, job.target_date, job.query_text)
+    updated = connection.execute(
+        f"UPDATE {table} SET next_search_page=?, pages_observed=?, items_observed=?, updated_at=? "
+        f"WHERE {key_clause} AND state='running' AND search_continuation=1 AND next_search_page=?",
+        (page_number + 1, page_number, items_observed, page.observed_at, *key, page_number),
+    )
+    if updated.rowcount != 1:
+        raise RuntimeError("search continuation checkpoint lost ownership or page order")
 
 
 def store_news_search_observation(

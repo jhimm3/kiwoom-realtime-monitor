@@ -198,20 +198,23 @@ def main(argv=None):
                     unittest.defaultTestLoader.loadTestsFromName(
                         'tests.integration.test_recorded_execution_postgres.RecordedExecutionPostgresTests'),
                 ))
-                expected_tests = 9
+                module_counts = [part.countTestCases() for part in suite]
             else:
                 suite_name = ('tests.integration.test_recorded_execution_postgres.RecordedExecutionPostgresTests'
                               if args.execution_gates else
                               'tests.integration.test_recorded_replay_baseline_postgres.RecordedReplayBaselinePostgresTests')
                 suite = unittest.defaultTestLoader.loadTestsFromName(suite_name)
-                expected_tests = 6 if args.execution_gates else 4
+                module_counts = [suite.countTestCases()]
+            planned_tests = suite.countTestCases()
+            if planned_tests < 1 or not all(module_counts):
+                raise RuntimeError('replay_acceptance_discovered_no_tests')
             result = unittest.TextTestRunner(verbosity=2).run(suite)
-            success = (result.wasSuccessful() and result.testsRun == expected_tests
+            success = (result.wasSuccessful() and result.testsRun == planned_tests
                        and not result.skipped and not result.expectedFailures
                        and not result.unexpectedSuccesses)
             print(json.dumps({'state': 'passed' if success else 'failed',
                               'database': baseline.DATABASE_NAME, 'source': str(ROOT),
-                              'baseline_id': baseline_id, 'tests': result.testsRun,
+                              'baseline_id': baseline_id, 'planned_tests': planned_tests, 'module_counts': module_counts, 'tests': result.testsRun,
                               'skipped': len(result.skipped), 'fixture': 'controlled_fixture',
                               'source_state_equivalent': False}), flush=True)
             return 0 if success else 1

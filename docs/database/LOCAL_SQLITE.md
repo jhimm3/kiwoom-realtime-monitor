@@ -452,7 +452,7 @@ CREATE TABLE minute_history_sync_log (
 
 **선언된 외래키**
 
-- `stock_code` → `stocks.code`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- `stock_code` → `stocks.code`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 <details><summary>실제 생성 SQL</summary>
 
@@ -490,8 +490,8 @@ CREATE TABLE new_high_snapshot_meta (period INTEGER PRIMARY KEY, checked_at TEXT
 
 **선언된 외래키**
 
-- `profile_id` → `profile_themes.profile_id`; ON DELETE CASCADE, ON UPDATE NO ACTION
-- `theme_name` → `profile_themes.theme_name`; ON DELETE CASCADE, ON UPDATE NO ACTION
+- `profile_id` → `profile_themes.profile_id`; 삭제 정책 `ON DELETE CASCADE`, 갱신 정책 `ON UPDATE NO ACTION`
+- `theme_name` → `profile_themes.theme_name`; 삭제 정책 `ON DELETE CASCADE`, 갱신 정책 `ON UPDATE NO ACTION`
 
 <details><summary>실제 생성 SQL</summary>
 
@@ -520,7 +520,7 @@ CREATE TABLE profile_stock_themes (
 
 **선언된 외래키**
 
-- `profile_id` → `theme_profiles.profile_id`; ON DELETE CASCADE, ON UPDATE NO ACTION
+- `profile_id` → `theme_profiles.profile_id`; 삭제 정책 `ON DELETE CASCADE`, 갱신 정책 `ON UPDATE NO ACTION`
 
 <details><summary>실제 생성 SQL</summary>
 
@@ -552,7 +552,7 @@ CREATE TABLE profile_theme_name_decisions (profile_id INTEGER NOT NULL,decision_
 
 **선언된 외래키**
 
-- `profile_id` → `theme_profiles.profile_id`; ON DELETE CASCADE, ON UPDATE NO ACTION
+- `profile_id` → `theme_profiles.profile_id`; 삭제 정책 `ON DELETE CASCADE`, 갱신 정책 `ON UPDATE NO ACTION`
 
 <details><summary>실제 생성 SQL</summary>
 
@@ -571,7 +571,7 @@ CREATE TABLE profile_theme_suggestions (profile_id INTEGER NOT NULL,stock_code T
 
 **선언된 외래키**
 
-- `profile_id` → `theme_profiles.profile_id`; ON DELETE CASCADE, ON UPDATE NO ACTION
+- `profile_id` → `theme_profiles.profile_id`; 삭제 정책 `ON DELETE CASCADE`, 갱신 정책 `ON UPDATE NO ACTION`
 
 <details><summary>실제 생성 SQL</summary>
 
@@ -635,7 +635,7 @@ CREATE TABLE settings (
 
 **선언된 외래키**
 
-- `stock_code` → `stocks.code`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- `stock_code` → `stocks.code`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 <details><summary>실제 생성 SQL</summary>
 
@@ -657,7 +657,7 @@ CREATE TABLE stock_aliases (alias TEXT PRIMARY KEY, stock_code TEXT NOT NULL, FO
 
 **선언된 외래키**
 
-- `stock_code` → `stocks.code`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- `stock_code` → `stocks.code`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 <details><summary>실제 생성 SQL</summary>
 
@@ -676,8 +676,8 @@ CREATE TABLE stock_name_history (stock_code TEXT NOT NULL, old_name TEXT NOT NUL
 
 **선언된 외래키**
 
-- `theme_id` → `themes.theme_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- `stock_code` → `stocks.code`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- `theme_id` → `themes.theme_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- `stock_code` → `stocks.code`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 <details><summary>실제 생성 SQL</summary>
 

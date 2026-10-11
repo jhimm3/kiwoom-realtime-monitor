@@ -92,7 +92,7 @@ payload, 시작·종료, checksum, sequence, 초기 상태와 미지원 작업�
 
 근거:
 
-- A1: [candidate_monitor_dialog.py](../src/kiwoom_monitor/presentation/candidate_monitor_dialog.py) `CandidatePollWorker.run`, constructor, show/close/shutdown;
+- A1: [candidate_monitor_dialog.py](../src/kiwoom_monitor/presentation/candidate_monitor_dialog.py)의 `CandidatePollWorker.run`, 생성자, 표시·닫기·종료 경로;
   [main_window.py](../src/kiwoom_monitor/presentation/main_window.py) 창 생성·종료;
   [database_shadow_state.py](../src/kiwoom_monitor/central_server/database_shadow_state.py) 후보 MAX(sequence)+range SELECT.
 - A2: [journal_process.py](../src/kiwoom_monitor/journal_process.py) `_live_timer` 및 2162행 부근 갱신;

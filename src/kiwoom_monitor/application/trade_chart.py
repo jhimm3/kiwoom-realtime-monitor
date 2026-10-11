@@ -113,6 +113,7 @@ def aggregate_chart_rows(
             max(float(row[2]) for row in bucket), min(float(row[3]) for row in bucket), bucket[-1][4],
             sum(int(row[5]) for row in bucket),
             sum(available_trade_values) if available_trade_values else None,
-            "확정" if all(str(row[7]) in ("api_confirmed", "after_close_confirmed", "확정") for row in bucket) else str(bucket[-1][7]),
+            "realtime_partial" if any(str(row[7]) in ("realtime_partial", "market_index_partial") for row in bucket)
+            else "확정" if all(str(row[7]) in ("api_confirmed", "after_close_confirmed", "확정") for row in bucket) else str(bucket[-1][7]),
         ))
     return tuple(values)

@@ -5,6 +5,8 @@ from .diagnostic_replay_runtime import owned_create_task, owned_to_thread
 import json
 import logging
 import time
+from contextlib import contextmanager
+from itertools import chain
 from uuid import uuid4
 from dataclasses import asdict
 from datetime import datetime, time as clock_time, timedelta, timezone
@@ -210,10 +212,105 @@ class CentralRealtimeCollector:
         self._reconnect_outcome = "idle"
         self._last_trade_observed_at: str | None = None
         self._last_trade_observed_clock: float | None = None
+        self._save_success_at: dict[str, str] = {}
+        self._save_failures: dict[str, str] = {}
+        self._active_save: dict[str, object] | None = None
         self._reconnect_previous_trade_at: str | None = None
         self._reconnect_previous_trade_clock: float | None = None
         self._reconnect_first_trade_at: str | None = None
         self._reconnect_gap_seconds: float | None = None
+
+    @staticmethod
+    def _save_record_summary(records) -> dict[str, object]:
+        """Retained record times, not first enqueue times or unique event counts."""
+        oldest = None
+        known = 0
+        count = 0
+        for record in records:
+            count += 1
+            document = record.get("document", {})
+            raw = next((record.get(key) for key in ("received_at", "updated_at", "available_at")
+                        if record.get(key) is not None), None)
+            if raw is None:
+                raw = document.get("observed_at") or document.get("last_executed_at")
+            try:
+                at = (datetime.fromisoformat(raw).timestamp() if isinstance(raw, str)
+                      else raw.timestamp() if isinstance(raw, datetime) else float(raw))
+                # Conversion also rejects out-of-range/non-finite timestamps.
+                datetime.fromtimestamp(at, timezone.utc)
+            except (TypeError, ValueError, OverflowError, OSError):
+                continue
+            known += 1
+            if oldest is None or at < oldest:
+                oldest = at
+        return {"records": count,
+                "oldest_record_at": datetime.fromtimestamp(oldest, timezone.utc).isoformat() if oldest is not None else None,
+                "timed_records": known}
+
+    def operational_status(self) -> dict[str, object]:
+        """Read in-memory owner state without polling the DB or draining buffers."""
+        pending = {
+            "snapshots": self._save_record_summary(self._pending_snapshots.values()),
+            "minute_bars": self._save_record_summary(chain(
+                ({"updated_at": self._minute_bars._bars[key].updated_at} for key in self._minute_bars._dirty),
+                self._pending_minute_retries.values(),
+            )),
+            "account_entry_symbols": self._save_record_summary(self._pending_account_entry_symbols.values()),
+            "stock_references": self._save_record_summary(self._pending_stock_references.values()),
+            "minute_finalizations": self._save_record_summary(self._pending_minute_finalizations.values()),
+            "second_bars": self._save_record_summary(chain(
+                ({"available_at": self._second_trades._bars[key].available_at} for key in self._second_trades._dirty),
+                self._pending_second_retries.values(),
+            )),
+            "market_history": self._save_record_summary(
+                {"available_at": value[3].metadata.available_at}
+                for value in self._pending_market_history.values()),
+        }
+        inflight = dict(self._active_save) if self._active_save is not None else None
+        summaries = [*pending.values(), *([inflight] if inflight else [])]
+        times = [row["oldest_record_at"] for row in summaries if row["oldest_record_at"] is not None]
+        return {
+            "scope": "realtime_collector", "measurement": "process_local",
+            "receive": {
+                "scope": "accepted_trade_0B", "last_received_at": self._last_trade_observed_at,
+                "age_seconds": (max(0.0, time.monotonic() - self._last_trade_observed_clock)
+                                if self._last_trade_observed_clock is not None else None),
+            },
+            "persistence": {
+                "state": "not_configured" if self._store is None else
+                         "degraded" if self._save_failures else
+                         "saving" if inflight else
+                         "observed" if self._save_success_at else "unknown",
+                "last_success_at": max(self._save_success_at.values(), default=None),
+                "last_success_by_kind": dict(self._save_success_at),
+                "unresolved_failures": dict(self._save_failures),
+                "pending_records": sum(int(row["records"]) for row in pending.values()),
+                "inflight_records": int(inflight["records"]) if inflight else 0,
+                "oldest_record_at": min(times, default=None),
+                "timed_records": sum(int(row["timed_records"]) for row in summaries),
+                "record_time_basis": "retained_record_observation_time_not_queue_entry",
+                "pending_by_kind": pending, "inflight": inflight,
+                "waiting_flushes": max(0, len(self._flush_tasks) - int(self._flush_lock.locked())),
+            },
+        }
+
+    @contextmanager
+    def _observe_save(self, kind: str, records):
+        # The existing serialized flush and owned native await retain ownership.
+        self._active_save = {
+            "kind": kind, **self._save_record_summary(records),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            yield
+        except BaseException:
+            self._save_failures[kind] = datetime.now(timezone.utc).isoformat()
+            raise
+        else:
+            self._save_success_at[kind] = datetime.now(timezone.utc).isoformat()
+            self._save_failures.pop(kind, None)
+        finally:
+            self._active_save = None
 
     def credential_connection_status(self) -> dict[str, object]:
         codes, nxt_codes = self._hub.requested_codes()
@@ -979,7 +1076,8 @@ class CentralRealtimeCollector:
             self._pending_snapshots.clear()
             if values:
                 try:
-                    await owned_to_thread(self._store.save_realtime_snapshots, values)
+                    with self._observe_save("snapshots", values):
+                        await owned_to_thread(self._store.save_realtime_snapshots, values)
                 except Exception:
                     for value in values:
                         key = (str(value["event_type"]), str(value["item_key"]))
@@ -1003,11 +1101,12 @@ class CentralRealtimeCollector:
                 observations.append((bar_observation_key(observation), observation))
             self._inflight_minute_bars = minute_bars
             try:
-                await owned_to_thread(
-                    self._store.save_minute_bars,
-                    minute_bars,
-                    observations=observations,
-                )
+                with self._observe_save("minute_bars", minute_bars):
+                    await owned_to_thread(
+                        self._store.save_minute_bars,
+                        minute_bars,
+                        observations=observations,
+                    )
             except Exception:
                 for value in minute_bars:
                     self._merge_minute_retry(value)
@@ -1019,11 +1118,12 @@ class CentralRealtimeCollector:
         self._pending_account_entry_symbols = {}
         if entry_values:
             try:
-                await owned_to_thread(
-                    self._store.upsert_documents,
-                    "account_entry_symbols_daily",
-                    entry_values,
-                )
+                with self._observe_save("account_entry_symbols", entry_values):
+                    await owned_to_thread(
+                        self._store.upsert_documents,
+                        "account_entry_symbols_daily",
+                        entry_values,
+                    )
             except Exception:
                 for value in entry_values:
                     self._pending_account_entry_symbols[
@@ -1034,11 +1134,12 @@ class CentralRealtimeCollector:
         self._pending_stock_references.clear()
         if reference_values:
             try:
-                await owned_to_thread(
-                    self._store.upsert_documents,
-                    "stock_price_references",
-                    reference_values,
-                )
+                with self._observe_save("stock_references", reference_values):
+                    await owned_to_thread(
+                        self._store.upsert_documents,
+                        "stock_price_references",
+                        reference_values,
+                    )
             except Exception:
                 for value in reference_values:
                     self._pending_stock_references[str(value["owner"])] = value
@@ -1052,7 +1153,8 @@ class CentralRealtimeCollector:
         closures.extend(new_closures)
         if closures:
             try:
-                await owned_to_thread(self._store.finalize_minute_bars, closures)
+                with self._observe_save("minute_finalizations", closures):
+                    await owned_to_thread(self._store.finalize_minute_bars, closures)
             except Exception:
                 for value in closures:
                     key = tuple(
@@ -1070,7 +1172,8 @@ class CentralRealtimeCollector:
         self._pending_second_retries.clear()
         if second_bars:
             try:
-                await owned_to_thread(self._store.save_second_trade_bars, second_bars)
+                with self._observe_save("second_bars", second_bars):
+                    await owned_to_thread(self._store.save_second_trade_bars, second_bars)
             except Exception:
                 for value in second_bars:
                     self._keep_second_retry(value)
@@ -1080,13 +1183,16 @@ class CentralRealtimeCollector:
         self._pending_market_history.clear()
         if market_history:
             try:
-                await owned_to_thread(
-                    self._store.save_dataset_snapshots,
-                    [
-                        ("market_state", subject, snapshot_key, payload, observation)
-                        for subject, snapshot_key, payload, observation in market_history
-                    ],
-                )
+                with self._observe_save("market_history", (
+                    {"available_at": value[3].metadata.available_at} for value in market_history
+                )):
+                    await owned_to_thread(
+                        self._store.save_dataset_snapshots,
+                        [
+                            ("market_state", subject, snapshot_key, payload, observation)
+                            for subject, snapshot_key, payload, observation in market_history
+                        ],
+                    )
             except Exception:
                 for retry_value in market_history:
                     self._pending_market_history.setdefault(retry_value[0], retry_value)

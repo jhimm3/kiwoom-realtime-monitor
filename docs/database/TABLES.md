@@ -49,14 +49,14 @@ CREATE INDEX idx_central_account_binding_latest ON public.central_account_bindin
 
 **코드 근거**
 
-- [_credential_schema_statements](../../src/kiwoom_monitor/central_server/central_schema.py) (L876) — read
-- [_verify_real_account_write](../../src/kiwoom_monitor/central_server/database.py) (L632) — read
-- [_save_market_profile_settings](../../src/kiwoom_monitor/central_server/database.py) (L735) — read
-- [_save_account_settings](../../src/kiwoom_monitor/central_server/database.py) (L812) — read
-- [_finalize_credential_activation](../../src/kiwoom_monitor/central_server/database.py) (L906) — read
-- [PostgresQueryStore.append_account_binding](../../src/kiwoom_monitor/central_server/database.py) (L5280) — read
-- [PostgresQueryStore.load_account_bindings](../../src/kiwoom_monitor/central_server/database.py) (L5308) — read
-- [_verify_account_scope_alias_postgres](../../src/kiwoom_monitor/central_server/database.py) (L5595) — read
+- [_credential_schema_statements](../../src/kiwoom_monitor/central_server/central_schema.py) (L876) — 읽기
+- [_verify_real_account_write](../../src/kiwoom_monitor/central_server/database.py) (L632) — 읽기
+- [_save_market_profile_settings](../../src/kiwoom_monitor/central_server/database.py) (L735) — 읽기
+- [_save_account_settings](../../src/kiwoom_monitor/central_server/database.py) (L812) — 읽기
+- [_finalize_credential_activation](../../src/kiwoom_monitor/central_server/database.py) (L906) — 읽기
+- [PostgresQueryStore.append_account_binding](../../src/kiwoom_monitor/central_server/database.py) (L5280) — 읽기
+- [PostgresQueryStore.load_account_bindings](../../src/kiwoom_monitor/central_server/database.py) (L5308) — 읽기
+- [_verify_account_scope_alias_postgres](../../src/kiwoom_monitor/central_server/database.py) (L5595) — 읽기
 
 <a id="central_account_registry"></a>
 ## 계좌 신원 등록부 — `central_account_registry`
@@ -97,12 +97,12 @@ CREATE UNIQUE INDEX central_account_registry_pkey ON public.central_account_regi
 
 **코드 근거**
 
-- [_verified_settings_scope](../../src/kiwoom_monitor/central_server/database.py) (L610) — read
-- [_finalize_credential_activation](../../src/kiwoom_monitor/central_server/database.py) (L902) — read
-- [PostgresQueryStore.register_account_identity](../../src/kiwoom_monitor/central_server/database.py) (L5240) — write
-- [PostgresQueryStore.append_account_binding](../../src/kiwoom_monitor/central_server/database.py) (L5273) — read
-- [PostgresQueryStore.resolve_account_scope](../../src/kiwoom_monitor/central_server/database.py) (L5351) — read
-- [_verify_account_scope_alias_postgres](../../src/kiwoom_monitor/central_server/database.py) (L5583) — read
+- [_verified_settings_scope](../../src/kiwoom_monitor/central_server/database.py) (L610) — 읽기
+- [_finalize_credential_activation](../../src/kiwoom_monitor/central_server/database.py) (L902) — 읽기
+- [PostgresQueryStore.register_account_identity](../../src/kiwoom_monitor/central_server/database.py) (L5240) — 쓰기
+- [PostgresQueryStore.append_account_binding](../../src/kiwoom_monitor/central_server/database.py) (L5273) — 읽기
+- [PostgresQueryStore.resolve_account_scope](../../src/kiwoom_monitor/central_server/database.py) (L5351) — 읽기
+- [_verify_account_scope_alias_postgres](../../src/kiwoom_monitor/central_server/database.py) (L5583) — 읽기
 
 <a id="central_account_scope_aliases"></a>
 ## 검증된 계좌 범위 별칭 — `central_account_scope_aliases`
@@ -141,9 +141,9 @@ CREATE INDEX idx_central_account_scope_alias_target ON public.central_account_sc
 
 **코드 근거**
 
-- [PostgresQueryStore.register_account_scope_alias](../../src/kiwoom_monitor/central_server/database.py) (L5322) — read
-- [PostgresQueryStore.resolve_account_scope](../../src/kiwoom_monitor/central_server/database.py) (L5351) — read
-- [_verify_account_scope_alias_postgres](../../src/kiwoom_monitor/central_server/database.py) (L5589) — read
+- [PostgresQueryStore.register_account_scope_alias](../../src/kiwoom_monitor/central_server/database.py) (L5322) — 읽기
+- [PostgresQueryStore.resolve_account_scope](../../src/kiwoom_monitor/central_server/database.py) (L5351) — 읽기
+- [_verify_account_scope_alias_postgres](../../src/kiwoom_monitor/central_server/database.py) (L5589) — 읽기
 
 <a id="central_api_query_cache"></a>
 ## 키움 응답 캐시 — `central_api_query_cache`
@@ -180,8 +180,8 @@ CREATE INDEX idx_central_api_query_expiry ON public.central_api_query_cache USIN
 
 **코드 근거**
 
-- [PostgresQueryStore.load_query](../../src/kiwoom_monitor/central_server/database.py) (L2768) — read
-- [PostgresQueryStore.save_query](../../src/kiwoom_monitor/central_server/database.py) (L2797) — write
+- [PostgresQueryStore.load_query](../../src/kiwoom_monitor/central_server/database.py) (L2768) — 읽기
+- [PostgresQueryStore.save_query](../../src/kiwoom_monitor/central_server/database.py) (L2797) — 쓰기
 
 <a id="central_credential_activations"></a>
 ## 자격증명 활성화 원장 — `central_credential_activations`
@@ -226,9 +226,9 @@ CREATE UNIQUE INDEX central_credential_activations_pkey ON public.central_creden
 
 **코드 근거**
 
-- [_load_credential_activations](../../src/kiwoom_monitor/central_server/database.py) (L514) — read
-- [_find_credential_activation](../../src/kiwoom_monitor/central_server/database.py) (L568) — read
-- [_finalize_credential_activation](../../src/kiwoom_monitor/central_server/database.py) (L932) — write
+- [_load_credential_activations](../../src/kiwoom_monitor/central_server/database.py) (L514) — 읽기
+- [_find_credential_activation](../../src/kiwoom_monitor/central_server/database.py) (L568) — 읽기
+- [_finalize_credential_activation](../../src/kiwoom_monitor/central_server/database.py) (L932) — 쓰기
 
 <a id="central_credential_profiles"></a>
 ## 자격증명 프로필 목록 — `central_credential_profiles`
@@ -266,15 +266,15 @@ CREATE UNIQUE INDEX central_credential_profiles_pkey ON public.central_credentia
 
 **코드 근거**
 
-- [_credential_schema_statements](../../src/kiwoom_monitor/central_server/central_schema.py) (L876) — write
-- [_register_credential_profile](../../src/kiwoom_monitor/central_server/database.py) (L502) — read
-- [_list_credential_profiles](../../src/kiwoom_monitor/central_server/database.py) (L522) — read
-- [_archive_credential_profile](../../src/kiwoom_monitor/central_server/database.py) (L528) — read
-- [_rename_credential_profile](../../src/kiwoom_monitor/central_server/database.py) (L550) — read
-- [_create_credential_profile](../../src/kiwoom_monitor/central_server/database.py) (L591) — write
-- [_save_market_profile_settings](../../src/kiwoom_monitor/central_server/database.py) (L730) — read
-- [_save_account_settings](../../src/kiwoom_monitor/central_server/database.py) (L807) — read
-- [_finalize_credential_activation](../../src/kiwoom_monitor/central_server/database.py) (L896) — read
+- [_credential_schema_statements](../../src/kiwoom_monitor/central_server/central_schema.py) (L876) — 쓰기
+- [_register_credential_profile](../../src/kiwoom_monitor/central_server/database.py) (L502) — 읽기
+- [_list_credential_profiles](../../src/kiwoom_monitor/central_server/database.py) (L522) — 읽기
+- [_archive_credential_profile](../../src/kiwoom_monitor/central_server/database.py) (L528) — 읽기
+- [_rename_credential_profile](../../src/kiwoom_monitor/central_server/database.py) (L550) — 읽기
+- [_create_credential_profile](../../src/kiwoom_monitor/central_server/database.py) (L591) — 쓰기
+- [_save_market_profile_settings](../../src/kiwoom_monitor/central_server/database.py) (L730) — 읽기
+- [_save_account_settings](../../src/kiwoom_monitor/central_server/database.py) (L807) — 읽기
+- [_finalize_credential_activation](../../src/kiwoom_monitor/central_server/database.py) (L896) — 읽기
 
 <a id="central_daily_bars"></a>
 ## 시장별 일봉 — `central_daily_bars`
@@ -315,7 +315,7 @@ CREATE INDEX idx_central_daily_bars_code_market_date ON public.central_daily_bar
 
 **코드 근거**
 
-- [PostgresQueryStore.load_daily_bars](../../src/kiwoom_monitor/central_server/database.py) (L3476) — read
+- [PostgresQueryStore.load_daily_bars](../../src/kiwoom_monitor/central_server/database.py) (L3476) — 읽기
 - [replace_daily_bars](../../src/kiwoom_monitor/central_server/database.py) (L1016) — dynamic boundary
 - [_replace_bars](../../src/kiwoom_monitor/central_server/database.py) (L1501) — dynamic boundary
 
@@ -353,10 +353,10 @@ CREATE INDEX idx_central_dataset_lookup ON public.central_dataset_snapshots USIN
 
 **코드 근거**
 
-- [central_schema_migrations](../../src/kiwoom_monitor/central_server/central_schema.py) (L233) — write
-- [PostgresQueryStore.save_dataset_snapshots](../../src/kiwoom_monitor/central_server/database.py) (L3564) — write
-- [PostgresQueryStore.load_dataset_snapshots](../../src/kiwoom_monitor/central_server/database.py) (L3631) — read
-- [PostgresQueryStore.load_top20_statistics](../../src/kiwoom_monitor/central_server/database.py) (L3678) — read
+- [central_schema_migrations](../../src/kiwoom_monitor/central_server/central_schema.py) (L233) — 쓰기
+- [PostgresQueryStore.save_dataset_snapshots](../../src/kiwoom_monitor/central_server/database.py) (L3564) — 쓰기
+- [PostgresQueryStore.load_dataset_snapshots](../../src/kiwoom_monitor/central_server/database.py) (L3631) — 읽기
+- [PostgresQueryStore.load_top20_statistics](../../src/kiwoom_monitor/central_server/database.py) (L3678) — 읽기
 
 <a id="central_documents"></a>
 ## 기능별 문서 저장소 — `central_documents`
@@ -394,24 +394,24 @@ CREATE INDEX idx_central_documents_lookup ON public.central_documents USING btre
 
 **코드 근거**
 
-- [_create_credential_profile](../../src/kiwoom_monitor/central_server/database.py) (L579) — read
-- [_save_real_account_recovery](../../src/kiwoom_monitor/central_server/database.py) (L665) — write
-- [_save_real_account_event](../../src/kiwoom_monitor/central_server/database.py) (L688) — write
-- [_load_market_profile_settings](../../src/kiwoom_monitor/central_server/database.py) (L697) — read
-- [_save_market_profile_settings](../../src/kiwoom_monitor/central_server/database.py) (L753) — write
-- [_load_account_settings](../../src/kiwoom_monitor/central_server/database.py) (L762) — read
-- [_save_account_settings](../../src/kiwoom_monitor/central_server/database.py) (L826) — write
-- [_require_execution_ownership](../../src/kiwoom_monitor/central_server/database.py) (L956) — read
-- [PostgresQueryStore.storage_breakdown](../../src/kiwoom_monitor/central_server/database.py) (L2864) — read
-- [PostgresQueryStore.upsert_documents](../../src/kiwoom_monitor/central_server/database.py) (L4129) — write
-- [PostgresQueryStore.replace_documents](../../src/kiwoom_monitor/central_server/database.py) (L4169) — write
-- [PostgresQueryStore.load_document](../../src/kiwoom_monitor/central_server/database.py) (L4209) — read
-- [PostgresQueryStore.save_news_ai_results](../../src/kiwoom_monitor/central_server/database.py) (L4610) — write
-- [PostgresQueryStore.load_mock_automation_control](../../src/kiwoom_monitor/central_server/database.py) (L5141) — read
-- [PostgresQueryStore.save_mock_automation_control](../../src/kiwoom_monitor/central_server/database.py) (L5186) — read
-- [_complete_external_news_job](../../src/kiwoom_monitor/central_server/database.py) (L6158) — write
-- [_confirmed_news_articles_query](../../src/kiwoom_monitor/central_server/database.py) (L7182) — read
-- [_market_news_feed_sql](../../src/kiwoom_monitor/central_server/database.py) (L7208) — read
+- [_create_credential_profile](../../src/kiwoom_monitor/central_server/database.py) (L579) — 읽기
+- [_save_real_account_recovery](../../src/kiwoom_monitor/central_server/database.py) (L665) — 쓰기
+- [_save_real_account_event](../../src/kiwoom_monitor/central_server/database.py) (L688) — 쓰기
+- [_load_market_profile_settings](../../src/kiwoom_monitor/central_server/database.py) (L697) — 읽기
+- [_save_market_profile_settings](../../src/kiwoom_monitor/central_server/database.py) (L753) — 쓰기
+- [_load_account_settings](../../src/kiwoom_monitor/central_server/database.py) (L762) — 읽기
+- [_save_account_settings](../../src/kiwoom_monitor/central_server/database.py) (L826) — 쓰기
+- [_require_execution_ownership](../../src/kiwoom_monitor/central_server/database.py) (L956) — 읽기
+- [PostgresQueryStore.storage_breakdown](../../src/kiwoom_monitor/central_server/database.py) (L2864) — 읽기
+- [PostgresQueryStore.upsert_documents](../../src/kiwoom_monitor/central_server/database.py) (L4129) — 쓰기
+- [PostgresQueryStore.replace_documents](../../src/kiwoom_monitor/central_server/database.py) (L4169) — 쓰기
+- [PostgresQueryStore.load_document](../../src/kiwoom_monitor/central_server/database.py) (L4209) — 읽기
+- [PostgresQueryStore.save_news_ai_results](../../src/kiwoom_monitor/central_server/database.py) (L4610) — 쓰기
+- [PostgresQueryStore.load_mock_automation_control](../../src/kiwoom_monitor/central_server/database.py) (L5141) — 읽기
+- [PostgresQueryStore.save_mock_automation_control](../../src/kiwoom_monitor/central_server/database.py) (L5186) — 읽기
+- [_complete_external_news_job](../../src/kiwoom_monitor/central_server/database.py) (L6158) — 쓰기
+- [_confirmed_news_articles_query](../../src/kiwoom_monitor/central_server/database.py) (L7182) — 읽기
+- [_market_news_feed_sql](../../src/kiwoom_monitor/central_server/database.py) (L7208) — 읽기
 - 나머지 정적 참조는 `catalog.json`에 포함.
 
 <a id="central_execution_account_snapshots"></a>
@@ -449,7 +449,7 @@ CREATE INDEX idx_central_execution_account_snapshots ON public.central_execution
 
 **코드 근거**
 
-- [PostgresQueryStore.save_execution_account_snapshot](../../src/kiwoom_monitor/central_server/database.py) (L5122) — write
+- [PostgresQueryStore.save_execution_account_snapshot](../../src/kiwoom_monitor/central_server/database.py) (L5122) — 쓰기
 
 <a id="central_execution_events"></a>
 ## 주문 상태·체결 이벤트 원장 — `central_execution_events`
@@ -490,9 +490,9 @@ CREATE INDEX idx_central_execution_events_intent ON public.central_execution_eve
 
 **코드 근거**
 
-- [PostgresQueryStore.append_execution_event](../../src/kiwoom_monitor/central_server/database.py) (L5019) — write
-- [PostgresQueryStore.load_execution_events](../../src/kiwoom_monitor/central_server/database.py) (L5082) — read
-- [PostgresQueryStore.load_account_execution_events](../../src/kiwoom_monitor/central_server/database.py) (L5099) — read
+- [PostgresQueryStore.append_execution_event](../../src/kiwoom_monitor/central_server/database.py) (L5019) — 쓰기
+- [PostgresQueryStore.load_execution_events](../../src/kiwoom_monitor/central_server/database.py) (L5082) — 읽기
+- [PostgresQueryStore.load_account_execution_events](../../src/kiwoom_monitor/central_server/database.py) (L5099) — 읽기
 
 <a id="central_execution_intents"></a>
 ## 주문 의도 현재 상태 — `central_execution_intents`
@@ -535,13 +535,13 @@ CREATE INDEX idx_central_execution_intents_scope ON public.central_execution_int
 
 **코드 근거**
 
-- [_require_execution_ownership](../../src/kiwoom_monitor/central_server/database.py) (L975) — read
-- [PostgresQueryStore.create_execution_intent](../../src/kiwoom_monitor/central_server/database.py) (L5001) — write
-- [PostgresQueryStore.append_execution_event](../../src/kiwoom_monitor/central_server/database.py) (L5027) — write
-- [PostgresQueryStore.load_execution_intent](../../src/kiwoom_monitor/central_server/database.py) (L5048) — read
-- [PostgresQueryStore.find_execution_intent_by_broker_order_id](../../src/kiwoom_monitor/central_server/database.py) (L5064) — read
-- [PostgresQueryStore.load_account_execution_events](../../src/kiwoom_monitor/central_server/database.py) (L5099) — read
-- [PostgresQueryStore.load_active_execution_intents](../../src/kiwoom_monitor/central_server/database.py) (L5160) — read
+- [_require_execution_ownership](../../src/kiwoom_monitor/central_server/database.py) (L975) — 읽기
+- [PostgresQueryStore.create_execution_intent](../../src/kiwoom_monitor/central_server/database.py) (L5001) — 쓰기
+- [PostgresQueryStore.append_execution_event](../../src/kiwoom_monitor/central_server/database.py) (L5027) — 쓰기
+- [PostgresQueryStore.load_execution_intent](../../src/kiwoom_monitor/central_server/database.py) (L5048) — 읽기
+- [PostgresQueryStore.find_execution_intent_by_broker_order_id](../../src/kiwoom_monitor/central_server/database.py) (L5064) — 읽기
+- [PostgresQueryStore.load_account_execution_events](../../src/kiwoom_monitor/central_server/database.py) (L5099) — 읽기
+- [PostgresQueryStore.load_active_execution_intents](../../src/kiwoom_monitor/central_server/database.py) (L5160) — 읽기
 
 <a id="central_execution_runtime_leases"></a>
 ## 실행 소유권 임대 — `central_execution_runtime_leases`
@@ -575,9 +575,9 @@ CREATE UNIQUE INDEX central_execution_runtime_leases_pkey ON public.central_exec
 
 **코드 근거**
 
-- [_require_execution_ownership](../../src/kiwoom_monitor/central_server/database.py) (L947) — read
-- [PostgresQueryStore.release_execution_runtime](../../src/kiwoom_monitor/central_server/database.py) (L2584) — write
-- [PostgresQueryStore.acquire_execution_runtime](../../src/kiwoom_monitor/central_server/database.py) (L5217) — write
+- [_require_execution_ownership](../../src/kiwoom_monitor/central_server/database.py) (L947) — 읽기
+- [PostgresQueryStore.release_execution_runtime](../../src/kiwoom_monitor/central_server/database.py) (L2584) — 쓰기
+- [PostgresQueryStore.acquire_execution_runtime](../../src/kiwoom_monitor/central_server/database.py) (L5217) — 쓰기
 
 <a id="central_external_bars"></a>
 ## 외부시장 봉 — `central_external_bars`
@@ -619,8 +619,8 @@ CREATE INDEX idx_central_external_bars_lookup ON public.central_external_bars US
 
 **코드 근거**
 
-- [PostgresQueryStore.save_external_bars](../../src/kiwoom_monitor/central_server/database.py) (L4964) — write
-- [PostgresQueryStore.load_external_bars](../../src/kiwoom_monitor/central_server/database.py) (L4984) — read
+- [PostgresQueryStore.save_external_bars](../../src/kiwoom_monitor/central_server/database.py) (L4964) — 쓰기
+- [PostgresQueryStore.load_external_bars](../../src/kiwoom_monitor/central_server/database.py) (L4984) — 읽기
 
 <a id="central_five_minute_bars"></a>
 ## 과거 5분봉 — `central_five_minute_bars`
@@ -667,8 +667,8 @@ CREATE INDEX idx_central_five_minute_bars_lookup ON public.central_five_minute_b
 
 **코드 근거**
 
-- [PostgresQueryStore.save_five_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L3169) — write
-- [PostgresQueryStore.load_five_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L3181) — read
+- [PostgresQueryStore.save_five_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L3169) — 쓰기
+- [PostgresQueryStore.load_five_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L3181) — 읽기
 
 <a id="central_hot_cohort_current"></a>
 ## 현재 조건편입 대상 — `central_hot_cohort_current`
@@ -709,8 +709,8 @@ CREATE UNIQUE INDEX central_hot_cohort_current_pkey ON public.central_hot_cohort
 
 **코드 근거**
 
-- [PostgresQueryStore.record_hot_cohort_revision](../../src/kiwoom_monitor/central_server/database.py) (L4884) — write
-- [PostgresQueryStore.load_hot_cohort](../../src/kiwoom_monitor/central_server/database.py) (L4899) — read
+- [PostgresQueryStore.record_hot_cohort_revision](../../src/kiwoom_monitor/central_server/database.py) (L4884) — 쓰기
+- [PostgresQueryStore.load_hot_cohort](../../src/kiwoom_monitor/central_server/database.py) (L4899) — 읽기
 
 <a id="central_hot_cohort_revisions"></a>
 ## 조건편입 변화 이력 — `central_hot_cohort_revisions`
@@ -756,7 +756,7 @@ CREATE INDEX idx_central_hot_cohort_lookup ON public.central_hot_cohort_revision
 
 **코드 근거**
 
-- [PostgresQueryStore.record_hot_cohort_revision](../../src/kiwoom_monitor/central_server/database.py) (L4876) — write
+- [PostgresQueryStore.record_hot_cohort_revision](../../src/kiwoom_monitor/central_server/database.py) (L4876) — 쓰기
 
 <a id="central_market_data_observation_meta"></a>
 ## 현재 봉의 시간·출처 근거 — `central_market_data_observation_meta`
@@ -800,13 +800,13 @@ CREATE UNIQUE INDEX central_market_data_observation_meta_pkey ON public.central_
 
 **코드 근거**
 
-- [central_schema_migrations](../../src/kiwoom_monitor/central_server/central_schema.py) (L239) — write
-- [PostgresQueryStore.load_market_data_metadata](../../src/kiwoom_monitor/central_server/database.py) (L3942) — read
-- [PostgresQueryStore.load_market_data_metadata_range](../../src/kiwoom_monitor/central_server/database.py) (L3963) — read
-- [_market_metadata_upsert_sql](../../src/kiwoom_monitor/central_server/database.py) (L7311) — write
-- [_minute_query_authority](../../src/kiwoom_monitor/central_server/database.py) (L7814) — read
-- [_load_postgres_minute_query_authorities](../../src/kiwoom_monitor/central_server/database.py) (L7848) — read
-- [_save_postgres_metadata](../../src/kiwoom_monitor/central_server/database.py) (L8185) — write
+- [central_schema_migrations](../../src/kiwoom_monitor/central_server/central_schema.py) (L239) — 쓰기
+- [PostgresQueryStore.load_market_data_metadata](../../src/kiwoom_monitor/central_server/database.py) (L3942) — 읽기
+- [PostgresQueryStore.load_market_data_metadata_range](../../src/kiwoom_monitor/central_server/database.py) (L3963) — 읽기
+- [_market_metadata_upsert_sql](../../src/kiwoom_monitor/central_server/database.py) (L7311) — 쓰기
+- [_minute_query_authority](../../src/kiwoom_monitor/central_server/database.py) (L7814) — 읽기
+- [_load_postgres_minute_query_authorities](../../src/kiwoom_monitor/central_server/database.py) (L7848) — 읽기
+- [_save_postgres_metadata](../../src/kiwoom_monitor/central_server/database.py) (L8185) — 쓰기
 
 <a id="central_minute_bar_operations"></a>
 ## 분봉 재처리 방지 원장 — `central_minute_bar_operations`
@@ -839,9 +839,9 @@ CREATE UNIQUE INDEX central_minute_bar_operations_pkey ON public.central_minute_
 
 **코드 근거**
 
-- [PostgresQueryStore.save_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L3063) — write
-- [PostgresQueryStore.finalize_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L3092) — read
-- [_load_postgres_minute_operation_hashes](../../src/kiwoom_monitor/central_server/database.py) (L7832) — read
+- [PostgresQueryStore.save_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L3063) — 쓰기
+- [PostgresQueryStore.finalize_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L3092) — 읽기
+- [_load_postgres_minute_operation_hashes](../../src/kiwoom_monitor/central_server/database.py) (L7832) — 읽기
 
 <a id="central_minute_bars"></a>
 ## 시장별 분봉 — `central_minute_bars`
@@ -884,9 +884,9 @@ CREATE INDEX idx_central_minute_bars_lookup ON public.central_minute_bars USING 
 
 **코드 근거**
 
-- [PostgresQueryStore.save_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L3025) — write
-- [PostgresQueryStore.load_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L3147) — read
-- [_load_postgres_minute_bar](../../src/kiwoom_monitor/central_server/database.py) (L7594) — read
+- [PostgresQueryStore.save_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L3025) — 쓰기
+- [PostgresQueryStore.load_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L3147) — 읽기
+- [_load_postgres_minute_bar](../../src/kiwoom_monitor/central_server/database.py) (L7594) — 읽기
 - [replace_minute_bars](../../src/kiwoom_monitor/central_server/database.py) (L1009) — dynamic boundary
 - [_replace_bars](../../src/kiwoom_monitor/central_server/database.py) (L1501) — dynamic boundary
 
@@ -937,9 +937,9 @@ CREATE INDEX idx_central_news_ai_lookup ON public.central_news_ai_revisions USIN
 
 **코드 근거**
 
-- [PostgresQueryStore.find_news_ai_revision](../../src/kiwoom_monitor/central_server/database.py) (L4836) — read
-- [_save_postgres_news_ai](../../src/kiwoom_monitor/central_server/database.py) (L6338) — write
-- [_news_history_query](../../src/kiwoom_monitor/central_server/database.py) (L7099) — read
+- [PostgresQueryStore.find_news_ai_revision](../../src/kiwoom_monitor/central_server/database.py) (L4836) — 읽기
+- [_save_postgres_news_ai](../../src/kiwoom_monitor/central_server/database.py) (L6338) — 쓰기
+- [_news_history_query](../../src/kiwoom_monitor/central_server/database.py) (L7099) — 읽기
 
 <a id="central_news_article_revisions"></a>
 ## 기사 원본 revision — `central_news_article_revisions`
@@ -992,19 +992,19 @@ CREATE INDEX idx_central_news_article_lookup ON public.central_news_article_revi
 
 **코드 근거**
 
-- [PostgresQueryStore.claim_external_historical_news_job](../../src/kiwoom_monitor/central_server/database.py) (L4446) — read
-- [PostgresQueryStore.load_news_article_revision](../../src/kiwoom_monitor/central_server/database.py) (L4674) — read
-- [_append_postgres_news_articles](../../src/kiwoom_monitor/central_server/database.py) (L5945) — read
-- [_enqueue_postgres_news_ai_jobs](../../src/kiwoom_monitor/central_server/database.py) (L6032) — read
-- [_complete_external_news_job](../../src/kiwoom_monitor/central_server/database.py) (L6103) — read
-- [_save_postgres_news_body](../../src/kiwoom_monitor/central_server/database.py) (L6290) — read
-- [_save_postgres_news_event](../../src/kiwoom_monitor/central_server/database.py) (L6444) — read
-- [_save_postgres_news_source_page](../../src/kiwoom_monitor/central_server/database.py) (L6711) — read
-- [_postgres_possible_related](../../src/kiwoom_monitor/central_server/database.py) (L7069) — read
-- [_news_history_query](../../src/kiwoom_monitor/central_server/database.py) (L7090) — read
-- [_confirmed_news_articles_query](../../src/kiwoom_monitor/central_server/database.py) (L7177) — read
-- [_stock_news_articles_query](../../src/kiwoom_monitor/central_server/database.py) (L7236) — read
-- [HistoricalNewsArchiveReader.article_by_id](../../src/kiwoom_monitor/central_server/historical_news_archive.py) (L151) — read
+- [PostgresQueryStore.claim_external_historical_news_job](../../src/kiwoom_monitor/central_server/database.py) (L4446) — 읽기
+- [PostgresQueryStore.load_news_article_revision](../../src/kiwoom_monitor/central_server/database.py) (L4674) — 읽기
+- [_append_postgres_news_articles](../../src/kiwoom_monitor/central_server/database.py) (L5945) — 읽기
+- [_enqueue_postgres_news_ai_jobs](../../src/kiwoom_monitor/central_server/database.py) (L6032) — 읽기
+- [_complete_external_news_job](../../src/kiwoom_monitor/central_server/database.py) (L6103) — 읽기
+- [_save_postgres_news_body](../../src/kiwoom_monitor/central_server/database.py) (L6290) — 읽기
+- [_save_postgres_news_event](../../src/kiwoom_monitor/central_server/database.py) (L6444) — 읽기
+- [_save_postgres_news_source_page](../../src/kiwoom_monitor/central_server/database.py) (L6711) — 읽기
+- [_postgres_possible_related](../../src/kiwoom_monitor/central_server/database.py) (L7069) — 읽기
+- [_news_history_query](../../src/kiwoom_monitor/central_server/database.py) (L7090) — 읽기
+- [_confirmed_news_articles_query](../../src/kiwoom_monitor/central_server/database.py) (L7177) — 읽기
+- [_stock_news_articles_query](../../src/kiwoom_monitor/central_server/database.py) (L7236) — 읽기
+- [HistoricalNewsArchiveReader.article_by_id](../../src/kiwoom_monitor/central_server/historical_news_archive.py) (L151) — 읽기
 
 <a id="central_news_article_target_revisions"></a>
 ## 기사와 종목의 관련성 이력 — `central_news_article_target_revisions`
@@ -1053,10 +1053,10 @@ CREATE INDEX idx_central_news_targets_stock_lookup ON public.central_news_articl
 
 **코드 근거**
 
-- [_save_postgres_news_body](../../src/kiwoom_monitor/central_server/database.py) (L6302) — read
-- [_insert_postgres_article_target](../../src/kiwoom_monitor/central_server/database.py) (L6777) — read
-- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L7018) — read
-- [_confirmed_news_articles_query](../../src/kiwoom_monitor/central_server/database.py) (L7177) — read
+- [_save_postgres_news_body](../../src/kiwoom_monitor/central_server/database.py) (L6302) — 읽기
+- [_insert_postgres_article_target](../../src/kiwoom_monitor/central_server/database.py) (L6777) — 읽기
+- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L7018) — 읽기
+- [_confirmed_news_articles_query](../../src/kiwoom_monitor/central_server/database.py) (L7177) — 읽기
 
 <a id="central_news_body_revisions"></a>
 ## 뉴스 본문 추출 이력 — `central_news_body_revisions`
@@ -1103,16 +1103,16 @@ CREATE INDEX idx_central_news_body_lookup ON public.central_news_body_revisions 
 
 **코드 근거**
 
-- [PostgresQueryStore.load_news_body_revision](../../src/kiwoom_monitor/central_server/database.py) (L4656) — read
-- [_enqueue_postgres_news_ai_jobs](../../src/kiwoom_monitor/central_server/database.py) (L6039) — read
-- [_complete_external_news_job](../../src/kiwoom_monitor/central_server/database.py) (L6141) — read
-- [_save_postgres_news_body](../../src/kiwoom_monitor/central_server/database.py) (L6281) — write
-- [_enqueue_postgres_existing_body_rule](../../src/kiwoom_monitor/central_server/database.py) (L6803) — read
-- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L7010) — read
-- [_news_history_query](../../src/kiwoom_monitor/central_server/database.py) (L7095) — read
-- [_confirmed_news_articles_query](../../src/kiwoom_monitor/central_server/database.py) (L7182) — read
-- [_stock_news_articles_query](../../src/kiwoom_monitor/central_server/database.py) (L7240) — read
-- [HistoricalNewsArchiveReader.article_by_id](../../src/kiwoom_monitor/central_server/historical_news_archive.py) (L159) — read
+- [PostgresQueryStore.load_news_body_revision](../../src/kiwoom_monitor/central_server/database.py) (L4656) — 읽기
+- [_enqueue_postgres_news_ai_jobs](../../src/kiwoom_monitor/central_server/database.py) (L6039) — 읽기
+- [_complete_external_news_job](../../src/kiwoom_monitor/central_server/database.py) (L6141) — 읽기
+- [_save_postgres_news_body](../../src/kiwoom_monitor/central_server/database.py) (L6281) — 쓰기
+- [_enqueue_postgres_existing_body_rule](../../src/kiwoom_monitor/central_server/database.py) (L6803) — 읽기
+- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L7010) — 읽기
+- [_news_history_query](../../src/kiwoom_monitor/central_server/database.py) (L7095) — 읽기
+- [_confirmed_news_articles_query](../../src/kiwoom_monitor/central_server/database.py) (L7182) — 읽기
+- [_stock_news_articles_query](../../src/kiwoom_monitor/central_server/database.py) (L7240) — 읽기
+- [HistoricalNewsArchiveReader.article_by_id](../../src/kiwoom_monitor/central_server/historical_news_archive.py) (L159) — 읽기
 
 <a id="central_news_event_membership_revisions"></a>
 ## 사건과 근거 기사의 연결 이력 — `central_news_event_membership_revisions`
@@ -1160,10 +1160,10 @@ CREATE INDEX idx_central_news_membership_lookup ON public.central_news_event_mem
 
 **코드 근거**
 
-- [_save_postgres_news_event](../../src/kiwoom_monitor/central_server/database.py) (L6454) — read
-- [_postgres_possible_related](../../src/kiwoom_monitor/central_server/database.py) (L7069) — read
-- [_news_history_query](../../src/kiwoom_monitor/central_server/database.py) (L7110) — read
-- [HistoricalNewsArchiveReader.article_by_id](../../src/kiwoom_monitor/central_server/historical_news_archive.py) (L173) — read
+- [_save_postgres_news_event](../../src/kiwoom_monitor/central_server/database.py) (L6454) — 읽기
+- [_postgres_possible_related](../../src/kiwoom_monitor/central_server/database.py) (L7069) — 읽기
+- [_news_history_query](../../src/kiwoom_monitor/central_server/database.py) (L7110) — 읽기
+- [HistoricalNewsArchiveReader.article_by_id](../../src/kiwoom_monitor/central_server/historical_news_archive.py) (L173) — 읽기
 
 <a id="central_news_event_revisions"></a>
 ## 뉴스 사건 판단 이력 — `central_news_event_revisions`
@@ -1224,11 +1224,11 @@ CREATE INDEX idx_central_news_event_lookup ON public.central_news_event_revision
 
 **코드 근거**
 
-- [_save_postgres_news_event](../../src/kiwoom_monitor/central_server/database.py) (L6436) — read
-- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L7014) — read
-- [_postgres_possible_related](../../src/kiwoom_monitor/central_server/database.py) (L7069) — read
-- [_news_history_query](../../src/kiwoom_monitor/central_server/database.py) (L7104) — read
-- [HistoricalNewsArchiveReader.article_by_id](../../src/kiwoom_monitor/central_server/historical_news_archive.py) (L173) — read
+- [_save_postgres_news_event](../../src/kiwoom_monitor/central_server/database.py) (L6436) — 읽기
+- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L7014) — 읽기
+- [_postgres_possible_related](../../src/kiwoom_monitor/central_server/database.py) (L7069) — 읽기
+- [_news_history_query](../../src/kiwoom_monitor/central_server/database.py) (L7104) — 읽기
+- [HistoricalNewsArchiveReader.article_by_id](../../src/kiwoom_monitor/central_server/historical_news_archive.py) (L173) — 읽기
 
 <a id="central_news_jobs"></a>
 ## 뉴스 처리 작업 큐 — `central_news_jobs`
@@ -1275,15 +1275,15 @@ CREATE INDEX idx_central_news_jobs_ready ON public.central_news_jobs USING btree
 
 **코드 근거**
 
-- [PostgresQueryStore.claim_news_jobs](../../src/kiwoom_monitor/central_server/database.py) (L4265) — write
-- [PostgresQueryStore.explain_news_job_claim_plan](../../src/kiwoom_monitor/central_server/database.py) (L4330) — write
-- [PostgresQueryStore.claim_external_historical_news_job](../../src/kiwoom_monitor/central_server/database.py) (L4446) — read
-- [PostgresQueryStore.finish_news_job](../../src/kiwoom_monitor/central_server/database.py) (L4552) — write
-- [PostgresQueryStore.retry_news_job](../../src/kiwoom_monitor/central_server/database.py) (L4569) — read
-- [_insert_postgres_news_job](../../src/kiwoom_monitor/central_server/database.py) (L5992) — write
-- [_enqueue_postgres_news_ai_jobs](../../src/kiwoom_monitor/central_server/database.py) (L6051) — write
-- [_complete_external_news_job](../../src/kiwoom_monitor/central_server/database.py) (L6103) — read
-- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L7006) — read
+- [PostgresQueryStore.claim_news_jobs](../../src/kiwoom_monitor/central_server/database.py) (L4265) — 쓰기
+- [PostgresQueryStore.explain_news_job_claim_plan](../../src/kiwoom_monitor/central_server/database.py) (L4330) — 쓰기
+- [PostgresQueryStore.claim_external_historical_news_job](../../src/kiwoom_monitor/central_server/database.py) (L4446) — 읽기
+- [PostgresQueryStore.finish_news_job](../../src/kiwoom_monitor/central_server/database.py) (L4552) — 쓰기
+- [PostgresQueryStore.retry_news_job](../../src/kiwoom_monitor/central_server/database.py) (L4569) — 읽기
+- [_insert_postgres_news_job](../../src/kiwoom_monitor/central_server/database.py) (L5992) — 쓰기
+- [_enqueue_postgres_news_ai_jobs](../../src/kiwoom_monitor/central_server/database.py) (L6051) — 쓰기
+- [_complete_external_news_job](../../src/kiwoom_monitor/central_server/database.py) (L6103) — 읽기
+- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L7006) — 읽기
 
 <a id="central_news_request_budget"></a>
 ## 뉴스 요청 한도 — `central_news_request_budget`
@@ -1317,9 +1317,9 @@ CREATE UNIQUE INDEX central_news_request_budget_pkey ON public.central_news_requ
 
 **코드 근거**
 
-- [PostgresQueryStore.claim_news_request](../../src/kiwoom_monitor/central_server/database.py) (L4726) — read
-- [PostgresQueryStore.news_request_count](../../src/kiwoom_monitor/central_server/database.py) (L4754) — read
-- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L7003) — read
+- [PostgresQueryStore.claim_news_request](../../src/kiwoom_monitor/central_server/database.py) (L4726) — 읽기
+- [PostgresQueryStore.news_request_count](../../src/kiwoom_monitor/central_server/database.py) (L4754) — 읽기
+- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L7003) — 읽기
 
 <a id="central_news_source_cursors"></a>
 ## 뉴스 수집 진행 위치 — `central_news_source_cursors`
@@ -1364,9 +1364,9 @@ CREATE UNIQUE INDEX central_news_source_cursors_pkey ON public.central_news_sour
 
 **코드 근거**
 
-- [PostgresQueryStore.load_news_source_cursor](../../src/kiwoom_monitor/central_server/database.py) (L4771) — read
-- [_upsert_postgres_source_cursor](../../src/kiwoom_monitor/central_server/database.py) (L6822) — write
-- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L6965) — read
+- [PostgresQueryStore.load_news_source_cursor](../../src/kiwoom_monitor/central_server/database.py) (L4771) — 읽기
+- [_upsert_postgres_source_cursor](../../src/kiwoom_monitor/central_server/database.py) (L6822) — 쓰기
+- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L6965) — 읽기
 
 <a id="central_news_source_observations"></a>
 ## 뉴스 출처별 발견 이력 — `central_news_source_observations`
@@ -1415,9 +1415,9 @@ CREATE INDEX idx_central_news_source_observations_lookup ON public.central_news_
 
 **코드 근거**
 
-- [_save_postgres_news_source_page](../../src/kiwoom_monitor/central_server/database.py) (L6705) — read
-- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L6975) — read
-- [_market_news_feed_sql](../../src/kiwoom_monitor/central_server/database.py) (L7206) — read
+- [_save_postgres_news_source_page](../../src/kiwoom_monitor/central_server/database.py) (L6705) — 읽기
+- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L6975) — 읽기
+- [_market_news_feed_sql](../../src/kiwoom_monitor/central_server/database.py) (L7206) — 읽기
 
 <a id="central_news_source_runs"></a>
 ## 뉴스 수집 실행 이력 — `central_news_source_runs`
@@ -1469,9 +1469,9 @@ CREATE INDEX idx_central_news_source_runs_lookup ON public.central_news_source_r
 
 **코드 근거**
 
-- [PostgresQueryStore.save_historical_market_news_batch](../../src/kiwoom_monitor/central_server/database.py) (L4533) — read
-- [_save_postgres_news_source_page](../../src/kiwoom_monitor/central_server/database.py) (L6759) — write
-- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L6970) — read
+- [PostgresQueryStore.save_historical_market_news_batch](../../src/kiwoom_monitor/central_server/database.py) (L4533) — 읽기
+- [_save_postgres_news_source_page](../../src/kiwoom_monitor/central_server/database.py) (L6759) — 쓰기
+- [_load_postgres_news_source_diagnostics](../../src/kiwoom_monitor/central_server/database.py) (L6970) — 읽기
 
 <a id="central_observation_revisions"></a>
 ## 시장 관측 revision 이력 — `central_observation_revisions`
@@ -1532,14 +1532,14 @@ CREATE INDEX idx_central_observation_lookup ON public.central_observation_revisi
 
 **코드 근거**
 
-- [PostgresQueryStore.load_observation_revisions_after](../../src/kiwoom_monitor/central_server/database.py) (L3751) — read
-- [PostgresQueryStore.create_observation_export](../../src/kiwoom_monitor/central_server/database.py) (L3878) — read
-- [_observation_revision_select](../../src/kiwoom_monitor/central_server/database.py) (L7340) — read
-- [_observation_export_page_sql](../../src/kiwoom_monitor/central_server/database.py) (L7530) — read
-- [_append_postgres_observation_revision](../../src/kiwoom_monitor/central_server/database.py) (L7801) — read
-- [_load_postgres_latest_revisions](../../src/kiwoom_monitor/central_server/database.py) (L7897) — read
-- [_insert_postgres_observation_revision](../../src/kiwoom_monitor/central_server/database.py) (L7928) — write
-- [_insert_postgres_observation_revisions_batch.flush](../../src/kiwoom_monitor/central_server/database.py) (L7985) — write
+- [PostgresQueryStore.load_observation_revisions_after](../../src/kiwoom_monitor/central_server/database.py) (L3751) — 읽기
+- [PostgresQueryStore.create_observation_export](../../src/kiwoom_monitor/central_server/database.py) (L3878) — 읽기
+- [_observation_revision_select](../../src/kiwoom_monitor/central_server/database.py) (L7340) — 읽기
+- [_observation_export_page_sql](../../src/kiwoom_monitor/central_server/database.py) (L7530) — 읽기
+- [_append_postgres_observation_revision](../../src/kiwoom_monitor/central_server/database.py) (L7801) — 읽기
+- [_load_postgres_latest_revisions](../../src/kiwoom_monitor/central_server/database.py) (L7897) — 읽기
+- [_insert_postgres_observation_revision](../../src/kiwoom_monitor/central_server/database.py) (L7928) — 쓰기
+- [_insert_postgres_observation_revisions_batch.flush](../../src/kiwoom_monitor/central_server/database.py) (L7985) — 쓰기
 
 <a id="central_realtime_latest"></a>
 ## 실시간 종류별 최신값 — `central_realtime_latest`
@@ -1573,9 +1573,9 @@ CREATE UNIQUE INDEX central_realtime_latest_pkey ON public.central_realtime_late
 
 **코드 근거**
 
-- [PostgresQueryStore.save_realtime_snapshots](../../src/kiwoom_monitor/central_server/database.py) (L2883) — write
-- [PostgresQueryStore.load_realtime_snapshots](../../src/kiwoom_monitor/central_server/database.py) (L2903) — read
-- [PostgresQueryStore.load_latest_market_caps](../../src/kiwoom_monitor/central_server/database.py) (L2922) — read
+- [PostgresQueryStore.save_realtime_snapshots](../../src/kiwoom_monitor/central_server/database.py) (L2883) — 쓰기
+- [PostgresQueryStore.load_realtime_snapshots](../../src/kiwoom_monitor/central_server/database.py) (L2903) — 읽기
+- [PostgresQueryStore.load_latest_market_caps](../../src/kiwoom_monitor/central_server/database.py) (L2922) — 읽기
 
 <a id="central_research_export_members"></a>
 ## 고정 연구 데이터셋 구성원 — `central_research_export_members`
@@ -1611,8 +1611,8 @@ CREATE UNIQUE INDEX central_research_export_members_pkey ON public.central_resea
 
 **코드 근거**
 
-- [PostgresQueryStore.create_observation_export](../../src/kiwoom_monitor/central_server/database.py) (L3897) — write
-- [_observation_export_page_sql](../../src/kiwoom_monitor/central_server/database.py) (L7530) — read
+- [PostgresQueryStore.create_observation_export](../../src/kiwoom_monitor/central_server/database.py) (L3897) — 쓰기
+- [_observation_export_page_sql](../../src/kiwoom_monitor/central_server/database.py) (L7530) — 읽기
 
 <a id="central_research_exports"></a>
 ## 고정 연구 데이터셋 명세 — `central_research_exports`
@@ -1651,8 +1651,8 @@ CREATE UNIQUE INDEX central_research_exports_pkey ON public.central_research_exp
 
 **코드 근거**
 
-- [PostgresQueryStore.create_observation_export](../../src/kiwoom_monitor/central_server/database.py) (L3893) — write
-- [PostgresQueryStore.load_observation_export_page](../../src/kiwoom_monitor/central_server/database.py) (L3915) — read
+- [PostgresQueryStore.create_observation_export](../../src/kiwoom_monitor/central_server/database.py) (L3893) — 쓰기
+- [PostgresQueryStore.load_observation_export_page](../../src/kiwoom_monitor/central_server/database.py) (L3915) — 읽기
 
 <a id="central_schema_migrations"></a>
 ## 중앙 스키마 적용 원장 — `central_schema_migrations`
@@ -1685,7 +1685,7 @@ CREATE UNIQUE INDEX central_schema_migrations_pkey ON public.central_schema_migr
 
 **코드 근거**
 
-- [downgrade_schema](../../src/kiwoom_monitor/central_server/shadow_checkpoint.py) (L176) — read
+- [downgrade_schema](../../src/kiwoom_monitor/central_server/shadow_checkpoint.py) (L176) — 읽기
 - [_apply_plan](../../src/kiwoom_monitor/central_server/schema_migrations.py) (L58) — dynamic boundary
 
 <a id="central_second_trade_bars"></a>
@@ -1729,7 +1729,7 @@ CREATE INDEX idx_central_second_trade_bars_lookup ON public.central_second_trade
 
 **코드 근거**
 
-- [PostgresQueryStore.save_second_trade_bars](../../src/kiwoom_monitor/central_server/database.py) (L3127) — write
+- [PostgresQueryStore.save_second_trade_bars](../../src/kiwoom_monitor/central_server/database.py) (L3127) — 쓰기
 
 <a id="central_shadow_candidate_events"></a>
 ## 화면에 전달할 후보 이벤트 — `central_shadow_candidate_events`
@@ -1768,8 +1768,8 @@ CREATE INDEX idx_central_shadow_candidate_available ON public.central_shadow_can
 
 **코드 근거**
 
-- [PostgresQueryStore.load_shadow_candidates](../../src/kiwoom_monitor/central_server/database.py) (L3852) — read
-- [_save_postgres_shadow_evaluation](../../src/kiwoom_monitor/central_server/database.py) (L7405) — read
+- [PostgresQueryStore.load_shadow_candidates](../../src/kiwoom_monitor/central_server/database.py) (L3852) — 읽기
+- [_save_postgres_shadow_evaluation](../../src/kiwoom_monitor/central_server/database.py) (L7405) — 읽기
 
 <a id="central_shadow_decisions"></a>
 ## 후보 판단 원장 — `central_shadow_decisions`
@@ -1804,7 +1804,7 @@ CREATE UNIQUE INDEX central_shadow_decisions_pkey ON public.central_shadow_decis
 
 **코드 근거**
 
-- [_save_postgres_shadow_evaluation](../../src/kiwoom_monitor/central_server/database.py) (L7391) — read
+- [_save_postgres_shadow_evaluation](../../src/kiwoom_monitor/central_server/database.py) (L7391) — 읽기
 
 <a id="central_shadow_monitor_state"></a>
 ## 후보 분석 재개 상태 — `central_shadow_monitor_state`
@@ -1837,9 +1837,9 @@ CREATE UNIQUE INDEX central_shadow_monitor_state_pkey ON public.central_shadow_m
 
 **코드 근거**
 
-- [PostgresQueryStore.save_shadow_monitor_state](../../src/kiwoom_monitor/central_server/database.py) (L3807) — write
-- [save_frames](../../src/kiwoom_monitor/central_server/shadow_checkpoint.py) (L124) — write
-- [downgrade_schema](../../src/kiwoom_monitor/central_server/shadow_checkpoint.py) (L192) — write
+- [PostgresQueryStore.save_shadow_monitor_state](../../src/kiwoom_monitor/central_server/database.py) (L3807) — 쓰기
+- [save_frames](../../src/kiwoom_monitor/central_server/shadow_checkpoint.py) (L124) — 쓰기
+- [downgrade_schema](../../src/kiwoom_monitor/central_server/shadow_checkpoint.py) (L192) — 쓰기
 - [load_shadow_monitor_state](../../src/kiwoom_monitor/central_server/database.py) (L1034) — dynamic boundary
 
 <a id="central_theme_snapshots"></a>
@@ -1884,8 +1884,8 @@ CREATE INDEX idx_central_theme_snapshot_available ON public.central_theme_snapsh
 
 **코드 근거**
 
-- [PostgresQueryStore.load_theme_snapshots](../../src/kiwoom_monitor/central_server/database.py) (L4222) — read
-- [_append_postgres_theme_snapshot](../../src/kiwoom_monitor/central_server/database.py) (L5857) — read
+- [PostgresQueryStore.load_theme_snapshots](../../src/kiwoom_monitor/central_server/database.py) (L4222) — 읽기
+- [_append_postgres_theme_snapshot](../../src/kiwoom_monitor/central_server/database.py) (L5857) — 읽기
 
 <a id="central_upper_limit_fact_revisions"></a>
 ## 상한가 사실 이력 — `central_upper_limit_fact_revisions`
@@ -1934,7 +1934,7 @@ CREATE INDEX idx_central_upper_limit_lookup ON public.central_upper_limit_fact_r
 
 **코드 근거**
 
-- [PostgresQueryStore.append_upper_limit_facts](../../src/kiwoom_monitor/central_server/database.py) (L4924) — write
+- [PostgresQueryStore.append_upper_limit_facts](../../src/kiwoom_monitor/central_server/database.py) (L4924) — 쓰기
 
 <a id="central_vi_event_revisions"></a>
 ## VI 이벤트 이력 — `central_vi_event_revisions`
@@ -1984,4 +1984,4 @@ CREATE INDEX idx_central_vi_event_lookup ON public.central_vi_event_revisions US
 
 **코드 근거**
 
-- [PostgresQueryStore.append_vi_events](../../src/kiwoom_monitor/central_server/database.py) (L4857) — write
+- [PostgresQueryStore.append_vi_events](../../src/kiwoom_monitor/central_server/database.py) (L4857) — 쓰기

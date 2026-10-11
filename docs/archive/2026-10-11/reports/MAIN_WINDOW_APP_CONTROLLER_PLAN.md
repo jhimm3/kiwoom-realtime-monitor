@@ -1,3 +1,5 @@
+> 2026-10-11에 보존한 과거 기록입니다. 아래 ‘현재/다음/미완료’는 작성 당시 표현입니다. 현행 판정은 [승계 문서](../../../../MODULE_MAP.md)와 [현재 상태](../../../CURRENT_STATUS.md)를 따릅니다. 이 기록은 새 배포·주문·삭제 권한이 아닙니다.
+
 # MainWindow → AppController 책임 이전과 연결 보존 계약
 
 2026-10-04 · 단계 A-D 로컬 구현·offscreen 회귀 완료 / 설치 앱 수동 확인 남음
@@ -10,7 +12,7 @@
 - 실제 대상은 `src/kiwoom_monitor/presentation/main_window.py`의 `MainWindow`다.
 - `bootstrap.py`가 runtime·저장소·경로를 생성하여 MainWindow에 주입한다. 기존 생성자 인자를 유지한다.
 - 테스트 앱은 이 워크트리의 `scripts/run_test_app_with_data.py`를 통해 실행한다. 원본 프로젝트의 `.venv` 재사용과 실행 소스는 별개다. 자동 검증에는 임시 DB와 fake API를 사용한다.
-- [연결 기준 JSON](MAIN_WINDOW_CONNECTION_BASELINE.json)은 MainWindow 내부 메서드 정의 267개, `.connect()` 지점 116개, `QTimer.singleShot()` 지점 24개, Controller/Coordinator/Writer/QTimer 생성 지점 35개를 기록한다. 조건부·동적 생성도 포함한 **정적 호출 지점 수**이며 실제 생성 객체나 신호 전달 횟수가 아니다. 자식 Controller 내부·상속받은 연결까지 전수 확인했다는 뜻도 아니다.
+- [연결 기준 JSON](../evidence/MAIN_WINDOW_CONNECTION_BASELINE.json)은 MainWindow 내부 메서드 정의 267개, `.connect()` 지점 116개, `QTimer.singleShot()` 지점 24개, Controller/Coordinator/Writer/QTimer 생성 지점 35개를 기록한다. 조건부·동적 생성도 포함한 **정적 호출 지점 수**이며 실제 생성 객체나 신호 전달 횟수가 아니다. 자식 Controller 내부·상속받은 연결까지 전수 확인했다는 뜻도 아니다.
 - 기준 JSON은 변경 전 상태로 고정한다. 변경 후에는 이전→이후 연결 대응과 실행 증거를 별도로 기록하며 수신자 이름이나 연결 개수만 같다고 성공으로 판정하지 않는다.
 
 ## 책임 결정
@@ -85,7 +87,7 @@ AppController는 feature controller를 이름 있는 속성으로 제공한다. 
 
 응답 경로는 표 적용 → 분봉 요청 → 실시간 구독 → 구독 준비 또는 fallback 후속 작업 순서를 유지한다. NXT 확인 완료 뒤에는 종목 목록 갱신 → 구독 → 후속 보완 순서를 유지한다. 직접 API의 부분 응답은 1.5초 뒤 재시도하고 NAS 저장소의 부분 응답은 다음 순위 일정까지 기다린다. 모달이 열려 있으면 최신 응답 하나만 보류한다. API 설정 교체 중 이전 runtime 결과를 버리고, 종료 시 timer 예약과 새 후속 작업을 중단한다. 후속 종목은 table에서 다시 추출하지 않고 적용된 순위 tuple을 사용한다.
 
-변경 전 정적 연결 기준 116건 중 105건은 MainWindow에 유지되고, 11건은 [연결 대조](MAIN_WINDOW_CONNECTION_COMPARISON.json)에 기록한 대로 AppController로 이동했다. 단계 A-C에서 MainWindow 화면 결과·제어 연결 16건이 추가됐다. 관련 19개 모듈의 offscreen 회귀 138건이 프로세스 exit code 0으로 통과했고, 직접 영향을 받는 두 모듈은 별도로 65건을 통과했다. 로컬 Qt 검증이며 설치 앱 수동 검증이나 NAS 실행 증거는 아니다.
+변경 전 정적 연결 기준 116건 중 105건은 MainWindow에 유지되고, 11건은 [연결 대조](../evidence/MAIN_WINDOW_CONNECTION_COMPARISON.json)에 기록한 대로 AppController로 이동했다. 단계 A-C에서 MainWindow 화면 결과·제어 연결 16건이 추가됐다. 관련 19개 모듈의 offscreen 회귀 138건이 프로세스 exit code 0으로 통과했고, 직접 영향을 받는 두 모듈은 별도로 65건을 통과했다. 로컬 Qt 검증이며 설치 앱 수동 검증이나 NAS 실행 증거는 아니다.
 
 ### D. pending 저장과 화면 의존 상태 — 로컬 구현·offscreen 회귀 완료
 
@@ -95,7 +97,7 @@ AppController는 feature controller를 이름 있는 속성으로 제공한다. 
 
 실패 복구는 저장 중 보관했던 값을 현재 pending 값 뒤에 합쳐 같은 키의 새 값이 우선하게 한다. 종료 시 producer와 queued 결과 signal을 기다린 뒤 AppController가 세 pending을 flush하고 writer 종료를 기다린다. 종료 중 실패한 저장은 예전 동작대로 메모리에 남기되 재시도 timer는 시작하지 않는다. 이 단계는 버퍼 수명과 연결만 옮겼으며 날짜 경계 동작, 비교 저장 실패 정책, 종료 뒤 재시작/영속 복구 정책은 변경하지 않았다.
 
-`tests.unit.test_app_controller`, `test_main_window`, `test_market_cache_writer`의 offscreen 회귀와 새 coalescing/Qt failure signal/late trade shutdown 검사를 포함한 관련 19개 모듈 **142건이 통과했다**(현재 워크트리 소스 우선, 종료 코드 0). 지연 체결이 종료 대기 중 MainWindow 메모리 처리기를 거쳐 실제 임시 SQLite에 현재가와 분봉을 기록하는 것도 확인했다. 상세 연결 수는 [정적 대조표](MAIN_WINDOW_CONNECTION_COMPARISON.json)에 기록했다.
+`tests.unit.test_app_controller`, `test_main_window`, `test_market_cache_writer`의 offscreen 회귀와 새 coalescing/Qt failure signal/late trade shutdown 검사를 포함한 관련 19개 모듈 **142건이 통과했다**(현재 워크트리 소스 우선, 종료 코드 0). 지연 체결이 종료 대기 중 MainWindow 메모리 처리기를 거쳐 실제 임시 SQLite에 현재가와 분봉을 기록하는 것도 확인했다. 상세 연결 수는 [정적 대조표](../evidence/MAIN_WINDOW_CONNECTION_COMPARISON.json)에 기록했다.
 
 경계 검토 결과 TOP20 collector는 이미 해당 도메인 상태를 소유하고, snapshot 계산은 UI에서 관측하는 계좌·화면 데이터를 함께 소비한다. 두 책임은 기존 담당자와 MainWindow에 남겨 독립 데이터 소유자인 척 AppController로 이동하지 않았다. 실제 설치된 앱의 전체 화면 흐름·장중 수신은 아직 수동 확인하지 않았다.
 
@@ -135,7 +137,7 @@ AppController는 feature controller를 이름 있는 속성으로 제공한다. 
 4. **별도 QThread·timer:** journal/investment 안내 timer를 종료 목록에 넣었다. `_theme_save_request`는 기존에 AppController의 QObject 자식이 아니어서 동적 QThread 검색에서 빠질 수 있었다. SettingsRequestWorker를 AppController 자식으로 생성하도록 연결하고, 실제 대기 중인 child QThread가 끝나기 전에는 종료하지 않는 회귀를 추가했다.
 5. **동적 worker 목록:** TOP20 NAS 작업과 feature controller가 현재 보유한 worker를 각 대기 단계에서 다시 조회한다. 참조 교체 및 feature controller가 참조를 비운 뒤에도 남아 있는 QThread를 확인한다.
 
-관련 구현·검증 결과는 [보류 원장](OPEN_ITEMS.md), [정적 연결 비교](MAIN_WINDOW_CONNECTION_COMPARISON.json), `tests/unit/test_app_controller.py`에서 확인한다. A/B 검증은 로컬 offscreen 회귀이며 설치된 테스트 앱의 수동 전체 흐름이나 NAS 배포 검증은 포함하지 않는다.
+관련 구현·검증 결과는 [보류 원장](../../../OPEN_ITEMS.md), [정적 연결 비교](../evidence/MAIN_WINDOW_CONNECTION_COMPARISON.json), `tests/unit/test_app_controller.py`에서 확인한다. A/B 검증은 로컬 offscreen 회귀이며 설치된 테스트 앱의 수동 전체 흐름이나 NAS 배포 검증은 포함하지 않는다.
 
 ## 현재 진행 상태
 
@@ -144,6 +146,6 @@ AppController는 feature controller를 이름 있는 속성으로 제공한다. 
 - 완료: 단계 B API runtime 교체 상태/worker 대기, runtime factory 적용, feature factory·entry writer loader·market client 교체, 구독/aggregator/cache 화면 효과 연결, 초기 순위 시작 조정을 이전했다. 실패 시 이전 runtime 보존 및 종료 중 예약 취소를 검사했다.
 - 완료: 단계 C 순위 일정·응답 판단·NXT 구간·실시간 구독·보완 후속 순서를 AppController로 이전했다. 적용 종목은 widget에서 다시 추출하지 않고 controller snapshot을 쓴다. 직접 부분 응답 재시도, NAS 저장 부분 응답 대기, modal 최신 응답, API 교체 후착 결과, close timer 정리를 Qt 회귀로 검사했다.
 - 재현 후 수정: comparison flush를 writer drain 앞으로 옮겼고, 실행 중 producer 결과 신호 전달 뒤 queue를 drain한다. writer drain timeout은 종료 허용으로 처리하지 않고 writer 종료까지 기다린다. worker 목록은 각 확인 때 다시 조회한다. 종료 중 새 OCR·업데이트·NAS 요청을 막고 journal 안내 timer를 멈춘다.
-- 연결 비교: 변경 전 116건 중 99건은 MainWindow에 남고 17건은 AppController로 이동했다. 단계 A-D에서 MainWindow 화면 결과·제어 연결 17건이 추가됐다. 이전 연결은 [전후 비교](MAIN_WINDOW_CONNECTION_COMPARISON.json)에 개별 대응시켰다. 정적 AST 수치는 신호 전달 증거가 아니며 Qt 회귀 결과와 구분한다.
+- 연결 비교: 변경 전 116건 중 99건은 MainWindow에 남고 17건은 AppController로 이동했다. 단계 A-D에서 MainWindow 화면 결과·제어 연결 17건이 추가됐다. 이전 연결은 [전후 비교](../evidence/MAIN_WINDOW_CONNECTION_COMPARISON.json)에 개별 대응시켰다. 정적 AST 수치는 신호 전달 증거가 아니며 Qt 회귀 결과와 구분한다.
 - 실행 검증: 기준 Python/Qt 환경과 현재 worktree `src`로 관련 19개 모듈 142건이 통과했다(exit code 0). Qt teardown은 DeferredDelete/event 처리를 실행하고 남은 QThread를 확인했다. 로그는 `artifacts/app-controller-validation/stage-d-suite.log`에 있다.
-- 단계 A-D 로컬 구현이 끝났다. 실제 설치 앱의 전체 흐름·장중 실시간 수신 수동 확인 및 NAS 배포는 하지 않았다. 여기까지의 결과는 [보류 원장](OPEN_ITEMS.md)과 [정적 연결 대조](MAIN_WINDOW_CONNECTION_COMPARISON.json)에 기록한다.
+- 단계 A-D 로컬 구현이 끝났다. 실제 설치 앱의 전체 흐름·장중 실시간 수신 수동 확인 및 NAS 배포는 하지 않았다. 여기까지의 결과는 [보류 원장](../../../OPEN_ITEMS.md)과 [정적 연결 대조](../evidence/MAIN_WINDOW_CONNECTION_COMPARISON.json)에 기록한다.

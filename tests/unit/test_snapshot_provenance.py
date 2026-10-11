@@ -15,6 +15,18 @@ from kiwoom_monitor.domain.trade_snapshot_observations import entry_context_obse
 
 
 class SnapshotProvenanceTests(unittest.TestCase):
+    def test_gap_entry_nullable_values_and_partial_market_context_are_not_complete(self) -> None:
+        snapshot = SimpleNamespace(
+            execution_key="gap-entry", stock_code="005930", executed_at=datetime(2026, 10, 11, 10, 0),
+            market="KRX", rank=3, trade_value_1m_eok=None, trade_value_5m_eok=None,
+            themes=(), high_distance_percent=None, news=(), investor_flow={}, orderbook={},
+            market_state={"input_quality": {"005930": {"1m": "partial", "5m": "unconfirmed"}}},
+        )
+        observations = entry_context_observations(snapshot, datetime(2026, 10, 11, 10, 1))
+        self.assertEqual(DataCompleteness.MISSING, observations["trade_value_1m"].metadata.completeness)
+        self.assertEqual(DataCompleteness.MISSING, observations["trade_value_5m"].metadata.completeness)
+        self.assertEqual(DataCompleteness.PARTIAL, observations["market_state"].metadata.completeness)
+
     def test_entry_context_is_split_into_independent_field_observations(self) -> None:
         executed_at = datetime(2026, 9, 10, 9, 1)
         snapshot = SimpleNamespace(

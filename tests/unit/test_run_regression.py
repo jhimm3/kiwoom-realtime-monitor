@@ -107,6 +107,7 @@ class RunRegressionTests(unittest.TestCase):
         self.assertIn("tests.unit.test_app_controller", pc_modules)
         self.assertIn("tests.unit.test_main_window", pc_modules)
         self.assertIn("tests.unit.test_market_cache_writer", pc_modules)
+        self.assertIn("tests.unit.test_realtime_gap_quality", pc_modules)
         runner_modules = [module for batch in run_regression._planned_batches(
             manifest, "runner",
         ) for module in batch["modules"]]
@@ -115,6 +116,7 @@ class RunRegressionTests(unittest.TestCase):
         all_local = run_regression._planned_batches(manifest, "all-local")
         all_modules = [module for batch in all_local for module in batch["modules"]]
         self.assertEqual(1, all_modules.count("tests.unit.test_market_cache_writer"))
+        self.assertEqual(1, all_modules.count("tests.unit.test_realtime_gap_quality"))
         self.assertIn("tests.unit.test_top20_program_shutdown", all_modules)
         self.assertIn("tests.unit.test_top20_execution_boundaries", all_modules)
 
@@ -154,7 +156,7 @@ class RunRegressionTests(unittest.TestCase):
         self.assertFalse(membership["nas-operator-owned"] & set().union(*(
             members for group, members in membership.items() if group != "nas-operator-owned"
         )))
-        self.assertEqual((286, 133, 2), tuple(len(membership[name]) for name in
+        self.assertEqual((287, 133, 2), tuple(len(membership[name]) for name in
                          run_regression.CI_WINDOWS_PROFILES))
         required = run_regression._planned_batches(manifest, "ci-required-windows")
         self.assertEqual(
@@ -201,16 +203,29 @@ class RunRegressionTests(unittest.TestCase):
         gitkeep = self.directory / "tests" / "unit" / ".gitkeep"
         gitkeep.parent.mkdir()
         gitkeep.write_bytes(b"\n")
+        deployment = self.directory / "deploy" / "synology"
+        deployment.mkdir(parents=True)
+        shell = deployment / "kiwoom-nas"
+        example = deployment / ".env.example"
+        readme = deployment / "README.md"
+        shell.write_bytes(b"#!/bin/sh\nexit 0\n")
+        example.write_bytes(b"FIXTURE=1\n")
+        readme.write_bytes(b"deployment fixture\n")
         with patch.object(run_regression, "ROOT", self.directory):
             before = run_regression._code_tree_identity()
             source.write_bytes(b"value = 1\r\n")
             dockerfile.write_bytes(b"FROM python:3.13-slim\r\n")
             gitkeep.write_bytes(b"\r\n")
+            for path in (shell, example, readme):
+                path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
             newline_only = run_regression._code_tree_identity()
+            shell.write_bytes(b"#!/bin/sh\r\nexit 1\r\n")
+            deployment_changed = run_regression._code_tree_identity()
             source.write_bytes(b"value = 2\r\n")
             changed = run_regression._code_tree_identity()
         self.assertEqual(before["lf_sha256"], newline_only["lf_sha256"])
         self.assertNotEqual(before["raw_sha256"], newline_only["raw_sha256"])
+        self.assertNotEqual(newline_only["lf_sha256"], deployment_changed["lf_sha256"])
         self.assertNotEqual(before["lf_sha256"], changed["lf_sha256"])
 
     def test_source_change_during_run_cannot_report_success(self) -> None:
@@ -263,6 +278,16 @@ class RunRegressionTests(unittest.TestCase):
             "git_commit": "test-commit",
         }
         check_required_ci_results.validate(windows, linux, postgres, "test-commit")
+        # Reuse the full-run proof locally; changing current content invalidates it.
+        report = self.directory / "local-proof.json"
+        report.write_text(json.dumps(windows), encoding="utf-8")
+        argv = ["check_required_ci_results", "--windows-only", "--local", "--windows", str(report)]
+        with patch.object(sys, "argv", argv), redirect_stdout(StringIO()):
+            with patch.object(run_regression, "_code_tree_identity", return_value=code):
+                self.assertEqual(0, check_required_ci_results.main())
+            with patch.object(run_regression, "_code_tree_identity", return_value={**code, "lf_sha256": "e" * 64}):
+                with patch.object(sys, "stderr", StringIO()):
+                    self.assertEqual(1, check_required_ci_results.main())
         for target, field, value in (
             ("linux", "skipped", 1),
             ("postgres", "modules", catalog["postgres_required"][:-1]),
@@ -278,6 +303,20 @@ class RunRegressionTests(unittest.TestCase):
                     p[field] = value
                 with self.assertRaises(ValueError):
                     check_required_ci_results.validate(w, l, p, "test-commit")
+
+    def test_full_profile_refuses_catalog_gap_before_any_worker(self) -> None:
+        output = self.directory / "not-created"
+        with patch.object(run_regression, "_check_test_catalog", return_value=1), \
+             patch.object(run_regression, "_locked_environment") as environment:
+            with self.assertRaisesRegex(ValueError, "complete unit/integration routing"):
+                run_regression._execute_profile("all-local", 5, output)
+        environment.assert_not_called()
+        self.assertFalse(output.exists())
+
+    def test_locked_environment_refuses_drift_without_installing_packages(self) -> None:
+        with patch.object(run_regression.importlib.metadata, "version", return_value="drift"):
+            with self.assertRaisesRegex(ValueError, "Locked regression dependencies differ"):
+                run_regression._locked_environment()
 
     def test_extended_selection_is_conservative_for_unmapped_changes(self) -> None:
         docs = select_ci_groups.select(["docs/OPEN_ITEMS.md"], "auto")["groups"]

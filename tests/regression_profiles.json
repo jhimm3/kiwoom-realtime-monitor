@@ -170,6 +170,7 @@
       "tests.unit.test_app_controller",
       "tests.unit.test_main_window",
       "tests.unit.test_market_cache_writer",
+      "tests.unit.test_realtime_gap_quality",
       "tests.unit.test_run_test_app_with_data"
     ],
     "top20-lifecycle": [

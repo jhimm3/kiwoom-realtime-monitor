@@ -1338,7 +1338,7 @@ flowchart LR
 | `target_date` | `TEXT` | True | 3 | — |
 | `query_text` | `TEXT` | True | 4 | — |
 
-- FK `range_id` → `news_range_jobs.range_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `range_id` → `news_range_jobs.range_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `news_search_observations`
 
@@ -2314,7 +2314,7 @@ flowchart LR
 | `period` | `INTEGER` | True | 1 | — |
 | `stock_code` | `TEXT` | True | 2 | — |
 
-- FK `stock_code` → `stocks.code`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `stock_code` → `stocks.code`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `new_high_snapshot_meta`
 
@@ -2336,8 +2336,8 @@ flowchart LR
 | `theme_name` | `TEXT` | True | 3 | — |
 | `custom_color` | `TEXT` | False | — | — |
 
-- FK `profile_id` → `profile_themes.profile_id`; ON DELETE CASCADE, ON UPDATE NO ACTION
-- FK `theme_name` → `profile_themes.theme_name`; ON DELETE CASCADE, ON UPDATE NO ACTION
+- FK `profile_id` → `profile_themes.profile_id`; 삭제 정책 `ON DELETE CASCADE`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `theme_name` → `profile_themes.theme_name`; 삭제 정책 `ON DELETE CASCADE`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `profile_theme_name_decisions`
 
@@ -2352,7 +2352,7 @@ flowchart LR
 | `decision_source` | `TEXT` | True | — | 'user' |
 | `updated_at` | `TEXT` | True | — | CURRENT_TIMESTAMP |
 
-- FK `profile_id` → `theme_profiles.profile_id`; ON DELETE CASCADE, ON UPDATE NO ACTION
+- FK `profile_id` → `theme_profiles.profile_id`; 삭제 정책 `ON DELETE CASCADE`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `profile_theme_suggestions`
 
@@ -2377,7 +2377,7 @@ flowchart LR
 | `article_published_at` | `TEXT` | True | — | '' |
 | `article_url` | `TEXT` | True | — | '' |
 
-- FK `profile_id` → `theme_profiles.profile_id`; ON DELETE CASCADE, ON UPDATE NO ACTION
+- FK `profile_id` → `theme_profiles.profile_id`; 삭제 정책 `ON DELETE CASCADE`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `profile_themes`
 
@@ -2389,7 +2389,7 @@ flowchart LR
 | `theme_name` | `TEXT` | True | 2 | — |
 | `default_color` | `TEXT` | True | — | '#DCE6F1' |
 
-- FK `profile_id` → `theme_profiles.profile_id`; ON DELETE CASCADE, ON UPDATE NO ACTION
+- FK `profile_id` → `theme_profiles.profile_id`; 삭제 정책 `ON DELETE CASCADE`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `schema_migrations`
 
@@ -2419,7 +2419,7 @@ flowchart LR
 | `alias` | `TEXT` | False | 1 | — |
 | `stock_code` | `TEXT` | True | — | — |
 
-- FK `stock_code` → `stocks.code`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `stock_code` → `stocks.code`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `stock_name_history`
 
@@ -2434,7 +2434,7 @@ flowchart LR
 | `source` | `TEXT` | True | — | 'KRX' |
 | `decision` | `TEXT` | True | — | 'pending' |
 
-- FK `stock_code` → `stocks.code`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `stock_code` → `stocks.code`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `stock_themes`
 
@@ -2446,8 +2446,8 @@ flowchart LR
 | `theme_id` | `INTEGER` | True | 2 | — |
 | `custom_color` | `TEXT` | False | — | — |
 
-- FK `theme_id` → `themes.theme_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `stock_code` → `stocks.code`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `theme_id` → `themes.theme_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `stock_code` → `stocks.code`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `stocks`
 
@@ -3131,10 +3131,10 @@ flowchart LR
 | `reason` | `TEXT` | True | — | '' |
 | `budget_revision` | `INTEGER` | True | — | 1 |
 
-- FK `campaign_id` → `research_campaign_revisions.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_revision` → `research_campaign_revisions.revision`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_id` → `research_campaign_jobs.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `job_id` → `research_campaign_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaign_revisions.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_revision` → `research_campaign_revisions.revision`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_id` → `research_campaign_jobs.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `job_id` → `research_campaign_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_hypotheses`
 
@@ -3151,10 +3151,10 @@ flowchart LR
 | `registered_at` | `TEXT` | True | — | — |
 | `enqueued_at` | `TEXT` | True | — | '' |
 
-- FK `campaign_id` → `research_campaign_jobs.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `job_id` → `research_campaign_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `hypothesis_id` → `research_hypotheses.hypothesis_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_id` → `research_campaigns.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaign_jobs.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `job_id` → `research_campaign_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `hypothesis_id` → `research_hypotheses.hypothesis_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_id` → `research_campaigns.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_hypothesis_expansions`
 
@@ -3172,10 +3172,10 @@ flowchart LR
 | `evidence_json` | `TEXT` | True | — | — |
 | `created_at` | `TEXT` | True | — | — |
 
-- FK `campaign_id` → `research_campaign_revisions.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `policy_revision` → `research_campaign_revisions.revision`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_id` → `research_campaign_hypotheses.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `parent_hypothesis_id` → `research_campaign_hypotheses.hypothesis_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaign_revisions.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `policy_revision` → `research_campaign_revisions.revision`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_id` → `research_campaign_hypotheses.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `parent_hypothesis_id` → `research_campaign_hypotheses.hypothesis_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_input_acceptances`
 
@@ -3189,7 +3189,7 @@ flowchart LR
 | `job_id` | `TEXT` | True | — | — |
 | `manifest_hash` | `TEXT` | True | — | — |
 
-- FK `source_id` → `research_campaign_input_sources.source_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `source_id` → `research_campaign_input_sources.source_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_input_sources`
 
@@ -3214,8 +3214,8 @@ flowchart LR
 | `rolling_daily` | `INTEGER` | True | — | 0 |
 | `rolling_next_start` | `TEXT` | True | — | '' |
 
-- FK `campaign_id` → `research_campaign_jobs.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `template_job_id` → `research_campaign_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaign_jobs.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `template_job_id` → `research_campaign_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_job_budgets`
 
@@ -3229,8 +3229,8 @@ flowchart LR
 | `budget_json` | `TEXT` | True | — | — |
 | `created_at` | `TEXT` | True | — | — |
 
-- FK `campaign_id` → `research_campaign_jobs.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `job_id` → `research_campaign_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaign_jobs.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `job_id` → `research_campaign_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_jobs`
 
@@ -3255,8 +3255,8 @@ flowchart LR
 | `budget_revision` | `INTEGER` | True | — | 1 |
 | `source_request_json` | `TEXT` | True | — | '' |
 
-- FK `job_id` → `research_search_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_id` → `research_campaigns.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `job_id` → `research_search_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_id` → `research_campaigns.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_revisions`
 
@@ -3269,7 +3269,7 @@ flowchart LR
 | `policy_json` | `TEXT` | True | — | — |
 | `created_at` | `TEXT` | True | — | — |
 
-- FK `campaign_id` → `research_campaigns.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaigns.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_rolling_empty_days`
 
@@ -3283,7 +3283,7 @@ flowchart LR
 | `last_checked_at` | `TEXT` | True | — | — |
 | `next_retry_at` | `TEXT` | True | — | — |
 
-- FK `source_id` → `research_campaign_input_sources.source_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `source_id` → `research_campaign_input_sources.source_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_staging_cleanups`
 
@@ -3302,8 +3302,8 @@ flowchart LR
 | `reason` | `TEXT` | True | — | '' |
 | `updated_at` | `TEXT` | True | — | — |
 
-- FK `source_id` → `research_campaign_input_sources.source_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `operation_id` → `research_campaign_storage_operations.operation_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `source_id` → `research_campaign_input_sources.source_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `operation_id` → `research_campaign_storage_operations.operation_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_storage_operations`
 
@@ -3325,8 +3325,8 @@ flowchart LR
 | `input_path` | `TEXT` | True | — | '' |
 | `reason` | `TEXT` | True | — | '' |
 
-- FK `campaign_id` → `research_campaigns.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `source_id` → `research_campaign_input_sources.source_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaigns.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `source_id` → `research_campaign_input_sources.source_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_worker_attempts`
 
@@ -3344,9 +3344,9 @@ flowchart LR
 | `exit_code` | `INTEGER` | False | — | — |
 | `reason` | `TEXT` | True | — | '' |
 
-- FK `campaign_id` → `research_campaign_revisions.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_revision` → `research_campaign_revisions.revision`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_id` → `research_campaigns.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaign_revisions.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_revision` → `research_campaign_revisions.revision`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_id` → `research_campaigns.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_workers`
 
@@ -3364,7 +3364,7 @@ flowchart LR
 | `reason` | `TEXT` | True | — | '' |
 | `updated_at` | `TEXT` | True | — | — |
 
-- FK `campaign_id` → `research_campaigns.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaigns.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaigns`
 
@@ -3394,8 +3394,8 @@ flowchart LR
 | `status` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `trial_id` → `research_search_trials.trial_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `experiment_id` → `research_search_experiments.experiment_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `trial_id` → `research_search_trials.trial_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `experiment_id` → `research_search_experiments.experiment_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_candidate_events`
 
@@ -3412,8 +3412,8 @@ flowchart LR
 | `available_at` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `decision_id` → `research_decisions.decision_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `decision_id` → `research_decisions.decision_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_comparisons`
 
@@ -3428,8 +3428,8 @@ flowchart LR
 | `status` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `variant_run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `baseline_run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `variant_run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `baseline_run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_context_hypothesis_revisions`
 
@@ -3461,8 +3461,8 @@ flowchart LR
 | `final_action` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `snapshot_id` → `research_feature_snapshots.snapshot_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `snapshot_id` → `research_feature_snapshots.snapshot_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_entry_theses`
 
@@ -3477,8 +3477,8 @@ flowchart LR
 | `created_at` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `leadership_revision_id` → `research_theme_leadership_revisions.revision_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `leadership_revision_id` → `research_theme_leadership_revisions.revision_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_execution_events`
 
@@ -3497,7 +3497,7 @@ flowchart LR
 | `symbol` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_feature_snapshots`
 
@@ -3513,7 +3513,7 @@ flowchart LR
 | `symbol` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_final_holdout_events`
 
@@ -3528,7 +3528,7 @@ flowchart LR
 | `accessed_at` | `TEXT` | True | — | — |
 | `reason` | `TEXT` | True | — | — |
 
-- FK `window_id` → `research_final_holdout_windows.window_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `window_id` → `research_final_holdout_windows.window_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_final_holdout_executions`
 
@@ -3549,8 +3549,8 @@ flowchart LR
 | `reason` | `TEXT` | True | — | '' |
 | `generation` | `INTEGER` | True | — | 1 |
 
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `window_id` → `research_final_holdout_windows.window_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `window_id` → `research_final_holdout_windows.window_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_final_holdout_recoveries`
 
@@ -3567,7 +3567,7 @@ flowchart LR
 | `claimed_at` | `TEXT` | True | — | '' |
 | `generation` | `INTEGER` | True | — | — |
 
-- FK `execution_id` → `research_final_holdout_executions.execution_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `execution_id` → `research_final_holdout_executions.execution_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_final_holdout_windows`
 
@@ -3606,8 +3606,8 @@ flowchart LR
 | `parent_ordinal` | `INTEGER` | True | 2 | — |
 | `parent_id` | `TEXT` | True | — | — |
 
-- FK `parent_id` → `research_hypotheses.hypothesis_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `hypothesis_id` → `research_hypotheses.hypothesis_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `parent_id` → `research_hypotheses.hypothesis_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `hypothesis_id` → `research_hypotheses.hypothesis_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_independent_run_owner_history`
 
@@ -3620,7 +3620,7 @@ flowchart LR
 | `generation` | `INTEGER` | True | — | — |
 | `claimed_at` | `TEXT` | True | — | — |
 
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_independent_run_owners`
 
@@ -3633,7 +3633,7 @@ flowchart LR
 | `generation` | `INTEGER` | True | — | — |
 | `claimed_at` | `TEXT` | True | — | — |
 
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_outcome_labels`
 
@@ -3650,8 +3650,8 @@ flowchart LR
 | `available_at` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `candidate_event_id` → `research_candidate_events.event_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `candidate_event_id` → `research_candidate_events.event_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_reports`
 
@@ -3664,7 +3664,7 @@ flowchart LR
 | `status` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_run_evaluations`
 
@@ -3677,7 +3677,7 @@ flowchart LR
 | `status` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_runs`
 
@@ -3727,7 +3727,7 @@ flowchart LR
 | `occurred_at` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `job_id` → `research_search_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `job_id` → `research_search_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_search_jobs`
 
@@ -3750,7 +3750,7 @@ flowchart LR
 | `generation` | `INTEGER` | True | — | 0 |
 | `heartbeat_at` | `TEXT` | True | — | '' |
 
-- FK `experiment_id` → `research_search_experiments.experiment_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `experiment_id` → `research_search_experiments.experiment_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_search_trials`
 
@@ -3766,7 +3766,7 @@ flowchart LR
 | `finished_at` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `experiment_id` → `research_search_experiments.experiment_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `experiment_id` → `research_search_experiments.experiment_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_theme_leadership_revisions`
 
@@ -3796,9 +3796,9 @@ flowchart LR
 | `available_at` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `leadership_revision_id` → `research_theme_leadership_revisions.revision_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `thesis_id` → `research_entry_theses.thesis_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `leadership_revision_id` → `research_theme_leadership_revisions.revision_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `thesis_id` → `research_entry_theses.thesis_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_trial_attempts`
 
@@ -3818,8 +3818,8 @@ flowchart LR
 | `finished_at` | `TEXT` | True | — | '' |
 | `error` | `TEXT` | True | — | '' |
 
-- FK `experiment_id` → `research_search_experiments.experiment_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `job_id` → `research_search_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `experiment_id` → `research_search_experiments.experiment_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `job_id` → `research_search_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 
 <a id="s-5fb6f5a9925737cb"></a>
@@ -3946,10 +3946,10 @@ flowchart LR
 | `reason` | `TEXT` | True | — | '' |
 | `budget_revision` | `INTEGER` | True | — | 1 |
 
-- FK `campaign_id` → `research_campaign_revisions.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_revision` → `research_campaign_revisions.revision`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_id` → `research_campaign_jobs.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `job_id` → `research_campaign_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaign_revisions.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_revision` → `research_campaign_revisions.revision`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_id` → `research_campaign_jobs.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `job_id` → `research_campaign_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_hypotheses`
 
@@ -3966,10 +3966,10 @@ flowchart LR
 | `registered_at` | `TEXT` | True | — | — |
 | `enqueued_at` | `TEXT` | True | — | '' |
 
-- FK `campaign_id` → `research_campaign_jobs.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `job_id` → `research_campaign_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `hypothesis_id` → `research_hypotheses.hypothesis_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_id` → `research_campaigns.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaign_jobs.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `job_id` → `research_campaign_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `hypothesis_id` → `research_hypotheses.hypothesis_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_id` → `research_campaigns.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_hypothesis_expansions`
 
@@ -3987,10 +3987,10 @@ flowchart LR
 | `evidence_json` | `TEXT` | True | — | — |
 | `created_at` | `TEXT` | True | — | — |
 
-- FK `campaign_id` → `research_campaign_revisions.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `policy_revision` → `research_campaign_revisions.revision`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_id` → `research_campaign_hypotheses.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `parent_hypothesis_id` → `research_campaign_hypotheses.hypothesis_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaign_revisions.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `policy_revision` → `research_campaign_revisions.revision`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_id` → `research_campaign_hypotheses.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `parent_hypothesis_id` → `research_campaign_hypotheses.hypothesis_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_input_acceptances`
 
@@ -4004,7 +4004,7 @@ flowchart LR
 | `job_id` | `TEXT` | True | — | — |
 | `manifest_hash` | `TEXT` | True | — | — |
 
-- FK `source_id` → `research_campaign_input_sources.source_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `source_id` → `research_campaign_input_sources.source_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_input_sources`
 
@@ -4027,8 +4027,8 @@ flowchart LR
 | `remote_signature` | `TEXT` | True | — | '' |
 | `storage_cap_bytes` | `INTEGER` | True | — | 0 |
 
-- FK `campaign_id` → `research_campaign_jobs.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `template_job_id` → `research_campaign_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaign_jobs.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `template_job_id` → `research_campaign_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_job_budgets`
 
@@ -4042,8 +4042,8 @@ flowchart LR
 | `budget_json` | `TEXT` | True | — | — |
 | `created_at` | `TEXT` | True | — | — |
 
-- FK `campaign_id` → `research_campaign_jobs.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `job_id` → `research_campaign_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaign_jobs.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `job_id` → `research_campaign_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_jobs`
 
@@ -4068,8 +4068,8 @@ flowchart LR
 | `budget_revision` | `INTEGER` | True | — | 1 |
 | `source_request_json` | `TEXT` | True | — | '' |
 
-- FK `job_id` → `research_search_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_id` → `research_campaigns.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `job_id` → `research_search_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_id` → `research_campaigns.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_revisions`
 
@@ -4082,7 +4082,7 @@ flowchart LR
 | `policy_json` | `TEXT` | True | — | — |
 | `created_at` | `TEXT` | True | — | — |
 
-- FK `campaign_id` → `research_campaigns.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaigns.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_staging_cleanups`
 
@@ -4101,8 +4101,8 @@ flowchart LR
 | `reason` | `TEXT` | True | — | '' |
 | `updated_at` | `TEXT` | True | — | — |
 
-- FK `source_id` → `research_campaign_input_sources.source_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `operation_id` → `research_campaign_storage_operations.operation_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `source_id` → `research_campaign_input_sources.source_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `operation_id` → `research_campaign_storage_operations.operation_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_storage_operations`
 
@@ -4124,8 +4124,8 @@ flowchart LR
 | `input_path` | `TEXT` | True | — | '' |
 | `reason` | `TEXT` | True | — | '' |
 
-- FK `campaign_id` → `research_campaigns.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `source_id` → `research_campaign_input_sources.source_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaigns.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `source_id` → `research_campaign_input_sources.source_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_worker_attempts`
 
@@ -4143,9 +4143,9 @@ flowchart LR
 | `exit_code` | `INTEGER` | False | — | — |
 | `reason` | `TEXT` | True | — | '' |
 
-- FK `campaign_id` → `research_campaign_revisions.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_revision` → `research_campaign_revisions.revision`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `campaign_id` → `research_campaigns.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaign_revisions.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_revision` → `research_campaign_revisions.revision`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `campaign_id` → `research_campaigns.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaign_workers`
 
@@ -4163,7 +4163,7 @@ flowchart LR
 | `reason` | `TEXT` | True | — | '' |
 | `updated_at` | `TEXT` | True | — | — |
 
-- FK `campaign_id` → `research_campaigns.campaign_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `campaign_id` → `research_campaigns.campaign_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_campaigns`
 
@@ -4193,8 +4193,8 @@ flowchart LR
 | `status` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `trial_id` → `research_search_trials.trial_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `experiment_id` → `research_search_experiments.experiment_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `trial_id` → `research_search_trials.trial_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `experiment_id` → `research_search_experiments.experiment_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_candidate_events`
 
@@ -4211,8 +4211,8 @@ flowchart LR
 | `available_at` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `decision_id` → `research_decisions.decision_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `decision_id` → `research_decisions.decision_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_comparisons`
 
@@ -4227,8 +4227,8 @@ flowchart LR
 | `status` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `variant_run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `baseline_run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `variant_run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `baseline_run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_context_hypothesis_revisions`
 
@@ -4260,8 +4260,8 @@ flowchart LR
 | `final_action` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `snapshot_id` → `research_feature_snapshots.snapshot_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `snapshot_id` → `research_feature_snapshots.snapshot_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_entry_theses`
 
@@ -4276,8 +4276,8 @@ flowchart LR
 | `created_at` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `leadership_revision_id` → `research_theme_leadership_revisions.revision_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `leadership_revision_id` → `research_theme_leadership_revisions.revision_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_execution_events`
 
@@ -4296,7 +4296,7 @@ flowchart LR
 | `symbol` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_feature_snapshots`
 
@@ -4312,7 +4312,7 @@ flowchart LR
 | `symbol` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_final_holdout_events`
 
@@ -4327,7 +4327,7 @@ flowchart LR
 | `accessed_at` | `TEXT` | True | — | — |
 | `reason` | `TEXT` | True | — | — |
 
-- FK `window_id` → `research_final_holdout_windows.window_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `window_id` → `research_final_holdout_windows.window_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_final_holdout_executions`
 
@@ -4348,8 +4348,8 @@ flowchart LR
 | `reason` | `TEXT` | True | — | '' |
 | `generation` | `INTEGER` | True | — | 1 |
 
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `window_id` → `research_final_holdout_windows.window_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `window_id` → `research_final_holdout_windows.window_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_final_holdout_recoveries`
 
@@ -4366,7 +4366,7 @@ flowchart LR
 | `claimed_at` | `TEXT` | True | — | '' |
 | `generation` | `INTEGER` | True | — | — |
 
-- FK `execution_id` → `research_final_holdout_executions.execution_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `execution_id` → `research_final_holdout_executions.execution_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_final_holdout_windows`
 
@@ -4405,8 +4405,8 @@ flowchart LR
 | `parent_ordinal` | `INTEGER` | True | 2 | — |
 | `parent_id` | `TEXT` | True | — | — |
 
-- FK `parent_id` → `research_hypotheses.hypothesis_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `hypothesis_id` → `research_hypotheses.hypothesis_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `parent_id` → `research_hypotheses.hypothesis_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `hypothesis_id` → `research_hypotheses.hypothesis_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_outcome_labels`
 
@@ -4423,8 +4423,8 @@ flowchart LR
 | `available_at` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `candidate_event_id` → `research_candidate_events.event_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `candidate_event_id` → `research_candidate_events.event_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_reports`
 
@@ -4437,7 +4437,7 @@ flowchart LR
 | `status` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_run_evaluations`
 
@@ -4450,7 +4450,7 @@ flowchart LR
 | `status` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_runs`
 
@@ -4500,7 +4500,7 @@ flowchart LR
 | `occurred_at` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `job_id` → `research_search_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `job_id` → `research_search_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_search_jobs`
 
@@ -4523,7 +4523,7 @@ flowchart LR
 | `generation` | `INTEGER` | True | — | 0 |
 | `heartbeat_at` | `TEXT` | True | — | '' |
 
-- FK `experiment_id` → `research_search_experiments.experiment_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `experiment_id` → `research_search_experiments.experiment_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_search_trials`
 
@@ -4539,7 +4539,7 @@ flowchart LR
 | `finished_at` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `experiment_id` → `research_search_experiments.experiment_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `experiment_id` → `research_search_experiments.experiment_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_theme_leadership_revisions`
 
@@ -4569,9 +4569,9 @@ flowchart LR
 | `available_at` | `TEXT` | True | — | — |
 | `document_json` | `TEXT` | True | — | — |
 
-- FK `leadership_revision_id` → `research_theme_leadership_revisions.revision_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `thesis_id` → `research_entry_theses.thesis_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `run_id` → `research_runs.run_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `leadership_revision_id` → `research_theme_leadership_revisions.revision_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `thesis_id` → `research_entry_theses.thesis_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `run_id` → `research_runs.run_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
 
 ### `research_trial_attempts`
 
@@ -4591,5 +4591,5 @@ flowchart LR
 | `finished_at` | `TEXT` | True | — | '' |
 | `error` | `TEXT` | True | — | '' |
 
-- FK `experiment_id` → `research_search_experiments.experiment_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
-- FK `job_id` → `research_search_jobs.job_id`; ON DELETE NO ACTION, ON UPDATE NO ACTION
+- FK `experiment_id` → `research_search_experiments.experiment_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`
+- FK `job_id` → `research_search_jobs.job_id`; 삭제 정책 `ON DELETE NO ACTION`, 갱신 정책 `ON UPDATE NO ACTION`

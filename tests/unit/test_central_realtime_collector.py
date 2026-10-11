@@ -38,12 +38,20 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
             entered, release = Event(), Event()
 
             class LostAckStore:
+                fail = True
                 def save_minute_bars(self, rows, *, observations=None):
                     entered.set()
                     if not release.wait(5):
                         raise TimeoutError('test did not release writer')
                     store.save_minute_bars(rows, observations=observations)
-                    raise OSError('injected lost commit acknowledgement')
+                    if self.fail:
+                        raise OSError('injected lost commit acknowledgement')
+
+                def save_realtime_snapshots(self, rows):
+                    store.save_realtime_snapshots(rows)
+
+                def finalize_minute_bars(self, rows):
+                    store.finalize_minute_bars(rows)
 
                 def load_minute_bars(self, *args, **kwargs):
                     return store.load_minute_bars(*args, **kwargs)
@@ -51,11 +59,20 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
             at = datetime(2026, 10, 6, 10, 4, 40)
             collector = CentralRealtimeCollector(lambda: 'token', 'real', RealtimeHub(), lambda: at, LostAckStore())
             collector._minute_bars.add(TradeTick('005930', 100, None, None, 2, None, '100440'), at, at.timestamp())
+            collector._observe_reconnect_trade()
+            initial = collector.operational_status()
+            self.assertIsNone(initial['persistence']['last_success_at'])
+            self.assertEqual(1, initial['persistence']['pending_records'])
+            self.assertIsNotNone(initial['receive']['last_received_at'])
 
             async def exercise():
                 flush = asyncio.create_task(collector._flush_snapshots(flush_latest=False, flush_seconds=False))
                 try:
                     self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                    health = collector.operational_status()['persistence']
+                    self.assertEqual(('saving', 0, 1), (health['state'], health['pending_records'], health['inflight_records']))
+                    self.assertIsNone(health['last_success_at'])
+                    self.assertEqual(datetime.fromtimestamp(at.timestamp(), timezone.utc).isoformat(), health['oldest_record_at'])
                     [during] = await collector.load_live_minute_bars('005930', '2026-10-06', 'KRX')
                     self.assertEqual(2, during['volume'])
                     self.assertEqual([], store.load_minute_bars('005930', '2026-10-06', 'KRX'))
@@ -63,11 +80,118 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
                     release.set()
                     with self.assertRaisesRegex(OSError, 'lost commit'):
                         await flush
+                failed = collector.operational_status()['persistence']
+                self.assertEqual(('degraded', 1, 0), (failed['state'], failed['pending_records'], failed['inflight_records']))
+                self.assertIsNone(failed['last_success_at'])  # DB committed, but its ACK was lost.
+                collector._pending_snapshots[('trade', '005930')] = {
+                    'event_type': 'trade', 'item_key': '005930', 'received_at': at.timestamp(),
+                    'event': {'type': 'trade', 'payload': {}},
+                }
+                # An unrelated successful save cannot clear the failed minute writer.
+                with self.assertRaisesRegex(OSError, 'lost commit'):
+                    await collector._flush_snapshots(flush_seconds=False)
+                self.assertEqual('degraded', collector.operational_status()['persistence']['state'])
                 collector._minute_bars.add(TradeTick('005930', 110, None, None, 3, None, '100441'), at, at.timestamp())
                 [after] = await collector.load_live_minute_bars('005930', '2026-10-06', 'KRX')
                 self.assertEqual(5, after['volume'])
                 self.assertEqual(2, store.load_minute_bars('005930', '2026-10-06', 'KRX')[0]['volume'])
+                collector._store.fail = False
+                await collector._flush_snapshots(flush_latest=False, flush_seconds=False)
+                recovered = collector.operational_status()['persistence']
+                self.assertEqual(('observed', 0, 0), (recovered['state'], recovered['pending_records'], recovered['inflight_records']))
+                self.assertFalse(recovered['unresolved_failures'])
+                self.assertIn('minute_bars', recovered['last_success_by_kind'])
+                self.assertEqual(5, store.load_minute_bars('005930', '2026-10-06', 'KRX')[0]['volume'])
 
+            try:
+                asyncio.run(exercise())
+            finally:
+                release.set()
+                store.close()
+
+    def test_operational_status_covers_all_native_save_kinds_without_draining(self) -> None:
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+        from kiwoom_monitor.central_server.market_observations import market_state_observation
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / 'health.sqlite3')
+            store.initialize()
+            at = datetime(2026, 10, 6, 10, 4, 50, tzinfo=timezone(timedelta(hours=9)))
+            collector = CentralRealtimeCollector(lambda: 'token', 'real', RealtimeHub(), lambda: at + timedelta(seconds=15), store)
+            tick = TradeTick('005930', 100, None, None, 2, None, '100450')
+            collector._minute_bars.add(tick, at, at.timestamp())
+            collector._second_trades.add(tick, at, at.timestamp())
+            collector._pending_snapshots[('trade', '005930')] = {
+                'event_type': 'trade', 'item_key': '005930', 'received_at': at.timestamp(), 'event': {'type': 'trade', 'payload': {}},
+            }
+            collector._pending_account_entry_symbols[('2026-10-06', '005930')] = {
+                'owner': '2026-10-06', 'key': '005930', 'document': {'last_executed_at': at.isoformat()},
+            }
+            collector._pending_stock_references['005930'] = {
+                'owner': '005930', 'key': 'latest', 'document': {'observed_at': at.isoformat()},
+            }
+            payload = {'market': 'KOSPI', 'value': {}}
+            collector._pending_market_history['KOSPI'] = (
+                'KOSPI', '2026-10-06T10:04', payload,
+                market_state_observation('KOSPI', '2026-10-06T10:04', payload, at),
+            )
+            try:
+                before = collector.operational_status()['persistence']
+                self.assertEqual(6, before['pending_records'])
+                self.assertEqual(before, collector.operational_status()['persistence'])
+                self.assertFalse(store.load_minute_bars('005930', '2026-10-06', 'KRX'))
+                asyncio.run(collector._flush_snapshots())
+                after = collector.operational_status()['persistence']
+                self.assertEqual(set(before['pending_by_kind']), set(after['last_success_by_kind']))
+                self.assertEqual((0, 0), (after['pending_records'], after['inflight_records']))
+                stamp = after['last_success_at']
+                asyncio.run(collector._flush_snapshots())
+                self.assertEqual(stamp, collector.operational_status()['persistence']['last_success_at'])
+            finally:
+                store.close()
+
+    def test_operational_inflight_survives_cancelled_flush_and_close_waiters(self) -> None:
+        from threading import Event
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / 'drain-health.sqlite3')
+            store.initialize()
+            entered, release = Event(), Event()
+            class HeldStore:
+                def __getattr__(self, name):
+                    return getattr(store, name)
+                def save_minute_bars(self, rows, *, observations=None):
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError('test did not release writer')
+                    store.save_minute_bars(rows, observations=observations)
+            at = datetime(2026, 10, 6, 10, 4, 40)
+            collector = CentralRealtimeCollector(lambda: 'token', 'real', RealtimeHub(), lambda: at, HeldStore())
+            collector._minute_bars.add(TradeTick('005930', 100, None, None, 2, None, '100440'), at, at.timestamp())
+            async def exercise():
+                waiter = asyncio.create_task(collector._flush_snapshots(flush_latest=False, flush_seconds=False))
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                    waiter.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await waiter
+                    close_waiter = asyncio.create_task(collector.close())
+                    await asyncio.sleep(0)
+                    close_waiter.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await close_waiter
+                    during = collector.operational_status()['persistence']
+                    self.assertEqual(('saving', 1), (during['state'], during['inflight_records']))
+                    self.assertIsNone(during['last_success_at'])
+                    self.assertFalse(collector._close_task.done())
+                    release.set()
+                    await collector.close()
+                    after = collector.operational_status()['persistence']
+                    self.assertEqual(('observed', 0), (after['state'], after['inflight_records']))
+                    self.assertIn('minute_bars', after['last_success_by_kind'])
+                    self.assertEqual(2, store.load_minute_bars('005930', '2026-10-06', 'KRX')[0]['volume'])
+                finally:
+                    release.set()
+                    await collector.close()
             try:
                 asyncio.run(exercise())
             finally:

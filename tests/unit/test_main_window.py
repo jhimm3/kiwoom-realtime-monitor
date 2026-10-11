@@ -4,7 +4,8 @@ import gc
 import os
 import tempfile
 import unittest
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
@@ -38,6 +39,41 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_gap_keeps_latest_price_but_blocks_partial_trade_alert_and_entry_inputs(self) -> None:
+        from kiwoom_monitor.domain.realtime_gap import GapRange, RealtimeGap
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "monitor.sqlite3")
+            database.initialize()
+            database.settings.set("trade_value_alert_enabled", "1")
+            database.settings.set("trade_value_1m_alert_eok", "1")
+            window = MainWindow(database.settings, FakeRankingLoader())
+            now = datetime(2026, 10, 9, 10, 15, 10)
+            window._ranking_now = lambda: now
+            window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
+            first = TradeTick("005930", 100, None, 1000, 10, None, "101501")
+            window._on_trade_tick(first)
+            window._on_trade_tick(replace(first, cumulative_trade_value=1250))
+            window._render_trade_values("005930")
+            self.assertTrue(window._table.item(0, 6).data(window.TRADE_VALUE_ALERT_ROLE))
+            gap = RealtimeGap(1, (GapRange("trade", "005930", "KRX", now, now),), False)
+            window._on_realtime_gap(gap.document())
+            window._on_trade_tick(replace(first, current_price=110, cumulative_trade_value=1300))
+            window._flush_trade_tick_updates()
+            self.assertEqual(110, window._current_prices["005930"])
+            self.assertIn("부분", window._table.item(0, 6).text())
+            self.assertFalse(window._table.item(0, 6).data(window.TRADE_VALUE_ALERT_ROLE))
+            self.assertIsNone(window._entry_market_state()["ranking_table"]["visible_trade_value_1m_eok"])
+            pressure = window._execution_pressure_at_entry("005930", now)
+            self.assertFalse(pressure["available"])
+            self.assertIsNone(pressure["buy_share_percent"])
+            now += timedelta(seconds=61)
+            window._on_trade_tick(replace(first, trade_time=now.strftime("%H%M%S"), cumulative_trade_value=1400))
+            recovered = window._execution_pressure_at_entry("005930", now)
+            self.assertTrue(recovered.get("available", True))
+            self.assertEqual(100.0, recovered["buy_share_percent"])
+            self.assertFalse(pressure["available"])  # Historical snapshot stays partial.
+            window.close()
+
     def test_after_hours_daily_restore_only_reads_missing_nas_proof(self) -> None:
         from kiwoom_monitor.application.secondary_data_schedule import SecondaryStartPhase
         now = datetime(2026, 10, 1, 21, 0)

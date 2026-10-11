@@ -13,6 +13,11 @@ from kiwoom_monitor.infrastructure.naver_stock_market_news import initialize_dat
 
 
 class HistoricalCollectionMonitorTests(unittest.TestCase):
+    def test_truncated_jobs_remain_outside_completed_progress(self) -> None:
+        text, percent = monitor._counts_text({"complete": 2, "truncated": 1, "pending": 1})
+        self.assertIn("완료 2 / 4", text)
+        self.assertEqual(50, percent)
+
     def test_excluded_products_do_not_inflate_collection_denominator(self) -> None:
         text, percent = monitor._counts_text({"complete": 2, "failed": 1, "excluded": 2})
         self.assertIn("완료 2 / 3", text)

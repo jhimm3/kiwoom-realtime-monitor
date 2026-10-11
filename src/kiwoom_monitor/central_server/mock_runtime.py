@@ -135,6 +135,10 @@ class MockCredentialOwner:
         """Snapshot admitted query contexts; dormant/history accounts stay outside."""
         return tuple(b.binding for b in self._bundles.values() if b.binding is not None and b.account_queries is not None)
 
+    def has_started_monitor(self) -> bool:
+        """Published profiles with a started monitor; not permission to place orders."""
+        return any(bundle.monitor.is_started for bundle in self._bundles.values())
+
     def active_revision(self, profile_id: str):
         return self._revisions.get(profile_id)
 
@@ -288,7 +292,7 @@ class MockCredentialOwner:
             client, allowed_endpoints=MOCK_ACCOUNT_ENDPOINTS, namespace=f"mock-account:{account_ref}")
         plan = _MockCredentialPlan(client, broker, None, None, previous, account_ref, run_id,
             configuration["revision"], lock, self._revisions.get(profile_id),
-            self._settings_revisions.get(profile_id), bool(previous and previous.monitor._task is not None))
+            self._settings_revisions.get(profile_id), bool(previous and previous.monitor.is_started))
         plan.previous_disabled = current.disabled
         return ValidatedCredential(account_ref=account_ref, run_id=run_id, prepared=plan)
 
@@ -359,7 +363,7 @@ class MockCredentialOwner:
                 plan = _MockCredentialPlan(client, broker, prepared, identity, previous,
                     account_ref, run_id, configuration["revision"], lock,
                     self._revisions.get(profile_id), self._settings_revisions.get(profile_id),
-                    bool(previous and previous.monitor._task is not None))
+                    bool(previous and previous.monitor.is_started))
                 plan.previous_disabled = bool(current and current.disabled)
                 return ValidatedCredential(account_ref=account_ref, run_id=run_id, prepared=plan)
             except Exception:
@@ -553,7 +557,7 @@ class MockCredentialOwner:
         credential_revision = record.revision
         rollback = _MockCredentialPlan(old.client, old.broker, None, old._identity, old,
             old.account_ref, old.run_id, expected_revision, lock, self._revisions.get(profile_id),
-            self._settings_revisions.get(profile_id), old.monitor._task is not None)
+            self._settings_revisions.get(profile_id), old.monitor.is_started)
         self._applying[profile_id] = rollback
         try:
             if ({**value, "scope": current["scope"], "revision": expected_revision} == current

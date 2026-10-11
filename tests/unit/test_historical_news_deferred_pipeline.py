@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import sqlite3
+import json
+from datetime import UTC, datetime
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.error import URLError
 
 from kiwoom_monitor.infrastructure.historical_backfill import (
     ArticleFetchAttempt,
@@ -16,6 +19,10 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
     NaverHistoricalNewsItem,
     NaverHistoricalNewsPage,
     claim_news_article_pipeline,
+    claim_truncated_news_job,
+    finish_news_backfill_job,
+    finish_news_range_job,
+    parse_naver_historical_search_page,
     defer_news_article_host_403,
     finalize_news_article_jobs,
     finish_news_article_pipeline,
@@ -51,6 +58,148 @@ def _result(article: str = "one") -> ArticlePublicationResult:
         f"https://publisher.test/{article}",
         "2022-11-01T09:00:00+09:00",
     )
+
+
+
+def _continuation_page(index: int, *, count: int = 10, identity_page: int | None = None):
+    identity_page = index if identity_page is None else identity_page
+    articles = [{"contentHref": f"https://publisher.test/{identity_page}-{n}",
+                 "title": f"sample article {identity_page}-{n}",
+                 "sourceProfile": {"subTexts": [{"textHref":
+                     f"https://n.news.naver.com/mnews/article/001/{identity_page * 10 + n:010d}"}]}}
+                for n in range(count)]
+    payload = {"collection": [{"script":
+        'entry.bootstrap(document.getElementById("root"), ' +
+        json.dumps({"body": {"children": articles}}) + ');'}]} if articles else {"collection": []}
+    return parse_naver_historical_search_page("005930", "sample", "2022-11-01",
+                                             index * 10 + 1, payload)
+
+
+class TruncatedNewsContinuationTests(unittest.TestCase):
+    def _seed(self, db, *, state="truncated", code="005930"):
+        initialize_probe_database(db)
+        with closing(sqlite3.connect(db)) as c, c:
+            c.execute("INSERT INTO news_backfill_jobs(code,target_date,query_text,state,"
+                      "pages_observed,items_observed,last_error,updated_at) VALUES(?,?,?,?,100,1000,?,?)",
+                      (code, "2022-11-01", "sample", state,
+                       "page_limit_reached" if state == "truncated" else "", datetime.now(UTC).isoformat()))
+        if code == "005930":
+            job = NewsBackfillJob(code, "2022-11-01", "sample", "test", "", 1)
+            store_naver_historical_search_page(db, _continuation_page(99), deferred_job_key=news_job_key(job))
+
+    def _run(self, db, fetch, *, pages=100):
+        argv = ["probe_historical_backfill.py", "news-run", "--jobs", "1", "--search-only",
+                "--resume-truncated", "--max-pages", str(pages), "--output", str(db)]
+        with patch("sys.argv", argv), patch(
+            "scripts.probe_historical_backfill._SearchPagePool.fetch_batch", side_effect=fetch):
+            return main()
+
+    def test_only_truncated_resumes_101_and_preserves_old_article_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "news.sqlite3"
+            self._seed(db)
+            self._seed(db, state="pending", code="000660")
+            self._seed(db, state="complete", code="035420")
+            requested = []
+            def fetch(job, indexes):
+                requested.extend(indexes)
+                return [(i, _continuation_page(i, count=10 if i == 100 else 0)) for i in indexes]
+            self.assertEqual(0, self._run(db, fetch))
+            self.assertEqual([100, 101], requested)
+            with closing(sqlite3.connect(db)) as c:
+                self.assertEqual(("search_complete", 102, 103, 1010), c.execute(
+                    "SELECT state,pages_observed,next_search_page,items_observed "
+                    "FROM news_backfill_jobs WHERE code='005930'").fetchone())
+                self.assertEqual(20, c.execute("SELECT COUNT(*) FROM news_article_pipeline").fetchone()[0])
+                self.assertEqual([("000660", "pending"), ("035420", "complete")], c.execute(
+                    "SELECT code,state FROM news_backfill_jobs WHERE code!='005930' ORDER BY code").fetchall())
+
+    def test_capped_chunks_continue_201_without_consuming_error_retry_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "news.sqlite3"
+            self._seed(db)
+            indexes_seen = []
+            def fetch(job, indexes):
+                indexes_seen.extend(indexes)
+                return [(i, _continuation_page(i)) for i in indexes]
+            self.assertEqual(0, self._run(db, fetch, pages=100))
+            self.assertEqual(list(range(100, 200)), indexes_seen)
+            job = claim_truncated_news_job(db)
+            self.assertIsNotNone(job)
+            self.assertEqual((201, 2000, 1), (job.next_search_page, job.previous_items, job.attempts))
+            self.assertIsNone(claim_truncated_news_job(db))
+
+    def test_saved_page_and_cursor_rollback_together_and_stale_worker_recovers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "news.sqlite3"
+            self._seed(db)
+            job = claim_truncated_news_job(db)
+            with patch("kiwoom_monitor.infrastructure.historical_backfill._checkpoint_news_search_page",
+                       side_effect=RuntimeError("checkpoint failure")):
+                with self.assertRaisesRegex(RuntimeError, "checkpoint failure"):
+                    store_naver_historical_search_page(db, _continuation_page(100),
+                        deferred_job_key=news_job_key(job), continuation_job=job, items_observed=1010)
+            with closing(sqlite3.connect(db)) as c, c:
+                self.assertEqual((101, 1000), c.execute(
+                    "SELECT next_search_page,items_observed FROM news_backfill_jobs").fetchone())
+                self.assertEqual(10, c.execute("SELECT COUNT(*) FROM news_article_pipeline").fetchone()[0])
+            store_naver_historical_search_page(db, _continuation_page(100),
+                deferred_job_key=news_job_key(job), continuation_job=job, items_observed=1010)
+            with closing(sqlite3.connect(db)) as c, c:
+                c.execute("UPDATE news_backfill_jobs SET updated_at='2000-01-01'")
+            recovered = claim_truncated_news_job(db)
+            self.assertEqual((102, 1010), (recovered.next_search_page, recovered.previous_items))
+
+    def test_repeated_full_page_remains_incomplete_and_is_not_automatically_retried(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "news.sqlite3"
+            self._seed(db)
+            self.assertEqual(2, self._run(db, lambda job, indexes:
+                [(i, _continuation_page(i, identity_page=99)) for i in indexes]))
+            with closing(sqlite3.connect(db)) as c:
+                self.assertEqual(("truncated", "repeated_search_page", 101), c.execute(
+                    "SELECT state,last_error,next_search_page FROM news_backfill_jobs").fetchone())
+            self.assertIsNone(claim_truncated_news_job(db))
+
+    def test_empty_tail_finishes_search_but_waits_for_existing_article_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "news.sqlite3"
+            self._seed(db)
+            self.assertEqual(0, self._run(db, lambda job, indexes:
+                [(i, _continuation_page(i, count=0)) for i in indexes]))
+            with closing(sqlite3.connect(db)) as c:
+                self.assertEqual("search_complete", c.execute("SELECT state FROM news_backfill_jobs").fetchone()[0])
+
+    def test_network_failure_after_committed_page_resumes_at_102(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "news.sqlite3"
+            self._seed(db)
+            def fetch(job, indexes):
+                if indexes[0] == 100:
+                    return [(100, _continuation_page(100))]
+                raise URLError("temporary search outage")
+            self.assertEqual(3, self._run(db, fetch))
+            resumed = claim_truncated_news_job(db)
+            self.assertEqual((102, 1010), (resumed.next_search_page, resumed.previous_items))
+
+    def test_single_day_range_completion_updates_truncated_daily_member(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "news.sqlite3"
+            self._seed(db)
+            with closing(sqlite3.connect(db)) as c, c:
+                c.execute("UPDATE news_backfill_jobs SET pages_observed=0")
+                c.execute("INSERT INTO news_range_jobs(range_id,code,query_text,start_date,end_date,state,"
+                          "member_count,pages_observed,items_observed,last_error,updated_at) "
+                          "VALUES('r','005930','sample','2022-11-01','2022-11-01','truncated',1,100,1000,"
+                          "'page_limit_reached',?)", (datetime.now(UTC).isoformat(),))
+                c.execute("INSERT INTO news_range_members VALUES('r','005930','2022-11-01','sample')")
+            job = claim_truncated_news_job(db)
+            self.assertEqual("r", job.range_id)
+            finish_news_range_job(db, job, state="search_complete", pages_observed=101,
+                                  items_observed=1000, usable_articles=0, unreadable_articles=0,
+                                  missing_time_articles=0)
+            with closing(sqlite3.connect(db)) as c:
+                self.assertEqual("search_complete", c.execute("SELECT state FROM news_backfill_jobs").fetchone()[0])
 
 
 class DeferredHistoricalNewsTests(unittest.TestCase):

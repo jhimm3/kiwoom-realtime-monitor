@@ -155,7 +155,7 @@ class CentralRealtimeWorker(QThread):
         elif event_type == "realtime_gap":
             dropped = event.get("dropped_events")
             if type(dropped) is int and dropped > 0:
-                self.realtime_gap.emit(dropped)
+                self.realtime_gap.emit(event if "ranges" in event else dropped)
         elif event_type == "connection_failed":
             if time.monotonic() < self._planned_deadline:
                 self.status_changed.emit("나스 실시간 연결 변경 중 · 기존 순위 유지")

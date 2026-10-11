@@ -225,53 +225,45 @@ jobs:
 
   windows-extended:
     name: Extended Windows regression
-    needs: [select-extended]
+    needs: [select-extended, all-local]
     if: ${{ needs['select-extended'].outputs.windows_fast == 'true' }}
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-          cache: pip
-          cache-dependency-path: requirements.lock.txt
-      - run: python -m pip install -r requirements.lock.txt
-      - run: >-
-          python scripts/run_regression.py --profile ci-extended-windows
-          --timeout-seconds 1800 --output tmp/regression/ci-extended-windows
-      - if: always()
-        uses: actions/upload-artifact@v7
+      - uses: actions/download-artifact@v7
         with:
-          name: extended-windows-${{ github.run_id }}
-          path: tmp/regression/ci-extended-windows/
-          if-no-files-found: error
-          retention-days: 14
+          name: all-local-regression-${{ github.run_id }}
+          path: tmp/regression/existing-all-local
+      - name: Verify already executed Windows profile on matching source
+        run: >-
+          python -m scripts.check_required_ci_results --windows-only
+          --windows tmp/regression/existing-all-local/run.json
+          --covered-profile ci-extended-windows
 
   windows-long:
     name: Long Windows replay regression
-    needs: [select-extended]
+    needs: [select-extended, all-local]
     if: ${{ needs['select-extended'].outputs.windows_long == 'true' }}
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-          cache: pip
-          cache-dependency-path: requirements.lock.txt
-      - run: python -m pip install -r requirements.lock.txt
-      - run: >-
-          python scripts/run_regression.py --profile ci-long-windows
-          --timeout-seconds 1800 --output tmp/regression/ci-long-windows
-      - if: always()
-        uses: actions/upload-artifact@v7
+      - uses: actions/download-artifact@v7
         with:
-          name: long-windows-${{ github.run_id }}
-          path: tmp/regression/ci-long-windows/
-          if-no-files-found: error
-          retention-days: 14
+          name: all-local-regression-${{ github.run_id }}
+          path: tmp/regression/existing-all-local
+      - name: Verify already executed Windows profile on matching source
+        run: >-
+          python -m scripts.check_required_ci_results --windows-only
+          --windows tmp/regression/existing-all-local/run.json
+          --covered-profile ci-long-windows
 
   postgres-extended:
     name: Extended PostgreSQL integration

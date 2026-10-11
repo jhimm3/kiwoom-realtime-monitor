@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv, MinuteTradeValueAggregator
@@ -144,7 +145,8 @@ class MinuteTradeValueTests(unittest.TestCase):
         )
 
         self.assertIsNone(late)
-        self.assertEqual(query_bar, aggregator._bars["005930"][0])
+        self.assertEqual(query_bar, replace(aggregator._bars["005930"][0], metadata=None))
+        self.assertTrue(aggregator._bars["005930"][0].metadata.is_complete)
         self.assertEqual(query_bar.trade_value_eok, aggregator.completed_today_trade_value_eok("005930", now))
         current = aggregator.ingest(
             TradeTick("005930", 130, 10_010, 12_100, 10, None, "100201"),

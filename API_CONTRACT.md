@@ -1,61 +1,25 @@
 # NAS API 계약
 
-2026-10-10 local block capture candidate: `POST /api/v1/diagnostics/trace` adds strict boolean
-`large_inputs` (defaultfalse), requiring `store_inputs=true` and deferred `persist_at`. Invalid
-type is422; missing prerequisites are409 with child-control rollback and master preserved.
-This opt-in selects trace schema4 with `large-store-input/v1` for daily/minute replacements,
-second bars and Shadow checkpoints. Capabilities adds `large_input_capture` while retaining
-the legacy schema/options fields: typed accounting64MiB, encoded blocks1MiB, encoded input128MiB.
-All parts must pass checksums before offline native replay; public payload download does not
-concatenate block roots. Window reports distinguish verified block bytes from retained legacy
-decoded bytes. NAS capacity acceptance is pending; no deployment or Monday registration claim.
+> 정리 기준(2026-10-11): API·필드·오류 계약을 다룬다. 날짜가 붙은 확장·검증 문단은 그 단계 당시의 구현·검증 범위이며, 당시의 배포 대기 표현을 현재 배포 상태로 해석하지 않는다. 최신 실행 소스와 배포 기록은 [현재 상태](docs/CURRENT_STATUS.md), 실제 잔여는 [남은 작업](docs/OPEN_ITEMS.md), 진단 운영·제어의 통합 계약은 [NAS 진단 운영](docs/NAS_RUNTIME_DIAGNOSTICS.md)을 따른다.
 
-The same local candidate adds strict boolean `account_inputs` (defaultfalse), requiring
-`store_inputs=true` and deferred `persist_at`; type/prerequisite errors use422/409.
-Capabilities adds `account_input_capture` with schema4 and `native_replay_ready=false`.
-Account recovery/events/snapshots and execution lease/ledger arguments use explicit typed
-codecs. Only authority-bearing owner tokens become session HMAC aliases; UUIDs, revisions,
-run IDs and order IDs remain native values. The HMAC key and source tokens are not persisted.
-Actor attribution follows actual account writers/heartbeat/start/stop and VI live/backfill.
-Account opt-in now captures account-context/v2: registry/binding, initial runtime leases,
-execution intents/events/account snapshots and settings/control/recovery/event documents
-before input admission. The next execution-event sequence preserves observed gaps; its
-transactional RESTART shares the v3 seal rollback. v1 capsules retain their original scope.
-PostgreSQL uses READ ONLY
-REPEATABLE READ with a named cursor, bounded fetch/row/document/total size and a read deadline.
-The context has32MiB copy accounting/50,000 row bounds and its own block profile; it is
-atomically admitted before native producers and persisted with the existing deferred writer.
-Status exposes only checksum/count/timing; full projected values use the authenticated
-recorded-file reader. Source authority aliases share the input session key; original
-fingerprints/tokens/vault data are absent. Child renewal checks the same control revision
-and preparation does not shorten the requested input duration. A v3 seal can apply the
-detached capsule after verifying its v1 parent, in the same management transaction.
-Account/VI scheduler wiring and expected-failure execution passed the78-test native
-PostgreSQL gate. Offline CLI v3 seal/run now reads the pinned capsule and validates the
-explicit native frontier/source clock before acquiring a DB lease. Block-aware privileged
-registration and v3 worker bridging are implemented locally; root helper installation is
-separate. Actual offline CLI seal/run passed107 NAS PostgreSQL tests, including two runs
-of the same12 controlled inputs/initial DB with matching content, native outcomes and restore.
-Public `native_replay_ready` remains false: this API does not dispatch native
-Replay or promise source-state equivalence. NAS60minute acceptance/deployment remains pending.
+2026-10-10 로컬 블록 수집 후보: `POST /api/v1/diagnostics/trace`에 엄격한 불리언 `large_inputs`(기본값 false)를 추가했다. `store_inputs=true`와 지연 저장 시각 `persist_at`가 필요하다. 타입 오류는 422, 선행 조건 누락은 409이며 자식 제어를 되돌리고 master를 보존한다.
+이 선택은 일봉·분봉 교체, 초봉, Shadow 체크포인트에 trace 스키마 4와 `large-store-input/v1`을 사용한다. 기존 스키마·옵션 필드를 유지하면서 capabilities에 `large_input_capture`를 추가한다. 타입별 계산 한도는 64MiB, 인코딩 블록은 1MiB, 인코딩 입력은 128MiB 다.
+오프라인 원래 경로 재생 전에 모든 조각의 체크섬이 통과해야 한다. 공개 payload 다운로드는 블록 루트를 이어 붙이지 않는다. 구간 보고서는 검증한 블록 바이트와 기존 방식으로 보관한 디코딩 바이트를 구분한다. NAS 용량 검증은 미완료이며 배포·월요일 예약 완료를 뜻하지 않는다.
 
-Latest context/v2 gate passed138 NAS tests: same17 controlled native inputs/initial DB
-replayed twice,14 COMMIT/3 rollback per run, preserved initial ledger duplicates and
-source ledger/document contents and next sequence. An encoded-over8MiB Shadow input
-reconstructs into one actual PostgreSQL call/COMMIT with matching JSON. Failed seal
-rolls back rows/sequence and final restore drains all owned connections. This is offline
-acceptance; the latest root helper/registered-bundle path and60minute deployment remain pending.
+같은 로컬 후보는 엄격한 불리언 `account_inputs`(기본값 false)를 추가한다. `store_inputs=true`와 지연 저장 `persist_at`가 필요하며 타입·선행 조건 오류는 각각 422·409 다. capabilities는 스키마 4와 `native_replay_ready=false`인 `account_input_capture`를 제공한다.
+계좌 복구·이벤트·스냅샷과 실행 lease·원장의 인수는 명시적인 타입별 코덱을 사용한다. 권한을 부여하는 owner 토큰만 세션 HMAC 별칭으로 바꾼다. UUID·revision·run ID·order ID는 원래 값을 유지한다. HMAC 키와 원본 토큰은 저장하지 않는다. 행위자 귀속은 실제 계좌 writer·heartbeat·start·stop과 VI 실시간·과거 수집 경로를 따른다.
+계좌 수집을 선택하면 입력 승인 전에 `account-context/v2`를 수집한다. registry·binding, 초기 런타임 lease, 실행 intent·event·계좌 snapshot, settings·control·recovery·event 문서를 포함한다. 다음 execution-event 시퀀스는 관측된 빈 구간을 유지하고 트랜잭션 `RESTART`는 v3 seal과 함께 롤백된다. v1 캡슐은 원래 범위를 유지한다.
+PostgreSQL은 `READ ONLY REPEATABLE READ`와 이름 있는 cursor를 사용하며 fetch·행·문서·전체 크기 및 읽기 시간을 제한한다. 컨텍스트는 복사 계산 32MiB·50,000행 한도와 전용 블록 프로필을 갖는다. 원래 producer가 시작되기 전에 원자적으로 승인하고 기존 지연 writer로 저장한다.
+상태에는 체크섬·개수·시간만 노출한다. 전체 투영 값은 인증된 기록 파일 reader로 읽는다. 원본 권한 별칭은 입력 세션 키를 공유하며 원래 fingerprint·토큰·vault 데이터는 없다. 자식 갱신은 같은 control revision을 확인하고 준비 시간은 요청된 입력 수집 시간을 줄이지 않는다. v3 seal은 v1 부모를 확인한 뒤 같은 관리 트랜잭션에서 분리된 캡슐을 적용할 수 있다.
+계좌·VI 스케줄러 연결과 예상 실패 실행은 실제 PostgreSQL 78개 테스트를 통과했다. 오프라인 CLI v3 seal/run은 고정된 캡슐을 읽고 명시적 native frontier·source clock을 확인한 뒤 DB lease를 얻는다. 블록을 이해하는 권한 등록과 v3 worker 연결은 로컬 구현되었으며 root helper 설치는 별도다.
+실제 오프라인 CLI seal/run은 NAS PostgreSQL 107개 테스트를 통과했다. 같은 제어 입력 12개·초기 DB로 두 번 실행하여 내용·원래 경로 결과·복원 일치를 확인했다. 공개 `native_replay_ready`는 false를 유지한다. 이 API는 native Replay를 실행하거나 원본 상태 동등성을 보장하지 않는다. NAS 60분 검증·배포는 미완료다.
 
-2026-10-09 recorded input trace source (`2026.10.09-trace-ram-main-v1`): authenticated
-`GET /api/v1/diagnostics/capabilities` advertises `trace_input_capture` schema 3, observed-path-only
-coverage, causal REST/catalog/ranking/subscription/lifecycle/delivery-receipt boundaries, and
-collector event types `0B`, `0w`, `0J`, `0U`. `POST /api/v1/diagnostics/trace` keeps strict boolean
-`store_inputs`, `collector_inputs`, and `top20_inputs` opt-ins defaulting to false. Deferred persistence
-reports 8 GiB, 5,000,000 events, and 1 MiB/s; it retains inputs in bounded raw staging and framed RAM
-blocks before paced persistence. These are configured logical limits, not an RSS guarantee or proof of
-whole-market capture coverage. NAS active release has not yet been switched to this PC main source.
+최신 context/v2 검증은 NAS 138개 테스트를 통과했다. 같은 제어 입력 17개·초기 DB를 두 번 재생했고 매회 COMMIT 14개·롤백 3개였다. 초기 원장의 중복 결과, 원본 원장·문서 내용, 다음 시퀀스를 보존했다. 인코딩 크기 8MiB 초과 Shadow 입력을 실제 PostgreSQL 호출 1회·COMMIT 1회로 복원하여 JSON 일치를 확인했다. seal 실패 시 행·시퀀스를 롤백하고 최종 복원은 소유 연결을 모두 비웠다. 이는 오프라인 검증이다. 최신 root helper·등록 bundle 경로와 60분 배포 검증은 남아 있다.
 
-2026-09-29 NAS 진단 API v4(`2026.09.29-diagnostic-api-v4`)가 NAS에 배포됐다. 기존 Bearer 인증 아래 `GET /api/v1/diagnostics/capabilities`, `PUT /api/v1/diagnostics/control`, `GET /api/v1/diagnostics/snapshot`, `POST /api/v1/diagnostics/runs`, `GET /api/v1/diagnostics/runs/{run_id}`, `POST /api/v1/diagnostics/runs/{run_id}/cancel`, `GET /api/v1/diagnostics/reports`, `GET /api/v1/diagnostics/reports/{report_id}`, `GET /api/v1/diagnostics/history`를 제공한다. control은 `target=master|capture|workload`, `expected_revision` 필수, 기존 session/TTL/owner 규칙을 따른다. PostgreSQL snapshot은 고정 read-only query만 실행하며 `sections=postgres,activity,news_jobs,host,storage`에서 선택한다. query text·parameter·DSN은 반환하지 않는다. run은 `kind=measure|compare`, `seconds`와 선택 label/workload/request_id를 받아 202와 run ID를 반환하고, 동일 session/request_id의 같은 요청은 기존 run을 반환한다. 한 번에 한 run만 허용하며 409 충돌은 큐잉하지 않는다. 보고서는 기존 diagnostic-results JSON도 조회한다. 실제 검증은 [설계·검증 문서](docs/NAS_DIAGNOSTIC_API_DESIGN.md)에 기록하며, 관측 범위는 `opt_in_observed_calls_only`와 각 section의 scope에 한정된다.
+2026-10-09 기록 입력 trace 소스(`2026.10.09-trace-ram-main-v1`): 인증된 `GET /api/v1/diagnostics/capabilities`는 `trace_input_capture` 스키마 3, 관측 경로에 한정된 범위, 인과 REST·catalog·ranking·subscription·lifecycle·delivery-receipt 경계와 collector 이벤트 `0B`, `0w`, `0J`, `0U`를 알린다.
+`POST /api/v1/diagnostics/trace`의 엄격한 불리언 선택 `store_inputs`, `collector_inputs`, `top20_inputs`는 기본값 false를 유지한다. 지연 저장 한도는 8GiB·5,000,000이벤트·1MiB/s이며 제한된 원시 staging과 프레임 RAM 블록에 입력을 보관한 뒤 속도를 제한하여 저장한다. 이는 설정상 논리 한도이며 RSS 보장이나 전체 시장 수집 범위의 증거가 아니다. NAS 활성 release는 당시 PC main 소스로 전환되지 않았다.
+
+2026-09-29 NAS 진단 API v4(`2026.09.29-diagnostic-api-v4`)가 NAS에 배포됐다. 기존 Bearer 인증 아래 `GET /api/v1/diagnostics/capabilities`, `PUT /api/v1/diagnostics/control`, `GET /api/v1/diagnostics/snapshot`, `POST /api/v1/diagnostics/runs`, `GET /api/v1/diagnostics/runs/{run_id}`, `POST /api/v1/diagnostics/runs/{run_id}/cancel`, `GET /api/v1/diagnostics/reports`, `GET /api/v1/diagnostics/reports/{report_id}`, `GET /api/v1/diagnostics/history`를 제공한다. control은 `target=master|capture|workload`, `expected_revision` 필수, 기존 session/TTL/owner 규칙을 따른다. PostgreSQL snapshot은 고정 read-only query만 실행하며 `sections=postgres,activity,news_jobs,host,storage`에서 선택한다. query text·parameter·DSN은 반환하지 않는다. run은 `kind=measure|compare`, `seconds`와 선택 label/workload/request_id를 받아 202와 run ID를 반환하고, 동일 session/request_id의 같은 요청은 기존 run을 반환한다. 한 번에 한 run만 허용하며 409 충돌은 큐잉하지 않는다. 보고서는 기존 diagnostic-results JSON도 조회한다. 실제 검증은 [설계·검증 문서](docs/NAS_RUNTIME_DIAGNOSTICS.md#api-contract)에 기록하며, 관측 범위는 `opt_in_observed_calls_only`와 각 section의 scope에 한정된다.
 
 2026-09-27 공통 DB 관측 pilot: 인증된 `GET /api/v1/diagnostics/db-calls?start=<epoch>&end=<epoch>&mode=summary|verbose|raw&limit=200&slow_ms=500`는 capture 중 공통 경계를 통과한 호출만 반환한다. 구간은 0초 초과·1,800초 이내, `limit`은 1~500, `slow_ms`는 1~30,000이다. 응답은 `coverage=opt_in_observed_calls_only`, capture 상태, 보존 범위와 drop 수, `(writer_family,writer_kind)`별 `writers`와 `readers` 집계 및 무등록 수를 포함한다. 기존 call record에 `access_mode`가 없으면 `write`로 취급한다. `raw`는 최대 `limit`개 호출별 ID·PID·접근 분류·단계 시간·outcome·오류 타입만 노출하며 SQL/parameter/DSN은 담지 않는다. 현재 이관 writer는 REST query cache 한 종류이며 cache reader는 별도 `read.query_cache/query_cache` 집계다. capture OFF/만료나 미이관 경로는 0건 활동으로 해석하지 않는다. 기존 `/diagnostics/market-bar-saves`와 `/diagnostics/writers`는 유지한다.
 
@@ -254,10 +218,31 @@ v2 계좌 조회의 legacy main profile도 화면 선택에 따라 바뀌지 않
 
 | Method / path | 요청 | 응답 핵심 | 역할 |
 | --- | --- | --- | --- |
-| `GET /health` | 없음 | `status`, `api_version`, `schema_version`, `server_time`, `server_build` | 공개 생존 확인 |
+| `GET /health` | 없음 | `status`, `api_version`, `schema_version`, `server_time`, `server_build`, `operational` | 공개 생존 확인과 부분 업무 관측 |
 | `GET /api/v1/capabilities` | 없음 | 버전 + `capabilities` boolean map | 서버가 제공하는 기능 협상 |
 | `GET /api/v1/settings/operations` | 없음 | AI·뉴스·Shadow 설정과 revision/applied_revision/apply_status | 영속값과 실행 적용 상태 읽기 |
 | `PUT /api/v1/settings/operations` | 변경 필드, 선택 expected_revision | 저장된 전체 구조와 적용 상태 | 부분 변경; 충돌 409, 저장/적용 실패 503 |
+
+### 업무 상태 관측 — 2026-10-11 로컬 소스
+
+`/health.status=ok`와 기존 `realtime_connection`은 보존한다. 추가 `operational`은
+`coverage=partial`이며, 수집기 저장 실패 또는 후보 입력 누락/만료·평가 오류가 있으면
+`state=degraded`, 그 외에는 `unknown`이다. 모든 업무가 정상이라는 판정은 제공하지 않는다.
+수집기/후보 감시가 구성되지 않은 경우 각각 `realtime`/`candidate_inputs`는 null이다.
+
+| 기존 owner에서 수집하는 값 | 의미와 범위 |
+|---|---|
+| `realtime.receive.last_received_at`, `age_seconds` | 이 프로세스가 승인한 0B 체결을 마지막으로 관측한 UTC 시각·monotonic 경과 시간. 전체 공급자 수신 시각은 아니다. |
+| `realtime.persistence.last_success_at`, `last_success_by_kind` | 기존 native 저장 호출이 성공 반환한 시각. 프로세스 재시작·아직 저장 없음은 null/빈 map이며 DB의 과거 성공을 추측하지 않는다. |
+| `pending_records`, `inflight_records`, `pending_by_kind`, `inflight`, `waiting_flushes` | 기존 버퍼·재시도 안의 저장 레코드 수와 실제 저장 중 레코드/flush 대기 수를 구분한다. 고유 입력 이벤트 수가 아니며 정상 봉·최신값 저장 주기의 대기도 포함한다. |
+| `oldest_record_at`, `timed_records`, `record_time_basis` | 보유 레코드의 관측/최신 갱신 시각 중 가장 오래된 값과 시각을 아는 레코드 수. 최초 enqueue 시각·정확한 queue 대기 시간은 미계측이다. |
+| `unresolved_failures`, 저장 `state` | 종류별 마지막 실패 시각을 같은 종류의 성공 ACK까지 보존한다. 다른 저장 성공으로 실패를 지우지 않는다. `observed`는 성공 관측 이력이며 대기열 완료나 전체 저장 정상의 뜻이 아니다. |
+| `candidate_inputs.universe` | 조회 시각의 후보군 available_at·나이·기존 max-age 기준의 fresh/stale/missing. 장외라도 시각을 임의 갱신하지 않는다. |
+| `candidate_inputs.last_evaluation`, `current_all_inputs_fresh` | 마지막 평가 결과/시각은 현재 신선도와 분리한다. 모든 판단 입력의 현재 최신 여부는 미계측이므로 null이다. |
+
+응답은 기존 owner의 메모리만 읽고 DB 조회·버퍼 drain·업무/주문을 시작하지 않는다.
+공개 필드에는 오류 원문·계좌/종목 식별자·키/토큰을 추가하지 않는다. 뉴스·외부시장·다른
+writer와 최초 enqueue 대기 시간의 종합 관측은 후속 범위이며, 이 추가는 NAS 배포를 뜻하지 않는다.
 
 R5d2a는 operations에 `external_market_enabled`/`external_market_auto_roll_enabled`(strict bool),
 `external_market_poll_seconds`(strict int 60~86400), `external_market_roll_confirmations`(strict int 1~100)을 추가한다.
@@ -615,7 +600,7 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 
 기사 이력의 `target`은 종목코드, `identity`는 기존 기사 identity다. 본문 이력의 `target`은 `article_revision_id`, AI 이력의 `target`은 분석 대상 종목코드다. `as_of`는 `available_at <= as_of`인 행만 반환하며 최초 원장 기록 전에는 `known=false`다. 이 API는 현재 화면용 `news_article/news_ai` projection을 변경하지 않는다.
 
-단발성 과거뉴스 archive API는 **로컬 구현·운영 미게시** 상태다. `HISTORICAL_NEWS_ARCHIVE_PATH`가 비어 있으면 비활성이고, 절대경로의 `sealed` 파일과 완료된 검색 projection이 있어야 켜진다. 기존 `capabilities.news_archive`는 기존 PG 뉴스 기능으로 유지하고, 새 `capabilities.historical_news_archive_v1` 및 `historical_news_archive_dataset_id`로만 별도 지원을 알린다. cursor는 dataset·종목 필터에 묶이고, 해당 reader의 진단 pause는 진단 master 세션과 TTL 아래에서만 유효하다. 현재 API에는 시황 목록·`as_of`·클라이언트 UI 연결이 없다.
+단발성 과거뉴스 archive는 **로컬 reader·API·조회 화면 구현, 운영 자료 게시 미완료** 상태다. `HISTORICAL_NEWS_ARCHIVE_PATH`가 비어 있으면 비활성이고, 절대경로의 `sealed` 파일과 완료된 검색 projection이 있어야 켜진다. 기존 `capabilities.news_archive`는 기존 PG 뉴스 기능으로 유지하고, 새 `capabilities.historical_news_archive_v1` 및 `historical_news_archive_dataset_id`로만 별도 지원을 알린다. cursor는 dataset·종목 필터에 묶이고, 해당 reader의 진단 pause는 진단 master 세션과 TTL 아래에서만 유효하다. 종목 뉴스 창의 별도 `HistoricalNewsArchiveDialog`가 `CentralNewsClient`를 통해 종목별 목록·다음 페이지·본문을 읽는다. 이 archive API에는 시황 목록과 `as_of` 조회가 없다. 화면 구현은 NAS에 운영 자료가 게시됐다는 증거가 아니다.
 
 사건 이력의 `target`은 종목코드, `identity`는 영속 `event_id`다. 소속 이력은 `target=event_id`, 선택 `identity=article_revision_id`로 조회한다. `event` 행은 정확한 article/body revision과 규칙·점수 산식 버전, 역할·범위·확실성·신규성, 근거 span, 금액/상대방, 대상별 방향·직접성, `ai_required` 이유를 가진다. URL은 event ID가 아니며 `possible_related_event_ids`는 후보 관계일 뿐 과거 행을 병합하지 않는다.
 
@@ -817,6 +802,11 @@ R3c 로컬 소스의 `/health.mock_account_available`은 실제 모의 bundle �
 `mock_account_error`는 계좌 불일치의 `ACCOUNT_CONTEXT_MISMATCH` 또는 그 밖의
 `MOCK_ACCOUNT_STARTUP_FAILED`만 공개한다. 공급자 원문 오류·키·토큰을 공개 health에 전달하지 않는다.
 기존 `/api/v1/mock/orders`의 기본 계좌 계약은 유지하고, 한 응답의 주문과 events는 동일 gateway로 읽는다.
+
+2026-10-11 로컬 소스에서 owner 경로의 시작 상태 판단은 `MockCredentialOwner.has_started_monitor()`와
+`MockAccountMonitor.is_started`를 사용한다. 기존 task 설치/종료 정리와 profile 공개 경계의 의미를
+보존하며 복구 완료·heartbeat/lease 정상·주문 허용을 뜻하지 않는다. 계좌 공개 목록은 기존
+`account_bindings()`를 사용하며 monitor OFF에서도 승인된 query context의 binding은 유지한다.
 
 1. 기존 필드와 경로는 삭제·의미 변경하지 않는다.
 2. 선택 필드 추가를 우선한다.

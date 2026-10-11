@@ -6,6 +6,11 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 
+from kiwoom_monitor.domain.market_data_contract import (
+    CandidateUniverse, DataCompleteness, DataUnit, DataValueKind, MarketDataMetadata,
+    ObservationOrigin, TradingVenue,
+)
+from kiwoom_monitor.domain.realtime_gap import RealtimeGap
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
 
 
@@ -20,6 +25,7 @@ class MinuteOhlcv:
     # 0B의 누적거래대금(14) 증가분으로 받은 실제 금액이다. 값이 있으면
     # OHLC 평균가 추정식보다 우선한다.
     trade_value_eok_override: float | None = None
+    metadata: MarketDataMetadata | None = None
 
     @property
     def trade_value_eok(self) -> float:
@@ -40,6 +46,12 @@ class MinuteTradeValueAggregator:
         self._estimated_since_cumulative: dict[tuple[str, str], dict[datetime, float]] = {}
         self._source_mode_by_code: dict[str, str] = {}
         self._query_completed_minutes: dict[str, set[datetime]] = defaultdict(set)
+        self._gap_minutes: dict[str, set[datetime]] = defaultdict(set)
+        self._gap_generation: dict[str, int] = defaultdict(int)
+        self._baseline_gap_pending: set[str] = set()
+        self._recovery_candidates: dict[str, tuple[int, set[datetime]]] = {}
+        self._confirmed_empty_minutes: dict[str, set[datetime]] = defaultdict(set)
+        self._expired_gap_codes: set[str] = set()
 
     def ingest(self, tick: TradeTick, observed_at: datetime) -> MinuteOhlcv | None:
         if tick.current_price is None:
@@ -48,6 +60,11 @@ class MinuteTradeValueAggregator:
         key = (tick.code, tick.market)
         previous_cumulative = self._last_cumulative_trade_value.get(key)
         minute = _trade_minute(tick, observed_at)
+        if tick.code in self._baseline_gap_pending:
+            self._gap_minutes[tick.code].add(minute)
+            if ((tick.cumulative_trade_value is not None and abs(tick.cumulative_trade_value) > 0)
+                    or tick.cumulative_volume is not None or tick.trade_volume is not None):
+                self._baseline_gap_pending.discard(tick.code)
         if minute in self._query_completed_minutes.get(tick.code, ()):
             # A delayed 0B belongs to an already reconciled REST minute. Keep
             # cumulative baselines current without changing its OHLCV or value.
@@ -119,7 +136,140 @@ class MinuteTradeValueAggregator:
             bars.append(bar)
         if len(bars) > 1 and bars[-1].minute < bars[-2].minute:
             self._bars[tick.code] = deque(sorted(bars, key=lambda value: value.minute)[-self._max_minutes :], maxlen=self._max_minutes)
+        state = DataCompleteness.PARTIAL if minute in self._gap_minutes[tick.code] else DataCompleteness.IN_PROGRESS
+        if previous_index is not None and previous.metadata is not None and previous.metadata.completeness in {
+            DataCompleteness.PARTIAL, DataCompleteness.UNCONFIRMED, DataCompleteness.MISSING,
+        }:
+            state = DataCompleteness.PARTIAL if state == DataCompleteness.PARTIAL else previous.metadata.completeness
+        bar = replace(bar, metadata=MarketDataMetadata(
+            effective_at=minute, available_at=observed_at, venue=TradingVenue.COMBINED,
+            unit=DataUnit.EOK_WON, value_kind=(DataValueKind.ACTUAL if trade_value_delta is not None else DataValueKind.ESTIMATED),
+            completeness=state, origin=ObservationOrigin.REALTIME, source="kiwoom-websocket-0B",
+            candidate_universe=CandidateUniverse.RANKING_VISIBLE,
+        ))
+        for index, previous in enumerate(self._bars[tick.code]):
+            if previous.minute == minute:
+                self._bars[tick.code][index] = bar
+                break
         return bar
+
+    def mark_gap(self, gap: RealtimeGap, codes: tuple[str, ...], now: datetime) -> dict[str, tuple[datetime, ...]]:
+        """Invalidate lost minutes and retain holes independently of numeric bars."""
+        affected: dict[str, set[datetime]] = defaultdict(set)
+        for scope in gap.ranges:
+            if scope.event_type != "trade":
+                continue
+            minute = scope.start.replace(second=0, microsecond=0)
+            end = scope.end.replace(second=0, microsecond=0)
+            while minute <= end:
+                affected[scope.code].add(minute)
+                minute += timedelta(minutes=1)
+        if gap.scope_unknown:
+            for code in set(codes) | set(self._bars):
+                affected[code].update(bar.minute for bar in self._bars.get(code, ()))
+                affected[code].add(now.replace(second=0, microsecond=0))
+        result = {}
+        for code, minutes in affected.items():
+            minutes.difference_update(self._query_completed_minutes.get(code, ()))
+            if not minutes:
+                continue
+            self._gap_generation[code] += 1
+            self._gap_minutes[code].update(minutes)
+            self._baseline_gap_pending.add(code)
+            self._recovery_candidates.pop(code, None)
+            bars = self._bars.get(code, ())
+            for index, bar in enumerate(bars):
+                if bar.minute in minutes:
+                    metadata = bar.metadata or MarketDataMetadata(effective_at=bar.minute, available_at=now)
+                    bars[index] = replace(bar, metadata=replace(metadata, completeness=DataCompleteness.PARTIAL))
+            result[code] = tuple(sorted(minutes))
+        self.reset_cumulative_baselines(tuple(result))
+        return result
+
+    def gap_generation(self, code: str) -> int:
+        return self._gap_generation.get(code, 0)
+
+    def recovery_codes(self) -> tuple[str, ...]:
+        return tuple(code for code, minutes in self._gap_minutes.items() if minutes)
+
+    def recovery_state(self, code: str) -> str:
+        if self._gap_minutes.get(code):
+            return "recovering" if code in self._recovery_candidates else "recovery_required"
+        if code in self._expired_gap_codes:
+            return "expired_unresolved"
+        return "recovered" if self.gap_generation(code) else "not_required"
+
+    def confirm_history_saved(self, code: str, generation: int, minutes: tuple[datetime, ...] | None = None, *, empty: bool = False) -> None:
+        candidate = self._recovery_candidates.get(code)
+        if candidate is None or candidate[0] != generation or self.gap_generation(code) != generation:
+            return
+        committed = candidate[1] if minutes is None else candidate[1].intersection(minutes)
+        if empty:
+            self._confirmed_empty_minutes[code].update(committed)
+            self._query_completed_minutes[code].update(committed)
+        self._gap_minutes[code].difference_update(committed)
+        remaining = candidate[1] - committed
+        if remaining:
+            self._recovery_candidates[code] = (generation, remaining)
+        else:
+            self._recovery_candidates.pop(code, None)
+
+    def history_save_failed(self, code: str) -> None:
+        self._recovery_candidates.pop(code, None)
+
+    def empty_recovery_candidates(self, code: str, present: tuple[datetime, ...], now: datetime, generation: int | None) -> tuple[datetime, ...]:
+        if generation != self.gap_generation(code):
+            return ()
+        # A query/live contradiction requires more evidence than an empty response.
+        numeric = {bar.minute for bar in self._bars.get(code, ())} | set(present)
+        minutes = {minute for minute in self._gap_minutes.get(code, ()) if minute.date() == now.date()
+                   and minute < now.replace(second=0, microsecond=0) and minute not in numeric}
+        if minutes:
+            previous = self._recovery_candidates.get(code)
+            self._recovery_candidates[code] = (generation, minutes | (previous[1] if previous and previous[0] == generation else set()))
+        return tuple(sorted(minutes))
+
+    def history_for_storage(self, code: str, bars: tuple[MinuteOhlcv, ...], generation: int | None) -> tuple[MinuteOhlcv, ...]:
+        """An older request cannot replace an input invalidated by a newer gap."""
+        if generation == self.gap_generation(code):
+            return bars
+        gaps = self._gap_minutes.get(code, ())
+        return tuple(bar for bar in bars if bar.minute not in gaps)
+
+    def bars(self, code: str) -> tuple[MinuteOhlcv, ...]:
+        return tuple(self._bars.get(code, ()))
+
+    def quality_for_range(self, code: str, start: datetime, end: datetime) -> DataCompleteness:
+        if any(start <= minute < end for minute in self._gap_minutes.get(code, ())):
+            return DataCompleteness.PARTIAL
+        selected = [bar for bar in self._bars.get(code, ()) if start <= bar.minute < end]
+        if any(bar.metadata and bar.metadata.completeness == DataCompleteness.PARTIAL for bar in selected):
+            return DataCompleteness.PARTIAL
+        if any(bar.metadata is None or bar.metadata.completeness in {
+            DataCompleteness.UNCONFIRMED, DataCompleteness.MISSING, DataCompleteness.PARTIAL,
+        } or bar.metadata.completeness == DataCompleteness.IN_PROGRESS and bar.metadata.source.startswith("NAS:") for bar in selected):
+            return DataCompleteness.UNCONFIRMED
+        if selected:
+            return DataCompleteness.COMPLETE
+        minute = start.replace(second=0, microsecond=0)
+        while minute < end:
+            if minute not in self._confirmed_empty_minutes.get(code, ()):
+                return DataCompleteness.MISSING
+            minute += timedelta(minutes=1)
+        return DataCompleteness.COMPLETE
+
+    def bucket_quality(self, code: str, minutes: int, now: datetime, *, previous: bool = False) -> DataCompleteness:
+        start = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % minutes)
+        if previous:
+            start -= timedelta(minutes=minutes)
+        return self.quality_for_range(code, start, start + timedelta(minutes=minutes))
+
+    def recent_quality(self, code: str, minutes: int, now: datetime) -> DataCompleteness:
+        selected = list(self._bars.get(code, ()))[-minutes:]
+        start = now.replace(second=0, microsecond=0) - timedelta(minutes=minutes - 1)
+        if selected:
+            start = min(start, selected[0].minute)
+        return self.quality_for_range(code, start, now.replace(second=0, microsecond=0) + timedelta(minutes=1))
 
     def _reduce_estimated_bars(
         self, code: str, estimates: dict[datetime, float], excess: float,
@@ -231,6 +381,7 @@ class MinuteTradeValueAggregator:
     def seed(
         self, code: str, bars: tuple[MinuteOhlcv, ...], now: datetime | None = None,
         *, include_current_snapshot: bool = False, query_authoritative: bool = False,
+        recovery_generation: int | None = None,
     ) -> None:
         """REST로 받은 과거 1분봉을 시간순으로 넣어 접속 전 누락분을 보완한다."""
         now = now or datetime.now()
@@ -239,8 +390,34 @@ class MinuteTradeValueAggregator:
             bar.minute: bar for bar in bars if bar.minute.date() == now.date() and bar.minute < current_minute
         }
         if query_authoritative:
+            by_minute = {minute: (bar if bar.metadata else replace(bar, metadata=MarketDataMetadata(
+                effective_at=minute, available_at=now, completeness=DataCompleteness.COMPLETE,
+                origin=ObservationOrigin.QUERY, source="kiwoom-ka10080", value_kind=DataValueKind.ESTIMATED,
+                unit=DataUnit.EOK_WON, venue=TradingVenue.COMBINED,
+            ))) for minute, bar in by_minute.items()}
+        recovered = set()
+        gaps = self._gap_minutes.get(code, set())
+        for minute in gaps:
+            bar = by_minute.get(minute)
+            trusted = bool(bar and _recovery_authority(bar))
+            if trusted and recovery_generation == self.gap_generation(code):
+                recovered.add(minute)
+            else:
+                by_minute.pop(minute, None)
+                previous = next((item for item in self._bars.get(code, ()) if item.minute == minute), None)
+                if previous is not None:
+                    by_minute[minute] = previous
+        if recovered:
+            previous_candidate = self._recovery_candidates.get(code)
+            if previous_candidate and previous_candidate[0] == self.gap_generation(code):
+                recovered.update(previous_candidate[1])
+            self._recovery_candidates[code] = (self.gap_generation(code), recovered)
+        self._query_completed_minutes[code].update(minute for minute, bar in by_minute.items() if _recovery_authority(bar))
+        if query_authoritative:
             completed = self._query_completed_minutes[code]
-            completed.update(by_minute)
+            completed.update(minute for minute, bar in by_minute.items()
+                             if bar.metadata and bar.metadata.is_complete
+                             and bar.metadata.origin == ObservationOrigin.QUERY)
             for key, estimates in self._estimated_since_cumulative.items():
                 if key[0] == code:
                     for minute in by_minute:
@@ -298,6 +475,15 @@ class MinuteTradeValueAggregator:
         self._last_cumulative_trade_value.clear()
         self._estimated_since_cumulative.clear()
         self._query_completed_minutes.clear()
+        for code, minutes in self._gap_minutes.items():
+            expired = {minute for minute in minutes if minute.date() < today}
+            if expired:
+                self._expired_gap_codes.add(code)
+                minutes.difference_update(expired)
+                self._recovery_candidates.pop(code, None)
+                self._baseline_gap_pending.discard(code)
+        for code, minutes in self._confirmed_empty_minutes.items():
+            self._confirmed_empty_minutes[code] = {minute for minute in minutes if minute.date() >= today}
 
     def reset_cumulative_baselines(self, codes: tuple[str, ...]) -> None:
         """신규 구독·재접속 뒤 공백 누적분을 현재 1분에 몰아 넣지 않는다."""
@@ -319,3 +505,9 @@ def _trade_minute(tick: TradeTick, observed_at: datetime) -> datetime:
     if len(value) == 6 and value.isdigit():
         return observed_at.replace(hour=int(value[:2]), minute=int(value[2:4]), second=0, microsecond=0)
     return observed_at.replace(second=0, microsecond=0)
+
+
+def _recovery_authority(bar: MinuteOhlcv) -> bool:
+    meta = bar.metadata
+    return bool(meta and meta.effective_at is not None and meta.available_at is not None and meta.is_complete and (meta.origin in {ObservationOrigin.QUERY, ObservationOrigin.BACKFILLED}
+                or meta.origin == ObservationOrigin.REALTIME and meta.source == "NAS:kiwoom-websocket-0B"))

@@ -41,6 +41,7 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
     claim_news_article_pipeline,
     defer_news_article_host_403,
     claim_news_range_job,
+    claim_truncated_news_job,
     clear_news_backfill_jobs,
     exclude_non_stock_news_jobs,
     fetch_article_publication,
@@ -484,6 +485,8 @@ def _write_news_heartbeat(
         "code": str(getattr(job, "code")),
         "target_date": str(getattr(job, "target_date")),
         "query": str(getattr(job, "query_text")),
+        "search_continuation": bool(getattr(job, "search_continuation", False)),
+        "resume_first_page": int(getattr(job, "next_search_page", 1)),
         "page": page,
         "pages_observed": pages_observed,
         "items_observed": items_observed,
@@ -729,6 +732,8 @@ def main() -> int:
     news_run.add_argument("--prepare-workers", type=int, default=4)
     news_run.add_argument("--search-only", action="store_true",
                           help="검색 목록만 저장하고 원문/BODY/RULE은 별도 article-run에 맡깁니다.")
+    news_run.add_argument("--resume-truncated", action="store_true",
+                          help="페이지 상한으로 잘린 작업만 마지막 저장 다음 페이지부터 이어 읽습니다.")
     news_run.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DB)
 
     article_run = subparsers.add_parser(
@@ -808,6 +813,8 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False), flush=True)
         return 0
     if args.command == "news-run":
+        if args.resume_truncated and not args.search_only:
+            parser.error("--resume-truncated requires --search-only; article work must remain durably queued")
         if args.jobs < 1 or args.jobs > 10000:
             parser.error("--jobs must be between 1 and 10000")
         if args.max_pages < 1 or args.max_pages > 100:
@@ -831,18 +838,23 @@ def main() -> int:
         claimed_jobs = 0
         collector_unavailable = False
         for _ in range(args.jobs):
-            job = claim_news_range_job(args.output) or claim_news_backfill_job(args.output)
+            job = None if args.resume_truncated else (
+                claim_news_range_job(args.output) or claim_news_backfill_job(args.output))
+            if job is None and args.search_only:
+                job = claim_truncated_news_job(args.output)
             if job is None:
                 break
             claimed_jobs += 1
-            pages_observed = 0
-            items_observed = 0
-            usable = 0
-            unreadable = 0
-            missing_time = 0
+            pages_observed = job.next_search_page - 1
+            items_observed = job.previous_items
+            usable = job.previous_usable
+            unreadable = job.previous_unreadable
+            missing_time = job.previous_missing_time
             job_started = time.monotonic()
             job_fields = {"code": job.code, "target_date": job.target_date,
-                          "target_end_date": job.target_end_date or job.target_date}
+                          "target_end_date": job.target_end_date or job.target_date,
+                          "search_continuation": job.search_continuation,
+                          "resume_first_page": job.next_search_page}
             timing_log.write("job_start", **job_fields, search_workers=args.search_workers,
                              article_workers=args.article_workers, prepare_workers=args.prepare_workers,
                              throttle_delay_seconds=args.throttle_delay)
@@ -992,12 +1004,15 @@ def main() -> int:
                             fetch=fetch,
                         )
 
-                    batch_start = 0
-                    while batch_start < args.max_pages:
-                        batch_width = 1 if batch_start == 0 else args.search_workers
+                    first_index = job.next_search_page - 1
+                    seen_page_keys = {tuple(sorted(job.previous_page_keys))} if job.previous_page_keys else set()
+                    batch_start = first_index
+                    end_index = first_index + args.max_pages
+                    while batch_start < end_index:
+                        batch_width = 1 if batch_start == first_index else args.search_workers
                         indexes = list(range(
                             batch_start,
-                            min(args.max_pages, batch_start + batch_width),
+                            min(end_index, batch_start + batch_width),
                         ))
                         _write_news_heartbeat(
                             args.heartbeat_file, job, "search_page",
@@ -1011,6 +1026,11 @@ def main() -> int:
                                          first_page=indexes[0] + 1, pages=len(batch),
                                          elapsed_ms=round((time.monotonic() - search_batch_started) * 1000))
                         for page_index, page in batch:
+                            page_keys = tuple(sorted((item.office_id, item.article_id) for item in page.items))
+                            if job.search_continuation and len(page.items) >= 10 and page_keys in seen_page_keys:
+                                raise ValueError(f"repeated_search_page: page {page_index + 1} repeats a saved page")
+                            if page_keys:
+                                seen_page_keys.add(page_keys)
                             _write_news_heartbeat(
                                 args.heartbeat_file, job, "search_page",
                                 page=page_index + 1, pages_observed=pages_observed,
@@ -1021,6 +1041,8 @@ def main() -> int:
                             store_naver_historical_search_page(
                                 args.output, page,
                                 deferred_job_key=news_job_key(job) if args.search_only else "",
+                                continuation_job=job if job.search_continuation else None,
+                                items_observed=items_observed + len(page.items),
                             )
                             timing_log.write("search_page_store", **job_fields,
                                              page=page_index + 1, items=len(page.items),
@@ -1107,7 +1129,7 @@ def main() -> int:
                         continue
                     else:
                         unreadable += 1
-                state = ("search_complete" if args.search_only and occurrences else
+                state = ("search_complete" if args.search_only and (occurrences or job.previous_items) else
                          "complete") if exhausted else "truncated"
                 if job.range_id and not exhausted and job.target_date < job.target_end_date:
                     split_news_range_job(args.output, job)
@@ -1180,11 +1202,12 @@ def main() -> int:
                     }, ensure_ascii=False), flush=True)
                     break
                 finish = finish_news_range_job if job.range_id else finish_news_backfill_job
+                repeated_page = str(error).startswith("repeated_search_page:")
                 finish(
-                    args.output, job, state="failed", pages_observed=pages_observed,
+                    args.output, job, state="truncated" if repeated_page else "failed", pages_observed=pages_observed,
                     items_observed=items_observed, usable_articles=usable,
                     unreadable_articles=unreadable, missing_time_articles=missing_time,
-                    error=f"{type(error).__name__}: {error}",
+                    error="repeated_search_page" if repeated_page else f"{type(error).__name__}: {error}",
                 )
                 failed_jobs += 1
                 _write_news_heartbeat(

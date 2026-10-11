@@ -1,4 +1,8 @@
+> 2026-10-11 통합 전의 설계·운영 기록입니다. 현행 운영/API/제어 계약은 [통합 진단 문서](../../../NAS_RUNTIME_DIAGNOSTICS.md), 실제 배포·검증은 [현재 상태](../../../CURRENT_STATUS.md)를 따릅니다. 아래 구현 전·후속·수량·배포 표현은 당시 기록입니다.
+
 # 진단도구 하위 스위치 설계 검토
+
+> 문서 역할 정리(2026-10-11): master/자식·TTL·보호 경로·자료 보존 계약은 현행 개발 기준이다. 아래 ‘선택 작업 8개/계측 12개’는 최초 검토 수량이며 현재 전수 목록이 아니다. 실제 등록은 `diagnostic_workloads.py`·`diagnostic_writer_registry.py`와 [저장 경로 감사](../../../KIWOOM_STORAGE_WRITE_AUDIT.md), 완료/잔여는 [OPEN_ITEMS](../../../OPEN_ITEMS.md)를 따른다.
 
 2026-09-26 · O12 · 제품 2.1.0
 

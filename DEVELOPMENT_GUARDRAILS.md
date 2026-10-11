@@ -6,6 +6,8 @@ AI와 사람이 이 저장소를 수정할 때 아래 규칙을 기본 계약으
 
 ## 데이터와 API
 
+커밋·push 전에는 기존 Windows `all-local` 전수검사를 통과하고 `python -m scripts.check_required_ci_results --windows-only --local --windows <run.json>`으로 현재 실행 코드·검사·배포 도구의 LF 지문과 보고서를 대조한다. 이후 실행 소스를 수정하면 이전 보고서를 현재 통과로 재사용하지 않는다. `all-local`은 catalog·lock 버전 검사를 포함하며 Linux·실제 PostgreSQL·봉인 replay·operator의 외부 검증은 별도 Actions 결과로 보고한다. CI 전용 실패는 실제 실패 단계의 로그·artifact를 먼저 감사하고 기존 검사를 중복 추가하거나 판정 조건을 낮추지 않는다.
+
 1. NAS 모드의 모든 Kiwoom REST 조회는 `CentralRestBroker`를 통과한다. 새 직접 HTTP 호출로 중앙 큐를 우회하지 않는다.
 2. `ka00198` 실시간 종목조회순위가 대기 중인 분봉·일봉·역사 백필보다 항상 높은 우선순위를 갖게 한다.
 20:05 이후 장후 보완은 30초 순위 schedule loop에서 직접 기다리지 않고 별도 owned task로 실행한다. 장후 분봉·일봉·수급 보완이 오래 걸려도 다음 `ka00198` 회차를 막지 않는다.
@@ -36,6 +38,7 @@ NAS 재시작·단절 뒤 로컬 실시간 대체 수신에서 중앙 실시간�
 중앙 `realtime.latest`는 수신 즉시 메모리와 기존 구독자에게 반영하고, DB에는 매 5분 경계의 10초에 최신값을 checkpoint한다. 새 구독자의 초기값은 최근 5분 메모리 값을 DB checkpoint보다 우선하며, 정상 종료와 실전 인증 전환 시 대기값을 즉시 저장한다. 비정상 종료 시에는 마지막 checkpoint 이후 최대 약 5분의 최신 projection이 남지 않을 수 있으므로 이를 원본 체결 이력으로 취급하지 않는다.
 중앙 0B 분봉은 진행 중 delta를 RAM에 모아 종료+2초 이후 먼저 저장한 뒤 기존 확정 transaction을 실행한다. 초봉은 매분 45초에 현재 분 시작보다 이전인 초봉만 저장한다(10:04:00~10:04:59는 10:05:45에 저장). 아직 저장하지 않은 현재 분 초봉은 late-trade 정리 대상에서 제외하며, 저장 실패분은 다음 1초 관리 주기에 같은 operation ID 또는 최신 절대 상태로 재시도한다. 정상 종료·실전 인증 전환은 열린 분봉과 모든 초봉까지 즉시 flush한다. 계좌 편입·0g 기준정보·시장 이력의 기존 관리 주기는 유지한다. 앱 표시용 minute-bars/recent-minute-bars 조회는 저장 이력과 미저장 RAM delta(열린 분·저장 중·실패 재시도)를 합친다. 동일한 읽기 transaction snapshot에서 operation marker와 query 완료 상태를 확인해 이미 COMMIT된 delta 또는 완료된 ka10080 봉을 중복 합산하지 않는다. RAM 조회는 저장·revision·완료 coverage를 생성하지 않으며 일반 DB/연구 조회는 저장본만 반환한다. 신규 접속은 NAS가 실제 수신한 현재 분 prefix부터 이어 계산하지만 NAS 자체의 수신 공백을 복원하지 않는다. 비정상 종료 시 열린 분봉과 정상 주기 기준 최대 약 105초의 미저장 초봉이 소실될 수 있고, DB 장애·지연 시 그 범위는 더 길어질 수 있다.
 8-5-6. PC 직접 연결의 `MinuteBarRepository`도 NAS `PostgresQueryStore`와 같은 분봉 출처 우선권을 지킨다. 열린 분의 0B 저장은 aggregator가 만든 최신 누적 snapshot을 임시 canonical 값으로 교체하고, SQLite에 이미 저장된 0B 봉에 다시 더하지 않는다. `ka10080`이 `QUERY + COMPLETE + kiwoom-ka10080` 메타데이터와 OHLCV·계산 거래대금을 저장하면 이후 0B는 그 분의 봉과 출처 메타데이터를 바꾸지 않는다. 출처 판정과 봉·metadata 갱신은 한 `BEGIN IMMEDIATE` transaction에서 직렬화한다. PC 화면의 메모리 집계에서도 `ka10080`으로 받은 종료 분은 늦은 0B가 수정하지 못하게 하고, NAS에서 복원한 종료 분은 이 직접 조회 확정 표식으로 오인하지 않는다. KRX+NXT 조회 추정값을 override로 전달해도 출처 메타데이터의 거래대금은 `ESTIMATED`다. 분봉 batch/revision 최적화와 별개의 정합성 계약이다.
+8-5-7. hub gap의 범위와 `MinuteOhlcv.metadata`를 기존 집계·writer·reader·소비자에 보존한다. 누락 분의 PARTIAL/MISSING은 늦은 정상 batch나 재시도가 해소하지 못하며 값 없는 분은 metadata만 저장한다. 권한 있는 QUERY/BACKFILLED 종료 봉 또는 같은 숫자 snapshot의 NAS `REALTIME + COMPLETE + kiwoom-websocket-0B` 확정 근거를 받은 뒤, 같은 복구 세대·분 범위의 실제 저장 성공으로만 recovered를 표시한다. NAS metadata 없는 숫자와 RAM overlay는 미확인이다. 전체 페이지·필요 시장의 같은 조회 범위 근거 없는 빈 응답/별도 NAS coverage는 무거래로 올리지 않는다. 로컬 값과 품질은 같은 transaction, gap 무효화와 저장은 같은 writer queue를 사용한다. 현재가 등 최신값은 갱신하되 영향 합계·알림·차트·체결 판단은 부분 품질을 구분한다. 재시작·기간 만료는 복구 성공이 아니다.
 8-6. 뉴스 언론사 식별은 원문 URL의 정규화된 `publisher_domain`과 매핑 가능한 `publisher_name`을 함께 사용한다. 화면 제공처 제외는 목록 숨김이고 NAS 처리 제외는 별도 운영 정책이다. NAS 처리 제외 기사도 제목·링크와 source observation은 보존하되 새 BODY/RULE/자동 AI 작업을 만들지 않는다. 기존 완료·대기 작업을 소급 삭제하지 않으며, 파생 언론사 필드 보정만으로 새 기사 revision을 만들지 않는다.
 8-7. 중앙 종목 뉴스의 관련성 판정은 저장된 `fulltext` 원문이 있으면 이를 함께 사용한다. 원문 evidence는 그대로 보존하고, 화면·규칙·AI 입력에서는 저작권 문구 뒤의 포털 추천·랭킹·댓글 영역을 제거한 정제본을 사용한다. 정제 뒤 본문이 비면 검색 요약으로 보완한다. 장중 가격·지수·거래량을 중계하는 제목은 원문 뒤쪽에 과거 계약이나 일반 기대가 있어도 새 기업 사건으로 승격하지 않는다. 제목 또는 원문 도입부에서 당일 공시·계약·실적처럼 확인 가능한 새 사건을 제시할 때만 관련 뉴스로 보존한다. 공급계약 금액은 공급·수주 표현과 같은 문장 안에서만 추출하며 주가와 시가총액을 계약금액으로 사용하지 않는다.
 8-8. 뉴스 상세의 비AI 요약은 정제된 `fulltext`에서 최대 3개 원문 문장만 선택한다. 새 문장을 생성하거나 원문을 대체하지 않으며, 포털 푸터·저작권 꼬리와 900자를 넘는 비정상 단일 문장은 선택하지 않는다. 안전한 핵심 문장이 없으면 요약을 생략하고 저장 본문만 표시한다. `summary_only` 자료에는 추출 요약을 표시하지 않는다.
@@ -70,7 +73,7 @@ Kiwoom TR·주문 transport를 호출하지 않는다.
 - 단순 전달만 하는 Manager/Service/Handler/Controller를 새로 만들지 않는다.
 - 새 계층은 독립된 정책, 상태, 객체 수명, 저장/외부 시스템 경계 중 하나 이상을 실제로 소유해야 한다.
 - 파일 분리 전후에 기능을 이해하는 데 필요한 파일 수와 호출 깊이를 비교한다. 영향 범위가 줄지 않고 호출 단계만 늘어나면 기존 위치를 유지한다.
-- 이미 만든 계층이 얇아 보여도 작업 도중 성급히 재통합하지 않는다. `AUDIT_REPORT.md`에 후보와 근거를 기록하고 현재 리팩터링 종료 후 한 번에 감사한다.
+- 이미 만든 계층이 얇아 보여도 작업 도중 성급히 재통합하지 않는다. `docs/OPEN_ITEMS.md`에 후보와 근거를 기록하고 현재 리팩터링 종료 후 한 번에 감사한다.
 - 순수 계산을 기존 응집도 높은 모듈에 추가할 수 있다면 이름만 다른 새 Service/Manager보다 기존 모듈 확장을 우선한다.
 
 ### 증거 기반 버그 수정
@@ -121,7 +124,7 @@ Kiwoom TR·주문 transport를 호출하지 않는다.
 
 24. 수정 후 최소 관련 테스트와 핵심 회귀 묶음을 실행한다. 실행 불가능하면 이유와 미검증 범위를 숨기지 않는다.
 25. API 변경은 `API_CONTRACT.md`, DB 변경은 `DB_SCHEMA.md`, 모듈 이동은 `MODULE_MAP.md`, 사용자 영향은 `CHANGELOG.md`를 함께 갱신한다.
-26. 기능개발서의 미래 계획을 현재 구현으로 단정하지 않는다. 현재 사실은 `ARCHITECTURE_CURRENT.md`, 불일치는 `AUDIT_REPORT.md`에 기록한다.
+26. 기능개발서의 미래 계획을 현재 구현으로 단정하지 않는다. 현재 사실은 `ARCHITECTURE_CURRENT.md`, 불일치는 `docs/OPEN_ITEMS.md`에 기록한다.
 27. 기본 이미지 배포에서 NAS 서버 소스·의존성·Dockerfile·Compose가 바뀌면 **같은 변경에서 반드시 NAS 빌드 식별자도 올린다.** 아래 세 곳은 한 묶음이며 값이 정확히 같아야 한다.
     - `src/kiwoom_monitor/central_server/app.py`의 `SERVER_BUILD`
     - `deploy/synology/docker-compose.yml`의 `server.image`

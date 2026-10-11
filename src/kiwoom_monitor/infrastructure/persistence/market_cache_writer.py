@@ -23,6 +23,8 @@ class MarketCacheWriter(QThread):
     price_failed = Signal(object, object, object, object, str)
     history_saved = Signal(str)
     history_failed = Signal(str, str)
+    history_quality_saved = Signal(str, object)
+    gap_failed = Signal(object, str)
     daily_high_failed = Signal(str, str)
     comparison_saved = Signal(int)
     comparison_failed = Signal(str)
@@ -54,10 +56,17 @@ class MarketCacheWriter(QThread):
 
     def enqueue_history_bars(
         self, code: str, bars: tuple[MinuteOhlcv, ...], trade_date: date,
-        synced_at: datetime,
+        synced_at: datetime, *, recovery_generation: int | None = None,
     ) -> None:
         if bars:
-            self._queue.put(("history", code, tuple(bars), trade_date, synced_at))
+            self._queue.put(("history", code, tuple(bars), trade_date, synced_at, recovery_generation))
+
+    def enqueue_gap_minutes(self, minutes: dict[str, tuple[datetime, ...]]) -> None:
+        if minutes:
+            self._queue.put(("gap", dict(minutes)))
+
+    def enqueue_empty_coverage(self, code: str, minutes: tuple[datetime, ...], generation: int) -> None:
+        self._queue.put(("empty_coverage", code, minutes, generation))
 
     def enqueue_daily_high(self, code: str, targets: DailyHighTargets,
                            trade_date: date, observed_at: datetime) -> None:
@@ -94,7 +103,19 @@ class MarketCacheWriter(QThread):
             elif job[0] == "price":
                 self._save_prices(stock_repository, job[1], job[2], job[3], job[4])
             elif job[0] == "history":
-                self._save_history(minute_repository, job[1], job[2], job[3], job[4])
+                self._save_history(minute_repository, job[1], job[2], job[3], job[4], job[5])
+            elif job[0] == "gap":
+                try:
+                    minute_repository.mark_gap_minutes(job[1])
+                except Exception as error:
+                    self.gap_failed.emit(job[1], str(error))
+            elif job[0] == "empty_coverage":
+                try:
+                    committed = minute_repository.confirm_empty_minutes(job[1], job[2])
+                except Exception as error:
+                    self.history_failed.emit(job[1], str(error))
+                else:
+                    self.history_quality_saved.emit(job[1], {"generation": job[3], "minutes": committed, "empty": True})
             elif job[0] == "daily_high":
                 self._save_daily_high(stock_repository, daily_repository, job[1], job[2], job[3], job[4])
             elif job[0] == "comparison":
@@ -172,6 +193,7 @@ class MarketCacheWriter(QThread):
     def _save_history(
         self, repository: MinuteBarRepository, code: str,
         bars: tuple[MinuteOhlcv, ...], trade_date: date, synced_at: datetime,
+        recovery_generation: int | None = None,
     ) -> None:
         try:
             repository.upsert_bars(code, bars)
@@ -180,3 +202,5 @@ class MarketCacheWriter(QThread):
             self.history_failed.emit(code, str(error))
             return
         self.history_saved.emit(code)
+        self.history_quality_saved.emit(code, {"generation": recovery_generation,
+            "minutes": tuple(bar.minute for bar in bars)})

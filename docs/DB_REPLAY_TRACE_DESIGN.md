@@ -1,13 +1,15 @@
 # 장중 경량 trace와 장후 선택 재생 설계
 
+> 문서 역할 정리(2026-10-11): 경량 scalar trace·synthetic/부분 recorded-operation replay의 독립 계약을 유지한다. 전체 원인 입력 Replay의 후속은 [기록 workload 계약](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md), 현재 완료/잔여는 [현재 상태](CURRENT_STATUS.md)·[O12](OPEN_ITEMS.md)를 따른다. 두 설계의 보존 범위·완료 조건은 서로 대신하지 않는다.
+
 2026-10-05 후속 [고정 장중 입력의 다중 workload 실험 계약](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md)은
 실제 입력 보존·전체/단독/제외·수정 전후 비교를 추가한다. 이 문서의 scalar trace와
 synthetic replay는 유지하지만 실제 payload/key 관계가 기록된 것으로 취급하지 않는다.
-새 payload capture와 처리량·보존 한도 변경은 아직 구현하지 않았다.
+당시에는 새 payload capture와 처리량·보존 한도 변경을 구현하지 않았다. 이후 단계의 구현·검증 기록은 아래 날짜별 절에 남기며, 현행 완료·잔여 판단은 위의 현재 상태와 O12를 따른다.
 
 2026-10-05 · O12 · **NAS trace smoke 및 뉴스/shadow·query_minute 합성 replay 완료; 65분 burst와 바이트 기준 청크 검사 통과; chunk-bound 회귀 18건 NAS test container 통과; 실제 NAS 65분 내구성·오버헤드·장중 원본 capture 미완료**
 
-## 목표와 이번 순서
+## 2026-10-05 당시 목표와 순서
 
 1. 기존 토요일 trace는 장중 원본이 아니다. NAS active release `2026.10.03-db-minute-replay-v1-388841088675094c`에서 실행한 선택 replay는 합성 shape 검증으로만 해석한다.
 2. 다음 예정 capture window는 2026-10-06 **08:55~10:00 KST**, 특히 09:00~09:10이다. 이 문서와 통과 테스트만으로 예약이나 실제 자료 확보가 완료된 것은 아니며 실행 전 거래일과 NAS control state를 확인한다.
@@ -128,7 +130,9 @@ adapter는 재생 call당 최대 1,000행, run당 30,000행으로 제한하고 d
 | 4. 주말 replay adapter | `diagnostic_replay.py`, 해당 writer 계측, 전용 DB integration | 뉴스/shadow 38 calls 및 분봉 3 synthetic scenarios 전용 DB replay 완료. 분봉 원 trace shape counters 부재와 timing miss를 기록; 새 shape 기반 입력 적용은 다음 capture 이후 재평가 |
 | 5. 65분 acceptance/예약 | trace 테스트/운영 안내 | 기존 3,900초·20,000-event burst에 더해 1,024 wide Unicode domain events가 약 3.90MB였던 청크 초과를 재현하고, 최대 1MiB로 분리된 모든 청크의 조회·checksum·순번·종료 drain 및 단일 oversized event의 명시적 실패를 로컬과 NAS test container의 trace/replay 18건으로 검사했다. 활성 NAS release `2026.10.03-db-minute-replay-v1-388841088675094c`를 기반으로 한 immutable release `2026.10.05-db-trace-chunk-bounds-v1-9209b8fd29423301`은 NAS 테스트 7/7 통과 후 배포했다. `/health`에서 새 build/release, DB 컨테이너 불변을 확인했고 현재 `WAITING_MARKET`, observation 미예정, trace OFF다. Codex heartbeat `nas-65-minute-db-trace-capture`가 2026-10-06 08:54 KST trace를 시작하고 `verify-nas-db-trace-capture`가 10:01 KST manifest/chunk를 검증하도록 1회 등록됨(PC와 데스크톱 앱 실행 필요). 실제 65분 NAS 보존·오버헤드 측정 및 파일 검증은 실행 뒤 완료 |
 
-### Dedicated DB recorded-operation execution (2026-10-06)
+<a id="dedicated-db-recorded-operation-execution-2026-10-06"></a>
+
+### 전용 DB 기록 작업 실행(2026-10-06)
 
 `diagnostic_replay_database_cli.py run`은 이미 봉인된 전용 replay DB와 baseline ID, trace ID,
 선택 window/workload/mode를 받아 checksummed schema-2 capture를 별도 프로세스에서 실행한다.
@@ -150,369 +154,164 @@ container 불변을 확인했다. controlled fixture라 실제 장중 capture와
 실제 capture가 완성된 뒤 bounded window replay다. 공개 replay/run API, generated-ID adapter, WAL transaction
 attribution, 장중 acceptance는 남았다.
 
-### Authenticated trace input capture API (2026-10-06 local candidate)
+<a id="authenticated-trace-input-capture-api-2026-10-06-local-candidate"></a>
 
-The authenticated trace-start API now accepts strict `store_inputs` and `collector_inputs`
-booleans, both defaulting to false, and forwards them to the schema-2 recorder. Either opt-in
-selects schema 2; both together retain allowlisted native store operation inputs and observed
-0B collector inputs while the collector excludes other event types and sensitive account data.
-The authenticated capabilities response advertises schema 2, the two OFF defaults, 0B scope,
-observed-path-only coverage, and `overhead_verified=false`. API/capture regression coverage passed
-33 local tests, including real SQLite store and collector paths, invalid/auth/session/TTL failures,
-and existing concurrent-start protection. Candidate build is
-`2026.10.06-recorded-capture-api-v1`; NAS staging, activation, a complete 65-minute capture,
-and capture overhead remain unverified. NAS source-runtime candidate
-`2026.10.06-recorded-capture-api-v1-af7d3d49b61aad09` (888 files) was staged and then activated.
-Authenticated `/health` and capabilities reads confirmed matching build/source release, schema 2,
-the 0B scope and both OFF defaults. Master and trace were OFF; realtime was `WAITING_MARKET` with
-observation not expected. The 08:54 capture and 10:01 verification automations require the active
-build/schema-2 capability and both input flags, and leave diagnostics off if preflight fails. A real
-65-minute capture and overhead measurement remain open.
+### 인증된 trace 입력 수집 API(2026-10-06 로컬 후보)
 
-### Deferred RAM capture and paced after-hours persistence (2026-10-07 local candidate)
+인증된 trace 시작 API는 기본 false 인 엄격한 불리언 store_inputs·collector_inputs를 받아 schema2 recorder로 전달한다. 하나라도 선택하면 schema2이며 둘을 선택하면 허용된 native store 인수·관측 0B collector 입력을 보관한다. 다른 이벤트·민감 계좌 데이터는 제외한다. 인증 capabilities는 schema2·두 OFF 기본·0B 범위·관측 경로 한정·overhead_verified=false를 알린다.
+실제 SQLite/collector·invalid/auth/session/TTL 실패·병렬 시작 보호 포함 로컬 33개 통과. 후보 build=`2026.10.06-recorded-capture-api-v1`이며 당시 NAS 준비/활성·완전 65분·부하는 미검증이었다. 이후 888 파일 후보 `2026.10.06-recorded-capture-api-v1-af7d3d49b61aad09`를 준비·활성화했고 인증 health/capabilities에서 build/source·schema2·0B·두 OFF를 확인했다. master/traceOFF·realtime WAITING_MARKET·observation 예상없음이었다.
+08:54 수집·10:01 검증 automation은 활성 build/schema2·두플래그를 요구하며 preflight 실패면 진단 OFF를 유지한다. 실제 65분·부하 측정은 남아 있다.
 
-The trace-start API accepts optional `persist_at` (Unix seconds). Only this explicit mode uses
-a 4GiB charged-RAM budget and 1,000,000-event cap. Startup requires Linux host and cgroup memory
-headroom of at least 5GiB; this is a headroom check, not an RSS hard cap. At capture expiry the
-producer token closes and the owned writer keeps payloads in RAM without periodic payload/chunk
-I/O until the deadline. Master TTL expiry does not move the deadline. The retained in-memory trace
-holds the existing diagnostic run lock, so replay/measure/compare cannot overlap it.
+<a id="deferred-ram-capture-and-paced-after-hours-persistence-2026-10-07-local-candidate"></a>
 
-At `persist_at`, payload and JSONL bytes are paced in 64KiB blocks at no more than 1MiB/s, then
-the worker adds up to five seconds of cooldown after each chunk sync. It does not accumulate pace
-credit while waiting on slow storage. During deferred flush, the growing blob index is checkpointed
-at most once per minute plus a final durable manifest. Capture stop does not trigger early flush;
-server shutdown before the deadline marks the trace interrupted and leaves only its already durable
-initial manifest. A process crash loses the RAM tail by design. Disk/manifest failure must never
-publish `complete`.
+### RAM 지연 수집·장후 속도 제한 저장(2026-10-07 로컬 후보)
 
-Local regression coverage passed 46 executions across deferred lifecycle/API, chunk durability,
-and recorded input tests, including 33,001 sequenced events held past the former 32,768-event cap,
-payload integrity, no pre-deadline payload files, paced writes, shutdown, master OFF, expiry, and
-headroom refusal. NAS host `MemAvailable` was 18,077,790,208 bytes in one read-only snapshot;
-NAS container headroom and the new release have not been verified. The immutable candidate
-`2026.10.07-trace-deferred-ram-v1-2c08d26bca5b6f4f` is staged but inactive; build marker is
-`2026.10.07-trace-deferred-ram-v1`. SSH access can read NAS files, but NAS source-runtime tests and
-activation require interactive sudo authentication. The October 8 automations still need to be
-updated to pass `persist_at=20:10 KST` and verify after persistence. Do not start the capture until
-the deferred capability is live on `/health`/capabilities and container headroom is verified.
+trace 시작 API는 선택 persist_at(Unix초)를 받는다. 이 명시적 모드만 charge4GiB·1,000,000이벤트를 사용한다. Linux host/cgroup 여유≥5GiB가 필요하며 RSS hard cap은 아니다. 수집 만료 시 producer token을 닫고 writer가 저장 시각까지 정기 payload/chunk I/O 없이 RAM에 보관한다. master TTL 만료도 저장 시각을 옮기지 않는다. 보관 trace는 기존 진단 run lock을 유지하여 replay/measure/compare와 겹칠 수 없다.
 
-### T1–T4 deferred capture capacity decision (2026-10-07; implementation pending)
+persist_at에서 payload/JSONL을 64KiB 블록·최대 1MiB/s로 쓰고 chunk sync 뒤 최대 5초 cooldown을 더한다. 느린 storage 대기 중 pacing credit을 쌓지 않는다. 지연 flush의 blob index는 최대분당 1회·최종 durable manifest로 저장한다. capture stop은 조기 flush를 유발하지 않는다. 저장 시각 전 shutdown은 interrupted로 표시하고 이미 durable 한 초기 manifest만 남긴다. crash는 설계상 RAM 꼬리를 잃으며 disk/manifest 실패에서 complete를 공개하면 안 된다.
 
-This decision continues O12 and supersedes any assumption that raising the deferred limits to
-8GiB/5M alone proves a complete 65-minute recording. Active v6 and the October 8 08:55 reservation
-remain unchanged. The staged `2026.10.07-causal-deferred-capture-v1-24cd50ff92fe752b` is an inactive
-functional integration candidate, not an accepted capacity release. Its local 78-test/API gate does
-not substitute for its own NAS correctness, memory, latency, and persistence gates.
+로컬 지연 수명/API·chunk 내구성·기록입력 46회 통과. 이전 32768 상한을 넘는 33001 순서이벤트·payload 무결성·시각 전 payload 파일 없음·pacing·shutdown/masterOFF/만료/여유 거부를 포함한다. 읽기 전용 NAS 표본 MemAvailable=18,077,790,208 바이트지만 container 여유·새 release는 미확인이다.
+고정 후보 `2026.10.07-trace-deferred-ram-v1-2c08d26bca5b6f4f`는 비활성 준비이고 build=`2026.10.07-trace-deferred-ram-v1`이다. SSH 읽기는 가능하나 NAS 소스/runtime·활성화는 대화형 sudo가 필요하다.10 월 8 일 automation의 persist_at20:10·저장후검증 갱신이 남았다. health/capabilities 지연기능·container 여유 확인 전 수집하지 않는다.
 
-#### Updated capture window (2026-10-08)
+<a id="t1t4-deferred-capture-capacity-decision-2026-10-07-implementation-pending"></a>
 
-The user selected 09:00–10:00 KST: the capture request is 3,600 seconds. The earlier 65-minute
-results remain historical sizing evidence. The next immutable private candidate must test 36,000
-20-row messages at 100ms synthetic timestamps with the exact v11 mixed-input profile. Synthetic
-input duration is distinct from benchmark wall-clock duration. Add the requested duration to probe
-output and report capacity-rate estimates for that duration explicitly; do not relabel an earlier
-65-minute rate as a 60-minute measurement.
+### T1–T4 지연 수집 용량 결정(2026-10-07; 당시 구현 대기)
 
-Keep the retained-charge implementation unchanged for this step. Its private 15GiB accounting
-budget is not physical RSS allocation: v11 recorded 16,075,246,320 charged bytes and a process RSS
-peak of 4,675,239,936 bytes. Capacity, RSS, host/cgroup headroom, admission rejection and persistent
-output are independent limits. The operational 4GiB/1M limits and active/scheduled source remain
-unchanged until the release gates below pass. A 60-minute synthetic capacity pass by itself does not
-complete overhead, paced near-capacity persistence or actual market coverage acceptance.
+O12 후속 결정이며 한도를 8GiB/5M로 높이는 것만으로 완전 65분을 증명한다는 가정을 대체한다. 활성 v6·10 월 8 일 08:55 예약 유지. 준비 `2026.10.07-causal-deferred-capture-v1-24cd50ff92fe752b`는 비활성 기능 통합 후보이지 승인 용량 release가 아니다. 로컬 78개/API는 후보 자체 NAS 정합성/메모리/지연/저장을 대체하지 않는다.
 
-#### Evidence and limits of the evidence
+<a id="updated-capture-window-2026-10-08"></a>
 
-The earlier 8GiB/5M private probe refused an input at 326,960 delivered ticks and 1,013,577 accepted
-events, with process RSS about 1.26GiB. Receipt scalar accounting, not the event cap, saturated first.
-`queue_delivery` creates one receipt per subscriber delivery; enqueue/dequeue/consume_end each store
-the same identity fields in a separate dictionary. `_field_charge` recursively charges keys and
-referenced strings for every stage, even when their actual Python objects are shared.
+#### 수집 구간 갱신(2026-10-08)
 
-A design-only Windows comparison used the same native collector/hub/consumer path with 2,000
-messages of 20 ticks: 40,000 deliveries and 124,001 logical events in every case. Inputs had one
-TOP20 subscriber; no REST transport, production DB, network, scheduled capture, or persistence ran.
+사용자가 선택한 구간은 09:00–10:00 KST, 3,600초다. 앞선 65분 결과는 과거 용량 증거로 남긴다. 다음 불변 비공개 후보는 정확한 v11 혼합 입력으로 20행 메시지 36,000개를 100ms 합성 시각 간격으로 검사한다. 합성 입력 기간과 실제 benchmark 실행 시간을 구분한다. 요청 기간과 해당 기간의 용량률 추정을 출력하고, 이전 65분률을 60분 측정으로 부르지 않는다.
 
-| RAM representation prototype | Charged MiB | RSS increase MiB | Producer p50/p95 ms per 20-row message |
+이 단계에서는 기존 보관 charge 구현을 유지한다. 비공개 계산 예산 15GiB는 물리 RSS 할당량이 아니다. v11은 charge 16,075,246,320바이트와 RSS 최대 4,675,239,936바이트를 기록했다. 용량·RSS·host/cgroup 여유·승인 거부·저장 출력은 독립 한도다. 아래 release 검증 전에는 운영 4GiB/1M, 활성 소스와 예약을 유지한다. 합성 60분 통과만으로 부하·한도 근처 속도 제한 저장·실제 시장 범위 검증이 끝나지 않는다.
+
+<a id="evidence-and-limits-of-the-evidence"></a>
+
+#### 증거와 해석 한계
+
+이전 8GiB/5M 비공개 probe는 전달 tick326960·승인이벤트 1013577·RSS 약 1.26GiB에서 거부했다. 이벤트상한보다 receipt scalar 계산이 먼저 포화했다. queue_delivery는 구독자 delivery 마다 receipt를 만들며 enqueue/dequeue/consume_end는 같은 identity 필드를 각각 dict에 저장한다. _field_charge는 실제 Python 객체를 공유해도 단계별 키·문자열을 재귀 계산한다.
+
+설계용 Windows 비교는 같은 native collector/hub/consumer·2000 메시지×20tick을 사용해 모두 40000delivery·124001 논리이벤트였다. TOP20 구독자 1개뿐이며 REST transport/운영 DB/네트워크/예약 수집/저장은 없었다.
+
+| RAM 표현 시제품 | 계산 MiB | RSS 증가 MiB | 20행 메시지당 producer p50/p95(ms) |
 | --- | ---: | ---: | --- |
-| Existing dictionaries/accounting | 998.28 | 155.13 | 2.7968 / 3.6025 |
-| JSON bytes for delivery fields | 303.99 | 176.28 | 2.8531 / 3.6355 |
-| Fixed columns with per-record dictionary header | 357.86 | 139.47 | 3.1205 / 4.1399 |
-| Shared fixed columns with slotted stage record | 357.86 | 106.04 | 2.6304 / 4.0271 |
+| 기존 dictionary·계산 | 998.28 | 155.13 | 2.7968 / 3.6025 |
+| delivery 필드의 JSON byte | 303.99 | 176.28 | 2.8531 / 3.6355 |
+| 기록별 dictionary header·고정 column | 357.86 | 139.47 | 3.1205 / 4.1399 |
+| 공유 고정 column·slots 단계 기록 | 357.86 | 106.04 | 2.6304 / 4.0271 |
 
-These are single controlled burst runs, not a latency win or NAS acceptance. The slotted prototype
-verified field roundtrips for enqueue/dequeue/consume_end, but did not persist or replay them. It
-still conservatively charged the full shared identity separately per stage. Actual production
-code and the staged candidate were not changed by these process-local monkeypatches. Reports are
-`artifacts/delivery-design-{legacy,json-bytes,columns,shared-slots}.json`; experiment source is
-`artifacts/probe_delivery_ram_representations.py`.
+단일 제어 burst이므로 지연개선·NAS 승인은 아니다. slots 시제품은 enqueue/dequeue/consume_end 필드왕복만 확인하고 저장/재생하지 않았다. 공유 identity 전체를 단계마다 여전히 보수적으로계산했다. 프로세스 내 monkeypatch는 운영·준비후보를 바꾸지 않았다. 보고서=`artifacts/delivery-design-{legacy,json-bytes,columns,shared-slots}.json`, 실험=`artifacts/probe_delivery_ram_representations.py`.
 
-The 20-row fixture implies approximately `3*delivered_rows + 2*messages` events before other inputs.
-Thus 5M events alone permits at most about 414 delivered ticks/s for 3,900 seconds in this particular
-shape, with no allowance for REST/store/control activity. This is a capacity curve, not the observed
-market rate. More source rows than TOP20 deliveries, fragment sizes, or subscribers change the curve.
-Only AutonomousTop20Service currently supplies a nonempty production `capture_component`; adding
-another such consumer would increase receipts and must invalidate that sizing assumption.
+20행 fixture는 다른 입력을 제외하면 대략 `3*delivered_rows + 2*messages` 이벤트를 만든다. 이 형태에서 5M 한도는 3,900초 동안 전달 tick 약 414개/초이며 REST·store·control 여유는 없다. 용량 곡선이지 관측 시장률이 아니다. 원본 행 수·fragment 크기·구독자 수가 달라지면 곡선도 바뀐다. 현재 운영에서 비어 있지 않은 `capture_component`를 제공하는 consumer는 AutonomousTop20Service뿐이다. 다른 consumer를 추가하면 receipt가 늘어나므로 이 용량 가정을 다시 검증해야 한다.
 
-The separate 900-row REST shape costs 3,024,848 charged bytes. Even one such page/s for 65 minutes
-would be about 10.99GiB before store inputs/receipts; this is a counterexample scenario, not a claim
-that production has this rate. The incomplete October 6 capture and missing local payload bundles
-cannot establish the true 09:00–09:10 maximum. There is no finite RAM-only promise for an unspecified
-input rate. The release gate must name the tested workload/rate/size envelope and its margins.
+별도 900행 REST 형태는 charge 3,024,848바이트다. 65분 동안 1page/s만으로 store 입력·receipt 전 약 10.99GiB가 되지만 운영률 주장이 아닌 반례다. 불완전한 10월 6일 수집과 없는 로컬 payload bundle로 09:00–09:10 실제 최대를 확정할 수 없다. 입력률을 지정하지 않은 RAM 전용 수집에 유한 용량을 보장할 수 없다. release 검증은 시험 workload·률·크기·여유를 명시해야 한다.
 
-#### Implemented boundary (PC regression complete; NAS capacity pending)
+<a id="implemented-boundary-pc-regression-complete-nas-capacity-pending"></a>
 
-Keep all three logical delivery events, original global sequence order, wall/monotonic timestamps,
-delivery/parent/subscriber IDs, parser positions, stages, failures and drops. Do not combine them into
-one terminal event, sample them, infer missing receipts, or change wire schema 3/replay semantics.
-Do not add caller-side JSON/hash/compression. The JSON-bytes prototype reduced accounting but raised
-RSS and is rejected. Broad payload codec or asynchronous compression redesign is deferred.
+#### 구현 경계(PC 회귀 완료·NAS 용량 대기)
 
-Implement a private compact delivery representation inside the existing recorder boundary, enabled
-only for deferred captures. Streaming mode and ordinary trace events retain the current dictionary
-path. The compact path consists of:
+논리 delivery 이벤트 3개, 원래 전역 순서, wall/monotonic 시각, delivery/parent/subscriber ID, parser 위치, stage·실패·drop을 모두 유지한다. 최종 이벤트 1개로 통합하거나 표본화·누락 receipt 추론·schema 3/재생 의미 변경을 하지 않는다. caller에 JSON·hash·압축을 추가하지 않는다. JSON-bytes 시제품은 계산량을 줄였지만 RSS가 늘어 기각했다. 광범위 payload 코덱·비동기 압축 재설계는 보류한다.
 
-1. Immutable source context: source component, message/control ID, parent input IDs and completeness.
-   Share it through the existing CapturedMessageReceipt/CapturedControlReceipt object, not a global
-   content-addressed string registry. Large fragmented messages may contain up to 100 parent IDs;
-   do not multiply their retained-memory charge by every delivered row and stage.
-2. Immutable subscriber context scoped to its capture epoch: trace/component/subscriber identity.
-3. Immutable delivery identity: delivery ID, sequence, event kind, parser ordinal and references to
-   source/subscriber contexts. It is created once at the actual queue delivery, not reconstructed
-   later from the latest subscription state.
-4. A slotted per-stage queue record: original clocks, global seq, producer, stage/outcome and identity
-   reference. Preserve absent fields versus explicit null and every diagnostic failure stage.
+기존 recorder 경계 안의 비공개 간결 delivery 표현을 지연 수집에만 사용한다. streaming 모드·일반 trace 이벤트는 기존 dictionary 경로를 유지한다. 구성은 다음과 같다:
 
-The immutable data graph has fixed depth; private retention counters are recorder-owned and guarded
-by the existing trace lock. A node is charged on the first retained queue/pending reference and
-released on the last. Retain/release children only on those 0↔1 transitions. There is no session-wide
-intern map and no per-stage traversal of all parent strings. Compute an admission delta before
-publishing a record; on rejection no ownership/count is changed. Global sequence/drop accounting
-continues through the same admission boundary. Shared children must be counted once when computing
-one atomic admission delta. Cache the built-in shallow allocation charges at immutable construction.
+1. 불변 source context: source component·message/controlID·parent inputID·완전성. 기존 CapturedMessageReceipt/CapturedControlReceipt로 공유하며 전역 content-addressed 문자열 registry를 만들지 않는다. 큰분할메시지의 parent 최대 100개를 delivery행/단계마다 중복 charge 하지 않는다.
+2. capture epoch 범위의 불변 subscriber context: trace/component/subscriberidentity.
+3. 불변 delivery identity: deliveryID·sequence·event kind·parser ordinal·source/subscriber 참조. 실제 queue 전달에서 1회생성하고 최신구독상태로나중에복원하지 않는다.
+4. slots 단계 queue 기록: 원래 clock·global seq·producer·stage/outcome·identity 참조. 필드없음과명시 null·모든진단실패 stage를구분하여보존한다.
 
-Charge includes node/tuple/string/int allocation, deque references, bookkeeping and a measured
-allocator margin, plus existing copy/worker reserves. Use exact built-in types, not arbitrary user
-`__sizeof__` methods. This is an upper-bound retention model, not `RSS == charged_bytes`. Confirm
-its bound against actual Linux RSS. Keep the generic `freeze_payload` byte/node/type/secret checks
-unchanged; the narrowly named catalog copy profile below is a separate measured exception.
-Transient producer construction and native queue-held receipt references require a bounded reserve;
-the existing subscriber queue cap of 1,000 and message bound of 10,000 rows are inputs to that bound.
-An old-epoch object must never be admitted or charged to a new session.
+불변 그래프 깊이는 고정이고 비공개 보관 counter는 recorder가 기존 trace lock으로 소유한다. 첫 queue/pending 참조에서 charge하고 마지막 참조에서 해제한다. 자식 retain/release는 0↔1 전환에서만 한다. 세션 전체 intern map이나 단계마다 모든 parent 문자열을 순회하는 경로는 없다. 공개 전에 승인 차이를 계산하고 거부 시 소유권·개수를 바꾸지 않는다. 전역 sequence/drop 계산은 같은 승인 경계를 사용한다. 한 원자적 승인 차이에서 공유 자식은 한 번만 계산하며, 불변 구성 시 기본 shallow 할당 비용을 cache한다.
 
-At persistence, the existing worker expands one bounded batch into the original JSONL dictionaries.
-Only after the existing durable chunk publication succeeds does it release each retained record and
-its identity graph. Pending suffixes and partially written chunks retain their full charge. A stage
-persisted before its siblings must not free shared context early. Abort/failure cleanup must leave no
-global retention registry or cross-session references. Use one explicit conversion/release boundary
-in `diagnostic_trace.py`, not a new store, transaction, or general framework.
+계산은 node/tuple/string/int 할당, deque 참조, 관리 정보, 측정한 allocator 여유와 기존 copy/worker 예약을 포함한다. 사용자 `__sizeof__` 대신 정확한 기본 타입을 사용한다. 보관 상한 모델이지 `RSS == charged_bytes`가 아니며 실제 Linux RSS로 상한을 확인한다. 일반 `freeze_payload`의 byte/node/type/secret 검사는 유지하고 아래 명명 catalog 프로필은 별도 측정 예외로 취급한다. producer 임시 구성과 native queue의 receipt 참조에는 제한된 reserve가 필요하며, 기존 subscriber queue 1,000개·message 10,000행 상한이 계산의 입력이다. 이전 epoch 객체를 새 세션에 승인하거나 charge하면 안 된다.
 
-Likely edits: `diagnostic_trace.py`, the private receipt types in `realtime_hub.py`, delivery hooks in
-`diagnostic_top20_input.py`, and source receipt creation in `realtime_collector.py`. A small dedicated
-record-layout module is allowed only if it owns this representation/accounting contract. Native
-consumer queue policy, subscription policy, DB connections/transactions and collector outputs do not
-change. A capture failure must remain visible while native delivery continues.
+저장 시 기존 worker가 제한된 batch를 원래 JSONL dictionary로 펼친다. durable chunk 공개 성공 후에만 각 기록·identity 그래프를 해제한다. pending 뒤쪽과 부분 저장 chunk는 전체 charge를 유지한다. 먼저 저장된 stage가 공유 context를 조기 해제하면 안 된다. abort·실패 정리 후 전역 보관 registry·세션 간 참조가 남으면 안 된다. diagnostic_trace.py에 명시적 변환·해제 경계 하나를 두며 새 store·transaction·일반 framework를 만들지 않는다.
 
-#### Independent limits and correctness gates
+예상 수정은 diagnostic_trace.py, realtime_hub.py의 비공개 receipt 타입, diagnostic_top20_input.py의 delivery hook, realtime_collector.py의 source receipt 생성이다. 작은 전용 layout 모듈은 이 표현·계산 계약을 소유할 때만 허용한다. native consumer queue·구독 정책, DB 연결·transaction, collector 출력은 유지한다. native 전달이 계속되어도 수집 실패는 보여야 한다.
 
-- Deferred retained bytes, logical event count, per-input copy bytes/nodes, copy concurrency,
-  available host/cgroup memory, and persistent bytes are independent gates. Report each separately.
-- `_MAX_STORED_BYTES` is currently 4GiB across existing captures. Even an 8GiB RAM candidate can
-  still fail at delayed persistence. Introduce an explicit per-capture persistence quota and matching
-  total-retention quota only after measuring final JSONL+unique-payload+manifest bytes. Require the
-  whole requested quota to be available at preflight; do not silently shrink it with `min(...)`.
-  Preserve old recordings and the 1MiB/s pacing/cooldown. Report projected finish time including
-  manifest writes/fsync; actual completion remains a separate gate.
-- Any `input_rejected > 0` must make terminal capture state incomplete, even if scalar enqueue worked,
-  `known_dropped == 0`, and accepted == written. Current terminal-state construction only checks
-  known_dropped/censorship; add the input-rejection condition as a separate correctness correction.
-- Test durable JSON equality with legacy records, Unicode/100-parent fragmented inputs, multiple
-  subscribers, dequeue/drop/failure/missing stages, epoch switch, rejected first/later stages,
-  concurrent admission, pending suffix retention, final-manifest failure and shutdown. Validate
-  original delivery coverage and T4 native/descendant exclusion replay against persisted output.
-- Measure small and near-capacity input distributions, not only repeated small messages. Include
-  REST/catalog/ranking/subscription/lifecycle receipts, typed store inputs and deferred save. No
-  zero/missing group counts as coverage. Native outputs/transactions must match OFF controls.
+<a id="independent-limits-and-correctness-gates"></a>
 
-#### Capacity selection and release gate
+#### 독립 한도와 정합성 검증
 
-8GiB/5M is a candidate setting, not a selected configuration. First run the compact implementation
-against the same failing native fixture and its burst variants, then a mixed named input envelope.
-Collect actual RSS/peak RSS, MemAvailable/cgroup headroom, memory charge, event count, copy rejection,
-latency/loop lag and final output bytes. Use alternating OFF/ON rounds; no parallel benchmark jobs.
-Keep the existing documented overhead goals and explicitly report misses; do not relabel a regression
-as acceptable merely because memory fits. The source workload must identify 0B/0w delivery rates,
-messages/fragments, subscriber fan-out, REST pages/rows, catalog refreshes, store shapes and lifecycle
-churn. A synthetic envelope is not an actual market maximum or performance baseline.
+- 지연보관 byte·논리 event·입력별 copy byte/node·copy 병렬수·host/cgroup 여유·저장 byte는독립검사이며각각보고한다.
+- 당시 _MAX_STORED_BYTES는기존수집전체 4GiB 다. RAM8GiB도지연 저장에서실패할 수 있다. 최종 JSONL+고유 payload+manifest를측정한뒤수집별저장 quota·전체 보관 quota를명시한다. preflight에서요청 quota 전체가필요하며 min(...)으로몰래줄이지않는다. 기존기록·1MiB/s/cooldown을보존하고 manifest/fsync 포함완료예상을보고하되실제완료는별도 검증이다.
+- input_rejected>0이면 scalarenqueue 성공·known_dropped=0·accepted=written이어도최종 incomplete 다. 기존최종 상태가 drop/censorship만검사하므로입력 거부조건을별도정합성 수정으로추가한다.
+- 구기록과 durableJSON 동일성·Unicode/parent100분할·다중구독자·dequeue/drop/실패/없는 stage·epoch 전환·첫/후속 stage 거부·병렬승인·pending 뒤쪽·최종 manifest 실패·shutdown을검증한다. 저장출력으로원래 delivery 범위·T4 native/descendant 제외재생을검증한다.
+- 반복 작은 메시지만아닌작은/한도 근처분포를측정한다. REST/catalog/ranking/subscription/lifecycle receipt·typed store 입력·지연 저장을포함한다.0개/누락그룹은범위 검증이아니며 native 출력/transaction은 OFF와같아야한다.
 
-Keep at least 4GiB host MemAvailable as an initial guardrail while testing an 8GiB candidate, and
-include production baseline RSS/cgroup headroom. Stop the private test before violating the reserve.
-The reserve is a proposed safety margin to verify on this 20GB NAS, not an observed peak requirement.
-Do not increase to 12GiB or more unless the mixed envelope needs it and measured NAS headroom permits
-it with the same reserve. A lightweight worker-side memory-pressure check may close only the capture
-gate as incomplete and keep accepted data until persist_at; it must not pause native workloads or
-flush early. Never promise this polling guard is a hard process RSS limit.
+<a id="capacity-selection-and-release-gate"></a>
 
-Only after immutable candidate regressions, exact-source NAS correctness/overhead/capacity/persistence
-gates and explicit coverage checks pass may its build/options replace active v6 and the October 8
-reservation. Update start AND verification expectations together (schema3, all three flags true,
-accepted limits, exact release, deferred persist_at). If the deadline arrives before gates pass,
-leave the existing v6 reservation unchanged and report that expanded T1–T4 capture was not approved.
+#### 용량 선택과 release 검증
 
-#### Catalog copy profile decision (2026-10-07; PC implementation complete, candidate gate pending)
+8GiB/5M은 후보값이며 확정 설정이 아니다. 먼저 같은 실패 native fixture·burst 변형, 이어서 명명된 혼합 입력 범위로 간결 구현을 확인한다. 실제 RSS/최대 RSS·MemAvailable/cgroup 여유·charge·event 수·copy 거부·지연/loop lag·최종 출력 byte를 모은다. OFF/ON을 교대로 실행하고 benchmark를 병렬로 돌리지 않는다. 기존 부하 목표·미달을 명시하며 메모리에 맞는다는 이유로 회귀를 승인하지 않는다. source workload는 0B/0w 전달률·message/fragment·fan-out·REST page/row·catalog 갱신·store 형태·lifecycle 변동을 명시해야 한다. 합성 범위는 실제 시장 최대·성능 기준이 아니다.
 
-The mixed native boundary probe exposed a third limiting factor before retained RAM or event count:
-`AutonomousTop20Service._ensure_market_catalog` converts 5,000 `(code, name, market)` rows into
-5,001 document rows and invokes `replace_documents("stock_catalog", documents)` once. The catalog
-response itself is accepted, but that store operation exceeds the default 8MiB *in-memory copy
-charge*. This is not an 8MiB file or network response. At rejection the whole private trace held only
-12,908,809 charged bytes, 79 accepted events, zero scalar drops and one rejected store input.
-The first over-budget visit was 8,388,644 bytes / 44,661 nodes (limits 8,388,608 / 120,000).
-The native call continued. Increasing the total session RAM cannot fix this per-input rejection.
+8GiB 후보 시험의 초기 guard로 host MemAvailable 최소 4GiB를 유지하고 운영 baseline RSS·cgroup 여유를 포함한다. reserve 침해 전에 비공개 시험을 멈춘다. 20GB NAS에서 확인할 제안 여유이지 관측된 최대 필요량은 아니다. 혼합 입력에 필요하고 같은 reserve를 유지할 실제 여유가 있을 때만 12GiB 이상을 검토한다. 가벼운 worker 메모리 압력 검사는 capture만 incomplete로 닫고 승인 데이터를 persist_at까지 유지할 수 있지만, native workload 중지·조기 flush는 금지한다. polling guard를 process RSS의 강제 상한으로 보장하지 않는다.
 
-Controlled PC comparison (`artifacts/catalog-capture-design-comparison.json`, five copies per case):
+불변회귀·정확한 NAS 정합성/부하/용량/저장·명시 범위 검증이모두통과한뒤에만 build/options로활성 v6·10 월 8 일예약을대체한다. 시작/검증을함께갱신한다(schema3·3 플래그 true·승인한도·정확 release·persist_at). 시각 전통과못하면 v6 예약유지·확장 T1–T4 미승인을보고한다.
 
-| 5,000-stock case | Retained copy charge | Encoded payload bytes | Copy median / max |
+<a id="catalog-copy-profile-decision-2026-10-07-implementation-pending"></a>
+
+<a id="catalog-copy-profile-decision-2026-10-07-pc-implementation-complete-candidate-gate-pending"></a>
+
+#### Catalog 복사 프로필 결정(2026-10-07; PC 구현 완료·후보 검증 대기)
+
+혼합 native 경계 probe는보관 RAM/event 전세번째한도를드러냈다. AutonomousTop20Service._ensure_market_catalog는 5000(code,name,market)행을 5001 문서로바꾸어 replace_documents("stock_catalog",documents)를 1회호출한다. catalog 응답은승인되지만 store 인수의메모리복사계산이기본 8MiB를넘었다.8MiB 파일/네트워크응답이아니다.
+거부당시 trace 전체 charge12,908,809 바이트·승인 79·scalar drop0·store 거부 1이었다. 처음한도초과지점은 8,388,644 바이트/44,661node(한도 8,388,608/120,000)다. native 호출은계속되었으며전체 RAM 증가로입력별 거부를해결할 수 없다.
+
+제어 PC 비교(`artifacts/catalog-capture-design-comparison.json`, 경우별 5회 복사):
+
+| 5,000종목 경우 | 보관 copy 계산 | 인코딩 payload 바이트 | copy 중앙값 / 최대 |
 | --- | ---: | ---: | ---: |
-| Unchanged arguments, 8MiB | rejected | not produced | not applicable |
-| Unchanged arguments, 16MiB | 14,038,408 | 814,054 | 36.08 / 45.04 ms |
+| 기존 인수·8MiB | 거부 | 생성 없음 | 해당 없음 |
+| 기존 인수·16MiB | 14,038,408 | 814,054 | 36.08 / 45.04 ms |
 | Columnar prototype, 8MiB | 3,359,372 | 284,101 | 9.23 / 11.98 ms |
 
-The columnar timing excludes building/validating its new layout, and fixture equality is not a
-general codec correctness proof. These numbers are PC design evidence, not NAS latency acceptance.
-The 2,500-stock mixed deferred probe separately completed 150 events, with all chunks, references,
-sequences, REST pairs, subscription approvals and delivery closure verified; its files totalled
-1,773,717 bytes. It does not excuse the 5,000-stock failure or establish a 65-minute bound.
+columnar 시간은 새 layout 구성·검증을 제외하며 fixture 일치만으로 일반 코덱 정합성을 증명하지 않는다. PC 설계 증거이지 NAS 지연 검증은 아니다. 별도 2500 종목 혼합 지연 probe는 150이벤트를 완료했고 chunk/참조/시퀀스/REST 쌍/구독 승인/delivery 종료를 확인했다. 파일은 1,773,717 바이트다. 5000 종목 실패나 65분 한도를 해결하는 증거는 아니다.
 
-**Decision:** keep the exact native store arguments and select a bounded **16MiB catalog store copy
-profile**. Do not implement fragmentation, columnar serialization or parent-payload reconstruction
-for this candidate. The native catalog task runs via `owned_to_thread`, is reused for the same day
-after success, and has no per-tick store call. The measured extra copy reservation is preferable to
-a new encoding/reconstruction contract before this release. This decision only permits implementing
-and testing the profile; it does not approve active deployment or 8GiB/5M session limits.
+**결정:** 정확한 native store 인수를 유지하고 제한된 **16MiB catalog store 복사 프로필**을 선택한다. 이 후보에 분할·columnar 직렬화·부모 payload 복원을 구현하지 않는다. native catalog task는 owned_to_thread로 실행하고 성공 후 같은 날 재사용하며 tick 별 store 호출은 없다. 이번 release 전에 새 인코딩/복원 계약을 만드는 것보다 측정된 추가 복사 예약을 선택한다. 프로필 구현/시험만 허용하며 활성 배포·8GiB/5M 세션 한도 승인은 아니다.
 
 Implementation contract:
 
-1. Add one named profile, `stock-catalog-documents/v1`, owned by `diagnostic_replay_contract.py`.
-   Select it only for captured `operation_start` of the native `replace_documents` method with
-   actual bound arguments `collection == "stock_catalog"`. Keep the generic 8MiB limit, the
-   120,000-node/depth/string/type/secret checks and all other methods unchanged. Do not broaden
-   `upsert_documents`, ordinary documents, REST/collector inputs or account inputs. No request
-   option may set an arbitrary per-input limit.
-2. Record `payload_profile` and `collection` on the operation's start and end. Both must match in
-   operation-pair validation. Absence retains legacy 8MiB behavior; unknown, mismatched or misplaced
-   profiles fail closed. Keep codec tags, original argument list/tuple/dict types, values, order,
-   operation/actor/cause IDs and the single native call exactly unchanged. No catalog regeneration
-   from today's template or upstream receipt is allowed during store-only replay.
-3. `diagnostic_trace.emit_payload` verifies the method/collection/profile against the actual value
-   before admission and reserves the selected 16MiB **before copying**. Copy once using that bound;
-   do not first copy 8MiB and retry. Use a local reservation amount on every success, rejection,
-   exception, stop/epoch-change and finally path. With the existing two-copy semaphore the maximum
-   in-flight reservation becomes 32MiB; include it in RSS/headroom tests and session accounting.
-   The generic `_COPY_RESERVATION` remains 8MiB. Native results/errors and connection ownership do
-   not change when capture fails.
-4. Make decoding symmetric: a central operation-argument reader validates profile metadata, thaws
-   with the selected bound, verifies the decoded collection/method binding and runs existing
-   operation validation. `thaw_payload` may accept an internal bounded-byte parameter while its
-   default stays 8MiB and final freeze validation uses the same selected limit. Do not infer a larger
-   budget from unverified payload contents or silently retry decoding after an 8MiB error.
-   Route the operation readers in `compile_recorded_plan`, `diagnostic_recorded_execution._prepare`
-   and `compile_lifecycle_descendants` through that reader. Audit any additional operation readers;
-   REST/collector readers continue to use the generic codec. Pair/profile mismatch must fail before
-   native store invocation.
-5. Declare supported input copy profiles and limits in candidate capabilities. Schema 3 and
-   `store-input/v1` typed encoding remain unchanged; profile metadata declares the expanded input
-   envelope. Older readers remain bounded and reject oversized inputs. Preserve the original
-   dataset selection/provenance rules: native TOP20 replay replaces its descendant catalog write;
-   TOP20 exclusion never reinjects it; explicitly supported store-only replay invokes the exact
-   stored native arguments once. Peer operations remain independent.
-6. Preserve existing 16MiB blob/bundle bounds and total file quota. Measure final serialized bytes
-   and keep those gates independent; this change is not permission to bypass a persistent bound.
-   The 5,000-stock fixture is a named envelope, not a maximum for every possible catalog/name size.
-   Values over 16MiB or 120,000 nodes remain visibly rejected/incomplete. Capacity acceptance must
-   name actual tested catalog counts/string shapes alongside the rest of the workload.
+1. diagnostic_replay_contract.py가 소유하는 명명 프로필 stock-catalog-documents/v1을 추가한다. 실제 bound 인수 collection="stock_catalog"인 native replace_documents의 기록 operation_start에만 선택한다. 일반 8MiB·120000node/depth/string/type/secret 검사·다른 메서드는 유지한다. upsert_documents/일반문서/REST/collector/account로 확대하거나 요청에서 임의 한도를 정하지 않는다.
+2. start/end에 payload_profile·collection을 기록하고 작업 쌍 검증에서 둘의 일치를 요구한다. 없으면 기존 8MiB, 미지/불일치/잘못된 위치는 실패 종료한다. codec tag·원래 list/tuple/dict 타입/값/순서·operation/actor/cause ID·native 단일 호출은 그대로다. store 전용 재생에서 오늘 template·상류 receipt로 catalog를 재생성하지 않는다.
+3. diagnostic_trace.emit_payload는 실제 값의 method/collection/profile을 확인하고 **복사 전에** 선택 16MiB를 예약한다. 해당 한도로 1회 복사하며 8MiB 실패 후 재시도하지 않는다. 성공/거부/예외/stop/epoch 변경/finally 마다 로컬 예약액을 쓴다. 기존 2copy semaphore의 최대예약은 32MiB이며 RSS/여유/세션 계산에 포함한다. 일반 _COPY_RESERVATION은 8MiB 다. capture 실패도 native 결과/오류/연결 소유권을 바꾸지 않는다.
+4. decode도 대칭이다. 공통 작업 인수 reader가 metadata를 확인하고 선택한도로 thaw 한 뒤 collection/method binding·기존 operation 검증을 한다. thaw_payload의 내부 한도 인수는 허용하되 기본 8MiB·최종 freeze도 같은 선택한도다. 미검증 내용으로 한도를 늘리거나 8MiB 실패 뒤 decode를 재시도하지 않는다. compile_recorded_plan·diagnostic_recorded_execution._prepare·compile_lifecycle_descendants와 추가 operation reader를 이 경로로 연결한다. REST/collector는 일반 codec이다. pair/profile 불일치는 native 호출 전에 실패해야 한다.
+5. capabilities에 지원 copy profile/한도를 명시한다. schema3·store-input/v1 typed encoding은 유지하고 metadata로 확장 범위를 밝힌다. 구 reader는 제한을 유지해 초과를 거부한다. 원래 dataset 선택/출처 규칙을 유지한다. native TOP20 재생은 후속 catalog 쓰기를 대체하고 TOP20 제외는 재주입하지 않으며 지원된 store 전용은 저장 native 인수를 정확히 1회 호출한다. peer는 독립이다.
+6. 기존 16MiB blob/bundle·전체 파일 quota를 유지하고 최종 직렬 byte를 별도 측정한다. 저장 한도를 우회하는 권한이 아니다.5000 종목은 명명 시험 범위이지 모든 catalog/name의 최대가 아니다.16MiB 또는 120000node 초과는 명시적 거부/incomplete 다. 검증은 시험 종목 수·문자열 형태·전체 workload를 명시해야 한다.
 
-Required acceptance before activation or reservation change:
+활성화·예약 변경 전에 필요한 검증:
 
-- Exact 5,000-stock native catalog capture and durable roundtrip, then standalone catalog store
-  replay and full/excluded TOP20 descendant checks in the disposable PostgreSQL fixture. Check the
-  same arguments, row values/order, single invocation and baseline restoration. No quiet skipped gate.
-- Mixed OFF/ON output equality and distinct profile checks; wrong method/collection/unknown profile,
-  mismatched end, secret field, oversized bytes/nodes, capture OFF, copy busy, concurrent 16MiB and
-  8MiB reservations, copy failure and stop/epoch-change all preserve native behavior and accounting.
-- Do not classify every input rejection as `capture_limit_reached`: payload/profile/node rejection
-  is a correctness/envelope failure. A near-capacity probe counts as a memory/event saturation test
-  only for the expected memory/event admission reasons. Emit exact first-limit/rejection details.
-- Complete the mixed probe's bounded durable-save gate and alternating OFF/ON rounds. Increase
-  the mixed probe counts enough to actually reach each tested 4GiB/1M or 8GiB/5M limit, with the
-  private 4GiB headroom guard. Run the exact immutable source on NAS, record RSS/MemAvailable/cgroup,
-  capture latency, serialized bytes and elapsed paced persistence, then decide the session/file limits.
+- 정확한 5000 종목 native 수집/durable 왕복 뒤 폐기 PG에서 catalog store 전용 재생·전체/제외 TOP20 후속 경로를 확인한다. 같은 인수·행 값/순서·단일 호출·baseline 복원을 검증하며 조용히 건너뛰지 않는다.
+- 혼합 OFF/ON 출력·프로필 구분을 확인한다. 잘못된 method/collection·미지 profile·end 불일치·secret·byte/node초과·OFF·copybusy·병렬 16/8MiB 예약·복사실패·stop/epoch 변경 모두 native 동작·계산을 보존해야 한다.
+- 모든 거부를 capture_limit_reached로 부르지 않는다. payload/profile/node는 정합성/입력범위 실패다. 예상 메모리/event 승인 사유일 때만 포화 시험으로 분류하고 첫 한도/거부를 정확히 출력한다.
+- 혼합 durable 저장·OFF/ON 교대를 완료한다. 비공개 4GiB 여유 guard를 유지하며 실제 4GiB/1M·8GiB/5M 한도에 닿도록 개수를 늘린다. 정확한 불변 NAS 소스로 RSS/MemAvailable/cgroup·지연·직렬 byte·pacing 저장 시간을 기록한 뒤 세션/파일 한도를 결정한다.
 
-PC implementation evidence (2026-10-07): the named profile is selected before copying and has a
-16MiB reservation; the two-copy gate therefore reserves at most 32MiB. The replay argument reader
-uses the same bounded decoder and verifies method, collection, and profile. Start/end metadata must
-match including field presence. Ten focused profile tests and the combined 95-test capture/replay
-regression set passed. A private 5,000-stock mixed probe durably wrote and re-read one catalog call
-(5,001 documents), validated the profile pair, all 294 event sequence/checksum references, and
-finished persistence in 5.29 seconds on Windows. This is codec and local-file evidence only; its
-RSS sample and 20-message fixture do not establish NAS I/O overhead or a 65-minute capacity bound.
-The v4 exact-source NAS gate did not reach tests: DSM Docker rejected its `--cpus 1` option with
-`NanoCPUs can not be set`; the trap confirmed the active release and both operational containers
-were unchanged. Candidate v5 removed that unsupported CPU limit and its API gate passed, but 41 of
-51 unit tests errored at trace start because the candidate's 128MiB `/tmp` tmpfs had less than the
-required 256MiB free-space preflight. This is a test-container setup failure before capacity probes,
-not evidence that the deferred RAM budget is too small. v6 still failed before capacity probes:
-deferred trace start reserves 4GiB+64MiB of real file-store headroom, exceeding its 512MiB test
-tmpfs, and three T1–T4 tests were absent from the candidate release. The 51-test run had 21 errors;
-these are gate setup/fixture failures, not capacity measurements. Candidate v7,
-`2026.10.07-causal-deferred-capture-v7-5127bafdc15c374a`, raises only the disposable test tmpfs to
-5GiB and adds the three missing tests. It retains network isolation, the 12GiB memory ceiling,
-read-only candidate source and active/container invariance checks. The v7 NAS gate was pending at this preparation checkpoint; no
-4GiB/1M or 8GiB/5M capacity, RSS/MemAvailable, ON/OFF latency or paced-persistence result has been
-established, and the scheduled capture remains unchanged.
-The offline 4GiB mixed capacity probe completed 5,000 messages with 250 REST/catalog rounds, 325,758
-events, 2,967,469,329 charged bytes and 842,534,912 bytes peak RSS. It did not saturate the budget,
-so it is only an input-shape measurement. The candidate NAS gate now requires mixed 5,000-stock
-probes to hit an explicitly classified memory or event limit for both proposed envelopes; these
-counts and the 4GiB headroom guard still need NAS confirmation.
+PC 구현 증거(2026-10-07): 프로필을 복사 전에 선택·16MiB 예약하고 2copy 최대 32MiB 다. 재생 인수 reader는 같은 제한 decode·method/collection/profile 검증을 사용한다. start/end는 필드 존재 여부까지 같아야 한다. 집중 10개·합동 95개 통과. 비공개 5000 종목 혼합 probe는 catalog1 호출/5001 문서를 저장·재읽고 profile 쌍·294이벤트 시퀀스/체크섬/참조를 검증했으며 Windows 저장 5.29초였다. 코덱/로컬 파일 증거일 뿐 RSS 표본·20 메시지로 NAS I/O·65분을 인정하지 않는다.
+v4 NAS는 DSM이 --cpus1에 NanoCPUs can not be set을 반환해 테스트에 도달하지 못했다. trap은 활성/두 운영 container 보존을 확인했다. v5는 CPU 옵션 제거·API 통과 뒤 trace start에서 51개 중 41 오류였다. /tmp tmpfs128MiB가 시작 여유 256MiB 보다 작았기 때문이며 용량 probe 전 설정 실패다.
+v6도 지연 시작의 실제 file-store4GiB+64MiB가 tmpfs512MiB를 넘어 실패했고 T1–T4 테스트 3개가 후보에 없었다.51개 중 21 오류는 설정/fixture이지 용량 측정이 아니다. v7 `2026.10.07-causal-deferred-capture-v7-5127bafdc15c374a`는 폐기 tmpfs만 5GiB로 올리고 누락 3개를 추가했다. 네트워크 격리·메모리 12GiB·읽기 전용 소스·활성/container 동일성 검사를 유지했다. 이 준비 시점 v7 NAS 검증·용량/RSS/여유/ON-OFF/저장 결과는 미완료이고 예약은 유지했다.
+오프라인 4GiB 혼합은 5000 메시지·REST/catalog250회·325758이벤트·charge2,967,469,329·peakRSS842,534,912 바이트로 포화하지 않아 입력 형태 측정만 인정한다. NAS 검증은 5000 종목 혼합으로 두 후보 한도의 명시적 메모리/event 포화와 4GiB 여유 확인을 요구한다.
 
-Scope of edits: `diagnostic_replay_contract.py`, `diagnostic_trace.py`, operation preflight readers,
-candidate `app.py` capabilities, targeted regression/integration fixtures and the private capacity
-gate scripts. Build from the accepted candidate app, not the unrelated dirty root app. No database
-method, native catalog transformation, runtime scheduling, active pointer or reservation change is
-part of implementing this profile.
+수정 범위는 diagnostic_replay_contract.py·diagnostic_trace.py·operation preflight reader·후보 app.py capabilities·대상 회귀/integration fixture·비공개 용량 script 다. 승인 후보 app에서 구성하고 무관한 변경이 있는 root app을 쓰지 않는다. DB 메서드·native catalog 변환·런타임 일정·활성 pointer·예약 변경은 프로필 구현 범위가 아니다.
 
-#### NAS v7 sizing evidence and private v8 continuation
+<a id="nas-v7-sizing-evidence-and-private-v8-continuation"></a>
 
-The supplied `causal-capture-sizing.1sKoif.log` completed API, 94 unit regressions and 15 dedicated
-PostgreSQL checks without skips. The mixed 5,000-stock durable smoke verified 294 events and all
-payload/chunk references. Saturation, however, rejected inputs at 630,132 events for 4GiB/1M and
-1,267,390 events for 8GiB/5M, both classified as retained-memory copy-reservation admission.
-For 8GiB the charged bytes were 8,556,861,911, RSS 2,508,378,112, host available 15,572,205,568 and
-cgroup headroom 10,363,731,968. These are bytes, not GiB; charge is not an RSS measurement.
-Simple OFF/ON p95 was 2.967/7.896ms. Mixed calls and actual consumer work need separate latency
-acceptance; neither the synthetic envelope nor its extrapolated 65-minute rate establishes the
-observed market maximum. No capacity or overhead approval follows from correctness passing.
+#### NAS v7 용량 증거·비공개 v8 후속
 
-v8 preserves all native v7 source except the build marker and private probe/gate files. It tests
-12GiB/5M in a disposable 16GiB container, requiring 13GiB start headroom and checking host/cgroup
-4GiB headroom during execution. It reports sampled RSS peaks, minimum headroom, classified failure,
-mixed OFF/ON latency, and visible progress. Invalid payload/profile/type failures cannot be masked
-by later saturation. The POSIX logging wrapper preserves command failure past the output pipeline.
-The 5GiB tmpfs remains sufficient for the current empty-store 4GiB+64MiB disk preflight; it does not
-prove that a 12GiB charged session will fit the independent global 4GiB durable quota.
-The full-capacity paced drain, valid market maximum, operational RSS and latency acceptance remain
-open. Operational 4GiB/1M defaults, active v6 and the scheduled capture must remain unchanged until
-those gates pass. PC exact-source validation passed 97 tests and API wiring; a 158-event smoke
-had zero input rejection/drop. This smoke is not a NAS capacity test.
+제공 causal-capture-sizing.1sKoif.log는 API·unit94·전용 PG15를 건너뜀 없이 통과했다. 혼합 5000 종목 durable smoke는 294이벤트·payload/chunk 참조를 확인했다. 그러나 4GiB/1M은 630132이벤트,8GiB/5M은 1267390에서 보관 메모리 복사 예약 승인 거부로 포화했다.
+8GiB의 charge8,556,861,911·RSS2,508,378,112·host 여유 15,572,205,568·cgroup 여유 10,363,731,968은 바이트이며 charge는 RSS가 아니다. 단순 OFF/ON p95=2.967/7.896ms 다. 혼합 호출·실제 consumer는 별도 지연 검증이 필요하다. 합성/외삽 65분률은 실제 시장 최대가 아니며 정합성 통과만으로 용량/부하를 승인하지 않는다.
 
-### Replay report call correlation (2026-10-03 local candidate)
+v8은 v7의 native 소스를 유지하고 build·비공개 probe/gate만 바꾼다. 폐기 16GiB container에서 12GiB/5M·시작여유 13GiB·실행 중 host/cgroup4GiB를 검사하고 RSS 최대·최소 여유·분류실패·혼합 OFF/ON 지연·진행을 보고한다. payload/profile/type 오류를 뒤의 포화로 덮지 않는다. POSIX logging wrapper는 pipeline 뒤에도 명령 실패를 유지한다.
+tmpfs5GiB는 빈 store의 4GiB+64MiB disk preflight에는 맞지만 charge12GiB가 별도전체 4GiB durable quota에 맞는 증거는 아니다. 전체 pacing drain·실제 시장 최대·운영 RSS/지연은 미완료다. 통과 전 운영 4GiB/1M·활성 v6·예약 유지. PC97개/API·158이벤트 smoke 거부/drop0 통과이며 NAS 용량 시험은 아니다.
 
-Each replay execution now has its own `replay_call_id`, passed as the observed DB call's `request_id`. The report joins that value to the source trace/report `source_call_id`, the generated `db_call_id`, and the call's attempted rows, domain counts, elapsed/execute/commit times, transaction/commit/rollback counts, SQL count, and outcome. Query-minute shape fields that were not recorded by the writer metrics are explicitly counted as incomplete instead of being implied as zero. Aggregate direct-call totals are built only from these linked calls.
+<a id="replay-report-call-correlation-2026-10-03-local-candidate"></a>
 
-The existing `phase.database_delta` remains an interval-wide before/after delta, with an adjacent scope record: `pg_stat_wal` is cluster-wide, while `pg_stat_database` is for the measured database and includes sampler queries and unrelated activity there. PostgreSQL does not expose WAL bytes attributable to one transaction through these counters, so per-call WAL remains unavailable; the report sets it to null and explains why. Per-call commit counts/timings are directly correlated, and cluster/database interval counters remain separately visible.
+### 재생 보고서 호출 연결(2026-10-03 로컬 후보)
 
-This report change is local and is not deployed to the active NAS source release. It does not block the higher-priority October 6 market-hours capture. That capture should use the active `db-minute-replay-v1` source whose minute writer records input rows, changed rows, duplicate input keys, and revision inserts; replay/report improvements can be deployed after the trace is safely captured and verified. Local regression tests passed 78 tests; 4 dedicated PostgreSQL tests were skipped because this PC run had no diagnostic DB URL. NAS acceptance of the report change remains pending.
+재생마다 replay_call_id를 만들고 관측 DB request_id로 전달한다. source trace/report의 source_call_id·생성 db_call_id·시도행·domain개수·elapsed/execute/commit 시간·transaction/commit/rollback 수·SQL 수·결과를 연결한다. writer 지표에 없는 query-minute 형태 필드는 0 으로 암시하지 않고 incomplete로 센다. 직접 호출 합계는 연결된 호출만으로 구성한다.
+
+phase.database_delta는 측정 구간 전후 차이를 유지하고 scope를 옆에 명시한다. pg_stat_wal은 cluster 전체, pg_stat_database는 대상 DB이지만 sampler query·무관 활동도 포함한다. 이 counter로 트랜잭션별 WALbyte를 알 수 없으므로 call WAL은 null·이유를 기록한다. call 별 COMMIT 수/시간은 직접 연결하고 cluster/DB 구간 counter는 별도 노출한다.
+
+보고서 변경은 로컬·활성 NAS 미배포다. 우선 10 월 6 일 장중 수집을 막지 않는다. 수집은 입력행/변경행/중복키/revision 삽입을 기록하는 활성 db-minute-replay-v1을 쓰고 재생/보고서 개선은 안전한 수집·검증 뒤 배포할 수 있다. 로컬 78개 통과·진단 DB URL이 없어 전용 PG4개 건너뜀. 보고서 변경 NAS 검증은 남았다.
 
 필수 테스트: multi-thread seq/queue, begin/end 밖 경계, overflow 표시, chunk checksum·partial·manifest crash recovery, disk full/permission 오류, master OFF/TTL/instance 변경, clock jump, shutdown 시 flush timeout, raw/trace 독립성, observer 실패의 DB 결과 불변, native transaction/peer 독립 commit, API 인증·경로 탈출·용량 제한.
 
@@ -520,200 +319,84 @@ This report change is local and is not deployed to the active NAS source release
 
 이 설계만으로 13시·10월 6일 capture 예약이나 자료 확보가 완료된 것은 아니다. 현재 활성 NAS release, 배포 여부, trace 실제 시작/종료, coverage와 유실 여부는 각각 별도 증거로 남긴다.
 
-#### REST request-lane sizing correction (2026-10-07)
+<a id="rest-request-lane-sizing-correction-2026-10-07"></a>
 
-The v8 NAS private 12GiB/5M sizing run stopped at 24,361 mixed rounds because two broker request
-identities were rejected by the per-owner 4MiB request-lane budget. Memory headroom and global
-event capacity were not the limiting boundary. The old estimate charged four bytes for every
-character of the string form of the request tuple and canonical signature; Python's tuple
-representation expands quotes and escapes, so that estimate grew much faster than the actual
-retained strings.
+#### REST 요청 lane 용량 계산 수정(2026-10-07)
 
-v9 stores the complete canonical UTF-8 signature bytes in the internal ordinal-map key and charges
-their exact byte length, with the existing 512-byte fixed allowance and conservative actor charge.
-UTF-8 encoding is reversible, so per-actor, per-signature ordinals and exact request matching remain
-unchanged. The trace payload, signature format, sequence pairing, replay reader, 4MiB budget, and
-32,768-key limit are unchanged. Tests cover 4,000 distinct requests under the old budget, Unicode and
-escaped signatures, repeated signatures, byte/entry-limit rejection, and reset on a new trace token.
-The recursive retained-size estimate remained below charged bytes for those fixtures.
+v8 NAS 비공개 12GiB/5M은 mixed24361회에서 owner 별 4MiB request-lane 예산이 broker identity2개를 거부하여 멈췄다. 메모리여유·전체 event가 먼저가 아니었다. 구 계산은 request tuple/signature 문자열의 문자마다 4byte를 더했고 tuple repr의따옴표/escape가 실제 보관 문자열보다 빠르게 계산값을 키웠다.
 
-The v9 NAS run confirmed 3,968 unique request keys charged at 2,911,020 bytes, below the unchanged
-4MiB limit. It then reached the 12GiB copy-reservation budget at 29,731 synthetic trade messages,
-whose 100ms timestamp cadence represents about 49.6 minutes. The run recorded 1,905,826 accepted
-events and 28 capture_memory_full input rejections, with zero known drops; RSS peak was
-3,735,203,840 bytes, minimum host MemAvailable 14,344,683,520 bytes, and cgroup headroom
-13,431,042,048 bytes. This expected classified saturation proves the REST-key overcharge is fixed,
-but the 12GiB budget does not cover even this synthetic 65-minute input envelope.
+v9는 내부 ordinal-map 키에 canonical UTF-8 signature 전체를 보관하고 정확한 길이·기존고정 512byte·보수적 actor charge를 계산한다. UTF-8은 가역적이어서 actor/signature 별 ordinal·정확요청대조는 유지한다. payload/signature 형식/sequence 쌍/reader/4MiB/32768 키는 동일하다. 기존예산 내 4000 요청·Unicode/escape·반복·byte/entry 거부·새 token reset을 검증했고 재귀보관크기 추정은 charge 보다 작았다.
 
-The inactive v10 candidate increases only the private probe budget to 16GiB and the disposable
-cgroup ceiling to 20GiB. It must retain a 4GiB host/cgroup reserve while completing 39,000 messages
-at 100ms cadence, reporting RSS and minimum headroom. Operational recorder defaults remain 4GiB/1M.
-The exact-source PC gate passed 100 unit regressions/API and a small 16GiB smoke. The v10 NAS
-65-minute synthetic-envelope gate did not start: its production preflight requires charge budget plus
-1GiB, or 17GiB available, and the preceding host MemAvailable sample was 18,073,481,216 bytes
-(180,129,792 bytes short). No input was recorded, so this is not evidence of 16GiB saturation.
-Inactive v11 `2026.10.08-causal-deferred-capture-v11-dffa8b971619a1ea` is staged from exact v10 source
-(928 files, commit `ae1e7cbe9c71ec44ca83cdeddbcae4bf529137d8`, active/runtime unchanged) and changes
-only the private probe budget to 15GiB. The same 39,000-message envelope, 5M event cap, disposable
-20GiB cgroup and in-run 4GiB host/cgroup guard remained. It saturated copy reservation after 37,201
-messages (about 62 minutes at synthetic 100ms cadence): 2,384,653 accepted events, 28
-`capture_memory_full` rejections, zero known drops. Charged bytes were 16,075,246,320 and process RSS
-peak was 4,675,239,936 bytes; host MemAvailable stayed at or above 13,404,901,376 and cgroup
-headroom at or above 16,789,262,336 bytes. Thus the measured physical reserve held, but 15GiB charge
-was short of the 65-minute envelope and 5M event count was not the first limit. The maximum payload
-copy took 2,481ms and one message took 1,833ms; the event responsible is not attributed, so capture
-overhead remains unapproved.
+v9 NAS는 3968 요청키/2,911,020 바이트로 4MiB 보다 낮았다. 이후 100ms 합성메시지 29731개(약 49.6분)에서 12GiB 복사예약을 포화했다. accepted1,905,826·capture_memory_full28·drop0·peakRSS3,735,203,840·최소 host 여유 14,344,683,520·cgroup 여유 13,431,042,048 바이트다. REST 키 과대계산 수정은 확인했지만 12GiB도 합성 65분에 부족하다.
 
-Next, retry the existing inactive v10 16GiB private gate only when current host MemAvailable reaches
-18,253,611,008 bytes (17GiB), its configured budget plus startup reserve. The v11 large-run starting
-snapshot was 18,036,588,544 bytes, 217,022,464 bytes short. Do not bypass or weaken production
-preflight. Operational defaults remain 4GiB/1M. Even a complete v10 synthetic envelope does not prove
-the real market maximum, paced near-capacity persistence, the independent global 4GiB file quota, or
-the source of the copy-time outlier.
+비활성 v10은 비공개예산 16GiB·폐기 cgroup20GiB만 늘린다.100ms39000 메시지 동안 host/cgroup4GiB 여유·RSS/최소 여유를 보고하며 운영 4GiB/1M은 유지한다. PC100/API·작은 16GiB smoke 통과. NAS65분은 시작하지 못했다. 운영 preflight는 예산+1GiB=17GiB 여유가 필요했지만 직전 host18,073,481,216 바이트는 180,129,792 부족이었다. 입력 없으므로 16GiB 포화 증거가 아니다.
+v11 `2026.10.08-causal-deferred-capture-v11-dffa8b971619a1ea`는 정확한 v10/928 파일/commit `ae1e7cbe9c71ec44ca83cdeddbcae4bf529137d8`에서 비공개예산만 15GiB로 바꾸고 활성/runtime 유지했다.39000/5M/cgroup20GiB/guard4GiB에서 37201 메시지(약 62분) 뒤 복사예약포화다. accepted2,384,653·거부 28·drop0·charge16,075,246,320·peakRSS4,675,239,936·host 최소 13,404,901,376·cgroup 최소 16,789,262,336 바이트다. 물리 reserve는 지켰으나 15GiB charge가 부족했고 event5M이 먼저가 아니다. 복사 max2481ms·메시지 max1833ms의 책임 event 미확정으로 부하 미승인이다.
 
-2026-10-08 controlled60-minute copy/GC evidence: private15GiB/5M probe completed36,000
-messages /2,307,608 events with no input rejection/drop. In the instrumented repeat, the largest
-REST immutable copy took2448.337ms, of which2430.272ms was automatic GC in the same thread.
-A19,268-byte charged realtime input took1989.087ms, with1988.862ms in GC. The save_query
-copy outlier took1636.053ms, with1617.831ms in GC. Gen2 totaled24801.542ms /38 collections.
-This narrows the measured long-copy cause to GC pauses; it does not establish production workload
-coverage or acceptable overhead. Large deferred persistence is still pending. Process-wide GC
-disable/freeze/threshold tuning is not a chosen fix. Evaluate capture-local packed retention against
-background RAM encoding, preserving immutable inputs, ownership/refcount charges, sequence IDs,
-descendant provenance, cancellation/shutdown, and unchanged durable schema. Avoid treating
-instrumented timing as the final uninstrumented performance baseline.
+실제 host MemAvailable≥18,253,611,008 바이트(17GiB)일 때만 기존 v10/16GiB를 다시 확인한다. v11 시작표본 18,036,588,544는 217,022,464 부족했다. 운영 preflight를 우회/약화하지 않으며 4GiB/1M 유지다. v10 합성 전체완료도 실제 시장 최대·한도 근처 pacing 저장·별도전체 4GiB 파일 quota·복사이상치원인을 증명하지 않는다.
 
-### Deferred capture GC decision — 2026-10-08
+2026-10-08 제어 60분 copy/GC 증거: 비공개 15GiB/5M이 36000 메시지/2,307,608이벤트를 거부/drop0 으로 완료했다. 계측반복의최장 REST 불변복사 2448.337ms 중 같은 thread 자동 GC2430.272ms, charge19268byte realtime1989.087ms 중 GC1988.862ms, save_query1636.053ms 중 GC1617.831ms 였다. Gen2 합계 24801.542ms/38회다.
+긴복사원인을 GC 정지로 좁혔지만 운영범위·허용부하 검증은 아니다. 큰지연 저장은 남았다. 전역 GC disable/freeze/threshold는 선택수정이 아니다. 수집별 packed 보관과배경 RAM 인코딩을 비교하되 불변입력·소유/refcountcharge·sequenceID·후속출처·취소/shutdown·durable 형식을 유지한다. 계측시간을최종비계측성능 기준으로 쓰지 않는다.
 
-**Status: implementation design selected; not implemented or deployment-approved.** Base the first
-candidate on the verified `2026.10.08-causal-capture-60m-v1-a8376b5b6bdf96e7` source, not the dirty
-main checkout or the instrumented copy-profile candidate. Keep schema3, all causal boundaries,
-native workload ownership, recorder opt-ins and persisted replay format unchanged.
+<a id="deferred-capture-gc-decision--2026-10-08"></a>
 
-#### Evidence and alternatives
+### 지연 수집 GC 결정 — 2026-10-08
 
-The copy-profile NAS run attributes 2430.272 of2448.337ms in its worst REST copy to same-thread GC.
-A small realtime input similarly spends1988.862 of1989.087ms in GC. It demonstrates the observed
-pause mechanism, not which retained object family alone accounts for all GC cost. Current deferred
-`_hold_deferred` prevents the existing writer from draining `_QUEUE` until persist_at. That queue
-retains event dictionaries, frozen payload tuple graphs and `DeliveryStage`/`Context` graphs for the
-entire session. The existing slots sharing reduces RSS but leaves GC-tracked instances per stage.
+**상태: 구현 설계 선택·당시 미구현·배포 미승인.** 첫 후보는확인된 `2026.10.08-causal-capture-60m-v1-a8376b5b6bdf96e7`에서 시작하며 변경있는 main·계측 copy-profile을기준으로삼지않는다. schema3·모든인과 경계·native workload 소유·recorder 선택·저장재생형식은 유지한다.
 
-| Choice | Decision | Reason |
+<a id="evidence-and-alternatives"></a>
+
+#### 증거와 대안
+
+NAS copy-profile은 최장 REST 복사 2448.337ms 중 같은 thread의 GC 2430.272ms, 작은 realtime 복사 1989.087ms 중 GC 1988.862ms를 확인했다. 관측된 정지 기전의 증거이며 특정 보관 객체군이 전체 GC 비용을 단독으로 설명하는 증거는 아니다. 기존 `_hold_deferred`는 persist_at까지 writer의 `_QUEUE` drain을 막아 event dictionary·불변 payload tuple·DeliveryStage/Context 그래프를 세션 전체에 보관한다. slots 공유는 RSS를 줄이지만 단계별 GC 추적 instance는 남긴다.
+
+| 선택지 | 판단 | 이유 |
 | --- | --- | --- |
-| Larger budget or fewer captured inputs | Reject as GC fix | Does not remove the observed pauses; reducing coverage violates the capture objective. |
-| Process-wide disable/freeze/threshold tuning | Reject | Affects trading, subscriptions, caches and cyclic application objects outside capture; postpones or hides reclamation. |
-| Serialize every event/payload in its producer | Do not select | Bounds long-lived objects but adds full encoding directly to collector/DB caller latency; the old delivery-only PC experiment does not validate mixed NAS inputs. |
-| More slots/shared references alone | Do not select as complete fix | Still retains per-event Python graphs; cannot establish a bound on old-generation scan work. |
-| New recorder process/shared-memory transport | Defer | Adds IPC, startup/shutdown, failure recovery and input ownership boundaries beyond this correction. |
-| Existing recorder worker packs bounded batches into RAM byte segments | Select for first candidate | Removes the hour-long Python graph while preserving producer copy policy, deferred filesystem writes and existing worker ownership. Must pass CPU/GIL/backlog gates. |
+| 예산 확대·수집 입력 축소 | GC 수정으로 기각 | 관측된 정지를 제거하지 못하며 범위 축소는 수집 목표에 어긋난다. |
+| process 전체 GC disable/freeze/threshold 조정 | 기각 | 수집 밖의 매매·구독·cache·순환 객체에도 영향을 주고 회수를 미루거나 숨긴다. |
+| producer에서 모든 event/payload 직렬화 | 선택 안 함 | 장기 객체는 제한하지만 전체 인코딩이 collector/DB caller 지연에 추가된다. 구 delivery 전용 PC 실험은 혼합 NAS 입력 검증이 아니다. |
+| slots·공유 참조만 확대 | 완전한 수정으로 선택 안 함 | event별 Python 그래프가 남아 오래된 세대의 탐색 상한을 확정하지 못한다. |
+| 새 recorder process·공유 메모리 전송 | 보류 | 이번 수정 범위를 넘어 IPC·시작/종료·실패 복구·입력 소유 경계를 추가한다. |
+| 기존 recorder worker가 제한 batch를 RAM byte segment로 packing | 첫 후보로 선택 | producer copy 정책·지연 파일 쓰기·worker 소유권을 유지하며 한 시간 보관 그래프를 제거한다. CPU/GIL/backlog 검증이 필요하다. |
 
-Here packing means encoding to bytes, **not compression**. Do not add zlib/zstd, content hashing,
-deduplication, filesystem writes or a second worker during capture. Hash/deduplicate at the existing
-durable write boundary. CPython GC settings remain untouched, including in final performance gates.
+여기서 packing은 바이트 인코딩이며 **압축이 아니다**. 수집 중 zlib/zstd·content hash·중복 제거·파일 쓰기·두 번째 worker를 추가하지 않는다. hash·중복 제거는 기존 durable 쓰기 경계에서 한다. 최종 성능 검증까지 CPython GC 설정은 유지한다.
 
-#### Data path and ownership
+<a id="data-path-and-ownership"></a>
 
-1. Producers keep existing bounded type/secret/cycle validation, immutable payload copy and the
-   two-copy admission semaphore. Scalar/delivery admissions keep the existing seq/epoch lock.
-   Mutable native payloads never escape to a worker. Native work never waits for recorder space.
-2. `_QUEUE` becomes the bounded *raw staging queue* for deferred sessions. The single existing
-   recorder worker drains it while running AND awaiting_persistence, regardless of persist_at.
-   Non-deferred recording keeps the current writer path. Sequence numbers are assigned only once,
-   at admission; compaction and persistence cannot renumber or reorder events.
-3. The worker expands a bounded raw batch outside `_LOCK`, using the same field enumeration and
-   frozen-payload JSON rules as the current writer. Store metadata JSON and payload JSON separately
-   in a private length-prefixed frame, so persistence need not hydrate/re-encode a whole payload.
-   The frame contains first/last sequence information via its metadata and validated lengths;
-   segment headers carry format/version, event count and allocation/accounting information.
-   This is internal RAM framing, not a new replay/wire format.
-4. Retain sealed immutable `bytes` segments, targeting1MiB. A single larger permitted frame gets
-   its own bounded segment. No per-event dictionary, tuple of objects, `DeliveryStage`, or decoded
-   payload survives alongside its packed frame. Segment/index objects scale with blocks, not events.
-   A partially filled mutable segment is worker-owned and counted until sealed.
-5. Raw source records remain owned and charged until the segment transfer succeeds under `_LOCK`.
-   Then release their shared `Context` refs with the existing release rules and publish the packed
-   segment atomically. A native receipt still in use remains valid; future dequeue/consume stages
-   may re-retain its context normally. Do not mutate subscriber/collector receipts or context values.
-6. At persist_at, after admission closes and all admitted copies and raw packing drain, feed frames
-   to the current payload-hash/bundle/chunk writer. Decode only one bounded metadata frame at a time;
-   use the pre-encoded payload bytes for the existing digest and bundle format. Retain segment bytes
-   and their charge until their last referenced frame is durably committed. Partial chunks retain
-   cursor/segment ownership and the uncommitted suffix, without reintroducing a full raw graph.
-7. `accepted`, `written`, drops/rejections, producer/call/event IDs, source/descendant links and
-   original timestamps keep their meanings. Packing is not durable writing: written stays0 before
-   persist_at. `complete` still requires all events durable and the final manifest fsynced.
+#### 데이터 경로와 소유권
 
-Use `diagnostic_trace.py` for lifecycle/locks/admission and the existing durable writer. A small
-`diagnostic_trace_ram.py` is permitted solely for bounded frame/segment packing, cursor iteration
-and allocation accounting. Do not introduce a generic queue/service/plugin abstraction or change
-`freeze_payload`, broker, collector, DB transaction or replay workload contracts.
+1. producer는 기존의 제한된 type/secret/cycle 검증·불변 payload 복사·2copy semaphore를 유지한다. scalar/delivery는 기존 seq/epoch lock을 사용한다. 가변 native payload를 worker에 넘기지 않으며 native 작업은 recorder 공간을 기다리지 않는다.
+2. 지연 세션의 `_QUEUE`는 제한된 원시 staging queue다. 기존 단일 worker는 persist_at와 무관하게 running/awaiting_persistence에서도 RAM으로 drain한다. 비지연 모드는 기존 writer다. sequence는 승인 때 한 번만 부여하며 packing·저장에서 재번호·재정렬하지 않는다.
+3. worker는 `_LOCK` 밖에서 기존 필드 열거·불변 payload JSON 규칙으로 제한 batch를 펼친다. metadata/payload JSON을 비공개 길이 prefix frame에 따로 두어 저장 때 전체 payload를 복원·재인코딩하지 않는다. metadata의 첫/끝 sequence·검증 길이, segment의 format/version/event 수·할당 계산을 기록한다. 내부 RAM 형식이며 새 replay/wire 형식은 아니다.
+4. 목표 1MiB의 봉인된 불변 bytes segment를 보관한다. 허용된 큰 단일 frame은 전용 제한 segment를 쓴다. packed frame 옆에 event dictionary·객체 tuple·DeliveryStage·decoded payload를 중복 보관하지 않는다. segment/index는 event 수가 아닌 block 수에 비례한다. 덜 찬 가변 segment는 worker 소유이며 계산 대상이다.
+5. 원시 source 기록은 `_LOCK` 안에서 segment 이전이 성공할 때까지 소유·charge한다. 이후 기존 규칙으로 공유 Context 참조를 해제하고 packed segment를 원자적으로 공개한다. 사용 중 native receipt는 유효하며 후속 dequeue/consume는 정상적으로 context를 다시 보관할 수 있다. subscriber/collector receipt·context 값은 바꾸지 않는다.
+6. persist_at에 승인을 닫고 승인된 복사·원시 packing을 drain한 뒤 기존 payload hash/bundle/chunk writer에 frame을 전달한다. 제한된 metadata frame 하나씩만 decode하고 미리 인코딩한 payload byte로 기존 digest/bundle을 쓴다. 마지막 참조 frame이 durable COMMIT될 때까지 segment byte·charge를 유지한다. 부분 chunk는 cursor/segment 소유권·미저장 뒤쪽을 유지하고 전체 원시 그래프를 다시 만들지 않는다.
+7. accepted/written·drop/거부·producer/call/event ID·source/후속 연결·원래 시각의 의미는 그대로다. packing은 durable 쓰기가 아니므로 persist_at 전 written은 0이다. complete는 전체 event의 durable 저장·최종 manifest fsync가 필요하다.
 
-#### Limits and state contract
+수명·lock·승인과 기존 durable writer는 diagnostic_trace.py에 둔다. diagnostic_trace_ram.py는 제한 frame/segment packing·cursor 반복·할당 계산만 소유할 때 허용한다. 일반 queue/service/plugin 계층을 추가하거나 freeze_payload·broker·collector·DB transaction·재생 workload 계약을 바꾸지 않는다.
 
-- Initial **private candidate** staging limits:64MiB raw retained charge and32,768 raw+packing events;
-  include in-flight copy reservations when enforcing bytes. This buffer drains continuously to RAM,
-  unlike the old48MiB disk-backed backlog. These are test values, not approved operational sizing.
-- Total retained-event admission counts raw + packing + packed + durable-writer pending events.
-  The session5M candidate cap must not accidentally become a32,768 total-capture cap. Shared entries
-  and a segment's partial cursor must not change the logical count of accepted events.
-- Keep raw accounting as today. Packed accounting counts actual allocated `bytes`/buffer capacity,
-  segment/index overhead and fixed allocator slack; it must never use input JSON length as a bound
-  for a still-live Python graph. This is representation-specific accounting, not an RSS-ratio discount.
-  During encoding count both representations or reserve a proven worst-case transient allowance.
-  Publishing must atomically replace old charge with new charge; no uncharged allocation window.
-- Start with a128MiB worker transient reserve for the private candidate. Prove it covers worst allowed
-  payload, Unicode encoder string/bytes, metadata, segment sealing copies and writer chunk/bundle buffers.
-  If it does not, adjust the bound before admission rather than bypassing checks. Retain per-input
-  copy limits, scalar reserve, independent persistent-file quota and existing host/cgroup preflight.
-- The15GiB/5M setting remains private until exact-source NAS gates select operational limits. Packing
-  changes the relationship between charge and RSS; do not carry the old15GiB requirement into production
-  automatically or infer a lower approved budget from compact output size alone.
-- Wake the worker on raw high-water (initial1MiB or256 events) and a short bounded fallback interval.
-  Encoding runs outside the admission lock. Process at most a small bounded batch (initial128 events,
-  4MiB raw charge or10ms elapsed, allowing one legal oversized record), then yield. These are tuning
-  candidates; collect single-record GIL/loop-lag outliers as well as average throughput. A thread does
-  not guarantee that encoding cannot stall the collector.
-- On staging/total-budget exhaustion, keep native work running, record the explicit rejection and
-  stop further capture admission as incomplete; preserve all accepted raw/packed data until persist_at.
-  Do not flush early or drop/replace recorded inputs to make room. Failures remain observable even
-  if the scalar rejection event itself cannot be enqueued. Never silently revert to unbounded raw RAM.
-- On stop/expiry, reject late admissions consistently and wait for pre-admitted copies. Seal raw
-  staging into packed segments before persistence. Status must distinguish packing backlog from
-  awaiting the persistence time. On packing error, preserve charged raw suffix and packed prefix,
-  mark failed/incomplete and never publish complete. On shutdown-before-persistence, follow the
-  existing explicit interrupted/loss semantics and release both representations; no implicit early disk flush.
-- Keep O(1) status counters for staging_events/bytes, packing_events/bytes/reservation, packed_events/
-  bytes/segments, writer_pending_events, high-water, pack time and rejection reason. No per-event timing
-  log or full-queue walk on production status. Diagnostic probes must use counters or a bounded small
-  fixture decoder; do not hydrate millions of packed events merely to inspect them.
+<a id="limits-and-state-contract"></a>
 
-#### Required tests and acceptance order
+#### 한도와 상태 계약
 
-1. Frame/segment boundaries: zero/Unicode/maximum payload, oversized single frame, malformed lengths,
-   exact legacy metadata/payload encoding, cross-segment ordering and bounded decode. Hashes, causal IDs,
-   delivery absence-vs-null semantics and approved catalog copy profiles must remain identical.
-2. State/accounting: simultaneous producers and copy reservations; pack/admit/stop races; shared context
-   spanning batches; rejected first/later delivery stages; native receipt reused after raw release;
-   stale epoch; pack failure; partial disk commit; final-manifest failure; discard/shutdown. At every
-   boundary assert accounting nonnegative and every accepted event has exactly one owner/position.
-3. Small native mixed roundtrip including all T1–T4 types, with same consumer results/store calls as OFF;
-   verify every payload, pair and delivery closure after paced durable persistence.
-4. Same36,000-message envelope, alternating uninstrumented OFF/current/packed candidates, plus a
-   burst variation with identical inputs. Measure producer p50/p95/max, event-loop heartbeat delay,
-   process CPU, GC durations, raw-backlog high-water/age, rejection/drop, RSS/host/cgroup headroom,
-   retained bytes/events and wire equality. Instrumented cause probes cannot approve final timing.
-   GC pauses must not simply move to encoding/GIL or queue latency; existing overhead goals still apply.
-5. Full-volume paced persistence to an isolated NAS scratch directory, retaining1MiB/s/cooldown and
-   file quota checks. Stream all chunk/checksum/sequence/reference validation with bounded memory;
-   do not use the current small-smoke `hydrated` list for millions of events. Measure peak RSS during
-   encoding AND saving, actual final bytes, fsync latency, disk free space and completion time.
-   Test interruption/failure separately; production capture files and controls remain untouched.
-6. Only then select total/staging limits, stage/activate the accepted operational candidate and update
-   BOTH start and verification reservations to09:00–10:00, exact build/release/schema/options/persist_at.
-   Until then active v6 and both existing reservations remain unchanged. This design is not proof of
-   real opening-market maximum throughput or complete replay coverage.
+- 초기 **비공개 후보** staging은 원시 charge 64MiB·원시+packing 32,768event다. byte 검사에는 진행 중 copy 예약을 포함한다. 기존 disk 48MiB backlog와 달리 RAM으로 계속 drain한다. 시험값이며 운영 승인값은 아니다.
+- 전체 보관 event는 원시+packing+packed+writer 대기를 합산한다. 세션 5M 한도가 전체 수집 32,768개로 줄어들면 안 된다. 공유 entry·segment 부분 cursor는 승인 event의 논리 개수를 바꾸지 않는다.
+- 원시 계산은 유지한다. packed 계산은 실제 bytes/buffer 할당·segment/index·고정 allocator 여유를 센다. 살아 있는 Python 그래프에 JSON 길이를 상한으로 쓰지 않는다. 표현별 계산이며 RSS 비율 할인은 아니다. 인코딩 중 두 표현을 모두 세거나 증명된 최악 임시 reserve를 쓴다. 공개 시 기존 charge를 원자적으로 교체하며 미계산 할당 구간이 없어야 한다.
+- 비공개 worker 임시 reserve 128MiB로 시작한다. 허용 최대 payload·Unicode string/bytes·metadata·segment 봉인 복사·writer chunk/bundle buffer를 포괄함을 증명한다. 부족하면 승인 전에 상한을 조정하고 우회하지 않는다. 입력 copy 한도·scalar reserve·독립 파일 quota·host/cgroup preflight를 유지한다.
+- 15GiB/5M은 정확한 NAS 검증에서 운영값을 고를 때까지 비공개다. packing으로 charge/RSS 관계가 바뀌므로 구 15GiB를 자동 승계하거나 작은 출력만으로 낮은 예산을 승인하지 않는다.
+- 원시 최대값 초기 1MiB/256event와 짧은 제한 보조 간격으로 worker를 깨운다. 승인 lock 밖에서 인코딩하고 초기 128event/4MiB 원시 charge/10ms의 작은 batch 후 양보한다(허용된 큰 기록 하나는 예외). 조정 후보이며 평균뿐 아니라 단일 기록 GIL/loop lag도 측정한다. thread는 collector 정지 없음을 보장하지 않는다.
+- staging/전체 예산 소진 시 native는 계속하고 명시적 거부·추가 capture 승인 중단/incomplete를 기록한다. 승인된 원시/packed 데이터는 persist_at까지 보존한다. 공간 확보용 조기 flush·입력 폐기/대체는 금지한다. scalar 거부 event도 enqueue하지 못해도 실패를 노출한다. 무제한 원시 RAM으로 돌아가지 않는다.
+- stop/만료는 늦은 승인을 거부하고 사전 승인 copy를 기다린다. 저장 전에 원시 staging을 packed segment로 봉인한다. status는 packing backlog·저장 시각 대기를 구분한다. packing 오류는 charge된 원시 뒤쪽·packed 앞쪽을 보존하고 failed/incomplete로 표시하며 complete를 금지한다. 저장 전 shutdown은 기존 interrupted/손실 규칙으로 두 표현을 해제하고 조기 disk flush를 하지 않는다.
+- O(1) counter로 staging_events/bytes, packing_events/bytes/reservation, packed_events/bytes/segments, writer_pending_events, 최대값·pack 시간·거부 사유를 유지한다. 운영 status에 event별 시간 log·전체 queue 순회를 넣지 않는다. probe는 counter·작은 제한 fixture decoder를 사용하고 확인하려고 수백만 event를 복원하지 않는다.
 
-Implementation handoff: Sol High. The ownership/accounting transfer, producer/worker races and
-partially durable segment cursor are concrete but remain complex concurrency work. Astra design
-work ends here; a simpler implementation must preserve these invariants rather than broaden scope.
+<a id="required-tests-and-acceptance-order"></a>
+
+#### 필수 테스트와 검증 순서
+
+1. frame/segment: 0/Unicode/최대 payload·큰 단일 frame·잘못된 길이·기존 metadata/payload 인코딩·segment 간 순서·제한 decode를 확인한다. hash·인과 ID·delivery 없음/null 구분·승인 catalog 프로필은 같아야 한다.
+2. 상태/계산: 병렬 producer/copy 예약, pack/admit/stop 경합, batch 간 공유 context, 첫/후속 stage 거부, 원시 해제 후 receipt 재사용, 구 epoch, pack 실패, 부분 disk COMMIT, 최종 manifest 실패, 폐기/shutdown을 확인한다. 모든 경계에서 음수 계산이 없고 승인 event마다 소유자·위치가 하나임을 assert한다.
+3. T1–T4 모든 종류를 포함한 작은 native 혼합 왕복에서 OFF와 같은 consumer 결과·store 호출을 확인한다. 속도 제한 durable 저장 후 모든 payload·쌍·delivery 종료를 검증한다.
+4. 같은 36,000메시지로 비계측 OFF/현재/packed를 교대하고 동일 입력 burst 변형을 비교한다. producer p50/p95/max·loop heartbeat 지연·CPU·GC 시간·원시 backlog 최대/나이·거부/drop·RSS/host/cgroup 여유·byte/event·wire 일치를 측정한다. 계측 원인 probe로 최종 시간을 승인하지 않는다. GC 정지를 encoding/GIL/queue 지연으로 옮겨서는 안 되며 기존 부하 목표를 유지한다.
+5. 격리 NAS scratch에 전체량을 1MiB/s·cooldown·파일 quota 검사와 함께 저장한다. 모든 chunk/체크섬/sequence/참조를 제한 메모리로 스트리밍 검증하고 작은 smoke의 hydrated list를 수백만 event에 쓰지 않는다. 인코딩/저장 최대 RSS·최종 byte·fsync 지연·disk 여유·완료 시간을 측정하고 중단/실패는 별도 검증한다. 운영 파일·제어는 보존한다.
+6. 이후 전체/staging 한도 선택·승인 후보 준비/활성화·시작/검증 예약 둘 다 09:00–10:00 및 정확한 build/release/schema/options/persist_at으로 갱신한다. 그전에는 활성 v6·기존 예약을 유지한다. 이 설계는 실제 장 시작 최대 처리량·전체 재생 범위의 증거가 아니다.
+
+구현 인계: Sol High. 소유권/계산 이전·producer/worker 경합·부분 durable segment cursor의 방법은 구체화했지만 복잡한 동시성 작업이 남는다. Astra 설계 단계는 여기서 끝난다. 더 단순한 구현도 이 불변 규칙을 보존하고 범위를 넓히지 않아야 한다.

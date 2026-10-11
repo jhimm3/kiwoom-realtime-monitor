@@ -298,8 +298,15 @@ class PostgresStorageBoundaryTests(unittest.TestCase):
                     [during] = future.result(timeout=15)
             [after] = self.store.load_minute_bars(code, delta['trading_date'], 'KRX', realtime_deltas=[delta])
             self.assertEqual(13, during['volume'])
-            self.assertEqual(during, after)
+            self.assertEqual({'completeness': 'unconfirmed', 'origin': 'realtime',
+                              'source': 'NAS-realtime-overlay'}, during['metadata'])
+            self.assertEqual({'completeness': 'unconfirmed'}, after['metadata'])
+            self.assertEqual({**during, 'metadata': after['metadata']}, after)
             self.assertEqual(after, self.store.load_minute_bars(code, delta['trading_date'], 'KRX')[0])
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute('SELECT COUNT(*) FROM central_minute_bar_operations WHERE operation_id=%s',
+                               (operation_id,))
+                self.assertEqual(1, cursor.fetchone()[0])
         finally:
             committed.set()
             with self.store._connect() as connection, connection.cursor() as cursor:

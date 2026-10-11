@@ -284,20 +284,19 @@ class JournalBarRepositoryMixin:
         rows = [(
             bar.minute.date().isoformat(), code, bar.minute.isoformat(timespec="minutes"),
             bar.open_price, bar.high_price, bar.low_price, bar.close_price, bar.volume,
-            float(bar.trade_value_eok), source,
+            float(bar.trade_value_eok), ("realtime_partial" if bar.metadata is not None and not bar.metadata.is_complete else source),
             confirmed_at.isoformat(timespec="seconds") if confirmed_at else None,
         ) for bar in bars]
-        update_guard = " WHERE journal_minute_bars.source NOT IN ('api_confirmed', 'after_close_confirmed')" if preserve_confirmed else ""
-        preserved = {}
-        if preserve_confirmed:
-            preserved = {
+        update_guard = (" WHERE journal_minute_bars.source NOT IN ('api_confirmed', 'after_close_confirmed')" if preserve_confirmed
+                        else " WHERE journal_minute_bars.source NOT IN ('api_confirmed','after_close_confirmed') OR excluded.source IN ('api_confirmed','after_close_confirmed')")
+        preserved = {
                 str(minute): (str(saved_source), saved_at)
                 for minute, saved_source, saved_at in connection.execute(
                     "SELECT minute,source,confirmed_at FROM journal_minute_bars "
                     "WHERE stock_code=? AND source IN ('api_confirmed','after_close_confirmed')",
                     (code,),
                 )
-            }
+        }
         connection.executemany(
             "INSERT INTO journal_minute_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(trade_date, stock_code, minute) DO UPDATE SET "
@@ -308,7 +307,9 @@ class JournalBarRepositoryMixin:
         )
         for bar in bars:
             key = bar.minute.isoformat(timespec="minutes")
-            saved_source, saved_at = preserved.get(key, (source, None))
+            incoming_source = "realtime_partial" if bar.metadata is not None and not bar.metadata.is_complete else source
+            preserve_previous = preserve_confirmed or incoming_source == "realtime_partial"
+            saved_source, saved_at = preserved.get(key, (incoming_source, None)) if preserve_previous else (incoming_source, None)
             effective_available_at = confirmed_at or datetime.now()
             if saved_at:
                 try:
@@ -327,6 +328,8 @@ class JournalBarRepositoryMixin:
                 completeness = DataCompleteness.COMPLETE
                 origin = ObservationOrigin.QUERY
                 value_kind = DataValueKind.ESTIMATED
+            if bar.metadata is not None and not (preserve_previous and key in preserved):
+                completeness, origin, value_kind = bar.metadata.completeness, bar.metadata.origin, bar.metadata.value_kind
             observation = local_minute_bar_observation(
                 code,
                 bar.minute,
@@ -433,8 +436,11 @@ class JournalBarRepositoryMixin:
                     conditions = f"({conditions} OR trade_date=?)"
                     parameters = (*parameters, previous)
                 raw = connection.execute(
-                    "SELECT minute,open_value,high_value,low_value,close_value,0,"
-                    "trade_value_eok,'market_index' FROM market_index_minute_bars "
+                    "SELECT minute,open_value,high_value,low_value,close_value,0,trade_value_eok,"
+                    "CASE WHEN EXISTS(SELECT 1 FROM market_data_observation_meta m WHERE m.dataset_kind='minute_bar' "
+                    "AND m.subject='market:'||market_index_minute_bars.market AND m.observation_key=market_index_minute_bars.minute "
+                    "AND m.completeness IN ('partial','missing','unconfirmed')) THEN 'market_index_partial' ELSE 'market_index' END "
+                    "FROM market_index_minute_bars "
                     f"WHERE market=? AND {conditions} ORDER BY minute", parameters,
                 ).fetchall()
                 result = []; previous_by_day: dict[str, float] = {}

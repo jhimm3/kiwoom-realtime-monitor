@@ -325,7 +325,8 @@ async def capture_realtime_asgi_contract(app_factory, database_path, with_collec
                         "codes": ["000660", "005930"]}
                     # Publish without yielding: oldest is dropped, gap precedes retained events.
                     for value in range(3): hub.publish({"type": "trade", "value": value}, "005930")
-                    assert (await read())["document"] == {"type": "realtime_gap", "dropped_events": 1}
+                    gap_frame = (await read())["document"]
+                    assert gap_frame == {"type": "realtime_gap", "dropped_events": 1, "ranges": [], "scope_unknown": True}
                     assert (await read())["document"] == {"type": "trade", "value": 1}
                     assert (await read())["document"] == {"type": "trade", "value": 2}
                     async with socket(app, authorization="Basic ignored", query="token=private-token") as (read2, write2):
@@ -2259,6 +2260,9 @@ class CentralServerAppTests(unittest.TestCase):
         # The recorder opt-ins extend the request schema; retain all other
         # pre-extraction WebSocket, route-order and OpenAPI expectations.
         for case in expected:
+            for frame in case["frames"]:
+                if frame.get("document", {}).get("type") == "realtime_gap":
+                    frame["document"].update(ranges=[], scope_unknown=True)
             properties = case["schema"]["components"]["schemas"]["DiagnosticTraceRequest"]["properties"]
             properties.update({
                 "large_inputs": {"type": "boolean", "title": "Large Inputs", "default": False},
@@ -2408,6 +2412,22 @@ class CentralServerAppTests(unittest.TestCase):
 
     def test_market_read_http_storage_and_current_collector_match_pre_extraction_baseline(self) -> None:
         expected = json.loads(MARKET_READ_BASELINE.read_text(encoding="utf-8"))["result"]
+        # Keep the historical fixture intact. The gap contract adds quality to
+        # minute rows; every existing value, auth response and storage hash stays checked.
+        for case in expected["cases"]:
+            body = case["body"]
+            if isinstance(body, dict) and "bars" in body and "daily" not in case["name"] and "external" not in case["name"]:
+                for row in body["bars"]:
+                    row["metadata"] = {"completeness": "unconfirmed"}
+                    if row["market"] == "COMBINED" and row["minute"] == "10:01":
+                        row["metadata"]["venue"] = "COMBINED"
+                    if row["minute"] == "10:04":
+                        row["metadata"].update(origin="realtime", source="NAS-realtime-overlay")
+                case["headers"]["content-length"] = str(len(json.dumps(
+                    body, ensure_ascii=False, separators=(",", ":"),
+                ).encode("utf-8")))
+        for row in expected["stored_minutes"]:
+            row["metadata"] = {"completeness": "unconfirmed"}
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "market.sqlite3"
             with market_read_contract_app(create_app, database_path) as (app, store, collectors):
@@ -3597,17 +3617,85 @@ class CentralServerAppTests(unittest.TestCase):
             self.assertFalse(disabled.json()["shadow_candidate_enabled"])
             self.assertEqual("DISABLED", inactive.json()["quality"]["status"])
 
+    def test_health_separates_ready_connection_from_failed_save_and_uses_current_monitor(self) -> None:
+        import httpx
+        from kiwoom_monitor.central_server.candidate_monitor import CandidateMonitor
+        from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
+        from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / 'monitor.sqlite3')
+            at = datetime.now(timezone.utc)
+            collector = CentralRealtimeCollector(lambda: 'not-requested', 'real', RealtimeHub(), lambda: at, store)
+            settings = CentralServerSettings(
+                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", 'private-token',
+                kiwoom_app_key='fixture-key', kiwoom_secret_key='fixture-secret',
+                autonomous_top20_enabled=False, market_event_collection_enabled=False,
+                shadow_candidate_enabled=True,
+            )
+            with patch('kiwoom_monitor.central_server.app.create_query_store', return_value=store), \
+                    patch('kiwoom_monitor.central_server.app.CentralRealtimeCollector', return_value=collector):
+                app = create_app(settings)
+            collector._credential_phase = 'READY'
+            collector._observe_reconnect_trade()
+            collector._minute_bars.add(TradeTick('005930', 100, None, None, 2, None, at.strftime('%H%M%S')), at, at.timestamp())
+            monitor = app.state.candidate_monitor
+            monitor._quality.update(status='READY', reason='fixture-private-value', last_decision_at='2020-01-01T00:00:00+00:00')
+            monitor._consume({'kind': 'top20_membership', 'available_at': at.isoformat(),
+                              'accepted_sequence': 1, 'revision_id': 'fixture-rank',
+                              'observation_key': 'fixture-rank', 'payload': {'codes': ['005930']}})
+
+            async def exercise():
+                with patch.object(store, 'save_minute_bars', side_effect=OSError('fixture-private-value')):
+                    with self.assertRaises(OSError):
+                        await collector._flush_snapshots(flush_latest=False, flush_seconds=False)
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                    with patch.object(store, 'load_documents', side_effect=AssertionError('health must not poll storage')):
+                        response = await client.get('/health')
+                        again = await client.get('/health')
+                    self.assertEqual((200, 200), (response.status_code, again.status_code))
+                    body = response.json()
+                    self.assertEqual(('ok', 'READY', 'degraded'), (body['status'], body['realtime_connection']['phase'], body['operational']['state']))
+                    self.assertEqual('degraded', body['operational']['realtime']['persistence']['state'])
+                    self.assertIsNotNone(body['operational']['realtime']['receive']['last_received_at'])
+                    self.assertEqual('fresh', body['operational']['candidate_inputs']['universe']['state'])
+                    self.assertIsNone(body['operational']['candidate_inputs']['current_all_inputs_fresh'])
+                    self.assertNotIn('fixture-private-value', response.text)
+                    self.assertNotIn('005930', response.text)
+                    await collector._flush_snapshots(flush_latest=False, flush_seconds=False)
+                    recovered = (await client.get('/health')).json()
+                    self.assertEqual('observed', recovered['operational']['realtime']['persistence']['state'])
+                    self.assertEqual('unknown', recovered['operational']['state'])
+                    headers = {'Authorization': 'Bearer private-token'}
+                    self.assertEqual(200, (await client.put('/api/v1/settings/operations', headers=headers, json={'shadow_candidate_enabled': False})).status_code)
+                    self.assertIsNone((await client.get('/health')).json()['operational']['candidate_inputs'])
+                    with patch.object(CandidateMonitor, 'start', new=AsyncMock()):
+                        self.assertEqual(200, (await client.put('/api/v1/settings/operations', headers=headers, json={'shadow_candidate_enabled': True})).status_code)
+                    self.assertIsNot(monitor, app.state.candidate_monitor)
+                    replaced = (await client.get('/health')).json()['operational']['candidate_inputs']
+                    self.assertNotEqual('READY', replaced['last_evaluation']['status'])
+            try:
+                asyncio.run(exercise())
+            finally:
+                store.close()
+
     def test_health_is_public_and_capabilities_require_token(self) -> None:
+        import httpx
         with tempfile.TemporaryDirectory() as directory:
             settings = CentralServerSettings(
                 f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
             )
-            with TestClient(create_app(settings)) as client:
-                self.assertEqual(200, client.get("/health").status_code)
-                self.assertEqual(401, client.get("/api/v1/capabilities").status_code)
-                response = client.get(
-                    "/api/v1/capabilities", headers={"Authorization": "Bearer private-token"},
-                )
+            app = create_app(settings)
+            async def exercise():
+                async with app.router.lifespan_context(app):
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                        health = await client.get('/health')
+                        self.assertEqual(200, health.status_code)
+                        self.assertEqual('ok', health.json()['status'])
+                        self.assertEqual({'state': 'unknown', 'coverage': 'partial', 'realtime': None, 'candidate_inputs': None}, health.json()['operational'])
+                        self.assertEqual(401, (await client.get('/api/v1/capabilities')).status_code)
+                        return await client.get('/api/v1/capabilities', headers={'Authorization': 'Bearer private-token'})
+            response = asyncio.run(exercise())
         self.assertEqual(200, response.status_code)
         self.assertFalse(response.json()["capabilities"]["kiwoom_rest"])
         self.assertTrue(response.json()["capabilities"]["news_archive"])

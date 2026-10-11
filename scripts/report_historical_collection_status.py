@@ -129,7 +129,7 @@ def _status(
         )
         total_jobs = sum(int(row[1]) for row in job_rows if str(row[0]) != "excluded")
         finished_jobs = sum(
-            int(row[1]) for row in job_rows if str(row[0]) in {"complete", "truncated"}
+            int(row[1]) for row in job_rows if str(row[0]) == "complete"
         )
         range_job_rows = _rows(
             connection,

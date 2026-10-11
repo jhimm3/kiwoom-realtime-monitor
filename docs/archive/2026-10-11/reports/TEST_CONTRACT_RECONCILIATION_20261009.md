@@ -1,3 +1,5 @@
+> 2026-10-11에 보존한 과거 기록입니다. 아래 ‘현재/다음/미완료’는 작성 당시 표현입니다. 현행 판정은 [승계 문서](../../../TEST_FINAL_QUALITY_AUDIT.md)와 [현재 상태](../../../CURRENT_STATUS.md)를 따릅니다. 이 기록은 새 배포·주문·삭제 권한이 아닙니다.
+
 # 테스트 계약·fixture 검토 결과 — 2026-10-09
 
 ## 범위와 실행 결과
@@ -27,7 +29,7 @@
 
 ## 직접 PostgreSQL 연결 3곳의 승인 근거
 
-- `scripts/check_replay_cache_baseline.py:run`: network-none disposable loopback cluster,
+- `scripts/check_replay_cache_baseline.py:run`: 외부 네트워크 없는 폐기용 loopback cluster,
   postgres/admin/fixture 신원과 pristine databases를 확인한 뒤 provision한다. bounded timeout과
   connection context를 사용하며 운영 DSN을 받지 않는다.
 - `scripts/nas_operator_worker.py:database_setup`: supervisor가 새 network-none PostgreSQL container와

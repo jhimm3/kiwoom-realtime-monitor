@@ -58,11 +58,11 @@
 | `docs/RELEASE_NOTES_v2.1.0.md` | [RELEASE_NOTES_v2.1.0.md](../../RELEASE_NOTES_v2.1.0.md) | 위치 유지 |
 | `docs/RESEARCH_REQUEST_FORMAT.md` | [RESEARCH_REQUEST_FORMAT.md](snapshots/docs/RESEARCH_REQUEST_FORMAT.md) | 현재 문서 갱신·원문 보존 |
 | `docs/UPDATE_PACKAGING.md` | [UPDATE_PACKAGING.md](snapshots/docs/UPDATE_PACKAGING.md) | 현재 문서 갱신·원문 보존 |
-| `docs/api-contract/2026-08-14_0B_주식체결_검증.md` | [2026-08-14_0B_주식체결_검증.md](../../api-contract/2026-08-14_0B_주식체결_검증.md) | 위치 유지 |
-| `docs/api-contract/2026-08-14_ka00198_순위_검증.md` | [2026-08-14_ka00198_순위_검증.md](../../api-contract/2026-08-14_ka00198_순위_검증.md) | 위치 유지 |
-| `docs/api-contract/2026-08-14_고가_기준_검증.md` | [2026-08-14_고가_기준_검증.md](../../api-contract/2026-08-14_고가_기준_검증.md) | 위치 유지 |
-| `docs/api-contract/2026-08-14_기본정보_및_거래대금_검증.md` | [2026-08-14_기본정보_및_거래대금_검증.md](../../api-contract/2026-08-14_기본정보_및_거래대금_검증.md) | 위치 유지 |
-| `docs/api-contract/2026-08-14_인증_검증.md` | [2026-08-14_인증_검증.md](../../api-contract/2026-08-14_인증_검증.md) | 위치 유지 |
+| `docs/api-contract/2026-08-14_0B_주식체결_검증.md` | [2026-08-14_0B_주식체결_검증.md](../2026-10-11/api-contract/2026-08-14_0B_주식체결_검증.md) | 위치 유지 |
+| `docs/api-contract/2026-08-14_ka00198_순위_검증.md` | [2026-08-14_ka00198_순위_검증.md](../2026-10-11/api-contract/2026-08-14_ka00198_순위_검증.md) | 위치 유지 |
+| `docs/api-contract/2026-08-14_고가_기준_검증.md` | [2026-08-14_고가_기준_검증.md](../2026-10-11/api-contract/2026-08-14_고가_기준_검증.md) | 위치 유지 |
+| `docs/api-contract/2026-08-14_기본정보_및_거래대금_검증.md` | [2026-08-14_기본정보_및_거래대금_검증.md](../2026-10-11/api-contract/2026-08-14_기본정보_및_거래대금_검증.md) | 위치 유지 |
+| `docs/api-contract/2026-08-14_인증_검증.md` | [2026-08-14_인증_검증.md](../2026-10-11/api-contract/2026-08-14_인증_검증.md) | 위치 유지 |
 | `docs/archive/API_검증_및_프로젝트_설계.md` | [API_검증_및_프로젝트_설계.md](../API_검증_및_프로젝트_설계.md) | 위치 유지 |
 | `docs/archive/PHASE1_구현_기록.md` | [PHASE1_구현_기록.md](../PHASE1_구현_기록.md) | 위치 유지 |
 | `docs/archive/PHASE2_REST_연결_기록.md` | [PHASE2_REST_연결_기록.md](../PHASE2_REST_연결_기록.md) | 위치 유지 |

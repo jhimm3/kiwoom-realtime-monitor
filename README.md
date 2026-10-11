@@ -20,7 +20,7 @@
 
 - [현재 2.1.0 릴리즈 노트](docs/RELEASE_NOTES_v2.1.0.md)
 - [누적 변경 기록](CHANGELOG.md)
-- [이전 릴리즈·완료 보고서·구형 명세](docs/archive/2026-09-22/README.md)
+- [이전 릴리즈·완료 보고서·구형 명세](docs/archive/README.md)
 
 ## 저작권 및 제3자 고지
 

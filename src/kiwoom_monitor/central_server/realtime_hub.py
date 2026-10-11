@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import Any
+from datetime import datetime, timedelta
+from kiwoom_monitor.domain.realtime_gap import GapRange, RealtimeGap, KST
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +40,7 @@ class CapturedHubEvent(dict):
         super().__init__(event)
         self.source_receipt = source
         self.delivery_receipt = delivery
+        self.published_at = getattr(event, "published_at", None) or datetime.now(KST)
 
 
 @dataclass(eq=False)
@@ -52,6 +55,46 @@ class RealtimeSubscriber:
     capture_epoch: str = ""
     capture_sequence: int = 0
     capture_context: Any = field(default=None, repr=False)
+    gap_ranges: dict[tuple[str, str, str], GapRange] = field(default_factory=dict, repr=False)
+    gap_scope_unknown: bool = False
+
+    def remember_drop(self, event: dict[str, Any]) -> None:
+        kind = str(event.get("type", ""))
+        # These frames carry no cumulative market input.
+        if kind in {"diagnostics", "pong", "ready", "subscribed"}:
+            return
+        payload = event.get("payload")
+        published = getattr(event, "published_at", None)
+        if (kind not in {"trade", "market_state", "program_trade", "stock_reference"}
+                or not isinstance(payload, dict) or not isinstance(published, datetime)):
+            self.gap_scope_unknown = True
+            return
+        code, market = str(payload.get("code", "")), str(payload.get("market", ""))
+        clock = str(payload.get("trade_time", ""))
+        try:
+            if len(clock) != 6 or not clock.isdigit():
+                raise ValueError("missing market clock")
+            at = published.replace(hour=int(clock[:2]), minute=int(clock[2:4]), second=int(clock[4:]), microsecond=0)
+            if at - published > timedelta(hours=12):
+                at -= timedelta(days=1)
+            if abs(at - published) > timedelta(hours=12):
+                raise ValueError("ambiguous trading day")
+        except ValueError:
+            self.gap_scope_unknown = True
+            return
+        key = (kind, code, market)
+        previous = self.gap_ranges.get(key)
+        if previous is None and len(self.gap_ranges) >= 400:
+            self.gap_scope_unknown = True
+            return
+        self.gap_ranges[key] = GapRange(kind, code, market,
+            min(previous.start, at) if previous else at, max(previous.end, at) if previous else at)
+
+    def take_gap(self, count: int) -> RealtimeGap:
+        result = RealtimeGap(count, tuple(self.gap_ranges.values()), self.gap_scope_unknown)
+        self.gap_ranges.clear()
+        self.gap_scope_unknown = False
+        return result
 
 
 class RealtimeHub:
@@ -129,6 +172,8 @@ class RealtimeHub:
     def publish(self, event: dict[str, Any], code: str = "") -> None:
         from .diagnostic_top20_lifecycle_input import record_hub_event
         event = record_hub_event(self, event)
+        if not isinstance(event, CapturedHubEvent):
+            event = CapturedHubEvent(event)
         capture_active = False
         if any(subscriber.capture_component for subscriber in self._subscribers):
             from .diagnostic_trace import input_token
@@ -142,6 +187,7 @@ class RealtimeHub:
                 try:
                     discarded = subscriber.queue.get_nowait()
                     subscriber.dropped_events += 1
+                    subscriber.remember_drop(discarded)
                     if capture_active:
                         dropped_delivery(subscriber, discarded)
                 except asyncio.QueueEmpty:

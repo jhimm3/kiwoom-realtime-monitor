@@ -5,6 +5,8 @@ import argparse
 import hashlib
 import importlib
 import importlib.util
+import importlib.metadata
+import platform
 import json
 import os
 import subprocess
@@ -714,15 +716,15 @@ def _code_tree_identity() -> dict[str, Any]:
         ".ini", ".dockerfile", ".sql", ".html", ".css", ".svg",
         ".csv", ".tsv", ".xml",
     }
-    paths = [p for relative in ("src", "scripts", "tests", ".github/workflows")
+    paths = [p for relative in ("src", "scripts", "tests", "deploy", ".github/workflows")
              for p in (ROOT / relative).rglob("*") if p.is_file() and "__pycache__" not in p.parts]
     paths.extend(ROOT / name for name in ("requirements.lock.txt", "pyproject.toml")
                  if (ROOT / name).is_file())
-    for path in sorted(paths):
+    for path in sorted(paths, key=lambda value: value.relative_to(ROOT).as_posix()):
         name = path.relative_to(ROOT).as_posix().encode("utf-8")
         data = path.read_bytes()
         canonical = (data.replace(b"\r\n", b"\n")
-                     if path.name == ".gitkeep" or path.suffix.lower() in text_suffixes else data)
+                     if path.name in {".gitkeep", ".env.example", "kiwoom-nas"} or path.suffix.lower() in text_suffixes else data)
         normalized.update(name + b"\0" + hashlib.sha256(canonical).digest())
         raw.update(name + b"\0" + hashlib.sha256(data).digest())
         count += 1
@@ -909,6 +911,26 @@ def _run_process(
     }
 
 
+def _locked_environment() -> dict[str, Any]:
+    versions = {}
+    mismatches = []
+    for line in (ROOT / "requirements.lock.txt").read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        name, expected = line.split("==", 1)
+        try:
+            actual = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            actual = None
+        versions[name] = actual
+        if actual != expected:
+            mismatches.append(f"{name}: expected={expected} installed={actual}")
+    if mismatches:
+        raise ValueError("Locked regression dependencies differ: " + "; ".join(mismatches))
+    return {"platform": platform.platform(), "python": sys.version,
+            "timezone": list(time.tzname), "locked_dependencies": versions}
+
+
 def _execute_profile(profile: str, timeout_seconds: int, output_path: Path) -> int:
     if timeout_seconds < 1:
         raise ValueError("--timeout-seconds must be positive")
@@ -916,6 +938,11 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path) -> i
     if output_path.exists():
         raise FileExistsError(f"Refusing to overwrite existing regression output: {output_path}")
 
+    environment = None
+    if profile == "all-local":
+        if _check_test_catalog():
+            raise ValueError("Full regression requires complete unit/integration routing")
+        environment = _locked_environment()
     manifest = _load_manifest()
     batches = _planned_batches(manifest, profile)
     if not batches or any(not batch["modules"] for batch in batches):
@@ -928,6 +955,11 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path) -> i
     missing = [str(path) for path in test_paths.values() if not path.is_file()]
     summary: dict[str, Any] = {
         "schema_version": 1, "profile": profile, "status": "incomplete",
+        "environment": environment,
+        "scope": {"windows_profiles": list(CI_WINDOWS_PROFILES),
+                  "external_groups_not_run": ["linux_required", "postgres_required",
+                      "postgres_extended", "sealed_extended", "operator_extended", "nas_operator_owned"]}
+                 if profile == "all-local" else {"profile": profile},
         "started_at": _utc_now(), "finished_at": None,
         "repository_root": str(ROOT), "python_executable": sys.executable,
         "python_version": sys.version, "source_root": str(SOURCE_ROOT),

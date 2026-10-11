@@ -407,6 +407,15 @@ def _combined_minute_bars(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     float(nxt.get("updated_at", 0) or 0),
                 ),
             })
+        metadata = [row.get("metadata") for row in (krx, nxt) if row is not None]
+        complete = len(metadata) == 2 and all(isinstance(item, dict) and item.get("completeness") == "complete" for item in metadata)
+        selected["metadata"] = {**(selected.get("metadata") or {}),
+                                "venue": "COMBINED", "completeness": "complete" if complete else "unconfirmed"}
+        kinds = {item.get("value_kind") for item in metadata if isinstance(item, dict)}
+        if len(kinds) > 1:
+            selected["metadata"]["value_kind"] = "estimated" if "estimated" in kinds else "unknown"
+        if len(metadata) == 2 and all(isinstance(item, dict) for item in metadata) and metadata[0].get("origin") != metadata[1].get("origin"):
+            selected["metadata"]["origin"] = "derived"
         result.append(selected)
     return result
 

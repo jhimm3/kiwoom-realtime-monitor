@@ -1,3 +1,5 @@
+> 2026-10-11에 보존한 과거 기록입니다. 아래 ‘현재/다음/미완료’는 작성 당시 표현입니다. 현행 판정은 [승계 문서](../../../OPEN_ITEMS.md)와 [현재 상태](../../../CURRENT_STATUS.md)를 따릅니다. 이 기록은 새 배포·주문·삭제 권한이 아닙니다.
+
 # 서버 시작 실패와 종료 책임 보완
 
 2026-10-11 · worktree c32b · A+B 구현·로컬 회귀 완료 / 간헐 Windows rename 원인은 별도 보류
@@ -104,11 +106,11 @@ Manager, 범용 자원 registry나 의존성 그래프 실행기를 만들지 �
 
 아래 현재 순서를 명시적으로 유지한다. 없는 자원은 건너뛰되 존재하는 미시작 자원은 정리한다.
 
-1. diagnostic runs → diagnostic trace
-2. credential runtime → mock automation supervisor → real owner → mock owner/legacy bundle
-3. 현재 candidate monitor → external market → news → AI
-4. TOP20 → collector → market events → 현재 account query manager → shared broker
-5. vault → store
+1. 진단 실행 → 진단 trace
+2. 자격증명 런타임 → 모의 자동운용 supervisor → 실계좌 owner → 모의 owner/기존 bundle
+3. 현재 후보 monitor → 외부 시장 → 뉴스 → AI
+4. TOP20 → 수집기 → 시장 event → 현재 계좌 조회 manager → 공유 broker
+5. 자격증명 vault → 저장소
 
 진단 callback과 credential 적용은 다른 서비스를 변경할 수 있으므로 먼저 종료한다.
 real owner는 공유 market broker를 닫지 않는다. collector는 market events의 생산자이며

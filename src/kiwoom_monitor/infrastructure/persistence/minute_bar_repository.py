@@ -9,6 +9,7 @@ from collections import defaultdict
 from contextlib import closing
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from dataclasses import replace
 from typing import Callable
 
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
@@ -77,9 +78,29 @@ class MinuteBarRepository:
                     continue
                 for bar in bars:
                     observation_key = bar.minute.isoformat(timespec="minutes")
-                    if source == "kiwoom-websocket-0B" and _has_completed_ka10080(
+                    if source == "kiwoom-websocket-0B" and _has_complete_minute_authority(
                         connection, code, observation_key,
                     ):
+                        continue
+                    metadata = bar.metadata
+                    if metadata is not None:
+                        source_for_bar, origin_for_bar = metadata.source, metadata.origin
+                        state = metadata.completeness
+                        if state == DataCompleteness.IN_PROGRESS and metadata.source == "kiwoom-websocket-0B" and bar.minute < available_at.replace(second=0, microsecond=0):
+                            state = DataCompleteness.COMPLETE
+                    else:
+                        source_for_bar, origin_for_bar = source, origin
+                        state = DataCompleteness.COMPLETE if bar.minute < available_at.replace(second=0, microsecond=0) else DataCompleteness.IN_PROGRESS
+                    previous = connection.execute(
+                        "SELECT completeness,origin FROM market_data_observation_meta "
+                        "WHERE dataset_kind=? AND subject=? AND observation_key=?",
+                        (MarketDatasetKind.MINUTE_BAR.value, code, observation_key),
+                    ).fetchone()
+                    trusted = state == DataCompleteness.COMPLETE and (origin_for_bar in {ObservationOrigin.QUERY, ObservationOrigin.BACKFILLED}
+                        or origin_for_bar == ObservationOrigin.REALTIME and source_for_bar == "NAS:kiwoom-websocket-0B")
+                    if previous and previous[0] in {"partial", "missing"} and not trusted:
+                        state = DataCompleteness.PARTIAL
+                    if previous and previous[0] == "complete" and previous[1] in {"query", "backfilled"} and not trusted:
                         continue
                     writable_rows.append((
                         bar.minute.date().isoformat(), code, observation_key,
@@ -91,14 +112,18 @@ class MinuteBarRepository:
                         bar.minute,
                         bar,
                         available_at=available_at,
-                        source=source,
+                        source=source_for_bar,
                         actual_trade_value=(
-                            origin == ObservationOrigin.REALTIME
+                            origin_for_bar == ObservationOrigin.REALTIME
                             and bar.trade_value_eok_override is not None
                         ),
-                        origin=origin,
+                        origin=origin_for_bar,
+                        completeness=state,
                         candidate_universe=candidate_universe,
                     )
+                    if metadata is not None:
+                        observation = replace(observation, metadata=replace(observation.metadata,
+                            venue=metadata.venue, unit=metadata.unit, value_kind=metadata.value_kind))
                     upsert_market_data_metadata(
                         connection, observation_key, observation
                     )
@@ -117,6 +142,70 @@ class MinuteBarRepository:
         finally:
             connection.close()
 
+    def mark_gap_minutes(self, minutes_by_code: dict[str, tuple[datetime, ...]]) -> None:
+        """Persist holes without inventing numeric bars; serialize with bar writes."""
+        connection = sqlite3.connect(self._path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for code, minutes in minutes_by_code.items():
+                if code.startswith("market:") and not minutes:
+                    # Legacy count-only gaps cannot identify the missing index minute.
+                    now = datetime.now().replace(second=0, microsecond=0)
+                    retained = connection.execute(
+                        "SELECT minute FROM market_index_minute_bars WHERE market=? AND trade_date=?",
+                        (code[7:], now.date().isoformat()),
+                    ).fetchall()
+                    minutes = tuple({now, *(datetime.fromisoformat(str(row[0])) for row in retained)})
+                for minute in minutes:
+                    key = minute.isoformat(timespec="minutes")
+                    if _has_complete_minute_authority(connection, code, key):
+                        continue
+                    if code.startswith("market:"):
+                        exists = connection.execute("SELECT 1 FROM market_index_minute_bars WHERE market=? AND minute=?", (code[7:], key)).fetchone()
+                    else:
+                        exists = connection.execute("SELECT 1 FROM minute_bars WHERE stock_code=? AND minute=?", (code, key)).fetchone()
+                    observation = local_minute_bar_observation(
+                        code, minute, None, source="subscriber-gap", actual_trade_value=False,
+                        completeness=DataCompleteness.PARTIAL if exists else DataCompleteness.MISSING,
+                    )
+                    upsert_market_data_metadata(connection, key, observation)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def load_gap_minutes(self, codes: tuple[str, ...], day: date) -> dict[str, tuple[datetime, ...]]:
+        if not codes:
+            return {}
+        marks = ",".join("?" for _ in codes)
+        with closing(sqlite3.connect(self._path, timeout=0.05)) as connection:
+            rows = connection.execute(
+                f"SELECT subject,observation_key FROM market_data_observation_meta WHERE dataset_kind='minute_bar' "
+                f"AND subject IN ({marks}) AND observation_key>=? AND observation_key<? AND completeness IN ('partial','missing')",
+                (*codes, day.isoformat(), (day + timedelta(days=1)).isoformat()),
+            ).fetchall()
+        result = defaultdict(list)
+        for code, key in rows:
+            result[str(code)].append(datetime.fromisoformat(str(key)))
+        return {code: tuple(values) for code, values in result.items()}
+
+    def confirm_empty_minutes(self, code: str, minutes: tuple[datetime, ...]) -> tuple[datetime, ...]:
+        committed = []
+        with closing(sqlite3.connect(self._path)) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for minute in minutes:
+                key = minute.isoformat(timespec="minutes")
+                if connection.execute("SELECT 1 FROM minute_bars WHERE stock_code=? AND minute=?", (code, key)).fetchone():
+                    continue
+                observation = local_minute_bar_observation(code, minute, None,
+                    source="kiwoom-ka10080-coverage-empty", actual_trade_value=False,
+                    origin=ObservationOrigin.QUERY, completeness=DataCompleteness.COMPLETE)
+                upsert_market_data_metadata(connection, key, observation)
+                committed.append(minute)
+        return tuple(committed)
+
     def upsert_market_index_minutes(
         self, rows: dict[tuple[str, datetime], tuple[float, float, float, float, float | None]],
     ) -> None:
@@ -130,6 +219,9 @@ class MinuteBarRepository:
             return
         connection = sqlite3.connect(self._path)
         try:
+            connection.execute("BEGIN IMMEDIATE")
+            values = tuple(value for value in values if not _has_complete_minute_authority(
+                connection, f"market:{value[1]}", str(value[2])))
             connection.executemany(
                 "INSERT INTO market_index_minute_bars(trade_date,market,minute,open_value,high_value,low_value,close_value,trade_value_eok) "
                 "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(trade_date,market,minute) DO UPDATE SET "
@@ -138,6 +230,14 @@ class MinuteBarRepository:
                 "close_value=excluded.close_value, trade_value_eok=excluded.trade_value_eok",
                 values,
             )
+            for (market, minute), value in rows.items():
+                subject, key = f"market:{market}", minute.isoformat(timespec="minutes")
+                if _has_complete_minute_authority(connection, subject, key):
+                    continue
+                previous = connection.execute("SELECT completeness FROM market_data_observation_meta WHERE dataset_kind='minute_bar' AND subject=? AND observation_key=?", (subject, key)).fetchone()
+                observation = local_minute_bar_observation(subject, minute, value, source="kiwoom-websocket-index", actual_trade_value=False,
+                    completeness=DataCompleteness.PARTIAL if previous and previous[0] in {"missing", "partial"} else DataCompleteness.IN_PROGRESS)
+                upsert_market_data_metadata(connection, key, observation, preserve_complete=True)
             connection.executemany(
                 "DELETE FROM top20_statistics_daily_cache WHERE trade_date=?",
                 {(str(row[0]),) for row in values},
@@ -205,6 +305,11 @@ class MinuteBarRepository:
             "trade_value_eok=COALESCE(excluded.trade_value_eok,market_index_minute_bars.trade_value_eok)",
             values,
         )
+        for (market, minute), value in rows.items():
+            observation = local_minute_bar_observation(f"market:{market}", minute, value,
+                source="kiwoom-ka20005", actual_trade_value=False, origin=ObservationOrigin.QUERY,
+                completeness=DataCompleteness.COMPLETE if minute < datetime.now().replace(second=0, microsecond=0) else DataCompleteness.IN_PROGRESS)
+            upsert_market_data_metadata(connection, minute.isoformat(timespec="minutes"), observation)
 
     @staticmethod
     def _replace_market_index_daily(
@@ -531,6 +636,11 @@ class MinuteBarRepository:
                 f"SELECT trade_date, stock_code, completed_at FROM minute_history_sync_log WHERE stock_code IN ({placeholders})",
                 codes,
             ).fetchall()
+            incomplete_rows = connection.execute(
+                f"SELECT subject,substr(observation_key,1,10) FROM market_data_observation_meta WHERE "
+                f"dataset_kind='minute_bar' AND subject IN ({placeholders}) AND completeness IN ('partial','missing','unconfirmed')",
+                codes,
+            ).fetchall()
         finally:
             connection.close()
         totals: dict[tuple[str, str], tuple[float, int]] = {}
@@ -546,6 +656,7 @@ class MinuteBarRepository:
             )
             totals[key] = (value, count + 1)
         sync_times = {(str(code), str(trade_date)): str(completed_at) for trade_date, code, completed_at in sync_rows}
+        incomplete = {(str(code), str(day)) for code, day in incomplete_rows}
         report_rows = [
             {
                 "date": trade_date,
@@ -553,6 +664,7 @@ class MinuteBarRepository:
                 "minute_count": count,
                 "minute_history_backfill_completed_at": sync_times.get((code, trade_date), ""),
                 "minute_trade_value_eok": f"{minute_value:.4f}",
+                "minute_data_quality": "partial" if (code, trade_date) in incomplete else "unconfirmed",
                 "daily_trade_value_eok": f"{daily_value:.4f}",
                 "difference_eok": f"{minute_value - daily_value:.4f}",
                 "difference_percent": f"{(minute_value / daily_value * 100 - 100) if daily_value else 0:.4f}",
@@ -564,7 +676,7 @@ class MinuteBarRepository:
             return 0
         report_dir = self._path.parent / "logs" / "developer_checks"
         report_dir.mkdir(parents=True, exist_ok=True)
-        fields = ("date", "code", "minute_count", "minute_history_backfill_completed_at", "minute_trade_value_eok", "daily_trade_value_eok", "difference_eok", "difference_percent")
+        fields = ("date", "code", "minute_count", "minute_history_backfill_completed_at", "minute_trade_value_eok", "daily_trade_value_eok", "difference_eok", "difference_percent", "minute_data_quality")
         reports: dict[str, list[dict[str, object]]] = defaultdict(list)
         for row in report_rows:
             reports[str(row["date"])[:7]].append(row)
@@ -603,7 +715,7 @@ class MinuteBarRepository:
             connection.close()
 
 
-def _has_completed_ka10080(
+def _has_complete_minute_authority(
     connection: sqlite3.Connection, code: str, observation_key: str,
 ) -> bool:
     row = connection.execute(
@@ -614,6 +726,6 @@ def _has_completed_ka10080(
     return bool(
         row
         and str(row[0]) == DataCompleteness.COMPLETE.value
-        and str(row[1]) == ObservationOrigin.QUERY.value
-        and str(row[2]).startswith("kiwoom-ka10080")
+        and (str(row[1]) in {ObservationOrigin.QUERY.value, ObservationOrigin.BACKFILLED.value}
+             or str(row[1]) == ObservationOrigin.REALTIME.value and str(row[2]) == "NAS:kiwoom-websocket-0B")
     )

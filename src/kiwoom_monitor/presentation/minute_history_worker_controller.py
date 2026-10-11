@@ -13,6 +13,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.minute_history_worker import (
 
 class MinuteHistoryWorkerController(QObject):
     history_received = Signal(str, object)
+    coverage_received = Signal(str, object)
     status_changed = Signal(str)
     failed = Signal(str)
     finished = Signal(object, bool)
@@ -64,6 +65,7 @@ class MinuteHistoryWorkerController(QObject):
             worker.deleteLater()
             return False
         worker.history_received.connect(self.history_received.emit)
+        worker.coverage_received.connect(self.coverage_received.emit)
         worker.status_changed.connect(self.status_changed.emit)
         worker.failed.connect(self.failed.emit)
         worker.finished.connect(

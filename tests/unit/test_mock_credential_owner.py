@@ -232,15 +232,21 @@ class MockCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_settings_off_on_keeps_credentials_scope_run_and_binding(self):
         old = await self.active(); scope = old.binding.scope.to_dict()
+        self.assertTrue(self.owner.has_started_monitor())
+        self.assertEqual((old.binding,), self.owner.account_bindings())
         bindings = self.store.load_account_bindings()
         result = await self.owner.update_settings(scope, {"active_profile_id": self.profile,
             "monitor_enabled": False, "mock_order_enabled": False}, 1)
         off = self.owner.bundle(self.profile)
         self.assertIsNone(off.monitor._task); self.assertFalse(old.runtime._active)
+        self.assertFalse(self.owner.has_started_monitor())
+        self.assertEqual((off.binding,), self.owner.account_bindings())  # Queries remain admitted.
         self.assertEqual(2, result["applied_revision"])
         result = await self.owner.update_settings(scope, {"active_profile_id": self.profile,
             "monitor_enabled": True, "mock_order_enabled": True}, 2)
         new = self.owner.bundle(self.profile)
+        self.assertTrue(self.owner.has_started_monitor())
+        self.assertEqual((new.binding,), self.owner.account_bindings())
         self.assertTrue(new.runtime._active); self.assertIsNotNone(new.gateway)
         self.assertIs(old.client, new.client); self.assertIs(old.broker, new.broker)
         self.assertEqual(old.run_id, new.run_id)
@@ -340,6 +346,7 @@ class MockCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(new._resolve_scope("1234567890"))
 
     async def test_second_account_has_independent_runtime_and_keeps_first_alive(self):
+        self.assertFalse(self.owner.has_started_monitor())
         first = await self.active()
         profile = (await self.runtime.create_profile("kiwoom_mock", str(uuid.uuid4()), "two"))["profile_id"]
         await self.apply(await self.ready("b1", profile))
@@ -348,6 +355,14 @@ class MockCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first.account_ref, second.account_ref); self.assertNotEqual(first.run_id, second.run_id)
         self.assertIsNot(first.client, second.client); self.assertIsNot(first.broker, second.broker)
         self.assertIsNone(second.gateway)
+        self.assertTrue(self.owner.has_started_monitor())
+        await self.owner.update_settings(first.binding.scope.to_dict(), {
+            'active_profile_id': self.profile, 'monitor_enabled': False, 'mock_order_enabled': False,
+        }, 1)
+        self.assertFalse(self.owner.bundle(self.profile).monitor.is_started)
+        self.assertTrue(second.monitor.is_started)
+        self.assertTrue(self.owner.has_started_monitor())
+        self.assertEqual(2, len(self.owner.account_bindings()))
 
     async def test_duplicate_account_profile_is_rejected_before_vault_commit(self):
         first = await self.active()
@@ -446,6 +461,73 @@ class MockCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
         await self.apply(next_operation)
         self.assertEqual("ACTIVE", next_operation.state)
         self.assertEqual(2, len(self.store.load_credential_activations(self.profile)))
+
+    async def test_native_asgi_health_and_bindings_follow_admission_and_monitor_settings(self):
+        import httpx
+        from kiwoom_monitor.central_server.app import create_app
+        from kiwoom_monitor.central_server.config import CentralServerSettings
+        app = create_app(CentralServerSettings(
+            f"sqlite:///{self.root / 'status-app.sqlite'}", 'private-token',
+            credential_directory=str(self.root / 'status-secrets'),
+            account_identity_registry_enabled=True, account_identity_hmac_key='x' * 32,
+            autonomous_top20_enabled=False, market_event_collection_enabled=False,
+        ))
+        headers = {'Authorization': 'Bearer private-token'}
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://nas.test') as client:
+                owner = app.state.mock_credential_owner
+                self.assertFalse(owner.has_started_monitor())
+                self.assertFalse((await client.get('/health')).json()['mock_account_available'])
+                response = await client.post('/api/v1/settings/credentials/kiwoom_mock/profiles', headers=headers,
+                    json={'request_id': str(uuid.uuid4()), 'label': 'native-status'})
+                self.assertEqual(200, response.status_code)
+                profile = response.json()['profile_id']
+                response = await client.post(f'/api/v1/settings/credentials/kiwoom_mock/profiles/{profile}/prepare', headers=headers,
+                    json={'request_id': str(uuid.uuid4()), 'expected_revision': 0,
+                          'replacement': {'app_key': 'a1', 'secret_key': 'fake-secret'}})
+                self.assertEqual(202, response.status_code)
+                operation = app.state.credential_runtime._operations[response.json()['operation_id']]
+                await asyncio.wait_for(asyncio.shield(operation.task), 5)
+                self.assertEqual('READY', operation.state)
+                FakeClient.read_entered = threading.Event()
+                FakeClient.read_release = threading.Event()
+                try:
+                    response = await client.post(f'/api/v1/settings/credential-operations/{operation.operation_id}/apply', headers=headers,
+                        json={'expected_revision': 0, 'target_account_ref': operation.candidate.account_ref})
+                    self.assertEqual(202, response.status_code)
+                    self.assertTrue(await asyncio.to_thread(FakeClient.read_entered.wait, 3))
+                    self.assertFalse(owner.has_started_monitor())
+                    self.assertFalse((await client.get('/health')).json()['mock_account_available'])
+                    self.assertFalse(app.state.verified_account_bindings)
+                    denied = await client.post('/api/v1/mock/orders', headers=headers,
+                        json={'request_id': 'not-admitted', 'symbol': '005930', 'side': 'BUY', 'quantity': 1, 'limit_price': 1000})
+                    self.assertEqual(503, denied.status_code)
+                finally:
+                    FakeClient.read_release.set()
+                    await asyncio.wait_for(asyncio.shield(operation.task), 5)
+                self.assertEqual('ACTIVE', operation.state)
+                bundle = owner.bundle(profile)
+                self.assertTrue(bundle.monitor.is_started)
+                self.assertTrue(owner.has_started_monitor())
+                self.assertTrue((await client.get('/health')).json()['mock_account_available'])
+                self.assertEqual((bundle.binding,), app.state.verified_account_bindings)
+                self.assertEqual(owner.account_bindings(), app.state.verified_account_bindings)
+                url = f'/api/v1/settings/accounts/{bundle.account_ref}?environment=mock'
+                for enabled, revision in ((False, 1), (True, 2)):
+                    response = await client.put(url, headers=headers, json={
+                        'expected_revision': revision, 'active_profile_id': profile,
+                        'monitor_enabled': enabled, 'mock_order_enabled': False,
+                    })
+                    self.assertEqual(200, response.status_code)
+                    self.assertEqual(revision + 1, response.json()['applied_revision'])
+                    self.assertEqual(enabled, owner.has_started_monitor())
+                    self.assertEqual(enabled, (await client.get('/health')).json()['mock_account_available'])
+                    self.assertEqual(owner.account_bindings(), app.state.verified_account_bindings)
+                    self.assertEqual(1, len(app.state.verified_account_bindings))
+                self.assertEqual(401, (await client.get(url)).status_code)
+                self.assertEqual(200, (await client.get(url, headers=headers)).status_code)
+        self.assertFalse(owner.has_started_monitor())
+        self.assertEqual((), owner.account_bindings())
 
     async def test_https_api_activates_scoped_profile_and_leaves_real_market_and_legacy_orders_intact(self):
         from fastapi.testclient import TestClient

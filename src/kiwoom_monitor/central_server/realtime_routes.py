@@ -47,7 +47,7 @@ def create_realtime_router(
                 if subscriber.dropped_events != reported_drops:
                     lost = subscriber.dropped_events - reported_drops
                     reported_drops = subscriber.dropped_events
-                    await websocket.send_json({"type": "realtime_gap", "dropped_events": lost})
+                    await websocket.send_json(subscriber.take_gap(lost).document())
                 await websocket.send_json(event)
 
         sender = asyncio.create_task(send_events())

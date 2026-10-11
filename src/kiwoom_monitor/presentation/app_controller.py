@@ -174,6 +174,7 @@ class AppController(QObject):
         self.pending_highs: dict[str, int] = {}
         self.pending_market_caps: dict[str, float] = {}
         self.pending_minutes: dict[tuple[str, datetime], MinuteOhlcv] = {}
+        self.pending_minute_gaps: dict[str, tuple[datetime, ...]] = {}
         self.pending_market_minutes: dict[
             tuple[str, datetime], tuple[float, float, float, float, float | None]
         ] = {}
@@ -193,6 +194,7 @@ class AppController(QObject):
         if self.market_cache_writer is not None:
             self.market_cache_writer.minute_saved.connect(self.minute_cache_saved.emit)
             self.market_cache_writer.minute_failed.connect(self.on_minute_cache_failed)
+            self.market_cache_writer.gap_failed.connect(self.on_minute_gap_failed)
             self.market_cache_writer.price_failed.connect(self.on_price_cache_failed)
         self.top20_nas_workers: set[QThread] = set()
         self._started_writers: set[str] = set()
@@ -620,11 +622,19 @@ class AppController(QObject):
 
     def flush_minute_cache(self) -> None:
         """실시간 체결을 1초 단위로 묶어 SQLite에 저장한다."""
-        if not self.pending_minutes and not self.pending_market_minutes:
+        if not self.pending_minutes and not self.pending_market_minutes and not self.pending_minute_gaps:
             return
         if self.minute_bar_repository is None:
             return
         pending, self.pending_minutes = self.pending_minutes, {}
+        gaps, self.pending_minute_gaps = self.pending_minute_gaps, {}
+        if self.market_cache_writer is not None and gaps:
+            self.market_cache_writer.enqueue_gap_minutes(gaps)
+        elif gaps:
+            try:
+                self.minute_bar_repository.mark_gap_minutes(gaps)
+            except Exception as error:
+                self.on_minute_gap_failed(gaps, str(error))
         market_pending, self.pending_market_minutes = self.pending_market_minutes, {}
         if self.market_cache_writer is not None:
             self.market_cache_writer.enqueue_minute_bars(pending, market_pending)
@@ -661,6 +671,27 @@ class AppController(QObject):
         if not self.closing and not self.minute_cache_timer.isActive():
             self.minute_cache_timer.start()
         logger.warning("실시간 분봉 DB 저장 실패: %s", message)
+
+    def queue_minute_gaps(self, gaps: dict[str, tuple[datetime, ...]]) -> None:
+        for code, minutes in gaps.items():
+            if code.startswith("market:") and (not minutes or code in self.pending_minute_gaps and not self.pending_minute_gaps[code]):
+                self.pending_minute_gaps[code] = ()
+            else:
+                self.pending_minute_gaps[code] = tuple(sorted(set(minutes) | set(self.pending_minute_gaps.get(code, ()))))
+        self.flush_minute_cache()
+
+    def on_minute_gap_failed(self, gaps: object, message: str) -> None:
+        if isinstance(gaps, dict):
+            for code, minutes in gaps.items():
+                if code.startswith("market:") and (not minutes or code in self.pending_minute_gaps and not self.pending_minute_gaps[code]):
+                    self.pending_minute_gaps[code] = ()
+                else:
+                    self.pending_minute_gaps[code] = tuple(sorted(set(minutes) | set(self.pending_minute_gaps.get(code, ()))))
+        if self.closing:
+            self._shutdown_cache_failed = True
+        elif not self.minute_cache_timer.isActive():
+            self.minute_cache_timer.start()
+        logger.warning("분봉 누락 품질 저장 실패: %s", message)
 
     def flush_comparisons(self) -> None:
         """이미 받은 ka10081 일봉값을 재사용해 개발 확인용 CSV를 갱신한다."""
@@ -903,7 +934,7 @@ class AppController(QObject):
         self._shutdown_cache_batch = {
             name: dict(getattr(self, name)) for name in (
                 "pending_prices", "pending_highs", "pending_market_caps",
-                "pending_minutes", "pending_market_minutes",
+                "pending_minutes", "pending_market_minutes", "pending_minute_gaps",
             )
         }
         self.flush_price_cache()
@@ -946,7 +977,7 @@ class AppController(QObject):
         assert actions is not None
         if self._shutdown_cache_failed and self.market_cache_writer is not None and (
             self.pending_prices or self.pending_highs or self.pending_market_caps
-            or self.pending_minutes or self.pending_market_minutes
+            or self.pending_minutes or self.pending_market_minutes or self.pending_minute_gaps
         ):
             self._shutdown_stage = "cache_failed"
             self.shutdown_progress.emit(

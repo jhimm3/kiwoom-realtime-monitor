@@ -1,5 +1,48 @@
 # 전체 테스트 최종 품질 감사와 CI 전환 설계
 
+> 문서 역할 정리(2026-10-11): 이 문서는 현행 CI 선택·발견·실패 판정 계약과 최종 감사 근거다. 아래 브랜치·파일 수·단계 지시는 작성 시점 기록이며 현재 실행 결과는 [현재 상태](CURRENT_STATUS.md), 등록 정본은 `tests/regression_profiles.json`·`tests/ci_groups.json`이다. 이전 조사/편입 보고서는 [10월 아카이브](archive/2026-10-11/README.md)로 옮겼다. main required checks·현재 작업본 hosted/전체 검증의 잔여는 [OPEN_ITEMS](OPEN_ITEMS.md)를 따른다.
+
+## 2026-10-11 로컬·Actions 차이 재감사
+
+최근 40개 실행에서 취소·동일 SHA의 PR/push 중복을 구분하고, 실패 11개 실행의 job/step 로그와 Windows 실패 8개 실행의 `run.json`·worker 결과를 직접 읽었다. 현재 HEAD `89fd6fd`의 [실행 38098916576](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38098916576)은 9개 job 성공, Windows 3,878건이다. 미커밋 통합본 3,912건과 동일 소스의 결과가 아니다.
+
+| 실제 실패 | 분류와 근거 | 현재 판정 |
+|---|---|---|
+| [37954769147](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37954769147) | 테스트 실행 전 신규 unit 4개 등록 누락으로 중단 | 기존 등록 보완 완료. 로컬 `all-local`에도 전체 catalog 검사를 자동 연결해야 한다. |
+| [37951316477](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37951316477), [37965231726](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37965231726), [38091019299](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38091019299) | daily-high/stock-refresh 날짜 fixture와 market-read baseline의 KST·호스트 시각 불일치. 마지막은 timestamp가 정확히 32,400초 차이 | 명시 KST fixture로 이미 수정. CI OS를 KST로 바꿔 숨기지 않는다. |
+| [37999933692](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37999933692), [38001321907](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38001321907) | 새 fixture의 직접 PG 연결 원장 누락 및 비동기 cadence fixture의 시각 의존: 기대 3회, 실제 4회 | 원장 등록·동기화 보완 완료. 이 테스트들은 Windows 전수 범위에 포함된다. |
+| [38095774197](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38095774197), [38096545205](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38096545205), [38097427424](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38097427424) | 같은 capture byte-bound fixture와 `trace.start` 새 인자 기대값 오류가 반복 | `2ff2e59`에서 이미 수정, 후속 CI 성공. 빌드 문자열·이미지 태그 오류로 재분류하지 않는다. |
+| [38095774197](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38095774197), [38097427424](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38097427424)의 sealed 단계 | unittest 6건 `OK` 뒤 별도 스크립트의 고정 건수 판정이 `failed` | 현재 기대 6으로 수정됨. 이후 테스트 증감 때 반복되지 않도록 발견 계획과 실제 실행 수를 대조하고 각 suite의 빈 발견·실패·skip을 계속 거부한다. |
+| [37987257844](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/37987257844) | v1 통과 후 v2 임시 secret 접근 `PermissionError` | 기존 UID/GID 보완 완료. Windows 전수에는 실제 Docker/봉인 DB 실행이 포함되지 않는다. |
+| [38092114105](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38092114105) | ECR Public PostgreSQL service의 `toomanyrequests: Rate exceeded`, 테스트 시작 전 실패. artifact 없음은 후속 오류 | [같은 SHA의 PR 38092117174](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38092117174)은 성공. 외부 registry 실패이며 테스트 통과로 대체할 수 없다. |
+
+### 실행 계약과 차이
+
+| 구분 | 로컬 전수 | Actions |
+|---|---|---|
+| Windows 명령·범위 | `scripts/run_regression.py --profile all-local`, 422개 등록 모듈. 기본 worker timeout 1,800초 | 같은 명령·manifest·worker 격리·종료 판정. OS는 `windows-latest`, 명시 timeout 1,800초 |
+| 등록 검사 | 별도 명령을 실행해야 했음 | 전체 catalog와 base 대비 신규 등록 검사를 실행 전에 수행 |
+| 의존성·Python | Windows venv Python 3.13.15. 현재 lock 전 항목의 설치 버전 일치 직접 확인 | Windows 실패/최신 성공도 3.13.15, Ubuntu는 로그상 3.13.16. `requirements.lock.txt` fresh install; Docker는 server subset를 같은 lock으로 제약 |
+| 시각·파일·권한 | 한국 PC, Windows 파일 잠금·CRLF | UTC runner와 Linux LF/POSIX UID/GID·권한. 서로 다른 환경을 무조건 같게 만들지 않고 명시적 fixture·정규화 지문을 사용 |
+| 외부 검증 | PC에 Docker/WSL·전용 PG DSN 없음. `all-local`로 실행되지 않음 | Linux 5개 모듈, disposable PG required/extended, sealed replay, 이미지 source parity, offline operator, 최종 보고서 gate |
+| 소스 증거 | dirty 작업본 통과 후 수정·merge·commit된 소스와 재대조하는 절차가 수동 | 깨끗한 SHA·Windows/Linux/PG 지문·계획/실행/종료 증거 대조 |
+
+로컬 전수 성공이 위 모든 실패를 발견했어야 한다는 결론은 성립하지 않는다. CI 전용 단계는 실행되지 않았고, 날짜·timer fixture는 환경에 따라 달랐다. capture 기대값 오류처럼 **같은 Windows 전수에 들어 있는 테스트**는 검사 범위 누락으로 설명할 수 없다. 해당 과거 로컬 실행의 동일 SHA·지문 증거가 없으므로 통과했다고 보고된 작업본과 실패 commit이 같았다고 단정하지 않는다. 현재 확보된 로컬 통합본과 원격 HEAD도 건수·지문이 서로 다르다.
+
+별도 Pages workflow의 최근 기록은 8/22 [32566936329](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/32566936329)·[32567155871](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/32567155871) 두 건이며, `configure-pages`의 사이트 조회 404로 실패했다. 테스트 실행 단계가 없는 공개 문서 배포 workflow다. 현재 읽기 전용 Pages API도 404를 반환했고, 자동 trigger는 `codex/monitor-core-implementation`과 일부 HTML 경로에 한정돼 main 회귀와 분리된다. 사이트 재활성화·공개 배포 범위는 별도 운영 결정이며 이번 검사 성공을 위해 임의 활성화하지 않는다.
+
+### 최소 보완과 재사용
+
+- 기존 `all-local`에 catalog·lock 버전 preflight를 연결하고 OS/Python/timezone/dependency와 미실행 외부 group을 보고서에 남긴다. 기존 테스트 선택·실패·skip·프로세스 종료 조건은 유지한다.
+- `check_required_ci_results`의 Windows 판정을 로컬과 CI가 함께 사용한다. push 전 `python -m scripts.check_required_ci_results --windows-only --local --windows <all-local/run.json>`으로 현재 LF 소스 지문과 보고서를 대조한다. 지문에 CI가 실행하는 `deploy/`도 포함하며 파일 순서는 플랫폼과 무관한 상대 경로 문자열로 정렬하고 extension 없는 shell·`.env.example`의 CRLF/LF도 정규화한다. 이후 소스 수정은 이전 통과 증거를 무효로 한다. 이 명령은 테스트를 재실행하지 않으며 외부 환경 완료를 뜻하지 않는다.
+- Actions Windows 확장·장시간 job은 이미 `all-local`에 포함된 모든 모듈의 성공·동일 SHA/지문 증거를 검사한다. 같은 테스트를 두 번째로 실행하지 않는다. 실제 PG·Linux·sealed·operator 실행은 별도로 유지한다.
+- sealed gate의 수동 테스트 합계는 발견 계획으로 대체하고 각 suite가 비어 있거나 실행 수가 달라지면 실패한다. 기존 assertion·skip 거부·봉인 소유권·실제 DB 검증은 유지한다.
+- NAS Linux 검사에서 발견한 credential lifespan 2건의 optional TestClient 로딩 실패는 기존 ASGI 요청 함수와 실제 lifespan으로 검사한다. vault 소유권·startup 실패·해제·HTTP 응답 검사는 그대로 실행하며 새 의존성을 설치하지 않는다.
+
+새 소스의 targeted 결과, 원격 Actions 및 NAS 배포 결과는 [현재 상태](CURRENT_STATUS.md)와 [통합 검증 이력](archive/2026-10-11/history/CURRENT_STATUS_through_20261011.md#release-integration-20261011)을 따른다. 외부 registry의 일시 실패는 로컬 전수 통과로 보증할 수 없으며 취소 실행을 결함/성공으로 계산하지 않는다.
+
+## 이전 감사 근거
+
 2026-10-10 KST. **감사·설계와 실행기·테스트·브랜치 CI 구현을 완료**했다.
 통합 전 브랜치의 전체 hosted 검증은 통과했으며, 최신 main 통합 후의 최종 결과는
 [PR #15의 검증 기록](https://github.com/jhimm3/kiwoom-realtime-monitor/pull/15/checks)으로 확인한다.
@@ -128,8 +171,8 @@ assertion을 추가한다. 원본 입력·해시·drop 0·pending 3·최종 nati
 `main-merge-final-0795231` 로컬 전체는 수정 전에 중단해 `incomplete`로 보존한다.
 전후 동일 cadence 재현과 관련 검사부터 확인하고, 최종 변경 전체가 포함된 로컬·hosted 결과로 판정한다.
 
-[409개 의존성 원장](TEST_DEPENDENCY_AUDIT.md), [260개 보호 계약](REGRESSION_COVERAGE_AUDIT.md),
-[후속 선택 편입·실패·개선 기록](TEST_DUPLICATION_CI_FOLLOWUP.md)을 재사용했다.
+[409개 의존성 원장](archive/2026-10-11/reports/TEST_DEPENDENCY_AUDIT.md), [260개 보호 계약](archive/2026-10-11/reports/REGRESSION_COVERAGE_AUDIT.md),
+[후속 선택 편입·실패·개선 기록](archive/2026-10-11/reports/TEST_DUPLICATION_CI_FOLLOWUP.md)을 재사용했다.
 기존 149개도 동일 기준으로 감사했던 결과를 유지하며, 현재 통과한다는 이유로 구조가 적절하다고 추정하지 않았다.
 이번에는 추가 integration 실행 경계와 아래 고위험 경로만 상세 대조했다.
 
@@ -142,7 +185,7 @@ assertion을 추가한다. 원본 입력·해시·drop 0·pending 3·최종 nati
 | 용도 미확정 파일 | 0 | 0 | 연구 시간 경계의 정책 문제는 아래 별도 보류; 파일의 필요성은 확인 |
 
 조건부는 삭제 예정이나 skip 허용이라는 뜻이 아니다. 모두 자동 실행 시점과 환경을 부여한다.
-430개 각각의 소속은 [실행 범위 제안 JSON](TEST_CI_TIER_PROPOSAL.json)에 기록했다.
+430개 각각의 소속은 [실행 범위 제안 JSON](archive/2026-10-11/evidence/TEST_CI_TIER_PROPOSAL.json)에 기록했다.
 이 JSON은 **설계 snapshot이며 CI에서 읽지 않는다**. 현재 CI가 읽는 배정 원장은
 `tests/ci_groups.json`이다. 기존 원장에 있는 파일별 보호 계약을 중복 작성하지 않았다.
 

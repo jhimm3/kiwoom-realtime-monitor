@@ -93,6 +93,11 @@ def entry_context_observations(
                 completeness=(
                     DataCompleteness.MISSING
                     if origin == ObservationOrigin.MISSING
+                    else DataCompleteness.PARTIAL
+                    if field == "market_state" and isinstance(value, dict) and any(
+                        state != "complete" for periods in value.get("input_quality", {}).values()
+                        if isinstance(periods, dict) for state in periods.values()
+                    )
                     else DataCompleteness.COMPLETE
                 ),
                 origin=origin,

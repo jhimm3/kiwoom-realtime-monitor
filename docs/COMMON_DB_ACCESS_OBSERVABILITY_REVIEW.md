@@ -1,5 +1,7 @@
 # PostgreSQL 공통 접근·관측 경계 설계 검토
 
+> 문서 역할 정리(2026-10-11): 공통 관측과 기존 writer의 per-call 연결·독립 transaction 보존 계약은 유지한다. 아래 pilot/배포/성능 수치는 각 날짜의 근거다. 현재 물리 책임은 [모듈 지도](../MODULE_MAP.md), 변경 전후 기준선은 [DB 기준선](db_refactoring/README.md), 운영 검증·최적화 잔여는 [OPEN_ITEMS](OPEN_ITEMS.md)를 따른다.
+
 2026-09-28 document writer batch 완료: `upsert_documents` whitelist에서 실제 caller가 있는 `news_watchlist`, `news_automation_settings`, `server_operational_settings`를 찾았다. 같은 공통 저장 경계를 쓰는 Forward Evaluation repository의 17개 추가 collection kind도 registry/mapping에 등록했다. 이 17개가 모두 현재 runtime caller라는 의미는 아니다. 기존 per-call native transaction·업무별 단일 호출 저장·추가 theme/news helper는 유지하고 관측 wrapper만 적용했다. v1의 recovery·decision gate·dispatch metrics assertion은 같은 kind READ까지 고르는 필터 문제였고 family+kind 조건으로 수정했다. v2 전용 PostgreSQL 4 tests가 통과(38.363초): 20-kind 독립 write/read와 mock automation recovery lineage·approval 경계·dispatch projection을 검증했다. 로컬 단위검사 68건 중 28 pass/40 environment skip. v2 ZIP SHA-256 `3631B2EA634B1A3FB9F2A14D65F6F54AC771B87CE5DF2E93EFC33EFCD7A335BF` NAS host hash 일치.
 
 2026-09-28 startup schema migration 관측 pilot 완료: PostgreSQL `initialize()` 연결 factory를 `schema.migration/central_schema` common wrapper로 감쌌다. `CentralSchemaMigrationRunner`와 SQLite 구현은 수정하지 않아 기존 savepoint 및 단일 native connection-context transaction을 유지한다. 로컬 공통 DB·migration 회귀 99건 통과(40 environment skip), NAS 전용 PostgreSQL 3 tests 통과(1.419초): initialize commit, synthetic DDL 실패 때 savepoint/native rollback·ledger 미기록, 기존 native context 종료를 확인했다. ZIP SHA-256 `B672F6322FBF6CB2D108716453F5939F906CE18CEEA4DB1C8D2F1FA56CB27BBB`의 NAS host hash 일치.
@@ -516,7 +518,7 @@ revision, source cursor/diagnostics, news publications/feed의 8개 직접 조�
 이어 active `CentralRestBroker`, `NewsSourceCollector`, `CentralNewsAIService` 경로의 external bars, request budget count, AI revision lookup reader 세 개를 family/kind별로 관측한다. native query/transaction은 그대로 유지하고 기존 external bars replay, budget concurrency, AI result/revision atomicity 테스트를 반복 `--test` 한 번으로 검증한다. 결과는 OPEN_ITEMS를 따른다.
 
 최초 정적 조사에서 직접 `self._connect()` context는 49곳(읽기·정보 45, 저장 3, schema 초기화 1)이었다.
-query-cache, documents, minute bars, daily bars, observation-revision, shadow, dataset snapshot, metadata-range,
+조회 캐시·문서·분봉·일봉·관측 revision·shadow·dataset snapshot·metadata 범위,
 news readers 열여덟 곳을 공통 wrapper로 옮긴 뒤 직접 context는 31곳이었다. market-state batch 다섯 context와 external/news batch 세 context를 적용한 당시 수는 23곳(읽기·정보 19, 저장 3, schema 초기화 1)이었다.
 2026-09-28 재감사에서는 AST 기준 `PostgresQueryStore`의 직접 `self._connect()` context가
 5곳, `open_observed_connection` context가 84곳이다. 다섯 곳은 `save/load_five_minute_bars`,

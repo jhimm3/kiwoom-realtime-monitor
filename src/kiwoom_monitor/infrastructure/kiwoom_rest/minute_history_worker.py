@@ -12,6 +12,7 @@ from kiwoom_monitor.application.minute_chart_service import MinuteChartService
 
 class MinuteHistoryWorker(QThread):
     history_received = Signal(str, object)
+    coverage_received = Signal(str, object)
     status_changed = Signal(str)
     failed = Signal(str)
 
@@ -26,11 +27,15 @@ class MinuteHistoryWorker(QThread):
             if self.isInterruptionRequested():
                 return
             try:
-                bars = self._service.load_today(code, self._now_provider())
+                checked_at = self._now_provider()
+                bars, complete = self._service.load_today_with_completion(code, checked_at)
             except Exception as error:
                 self.failed.emit(f"{code} 분봉 보완 실패: {error}")
                 continue
             self.history_received.emit(code, bars)
+            self.coverage_received.emit(code, {"complete": complete, "checked_at": checked_at,
+                                               "empty_authority": self._service.empty_coverage_authoritative,
+                                               "present_minutes": tuple(bar.minute for bar in bars)})
             self.status_changed.emit(f"분봉 보완 중 · {index}/{len(self._codes)}종목")
         self.status_changed.emit("분봉 보완 완료")
 

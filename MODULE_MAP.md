@@ -1,238 +1,10 @@
 # 현재 모듈 지도
 
-기준: 2.1.0 / 2026-09-23 · [현재 아키텍처](ARCHITECTURE_CURRENT.md) · [문서 안내](docs/README.md)
+소스 대조: 2026-10-11 · 제품 2.1.0 · [현재 상태](docs/CURRENT_STATUS.md) · [현재 아키텍처](ARCHITECTURE_CURRENT.md) · [문서 안내](docs/README.md)
 
-아래 경로는 현재 있는 파일이다. 파일을 나누는 계획이 아니라 변경 책임자를 찾는 지도다. 상세 단계별 계보는 [이전 지도](docs/archive/2026-09-22/root/MODULE_MAP.md)에 보존했다. 작업 전 [개발 불변 규칙](DEVELOPMENT_GUARDRAILS.md)을 읽는다.
+경로는 저장소 또는 `src/kiwoom_monitor/` 기준이다. 작업 전 [개발 불변 규칙](DEVELOPMENT_GUARDRAILS.md)을 읽고 관련 책임·호출자·테스트를 확인한다. 구현 수량·실행 시간·과거 후보 배포 기록은 [이전 지도와 단계별 근거](docs/archive/2026-10-11/history/MODULE_MAP_through_20261011.md)에 보존했다.
 
 ## 앱·시장·저장
-
-2026-10-11 main integration: `diagnostic_control_routes.py` owns the recorder's
-account/large request flags and capabilities after the route extraction. `app.py`
-passes its existing store to the router for the bounded account-context capture;
-the recorder retains capture, persistence and native transaction ownership.
-
-`scripts/nas_scheduled_trace.py` owns the one-shot NAS-local capture start. A plan may
-explicitly select account/large opt-ins in addition to the original three flags. It checks
-schema4 capability/context contracts before controls change and verifies all selected flags
-in the single POST response. Old plans retain schema3. No retry after uncertain acknowledgement;
-the process survives SSH disconnect but not NAS reboot. After a root-owned deploy protects active.json,
-the scheduler uses the installed read-only kiwoom-nas status interface on PermissionError for the fixed
-NAS root; malformed/readable or missing selectors are not silently bypassed. Sixteen scheduler gates
-passed and the actual deployed NAS preflight passed without control changes. No permission/sudoers edit.
-
-`scripts/check_causal_capture_capacity.py` owns two fixed offline operator envelopes:
-60second smoke and actual3600second capture with a private native SQLite account/lease/VI
-fixture, distinct large blocks and streaming durable verification. It never accesses the
-operating DB/network or establishes whole causal Replay eligibility. The existing operator
-owns their fixed12GiB worker/12GiB disk preflight/14400second deadline and approved server
-pause → isolated drain/cleanup → exact server resume; installed configuration is unchanged.
-Real Linux host/cgroup9GiB start headroom is mandatory. Installed helpers and the actual
-NAS60second gate passed; the3600second gate failed with worker RuntimeError, without OOM.
-The exact operating server is restored/healthy. The private checker logs bounded seal/persist/
-verify progress, rejects failed/interrupted capture immediately and polls scalars without
-copying the full blob/chunk index. Its local durable verifier also pins a terminal manifest for the
-existing checksum/bounds readers, then rejects changed manifest bytes; it avoids public status copies
-per payload. Eleven related gates passed, including reuse of the same saved files with start/stop forbidden.
-The immutable full job timed out after persistence completed; cleanup and exact server restoration passed.
-Its2,329,089events were privately preserved. The extracted read-only verify_persisted_capture path verifies
-that same saved capture with native checksum/sequence/pair/block readers; NAS verification passed184.287s,
-including72,360collector messages/721,080closed deliveries/120large calls. No re-recording or writer ran.
-The fixed artifact launcher has no network or operating app/DB mounts, and uses read-only saved files.
-The actual recorder retains1MiB/s pacing and.25-5s backoff; paid pacing is now excluded from extra
-cooldown. Same short NAS A/B preserved38827 events/45 transactions and reduced persistence24.476%.
-An exact local operating overlay exposes account/large API opt-ins and records actual
-real/mock account and VI actors. It retains the active app's other routes and market queues;
-101 pinned-source API/account/lease/VI/recording regressions passed. A new actual scheduler->ASGI->
-native SQLite account/VI/large persistence path passed on that frozen source (24/24 events,
-reject/drop0/RAM0). Exact NAS storage105/105 and the same-source native account/v3 replay case passed;
-operating6390e0b7de1a5189 is deployed/healthy, PG preserved, Monday60minute five-flag plan armed.
-This is not full app-lifespan/causal Replay or2-5x performance acceptance. The standalone NAS starter
-uses the updated scheduler artifact while the admitted app release stays immutable.
-
-`central_server/diagnostic_account_context.py` owns the bounded account-context/v2
-projection, initial execution ledger/documents, authority aliases and observed next
-event sequence. It validates JSON/column scope and event lineage before native replay.
-The existing v3 baseline applies rows and transactional sequence RESTART in one seal;
-v1 capsules retain their four-table/two-document scope. No writer transaction changes.
-PC 수명 경계 재검토(2026-10-11): 기존 AppController/feature controller/실제 writer 책임을
-유지하며 추가 관리 계층은 만들지 않는다. 마지막 분봉/가격 실패 signal이 pending을 복원하면
-AppController가 `cache_failed`로 close를 보류한다. 닫기 재요청은 같은 정지 writer와 RAM pending을
-사용한 명시 재시도이며 정상 타이머·생산자·시작 백업·완료한 TOP20 partial 저장을 다시 실행하지 않는다.
-종료 시 마지막 batch만 보관해 늦게 온 옛 실패가 더 최신 COMMIT 값을 덮지 않게 하고,
-대체되지 않은 peer와 마지막 batch 자체의 실패만 복원한다. 실제 저장 성공과
-queued 결과를 확인한 뒤 보조 자원/화면을 종료한다. MarketCacheWriter/DB의 queue·SQL·transaction은
-유지한다. 이는 owner 이동이 아니라 재현으로 확인한 종료 완료 판단의 최소 버그 수정이다.
-
-서버 수명 보완 A+B(2026-10-10): app은 단일 소유 종료 task와 오류 우선순위를 유지하고
-DiagnosticRuns parent/trace thread를 timeout=None로 off-loop 대기한다. DiagnosticRuns는
-replay child가 실제 끝난 뒤 capture/report/run lease를 정리한다. MockAutomationSupervisor는
-소유 종료 task를 재호출에도 기다리고 모든 runner close 결과 뒤 오류를 전파하며 실패 참조를
-유지한다. 수동 진단의 bounded 대기와 API/DB/주문 계약은 그대로다. 아래 A 당시 B 미완료
-표현은 이 보완으로 갱신됐으며 전체/독립 환경 검증 상태는 CURRENT_STATUS/OPEN_ITEMS를 따른다.
-
-`central_server/market_events.py` owns upper-limit fact decisions and immutable RAM
-admission separately from native ACK waits. One feature-owned worker retries frozen
-one-fact calls; the existing store owns each connection/transaction. Public observations
-and regular-close markers wait for ACK. Close disconnects/drains input and persistence;
-fact_collection reports saturation/gaps separately from condition REG. RAM admission
-does not provide crash recovery. VI ownership and the shared hub drop policy are unchanged.
-Condition signals share metadata/expiry's existing state lock through snapshot, native
-ACK and RAM publication; invocation time/session/condition are frozen before lock wait.
-Signal queue admission also freezes time/session/condition. Existing workers retain
-failed inputs; the same frozen native revision/current is retried under the state lock.
-Metadata publishes eligibility after ACK. An owned input task covers retry, actual
-native completion and descendant admission; close drains signals before metadata and
-keeps waiting after its warning threshold. cohort_collection reports pending/failure/drop
-state separately from condition registration. No new service/store or persistence schema.
-`MarketEventService` types its store dependency to the six methods it calls through
-`MarketEventStore`; the QueryStore aggregate, independent writer transactions and service lifecycle stay intact.
-
-`central_server/observation_frame_recovery.py` owns ephemeral legacy checkpoint
-prefix progress and frames-only repair. CandidateMonitor and MockAutomationRunner
-retain their execution cursor/state, seed scratch through the old cursor on bounded
-safe pages, then atomically save frames/protocol through their existing checkpoint
-writer. Shared frame trim functions preserve each consumer's existing horizon policy;
-no historical decision/order path is invoked. Cancellation drains owned native repair
-work before consumer close returns. NAS deployment and migration cost acceptance are
-separate from this correctness gate.
-
-`central_server/database_datasets.py` batches distinct snapshot/metadata identities
-inside the existing per-call transaction; shared multirow SQL helpers stay in
-`database_market_bars.py`. Duplicate identities, research revision chains, cache
-invalidation and large text use the original sequential path; saved_at freshness stays.
-`database_market_bars.py` also owns bounded advisory scope requests used by stock/day
-and research source/subject locking. Caller sort, serialized keys, hash seeds and
-transaction ownership remain; no separate lock service/connection/pool is added.
-Native blocking-order/rollback checks and same-recording A/B are required for retention.
-
-`src/kiwoom_monitor/` 기준 경로다.
-
-2026-10-08 NAS operator: `scripts/nas_operator.py` owns fixed command parsing, source/trace admission,
-capture fences, isolated jobs, deploy recovery, and opt-in replay maintenance of the approved app
-container. `replay --pause-operational` journals and stops only the server, leaves PostgreSQL
-running, cleans the isolated job before resuming the same release, and supports explicit recovery;
-it reports the expected collection gap without claiming realtime-loss verification. This is a
-candidate change until the exact-source NAS gate is run. The installer and
-worker live in `scripts/nas_operator_install.py` and `scripts/nas_operator_worker.py`. The
-administrator-only `--update` replaces just the installed helper pair while retaining the original
-revoke backups and permission surface. `scripts/prepare_nas_operator_update.py` prepares an inactive
-operator-only overlay on the verified active NAS app plus an immutable checksum-pinned admin bundle.
-PG start/readiness failure diagnostics belong to this existing operator: verify the temporary
-job label, preserve bounded startup markers/state before cleanup, and report no raw logs/env.
-The 2026-10-10 local49/NAS portable47 gates passed. The administrator reported Linux68 and
-helper update success; the installed supervisor hash matches the prepared bundle.
-Follow-up diagnostic-only candidate adds fixed-role UID/GID/mode, container/daemon userns
-and permission operation/role enums to distinguish the confirmed PGDATA mkdir denial;
-local50/NAS portable48 passed, with no permission/ownership repair and no new command surface.
-`deploy/synology/check-nas-operator.sh` gate tests Linux fd/ACL behavior in a disposable offline
-container. The follow-up identity diagnostic passed administrator Linux69 and is installed.
-The disk-parent repair stays in this operator: root-owned generated data parent only,
-anchored no-follow fd/fchmod0711, verify applied mode and close fd. Local51/NAS portable49 passed;
-candidate95f22a1d0c5913af passed administrator Linux70 and its helper hash is installed;
-actual disk replay42e7cb83fe64b0f0a33a7264c0946ddc passed with cleanup/resume.
-The partial workload timing gate failed (one113.875ms actor wait); startup repair and
-whole-app performance attribution remain separate. See
-[the operator contract](docs/NAS_OPERATOR_COMMANDS.md) before changing this boundary.
-
-0B collector 통합 진단은 `central_server/diagnostic_collector_replay.py`가 고정 입력,
-실행/종료 수명, 전용 DB 검증·정리를 소유한다. 실제 파서·RAM 집계·저장 주기는
-`central_server/realtime_collector.py`와 `minute_bars.py`를 재사용한다. 추가로
-`diagnostic_trace.py`가 선택된 store 입력과 collector 원인 사건을 schema-3 capture로 보존한다.
-지연 저장 모드는 `diagnostic_trace_ram.py`의 framed RAM block으로 bounded raw queue를 압축하고,
-기존 writer가 순서대로 persistence한다. 메모리/event quota 및 packing backlog도 capture 상태로 공개한다.
-기본 schema-3 limits는 8 GiB / 5,000,000 events이며, 실제 RSS·장중 전체 부하 수용을 뜻하지 않는다.
-Opt-in `large_inputs` selects schema4: the same capture owner freezes one bounded typed input,
-`diagnostic_trace_ram.py` encodes it into1MiB blocks, and the existing trace writer publishes
-all parts before one logical reference. `diagnostic_trace_payload.py` owns immutable offline
-descriptors and checksummed reconstruction. The recorded scheduler validates each selected
-input before native execution, shares three decode credits via `diagnostic_replay_runtime.py`,
-prepares a bounded frontier and drains actual threads before releasing credit. These local
-contracts passed62 regressions. `diagnostic_account_input.py` owns explicit typed account
-projection and session HMAC authority aliases; the source repository supplies opaque run IDs.
-Account event/recovery, heartbeat/start/stop and VI live/backfill retain actual task actors.
-Baselinev3 extends only12 named tables and5 actual sequences; v1/v2 are preserved. Private
-v3 clocks serve native lease expiry and real-account updated_at without changing operational
-time or transactions. The pure alias-frontier resolver preserves nested valid prefixes and
-unbound release identity; native scheduler wiring is implemented. `diagnostic_account_context.py`
-owns explicit bounded source prerequisites, read-only MVCC projection, checksummed
-recorded context reading and the private v3 capsule application. Capture admission places
-one frozen capsule before native producers. The existing v3 lease verifies its v1 parent
-then applies and seals within one transaction. Source time/identity projection gaps remain
-explicit; the capsule is not a whole-DB baseline. Native expected-failure Replay passed the
-78-test PostgreSQL/NAS gate. Missing context/clock still rejects before DB connection.
-`diagnostic_replay_contract.py`가 허용 메서드·codec·workload 선택과
-collector descendant 제외 계획을 검사한다. `diagnostic_recorded_execution.py`는 명시된
-store allowlist를 caller-owned test store에서 실행하며 actor 순서·동시성·replay ID를 기록한다.
-`diagnostic_replay_sampling.py`는 opt-in offline replay 중 기존 lease 관리 연결을
-독점 사용해 읽기 전용 PostgreSQL activity 표본과 worker CPU/RSS를 수집한다.
-`diagnostic_recorded_execution.py`가 native 실행과 observer drain을 소유하고 관리
-연결 재사용/복구 전에 종료를 기다린다. `diagnostic_replay_database_cli.py`가 같은
-backend/COMMIT 구간에 표본을 연결한다. writer 트랜잭션/공개 API/운영 계측은 바꾸지 않는다.
-표본은 SQL 원문 없이 bounded 상태/wait/blocker만 담으며 물리 장치 원인이나 미관측 대기를
-확정하지 않는다. 정확한 후보 소스의 PostgreSQL gate와 동일 입력 A/B를 별도로 기록한다.
-`diagnostic_replay_comparison.py`는 소유한 replay DB의 native drain 이후 네 결과 표의
-내용·revision 연결 비교값을 만든다. 기존 전체 hash/reset 판정은 그대로이며, 저장 시각과
-UUID 차이는 명시적으로 분리하고 source 시각·payload·revision 순서는 유지한다.
-이 비교는 화면/증분 동기화 등 wall-clock reader 동작이나 전체 기능 동등성을 승인하지 않는다.
-collector mode는 0B 원인 사건을 실제 collector loop에 전달하고 그 component의 과거 sink만
-제외한다. 로컬 collector-input/v2는 최소 0w·0J·0U 입력과 같은 component의 market_state-only
-dataset sink 대체도 지원하며 peer 및 다른 dataset은 유지한다. TOP20 subscriber 자체는
-실행하지 않으며 cross-component causal replay는 미지원이다. NAS 검증·활성화는 별도 gate다.
-로컬 `diagnostic_top20_input.py`는 `ka00198 qry_tp=5` freshness/slot/retry 판정만 재생한다.
-`diagnostic_top20_flow_input.py`는 TOP20 최초 편입 `ka10045` 입력에서 실제 investor-flow
-ingestor와 완료 marker까지 전용 replay DB 안에서 실행하며 native descendant를 중복 실행하지 않는다.
-일반 수급 fan-out, broker scheduling, 전체 TOP20 subscriber/준비 작업은 지원하지 않는다.
-`diagnostic_rest_input.py`는 top20_inputs opt-in의 broker 논리 요청/전송/cache·ingest 원인 및 catalog
-입력 pair를 기록·검증하고 명시 lane의 offline tape client를 제공한다. `diagnostic_top20_lifecycle_input.py`는
-0s·구독 intent/ACK/READY·hub control·gap 입력 pair와 descendant preflight를 검증하고, 현재 native 구독 intent에
-일치하는 결과만 offline tape로 공급한다. 둘 다 native broker/collector lifecycle을 그대로 실행하지 않으며
-full TOP20 executor를 열지 않는다. `diagnostic_replay_runtime.py`는 opt-in 실행의 Task와 실제 executor
-작업을 제출 시점부터 추적하고 실제 종료 전 DB reset/release를 차단한다. `diagnostic_top20_outbox.py`는
-run 소유 native 파일 outbox의 검증된 seed와 복구를 담당한다. 둘은 로컬 구현·native 회귀 142건을
-마쳤다. NAS 임시 RAM-backed·network-isolated PostgreSQL acceptance 13건이 skipped=0으로 통과했고
-취소 thread 종료, native outbox ACK 재시도, DB/file baseline 공동 복구를 확인했다. T4 v1 gate는 T3 13건 뒤
-fixture setup timeout으로 실패했으나, disposable PostgreSQL gate에만 180초를 지정한 비활성 v2 candidate
-`2026.10.07-top20-session-v2-57de01203aa5af84`의 후속 acceptance 15건이 skipped=0으로 통과했다.
-두 baseline 보존 및 반복 복구, TOP20 단독/제외와 peer writer 유지, descendant 대체, drain 및 DB/outbox
-복구를 controlled fixture에서 검증했다. 보고서는 `source_state_equivalent=false`이며 실제 장중 상태 등가,
-입력 coverage, 성능을 검증하지 않는다. 로그의 stale ranking `recording_gap` 두 건은 고정 시각 fixture가
-stale해져 해당 회차 저장을 건너뛴 것이며 acceptance 실패나 DB 입력 유실은 아니다. 운영 release와 두
-운영 container는 변경하지 않았다.
-`diagnostic_top20_seed.py`는 native TOP20 service의 의미 상태를 명시 목록으로만 검사하고, controlled
-cold fixture의 baseline/input/mask/component/source-clock identity를 window frontier에 결합한다.
-lock·Task·cache·pending work가 비었는지 확인하지만 RAM을 복원하거나 DB를 restore하지 않으며 execution
-gate를 열지 않는다. REST/catalog 및 lifecycle 입력 tape와 native service lifecycle runner가 연결됐다.
-T4 controlled PostgreSQL acceptance는 통과했으며, 장중 상태 등가 및 성능 결론은 유효한 실제 capture replay 전까지 보류한다.
-`postgres_access.py`는 replay operation ID와 owner·actor·component를 DB call에
-전달한다. `diagnostic_replay_baseline.py`는 고정 replay DB의 역할·소유권·run lock, baseline v1 14개
-허용 테이블/sequence 및 별도 opt-in v2 15개 테이블(`central_api_query_cache` 포함) snapshot,
-atomic restore와 native connection drain을 소유한다. 로컬 offline replay `run`도 v2를 선택할 수 있다.
-v3 native recorded runner는 계좌7종/VI를 명시적으로 실행하며 검증한 context capsule,
-동일 owner alias frontier, 봉인된 context/token hash와 실제 경과를 반영하는 lease-owned
-source clock을 요구한다. 예상 실패는 정확한 class/code로만 수락하고 결과 불일치는 drain한다.
-offline CLI의 v3 seal/run 선택은 녹화 context와 명시 window/owner frontier를 preflight한다.
-`scripts/nas_operator.py`는 schema4 block bundle을 bounded stdlib로 검사·등록하고 등록 후
-파일 hash를 재검사한다. v3 baseline과 trace context 연결 및 worker source-origin 전달을
-검사한다. root helper 반영, public 실행 선택과 NAS 녹화 운영 배포는 별도 단계다.
-v2 query-cache store 호출은 lease의 source clock을 사용하며 v1에서 거부한다. `rest_broker.py`의 선택적
-source wall clock과 `database_query_cache.py`의
-per-store clock hook은 v2 lease에서만 연결되고 운영 기본값에는 변화가 없다.
-비활성 NAS candidate에서 임시 RAM-backed·network-isolated PostgreSQL baseline gate 7건과 새 native
-run gate 3건, 총 10건이 skipped=0으로 통과했다. 반복 run의 source TTL과 collector/cache 공통 clock,
-exclusion의 과거 cache 결과 비주입, ACK-loss 뒤 drain 및 baseline 복구를 확인했다. 성능이나 장중
-상태 동등성은 입증하지 않았다. 후속 service clock 감사의 세 누수(신고가 helper 날짜, 분봉 날짜 fallback,
-membership 공개시각)는 로컬 수정과 신고가 12/ingestor 13/TOP20 67 단위 회귀 및 source-date 재현으로
-통과했다. 전체 TOP20 runner와 그 안에서 시간 의존 TR에 같은 clock을 바인딩하는 단계는 남아 있다.
-`diagnostic_replay_database_cli.py`는 offline provisioning/status/seal/restore와 bounded
-schema-2 recorded-operation replay를 제공한다. 실행은 기존에 봉인한 dedicated baseline 아래서
-수행하고 종료 후 기준 상태를 복구한다. 원본 operation ID와 replay operation ID를 실제 DB-call
-관측 ID에 연결하며, 이 연결은 workload가 발생시킨 연결만 관측한다. `news_article` 및
-`theme_metadata`의 history projection처럼 baseline allowlist 밖의 부수 쓰기가 필요한 입력은
-사전 거부한다. `scripts/check_recorded_replay_baseline.py --execution-gates`는 NAS 운영자가
-기존 sealed DB에서 반복 재생·workload 제외·실패 후 정리를 검사한다. 공개 선택/비교 API와
-장중 원본 동등성은 아직 없으며 운영 실행 경로에는 연결되지 않았다.
-역할과 검증 경계는
-[반복 부하 실험 계약](docs/RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md)을 따른다.
 
 | 영역 | 먼저 볼 파일 | 책임 |
 |---|---|---|
@@ -244,8 +16,9 @@ schema-2 recorded-operation replay를 제공한다. 실행은 기존에 봉인�
 | 세션 | `application/market_session_schedule.py`, `application/realtime_subscription.py`, `central_server/autonomous_top20.py` | 거래일별 venue/phase·구독 대상, NAS 장후 보완은 저장된 0s 거래일 증거가 있을 때만 예약. 공식 연간 휴장 달력 자동 동기화는 미구현 |
 | 봉·관측 | `central_server/minute_bars.py`, `central_server/market_ingest.py`, `central_server/market_observations.py` | 1초/1분 집계·TR 적재·revision 의미. `MarketDataIngestor`는 봉 교체·관측 metadata 조회·dataset/문서 저장의 7개 메서드 `MarketIngestStore` 계약을 사용한다. 실제 일봉 changed key 또는 저장 결과가 불확실할 때만 TOP20 daily/high 준비 상태를 code/market 범위로 재검증한다. native transaction과 broker 적재 호출 깊이는 유지한다. |
 | TOP20 | `application/top20_trade_value_collector.py`, `presentation/top20_trade_value.py`, `central_server/autonomous_top20.py`, `central_server/program_snapshot_writer.py` | 코호트·지수·차트. NAS 서비스의 `AutonomousTop20Store`는 직접 호출과 writer에 전달하는 저장을 합친 10개 메서드 계약이다. `ProgramSnapshotWriter`는 단일 메서드 `ProgramSnapshotStore`로 0W pending·실제 저장 task·실패 병합·drain을 소유한다. 순위·구독·준비·저장 주기와 전체 종료는 TOP20 서비스가 조정하며 producer stop→실제 save drain→pending final flush를 유지한다. 호출자 취소가 DB thread 소유권을 끊지 않는다. |
-| 로컬 쓰기 | `infrastructure/persistence/market_cache_writer.py`, `infrastructure/persistence/minute_bar_repository.py` | 비동기 직렬 쓰기·봉 저장 |
-| 중앙 서버 조립·API | `central_server/app.py`, `central_server/database.py`, `central_server/central_schema.py` | `app.py`가 QueryStore/backend, 서비스, lifespan과 나머지 API를 조립한다. 같은 파일의 명시적 시작/종료 경로가 현재 동적 owner를 사용하며 부분 시작·본문 실패·반복 취소에도 소유 종료 task를 기다린다. 첫 close 실패는 원래 오류와 안전한 단계 기록을 보존하고 후속 broker/vault/store 해제를 중단한다. 각 실제 worker/drain은 기존 서비스 책임이다. 진단 parent/child·trace 실제 종료 대기와 supervisor의 종료 task/실패 전달도 보완했으며 최종 전체 검증의 과거뉴스 폴더 이동 오류는 OPEN_ITEMS에 남아 있다. 뉴스 검색·AI 분석·이력 조회·과거 archive·외부 작업·콘텐츠 동기화·연구 조회·모의 자동매매 제어·시장 스냅샷/통계 라우터에는 app이 소유하는 service/store/reader와 기존 인증 dependency를 등록한다. |
+| 로컬 쓰기 | `infrastructure/persistence/market_cache_writer.py`, `infrastructure/persistence/minute_bar_repository.py` | 한 queue에서 gap 무효화·값/품질 저장·실제 COMMIT 이후 세대/분 범위 ACK. 실패와 최종 drain은 기존 owner가 유지. |
+| 실시간 누락 품질 | `domain/realtime_gap.py`, `application/minute_trade_value.py`, `application/minute_chart_service.py` | hub와 PC의 범위 값 계약, 집계기의 누락 분·복구 세대, 원천 종료 봉/조회 범위의 권한 판정. DTO metadata는 저장·NAS 읽기·합계/차트/판단까지 보존. |
+| 중앙 서버 조립·API | `central_server/app.py`, `central_server/database.py`, `central_server/central_schema.py` | `central_server/app.py`가 QueryStore/backend, 서비스, lifespan과 나머지 API를 조립한다. 같은 파일의 명시적 시작/종료 경로가 현재 동적 owner를 사용하며 부분 시작·본문 실패·반복 취소에도 소유 종료 task를 기다린다. 첫 close 실패는 원래 오류와 안전한 단계 기록을 보존하고 후속 broker/vault/store 해제를 중단한다. 각 실제 worker/drain은 기존 서비스 책임이다. 진단 parent/child·trace 실제 종료 대기와 supervisor의 종료 task/실패 전달도 보완했으며 과거 전체 실패와 후속 통과는 현재 상태의 근거에 보존하고, 간헐적 Windows rename 직접 원인은 OPEN_ITEMS에 남겨 둔다. 뉴스 검색·AI 분석·이력 조회·과거 archive·외부 작업·콘텐츠 동기화·연구 조회·모의 자동매매 제어·시장 스냅샷/통계 라우터에는 app이 소유하는 service/store/reader와 기존 인증 dependency를 등록한다. |
 | 클라이언트 실시간 WebSocket | `central_server/realtime_routes.py`, `central_server/realtime_hub.py`, `central_server/realtime_collector.py`, `central_server/app.py` | 인증 header/query 우선순위·ready/pong·구독 응답·초기 DB/RAM 값·central_ready/상류 승인·누락 알림·sender 취소/구독자 정리 정책을 소유한다. app의 같은 hub/token 검사/collector와 단일 메서드 snapshot reader를 주입한다. 실제 상류 연결·집계·DB 저장·서버 수명은 기존 owner에 유지하고 새 state/task 계층이나 전달 wrapper를 추가하지 않는다. |
 | 진단 실행·보고서 API | `central_server/diagnostic_run_routes.py`, `central_server/app.py`, `central_server/diagnostic_runs.py`, `central_server/diagnostic_sampling.py` | snapshot/run 시작·상태·취소/보고서 목록·상세/이력 7개 HTTP 정책·요청 모델·인증·오류 변환·summary/raw 필터를 소유한다. 같은 require-runs/DiagnosticRuns·logger/config/build 값을 전달한다. native sampler/worker/실행·취소·보고서 파일 읽기·이력·페이지·app 조립/수명은 기존 owner에 유지한다. 오류 우선순위·revision/session/전체 replay 옵션 전달과 명세/등록 순서를 보존하며 새 state/task/수명 wrapper나 호출 깊이를 추가하지 않는다. |
 | 진단 스위치·trace API | `central_server/diagnostic_control_routes.py`, `central_server/app.py`, `central_server/diagnostic_workloads.py`, `central_server/diagnostic_trace.py` | capabilities/control/trace 시작·상태·종료·manifest·chunk 7개의 요청 모델/인증/검증/오류 변환을 소유한다. app의 같은 run 객체·require-runs·workload reader와 config/build 값을 전달한다. native CAS/session/instance/TTL·이력·busy 4상태·실패 시 조건부 rollback·capture 옵션과 chunk media type을 유지한다. control 파일/trace worker/저장/종료와 app run 조립/수명은 기존 경계에 남으며 새 상태·수명 wrapper나 호출 깊이를 추가하지 않는다. |
@@ -266,24 +39,25 @@ schema-2 recorded-operation replay를 제공한다. 실행은 기존에 봉인�
 | 과거 뉴스 archive 조회 API | `central_server/historical_news_archive_routes.py`, `central_server/historical_news_archive.py`, `central_server/app.py` | 라우터가 검색·정확 기사 ID 조회의 인증/요청 검증/오류 응답과 요청 시점 diagnostic pause를 소유한다. reader 설정·봉인 확인·생성과 health/capabilities 공개는 app에 유지한다. 기존 reader의 읽기 전용 연결과 cursor/dataset 의미를 그대로 사용한다. |
 | 과거 뉴스 외부 처리 API | `central_server/historical_news_processing_routes.py`, `central_server/database_historical_news.py`, `central_server/database_news_revisions.py`, `central_server/app.py` | 작업 접수·완료·시황 batch의 요청 모델/인증/검증/오류 응답을 라우터가 소유한다. 5개 메서드의 `HistoricalNewsProcessingStore` 계약만 사용하고 store 생성·수명은 app, 임대/attempt 소유권·revision·트랜잭션/rollback·완료 후 wake-up은 기존 DB 구현에 유지한다. |
 | 중앙 서버 로그 | `central_server/server_logging.py` | 파일·콘솔 로그를 KST로 표시하고 날짜 회전을 한국 자정 기준으로 유지 |
-| 외부시장 봉 DB | `central_server/database_external_market.py`, `central_server/external_market_collector.py`, `central_server/database.py` | SQLite/PostgreSQL 외부시장 봉 저장·조회 실제 구현. Yahoo collector는 봉 저장과 roll/collection state 문서 조회·upsert만 요구하는 `ExternalMarketCollectorStore`를 사용하고, 조회 API는 `MarketReadStore`를 사용한다. QueryStore aggregate와 backend 선택은 `database.py`에 유지한다. |
+| 공개 업무 상태 | `central_server/app.py`, `central_server/realtime_collector.py`, `central_server/candidate_monitor.py` | health가 기존 owner의 공개 메모리 상태를 모은다. collector가 종류별 native 저장 성공/실패·대기/실제 저장 중·보유 레코드 시각을 소유하고, 후보 감시가 현재 후보군 만료와 마지막 평가를 구분한다. 전체 업무 관측은 partial/unknown이며 DB probe·새 owner·저장 호출 단계는 추가하지 않는다. |
+| 외부시장 봉 DB | `central_server/database_external_market.py`, `central_server/external_market_collector.py`, `central_server/database.py` | SQLite/PostgreSQL 외부시장 봉 저장·조회 실제 구현. Yahoo collector는 봉 저장과 roll/collection state 문서 조회·upsert만 요구하는 `ExternalMarketCollectorStore`를 사용하고, 조회 API는 `MarketReadStore`를 사용한다. QueryStore aggregate와 backend 선택은 `central_server/database.py`에 유지한다. |
 | 국내 시장 봉 DB | `central_server/database_market_bars.py`, `central_server/database_observation_writes.py`, `central_server/database.py`, `central_server/postgres_access.py` | SQLite/PostgreSQL 분봉·초봉·5분봉·일봉 저장·조회 구현과 revision/metadata writer helper. 분봉 metadata는 `(subject, trading_date+minute)`로 각 종목에 연결한다. 일봉 UPSERT는 commit이 확인된 changed key만 반환해 coverage freshness 입력으로 쓴다. QueryStore 계약·store 조립·기존 호출 연결은 유지하고, 공통 PostgreSQL wait probe는 뉴스 claim과 공유. 로컬 회귀 및 NAS 전용 PostgreSQL 일봉 changed-key/no-op/중복·metadata/rollback 검사 3/3 통과 |
 | 시장 관측 메타데이터 DB | `central_server/database_market_metadata.py`, `central_server/database_observation_writes.py`, `central_server/database.py`, `domain/market_data_contract.py` | SQLite/PostgreSQL metadata 저장·단건·범위 조회. QueryStore/API 계약과 native transaction을 유지하며 `CoverageObservation`을 하위 value contract로 둔다. 로컬 회귀·정적 연결 및 NAS 전용 PostgreSQL gate 3/3 통과 |
 | REST 응답 캐시 DB | `central_server/database_query_cache.py`, `central_server/database.py` | SQLite/PostgreSQL cache read/write와 `StoredQuery` 실제 구현. `QueryCacheStore`는 REST broker가 쓰는 두 메서드 계약이며 `QueryStore` aggregate·store 조립은 유지. NAS PostgreSQL·broker·SQLite gate 5/5 및 SQLite-backed API ASGI 연결 1/1 통과 |
 | 저장소 진단 DB | `central_server/database_storage_diagnostics.py`, `central_server/database.py` | SQLite/PostgreSQL 저장 크기·분류 조회와 공통 분류 구현. 인증된 `/api/v1/diagnostics/resources` 응답 및 PC 리소스 화면의 기존 연결 유지 |
-| 실시간 최신값 DB | `central_server/database_realtime_snapshot.py`, `central_server/database_codec.py`, `central_server/database.py` | SQLite/PostgreSQL 최신 스냅샷 저장·조회와 영속 0B 시총 projection. `realtime_collector.py`는 snapshot·minute/second bar 저장, finalization, live bar 조회, document upsert에 필요한 7개 메서드의 `RealtimeCollectorStore` 계약을 사용한다. 직렬 flush·실패 복구와 app.py WebSocket/API 연결을 유지하며, 공통 JSON decoder는 codec에서 제공 |
-| 시장 이벤트 DB | `central_server/database_market_events.py`, `central_server/database_codec.py`, `central_server/database.py` | SQLite/PostgreSQL VI·hot cohort·상한가 revision/current/history 저장·조회 구현. QueryStore 계약·store 조립과 기존 transaction/lock 소유권은 `database.py` 및 호출자에 유지 |
+| 실시간 최신값 DB | `central_server/database_realtime_snapshot.py`, `central_server/database_codec.py`, `central_server/database.py` | SQLite/PostgreSQL 최신 스냅샷 저장·조회와 영속 0B 시총 projection. `central_server/realtime_collector.py`는 snapshot·minute/second bar 저장, finalization, live bar 조회, document upsert에 필요한 7개 메서드의 `RealtimeCollectorStore` 계약을 사용한다. 직렬 flush·실패 복구와 app.py WebSocket/API 연결을 유지하며, 공통 JSON decoder는 codec에서 제공 |
+| 시장 이벤트 DB | `central_server/database_market_events.py`, `central_server/database_codec.py`, `central_server/database.py` | SQLite/PostgreSQL VI·hot cohort·상한가 revision/current/history 저장·조회 구현. QueryStore 계약·store 조립과 기존 transaction/lock 소유권은 `central_server/database.py` 및 호출자에 유지 |
 | 연구 관측 export DB | `central_server/database_research_export.py`, `central_server/database_codec.py`, `central_server/database.py` | 고정 revision membership manifest 생성과 cursor page 조회의 SQLite/PostgreSQL 구현. 인증 `/api/v1/research/observations`와 PC `CentralContentClient` 경로, 별도 writer/reader transaction 경계를 유지 |
-| 문서·테마 이력 DB | `central_server/database_documents.py`, `central_server/database.py` | SQLite/PostgreSQL 문서 upsert·replace·조회와 테마 snapshot, 뉴스 기사 revision/BODY job의 동일 transaction 후처리. QueryStore 계약과 store 조립은 `database.py`에 유지 |
+| 문서·테마 이력 DB | `central_server/database_documents.py`, `central_server/database.py` | SQLite/PostgreSQL 문서 upsert·replace·조회와 테마 snapshot, 뉴스 기사 revision/BODY job의 동일 transaction 후처리. QueryStore 계약과 store 조립은 `central_server/database.py`에 유지 |
 | 뉴스 작업 큐·요청 예산 DB | `central_server/database_news_jobs.py`, `central_server/database_news_job_writes.py`, `central_server/database_documents.py`, `central_server/database.py` | SQLite/PostgreSQL AI 작업 enqueue·claim·finish·retry, 요청 예산 claim/count, wake-up callback의 저장 구현. 문서 cursor transaction이 공유하는 job insert helper는 하위 공통 모듈에 두고 기존 import alias와 post-commit wake-up 순서를 유지. 로컬 회귀 및 NAS 전용 PostgreSQL gate 10/10 통과 |
 | 뉴스 revision DB | `central_server/database_news_revisions.py`, `central_server/database_news_jobs.py`, `central_server/database.py`, `domain/news_observation.py` | SQLite/PostgreSQL BODY·AI·event revision 저장과 뉴스 이력 조회 구현. caller-owned cursor helper와 job wake-up 연결은 하위 뉴스 job writer를 사용하며 QueryStore 조립·기존 import alias는 유지. 로컬 회귀 135건·NAS 전용 PostgreSQL gate 9/9 통과 |
 | 뉴스 소스 페이지·진행상태 DB | `central_server/database_news_sources.py`, `central_server/database_news_job_writes.py`, `central_server/database.py` | SQLite/PostgreSQL source cursor/page, source diagnostics, stored market feed. `save_news_source_page`와 historical batch가 공유 caller-owned transaction, 기사 revision/target/job/cursor atomicity, table lock 및 commit 후 wake-up을 보존한다. 로컬 회귀 76건·NAS 전용 PostgreSQL gate 5/5 통과 |
 | 과거 뉴스 외부 처리·시황 batch DB | `central_server/database_historical_news.py`, `central_server/database_news_sources.py`, `central_server/database_news_revisions.py`, `central_server/database.py` | 외부 BODY/RULE lease claim/completion 및 historical market batch. QueryStore 조립·호환 alias는 root에 유지하고 ownership fence, `SKIP LOCKED`, caller-owned transaction 및 commit 후 wake-up을 보존한다. 로컬 회귀 123건·NAS 전용 PostgreSQL gate 5/5 통과 |
-| 계좌 설정·복구 DB | `central_server/database_account_settings.py`, `central_server/database.py` | SQLite/PostgreSQL account settings·market profile CAS, fenced real account event/recovery 저장·조회 구현. QueryStore 계약과 store 조립은 `database.py`에 유지하며 credential activation은 기존 cursor transaction에서 domain helper를 빌림 |
-| 계좌 identity·binding DB | `central_server/database_account_identity.py`, `central_server/database.py` | SQLite/PostgreSQL 계좌 identity 등록, binding revision, scope alias 검증·조회 구현. QueryStore 계약과 store 조립은 `database.py`에 유지하며 credential activation의 기존 transaction 흐름을 보존 |
+| 계좌 설정·복구 DB | `central_server/database_account_settings.py`, `central_server/database.py` | SQLite/PostgreSQL account settings·market profile CAS, fenced real account event/recovery 저장·조회 구현. QueryStore 계약과 store 조립은 `central_server/database.py`에 유지하며 credential activation은 기존 cursor transaction에서 domain helper를 빌림 |
+| 계좌 identity·binding DB | `central_server/database_account_identity.py`, `central_server/database.py` | SQLite/PostgreSQL 계좌 identity 등록, binding revision, scope alias 검증·조회 구현. QueryStore 계약과 store 조립은 `central_server/database.py`에 유지하며 credential activation의 기존 transaction 흐름을 보존 |
 | 자격증명 프로필·활성화 DB | `central_server/database_credentials.py`, `domain/credential_contract.py`, `central_server/database.py` | 프로필 생성·등록·이름·보관 및 activation receipt의 SQLite/PostgreSQL 구현. activation은 identity binding과 account settings helper를 기존 cursor transaction에서 호출하고 암호화 vault 파일 commit 경계는 credential store에 둠 |
 | 실행 원장·mock 제어·lease DB | `central_server/database_execution.py`, `central_server/database.py` | SQLite/PostgreSQL intent/event/account snapshot, mock control CAS, runtime lease 저장·조회. ExecutionRepository·ForwardEvaluationRepository와 기존 mock 주문/이벤트 API 연결을 유지하고 소유권 fence, 독립 트랜잭션과 native 계측을 보존. 전용 PostgreSQL fence·ledger·control CAS 검사 3건 통과 |
-| Shadow 상태·평가 DB | `central_server/database_shadow_state.py`, `central_server/shadow_checkpoint.py`, `central_server/database.py` | SQLite/PostgreSQL checkpoint 상태, shadow 평가·candidate event 저장과 cursor page 조회. `CandidateMonitor`·인증 API 연결 및 기존 caller-owned transaction을 유지하고, normalized frame format/schema/DML helper는 `shadow_checkpoint.py`에 둠. 전용 PostgreSQL gate 7건 통과 |
+| Shadow 상태·평가 DB | `central_server/database_shadow_state.py`, `central_server/shadow_checkpoint.py`, `central_server/database.py` | SQLite/PostgreSQL checkpoint 상태, shadow 평가·candidate event 저장과 cursor page 조회. `CandidateMonitor`·인증 API 연결 및 기존 caller-owned transaction을 유지하고, normalized frame format/schema/DML helper는 `central_server/shadow_checkpoint.py`에 둠. 전용 PostgreSQL gate 7건 통과 |
 | dataset snapshot·관측 SQL DB | `central_server/database_datasets.py`, `central_server/database_observation_writes.py`, `central_server/database.py`, `central_server/postgres_access.py` | SQLite/PostgreSQL dataset snapshot 저장·조회 구현과 caller-owned cursor의 metadata/revision SQL을 분리했다. root QueryStore·기존 import alias 및 writer transaction은 유지한다. NAS 전용 PostgreSQL gate 9/9 통과 |
 | 관측 증분 전달·bootstrap DB | `central_server/database_observation_readers.py`, `central_server/database.py` | 기존 native 연결에서 sequence 상한과 유한 잠금 cohort로 safe page를 제공한다. store별 RAM epoch/fencing과 단일 snapshot bootstrap API를 소유하며 writer SQL/COMMIT·raw history·연구 export는 유지한다. 두 consumer의 bootstrap/legacy frames-only 복구까지 NAS 55건·로컬 36건 gate 통과. concurrent reader/lock-transfer와 비용 검증 후 배포하며 현재 운영 미배포다. |
 | PostgreSQL 공통 관측 pilot | `central_server/postgres_access.py`, `central_server/database.py:PostgresQueryStore`, `central_server/diagnostic_metrics.py`, `central_server/diagnostic_writer_registry.py` | 기존 호출별 연결과 transaction 경계를 유지한 명시적 writer 계측 및 query-cache·document-collection·market-bar·observation-revision·shadow·dataset snapshot·market metadata·news READ grouping. writer kind는 활성 호출 경계를 따라 점진 이관한다. 전체 store coverage나 pool 도입을 뜻하지 않는다. 상세 writer/kind와 검증 범위는 `docs/COMMON_DB_ACCESS_OBSERVABILITY_REVIEW.md` 참조 |
@@ -360,6 +134,11 @@ schema-2 recorded-operation replay를 제공한다. 실행은 기존에 봉인�
 
 `src/kiwoom_monitor/` 기준 경로다.
 
+모의 감시의 공개 시작 상태는 `central_server/mock_account_monitor.py::is_started`,
+공개 profile들의 감시 시작 여부는 `central_server/mock_runtime.py::has_started_monitor`가 소유한다.
+app과 키 교체/설정 rollback은 이 판단과 기존 `account_bindings()`를 사용한다.
+복구·주문 가능 판정과는 구분하며 기존 lease·저장·종료 경계는 유지한다.
+
 | 영역 | 먼저 볼 파일 | 책임 |
 |---|---|---|
 | 계좌 신원 | `application/account_identity.py`, `infrastructure/kiwoom_rest/account_identity.py` | scope/binding; A4B 직접 연결 미완료 범위 별도 |
@@ -376,3 +155,11 @@ schema-2 recorded-operation replay를 제공한다. 실행은 기존에 봉인�
 외부 `kiwoom_history_backfill`의 후보 DB·기존 수집 스크립트는 앱 모듈이 아니다. 현재 표본 경계는 `infrastructure/historical_backfill.py`, `scripts/probe_historical_backfill.py`, 32비트 COM 표본·연속조회 브리지 `scripts/daishin_stockchart_probe.ps1`과 `scripts/daishin_stockchart_backfill.ps1`에 있다. CREON의 종목 분봉·시총/주식수·수정주가 작업은 참조 `stocks.market_code` 0/10인 코스피·코스닥 개별 주식만 대상으로 하며 다른 상품의 기존 원응답은 삭제하지 않고 작업 원장에서 `excluded`로 분리한다. [과거 수집 기획](docs/HISTORICAL_BACKFILL_PLAN.md)으로 원천별 표본을 확인한 뒤 기존 `research_data_source`, 뉴스 revision, 프로필 저장 경계에 연결한다.
 
 관련 테스트는 각 책임의 `tests/unit/test_*.py`와 `scripts/check_*.py`에서 찾는다. 문서 정리에서 이전 테스트 개수를 새 실행 결과로 복사하지 않는다. 실제 코드 변경 때 해당 경계의 의미 있는 회귀와 필요한 통합 검증을 수행한다.
+
+## 녹화·계측의 추가 진입점
+
+| 파일 | 현재 책임 |
+|---|---|
+| `scripts/nas_scheduled_trace.py` | 단발성 NAS 녹화 preflight·옵션 검증·시작. 현재 예약과 실제 실행 결과는 CURRENT_STATUS/O12를 따른다. |
+| `scripts/check_causal_capture_capacity.py` | 운영 DB·네트워크를 쓰지 않는 고정 입력의 격리 용량 검사와 동일 저장본 읽기 전용 검증. 전체 앱 Replay 승인과 구분한다. |
+| `central_server/diagnostic_account_context.py` | 제한된 계좌 초기 context·원장·authority/sequence 계약 검증. 실제 저장 연결·transaction 소유권은 기존 store에 유지한다. |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from dataclasses import fields
 from enum import StrEnum
 from typing import TypeVar
 
@@ -19,6 +20,21 @@ from kiwoom_monitor.domain.market_data_contract import (
 
 
 EnumT = TypeVar("EnumT", bound=StrEnum)
+
+
+def market_metadata_document(metadata: MarketDataMetadata) -> dict[str, object]:
+    return {field.name: (value.isoformat() if isinstance(value, datetime) else
+                        value.value if isinstance(value, StrEnum) else value)
+            for field in fields(metadata) for value in (getattr(metadata, field.name),)}
+
+
+def market_metadata_from_document(value: object) -> MarketDataMetadata:
+    if not isinstance(value, dict):
+        return MarketDataMetadata(None, None)
+    return market_metadata_from_storage_row(tuple(value.get(key) for key in (
+        "effective_at", "available_at", "venue", "unit", "value_kind", "completeness",
+        "origin", "source", "candidate_universe",
+    ))) or MarketDataMetadata(None, None)
 
 
 def market_metadata_storage_values(

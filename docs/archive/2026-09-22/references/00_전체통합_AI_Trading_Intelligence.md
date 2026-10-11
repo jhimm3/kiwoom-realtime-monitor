@@ -1979,9 +1979,13 @@ ADD/REDUCE/REENTER 후보, 캠페인·episode, ③ EV/Risk 응답 소비를 추�
 
 <a id="part-3"></a>
 
-# ③ Research·EV·Risk·Execution
+<a id="③-researchevriskexecution"></a>
 
-# ③ Research·EV·Risk·Execution — Codex 개발 명세
+# ③ 연구·기대값·위험·실행
+
+<a id="③-researchevriskexecution"></a>
+
+# ③ 연구·기대값·위험·실행 — Codex 개발 명세
 
 > 버전: 1.0 · 작성일: 2026-09-20  
 > 범위: 데이터 연구·정책 평가·확률/기대값·목표 비중·위험 한도·모의/실거래 실행·일일 개선.  

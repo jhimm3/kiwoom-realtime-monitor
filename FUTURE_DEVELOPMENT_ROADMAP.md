@@ -1,6 +1,6 @@
 # AI Trading Intelligence 개발 로드맵
 
-기준: 2026-09-23 · 현재 제품 **2.1.0** · [현재 상태](docs/CURRENT_STATUS.md) · [남은 작업](docs/OPEN_ITEMS.md)
+문서 대조: 2026-10-11 · 수집·검증 수량은 해당 기록 시점 기준 · 현재 제품 **2.1.0** · [현재 상태](docs/CURRENT_STATUS.md) · [남은 작업](docs/OPEN_ITEMS.md)
 
 ## 방향
 

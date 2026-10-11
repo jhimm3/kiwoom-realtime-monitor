@@ -284,6 +284,11 @@ class MockAccountMonitor:
         self._risk_events = []
         self._risk_event_cursor = 0
 
+    @property
+    def is_started(self) -> bool:
+        """Event loop installed and not yet retired by close; not recovery/readiness."""
+        return self._task is not None
+
     async def start(self, *, initial_read: bool = False) -> None:
         if not self._accepting: raise RuntimeError("MOCK_MONITOR_CLOSED")
         if self._start_task is None:

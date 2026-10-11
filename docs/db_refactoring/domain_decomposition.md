@@ -991,7 +991,7 @@ service/API/UI 계층은 import하지 않는다.
 AST 대조상 QueryStore 99개와 SQLite 104/PostgreSQL 105개 구현 계약·본문 변경은 없고,
 이동 helper 미해결 전역 참조는 0이다. consumer 338곳, PostgreSQL 직접 연결 승인 42/42,
 storage path 및 logical PG inventory 105개도 변경되지 않았다. 뉴스 source collector,
-market-feed collector/client/window, authenticated diagnostics/feed API, historical PC job,
+시장 소식 수집기·client·화면, 인증된 진단/소식 API, PC 과거 수집 작업,
 news job·article/event history 로컬 회귀 76건이 통과했다. 전체 API route 계약 검사는
 이 선택 검사 묶음에 포함하지 않았다.
 
@@ -1016,7 +1016,7 @@ caller-owned DB context를 사용하는 `_historical_market_source_page`,
 QueryStore 계약·backend mixin 조립·`database` import 호환성을 보존했다. Completion 정책은
 기존 `grouped_candidate_identities` 함수를 store 조립 시 callback으로 주입해 DB 모듈이
 application/service 계층을 import하지 않게 했으며, 같은 cursor와 transaction을 유지한다.
-PostgreSQL `FOR UPDATE ... SKIP LOCKED` claim, completion ownership/attempt fence, article
+PostgreSQL `FOR UPDATE ... SKIP LOCKED` 작업 선점, 완료 소유권/시도 fence, 기사
 revision·job atomicity, batch advisory lock/idempotency, 성공 commit 뒤 wake-up 순서를 바꾸지
 않았다.
 

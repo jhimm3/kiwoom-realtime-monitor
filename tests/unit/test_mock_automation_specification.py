@@ -392,7 +392,13 @@ def capture_mock_publication_http_contract(client, store, inputs):
 class MockPublicationHTTPContractTests(unittest.TestCase):
     def test_http_and_native_publication_results_match_pre_extraction_baseline(self):
         expected = json.loads(PUBLICATION_BASELINE.read_text(encoding="utf-8"))["result"]
-        with tempfile.TemporaryDirectory() as directory:
+        scientific_hash = expected["stored"][
+            ForwardEvaluationRepository.MOCK_AUTOMATION_CANDIDATE_COLLECTION
+        ][0]["document"]["scientific_implementation_hash"]
+        # Freeze only the source identity input for the historical HTTP contract.
+        # The separate native test below checks admission against the actual source hash.
+        with patch("kiwoom_monitor.application.research_implementation.research_implementation_hash",
+                   return_value=scientific_hash), tempfile.TemporaryDirectory() as directory:
             with mock_publication_contract_app(create_app, Path(directory) / "publication.sqlite3") as (app, store, inputs):
                 with TestClient(app) as client:
                     actual = capture_mock_publication_http_contract(client, store, inputs)
@@ -402,6 +408,47 @@ class MockPublicationHTTPContractTests(unittest.TestCase):
                 self.assertEqual(original, observed)
         for field in ("stored", "binding", "shadow", "control"):
             self.assertEqual(expected[field], actual[field])
+
+    def test_native_publication_checks_current_scientific_hash_without_override(self):
+        from dataclasses import replace
+        from kiwoom_monitor.application.research_implementation import research_implementation_hash
+        scientific_hash = research_implementation_hash("krx-regular/v1")
+        with tempfile.TemporaryDirectory() as directory:
+            with mock_publication_contract_app(create_app, Path(directory) / "publication.sqlite3") as (app, store, inputs):
+                self.assertEqual(scientific_hash, inputs.package.scientific_implementation_hash)
+                with TestClient(app) as client:
+                    wrong_spec = deepcopy(inputs.package.candidate_spec)
+                    wrong_spec["implementation_hash"] = "a" * 64
+                    wrong_package = replace(inputs.package, candidate_spec=wrong_spec,
+                                            candidate_spec_hash=_hash(wrong_spec),
+                                            scientific_implementation_hash="a" * 64)
+                    wrong_policy = replace(inputs.policy, candidate_spec_hash=wrong_package.candidate_spec_hash)
+                    wrong_receipt = evaluate_candidate_eligibility(wrong_package, wrong_policy, account_ref=ACCOUNT_REF)
+                    mismatch = client.post("/api/v1/research/mock-automation-candidates",
+                        headers={"Authorization": "Bearer private-token"}, json={
+                            "account_ref": ACCOUNT_REF, "credential_profile_id": PROFILE_ID,
+                            "expected_binding_revision": inputs.binding["binding_revision"],
+                            "package": wrong_package.to_dict(), "eligibility_policy": wrong_policy.to_dict(),
+                            "eligibility_receipt": wrong_receipt.to_dict(),
+                        })
+                    self.assertEqual(409, mismatch.status_code)
+                    self.assertEqual("candidate scientific implementation hash does not match this server",
+                                     mismatch.json()["detail"])
+                    self.assertEqual([], store.load_documents(
+                        ForwardEvaluationRepository.MOCK_AUTOMATION_CANDIDATE_COLLECTION, limit=1000,
+                    ))
+                    actual = capture_mock_publication_http_contract(client, store, inputs)
+                cases = {case["name"]: case for case in actual["cases"]}
+                mismatch = cases["candidate-wrong-scientific-hash"]
+                self.assertEqual(400, mismatch["status"])
+                self.assertEqual(mismatch["stored_before"], mismatch["stored_after"])
+                self.assertIn("scientific implementation hash", mismatch["body"]["detail"])
+                self.assertEqual(200, cases["candidate-save"]["status"])
+                self.assertEqual(200, cases["candidate-repeat"]["status"])
+                self.assertEqual(inputs.package.package_hash, cases["candidate-save"]["body"]["package_hash"])
+                documents = actual["stored"][ForwardEvaluationRepository.MOCK_AUTOMATION_CANDIDATE_COLLECTION]
+                self.assertEqual(1, len(documents))
+                self.assertEqual(scientific_hash, documents[0]["document"]["scientific_implementation_hash"])
 
 
 class MockAutomationSpecificationTests(unittest.TestCase):

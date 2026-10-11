@@ -1,4 +1,8 @@
+> 2026-10-11 통합 전의 설계·운영 기록입니다. 현행 운영/API/제어 계약은 [통합 진단 문서](../../../NAS_RUNTIME_DIAGNOSTICS.md), 실제 배포·검증은 [현재 상태](../../../CURRENT_STATUS.md)를 따릅니다. 아래 구현 전·후속·수량·배포 표현은 당시 기록입니다.
+
 # NAS 진단도구 API 연결 설계
+
+> 문서 역할 정리(2026-10-11): 진단 API는 `diagnostic_read_routes.py`·`diagnostic_control_routes.py`·`diagnostic_run_routes.py`로 연결되어 있다. 이 문서는 인증·제어·표본·보고서 계약이며 ‘구현 전’ 전체 계획이 아니다. 아래 v4/v6 배포 표현은 과거 기록이고 실제 배포·검증 범위는 [현재 상태](../../../CURRENT_STATUS.md)를 따른다.
 
 2026-09-29 · O12 · **v6 배포 확인; observe-only run과 report GET 확인, CLI 동등성·진단 acceptance는 미확인**
 

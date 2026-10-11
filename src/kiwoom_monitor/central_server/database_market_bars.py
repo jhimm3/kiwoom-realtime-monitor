@@ -16,7 +16,9 @@ from kiwoom_monitor.domain.market_data_contract import (
     DataCompleteness, DataValueKind, MarketDataObservation, ObservationOrigin,
 )
 from kiwoom_monitor.domain.research_contract import ObservationRevisionSource
-from kiwoom_monitor.infrastructure.market_data_metadata_codec import market_metadata_storage_values
+from kiwoom_monitor.infrastructure.market_data_metadata_codec import (
+    market_metadata_storage_values, market_metadata_document, market_metadata_from_storage_row,
+)
 from kiwoom_monitor.central_server.database_codec import (
     BAR_KEY_COLUMNS, FIVE_MINUTE_BAR_COLUMNS, bar_columns, bar_result_rows,
     bar_value_rows, bounded_limit, five_minute_bar_result_rows,
@@ -431,11 +433,20 @@ def _read_realtime_minute_overlay(
                 volume=int(previous['volume']) + int(delta['volume']),
                 trade_value_million_won=int(previous['trade_value_million_won']) + int(delta['trade_value_million_won']),
             )
+        value["metadata"] = {"completeness": "unconfirmed", "origin": "realtime", "source": "NAS-realtime-overlay"}
         indexed[key] = value
         # The first pending realtime operation replaces an in-progress query;
         # later operations add to that replacement, just as the writer does.
         authorities.pop(authority_key, None)
     return [indexed[key] for key in sorted(indexed)]
+
+
+def _display_minute_rows(rows: list[tuple[object, ...]]) -> list[dict[str, Any]]:
+    result = bar_result_rows([tuple(row[:11]) for row in rows], minute=True)
+    for value, row in zip(result, rows):
+        metadata = market_metadata_from_storage_row(tuple(row[11:])) if len(row) >= 20 and row[11] is not None else None
+        value["metadata"] = market_metadata_document(metadata) if metadata else {"completeness": "unconfirmed"}
+    return result
 
 def _load_postgres_latest_revisions(
     cursor: Any, sources: list[ObservationRevisionSource], *,
@@ -741,23 +752,26 @@ class SQLiteMarketBarStoreMixin:
                            if value['code'] == code and value['trading_date'] == trading_date
                            and (not market or value['market'] == market)]
         sql = (
-            "SELECT trading_date,minute,code,market,open,high,low,close,volume,trade_value_million_won,updated_at "
-            "FROM central_minute_bars WHERE code=? AND trading_date=?"
+            "SELECT b.trading_date,b.minute,b.code,b.market,b.open,b.high,b.low,b.close,b.volume,b.trade_value_million_won,b.updated_at,"
+            "m.effective_at,m.available_at,m.venue,m.unit,m.value_kind,m.completeness,m.origin,m.source,m.candidate_universe "
+            "FROM central_minute_bars b LEFT JOIN central_market_data_observation_meta m ON "
+            "m.dataset_kind='minute_bar' AND m.subject=b.code||':'||b.market "
+            "AND m.observation_key=b.trading_date||'T'||b.minute WHERE b.code=? AND b.trading_date=?"
         )
         parameters: list[object] = [code, trading_date]
         if market:
-            sql += " AND market=?"
+            sql += " AND b.market=?"
             parameters.append(market)
-        sql += " ORDER BY minute"
+        sql += " ORDER BY b.minute"
         with self._lock, self._connection() as connection:
             if realtime_deltas:
                 connection.execute("BEGIN")
             rows = connection.execute(sql, parameters).fetchall()
             if realtime_deltas:
                 return _read_realtime_minute_overlay(
-                    connection, bar_result_rows(rows, minute=True), realtime_deltas, postgres=False,
+                    connection, _display_minute_rows(rows), realtime_deltas, postgres=False,
                 )
-        return bar_result_rows(rows, minute=True)
+        return _display_minute_rows(rows)
 
 
     def replace_minute_bars(
@@ -1058,14 +1072,18 @@ class PostgresMarketBarStoreMixin:
         from .postgres_access import DBWriterContext, open_observed_connection
 
         sql = (
-            "SELECT trading_date::text,to_char(minute,'HH24:MI'),code,market,open,high,low,close,volume,"
-            "trade_value_million_won,updated_at FROM central_minute_bars WHERE code=%s AND trading_date=%s"
+            "SELECT b.trading_date::text,to_char(b.minute,'HH24:MI'),b.code,b.market,b.open,b.high,b.low,b.close,b.volume,"
+            "b.trade_value_million_won,b.updated_at,m.effective_at,m.available_at,m.venue,m.unit,m.value_kind,"
+            "m.completeness,m.origin,m.source,m.candidate_universe FROM central_minute_bars b "
+            "LEFT JOIN central_market_data_observation_meta m ON m.dataset_kind='minute_bar' "
+            "AND m.subject=b.code||':'||b.market AND m.observation_key=b.trading_date::text||'T'||to_char(b.minute,'HH24:MI') "
+            "WHERE b.code=%s AND b.trading_date=%s"
         )
         parameters: list[object] = [code, trading_date]
         if market:
-            sql += " AND market=%s"
+            sql += " AND b.market=%s"
             parameters.append(market)
-        sql += " ORDER BY minute"
+        sql += " ORDER BY b.minute"
         reader = DBWriterContext(
             writer_family="read.market_bars", writer_kind="minute_bar",
             operation="load_minute_bars", access_mode="read",
@@ -1077,9 +1095,9 @@ class PostgresMarketBarStoreMixin:
             rows = cursor.fetchall()
             if realtime_deltas:
                 return _read_realtime_minute_overlay(
-                    cursor, bar_result_rows(rows, minute=True), realtime_deltas, postgres=True,
+                    cursor, _display_minute_rows(rows), realtime_deltas, postgres=True,
                 )
-        return bar_result_rows(rows, minute=True)
+        return _display_minute_rows(rows)
 
 
     def replace_minute_bars(

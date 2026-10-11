@@ -48,14 +48,19 @@ class MockAccountDrainTests(unittest.IsolatedAsyncioTestCase):
         self.releases.append(release)
         async def read(): entered.set(); await release.wait(); return self.recovery
         self.monitor._reader.read = read
+        self.assertFalse(self.monitor.is_started)
         await self.monitor.start(); await entered.wait()
+        self.assertTrue(self.monitor.is_started)
+        self.assertFalse(self.monitor._recovered_once)  # Start is not recovery readiness.
         closing = asyncio.create_task(self.monitor.close()); await asyncio.sleep(0)
         self.assertFalse(closing.done())
+        self.assertTrue(self.monitor.is_started)
         count = self.monitor._queue.qsize()
         self.monitor.handle_realtime("connected", None)
         self.assertEqual(count, self.monitor._queue.qsize())
         with self.assertRaisesRegex(RuntimeError, "CLOSED"): await self.monitor.refresh_account()
         release.set(); await closing
+        self.assertFalse(self.monitor.is_started)
         self.assertEqual(0, self.monitor._queue.qsize())
         self.assertTrue(self.repository.claim_runtime("mock", "account-1", "run-1", "owner-2", datetime.now(timezone.utc)))
         with self.assertRaisesRegex(RuntimeError, "CLOSED"): await self.monitor.start()
@@ -75,7 +80,9 @@ class MockAccountDrainTests(unittest.IsolatedAsyncioTestCase):
             closing.cancel()
             with self.assertRaises(asyncio.CancelledError): await closing
             self.assertFalse(self.monitor._close_task.done())
+            self.assertTrue(self.monitor.is_started)
             release.set(); await self.monitor.close()
+            self.assertFalse(self.monitor.is_started)
         self.assertTrue(self.runtime._retired)
 
     async def test_cancelled_direct_refresh_is_owned_until_database_completion(self):
@@ -121,6 +128,7 @@ class MockAccountDrainTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.runtime, "start", side_effect=start):
             starting = asyncio.create_task(self.monitor.start())
             self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            self.assertFalse(self.monitor.is_started)  # A start waiter alone isn't a loop.
             starting.cancel()
             with self.assertRaises(asyncio.CancelledError): await starting
             closing = asyncio.create_task(self.monitor.close()); await asyncio.sleep(0)

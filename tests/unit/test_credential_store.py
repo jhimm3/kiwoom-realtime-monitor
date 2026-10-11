@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -253,7 +254,6 @@ class CredentialStoreTests(unittest.TestCase):
         self.assertFalse(active.mock_account_monitor_enabled)  # No verified activation yet.
 
     def test_server_lifespan_releases_vault_and_second_worker_rejected(self):
-        from fastapi.testclient import TestClient
         from kiwoom_monitor.central_server.app import create_app
         directory = self.root / "app-secrets"
         settings = CentralServerSettings(f"sqlite:///{self.root / 'app.sqlite'}", uuid.uuid4().hex,
@@ -262,14 +262,17 @@ class CredentialStoreTests(unittest.TestCase):
         app = create_app(settings)
         with self.assertRaisesRegex(RuntimeError, "VAULT_ALREADY_OWNED"):
             create_app(settings)
-        with TestClient(app) as client:
-            self.assertEqual(200, client.get("/health").status_code)
-            self.assertEqual("UNCONFIGURED", app.state.credential_statuses["naver"])
+        from scripts.check_postgres_integration import _asgi_json_request
+        async def verify():
+            async with app.router.lifespan_context(app):
+                status, _ = await _asgi_json_request(app, "GET", "/health", settings.access_token, {})
+                self.assertEqual(200, status)
+                self.assertEqual("UNCONFIGURED", app.state.credential_statuses["naver"])
+        asyncio.run(verify())
         vault = CredentialStore(directory, self.database)
         vault.close()
 
     def test_server_startup_failure_releases_vault(self):
-        from fastapi.testclient import TestClient
         from unittest.mock import AsyncMock
         from kiwoom_monitor.central_server.app import create_app
         directory = self.root / "startup-secrets"
@@ -279,9 +282,11 @@ class CredentialStoreTests(unittest.TestCase):
                                         kiwoom_app_key=self.credentials["app_key"], kiwoom_secret_key=self.credentials["secret_key"])
         app = create_app(settings)
         with patch("kiwoom_monitor.central_server.app.CentralRestBroker.start", new=AsyncMock(side_effect=RuntimeError("injected"))):
+            async def verify():
+                async with app.router.lifespan_context(app):
+                    self.fail("Injected startup failure must not enter the lifespan")
             with self.assertRaisesRegex(RuntimeError, "injected"):
-                with TestClient(app):
-                    pass
+                asyncio.run(verify())
         vault = CredentialStore(directory, self.database)
         vault.close()
 

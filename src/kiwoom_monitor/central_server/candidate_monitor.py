@@ -112,6 +112,34 @@ class CandidateMonitor:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run(), name="shadow-candidate-monitor")
 
+    def operational_status(self, *, now: datetime | None = None) -> dict[str, object]:
+        """Report universe freshness now, separately from last evaluation quality."""
+        at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        # The worker publishes list replacements/appends; snapshot before inspecting.
+        frames = tuple(self._universes)
+        eligible = [datetime.fromisoformat(frame.available_at).astimezone(timezone.utc)
+                    for frame in frames
+                    if datetime.fromisoformat(frame.available_at).astimezone(timezone.utc) <= at]
+        latest = max(eligible, default=None)
+        age = (at - latest).total_seconds() if latest is not None else None
+        quality = dict(self._quality)
+        return {
+            "scope": "shadow_candidate_inputs", "coverage": "partial",
+            "checked_at": at.isoformat(),
+            "universe": {
+                "state": "missing" if latest is None else
+                         "stale" if age > self._universe_max_age_seconds else "fresh",
+                "latest_available_at": latest.isoformat() if latest is not None else None,
+                "age_seconds": age, "max_age_seconds": self._universe_max_age_seconds,
+            },
+            "last_evaluation": {
+                "status": "WARMUP" if self._frame_recovery is not None else quality.get("status", "UNKNOWN"),
+                "at": quality.get("last_decision_at"),
+                "last_processed_sequence": quality.get("last_processed_sequence", 0),
+            },
+            "current_all_inputs_fresh": None,
+        }
+
     async def close(self) -> None:
         if self._task is None:
             return
@@ -135,7 +163,7 @@ class CandidateMonitor:
                     "last_error_at": datetime.now(timezone.utc).isoformat(),
                 }
                 try:
-                    await asyncio.to_thread(self._save_checkpoint, reason="error")
+                    await drain_thread_call(self._save_checkpoint, reason="error")
                 except Exception:
                     logger.exception("shadow candidate monitor checkpoint failed")
             await asyncio.sleep(self._poll_seconds)

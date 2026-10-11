@@ -1,3 +1,33 @@
+## 2026-10-11 과거 종목뉴스 100페이지 이후 이어받기
+
+- 일반 검색 대기 소진 뒤 페이지 상한으로 잘린 작업만 마지막 저장 다음 페이지부터 이어 읽는다. 전용 `-ResumeTruncated` 실행도 지원한다.
+- 페이지·원문 대기열·재개 위치를 같은 transaction으로 보존하고 반복 응답은 미완료로 남긴다. 진행률에서 `truncated`를 완료로 세지 않는다.
+- 관련 회귀 68건 통과. 실제 네이버 표본의 100·101·102페이지가 각각 다른 10건을 반환함을 확인했다. 전체 누락 구간의 수집 완료는 후속 운영 결과로 확인한다.
+
+## 2026-10-11 모의 상태의 공개 읽기 경계 정리 (로컬)
+
+- 모의 감시의 task 존재 판단을 `is_started`, 공개 profile의 감시 시작 여부를 owner의 `has_started_monitor()`로 옮겼다. health·키 교체/설정 rollback이 내부 task를 읽지 않는다. 계좌 조립은 기존 `account_bindings()`를 재사용한다.
+- 기존 시작·drain·복구·주문 허용 의미를 보존했다. 새 owner·저장 계층 없이 관련 72건 통과. 원래 TestClient 기반 HTTP 3건은 미실행이며 변경 경로는 native ASGI로 확인했다.
+- 빌드 3곳 `2026.10.11-mock-state-api-v1` 일치. 미커밋·미배포이며 실제 NAS/전체 검증은 현재 상태 문서를 따른다.
+
+## 2026-10-11 연결·업무 상태 구분 (로컬)
+
+- 공개 `/health`에 기존 수집기의 체결 수신·종류별 저장 성공/실패·대기/실제 저장 중 레코드와 후보군의 현재 만료 상태를 추가했다. 마지막 평가 READY를 현재 모든 입력의 최신 상태로 해석하지 않는다.
+- 저장 성공은 native 호출의 성공 반환 후 기록하고 같은 종류의 재시도 성공으로 실패를 해제한다. 관측 범위는 partial이며 미계측은 unknown/null로 유지한다. 기존 저장·종료·인증 계약을 보존한다.
+- 관련 회귀 92건 통과. 빌드 3곳은 `2026.10.11-operational-health-v1`로 맞췄다. NAS 배포·운영 검증과 최초 enqueue/다른 writer의 종합 관측은 별도다.
+
+## 2026-10-11 실시간 누락 품질·복구 보완 (로컬)
+
+- 구독 큐 누락 범위를 기존 gap 통지로 전달하고 분봉 DTO·로컬 저장·NAS 조회·차트·합계·체결 판단에 부분/미확인 품질을 보존한다. 최신 현재가 갱신은 계속한다.
+- 권한 있는 종료 봉과 같은 복구 세대의 실제 저장 성공으로만 복구를 확정한다. 빈/부분 응답·구형 서버·오래된 응답·저장 실패는 누락을 해소하지 않는다. 누락 저장 실패의 최종 종료도 기존 writer 재시도로 보호한다.
+- 작업본 빌드 `2026.10.11-gap-quality-v1`의 서버·Compose·Dockerfile 식별자를 함께 갱신했다. NAS 배포와 실제 운영 검증은 별도이며 CURRENT_STATUS를 따른다.
+
+## 2026-10-11 후보 감시 오류 상태 저장의 종료 대기 보완 (로컬)
+
+- 임시 SQLite에서 일반 처리 실패 → 오류 checkpoint 저장 → 반복 종료 요청을 겹쳐 실제 저장이 끝나기 전에 close가 반환하는 것을 저장 성공·실패 두 조건에서 재현했다.
+- 오류 checkpoint에도 기존 `drain_thread_call`을 사용해 실제 저장의 성공 또는 실패가 정리된 뒤 close가 반환하도록 보완했다. 실제 운영 장애로 단정하지 않는다.
+- 소스 빌드 `2026.10.11-candidate-error-drain-v1`의 서버·Compose·Dockerfile 식별자를 함께 갱신했다. 검증 범위와 운영 잔여는 CURRENT_STATUS를 따른다.
+
 ## 2026-10-10 녹화 시험 실패 보고와 실제 예약 시작 경로 검증
 
 - worker의 제한된 오류 코드가 실패 report에서 누락되는 문제를 로컬 수정했다. 임의 오류 문장·비밀은 계속 제외하며 운영 helper는 아직 미반영이다.
@@ -51,17 +81,22 @@
   늦게 도착한 옛 저장 실패가 최신 저장 값을 덮지 않도록 하고, 완료한 TOP20 마감/백업은 반복하지 않는다.
   정상 종료 순서와 DB 저장 형식은 유지한다. 실행 중인 테스트 앱의 수동 확인은 아직 하지 않았다.
 
-## 2026-10-09 Recorded trace deferred RAM integration (PC main)
+<a id="2026-10-09-recorded-trace-deferred-ram-integration-pc-main"></a>
 
-- Integrated the NAS-validated deferred trace recorder's framed RAM blocks and bounded packing into PC main, with schema-3 capability fields and the 8 GiB / 5,000,000 event limits. Existing main changes and legacy capability fields are preserved. This updates source only; it does not switch the active NAS release.
-- The NAS restricted operator installation and passwordless status check are confirmed. An actual NAS `test`/`replay` invocation is still pending, and the prior trace is incomplete due to rejected inputs.
+## 2026-10-09 기록 trace의 RAM 지연 저장 통합(PC main)
 
-# Changelog
+- NAS에서 검증한 지연 trace recorder의 프레임 RAM 블록·제한된 packing을 PC main에 통합했다. 스키마 3, 8GiB·5,000,000이벤트와 기존 manifest/capabilities 필드는 유지했다. 소스 통합이며 활성 NAS release를 바꾼 것은 아니다.
+- 운영자 helper 설치와 비밀번호 없는 status는 확인되었다. 실제 입력 테스트·재생은 남아 있다. 이전 trace는 불완전하고 거부 입력이 있으므로 전체 재생 기준으로 인정하지 않는다.
+
+<a id="changelog"></a>
+
+# 변경 이력
 
 ## 2026-10-05 DB trace chunk bounds (로컬 검증 후보)
 
-- Trace drain now caps each UTF-8 chunk at 1 MiB, retains an unflushed suffix in sequence order, reports pending events in `queued`, and marks a trace failed if one event alone exceeds the limit. This prevents a trace from being marked complete when the chunk cannot be read back under the download limit.
-- `diagnostic_trace` and replay regression tests: 18 passed locally and in the NAS test container. Focused immutable release `2026.10.05-db-trace-chunk-bounds-v1-9209b8fd29423301` is based on the previous active release and changes only `app.py`, `diagnostic_trace.py`, and its trace test. Its manifest and active-base trace suite passed locally; NAS source-runtime tests passed 7/7. Deployment is confirmed by `/health` with the new build/release and unchanged database container. Realtime is `WAITING_MARKET` with observations not expected and trace is off; runtime overhead and a full 65-minute market capture remain open.
+- Trace drain은 UTF-8 chunk를 각각 1MiB 이하로 제한하고 아직 flush 하지 않은 뒤쪽 데이터를 시퀀스 순서로 보존하며 대기 이벤트를 `queued`에 보고한다. 너무 큰 단일 이벤트는 실패시켜 완료 표시만 있는 읽기 불가능한 trace를 막는다.
+- trace/replay 관련 로컬·NAS 테스트 18개를 통과했다. release `2026.10.05-db-trace-chunk-bounds-v1-9209b8fd29423301`은 기존 활성판에서 app·diagnostic_trace·테스트만 바꾼 후보이며 manifest의 활성 기준과 로컬/NAS 7/7 일치를 확인했다.
+- 배포 후 health/build는 해당 release와 일치했고 DB container는 보존했다. `WAITING_MARKET`, observation=false, trace=off 상태를 확인했다. 런타임 부하·전체 65분 검증은 남아 있다.
 
 ## 2026-09-29 NAS 진단 API 확장 (로컬 후보)
 
@@ -1357,7 +1392,9 @@
 
 ## [Unreleased]
 
-### Added
+<a id="added"></a>
+
+### 추가
 
 - 중앙 모드 종목 뉴스창에서 선택한 대표 기사의 NAS 저장 본문과 공급계약 규칙 근거를 별도 영역으로 표시한다. 기사 identity·종목·기사/본문 revision이 정확히 맞을 때만 결합하고, GLOBAL 본문 재사용 시에도 다른 종목 사건을 섞지 않는다. 조회는 짧은 timeout의 단일 worker와 최신 대기 요청 하나로 처리하며 자동 AI와 주문은 실행하지 않는다.
 - 기존 `/api/v1/news/search` 결과에 해당 종목으로 confirmed 연결된 N3 GLOBAL 저장기사를 합친다. 같은 identity는 기존 종목 owner 기사를 우선하고 전체 결과는 최신순 최대 1000건이며, 목록 읽기는 외부 뉴스·본문·규칙·AI 작업을 추가하지 않는다. 자동 AI 입력도 기존 종목 owner 기사로 유지한다.
@@ -1366,7 +1403,9 @@
 - 중앙 스키마 v6에 기사·본문·AI 불변 revision과 영속 BODY/AI 작업 원장을 추가했다. 제목 저장은 느린 본문/AI와 분리되고, 수집기별 최초 수신·정정·본문 fallback/실패·정확한 분석 입력과 사용량을 가용시각대로 보존하며 인증 뉴스 이력 API로 조회할 수 있다.
 - `NEWS_HISTORY_JOBS_ENABLED=false`로 새 후속 작업 실행기를 끄면 기존 요청형 AI 분석 경로를 계속 사용할 수 있다.
 
-### Fixed
+<a id="fixed"></a>
+
+### 수정
 
 - 중앙 스키마 v11에 confirmed 종목 관계 조회 인덱스를 추가해 종목 뉴스 목록 병합이 전체 기사·관계를 Python으로 읽지 않게 했다.
 - 중앙 스키마 v10에 source+identity 관측 조회 인덱스를 추가하고, 여러 검색어의 요약 변형 순환이 동일 GLOBAL article/BODY를 반복 생성하던 문제를 source별 직전 판본 재사용으로 막았다. 같은 source의 실제 A→B→A 정정 이력은 그대로 남는다.
@@ -1377,13 +1416,17 @@
 
 - 상세 내역: `docs/archive/2026-09-22/releases/RELEASE_NOTES_v2.0.0.md`
 
-### Fixed
+<a id="fixed-1"></a>
+
+### 수정
 
 - PyInstaller 창 모드 실행 파일이 이 PC의 로컬 중앙 서버를 자식 프로세스로 시작할 때 표준 출력 스트림 부재로 Uvicorn 로깅 초기화가 실패하던 패키징 결함을 수정했다.
 - ETF·ETN처럼 KRX 법인 목록으로 시장을 채울 수 없는 종목이 TOP20에 보일 때 전체 상장종목 2,700여 건을 계속 다시 저장하던 조건을 제거했다. 자동 KRX 목록 갱신은 잔여 미분류와 무관하게 성공 날짜 기준 하루 한 번만 실행되어 메인 표의 SQLite 잠금 대기를 반복시키지 않는다.
 - 실패 후 남은 테마 업로드 대기 자료가 앱 시작 때 무조건 NAS를 덮어쓰지 않도록, 로컬 변경 시각과 NAS `theme_metadata` 완료 시각을 비교해 최신 스냅샷을 선택하도록 수정했다.
 
-### Added
+<a id="added-1"></a>
+
+### 추가
 
 - NAS 경유 신고가 목록, 종목 기본정보·시가총액, NXT 가능 여부를 중앙 DB의 시점별 스냅샷으로 보존하고 기본정보·NXT는 종목별 최신 문서도 유지하도록 했다.
 - 중앙 시장 관측 메타데이터를 시간 범위로 조회해 완전/부분/누락과 가용 기준시각을 판정하는 인증 coverage API를 추가했다. 무체결일 수 있는 분봉·일봉에는 임의 주기 결측 추론을 금지한다.
@@ -1408,7 +1451,9 @@
 - 이 PC의 Python 설치 위치와 제한 환경의 실행 권한 문제를 개발 불변 규칙에 기록했다.
 - Codex 작업 트리에서 Git 원본 프로젝트의 `.venv`를 자동 탐색하도록 핵심 회귀 실행 도구를 보완했다.
 
-### Changed
+<a id="changed"></a>
+
+### 변경
 
 - NAS 이미지 `2026.09.12-shared-backup-contract-v1`를 재빌드하고 `/health`, 인증 콘텐츠 API, WebSocket ready/pong 및 저장된 순위 스냅샷 조회를 실환경에서 확인했다.
 - Google Drive의 설정/테마/둘 다 선택 모두 뉴스 AI 분석 결과를 별도 파일로 보존한다. NAS에는 메인 표의 표시·순서(폭 제외), 매매일지-뉴스 연결, 활성 프로필·별칭·종목 목록을 포함한 전체 테마 문서를 추가로 동기화한다.
@@ -1539,7 +1584,9 @@
 - 매매유형 요약, 회차 편집 행, 연결 데이터 상태와 전체 분석 문서를 `presentation/trade_review_view_model.py`의 불변 화면 모델로 분리했다. 매매일지 창은 완성된 값을 Qt 위젯에 반영한다.
 - TOP20 수집시간 회귀 테스트가 고정 날짜 경과로 실패하지 않도록 최근 평일을 기준으로 검증하게 했다. 제품 통계 로직은 변경하지 않았다.
 
-### Fixed
+<a id="fixed-2"></a>
+
+### 수정
 
 - 테마 NAS 즉시 보존 실패 시 로컬 변경을 표시하는 디스크 대기 표식을 유지하고 2초·10초·30초·60초 간격으로 자동 재시도한다. 앱 재실행 시에는 NAS pull보다 대기 테마 업로드를 먼저 수행한다.
 - 뉴스 설정의 화면별 숨김 Qt 위젯이 삭제된 뒤 저장 코드가 다시 접근해 설정 파일을 갱신하지 못하던 오류를 수정했다. 뉴스 화면은 뉴스 옵션만, 연결 화면은 API 항목만 저장하고 숨긴 값은 기존 설정을 보존한다.

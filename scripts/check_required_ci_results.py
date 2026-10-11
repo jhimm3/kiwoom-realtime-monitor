@@ -34,13 +34,14 @@ def _assert_clean_result(report: dict, label: str) -> None:
         raise ValueError(f"{label}: source changed or fingerprint missing")
 
 
-def validate(windows: dict, linux: dict, postgres: dict, commit: str) -> None:
+def validate_windows(windows: dict, commit: str | None) -> None:
     manifest = run_regression._load_manifest()
     catalog = run_regression._load_ci_groups()
     membership = run_regression._ci_membership(manifest, catalog)
     if windows.get("status") != "passed" or windows.get("profile") != "all-local":
         raise ValueError("Windows full regression did not pass")
-    if windows.get("git", {}).get("commit") != commit or windows.get("git", {}).get("working_tree_dirty") is not False:
+    if commit is not None and (windows.get("git", {}).get("commit") != commit
+                               or windows.get("git", {}).get("working_tree_dirty") is not False):
         raise ValueError("Windows source commit or cleanliness differs")
     if windows.get("missing_test_files") or windows.get("unrun_batches") or windows.get("interrupted"):
         raise ValueError("Windows run omitted work")
@@ -73,6 +74,11 @@ def validate(windows: dict, linux: dict, postgres: dict, commit: str) -> None:
     ):
         raise ValueError("Windows source changed during regression")
 
+
+def validate(windows: dict, linux: dict, postgres: dict, commit: str) -> None:
+    validate_windows(windows, commit)
+    manifest = run_regression._load_manifest()
+    membership = run_regression._ci_membership(manifest, run_regression._load_ci_groups())
     _assert_clean_result(linux, "Linux POSIX")
     _assert_clean_result(postgres, "PostgreSQL")
     if set(linux.get("modules", [])) != membership["ci-required-linux"]:
@@ -93,16 +99,40 @@ def validate(windows: dict, linux: dict, postgres: dict, commit: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--windows", required=True, type=Path)
-    parser.add_argument("--linux", required=True, type=Path)
-    parser.add_argument("--postgres", required=True, type=Path)
+    parser.add_argument("--linux", type=Path)
+    parser.add_argument("--postgres", type=Path)
+    parser.add_argument("--windows-only", action="store_true",
+                        help="Validate existing all-local evidence without rerunning any tests")
+    parser.add_argument("--local", action="store_true",
+                        help="Allow a precommit dirty report; still require exact current source content")
+    parser.add_argument("--covered-profile", choices=run_regression.CI_WINDOWS_PROFILES)
     args = parser.parse_args()
+    if (args.local or args.covered_profile) and not args.windows_only:
+        parser.error("local/covered-profile options require --windows-only")
+    if not args.windows_only and (args.linux is None or args.postgres is None):
+        parser.error("required CI validation requires Linux and PostgreSQL reports")
     try:
-        commit = os.environ["GITHUB_SHA"]
-        validate(_read(args.windows), _read(args.linux), _read(args.postgres), commit)
+        windows = _read(args.windows)
+        if args.windows_only:
+            commit = None if args.local else os.environ["GITHUB_SHA"]
+            validate_windows(windows, commit)
+            current = run_regression._code_tree_identity()["lf_sha256"]
+            if windows.get("code_tree_end", {}).get("lf_sha256") != current:
+                raise ValueError("Windows report is stale: current source differs from tested source")
+            if args.covered_profile:
+                membership = run_regression._ci_membership(
+                    run_regression._load_manifest(), run_regression._load_ci_groups())
+                covered = {m for worker in windows["batch_results"] for m in worker["modules"]}
+                if not membership[args.covered_profile].issubset(covered):
+                    raise ValueError("Requested Windows profile was not fully executed")
+                print(f"{args.covered_profile}: all modules passed in the existing all-local run")
+            print("Windows source evidence passed; external CI environments remain separate")
+        else:
+            validate(windows, _read(args.linux), _read(args.postgres), os.environ["GITHUB_SHA"])
+            print("Required regression passed: Windows, Linux and PostgreSQL reports match the source")
     except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
         print(f"Required regression failed: {error}", file=sys.stderr)
         return 1
-    print("Required regression passed: Windows, Linux and PostgreSQL reports match the source")
     return 0
 
 

@@ -1,5 +1,7 @@
 # 장중 사건 기록을 이용한 반복 부하 실험
 
+> 문서 역할 정리(2026-10-11): 이 문서는 진행 중인 원인 입력·초기 상태·전체/단독/제외·동일 입력 A/B 계약을 유지한다. 여러 단계의 실패/통과·구현 전 표현은 날짜별 근거다. 최신 녹화 예약·배포·저장본 검증과 실제 녹화/Replay/성능 잔여는 [현재 상태](CURRENT_STATUS.md)와 [O12](OPEN_ITEMS.md)를 정본으로 사용한다. 같은 저장본의 검증 통과를 전체 앱 Replay 승인으로 올리지 않는다.
+
 ### 2026-10-10 같은60분 저장본으로 검증 병목 수정 확인
 
 가설: payload마다 public status가 전체 blob/chunk index를 복사해 검증 비용이 입력 수와
@@ -2138,6 +2140,8 @@ peer workload 동시 실행, 공개 run API는 아직 이 core에 연결되지 �
 다음 gate는 core를 T3 lease/restore lifecycle에 연결해 PostgreSQL에서 세 번 같은 결과를 확인하고,
 TOP20 단독·제외 및 peer workload 조합에서 source descendant를 중복 실행하지 않는지 검증하는 것이다.
 운영 NAS release, capture 설정, timer/batch/concurrency는 변경하지 않았다.
+
+<a id="t4-shared-clock-peer-execution-경계--2026-10-07-로컬-검증"></a>
 
 #### T4 shared clock/peer execution 경계 — 2026-10-07 로컬 검증 및 NAS 후속 acceptance
 

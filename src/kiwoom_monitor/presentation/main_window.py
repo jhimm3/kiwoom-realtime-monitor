@@ -12,6 +12,8 @@ import sys
 import time
 from html import escape
 from dataclasses import replace
+from kiwoom_monitor.domain.realtime_gap import RealtimeGap
+from kiwoom_monitor.domain.market_data_contract import DataCompleteness
 from pathlib import Path
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -584,6 +586,7 @@ class MainWindow(QMainWindow):
             )
             self._market_cache_writer.history_saved.connect(self._on_history_cache_saved)
             self._market_cache_writer.history_failed.connect(self._on_history_cache_failed)
+            self._market_cache_writer.history_quality_saved.connect(self._on_history_quality_saved)
             self._market_cache_writer.daily_high_failed.connect(
                 lambda code, message: logger.warning("일봉 캐시 저장 실패 (%s): %s", code, message)
             )
@@ -711,9 +714,20 @@ class MainWindow(QMainWindow):
         self._near_high_sound_players: dict[str, tuple[QMediaPlayer, QAudioOutput]] = {}
         self._minute_history_codes: set[str] = set()
         self._minute_aggregator = minute_aggregator or MinuteTradeValueAggregator()
+        self._minute_recovery_requests: dict[str, int] = {}
+        self._minute_coverage_requests: dict[str, int | None] = {}
+        self._pressure_gap_until: dict[str, datetime] = {}
+        self._restored_gap_days: set[tuple[str, object]] = set()
+        self._minute_gap_retry_timer = QTimer(self)
+        self._minute_gap_retry_timer.setInterval(30_000)
+        self._minute_gap_retry_timer.timeout.connect(self._retry_minute_gaps)
+        self._minute_history_worker_controller.finished.connect(
+            lambda *_: QTimer.singleShot(0, self._retry_minute_gaps)
+        )
         self._minute_history_worker_controller.history_received.connect(
             self._on_history_received
         )
+        self._minute_history_worker_controller.coverage_received.connect(self._on_minute_coverage_received)
         self._minute_history_worker_controller.status_changed.connect(
             self.statusBar().showMessage
         )
@@ -1030,6 +1044,7 @@ class MainWindow(QMainWindow):
                 self._google_drive_debounce,
                 self._journal_news_timer, self._investment_notice_timer,
                 self._investment_notice_restore_timer,
+                self._minute_gap_retry_timer,
             ),
             tick_timer=lambda: getattr(self, "_trade_tick_flush_timer", None),
             save_view_state=self._save_shutdown_view_state,
@@ -3588,8 +3603,10 @@ class MainWindow(QMainWindow):
             stock_code=execution.code, stock_name=name, side=execution.side,
             executed_at=executed_at, price=execution.price, quantity=execution.quantity,
             market=execution.market, rank=self._ranking_execution.rank_by_code.get(execution.code),
-            trade_value_1m_eok=self._minute_aggregator.trade_value_eok(execution.code, 1),
-            trade_value_5m_eok=self._minute_aggregator.trade_value_eok(execution.code, 5),
+            trade_value_1m_eok=(self._minute_aggregator.trade_value_eok(execution.code, 1)
+                if self._minute_aggregator.recent_quality(execution.code, 1, now) == DataCompleteness.COMPLETE else None),
+            trade_value_5m_eok=(self._minute_aggregator.trade_value_eok(execution.code, 5)
+                if self._minute_aggregator.recent_quality(execution.code, 5, now) == DataCompleteness.COMPLETE else None),
             themes=themes, theme_ranks=self._theme_ranks_at_entry(execution.code, themes),
             high_distance_percent=high_distance, orderbook=self._execution_pressure_at_entry(execution.code, now),
             investor_flow=investor_flow,
@@ -3644,7 +3661,13 @@ class MainWindow(QMainWindow):
             ],
             "theme_frequency": dict(getattr(self, "_visible_theme_frequency", {})),
         }
-        return {**self._latest_market_state, "ranking_table": visible_state}
+        now = self._ranking_now()
+        input_quality = {code: {str(minutes): self._minute_aggregator.recent_quality(code, minutes, now).value
+                               for minutes in (1, 5)} for code, _ in ordered}
+        for minutes in (1, 5):
+            if any(value[str(minutes)] != "complete" for value in input_quality.values()):
+                visible_state[f"visible_trade_value_{minutes}m_eok"] = None
+        return {**self._latest_market_state, "ranking_table": visible_state, "input_quality": input_quality}
 
     def _on_market_index_tick(self, tick: object) -> None:
         if not isinstance(tick, MarketIndexTick):
@@ -3702,6 +3725,10 @@ class MainWindow(QMainWindow):
         buy_volume = sum(volume for observed, volume in pressure if observed >= cutoff and volume > 0)
         sell_volume = sum(abs(volume) for observed, volume in pressure if observed >= cutoff and volume < 0)
         total = buy_volume + sell_volume
+        if now < self._pressure_gap_until.get(code, datetime.min):
+            return {"source": "0B_execution_flow", "window_seconds": 60, "available": False,
+                    "completeness": "partial", "recovery_until": self._pressure_gap_until[code].isoformat(),
+                    "buy_execution_volume": None, "sell_execution_volume": None, "buy_share_percent": None}
         return {
             "source": "0B_execution_flow", "window_seconds": 60,
             "execution_strength": self._latest_execution_strength.get(code),
@@ -3821,6 +3848,25 @@ class MainWindow(QMainWindow):
         missing_codes = minute_history_candidates(codes, self._minute_history_codes, force=force)
         if not missing_codes:
             return False
+        if self._minute_bar_repository is not None:
+            day = self._ranking_now().date()
+            to_restore = tuple(code for code in missing_codes if (code, day) not in self._restored_gap_days)
+            loader = getattr(self._minute_bar_repository, "load_gap_minutes", None)
+            try:
+                restored = loader(to_restore, day) if callable(loader) else {}
+            except Exception as error:
+                logger.warning("분봉 누락 상태 복원 실패: %s", error)
+                self._minute_aggregator.mark_gap(RealtimeGap(1), to_restore, self._ranking_now())
+                self._minute_gap_retry_timer.start()
+                return False
+            else:
+                self._restored_gap_days.update((code, day) for code in to_restore)
+                from kiwoom_monitor.domain.realtime_gap import GapRange
+                ranges = tuple(GapRange("trade", code, "", minute, minute) for code, minutes in restored.items() for minute in minutes)
+                if ranges:
+                    self._minute_aggregator.mark_gap(RealtimeGap(len(ranges), ranges, False), (), self._ranking_now())
+        for code in missing_codes:
+            self._minute_recovery_requests[code] = self._minute_aggregator.gap_generation(code)
         return self._minute_history_worker_controller.start(
             missing_codes,
             followup_codes=codes,
@@ -3831,11 +3877,15 @@ class MainWindow(QMainWindow):
         if not isinstance(bars, tuple):
             return
         now = self._ranking_now()
+        generation = self._minute_recovery_requests.pop(code, None)
+        self._minute_coverage_requests[code] = generation
+        bars = self._minute_aggregator.history_for_storage(code, bars, generation)
         self._ensure_today_minute_bar_storage(now)
         self._minute_aggregator.seed(
             code, bars, now,
             include_current_snapshot=self._uses_nas_market_data_source(),
             query_authoritative=not self._uses_nas_market_data_source(),
+            recovery_generation=generation,
         )
         if code in self._after_close_finalization_codes and self._finalization_minute_bars_complete(code, bars):
             self._after_close_minute_received.add(code)
@@ -3852,13 +3902,17 @@ class MainWindow(QMainWindow):
                 self._today_high_prices[code] = restored_high
                 self._app_controller.queue_price_cache(code, high=restored_high)
         stored = self._minute_bar_repository is None
+        if stored and generation is not None:
+            self._minute_aggregator.confirm_history_saved(code, generation, tuple(bar.minute for bar in bars))
         if self._minute_bar_repository is not None and self._market_cache_writer is not None:
-            self._market_cache_writer.enqueue_history_bars(code, bars, now.date(), now)
+            self._market_cache_writer.enqueue_history_bars(code, bars, now.date(), now, recovery_generation=generation)
         elif self._minute_bar_repository is not None:
             try:
                 self._minute_bar_repository.upsert_bars(code, bars)
                 self._minute_bar_repository.record_history_sync(code, now.date(), now, len(bars))
                 stored = True
+                if generation is not None:
+                    self._minute_aggregator.confirm_history_saved(code, generation)
             except Exception as error:
                 logger.warning("분봉 보완 DB 저장 실패 (%s): %s", code, error)
         if stored:
@@ -3872,7 +3926,42 @@ class MainWindow(QMainWindow):
         self._minute_history_codes.add(code)
 
     def _on_history_cache_failed(self, code: str, error: str) -> None:
+        self._minute_aggregator.history_save_failed(code)
         logger.warning("분봉 보완 DB 저장 실패 (%s): %s", code, error)
+
+    def _on_history_quality_saved(self, code: str, generation: object) -> None:
+        if isinstance(generation, dict) and type(generation.get("generation")) is int:
+            self._minute_aggregator.confirm_history_saved(code, generation["generation"], generation["minutes"], empty=generation.get("empty") is True)
+            self._render_trade_values(code)
+
+    def _on_minute_coverage_received(self, code: str, coverage: object) -> None:
+        generation = self._minute_coverage_requests.pop(code, None)
+        if (not isinstance(coverage, dict) or coverage.get("complete") is not True or coverage.get("empty_authority") is not True
+                or not isinstance(coverage.get("checked_at"), datetime)):
+            return
+        minutes = self._minute_aggregator.empty_recovery_candidates(code, coverage["present_minutes"], coverage["checked_at"], generation)
+        if not minutes or generation is None:
+            return
+        if self._market_cache_writer is not None:
+            self._market_cache_writer.enqueue_empty_coverage(code, minutes, generation)
+        elif self._minute_bar_repository is not None:
+            try:
+                committed = self._minute_bar_repository.confirm_empty_minutes(code, minutes)
+            except Exception as error:
+                self._on_history_cache_failed(code, str(error))
+            else:
+                self._minute_aggregator.confirm_history_saved(code, generation, committed, empty=True)
+        else:
+            self._minute_aggregator.confirm_history_saved(code, generation, minutes, empty=True)
+
+    def _retry_minute_gaps(self) -> None:
+        if self._closing:
+            return
+        codes = self._minute_aggregator.recovery_codes()
+        if codes:
+            self._start_minute_history_loading(codes, force=True)
+        else:
+            self._minute_gap_retry_timer.stop()
 
     def _start_nxt_eligibility_loading(self, codes: tuple[str, ...]) -> bool:
         if self._closing or self._ranking_execution.priority_preparing or not self._nxt_eligibility_worker_controller.available:
@@ -4233,9 +4322,12 @@ class MainWindow(QMainWindow):
         )
         visible_values = zip(range(6, 7), ("1m",), values[:1]) if live_only else zip(range(6, 10), ("1m", "5m", "60m", "day"), values)
         for column, period, value in visible_values:
-            item = QTableWidgetItem(f"{value:.{self._decimal_places('trade_value')}f}")
+            quality = self._trade_value_quality(code, period, now)
+            label = self._minute_quality_label(code, quality)
+            item = QTableWidgetItem(f"{label}{value:.{self._decimal_places('trade_value')}f}")
+            item.setToolTip(f"자료 품질: {quality.value} · {self._minute_aggregator.recovery_state(code)}")
             threshold = float(self._settings.get(f"trade_value_{period}_alert_eok"))
-            is_alert = self._settings.get("trade_value_alert_enabled") == "1" and threshold > 0 and value >= threshold
+            is_alert = quality == DataCompleteness.COMPLETE and self._settings.get("trade_value_alert_enabled") == "1" and threshold > 0 and value >= threshold
             row = self._row_by_code.get(code, 0)
             item.setData(self.TRADE_VALUE_ALERT_ROLE, is_alert)
             item.setBackground(self.TRADE_VALUE_ALERT_COLOR if is_alert else self._row_background_color(code, row))
@@ -4249,6 +4341,7 @@ class MainWindow(QMainWindow):
             strength_source = values
             strength_values = zip((4,), ("1m",), strength_source[:1]) if live_only else zip((4, 10, 11, 12), ("1m", "5m", "60m", "day"), strength_source)
             for column, period, value in strength_values:
+                quality = self._trade_value_quality(code, period, now)
                 previous_day = period == "day" and self._trade_display_mode("day") == "completed"
                 # 유통주식 수와 현재가가 있으면 직접 계산하고, 그렇지 않으면
                 # 장중 0B 시가총액(311)·유통비율, 마지막으로 ka10001 캐시를 쓴다.
@@ -4257,7 +4350,7 @@ class MainWindow(QMainWindow):
                     fundamentals,
                     current_price=self._previous_day_close_prices.get(code) if previous_day else self._current_prices.get(code),
                     market_cap_eok=None if previous_day else self._market_cap_eok(code, fundamentals),
-                )
+                ) if quality == DataCompleteness.COMPLETE else None
                 interest = float(self._settings.get(f"strength_{period}_interest"))
                 caution = float(self._settings.get(f"strength_{period}_caution"))
                 fire = float(self._settings.get(f"strength_{period}_fire"))
@@ -4270,6 +4363,8 @@ class MainWindow(QMainWindow):
                     self._decimal_places("strength"),
                     self._strength_badge_icons(),
                 ))
+                if quality != DataCompleteness.COMPLETE:
+                    item.setText(self._minute_quality_label(code, quality) + "—")
                 level = "fire" if strength is not None and strength >= fire else "caution" if strength is not None and strength >= caution else "interest" if strength is not None and strength >= interest else ""
                 image = self._strength_icon_image_path(level) if level else None
                 if image is not None:
@@ -4282,6 +4377,21 @@ class MainWindow(QMainWindow):
                 item.setFont(font)
                 self._table.setItem(row, column, item)
         self._schedule_theme_trade_summary()
+
+    def _trade_value_quality(self, code: str, period: str, now: datetime) -> DataCompleteness:
+        previous = self._trade_display_mode(period) == "completed"
+        if period == "day":
+            if previous:
+                return DataCompleteness.COMPLETE if code in self._previous_day_trade_values else DataCompleteness.MISSING
+            return self._minute_aggregator.quality_for_range(code, now.replace(hour=0, minute=0, second=0, microsecond=0), now + timedelta(minutes=1))
+        return self._minute_aggregator.bucket_quality(code, {"1m": 1, "5m": 5, "60m": 60}[period], now, previous=previous)
+
+    def _minute_quality_label(self, code: str, quality: DataCompleteness) -> str:
+        if quality == DataCompleteness.COMPLETE:
+            return ""
+        if self._minute_aggregator.recovery_state(code) == "recovering":
+            return "복구 중 · "
+        return "부분 · " if quality == DataCompleteness.PARTIAL else "미확인 · "
 
     def _render_current_price(self, code: str) -> None:
         """현재가를 갱신해도 신고가·순위 행 강조 배경을 유지한다."""
@@ -4334,6 +4444,11 @@ class MainWindow(QMainWindow):
         period = period if period in period_labels else "day"
         minutes = {"1m": 1, "5m": 5, "60m": 60}
         digits = self._decimal_places("trade_value")
+        quality_notice = "부분/미확인 자료 포함 · " if any(
+            (self._minute_aggregator.quality_for_range(code, now.replace(hour=0, minute=0, second=0, microsecond=0), now + timedelta(minutes=1))
+             if period == "day" else self._minute_aggregator.bucket_quality(code, minutes[period], now)) != DataCompleteness.COMPLETE
+            for code in self._ranked_stock_names
+        ) else ""
         if show_summary:
             entries: list[tuple[str, str, float]] = []
             for code, name in self._ranked_stock_names.items():
@@ -4344,7 +4459,7 @@ class MainWindow(QMainWindow):
                 self._theme_trade_summary.setText("상위 테마 거래대금: 테마가 지정된 종목이 없습니다.")
             else:
                 values = self._theme_trade_summary_values(top, digits)
-                self._theme_trade_summary.setText(f"상위 테마 거래대금 (실시간 조회 상위 20종목 · {period_labels[period]}): {values}")
+                self._theme_trade_summary.setText(f"{quality_notice}상위 테마 거래대금 (실시간 조회 상위 20종목 · {period_labels[period]}): {values}")
         excluded_names = parse_themes(self._settings.get("theme_trade_summary_excluded_stocks"), ",/|;")
         excluded = {"".join(value.split()).casefold() for value in excluded_names}
         if not show_excluded_summary:
@@ -4363,7 +4478,7 @@ class MainWindow(QMainWindow):
         )
         self._theme_trade_excluded_summary.setVisible(True)
         self._theme_trade_excluded_summary.setText(
-            f"제외 종목 반영 상위 테마 거래대금 (실시간 조회 상위 20종목 · {period_labels[period]}): "
+            f"{quality_notice}제외 종목 반영 상위 테마 거래대금 (실시간 조회 상위 20종목 · {period_labels[period]}): "
             f"{self._theme_trade_summary_values(excluded_top, digits) if excluded_top else '표시할 테마가 없습니다.'}"
         )
 
@@ -4621,14 +4736,48 @@ class MainWindow(QMainWindow):
 
     def _on_realtime_gap(self, dropped: object) -> None:
         """A subscriber overflow makes the current aggregate incomplete."""
-        if type(dropped) is not int or dropped <= 0:
+        gap = RealtimeGap.parse(dropped)
+        if gap is None:
             return
+        dropped = gap.dropped_events
         self._top20_collector.mark_gap()
         self._realtime_diagnostics["gap_events"] = int(self._realtime_diagnostics.get("gap_events", 0)) + 1
         self._realtime_diagnostics["dropped_events"] = int(self._realtime_diagnostics.get("dropped_events", 0)) + dropped
-        self._minute_aggregator.reset_cumulative_baselines(
-            self._realtime_subscription.current_codes
-        )
+        now = self._ranking_now()
+        affected = self._minute_aggregator.mark_gap(gap, self._realtime_subscription.current_codes, now)
+        market_gaps = {}
+        for scope in gap.ranges:
+            if scope.event_type == "market_state" and scope.market in {"kospi", "kosdaq"}:
+                minute = scope.start.replace(second=0, microsecond=0)
+                minutes = []
+                while minute <= scope.end:
+                    minutes.append(minute)
+                    minute += timedelta(minutes=1)
+                market_gaps[f"market:{scope.market}"] = tuple(minutes)
+        if gap.scope_unknown:
+            for market in ("kospi", "kosdaq"):
+                # Empty market scope asks the writer to invalidate retained rows as well.
+                market_gaps[f"market:{market}"] = ()
+        pressure_codes = set(affected)
+        for scope in gap.ranges:
+            if scope.event_type == "program_trade":
+                self._latest_program_trade[scope.code] = {"available": False, "source": "subscriber-gap", "completeness": "partial"}
+        if gap.scope_unknown:
+            for code in self._latest_program_trade:
+                self._latest_program_trade[code] = {"available": False, "source": "subscriber-gap", "completeness": "unconfirmed"}
+            pressure_codes.update(self._realtime_subscription.current_codes)
+        for code in pressure_codes:
+            self._pressure_gap_until[code] = now + timedelta(seconds=60)
+        for code in affected:
+            for bar in self._minute_aggregator.bars(code):
+                if bar.minute in affected[code]:
+                    self._app_controller.queue_minute_bar(code, bar)
+            self._render_trade_values(code)
+        if affected or market_gaps:
+            self._app_controller.queue_minute_gaps({**affected, **market_gaps})
+        if affected:
+            self._minute_gap_retry_timer.start()
+            QTimer.singleShot(0, self._retry_minute_gaps)
         logger.warning("NAS 실시간 이벤트 %s건 누락; 현재 TOP20 구간을 부분 자료로 표시", dropped)
         self.statusBar().showMessage(
             f"실시간 체결 {dropped:,}건 누락 · 현재 TOP20 구간은 부분 자료입니다.", 10_000,

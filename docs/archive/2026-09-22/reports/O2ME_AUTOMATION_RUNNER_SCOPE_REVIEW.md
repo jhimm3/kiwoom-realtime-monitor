@@ -27,7 +27,7 @@
 - `src/kiwoom_monitor/research_process.py`: `final_candidate_spec_hash`, final request payload
 - `scripts/run_research.py`: final run `spec`의 family/parameters/execution/session/implementation hash
 - `src/kiwoom_monitor/central_server/candidate_monitor.py`: 현재 order-free shadow runner/checkpoint
-- `src/kiwoom_monitor/application/mock_automation_*.py`: spec/admission/recovery/Decision gate
+- `src/kiwoom_monitor/application/mock_automation_*.py`: 운용 명세·입장·복구·결정 허용 조건
 - `src/kiwoom_monitor/central_server/execution_runtime.py`: O1 account lease와 제출 직렬화
 - `src/kiwoom_monitor/application/forward_evaluation.py` 및 journal projection: 실제 비용 포함 피드백
 

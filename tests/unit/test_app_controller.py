@@ -69,6 +69,8 @@ class CapturingCacheWriter(QObject):
     price_failed = Signal(object, object, object, object, str)
     history_saved = Signal(str)
     history_failed = Signal(str, str)
+    history_quality_saved = Signal(str, object)
+    gap_failed = Signal(object, str)
     comparison_saved = Signal(int)
     comparison_failed = Signal(str)
     daily_high_failed = Signal(str, str)
@@ -78,6 +80,7 @@ class CapturingCacheWriter(QObject):
         super().__init__()
         self.enqueue_price_cache = Mock()
         self.enqueue_minute_bars = Mock()
+        self.enqueue_gap_minutes = Mock()
         self.enqueue_trade_comparisons = Mock()
         self.start = Mock()
 
@@ -665,6 +668,31 @@ class AppControllerTests(unittest.TestCase):
             window.deleteLater()
             QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
             self.windows.remove(window)
+
+    def test_gap_metadata_failure_blocks_close_until_existing_writer_retry_commits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            events = []
+            controller = self.controller(events, monitor_database_path=path,
+                minute_bar_repository=MinuteBarRepository(path))
+            controller.start_market_cache_writer()
+            minute = datetime(2026, 10, 11, 10, 0)
+            # Hold the final gap batch in the owner's existing pending buffer.
+            controller.pending_minute_gaps = {"005930": (minute,)}
+            with patch.object(MinuteBarRepository, "mark_gap_minutes", side_effect=OSError("gap save")):
+                self.assertFalse(controller.request_close())
+                self.wait_until(lambda: controller._shutdown_stage == "cache_failed")
+                self.assertNotIn("ready", events)
+                self.assertNotIn("auxiliaries", events)
+                self.assertEqual({"005930": (minute,)}, controller.pending_minute_gaps)
+            self.assertFalse(controller.request_close())
+            self.wait_until(controller.request_close)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(("missing",), connection.execute(
+                    "SELECT completeness FROM market_data_observation_meta WHERE subject='005930'").fetchone())
+            self.assertEqual(1, events.count("ready"))
+            self.assertEqual({}, controller.pending_minute_gaps)
 
     def test_final_minute_failure_blocks_close_and_retries_without_duplicate_commit(self):
         for after_commit in (False, True):

@@ -212,7 +212,7 @@ def _collector_health(
 def _counts_text(counts: dict[str, int]) -> tuple[str, float]:
     total = sum(counts.values()) - counts.get("excluded", 0)
     complete = (
-        counts.get("complete", 0) + counts.get("truncated", 0)
+        counts.get("complete", 0)
         + counts.get("complete_boundary", 0) + counts.get("empty", 0)
     )
     percent = 100 * complete / total if total else 0.0

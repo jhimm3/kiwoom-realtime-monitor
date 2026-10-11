@@ -5,6 +5,8 @@ param(
     [ValidateRange(1, 100)]
     [int]$MaxPages = 100,
 
+    [switch]$ResumeTruncated,
+
     [ValidateRange(0.0, 60.0)]
     [double]$RequestDelay = 0.7,
 
@@ -102,11 +104,13 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "news-exclude-nonstocks exited with code $LASTEXITCODE"
     }
-    $rangeSeedOutput = & $python scripts\probe_historical_backfill.py news-range-seed `
-        --minimum-density 0.5 --output $Database 2>&1
-    foreach ($line in $rangeSeedOutput) { Write-Log ([string]$line) }
-    if ($LASTEXITCODE -ne 0) {
-        throw "news-range-seed exited with code $LASTEXITCODE"
+    if (-not $ResumeTruncated) {
+        $rangeSeedOutput = & $python scripts\probe_historical_backfill.py news-range-seed `
+            --minimum-density 0.5 --output $Database 2>&1
+        foreach ($line in $rangeSeedOutput) { Write-Log ([string]$line) }
+        if ($LASTEXITCODE -ne 0) {
+            throw "news-range-seed exited with code $LASTEXITCODE"
+        }
     }
     for ($index = 1; $index -le $Jobs; $index++) {
         if (Test-Path -LiteralPath $stopFile) {
@@ -116,7 +120,9 @@ try {
         }
         $previousErrorAction = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $output = & $python scripts\probe_historical_backfill.py news-run `
+        $resumeArguments = @()
+        if ($ResumeTruncated) { $resumeArguments += '--resume-truncated' }
+        $output = & $python scripts\probe_historical_backfill.py news-run @resumeArguments `
             --jobs 1 --search-only --max-pages $MaxPages --request-delay $RequestDelay `
             --search-workers $SearchWorkers --throttle-delay $ThrottleDelaySeconds `
             --heartbeat-file $heartbeatFile `
@@ -127,7 +133,7 @@ try {
         foreach ($line in $output) { Write-Log ([string]$line) }
         $detail = ($output | ForEach-Object { [string]$_ }) -join ' '
         if ($detail -match '"claimed_jobs"\s*:\s*0') {
-            Write-Log 'no pending news job remains'
+            Write-Log 'no runnable news job remains; any capped or repeated-page gaps are retained in the ledger'
             break
         }
         if ($collectorExitCode -eq 2) {

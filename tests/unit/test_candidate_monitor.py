@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -82,6 +84,24 @@ class FakeStore:
 
 
 class CandidateMonitorTests(unittest.TestCase):
+    def test_operational_freshness_expires_without_changing_last_evaluation_or_storage(self):
+        from datetime import datetime, timezone
+        store = FakeStore([_rank(1), _bar(2, 0, 100, 110)])
+        monitor = CandidateMonitor(store, _config(), poll_seconds=1, universe_max_age_seconds=300)
+        monitor.run_once()
+        before = (dict(store.checkpoints), list(store.decisions), list(store.candidates), monitor.quality)
+        fresh = monitor.operational_status(now=datetime(2026, 9, 12, 0, 5, tzinfo=timezone.utc))
+        stale = monitor.operational_status(now=datetime(2026, 9, 12, 0, 5, 1, tzinfo=timezone.utc))
+        self.assertEqual('fresh', fresh['universe']['state'])
+        self.assertEqual('stale', stale['universe']['state'])
+        self.assertEqual('READY', stale['last_evaluation']['status'])
+        self.assertIsNone(stale['current_all_inputs_fresh'])
+        self.assertEqual(before, (store.checkpoints, store.decisions, store.candidates, monitor.quality))
+        monitor._quality.update(status='ERROR', reason='private-credential-value')
+        self.assertNotIn('private-credential-value', str(monitor.operational_status()))
+        monitor._universes.clear()
+        self.assertEqual('missing', monitor.operational_status()['universe']['state'])
+
     def test_pending_bootstrap_retries_without_checkpoint_or_historical_decisions(self):
         class PendingStore(FakeStore):
             page = ObservationRevisionPage(ready=False, reason="pending_sequence_commit")
@@ -321,6 +341,71 @@ class CandidateMonitorTests(unittest.TestCase):
         self.assertEqual("bootstrapped_without_historical_alerts", monitor.quality["reason"])
         self.assertEqual(OBSERVATION_DELIVERY_PROTOCOL,
                          store.checkpoints[monitor.monitor_id]["delivery_protocol"])
+
+
+class CandidateMonitorShutdownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_error_checkpoint_drains_before_repeated_close_and_store_close(self):
+        for save_fails in (False, True):
+            with self.subTest(save_fails=save_fails), tempfile.TemporaryDirectory() as directory:
+                loop = asyncio.get_running_loop()
+                started = asyncio.Event()
+                release = threading.Event()
+                finished = threading.Event()
+
+                class BlockingStore(SQLiteQueryStore):
+                    fail_iteration = False
+
+                    def load_observation_revisions_after(self, *args, **kwargs):
+                        if self.fail_iteration:
+                            raise RuntimeError("injected iteration failure")
+                        return super().load_observation_revisions_after(*args, **kwargs)
+
+                    def save_shadow_monitor_state(self, monitor_id, document):
+                        if document["quality"]["status"] != "ERROR":
+                            return super().save_shadow_monitor_state(monitor_id, document)
+                        loop.call_soon_threadsafe(started.set)
+                        try:
+                            if not release.wait(5):
+                                raise TimeoutError("test checkpoint was not released")
+                            if save_fails:
+                                raise RuntimeError("injected checkpoint failure")
+                            return super().save_shadow_monitor_state(monitor_id, document)
+                        finally:
+                            finished.set()
+
+                store = BlockingStore(Path(directory) / "monitor.db")
+                store.initialize()
+                monitor = CandidateMonitor(
+                    store, _config(), poll_seconds=60, universe_max_age_seconds=300,
+                )
+                store.fail_iteration = True
+                closes = []
+                try:
+                    with self.assertLogs(level="ERROR") as logs:
+                        await monitor.start()
+                        await asyncio.wait_for(started.wait(), 2)
+                        closes.append(asyncio.create_task(monitor.close()))
+                        await asyncio.sleep(0)
+                        closes.append(asyncio.create_task(monitor.close()))
+                        done, _ = await asyncio.wait(closes, timeout=0.05)
+                        self.assertFalse(finished.is_set())
+                        self.assertFalse(done, "close returned while the native checkpoint was running")
+                        release.set()
+                        await asyncio.wait_for(asyncio.gather(*closes), 2)
+                        self.assertTrue(finished.is_set())
+                        self.assertIsNone(monitor._task)
+                        saved = store.load_shadow_monitor_state(monitor.monitor_id)
+                        self.assertEqual("WARMUP" if save_fails else "ERROR", saved["quality"]["status"])
+                        self.assertEqual(save_fails, monitor._checkpoint_pending)
+                        if save_fails:
+                            self.assertTrue(any("failed while draining" in message for message in logs.output))
+                finally:
+                    release.set()
+                    if closes:
+                        await asyncio.gather(*closes, return_exceptions=True)
+                    await monitor.close()
+                    await asyncio.to_thread(finished.wait, 2)
+                    store.close()
 
 
 if __name__ == "__main__":

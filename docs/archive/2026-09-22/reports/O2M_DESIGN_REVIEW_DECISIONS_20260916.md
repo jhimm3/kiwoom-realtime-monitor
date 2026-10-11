@@ -94,7 +94,7 @@ reduce-only는 동일 scope/run/symbol의 확인된 매도가능 수량에서 �
 비공개 `mock_automation_risk_snapshot/v1`은 최소 다음을 가진다.
 
 - scope/run, KST 거래일, observed_at, broker 조회 관측 구간
-- account/reconciliation revision, execution event high-watermark, cost evidence revision
+- 계좌·대사 revision, 실행 event 진행 상한, 비용 근거 revision
 - 당일 FIFO 실현 순손익(미확인 null), 비용 완결 여부·누락 이유
 - 계좌 보유/주문 대조 완료, 데이터 경로/관측시각, 누적 장애 횟수
 

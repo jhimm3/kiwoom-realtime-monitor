@@ -37,7 +37,7 @@ from kiwoom_monitor.application.breakout_strategy import (
 )
 
 
-SERVER_BUILD = "2026.10.11-recorder-route-merge-v1"
+SERVER_BUILD = "2026.10.11-mock-state-api-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -282,7 +282,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             app.state.verified_account_bindings = tuple(
                 (list(real_owner.account_bindings()) if real_owner is not None else
                  [main_binding] if main_binding is not None else []) +
-                [b.binding for b in mock_owner._bundles.values() if b.binding is not None]
+                list(mock_owner.account_bindings())
             )
 
         mock_owner = MockCredentialOwner(store, credential_vault,
@@ -626,8 +626,24 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         }
         document["historical_news_pc_scopes"] = ["market", "search", "legacy_backlog"]
         document["realtime_connection"] = collector.credential_connection_status() if collector is not None else None
+        realtime_status = collector.operational_status() if collector is not None else None
+        monitor = operational_state.candidate_monitor
+        candidate_status = monitor.operational_status() if monitor is not None else None
+        degraded = (
+            realtime_status is not None and realtime_status["persistence"]["state"] == "degraded"
+        ) or (
+            candidate_status is not None and (
+                candidate_status["universe"]["state"] in {"missing", "stale"}
+                or candidate_status["last_evaluation"]["status"] in {"STALE", "ERROR"}
+            )
+        )
+        document["operational"] = {
+            "state": "degraded" if degraded else "unknown",
+            "coverage": "partial", "realtime": realtime_status,
+            "candidate_inputs": candidate_status,
+        }
         document["mock_account_available"] = (
-            any(bundle.monitor._task is not None for bundle in mock_owner._bundles.values())
+            mock_owner.has_started_monitor()
             if mock_owner is not None else mock_account_monitor is not None
         )
         if mock_owner is not None and mock_owner.errors.get("nas-mock-default"):

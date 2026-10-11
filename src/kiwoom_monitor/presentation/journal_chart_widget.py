@@ -229,6 +229,9 @@ class MinuteChart(QWidget):
 
     def set_rows(self, rows: tuple[tuple[object, ...], ...]) -> None:
         self._raw_rows = rows
+        self.setToolTip("부분 자료 포함 · 원천 조회 보완 대기" if any(
+            len(row) > 7 and str(row[7]) in {"realtime_partial", "market_index_partial"} for row in rows
+        ) else "")
         values = self._daily_rows if self._interval == "일봉" and self._daily_rows else aggregate_chart_rows(rows, self._interval)
         self._set_all_rows(values, stick_to_end=True)
 
@@ -369,6 +372,8 @@ class MinuteChart(QWidget):
             return top + (high - price) / span * max(1.0, price_bottom - top)
 
         information = chart_close_information(self._context_fills or day_fills, self._all_rows, index_mode=self._index_mode)
+        if self.toolTip():
+            information = "부분 자료 포함 · " + information
         available_width = max(1, int(self.width() - left - right))
         painter.setPen(self._foreground)
         enabled_averages = tuple(
