@@ -41,6 +41,15 @@
 
 새 소스의 targeted 결과, 원격 Actions 및 NAS 배포 결과는 [현재 상태](CURRENT_STATUS.md)와 [통합 검증 이력](archive/2026-10-11/history/CURRENT_STATUS_through_20261011.md#release-integration-20261011)을 따른다. 외부 registry의 일시 실패는 로컬 전수 통과로 보증할 수 없으며 취소 실행을 결함/성공으로 계산하지 않는다.
 
+### 수정 후 실제 검증·배포
+
+- 제품 소스 `44af48de387e93ed6d0885e8fbad3f4a04515fea`의 [Actions 38137039403](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38137039403)은 **9개 job 전부 성공**했다. Windows 3,914건·279 worker, Linux 65건, 필수 PG 163건·확장 PG 24건, sealed v1 4+6건/v2 15건, 설치 이미지 소스 대조·offline operator·종합 판정까지 실제 실행/증거를 확인했다. Windows 확장·장시간 job은 같은 전체 보고서를 검증하여 중복 테스트를 실행하지 않았다.
+- 커밋된 1,054개 파일의 정규화 LF 지문은 `6ca035aa9cfa6602c165d7fd86b175a35a035f87c846c6f411bcc2d7984fe872`로 Windows/Linux/PG가 일치했다. 로컬 작업본도 모든 커밋 파일의 현재 내용과 Git 객체를 대조해 이 지문과 일치했다. 로컬 전체 지문에만 더해진 6개는 무시되는 생성 설치 메타데이터(`src/kiwoom_realtime_monitor.egg-info/`)이며, 원본 1,060개 파일 지문과 보고서는 그대로 보존했다.
+- 로컬 최종 전체 E는 파일 교체 WinError 5 1건으로 실패했다. 동일 소스·의존성·기존 worker 경계의 549건 재검증은 통과했고 원본 실패와 실제 재검증 결과를 함께 보존했다. 직접 거부 소유자/필터는 미확정이며 CI 성공으로 이 PC 원인까지 해결됐다고 판정하지 않는다.
+- main 보호의 기존 Windows·PG 두 필수 검사에 **Required regression**을 추가하고 실제 3개 목록을 읽어 확인했다. 기존 strict=false·관리자 예외·리뷰 설정은 바꾸지 않았다. 직접 main push에는 관리자 예외가 사용됐으며, push 뒤 실제 종합 성공을 별도로 확인했다.
+- 성공한 extended PostgreSQL job의 `injected collector COMMIT acknowledgement loss` annotation은 `test_statement_rollback_and_lost_commit_ack_retry_keep_values_and_cleanup`에서 의도적으로 주입한 OSError 출력이다. 해당 테스트는 실패 유형·재시도 값·pending 0·cleanup까지 검사하고 성공했다. annotation 존재만으로 job 실패라고 판정하지 않으며 종료 코드·테스트 결과·job conclusion을 함께 확인한다. 오류 출력이나 검사를 숨기는 수정은 하지 않았다.
+- NAS는 해당 commit의 불변 운영 파일 1,042개를 최종 storage **114건** 통과 후 `2026.10.11-mock-state-api-v1-6f6782b2c18171af`로 배포했다. health/source 경로·파일 해시·예약 PID 7076의 armed/잠금/preflight와 기존 녹화 조건을 확인했다. 실제 다음 날 녹화·장시간·public operator Replay는 이 통제 검증에 포함되지 않는다.
+
 ## 이전 감사 근거
 
 2026-10-10 KST. **감사·설계와 실행기·테스트·브랜치 CI 구현을 완료**했다.

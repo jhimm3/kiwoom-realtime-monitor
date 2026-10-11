@@ -9,10 +9,10 @@
 | 후보 감시 예외 종료 | 오류 checkpoint 저장 중 반복 종료의 조기 완료를 임시 SQLite에서 재현하고 기존 native drain으로 보완. 관련 35건 및 NAS Linux 실행 통과. 실제 운영 장애로 단정하지 않는다. |
 | 실시간 누락 품질 | 범위→분봉/저장→합계·차트·체결 입력과 저장 ACK 복구를 구현. 관련 검사와 현재 전체 로컬 검증 통과. 구형 NAS·불충분한 빈 분 근거는 복구 대기를 유지한다. 실제 NAS/PG 검증은 남는다. |
 | health 부분 업무 관측 | 실제 저장 중/실패/ACK 유실·같은 종류 재시도·waiter 취소, 7종 저장 완료, 후보군 현재 만료/마지막 평가 분리, ASGI 공개/인증·동적 후보 교체를 포함한 관련 92건 통과. 미계측은 unknown/null이며 전체 업무/queue 대기 시간·실제 NAS 검증은 별도다. |
-| 모의 상태 공개 읽기 | 관련 72건에 이어 원래 TestClient HTTP 3건을 포함한 현재 전체 로컬 검증도 통과. 운영 검증은 남는다. |
-| 현재 전체 로컬 검증 | 최종 E는 3,914건·279 worker 전체 실행 중 파일 교체 오류 1건으로 실패했다. 최초 보고서를 보존하고 동일 소스·의존성의 해당 worker 549건을 AppData temp에서 재검증해 통과했다. 나머지 성공 worker와 실제 재검증 결과를 함께 검증한 보고서의 현재 소스 지문 대조 통과. 자동 재시도나 실패 허용은 추가하지 않았다. |
-| hosted 자동 실행 | 원격 main의 Windows/PG required checks 설정 확인 완료. 현재 통합 소스의 hosted 실행 결과는 커밋/push 뒤 확인한다. 이전 커밋의 성공은 과거 근거에 보존한다. |
-| 다음 검증 | NAS PG required 163건·extended 24건·후보 종료 14건·native API·Linux 필수 65건 통과, 기존 release와 녹화 예약 복원 확인. hosted CI 성공 뒤 최종 커밋 소스의 NAS storage gate·배포·health/source·예약을 확인한다. 수동 앱·장시간·Replay·성능은 OPEN_ITEMS O12를 따른다. |
+| 모의 상태 공개 읽기 | 관련 72건, 원래 HTTP 3건을 포함한 Windows 전수와 NAS Linux/배포 health 확인 완료. 실제 계좌별 모의 업무 상태 변화의 장중 관찰은 별도다. |
+| 현재 전체 로컬 검증 | 최종 E 3,914건·279 worker 전체 실행 중 파일 교체 오류 1건으로 최초 실패. 동일 소스의 해당 worker 549건을 AppData temp에서 전부 재검증해 통과했고, 원본을 보존한 전체 범위 보고서와 현재 소스 대조 통과. 새 제품 commit의 Actions에서도 3,914건·279 worker 전부 성공했다. 자동 재시도·실패 허용은 추가하지 않았다. |
+| hosted 자동 실행 | [제품 소스 `44af48d`](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/38137039403)의 9개 job 실제 성공. Windows/Linux/PG 동일 커밋·정규화 소스 지문 대조 통과. main 필수 검사에 Required regression을 추가해 3개 확인. 관리자 예외 등 기존 정책은 유지한다. |
+| 다음 검증 | NAS PG required 163건·extended 24건·후보 종료 14건·native API·Linux 필수 65건과 최종 storage 114건, 제품 소스 배포·실제 health/source·동일 조건 예약 재등록 확인 완료. 실제 장중 누락/복구·수동 앱·장시간·public operator Replay·성능은 OPEN_ITEMS O12와 기능별 잔여를 따른다. |
 
 검증은 실행 SHA/소스 지문·입력·환경과 함께 기록한다. 관련 검사 수를 전체 회귀 수로 합산하거나, 이전 소스·통제 입력의 통과를 현재 운영 환경의 완료로 옮기지 않는다. 현재 절차는 아래에, 이전 실행 근거는 날짜별 기록에 유지한다.
 
