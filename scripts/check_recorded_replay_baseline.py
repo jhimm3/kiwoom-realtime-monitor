@@ -204,7 +204,7 @@ def main(argv=None):
                               if args.execution_gates else
                               'tests.integration.test_recorded_replay_baseline_postgres.RecordedReplayBaselinePostgresTests')
                 suite = unittest.defaultTestLoader.loadTestsFromName(suite_name)
-                expected_tests = 5 if args.execution_gates else 4
+                expected_tests = 6 if args.execution_gates else 4
             result = unittest.TextTestRunner(verbosity=2).run(suite)
             success = (result.wasSuccessful() and result.testsRun == expected_tests
                        and not result.skipped and not result.expectedFailures

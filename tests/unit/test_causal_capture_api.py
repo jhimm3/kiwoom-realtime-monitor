@@ -29,4 +29,6 @@ class CausalCaptureApiTests(unittest.TestCase):
                               'collector_inputs':True, 'top20_inputs':True, 'persist_at':deadline})
                     self.assertEqual(200, response.status_code, response.text)
                     start.assert_called_once_with(seconds=3900, store_inputs=True, collector_inputs=True,
-                                                  top20_inputs=True, persist_at=deadline)
+                                                  top20_inputs=True, large_inputs=False,
+                                                  account_inputs=False, account_context_store=None,
+                                                  persist_at=deadline)
