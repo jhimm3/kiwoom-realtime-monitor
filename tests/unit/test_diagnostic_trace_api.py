@@ -92,9 +92,13 @@ def trace_api():
 
 class DiagnosticTraceApiTests(unittest.TestCase):
     def test_opt_ins_persist_native_operations_and_whitelisted_0b_independently(self):
+        from tests.unit.test_diagnostic_trace_deferred import recorder_storage_headroom
         for options in ({}, {"store_inputs": True}, {"collector_inputs": True},
                         {"store_inputs": True, "collector_inputs": True}):
-            with self.subTest(options=options), trace_api() as (app, store, _, session):
+            # This checks API wiring and payloads in the bounded NAS tmpfs;
+            # real storage capacity is checked separately, including below.
+            with self.subTest(options=options), recorder_storage_headroom(), \
+                    trace_api() as (app, store, _, session):
                 response = request_api(app, "POST", "/api/v1/diagnostics/trace", headers=HEADERS,
                                        json={"seconds": 60, "expected_session": session, **options})
                 self.assertEqual(200, response.status_code, response.text)
@@ -155,6 +159,23 @@ class DiagnosticTraceApiTests(unittest.TestCase):
                     downloaded = request_api(app, "GET",
                         f"/api/v1/diagnostics/trace/{started['trace_id']}/chunks/{chunk['name']}", headers=HEADERS)
                     self.assertEqual(trace.chunk_bytes(started["trace_id"], chunk["name"]), downloaded.content)
+
+    def test_real_low_storage_rejects_all_opt_ins_without_leaving_capture_enabled(self):
+        with trace_api() as (app, _, control, session):
+            usage = trace.shutil.disk_usage(control.parent)
+            with patch.object(trace.shutil, 'disk_usage', return_value=usage._replace(free=255 * 1024**2)):
+                for options in ({}, {'store_inputs': True}, {'collector_inputs': True},
+                                {'store_inputs': True, 'collector_inputs': True}):
+                    with self.subTest(options=options):
+                        response = request_api(app, 'POST', '/api/v1/diagnostics/trace', headers=HEADERS,
+                            json={'seconds': 60, 'expected_session': session, **options})
+                        self.assertEqual(409, response.status_code, response.text)
+                        self.assertEqual('trace_storage_quota_exceeded', response.json()['detail'])
+                        snapshot = control_snapshot(control)
+                        self.assertFalse(snapshot['trace_capture']['enabled'])
+                        self.assertTrue(snapshot['diagnostic_tool']['enabled'])
+                        self.assertIsNone(trace.input_token('store_inputs'))
+                        self.assertIsNone(trace.input_token('collector_inputs'))
 
     def test_auth_session_and_strict_boolean_errors_do_not_start_or_change_control(self):
         with trace_api() as (app, _, control, session):
