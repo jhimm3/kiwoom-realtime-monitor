@@ -135,6 +135,38 @@ class NasOperatorLinuxTests(unittest.TestCase):
                     op.admit_source(incoming, empty, release, contract)
                 self.assertEqual([], os.listdir(empty.fd))
 
+    def test_crlf_admission_keeps_manifested_bytes_and_rejects_build_and_hash_changes(self):
+        app = 'src/kiwoom_monitor/central_server/app.py'
+        for number, marker in enumerate((b'SERVER_BUILD = "build"\r\n',
+                                        b'SERVER_BUILD = "other"\r\n',
+                                        b'SERVER_BUILD = "build" # trailing\r\n')):
+            with self.subTest(marker=marker), self.tree('incoming-' + str(number)) as incoming, \
+                    self.tree('private-' + str(number), protected=True) as private:
+                content = {name: name.encode() for name in op.CONTRACT if name != op.CONTRACT[1]}
+                content[app] = marker
+                files = {name: hashlib.sha256(data).hexdigest() for name, data in content.items()}
+                contract = {name: files.get(name, 'a' * 64) for name in op.CONTRACT}
+                digest = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+                release = 'build-' + digest[:16]
+                value = dict(format=1, release_id=release, server_build='build', files=files,
+                    contract=contract, src_hash=hashlib.sha256(json.dumps(
+                        {k: v for k, v in files.items() if k.startswith('src/')}, sort_keys=True).encode()).hexdigest())
+                for name, data in content.items():
+                    incoming.write(name, data)
+                incoming.put_json('manifest.json', value)
+                if number:
+                    with self.assertRaisesRegex(op.Rejected, 'build_marker_mismatch'):
+                        op.admit_source(incoming, private, release, contract)
+                    self.assertEqual([], os.listdir(private.fd))
+                else:
+                    self.assertEqual((value, digest), op.admit_source(incoming, private, release, contract))
+                    self.assertEqual(marker, private.read('releases/' + release + '/' + app))
+                    incoming.write(app, marker.replace(b'\r\n', b'\n'))
+                    with self.tree('unchanged-hash-private', protected=True) as empty:
+                        with self.assertRaisesRegex(op.Rejected, 'source_file_hash_mismatch'):
+                            op.admit_source(incoming, empty, release, contract)
+                        self.assertEqual([], os.listdir(empty.fd))
+
     def test_acl_checks_reject_unknown_nonroot_writes_and_failed_tool(self):
         from scripts import nas_operator_install as installer
         import subprocess

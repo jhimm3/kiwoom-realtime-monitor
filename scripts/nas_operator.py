@@ -414,7 +414,8 @@ def admit_source(incoming, private, release_id, contract):
             require(total <= 512 * 1024 * 1024, 'source_total_size_limit')
             require(hashlib.sha256(data).hexdigest() == expected, 'source_file_hash_mismatch')
             if name == 'src/kiwoom_monitor/central_server/app.py':
-                marker = re.search(rb'^SERVER_BUILD = "([A-Za-z0-9._-]+)"$', data, re.M)
+                # Preserve hashed source bytes while accepting Windows CRLF.
+                marker = re.search(rb'^SERVER_BUILD = "([A-Za-z0-9._-]+)"\r?$', data, re.M)
                 require(marker is not None and marker.group(1).decode() == manifest['server_build'], 'build_marker_mismatch')
             private.write(temporary + '/' + name, data, mode=0o644)
         require(incoming.read('manifest.json') == raw, 'manifest_changed_during_copy')

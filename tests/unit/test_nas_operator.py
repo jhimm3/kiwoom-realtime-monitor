@@ -414,6 +414,51 @@ def idle_snapshot(state='off'):
 
 
 class NasOperatorTests(unittest.TestCase):
+    def test_source_admission_preserves_lf_crlf_bytes_and_rejects_invalid_markers(self):
+        class AdmissionTree(MemoryTree):
+            def read(self, name, limit=None):
+                if name not in self.documents:
+                    raise FileNotFoundError(name)
+                return super().read(name, limit)
+
+        app = 'src/kiwoom_monitor/central_server/app.py'
+        for marker, accepted in (
+                (b'SERVER_BUILD = "build"\n', True),
+                (b'SERVER_BUILD = "build"\r\n', True),
+                (b'SERVER_BUILD = "build"', True),
+                (b'SERVER_BUILD = "other"\r\n', False),
+                (b'SERVER_BUILD = "build" # changed\r\n', False),
+                (b'SERVER_BUILD = "build" \r\n', False),
+                (b'SERVER_BUILD = "build"\r\r\n', False),
+                (b'# SERVER_BUILD = "build"\r\n', False)):
+            with self.subTest(marker=marker):
+                incoming, private = AdmissionTree(), AdmissionTree()
+                source = {name: name.encode() for name in op.CONTRACT if name != op.CONTRACT[1]}
+                source[app] = marker
+                files = {name: hashlib.sha256(data).hexdigest() for name, data in source.items()}
+                contract = {name: files.get(name, 'a' * 64) for name in op.CONTRACT}
+                content = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+                release = 'build-' + content[:16]
+                value = dict(format=1, release_id=release, server_build='build', files=files,
+                    contract=contract, src_hash=hashlib.sha256(json.dumps(
+                        {k: v for k, v in files.items() if k.startswith('src/')}, sort_keys=True).encode()).hexdigest())
+                incoming.documents.update(source, **{'manifest.json': json.dumps(value).encode()})
+                with patch.object(op.os, 'rename') as rename, patch.object(op.os, 'fsync'), \
+                        patch.object(op, 'cleanup_directory'):
+                    if accepted:
+                        self.assertEqual((value, content), op.admit_source(incoming, private, release, contract))
+                        stored = [data for name, data in private.documents.items() if name.endswith('/' + app)]
+                        self.assertEqual([marker], stored)
+                        rename.assert_called_once()
+                        # A manifest-bound CRLF source cannot be changed to LF.
+                        incoming.documents[app] = marker + b'# changed\n'
+                        with self.assertRaisesRegex(op.Rejected, 'source_file_hash_mismatch'):
+                            op.admit_source(incoming, AdmissionTree(), release, contract)
+                    else:
+                        with self.assertRaisesRegex(op.Rejected, 'build_marker_mismatch'):
+                            op.admit_source(incoming, private, release, contract)
+                        rename.assert_not_called()
+
     @staticmethod
     def identity_fixture():
         return {'Id': '0' * 64, 'Image': 'sha256:fixture',
