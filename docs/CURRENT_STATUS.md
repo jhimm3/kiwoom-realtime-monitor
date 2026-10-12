@@ -1,5 +1,18 @@
 # 현재 상태 요약
 
+## 2026-10-13 통합 소스 커밋·녹화 범위 보완
+
+| 구분 | 현재 확인 결과 |
+| --- | --- |
+| 로컬 소스 | main 소스 커밋 `3180f04e4672a953cd1c18afde9372324c6b43fd`. 기존 미커밋분과 녹화 보완 169파일을 함께 커밋했다. 아래 미커밋 표현은 각 기록 시점의 상태다. |
+| 녹화 지원 | 모의 시계 초기 상태와 저장/조회는 account-context/v4 및 account 옵션으로 연결했다. TOP20 표시 계산본·통계·세 native reader와 실제 날짜/캐시 환경·결과 해시를 기록/검증한다. 구형 v1/v2/v3 복원 범위와 raw/표시 provenance를 유지한다. |
+| Windows 검증 | 고정 소스의 all-local 4,241건·290 worker 통과, 실패/오류/skip 0건·소스 변경 없음. Windows-only local 증거 gate 통과. Git에 저장할 1,084개 실행/검사/배포 파일의 LF 지문 `8396888a9b1c0ca7fcc52387e0f2e542e2e213dacd12f7f6e9d98f7025659dc4` 일치. |
+| 검사 보완 | 차등 REG 송신에 맞춘 재연결 fixture, 새 그룹 생성 함수를 읽는 저장 경로 감사, source/Replay 동일 25초와 20종목·미소비 입력 0건을 요구하는 TOP20 반복 fixture를 보완했다. 앞선 세 실패를 보존하고 최종 전체 실행에서 통과했다. |
+| NAS 실행·예약 | 05:15 KST 커밋 후 읽기 확인에서 활성 `2026.10.12-recorder-account-index-v3-875421f5e5e3fb26`, health=ok·trace=off. 10/13 08:59:50~09:59:50 녹화·20:10 저장·다섯 옵션·8GiB·500만 이벤트·1MiB/s 예약 PID 31632 생존. 이번 소스 커밋으로 NAS를 배포/재시작하거나 예약을 변경하지 않았다. 예약은 NAS 재부팅 생존을 보장하지 않는다. |
+| 외부 검증·잔여 | 새 계약의 실제 PostgreSQL/봉인·배포·실녹화 수락은 남는다. 과거뉴스 v2는 별도 불변 SQLite 파일의 버전·해시가 필요한 외부 읽기 범위다. 앱 전체 인과 Replay·전체 성능 수락은 완료하지 않았으며 실제 장중 10~20초 COMMIT은 P1 미해결이다. |
+
+이전 181건 NAS PostgreSQL 결과와 과거 prefix 저장 A/B를 새 통합 소스의 운영 수락으로 재사용하지 않는다. 로컬 근거는 `artifacts/commit-all-20261013/new-feature-capture-audit-v4.json`, 최종 Windows 보고서는 `C:/Users/pc-1/AppData/Local/Temp/kiwoom-commit-all-20261013-frozen-v6/run.json`에 보존했다. 이번 구현·검증에서 GPT-6.1 Sol High를 사용했다.
+
 **과거뉴스 원본 직접 입력으로 전환(2026-10-13 03:44 KST):** 사용자 요청에 따라 사본 입력 실행기를 정지하고 기존 `prepared_news.sqlite3`와 `prepared-market-news.sqlite3`를 직접 읽는 새 세대로 시작했다. 원본 SHA/WAL 전후 검사와 읽기 전용 transaction을 유지하며 시황의 legacy scope는 TEMP view에서만 정규화한다. 중복 key 거절·원래 scope/hash·failed 입력·batch rollback 의미를 보존했다. 추가 2건 포함 관련 **33건 통과(23.221초)**, 구문·대상 diff 검사 통과. 538파일 고정 코드의 실제 import/전수 SHA/construction digest `3df2cb20a3d2…`를 확인했다. 현재 원본 hash 확인 중이며 `archive-direct.building.sqlite3`에서 기존 NAS ID seed와 뉴스 결과를 구성한다. 봉인·전체 입력/관계/무결성 검사를 통과해야 `X:/kiwoom-monitor/deploy/synology/server-data/historical-news-archives`의 새 버전으로 자동 복사·검증한다. NAS 파일 경로와 활성 서버 연결은 별개이며 현재 NAS 복사·활성화는 미완료다. 기존 사본·원본·이전 building 파일을 삭제하지 않았다. 08:50 정지→12:00 재개 예약은 동일 실행기 이름으로 유지한다.
 
 **과거뉴스 v2 입력 범위 보완·재개(2026-10-13 02:41 KST):** 시황 준비본의 기존 `historical_market` 555,835행과 `historical_market_backfill` 사이 중복 key 0개를 읽기 확인했다. 원본은 유지하고 새 고정 사본에서만 명시 alias 정규화를 한다. 원래 scope/input hash는 ready·failed·제외 행 모두 별도 원장에 보존하고 출처 수·관계 검사를 봉인 gate에 포함한다. 중복 key는 사본 게시를 거절한다. 최신 관련 31건 회귀 통과(기본 sandbox에서 멈춘 이전 검사는 종료하고 사용자 실행 환경에서 검증), 구문·대상 diff 검사 통과. 537파일 고정 코드 `b583fcf49461…`의 전수 hash/실제 import digest를 확인해 새 `archive-v2.building.sqlite3`에서 기존 seed를 물질화하는 중이다. 기존 seed 작업본·검색 사본·원본 DB는 보존했다. 08:50~12:00 KST 녹화 시간은 phase 시작 대기와 두 일회성 자동화로 정지/재개한다. 전체 준비/봉인/NAS 복사·활성화는 아직 완료되지 않았다.

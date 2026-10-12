@@ -8,7 +8,7 @@
 
 로컬 메인에 계좌 초기 상태 v3·시작 단계 기록·차등 등록 v2와 저장 잔여 묶음 보충·최종 대기 제거를 통합했다. 불변 NAS 실행 릴리즈와 예약은 Git 커밋으로 변경되지 않는다. 실제 실행은 `2026.10.12-recorder-account-index-v3-875421f5e5e3fb26`이며, 10/13 08:59:50~09:59:50 녹화와 20:10 저장 예약을 유지한다. 로컬 빌드와 배포·장중 수락은 별도 상태다.
 
-새 기능의 경계 재현에서 `execution_mock_automation_clock_current`의 native 저장은 성공하지만 녹화 입력은 `unsupported_document_collection`으로 거부되고, 초기 계좌 복원 대상에도 해당 문서가 없다. TOP20 장후 표시 계산본·표시 통계는 현재 `install_store_capture`에서 건너뛴다. **사용자 요청에 따라 두 경로 모두 녹화·복원·native Replay에 포함하도록 아래 설계를 확정했다. 로컬 코드를 연결했고 같은 초기 SQLite fixture의 두 번 Replay와 저장 reader 회귀를 추가했다. 전체 통합 검증·실제 PostgreSQL·커밋은 아직 남아 있다.** 진단 Writer 등록만으로 입력 캡처·Replay 지원이 완료됐다고 판단하지 않는다. 현재 NAS 녹화가 이 새 기능까지 포함한다고 주장하지 않는다.
+새 기능의 경계 재현에서 `execution_mock_automation_clock_current`의 native 저장은 성공하지만 녹화 입력은 `unsupported_document_collection`으로 거부되고, 초기 계좌 복원 대상에도 해당 문서가 없다. TOP20 장후 표시 계산본·표시 통계는 현재 `install_store_capture`에서 건너뛴다. **사용자 요청에 따라 두 경로 모두 녹화·복원·native Replay에 포함하도록 아래 설계를 확정했다. 로컬 코드를 연결했고 같은 초기 SQLite fixture의 두 번 Replay와 저장 reader 회귀를 추가했다. Windows 전체 통합 검증 4,241건과 지문 대조를 통과해 소스 커밋 `3180f04`에 포함했다. 새 기능의 실제 PostgreSQL·배포·장중 검증은 아직 남아 있다.** 진단 Writer 등록만으로 입력 캡처·Replay 지원이 완료됐다고 판단하지 않는다. 현재 NAS 녹화가 이 새 기능까지 포함한다고 주장하지 않는다.
 
 ### 2026-10-13 시계·TOP20 표시 입력 포함 설계와 로컬 구현
 
@@ -47,7 +47,7 @@
 5. 동일 source fixture 입력과 동일 초기 DB로 두 번 native Replay하고 PostgreSQL의 독립 transaction·advisory lock·rollback·baseline reset을 검사한다. 기존 녹화본에는 새 기능 입력이 없어 이 기능의 실녹화 수락 증거로 사용할 수 없다. 새 실제 녹화 검증은 추후 배포 후 별도 단계다.
 6. 새 테스트를 catalog/profile에 등록하고 정확한 소스의 Windows `all-local`과 보고서 지문 검사를 통과한 뒤 사용자 요청의 통합 미커밋분을 커밋한다. 통과하지 않은 Linux/PG/봉인/운영 검증을 합산하지 않는다. NAS 예약·릴리즈 변경은 이 구현/커밋에 포함하지 않는다.
 
-설계 확인 후 GPT-6.1 Sol High에서 v4 초기 상태·문서 gate·native display 환경·결과 해시·complete/scoped 저장 reader를 구현했다. 실제 초기 fixture의 두 번 Replay와 구형 v1/v2/v3 복원 범위·관측 손상·실패 drain 회귀를 추가했다. 새 PostgreSQL Replay 회귀도 등록했으나 실제 DB 실행은 남는다. 이전 56건/181건 결과를 새 계약 통과로 재사용하지 않는다. 통합 Windows 전체 검증과 커밋은 현재 진행 단계이며 NAS는 기존 v3 릴리즈·다섯 옵션 예약을 유지한다.
+설계 확인 후 GPT-6.1 Sol High에서 v4 초기 상태·문서 gate·native display 환경·결과 해시·complete/scoped 저장 reader를 구현했다. 실제 초기 fixture의 두 번 Replay와 구형 v1/v2/v3 복원 범위·관측 손상·실패 drain 회귀를 추가했다. 새 PostgreSQL Replay 회귀도 등록했으나 실제 DB 실행은 남는다. 이전 56건/181건 결과를 새 계약 통과로 재사용하지 않는다. 통합 Windows 전체 검증은 4,241건·290개 격리 worker·실패/오류/skip 0건으로 통과했다. 실행 중 소스 변경은 없고 Windows-only local 증거 gate도 통과했다. 커밋 대상 1,084개 실행/검사/배포 파일의 LF 지문 `8396888a9b1c0ca7fcc52387e0f2e542e2e213dacd12f7f6e9d98f7025659dc4`가 검증본과 일치한다. 소스 커밋은 `3180f04e4672a953cd1c18afde9372324c6b43fd`이며 NAS는 기존 v3 릴리즈·다섯 옵션 예약을 유지한다.
 
 과거뉴스 v2 조회는 `HistoricalNewsArchiveReader.page_v2`에서 외부 SQLite 파일을 `mode=ro`로 읽는다. 코드 경로 감사에서 이 읽기·외부 파일 상태는 PostgreSQL native 저장 입력 캡처에 연결되지 않았다. 같은 파일의 불변 버전·해시를 별도로 제공하지 않은 Replay로 해당 조회 결과까지 복원했다고 판단하지 않는다. 증분 실시간 등록은 `top20-realtime-tape/v2` observer·reader·transport가 연결돼 있으나, 구현 경로 존재와 실제 장중 입력 완전성을 구분한다.
 
