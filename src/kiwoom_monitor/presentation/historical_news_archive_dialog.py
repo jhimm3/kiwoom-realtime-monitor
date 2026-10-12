@@ -7,7 +7,7 @@ from typing import Any
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QHBoxLayout, QLabel, QPushButton, QTableWidget,
+    QAbstractItemView, QComboBox, QDialog, QHBoxLayout, QLabel, QPushButton, QTableWidget,
     QTableWidgetItem, QTextBrowser, QVBoxLayout,
 )
 
@@ -31,13 +31,24 @@ class _ArchiveRequest(QThread):
     def run(self) -> None:
         try:
             if self._kind == "page":
-                if self._args.get("cursor") is None and not self._client.capabilities().get(
-                    "historical_news_archive_v1", False
-                ):
+                capabilities = self._client.capabilities()
+                v2 = capabilities.get("historical_news_archive_v2", False)
+                if not v2 and not capabilities.get("historical_news_archive_v1", False):
                     raise RuntimeError("과거 수집 자료 archive를 사용할 수 없습니다.")
-                result = self._client.historical_archive_page(
-                    self._stock_code, limit=200, cursor=self._args.get("cursor"),
-                )
+                scope = self._args.get("scope", "search")
+                if v2:
+                    result = self._client.historical_archive_page_v2(
+                        "search" if scope == "search" else "market",
+                        stock_code=self._stock_code if scope == "search" else None,
+                        source=scope if scope in ("flash", "world") else None,
+                        limit=200, cursor=self._args.get("cursor"),
+                    )
+                else:
+                    if scope != "search":
+                        raise RuntimeError("이 서버는 시황 보관 자료 조회를 지원하지 않습니다.")
+                    result = self._client.historical_archive_page(
+                        self._stock_code, limit=200, cursor=self._args.get("cursor"),
+                    )
             else:
                 result = self._client.historical_archive_article(
                     self._args["dataset_id"], self._args["article_revision_id"],
@@ -67,6 +78,11 @@ class HistoricalNewsArchiveDialog(QDialog):
         self._pending: tuple[int, str, str, dict[str, Any]] | None = None
 
         self._status = QLabel("종목을 선택하세요.")
+        self._scope = QComboBox()
+        for label, value in (("선택 종목", "search"), ("시황 전체", "market"),
+                             ("시황 속보", "flash"), ("해외 시황", "world")):
+            self._scope.addItem(label, value)
+        self._scope.currentIndexChanged.connect(self.refresh)
         self._table = QTableWidget(0, 3)
         self._table.setHorizontalHeaderLabels(("발행 시각", "본문 상태", "제목"))
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -87,6 +103,7 @@ class HistoricalNewsArchiveDialog(QDialog):
         buttons.addStretch()
         buttons.addWidget(self._more)
         layout = QVBoxLayout(self)
+        layout.addWidget(self._scope)
         layout.addWidget(self._status)
         layout.addWidget(self._table, 3)
         layout.addWidget(self._detail, 2)
@@ -110,7 +127,7 @@ class HistoricalNewsArchiveDialog(QDialog):
             self.refresh()
 
     def refresh(self) -> None:
-        if not self._stock_code:
+        if not self._stock_code and self._scope.currentData() == "search":
             return
         self._request_id += 1
         self._dataset_id = None
@@ -130,6 +147,8 @@ class HistoricalNewsArchiveDialog(QDialog):
             self._queue("page", {"cursor": self._cursor})
 
     def _queue(self, kind: str, args: dict[str, Any]) -> None:
+        if kind == "page":
+            args = {**args, "scope": self._scope.currentData()}
         self._request_id += 1
         self._pending = (self._request_id, self._stock_code, kind, args)
         self._more.setEnabled(False)
@@ -172,7 +191,7 @@ class HistoricalNewsArchiveDialog(QDialog):
                 self._items.append(row)
                 self._table.insertRow(index)
                 for column, value in enumerate((display.get("published_at") or "시각 없음",
-                                                row.get("body_status") or "미확인",
+                                                row.get("body_status") or display.get("body_status") or "미확인",
                                                 display.get("title") or "")):
                     self._table.setItem(index, column, QTableWidgetItem(str(value)))
         finally:
@@ -198,6 +217,9 @@ class HistoricalNewsArchiveDialog(QDialog):
         if row < 0 or row >= len(self._items) or not self._dataset_id:
             return
         item = self._items[row]
+        if not item.get("article_revision_id"):
+            self._detail.setPlainText(str((item.get("display") or {}).get("error") or "확보 실패 자료입니다."))
+            return
         self._queue("detail", {"dataset_id": self._dataset_id,
                                "article_revision_id": item["article_revision_id"],
                                "body_revision_id": item.get("body_revision_id")})
@@ -206,22 +228,30 @@ class HistoricalNewsArchiveDialog(QDialog):
         document = article.get("document") or {}
         body = article.get("body")
         body_status = body.get("status") if isinstance(body, dict) else "missing"
+        body_label = {'fulltext':'본문 확보','summary_only':'요약만 확보','missing':'본문 없음'}.get(str(body_status),'본문 확인 필요')
         body_text = body.get("text") if isinstance(body, dict) else None
         if body_status == "fulltext" and body_text:
             content = escape(str(body_text))
         elif body_status == "summary_only":
             content = "요약 자료만 확보됨"
         else:
-            content = f"본문 상태: {escape(str(body_status))} · 확보된 본문 없음"
-        assessment_status = escape(str(article.get("assessment_status") or "unassessed"))
+            content = "확보된 본문 없음"
+        assessment_status = escape({'assessed':'판정 완료','unassessed':'미판정','pending':'판정 대기'}.get(str(article.get("assessment_status") or 'unassessed'),'저장된 판정 참조'))
         events = article.get("events") or []
+        target_details = "".join(
+            f"<p>{escape(str(target.get('target_name') or target.get('target_id') or ''))} · "
+            f"{escape({'verified_equal':'기존 판정 일치','recomputed_posthoc':'현재 규칙으로 재판정'}.get(str(target.get('verification_state') or ''),'판정 확인 필요'))}<br>"
+            f"{escape(str((target.get('result') or {}).get('assessment', {}).get('reason') or ''))}</p>"
+            for target in article.get("target_assessments", []) if isinstance(target, dict)
+        )
         self._detail.setHtml(
             f"<h3>{escape(str(document.get('title') or '제목 없음'))}</h3>"
             f"<p>기사 ID: {escape(str(article['article_revision_id']))}<br>"
-            f"본문 상태: {escape(str(body_status))}<br>"
+            f"본문 상태: {body_label}<br>"
             f"판정 상태: {assessment_status}<br>"
             f"연결 사건: {len(events)}건</p>"
             f"<p style='white-space:pre-wrap'>{content}</p>"
+            + target_details
         )
 
     def shutdown(self) -> None:

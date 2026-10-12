@@ -37,7 +37,7 @@ from kiwoom_monitor.application.breakout_strategy import (
 )
 
 
-SERVER_BUILD = "2026.10.11-mock-state-api-v1"
+SERVER_BUILD = "2026.10.13-integrated-recorder-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -675,7 +675,12 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             mock_automation_runtime_v1=mock_automation_supervisor is not None,
         ).as_document()
         document["realtime_connection"] = collector.credential_connection_status() if collector is not None else None
-        document["capabilities"]["historical_news_archive_v1"] = historical_archive is not None
+        document["capabilities"]["historical_news_archive_v1"] = (
+            historical_archive is not None and historical_archive.schema_version == 1
+        )
+        document["capabilities"]["historical_news_archive_v2"] = (
+            historical_archive is not None and historical_archive.schema_version == 2
+        )
         document["historical_news_archive_dataset_id"] = (
             historical_archive.dataset_id if historical_archive else None
         )

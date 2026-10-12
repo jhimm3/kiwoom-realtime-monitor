@@ -64,6 +64,120 @@ def wait_state(state, timeout=5):
 
 
 class DeferredTraceTests(unittest.TestCase):
+    def test_last_durable_chunk_goes_directly_to_final_manifest_without_another_batch_delay(self):
+        native_write, native_manifest = trace._write, trace._manifest
+        native_monotonic = time.monotonic
+        elapsed = [0.0]
+        states = []
+        def write(file, content, session):
+            native_write(file, content, session)
+            if str(file.name).endswith('000001.jsonl.partial'):
+                elapsed[0] = 61.0  # Last chunk crosses the periodic checkpoint boundary.
+        def manifest(directory, session):
+            states.append((session['state'], session['written'], trace.status()['state']))
+            native_manifest(directory, session)
+        with deferred_capture() as (identifier, _):
+            for index in range(10):
+                trace.emit(identifier, 'domain', {'call_id': str(index)})
+            trace.stop(timeout=.01)
+            wait_state('awaiting_persistence')
+            with patch.object(trace.time, 'sleep'), patch.object(trace, '_write', side_effect=write), \
+                    patch.object(trace.time, 'monotonic', side_effect=lambda:native_monotonic()+elapsed[0]), \
+                    patch.object(trace, '_manifest', side_effect=manifest), \
+                    patch.object(trace, '_persistence_cooldown', wraps=trace._persistence_cooldown) as cooldown:
+                with trace._LOCK:
+                    trace._SESSION['persist_at'] = time.time() - 1
+                trace._WAKE.set()
+                trace._THREAD.join(5)
+            self.assertFalse(trace._THREAD.is_alive())
+            self.assertEqual([('complete', 10, 'persisting')], states)
+            cooldown.assert_not_called()
+            self.assertEqual((10, 0, 0), (trace.status()['written'], trace.status()['queued'],
+                                         trace.status()['charged_bytes']))
+            self.assertEqual('complete', json.loads((trace._directory() / identifier / 'manifest.json').read_bytes())['state'])
+
+    def test_terminal_manifest_failure_never_publishes_complete_after_the_last_chunk(self):
+        native_manifest = trace._manifest
+        observed = []
+        def manifest(directory, session):
+            observed.append((session['state'], trace.status()['state']))
+            if session['state'] == 'complete':
+                raise OSError('controlled final synchronization failure')
+            native_manifest(directory, session)
+        with deferred_capture() as (identifier, _):
+            trace.emit(identifier, 'domain', {'call_id': 'last'})
+            trace.stop(timeout=.01)
+            wait_state('awaiting_persistence')
+            with patch.object(trace.time, 'sleep'), patch.object(trace, '_manifest', side_effect=manifest):
+                with trace._LOCK:
+                    trace._SESSION['persist_at'] = time.time() - 1
+                trace._WAKE.set()
+                trace._THREAD.join(5)
+            self.assertFalse(trace._THREAD.is_alive())
+            self.assertEqual([('complete', 'persisting'), ('failed', 'failed')], observed)
+            self.assertEqual('failed', trace.status()['state'])
+            stored = json.loads((trace._directory() / identifier / 'manifest.json').read_bytes())
+            self.assertEqual('failed', stored['state'])
+            self.assertEqual(1, stored['written'])
+            self.assertEqual(1, len(stored['chunks']))
+
+    def test_pending_batch_tail_refills_before_a_metadata_chunk_is_closed(self):
+        with deferred_capture() as (identifier, _), patch.object(trace, '_MAX_CHUNK_BYTES', 32768):
+            for index in range(9000):
+                trace.emit(identifier, 'domain', {'call_id': str(index),
+                    'domain_counts': {f'counter-{item}': item for item in range(20)}})
+                if index % 128 == 0:
+                    threading.Event().wait(.001)
+            trace.stop(timeout=.01)
+            held = wait_state('awaiting_persistence')
+            self.assertEqual((9000, 0), (held['accepted'], held['known_dropped']))
+            with patch.object(trace.time, 'sleep'):
+                with trace._LOCK:
+                    trace._SESSION['persist_at'] = time.time() - 1
+                trace._WAKE.set()
+                final = wait_state('complete', 15)
+            chunks = [trace.chunk_bytes(identifier, part['name']) for part in final['chunks']]
+            rows = [json.loads(line) for content in chunks for line in content.splitlines()]
+            self.assertEqual(list(range(1, 9001)), [row['seq'] for row in rows])
+            self.assertEqual((9000, 9000, 0, 0), (final['accepted'], final['written'],
+                                                 final['queued'], final['charged_bytes']))
+            for previous, following, descriptor in zip(chunks, chunks[1:], final['chunks']):
+                if descriptor['count'] < 4096:
+                    next_line = following.splitlines(keepends=True)[0]
+                    self.assertGreater(len(previous) + len(next_line), 32768,
+                        'A pending-batch tail closed before the next queued row could fill the chunk')
+
+    def test_refilled_pending_suffix_rewinds_after_a_durable_write_failure(self):
+        native_write = trace._write
+        def fail_second_chunk(file, content, session):
+            if str(file.name).endswith('000002.jsonl.partial'):
+                raise OSError('controlled second chunk failure')
+            native_write(file, content, session)
+        with deferred_capture() as (identifier, _), patch.object(trace, '_MAX_CHUNK_BYTES', 32768):
+            for index in range(5000):
+                trace.emit(identifier, 'domain', {'call_id': str(index),
+                    'domain_counts': {f'counter-{item}': item for item in range(20)}})
+                if index % 128 == 0:
+                    threading.Event().wait(.001)
+            trace.stop(timeout=.01)
+            held = wait_state('awaiting_persistence')
+            self.assertEqual((5000, 0), (held['accepted'], held['known_dropped']))
+            with patch.object(trace.time, 'sleep'), patch.object(trace, '_write', side_effect=fail_second_chunk):
+                with trace._LOCK:
+                    trace._SESSION['persist_at'] = time.time() - 1
+                trace._WAKE.set()
+                failed = wait_state('failed', 15)
+                trace._THREAD.join(5)
+            self.assertFalse(trace._THREAD.is_alive())
+            self.assertEqual(1, len(failed['chunks']))
+            self.assertEqual(0, failed['pending_events'])
+            self.assertEqual(5000 - failed['written'], failed['packed_events'])
+            remaining = []
+            for segment in trace._PACKED:
+                while (row := segment.take()) is not None:
+                    remaining.append(row['seq'])
+            self.assertEqual(list(range(failed['written'] + 1, 5001)), remaining)
+
     def test_more_than_old_event_capacity_stays_in_ram_then_persists_in_order(self):
         with deferred_capture() as (identifier, control):
             self.assertTrue(trace.emit_payload(identifier, 'collector_input',

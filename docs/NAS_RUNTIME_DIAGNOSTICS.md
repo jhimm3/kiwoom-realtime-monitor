@@ -4,6 +4,65 @@
 
 ## 범위와 현재 책임
 
+### 2026-10-13 통합본의 녹화 범위 확인
+
+로컬 메인에 계좌 초기 상태 v3·시작 단계 기록·차등 등록 v2와 저장 잔여 묶음 보충·최종 대기 제거를 통합했다. 불변 NAS 실행 릴리즈와 예약은 Git 커밋으로 변경되지 않는다. 실제 실행은 `2026.10.12-recorder-account-index-v3-875421f5e5e3fb26`이며, 10/13 08:59:50~09:59:50 녹화와 20:10 저장 예약을 유지한다. 로컬 빌드와 배포·장중 수락은 별도 상태다.
+
+새 기능의 경계 재현에서 `execution_mock_automation_clock_current`의 native 저장은 성공하지만 녹화 입력은 `unsupported_document_collection`으로 거부되고, 초기 계좌 복원 대상에도 해당 문서가 없다. TOP20 장후 표시 계산본·표시 통계는 현재 `install_store_capture`에서 건너뛴다. **사용자 요청에 따라 두 경로 모두 녹화·복원·native Replay에 포함하도록 아래 설계를 확정했다. 로컬 코드를 연결했고 같은 초기 SQLite fixture의 두 번 Replay와 저장 reader 회귀를 추가했다. 전체 통합 검증·실제 PostgreSQL·커밋은 아직 남아 있다.** 진단 Writer 등록만으로 입력 캡처·Replay 지원이 완료됐다고 판단하지 않는다. 현재 NAS 녹화가 이 새 기능까지 포함한다고 주장하지 않는다.
+
+### 2026-10-13 시계·TOP20 표시 입력 포함 설계와 로컬 구현
+
+#### 계좌 시계: 명시적인 v4 초기 상태
+
+- 새 녹화는 `account-context/v4`로 시작한다. v3의 archive index 투영·원장·sequence·authority alias 계약에 `execution_mock_automation_clock_current` 초기 문서를 추가한다. 기존 32MiB·행 수·조회 시간 제한을 높이지 않는다.
+- v1/v2/v3의 허용 collection·필드·삭제/복원 범위는 그대로 둔다. 현재 `== VERSION`에 묶인 archive index, 원장 문자열 참조, seed, 봉인 검사는 명시적인 v3/v4 집합으로 옮겨 구형 v3가 새 VERSION 때문에 다른 경로로 들어가지 않게 한다. v4의 복원 삭제 범위에만 새 시계 collection을 추가한다.
+- 시계 `load_documents`/`load_document`와 `upsert_documents`/`replace_documents`는 기존 documents codec과 native 메서드를 사용한다. `account_inputs`가 켜진 동일 trace에서만 허용하고 workload는 account로 분류한다. 일곱 개 authority-token 전용 ACCOUNT_METHODS에 generic 문서 메서드를 넣지 않는다. `(method, collection)`을 판별하는 공통 predicate로 캡처·검증·실행 경계를 맞춘다.
+- 시계의 owner/account_ref는 같은 계좌 UUID, key는 `current`, document version은 `mock_automation_session_clock/v1`이어야 한다. 기존 control revision, execution run, Decision/snapshot, 취소 시도와 미해결 intent ID, STOP 상태를 원문 의미대로 보존한다. 크기·타입·비밀 필드 검사를 통과하지 못하면 캡처를 명시적으로 거부하고 native 호출 결과는 바꾸지 않는다.
+- 시계 입력을 선택한 Replay는 v4 context 및 기존 v3 전용 DB lease를 요구한다. 문서 저장·조회만 호출하며 runner/gateway를 시작하거나 주문·취소를 전송하지 않는다. 초기 문서와 이후 저장의 순서를 보존하고 같은 baseline으로 재실행한다. 구형 녹화에 시계 입력을 합성하지 않는다.
+- `diagnostic_control_routes`, `nas_scheduled_trace`, `nas_operator`, 용량 검사기의 버전 판정을 함께 갱신한다. v3 실행 서버의 기존 예약은 계속 읽을 수 있어야 하며 이 소스 수정만으로 NAS helper·릴리즈·예약을 교체하지 않는다.
+
+#### TOP20: 기존 테이블과 native 계산 경계 사용
+
+- `top20_index_reconciled`, `top20_statistics_display_day`는 **별도 테이블이 아니라 `central_dataset_snapshots`의 kind**다. 이 테이블과 계산 의존 테이블은 기존 baseline TABLES에 들어 있다. 따라서 이 기능 때문에 DB migration이나 baseline v4를 만들지 않는다. 앞선 인계 자료의 “TABLES_V3에 통계 캐시 테이블이 없다”는 판단을 정정한다.
+- 두 kind의 단건/배치 저장·조회에 대한 캡처 우회를 제거하고 허용 목록에 추가한다. raw와 display가 섞인 배치도 분할하지 않고 원래 한 native 호출·트랜잭션으로 기록/실행한다. payload kind와 `basis`, provenance, completeness는 보존하고 raw 과학 입력 추출기가 표시 계산본을 원본으로 채택하지 않게 한다.
+- `load_top20_series`, `load_top20_reconciliation_inputs`, `load_top20_display_statistics`를 명시적인 캡처·native 실행 목록에 추가한다. 인자는 기존 typed codec으로 보존한다. `Top20ReconciliationInput` 반환값 때문에 임의 객체 codec을 열지 않는다. 전체 반환값 재주입 대신 아래의 제한된 결과 해시와 같은 초기 DB의 native 결과를 비교한다.
+- 초기 복원은 기존 baseline의 dataset snapshots, minute bars, observation metadata, documents를 사용한다. 표시 캐시도 원래 행·saved_at 그대로 reset한다. **테이블이 포함됐다는 사실만으로 운영의 초기 상태와 같다고 판정하지 않는다.** 같은 초기 DB를 제공해야 하며, 빈 baseline에서 녹화 전 자료를 추정/재생성해 일치한다고 보고하지 않는다. 이번 변경은 전체 운영 DB snapshot 수집을 새로 구현하는 범위가 아니다.
+
+#### 날짜·캐시 정책의 실제 소비값 보존
+
+`database_top20_reconciliation._statistics`는 날짜 범위 계산과 각 날짜의 historical 판정에 현재 KST 날짜를 사용하고, cache miss 뒤 `is_paused('top20_after_close')`에 따라 INSERT 여부를 정한다. `_inputs`의 생성시각과 캐시의 `saved_at`도 호스트 시각을 사용한다. 다른 날의 Replay 또는 일시정지 정책 차이는 같은 입력의 저장 결과를 바꿀 수 있다.
+
+- native helper에 좁은 환경값 공급 경계를 추가한다. 기본 동작은 기존 `_top20_today`, `datetime.now(KST)`, `time`, `is_paused`를 기존 소비 위치에서 그대로 호출한다. 범위 전체를 한 번의 pause 값으로 바꾸거나 전역 시계를 patch하지 않는다. `_top20_statistics_days`는 display 경로에 한해 명시적인 today를 받을 수 있도록 하고 raw 통계 호출의 기본값은 보존한다.
+- 새 display 호출만 `top20-display-input/v1` 계약으로 표시한다. 호출별 ContextVar 관측 범위 안에서 실제 소비된 `today`, `computed_at`, `cache_write_paused`, `saved_at`을 순서·태그·operation_id와 함께 작은 `top20_display_environment` trace 행으로 기록한다. 기존 trace 예산·거부/누락 계수에 포함시키며 관측 실패는 native 호출의 성공/실패를 바꾸지 않는다.
+- operation_end에는 관측 수와 순서 해시를 넣는다. Replay 준비 단계에서 버전, 형식, 날짜/유한 시각/bool 타입, 연결된 operation, 연속 ordinal, 완료 receipt를 검사한다. 실행 시 같은 호출의 관측값만 소비하고 태그 불일치·누락·남는 값은 실패로 처리한다. 실제 clock/DB/pause 파일로 fallback하지 않는다. 취소·예외 뒤 ContextVar를 정리하고 concurrent actor 간 값을 공유하지 않는다.
+- 새 세 reader의 결과는 명시적인 dataclass 필드/dict/list를 기존 bounded codec으로 정규화한 내용 해시로 비교한다. 검증 한도를 넘는 결과를 성공으로 생략하지 않는다. source 반환 자체는 그대로 돌려준다. 결과 내용 검사에는 기본 8MiB typed-copy 한도를 쓰고, large_inputs가 켜진 새 호출만 기존 64MiB profile을 표시해 source와 Replay에 같은 한도를 적용한다. 동시 결과 복사는 두 건으로 제한하며 포화 시 native 반환을 지연하지 않고 관측을 거부한다. 한도 초과에도 operation_end를 남겨 recorder drain이 끝나며 해당 입력은 거부 상태로 유지한다. Replay에서 다른 초기 DB·raw/display 선택·캐시 무효화 때문에 내용이 다르면 불일치로 남긴다. 이 해시는 전체 앱 인과 재현을 보증하지 않는다.
+- 기존 trace에는 새 계약을 소급 적용하지 않는다. 새 display 호출은 계약/관측 receipt가 없으면 실행 전 거부한다. 호출 목록만 추가한 뒤 날짜·캐시 정책을 호스트 기본값으로 실행하는 중간 구현을 완료 처리하지 않는다.
+
+#### 구현 파일과 완료 조건
+
+1. `diagnostic_account_context.py`, `diagnostic_replay_contract.py`: v4 초기 문서와 계좌 문서 predicate, display 캡처·kind·reader 목록. authority 전용 `diagnostic_account_input.py`의 기존 token 투영 범위는 유지한다.
+2. `database_top20_reconciliation.py`, `database_top20_statistics.py`: native 환경 공급 경계. display에 한정된 관측/복원 코드는 작은 `diagnostic_top20_display_input.py`가 맡고, 연결·계산·트랜잭션은 기존 store가 계속 소유한다. 새 일반 Manager/Service는 만들지 않는다.
+3. `diagnostic_recorded_execution.py`와 replay reader/plan: 새 계약 사전 검증, 환경 소비 범위, 결과 비교. `diagnostic_replay_baseline.py`는 v4 계좌 봉인 계약 연결과 기존 테이블 복원 확인만 필요하며 baseline version은 3을 유지한다.
+4. 실제 시계 문서의 초기/갱신/STOP/재시도·계좌 옵션 꺼짐·secret 거부·v1/v2/v3 호환, display raw fallback/reconciled 선택·캐시 hit/miss/무효화·섞인 배치·다른 날짜·자정·pause 변경·동시 actor·실패/취소·관측 손상 회귀를 실행한다. source와 Replay에서 내용·revision·sequence·결과를 비교하며 주문/취소 전송은 0이어야 한다.
+5. 동일 source fixture 입력과 동일 초기 DB로 두 번 native Replay하고 PostgreSQL의 독립 transaction·advisory lock·rollback·baseline reset을 검사한다. 기존 녹화본에는 새 기능 입력이 없어 이 기능의 실녹화 수락 증거로 사용할 수 없다. 새 실제 녹화 검증은 추후 배포 후 별도 단계다.
+6. 새 테스트를 catalog/profile에 등록하고 정확한 소스의 Windows `all-local`과 보고서 지문 검사를 통과한 뒤 사용자 요청의 통합 미커밋분을 커밋한다. 통과하지 않은 Linux/PG/봉인/운영 검증을 합산하지 않는다. NAS 예약·릴리즈 변경은 이 구현/커밋에 포함하지 않는다.
+
+설계 확인 후 GPT-6.1 Sol High에서 v4 초기 상태·문서 gate·native display 환경·결과 해시·complete/scoped 저장 reader를 구현했다. 실제 초기 fixture의 두 번 Replay와 구형 v1/v2/v3 복원 범위·관측 손상·실패 drain 회귀를 추가했다. 새 PostgreSQL Replay 회귀도 등록했으나 실제 DB 실행은 남는다. 이전 56건/181건 결과를 새 계약 통과로 재사용하지 않는다. 통합 Windows 전체 검증과 커밋은 현재 진행 단계이며 NAS는 기존 v3 릴리즈·다섯 옵션 예약을 유지한다.
+
+과거뉴스 v2 조회는 `HistoricalNewsArchiveReader.page_v2`에서 외부 SQLite 파일을 `mode=ro`로 읽는다. 코드 경로 감사에서 이 읽기·외부 파일 상태는 PostgreSQL native 저장 입력 캡처에 연결되지 않았다. 같은 파일의 불변 버전·해시를 별도로 제공하지 않은 Replay로 해당 조회 결과까지 복원했다고 판단하지 않는다. 증분 실시간 등록은 `top20-realtime-tape/v2` observer·reader·transport가 연결돼 있으나, 구현 경로 존재와 실제 장중 입력 완전성을 구분한다.
+
+저장 최적화는 실제 녹화 입력 16,384건의 같은 초기 writer 디렉터리에서 비교했다. 잔여 묶음 보충은 NAS 두 쌍에서 전체 저장시간을 2.8%·6.0% 줄이고 동기화를 63→59회 줄였다. 최종 대기 제거는 마지막 입력 저장 후 완료까지 2.16→0.48초·2.75→0.28초로 줄였으나 전체 저장시간 개선은 일관되지 않았다. 내용·순번·본문 체크섬과 실패 시 완료 차단을 확인했으며, 전체 녹화·전체 앱 성능·실제 장중 10~20초 COMMIT 개선을 의미하지 않는다.
+
+### 계좌 초기 상태의 v3 투영
+
+`account-context/v3`는 계좌 identity·binding revision·설정·lease·실행 원장과 다음 event sequence를 초기 snapshot으로 보존한다. 과거 `real_account_recovery`·`real_account_event`의 본문 전체를 녹화 시작 때 복사하지 않고, 같은 읽기 전용 MVCC snapshot에서 collection·owner·내용 해시 키·최초 저장시각만 제한된 청크 인덱스로 보존한다. 기존 v1/v2 녹화본은 원래 전체 복원 의미를 유지한다.
+
+v3 Replay 봉인 전에는 선택된 녹화 입력을 기존 native writer와 같은 순수 JSON 인코딩으로 변환한다. 초기 인덱스에 실제로 있는 키만 원래 저장시각과 함께 전용 DB에 복원해 녹화 전 재시도의 `ON CONFLICT DO NOTHING`을 유지한다. 선택 입력과 복원 seed의 해시를 baseline 계약에 함께 묶고, 같은 계약인지 확인한 뒤 reset한다. 이 투영은 선택 입력이 접근하는 과거 키에 한정되며 전체 과거 본문이나 운영 DB 동일성을 보증하지 않는다. 저장 권한·revision·lease 검사는 기존 native writer가 수행한다.
+
+v3의 실행 원장 intent·snapshot은 native offline/import 저장이 허용하는 비어 있지 않은 문자열 account_ref를 원래 값으로 보존한다. 이 참조를 계좌 registry나 binding으로 등록하지 않는다. 검증된 registry·binding의 UUID 계약, 원장 column/JSON 일치, event lineage·sequence와 runtime ownership 검사는 유지한다. 기존 v1/v2 validator의 의미는 바꾸지 않는다.
+
+녹화 시작 POST의 HTTP 응답 대기는 60초이며 일반 조회는 10초다. timeout 뒤 POST를 자동 재시도하지 않는다. 실패 결과는 요청 단계·소요시간을 남기고, 서버는 제어 활성화·준비·정리의 공용 executor 대기시간과 실행시간, 기존 녹화 용량 순회·계좌 snapshot 시간을 payload 없이 기록한다. 과거 단계 로그가 없는 시간초과를 현재 빠른 조회 결과만으로 원인 확정하지 않는다.
+
 운영의 제어→측정→상태→보고서→종료를 CLI/API의 같은 control·수집·보고서 경계로 처리한다. 관측 수량과 실제 drain/보존 여부를 구분하며 기본 OFF 계측을 자동으로 상시 켜지 않는다.
 
 | 책임 | 코드 정본 |
@@ -18,6 +77,8 @@
 등록된 작업/계측 범위는 capabilities/workloads/writers 응답과 코드 registry에서 확인한다. 과거 문서의 8개 작업/12개 writer 수량을 현재 전수 목록으로 사용하지 않는다. 계좌·주문·실시간 수신/저장 독립 pause와 durable 인계는 항목별 검증 전까지 구현 완료로 보지 않는다. 아래 보호 경로 표는 확장 계약이며, capabilities에 없는 스위치를 사용할 수 있다는 뜻이 아니다.
 
 ## 운영 확인 순서
+
+TOP20 장후 표시 계산본은 기존 `top20_after_close` 및 `minute_backfill` pause를 admission과 게시 직전에 함께 확인한다. 진행 중인 게시의 owner는 DB thread 완료까지 drain한다. 범용 dataset writer를 재사용하며 별도 pause 스위치를 추가하지 않는다. 표시 캐시는 `dataset.display_statistics_cache`로 측정한다. master/TTL 규칙은 기존 계약을 따른다. 이 확장의 실제 PostgreSQL/WAL gate는 기존 녹화 예약 잠금 때문에 미실행 상태이며 runtime capabilities의 배포 여부를 따로 확인해야 한다.
 
 1. 현재 build/release·인증 capabilities·등록 범위와 TTL/권한을 확인한다. GET/status/기존 report 조회는 master나 capture를 켜지 않는다.
 2. 명시 진단 세션에서 전체 측정·drain·복구·보고서 여유보다 긴 TTL을 확보한다. 같은 ON 반복으로 lease를 자동 연장하거나 운영 OFF 기능을 켜지 않는다.
@@ -315,7 +376,7 @@ COMMIT/SQL 단계와 같은 backend의 wait/blocking owner 및 같은 시각 장
 
 transaction 또는 실시간 저장 변경은 [필수 보존 검사](KIWOOM_STORAGE_WRITE_AUDIT.md#transaction실시간-저장-변경-시-필수-검증)의 동시/중복/순서 역전·commit 전후 장애·재시작·멱등·원천/파생/완료값 대조를 함께 실행한다. 새 writer/DB/경로에는 master 아래 등록·계측·중단 중 보존·복구 계약을 같이 갱신한다.
 
-모델 판단은 [현행 정책](MODEL_HANDOFF_POLICY.md)을 따르며 이 사용자는 Luna를 사용하지 않는다. 현재 source·실제 NAS·Linux flock·독립 PostgreSQL·수동 UI/장중·장시간 검증을 서로 대신하지 않는다.
+모델 판단은 [현행 정책](MODEL_HANDOFF_POLICY.md)을 따른다. Luna는 네 가지 저위험 조건을 모두 만족하는 문서 서식·단순 조회·정해진 결과 정리에만 제한적으로 허용하며 transaction·실시간 저장·DB 정합성·원인 분석은 Sol 이상으로 판단한다. 현재 source·실제 NAS·Linux flock·독립 PostgreSQL·수동 UI/장중·장시간 검증을 서로 대신하지 않는다.
 
 ## 통합 전 근거
 

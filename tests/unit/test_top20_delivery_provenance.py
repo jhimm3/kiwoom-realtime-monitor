@@ -49,6 +49,7 @@ class Top20DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.stack.close)
         self.hub = RealtimeHub()
         self.collector = CentralRealtimeCollector(lambda: "", "real", self.hub, lambda: NOW)
+        self.collector._realtime_tape_version = self.collector._hub._realtime_tape_version = "top20-realtime-tape/v1"
         self.component = "autonomous_top20:selected"
         self.subscriber = self.hub.connect(capture_component=self.component)
 

@@ -56,6 +56,7 @@ class Top20LifecycleInputTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.stack.close)
         self.hub = RealtimeHub()
         self.collector = CentralRealtimeCollector(lambda: "", "real", self.hub, lambda: NOW)
+        self.collector._realtime_tape_version = self.collector._hub._realtime_tape_version = "top20-realtime-tape/v1"
         self.store = Store()
         self.service = AutonomousTop20Service(None, self.hub, self.store, now_provider=lambda: NOW)
         self.component = f"autonomous_top20:{id(self.service):x}"
@@ -217,16 +218,28 @@ class Top20LifecycleInputTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_actual_receive_binds_counted_native_reg_acks_before_publishing_ready(self):
         collector = self.collector
+        # This test exercises today's live policy; the other fixtures remain v1.
+        collector._realtime_tape_version = self.hub._realtime_tape_version = "top20-realtime-tape/v2"
+        self.events.clear()
+        self.hub._recorded_lifecycle_epoch = None
         class ReceivingSocket(Socket):
             def __init__(self):
                 super().__init__()
-                self.frames = [{"return_code": 0}] + [{"trnm": "REG", "return_code": 0}] * 4
-                self.frames.append({"trnm": "REAL", "data": [{"type": "0s", "values": {"215": "3"}}]})
+                self.frames = asyncio.Queue()
+                self.frames.put_nowait({"return_code": 0})
+
+            async def send(self, raw):
+                await super().send(raw)
+                value = json.loads(raw)
+                if value['trnm'] == 'REG':
+                    self.frames.put_nowait({'trnm':'REG', 'return_code':0})
+                    if len([packet for packet in self.sent if packet['trnm'] == 'REG']) == 4:
+                        self.frames.put_nowait({"trnm":"REAL", "data":[{"type":"0s", "item":"", "values":{"215":"3"}}]})
 
             async def recv(self):
-                frame = self.frames.pop(0)
-                if not self.frames:
-                    collector._market_session = lambda: None
+                frame = await self.frames.get()
+                if frame.get('trnm') == 'REAL':
+                    asyncio.get_running_loop().call_later(.01, setattr, collector, '_market_session', lambda: None)
                 return json.dumps(frame)
 
             async def __aenter__(self):

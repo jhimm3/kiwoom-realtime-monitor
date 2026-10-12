@@ -53,7 +53,7 @@ def _emit(owner, kind, value, *, identifier=None):
     component = (f"realtime_hub:{id(owner):x}" if hasattr(owner, "_subscribers")
                  else f"realtime_collector:{id(owner):x}")
     fields = {"input_id": identifier or uuid4().hex, "input_kind": kind,
-              "input_version": VERSION, "trace_id": token, "workload_id": "realtime",
+              "input_version": getattr(owner, "_realtime_tape_version", VERSION), "trace_id": token, "workload_id": "realtime",
               "producer_component": component, "entered_mono_ns": time.monotonic_ns(),
               "entered_wall_ns": time.time_ns()}
     try:
@@ -126,7 +126,7 @@ def record_hub_event(hub, event):
     try:
         hub_initial(hub)
         # TOP20 consumes no server error text. Retain only explicit public state.
-        value = {key: event[key] for key in ("type", "scope", "codes") if key in event}
+        value = {key: event[key] for key in ("type", "scope", "codes", "source_resets") if key in event}
         status = event.get("payload") if event["type"] == "connection_status" else event.get("connection_status")
         if isinstance(status, dict):
             value["status"] = {key: status[key] for key in ("generation", "phase", "paused", "shutdown",
@@ -235,6 +235,10 @@ def _validate_contributions(value):
 
 def read_realtime_tape(events):
     """Complete prefix gate. File checksums/sequence remain the outer reader's job."""
+    versions = {row.get("input_version") for row in events if row.get("event_type") == EVENT}
+    if versions == {"top20-realtime-tape/v2"}:
+        from .diagnostic_top20_subscription_v2 import read_v2
+        return read_v2(events)
     if not 1 <= len(events) <= MAX_EVENTS:
         raise ValueError("top20_realtime_event_limit")
     records, subscriptions, ready, initial, topology = {}, {}, {}, {}, {}
@@ -530,7 +534,7 @@ class SubscriptionTape:
             self._fail("top20_subscription_input_unavailable")
         _, identifier, batch = min(candidates)
         self.used.add(identifier)
-        return {"subscription_input_id": identifier, "outcome": batch["end"]["outcome"],
+        result = {"subscription_input_id": identifier, "outcome": batch["end"]["outcome"],
                 "entered_mono_ns": batch["row"]["entered_mono_ns"],
                 "finished_mono_ns": batch["end_row"]["entered_mono_ns"],
                 "groups": copy.deepcopy(batch["end"].get("groups", {})),
@@ -538,6 +542,11 @@ class SubscriptionTape:
                     "entered_mono_ns": self.tape["records"][item]["row"]["entered_mono_ns"],
                     **copy.deepcopy(self.tape["records"][item]["value"])} for item in batch["acks"]],
                 "error_type": batch["end"].get("error_type", ""), "ready_applied": False}
+        if self.tape["version"] == "top20-realtime-tape/v2":
+            result["v2"] = {"start": copy.deepcopy(batch["start"]),
+                "events": [copy.deepcopy(record) for record in self.tape["records"].values()
+                           if record["value"].get("subscription_input_id") == identifier]}
+        return result
 
     def report(self):
         return {"failure": self.failure, "unused_subscriptions": sorted(set(self.tape["subscriptions"]) - self.used),

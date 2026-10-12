@@ -51,6 +51,7 @@ def create_realtime_router(
                 await websocket.send_json(event)
 
         sender = asyncio.create_task(send_events())
+        client_connection_announced = False
         try:
             await websocket.send_json({"type": "ready", "schema_version": 1,
                                        "connection_status": collector.credential_connection_status() if collector is not None else None})
@@ -83,9 +84,12 @@ def create_realtime_router(
                                                "connection_status": collector.credential_connection_status() if collector is not None else None})
                     if realtime_hub.upstream_ready_for(subscriber.codes):
                         await websocket.send_json({
-                            "type": "connection_opened", "scope": "client",
-                            "codes": sorted(subscriber.codes),
+                            "type": "subscription_ready" if client_connection_announced else "connection_opened",
+                            "scope": "client", "codes": sorted(subscriber.codes),
+                            **({"connection_status": collector.credential_connection_status() if collector is not None else None}
+                               if client_connection_announced else {}),
                         })
+                        client_connection_announced = True
         except WebSocketDisconnect:
             pass
         finally:

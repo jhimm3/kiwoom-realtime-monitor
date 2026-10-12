@@ -43,6 +43,8 @@ class Top20TradeValueChart(QWidget):
         self._display_mode = "minute"
         self._view_end: int | None = None
         self._bars_per_screen = 60
+        self._missing_labels: dict[datetime, str] = {}
+        self._series_identity: tuple[str, str] | None = None
 
     def set_display_mode(self, mode: str) -> None:
         self._display_mode = mode
@@ -57,6 +59,7 @@ class Top20TradeValueChart(QWidget):
         bars = [(*item, False) for item in self._completed]
         if self._current_minute is not None:
             bars.append((self._current_minute, *self._current_values, True))
+        bars.sort(key=lambda row: row[0])
         end = len(bars) if self._view_end is None else min(len(bars), self._view_end)
         return bars[max(0, end - self._bars_per_screen):end]
 
@@ -83,6 +86,9 @@ class Top20TradeValueChart(QWidget):
         slot = (right - left) / len(bars)
         index = min(len(bars) - 1, max(0, int((point.x() - left) / slot)))
         minute, kospi, kosdaq, unknown, current = bars[index]
+        if minute in self._missing_labels:
+            QToolTip.showText(event.globalPosition().toPoint(), f"{minute:%H:%M} · {self._missing_labels[minute]}", self)
+            return
         total = kospi + kosdaq + unknown
         status = " · 진행 중" if current else ""
         tooltip = (
@@ -103,6 +109,7 @@ class Top20TradeValueChart(QWidget):
         completed: list[tuple[datetime, float, float, float]], status_text: str,
     ) -> None:
         self._current_minute = current_minute
+        self._missing_labels = {}
         self._minute_text = (
             current_minute.strftime("%H:%M") if current_minute else
             (completed[-1][0].strftime("%Y-%m-%d") if self._display_mode == "daily" and completed else "준비 중")
@@ -110,6 +117,58 @@ class Top20TradeValueChart(QWidget):
         self._current_values = current_values
         self._completed = list(completed)
         self._status_text = status_text
+        self.update()
+
+    def set_series(self, series: dict, interval: int = 1, *, current_minute: datetime | None = None,
+                   current_values: tuple[float, float, float] | None = None) -> None:
+        """Keep missing slots explicit; placeholders never enter the live collector."""
+        if current_minute is not None and current_minute.tzinfo is not None:
+            from kiwoom_monitor.domain.top20_reconciliation import KST
+            current_minute = current_minute.astimezone(KST).replace(tzinfo=None)
+        buckets: dict[datetime, list[dict]] = {}
+        for row in series.get("rows", []):
+            moment = datetime.fromisoformat(row["minute"])
+            bucket = moment.replace(minute=moment.minute // interval * interval)
+            buckets.setdefault(bucket, []).append(row)
+        completed, missing = [], {}
+        reasons = {"cohort_missing": "구성 이력 없음", "cohort_first_half_missing": "구성 이력 없음",
+                   "minute_evidence_missing": "분봉 확인 대기", "realtime_unconfirmed": "실시간 집계 미확인"}
+        for bucket, rows in sorted(buckets.items()):
+            valid = len(rows) == interval and all(row.get("status") == "complete" for row in rows)
+            values = tuple(sum(row["market_values"][i] for row in rows) for i in range(3)) if valid else (0.0, 0.0, 0.0)
+            if not valid:
+                reason = next((row.get("reason") for row in rows if row.get("status") != "complete"), "")
+                missing[bucket] = reasons.get(reason, "집계 미확인")
+            completed.append((bucket, *values))
+        if current_minute is not None and current_values is not None and series.get("basis") == "realtime":
+            bucket = current_minute.replace(minute=current_minute.minute // interval * interval)
+            # For larger buckets an incomplete historical prefix remains unconfirmed.
+            if interval == 1:
+                completed = [row for row in completed if row[0] != bucket]
+                missing.pop(bucket, None)
+            else:
+                current_minute, current_values = None, None
+        else:
+            current_minute, current_values = None, None
+        basis = "장후 분봉 재계산" if series.get("basis") == "after_close_estimate" else "장중 실시간 집계"
+        coverage = series.get("coverage", {}).get("full_day", {})
+        status = f"{series.get('trading_date', '')} · {basis} · 확인 {coverage.get('complete', 0)}/720분"
+        status += " · 30초 배분 추정"
+        if series.get("available_at"):
+            status += f" · 게시 {series['available_at'][11:19]}"
+        if series.get("read_error"):
+            status += f" · NAS 갱신 실패: {series['read_error']}"
+        identity = (str(series.get("trading_date")), str(series.get("basis")))
+        previous_view = self._view_end
+        self.set_data(current_minute, current_values or (0.0, 0.0, 0.0), completed, status)
+        if current_minute is None:
+            self._minute_text = str(series.get("trading_date", "저장 자료"))
+        self._missing_labels = missing
+        if self._series_identity != identity:
+            self._view_end = min(self._bars_per_screen, len(completed))
+        else:
+            self._view_end = previous_view
+        self._series_identity = identity
         self.update()
 
     @staticmethod
@@ -132,7 +191,7 @@ class Top20TradeValueChart(QWidget):
         font.setBold(False); painter.setFont(font)
         painter.setPen(QColor("#2563EB"))
         current_total = sum(self._current_values)
-        painter.drawText(10, 40, f"현재 {self._amount(current_total)}")
+        painter.drawText(10, 40, f"현재 {self._amount(current_total)}" if self._current_minute is not None else "저장 구간 보기")
         legend_x = 165
         for label, color in (("코스피", "#2563EB"), ("코스닥", "#F59E0B"), ("시장 미확인", "#94A3B8")):
             painter.fillRect(legend_x, 29, 9, 9, QColor(color))
@@ -157,6 +216,8 @@ class Top20TradeValueChart(QWidget):
             for index, (bar_minute, kospi, kosdaq, unknown, current) in enumerate(bars):
                 x = left + int(index * slot + (slot - bar_width) / 2)
                 y = bottom
+                if bar_minute in self._missing_labels:
+                    painter.fillRect(x, top, bar_width, bottom - top, QColor("#E2E8F0"))
                 for value, color in zip((kospi, kosdaq, unknown), colors):
                     if value <= 0:
                         continue
@@ -183,7 +244,7 @@ class Top20TradeValueChart(QWidget):
                 painter.setPen(QPen(QColor("#DC2626"), 1, Qt.PenStyle.DashLine))
                 painter.drawLine(boundary_x, top, boundary_x, bottom)
                 painter.setPen(QColor("#B91C1C"))
-                label = f"수집 중단 {missing_minutes}분"
+                label = f"집계 미확인 {missing_minutes}분"
                 label_width = painter.fontMetrics().horizontalAdvance(label)
                 label_x = max(left, min(right - label_width, boundary_x + 3))
                 painter.drawText(label_x, top + 12, label)
@@ -344,12 +405,17 @@ class Top20NasDataWorker(QThread):
         kind, value = self._request
         try:
             if kind == "date":
-                loader = getattr(self._client, "load_stored_top20_index")
+                loader = getattr(self._client, "load_stored_top20_series", None)
+                if not callable(loader):
+                    loader = getattr(self._client, "load_stored_top20_index")
                 result = loader(str(value))
             elif kind in {"statistics", "daily"}:
                 start_date, end_date = value  # type: ignore[misc]
                 loader = getattr(self._client, "load_stored_top20_statistics")
-                result = loader(str(start_date), str(end_date))
+                if callable(getattr(self._client, "load_stored_top20_series", None)):
+                    result = loader(str(start_date), str(end_date), basis="display")
+                else:
+                    result = loader(str(start_date), str(end_date))
             elif kind == "market_caps":
                 loader = getattr(self._client, "load_stored_market_caps")
                 result = loader(tuple(str(code) for code in value))  # type: ignore[arg-type]

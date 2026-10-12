@@ -219,23 +219,36 @@ class ReconnectSaveBoundaryTests(unittest.IsolatedAsyncioTestCase):
         finished = False
 
         class Socket:
-            reads = 0
-            async def send(self, raw): pass
+            def __init__(self):
+                self.responses = asyncio.Queue()
+
+            async def send(self, raw):
+                packet = json.loads(raw)
+                self.responses.put_nowait({"trnm": packet["trnm"], "return_code": 0})
+                if packet["trnm"] == "REG":
+                    self.responses.put_nowait({"trnm": "REAL", "data": [{"type": "0B", "item": "005930", "values": {"20": "100030", "10": "100", "13": "10000", "15": "3"}}]})
+
             async def recv(self):
-                nonlocal finished
-                self.reads += 1
-                if self.reads == 1: return json.dumps({"return_code": 0})
-                if self.reads == 2: return json.dumps({"trnm": "REG", "return_code": 0})
-                finished = True
-                return json.dumps({"trnm": "REAL", "data": [{"type": "0B", "item": "005930", "values": {"20": "100030", "10": "100", "13": "10000", "15": "3"}}]})
+                return json.dumps(await self.responses.get())
+
             async def __aenter__(self): return self
             async def __aexit__(self, *args): pass
 
+        native_publish = collector._publish_parsed
+
+        def publish(message):
+            nonlocal finished
+            native_publish(message)
+            # End the fixture after processing, not when recv prefetches the trade.
+            if message.get("trnm") == "REAL":
+                finished = True
+
         groups = {"1000": [{"item": ["005930"], "type": ["0B"]}]}
         with patch("kiwoom_monitor.central_server.realtime_collector.connect", return_value=Socket()), \
-                patch.object(collector, "_send_subscription", new=AsyncMock(return_value=groups)), \
+                patch.object(collector, "_subscription_groups", return_value=groups), \
+                patch.object(collector, "_publish_parsed", side_effect=publish), \
                 patch.object(collector, "_market_session", side_effect=lambda: None if finished else "KRX"):
-            await collector._receive("KRX")
+            await asyncio.wait_for(collector._receive("KRX"), timeout=5)
         self.assertEqual(5, collector._minute_bars.drain_dirty()[0]["volume"])
         self.assertEqual(5, sum(value["volume"] for value in collector._second_trades.drain_dirty()))
         self.assertEqual(current, collector._continuous_from[("005930", "KRX")])

@@ -221,6 +221,42 @@ class AccountContextTests(unittest.TestCase):
             self.assertEqual(normalize(first.execute(query).fetchall()), normalize(second.execute(query).fetchall()))
             self.assertEqual(13, second.execute("SELECT accepted_sequence FROM central_execution_events WHERE event_id='followup-event'").fetchone()[0])
 
+    def test_v3_preserves_native_opaque_ledger_refs_without_changing_registered_identity(self):
+        snapshots = [dict(snapshot_id='legacy-' + str(i), environment='mock',
+                          account_ref='offline-ledger-' + str(i),
+                          as_of=NOW.isoformat(), received_at=NOW.isoformat()) for i in range(5)]
+        for value in snapshots:
+            self.assertTrue(self.source.save_execution_account_snapshot(value))
+        intent = dict(intent_id='legacy-intent', run_id='offline-run', environment='mock',
+                      account_ref='offline-ledger-0', state='SUBMITTED',
+                      created_at=NOW.isoformat(), updated_at=NOW.isoformat())
+        self.assertTrue(self.source.create_execution_intent(intent))
+        capsule = self.capsule()
+        target = self.store('opaque-ledger')
+        with target._connection() as connection:
+            context._apply_account_context(SQLiteProjectionCursor(connection.cursor()), capsule,
+                bindings=resolve_owner_bindings(capsule['owner_bindings']))
+        with self.source._connection() as source, target._connection() as replayed:
+            query = 'SELECT * FROM central_execution_account_snapshots ORDER BY snapshot_id'
+            normalize = lambda rows: [(*row[:-1], json.loads(row[-1])) for row in rows]
+            self.assertEqual(normalize(source.execute(query).fetchall()),
+                             normalize(replayed.execute(query).fetchall()))
+        for value in snapshots:
+            self.assertFalse(target.save_execution_account_snapshot(value))
+        self.assertEqual(intent, target.load_execution_intent('legacy-intent'))
+        self.assertFalse(target.create_execution_intent(intent))
+        altered = copy.deepcopy(capsule)
+        altered['tables']['central_account_registry'][0]['account_ref'] = 'offline-ledger-0'
+        altered['sha256'] = context._digest({k: v for k, v in altered.items() if k != 'sha256'})[0]
+        with self.assertRaises(ValueError):
+            context.validate_account_context(altered)
+        legacy = copy.deepcopy(capsule)
+        legacy['version'] = 'account-context/v2'
+        legacy.pop('archive_index')
+        legacy['sha256'] = context._digest({k: v for k, v in legacy.items() if k != 'sha256'})[0]
+        with self.assertRaises(ValueError):
+            context.validate_account_context(legacy)
+
     def test_initial_ledger_corruption_and_sensitive_documents_fail_before_apply(self):
         self.seed_ledger()
         capsule = self.capsule()
@@ -246,6 +282,7 @@ class AccountContextTests(unittest.TestCase):
     def test_legacy_v1_context_still_validates_without_inventing_prior_ledger(self):
         capsule = self.capsule()
         capsule['version'] = 'account-context/v1'
+        capsule.pop('archive_index')
         capsule.pop('execution_event_next_sequence')
         capsule['tables'] = {key: capsule['tables'][key] for key in context.COLUMNS_V1}
         capsule['sha256'] = context._digest({k: v for k, v in capsule.items() if k != 'sha256'})[0]
@@ -308,6 +345,80 @@ class AccountContextTests(unittest.TestCase):
         with target._connection() as connection:
             rows = connection.execute("SELECT updated_at FROM central_documents WHERE collection='real_account_recovery'").fetchall()
             self.assertEqual([(NOW.timestamp(),)], rows)
+
+    def test_v3_pre_capture_retry_preserves_original_row_and_timestamp(self):
+        binding = AccountBinding('profile-1', AccountScope('kiwoom', AccountEnvironment.REAL, REF), 3, NOW)
+        recovery = AccountRecovery(AccountSnapshot(REF, 10000, 0, {'005930': 3}, NOW), ())
+        self.source._account_input_wall_time = lambda: 123.25
+        expected = self.source.save_real_account_recovery(binding, recovery, NOW, settings_revision=2)
+        capsule = self.capsule()
+        self.assertEqual([], [row for row in capsule['tables']['central_documents']
+                              if row['collection'] == 'real_account_recovery'])
+        row = {'event_type': 'operation_start', 'operation_id': 'retry',
+               'method': 'save_real_account_recovery', 'codec_version': 'store-input/v1',
+               'account_input_version': 'account-store-input/v1', 'account_alias_domain': capsule['alias_domain'],
+               'payload': freeze_payload(dict(binding=binding, recovery=recovery, received_at=NOW,
+                                             settings_revision=2)).value}
+        seed = context.prepare_archive_seed(capsule, [row])
+        target = self.store('prior-archive-retry')
+        with target._connection() as connection:
+            context._apply_account_context(SQLiteProjectionCursor(connection.cursor()), capsule,
+                bindings=resolve_owner_bindings(capsule['owner_bindings']), archive_seed=seed)
+        target._account_input_wall_time = lambda: NOW.timestamp()
+        self.assertEqual(expected, target.save_real_account_recovery(binding, recovery, NOW, settings_revision=2))
+        with target._connection() as connection:
+            self.assertEqual([(123.25,)], connection.execute(
+                "SELECT updated_at FROM central_documents WHERE collection='real_account_recovery'").fetchall())
+        bindings = resolve_owner_bindings(capsule['owner_bindings'])
+        first = context.sealed_context_contract(capsule, [row], bindings)
+        second = context.sealed_context_contract(capsule, [], bindings)
+        self.assertNotEqual(first['archive_seed_sha256'], second['archive_seed_sha256'])
+        self.assertNotEqual(first['archive_frontier_sha256'], second['archive_frontier_sha256'])
+        mixed = [dict(event_type='operation_start', operation_id='shadow',
+                      method='save_shadow_monitor_state'), row,
+                 dict(event_type='operation_start', operation_id='vi', method='append_vi_events')]
+        self.assertEqual(seed, context.prepare_archive_seed(capsule, mixed))
+        self.assertEqual(first, context.sealed_context_contract(capsule, mixed, bindings))
+        wrong_domain = dict(row, account_alias_domain='another-trace')
+        with self.assertRaisesRegex(ValueError, '^account_context_archive_frontier_invalid$'):
+            context.prepare_archive_seed(capsule, [mixed[0], wrong_domain])
+
+    def test_full_capsule_with_40452_archive_rows_never_reads_historical_bodies(self):
+        from kiwoom_monitor.central_server.diagnostic_account_archive import iter_index
+        body = json.dumps({'access_token': 'historical-body-must-not-be-read', 'evidence': 'x' * 1400})
+        with self.source._connection() as connection:
+            connection.executemany('INSERT INTO central_documents VALUES(?,?,?,?,?)',
+                (('real_account_recovery', 'kiwoom:real:' + REF, '%064x' % i, 123.25, body)
+                 for i in range(40452)))
+        capsule = self.capsule()
+        self.assertEqual(40456, capsule['row_count'])
+        self.assertEqual(40452, sum(1 for _ in iter_index(capsule['archive_index'])))
+        self.assertLess(freeze_payload(capsule, maximum_bytes=context.MAX_BYTES).charge, context.MAX_BYTES)
+        self.assertNotIn('historical-body-must-not-be-read', json.dumps(capsule))
+        with self.source._connection() as connection:
+            self.assertEqual(40452, connection.execute(
+                "SELECT count(*) FROM central_documents WHERE collection='real_account_recovery'").fetchone()[0])
+
+    def test_v1_v2_capsules_keep_legacy_restore_and_sequence_contract(self):
+        self.seed_ledger()
+        current = self.capsule()
+        for version in ('account-context/v1', 'account-context/v2'):
+            legacy = copy.deepcopy(current)
+            legacy['version'] = version
+            legacy.pop('archive_index')
+            if version == 'account-context/v1':
+                legacy.pop('execution_event_next_sequence')
+                legacy['tables'] = {key: value for key, value in legacy['tables'].items() if key in context.COLUMNS_V1}
+                legacy['row_count'] = sum(map(len, legacy['tables'].values()))
+            legacy['sha256'] = context._digest({k: v for k, v in legacy.items() if k != 'sha256'})[0]
+            context.validate_account_context(legacy)
+            target = self.store(version.rsplit('/', 1)[-1])
+            with target._connection() as connection:
+                context._apply_account_context(SQLiteProjectionCursor(connection.cursor()), legacy,
+                    bindings=resolve_owner_bindings(legacy['owner_bindings']))
+            if version.endswith('v2'):
+                self.assertEqual(self.source.load_execution_events('prior-intent'), target.load_execution_events('prior-intent'))
+            self.assertEqual([], context.prepare_archive_seed(legacy, []))
 
     def test_context_recording_and_durable_reader_retain_one_snapshot(self):
         with deferred_capture(account_inputs=True, account_context_store=self.source) as (identifier, _):

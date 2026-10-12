@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from copy import deepcopy
 from .database_observation_readers import OBSERVATION_DELIVERY_PROTOCOL
 from .observation_frame_recovery import (
     ObservationFrameRecovery, drain_thread_call, trim_bar_frames, trim_universe_frames,
@@ -13,9 +14,15 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from kiwoom_monitor.application.breakout_strategy import StrategyState
+from kiwoom_monitor.application.breakout_strategy import (
+    StrategyDecision, StrategyState, session_entry_time_rejection,
+)
 from kiwoom_monitor.application.mock_automation_execution import (
     dispatch_mock_automation_decision_from_risk,
+    emergency_stop_mock_automation,
+)
+from kiwoom_monitor.application.mock_automation_session_clock import (
+    SESSION_CLOCK_VERSION, clock_exit_decision, session_clock_assessment,
 )
 from kiwoom_monitor.application.mock_automation_recovery import (
     record_mock_automation_recovery_from_risk,
@@ -28,6 +35,7 @@ from kiwoom_monitor.application.research_replay import (
     replay_krx_minute_bars,
 )
 from kiwoom_monitor.domain.execution_activation import MockAutomationOperatingSpec
+from kiwoom_monitor.domain.order_contract import OrderSide, OrderState, TERMINAL_ORDER_STATES
 from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
     ForwardEvaluationRepository,
 )
@@ -36,6 +44,7 @@ from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository imp
 logger = logging.getLogger(__name__)
 RUNNER_CHECKPOINT_VERSION = "mock_automation_runner_checkpoint/v1"
 INPUT_KINDS = ("top20_membership", "minute_bar")
+CLOCK_COLLECTION = "execution_mock_automation_clock_current"
 
 
 class MockAutomationRunner:
@@ -94,7 +103,25 @@ class MockAutomationRunner:
         self._delivery_protocol: str | None = None
         self._frame_recovery: ObservationFrameRecovery | None = None
         self._frame_recovery_receipt: dict[str, Any] | None = None
+        self._session_clock: dict[str, Any] | None = None
         self._restore_or_bootstrap()
+        if self._config.session_exit_policy:
+            rows = self._store.load_documents(CLOCK_COLLECTION, self._bundle.account_ref, 1)
+            clock = rows[0].get("document") if rows else None
+            if isinstance(clock, Mapping) and (
+                clock.get("spec_id") == self._spec.spec_id
+                and clock.get("execution_run_id") == self._bundle.run_id
+                and clock.get("candidate_package_hash") == self._spec.candidate_package_hash
+            ):
+                if clock.get("version") != SESSION_CLOCK_VERSION:
+                    raise RuntimeError("unsupported_mock_session_clock_version")
+                if (type(clock.get("control_revision")) is not int
+                        or clock["control_revision"] <= 0
+                        or not isinstance(clock.get("cancel_attempted_intent_ids"), list)
+                        or any(not isinstance(value, str) or not value
+                               for value in clock["cancel_attempted_intent_ids"])):
+                    raise ValueError("invalid_mock_session_clock_receipt")
+                self._session_clock = dict(clock)
 
     @property
     def status(self) -> dict[str, Any]:
@@ -113,6 +140,8 @@ class MockAutomationRunner:
             value["input_recovery"] = self._frame_recovery.receipt()
             if self._status.get("state") not in ("BLOCKED", "STOPPED", "ERROR"):
                 value.update(state="WARMUP", reason="legacy_frames_recovery", orders_enabled=False)
+        if self._session_clock is not None:
+            value["session_clock"] = deepcopy(self._session_clock)
         return value
 
     async def start(self) -> None:
@@ -157,12 +186,14 @@ class MockAutomationRunner:
         poll_started = perf_counter()
         # A legacy recovery poll owns its fill/control native work as well as
         # scratch/checkpoint work; close must not leave a fill thread behind.
-        native_call = drain_thread_call if self._frame_recovery is not None else asyncio.to_thread
+        native_call = (drain_thread_call if self._frame_recovery is not None
+                       or self._config.session_exit_policy else asyncio.to_thread)
         await native_call(self._apply_new_fills)
         control = await native_call(
             self._repository.load_mock_automation_control, self._bundle.account_ref,
         )
-        if control is None or control.active_spec_id != self._spec.spec_id:
+        if (control is None or control.active_spec_id != self._spec.spec_id
+                or getattr(control, "execution_run_id", self._bundle.run_id) != self._bundle.run_id):
             status = {
                 **(self._status if self._frame_recovery is not None else {}),
                 "state": "BLOCKED", "reason": "automation_control_missing_or_replaced",
@@ -173,6 +204,10 @@ class MockAutomationRunner:
                 await asyncio.to_thread(self._save_checkpoint)
             return 0
         if control.desired_state.value != "RUNNING":
+            if (self._config.session_exit_policy and self._session_clock is not None
+                    and control.reason.startswith("session_clock:")):
+                await self._clock_call(control)
+                return 0
             status = {
                 **(self._status if self._frame_recovery is not None else {}),
                 "state": "STOPPED", "reason": "user_stopped", "orders_enabled": False,
@@ -184,9 +219,13 @@ class MockAutomationRunner:
 
         load_started = perf_counter()
         if self._bootstrap_pending:
+            if await self._clock_call(control):
+                return 0
             await asyncio.to_thread(self._bootstrap)
             return 0  # Never evaluate historical seed or dispatch its orders.
         if self._frame_recovery is not None:
+            if await self._clock_call(control):
+                return 0
             await drain_thread_call(self._recover_frames, limit)
             return 0
         observations = await asyncio.to_thread(
@@ -194,16 +233,22 @@ class MockAutomationRunner:
             self._cursor, INPUT_KINDS, limit,
         )
         load_ms = round((perf_counter() - load_started) * 1000)
+        if await self._clock_call(control, observations):
+            return 0
         max_processing_ms = 0
         max_bar_age_ms: int | None = None
         bar_count = 0
         future_bar_count = 0
         last_bar_age_ms = self._latency.get("last_bar_age_ms") if self._latency else None
         last_bar_processed_at = self._latency.get("last_bar_processed_at") if self._latency else None
+        consumed = 0
         for observation in observations:
+            if await self._clock_call(control, observations):
+                break
             observation_started = perf_counter()
             await self._consume(observation)
             self._cursor = max(self._cursor, int(observation.get("accepted_sequence", 0)))
+            consumed += 1
             await asyncio.to_thread(self._save_checkpoint)
             max_processing_ms = max(
                 max_processing_ms, round((perf_counter() - observation_started) * 1000),
@@ -229,7 +274,7 @@ class MockAutomationRunner:
             "last_poll_completed_at": datetime.now(timezone.utc).isoformat(),
             "last_poll_duration_ms": round((perf_counter() - poll_started) * 1000),
             "load_duration_ms": load_ms,
-            "observation_count": len(observations),
+            "observation_count": consumed,
             "minute_bar_count": bar_count,
             "max_observation_processing_ms": max_processing_ms,
             "max_minute_bar_age_ms": max_bar_age_ms,
@@ -237,7 +282,244 @@ class MockAutomationRunner:
             "last_bar_age_ms": last_bar_age_ms,
             "last_bar_processed_at": last_bar_processed_at,
         }
-        return len(observations)
+        return consumed
+
+    async def _clock_call(self, control, observations=()) -> bool:
+        if not self._config.session_exit_policy:
+            return False
+        # A close joins the whole broker/clock operation, including its native
+        # writes, rather than leaving a shielded gateway cancellation behind.
+        task = asyncio.create_task(self._poll_session_clock(control, observations))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not task.cancelled() and task.exception() is not None:
+                logger.error("session clock failed while draining", exc_info=task.exception())
+            raise
+
+    def _save_session_clock(self) -> None:
+        self._store.upsert_documents(CLOCK_COLLECTION, [{
+            "owner": self._bundle.account_ref, "key": "current",
+            "document": self._session_clock,
+        }])
+
+    async def _clock_status(self, state: str, reason: str) -> None:
+        self._session_clock.update(phase=state, reason=reason)
+        self._status = {
+            "state": "RUNNING" if state == "COMPLETED" else state,
+            "reason": reason, "orders_enabled": False,
+            "pending_intent_id": self._session_clock.get("pending_intent_id", ""),
+            "updated_at": self._bundle.runtime.server_now().isoformat(),
+        }
+        await drain_thread_call(self._save_session_clock)
+
+    async def _stop_session_clock(self, control, reason: str) -> None:
+        stop_reason = "session_clock:" + reason
+        self._session_clock["stop_reason"] = stop_reason
+        await drain_thread_call(self._save_session_clock)
+        stop = await drain_thread_call(
+            emergency_stop_mock_automation, self._repository, self._bundle.runtime,
+            account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id,
+            stopped_at=self._bundle.runtime.server_now(), reason=stop_reason,
+            expected_control_revision=control.control_revision,
+        )
+        self._session_clock["stop_revision_id"] = stop.revision_id
+        await self._clock_status("STOPPED", reason)
+
+    async def _poll_session_clock(self, control, observations) -> bool:
+        now = self._bundle.runtime.server_now()
+        active = await drain_thread_call(
+            self._bundle.repository.active_intents,
+            "mock", self._bundle.account_ref, self._bundle.run_id,
+        )
+        assessment = session_clock_assessment(self._config, self._state, now, active)
+        stopped = control.desired_state.value != "RUNNING"
+        if not stopped and self._session_clock is not None and (
+            self._session_clock["control_revision"] != control.control_revision
+            or (self._session_clock.get("phase") == "COMPLETED" and assessment["reasons"])
+            or (self._session_clock.get("decision") is not None and self._state.status == "open"
+                and self._session_clock.get("position_opened_at") != self._state.opened_at)
+        ):
+            # Only an explicit resume (with its existing fresh-recovery gate)
+            # can begin a new workflow after STOP; actual subsequent positions
+            # in a running control receive their own Decision and cancel keys.
+            self._session_clock = None
+        if not assessment["reasons"] and not stopped:
+            if self._session_clock is not None and self._session_clock.get("phase") != "COMPLETED":
+                await self._clock_status("COMPLETED", "actual_exit_or_order_reconciliation_complete")
+            return False
+        if self._session_clock is None:
+            self._session_clock = {
+                "version": SESSION_CLOCK_VERSION, "account_ref": self._bundle.account_ref,
+                "spec_id": self._spec.spec_id, "execution_run_id": self._bundle.run_id,
+                "candidate_package_hash": self._spec.candidate_package_hash,
+                "control_revision": control.control_revision,
+                "cancel_attempted_intent_ids": [], "assessment": assessment,
+                "position_opened_at": self._state.opened_at,
+            }
+        self._session_clock["assessment"] = assessment
+        await drain_thread_call(self._save_session_clock)
+        if stopped or any(reason in assessment["reasons"] for reason in (
+            "session_deadline_passed", "order_validity_expired", "position_time_from_future",
+        )):
+            if not stopped or not self._session_clock.get("stop_revision_id"):
+                await self._stop_session_clock(control, ";".join(assessment["reasons"]) or "recovery_required")
+            else:
+                await self._clock_status("STOPPED", self._session_clock.get("reason", "recovery_required"))
+            await self._cancel_clock_orders(all_orders=True)
+            return True
+        if active:
+            await self._clock_status("WAITING_ORDER", "clock_exit_waits_for_broker_order")
+            await self._cancel_clock_orders(all_orders=False)
+            return True
+        try:
+            recovery = await self._bundle.monitor.refresh_recovery()
+            await drain_thread_call(self._apply_new_fills)
+            active = await drain_thread_call(
+                self._bundle.repository.active_intents,
+                "mock", self._bundle.account_ref, self._bundle.run_id,
+            )
+            risk = await drain_thread_call(
+                self._repository.load_latest_mock_automation_risk, self._bundle.account_ref,
+            )
+            if risk is None or not risk.reconciliation_complete or not self._state_matches_risk(risk):
+                raise ValueError("clock_broker_reconciliation_unverified")
+            if active:
+                await self._clock_status("WAITING_ORDER", "clock_exit_waits_for_broker_order")
+                await self._cancel_clock_orders(all_orders=False)
+                return True
+            refreshed = session_clock_assessment(
+                self._config, self._state, risk.observed_at, active,
+            )
+            if not refreshed["exit_required"]:
+                if self._state.status == "open":
+                    raise ValueError("clock_recovery_predates_exit_due")
+                await self._clock_status("COMPLETED", "actual_exit_fill_confirmed")
+                return True
+            frames = tuple(self._bars.values()) + tuple(replay_krx_minute_bars(
+                observations, strict=True, session_profile=str(self._spec.session_profile),
+            ))
+            bars = [bar for bar in frames if bar.code == self._state.symbol
+                    and datetime.fromisoformat(bar.available_at) <= risk.observed_at]
+            bar = max(bars, key=lambda value: (
+                datetime.fromisoformat(value.bar_end), datetime.fromisoformat(value.available_at), value.revision_id),
+                      default=None)
+            if self._bootstrap_pending or self._frame_recovery is not None:
+                raise ValueError("clock_price_frames_not_ready")
+            decision, snapshot = clock_exit_decision(
+                spec_id=self._spec.spec_id, run_id=self._bundle.run_id,
+                state=self._state, assessment=refreshed, bar=bar, now=risk.observed_at,
+                maximum_age_seconds=self._spec.maximum_data_gap_seconds,
+            )
+            if self._session_clock.get("decision") is not None:
+                body = dict(self._session_clock["decision"])
+                body["reasons"] = tuple(body["reasons"])
+                body["constraints"] = tuple(body["constraints"])
+                decision = StrategyDecision(**body)
+            else:
+                self._session_clock.update(decision=decision.to_dict(), snapshot=snapshot)
+                await drain_thread_call(self._save_session_clock)
+            await drain_thread_call(
+                record_mock_automation_recovery_from_risk,
+                self._repository, self._bundle.runtime, recovery, risk,
+                account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id,
+            )
+            gate, record, _ = await drain_thread_call(
+                dispatch_mock_automation_decision_from_risk,
+                self._repository, self._bundle.runtime, decision, recovery, risk,
+                account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id,
+                strategy_ref=self._spec.strategy_ref,
+            )
+            if record is None or record.state in TERMINAL_ORDER_STATES:
+                raise ValueError("clock_exit_gate_blocked:" + ";".join(gate.reasons))
+            self._session_clock["pending_intent_id"] = record.intent.intent_id
+            await self._clock_status("ORDER_SUBMITTED", "clock_exit_submitted")
+        except Exception as error:
+            latest = await drain_thread_call(
+                self._repository.load_mock_automation_control, self._bundle.account_ref,
+            )
+            # Do not stop a replacement control or override a concurrent user stop.
+            if latest == control:
+                await self._stop_session_clock(control, str(error))
+                await self._cancel_clock_orders(all_orders=True)
+            else:
+                await self._clock_status("BLOCKED", "clock_control_changed")
+        return True
+
+    async def _cancel_clock_orders(self, *, all_orders: bool) -> None:
+        active = await drain_thread_call(
+            self._bundle.repository.active_intents,
+            "mock", self._bundle.account_ref, self._bundle.run_id,
+        )
+        if not any(
+            record.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
+            and (all_orders or record.intent.side is OrderSide.BUY)
+            and record.intent.intent_id not in self._session_clock["cancel_attempted_intent_ids"]
+            for record in active
+        ):
+            # UNKNOWN/CANCEL_PENDING reconciliation is already owned by the
+            # monitor. Do not flood its broker with full queries every idle poll.
+            self._session_clock["unresolved_intent_ids"] = [record.intent.intent_id for record in active]
+            await drain_thread_call(self._save_session_clock)
+            return
+        try:
+            recovery = await self._bundle.monitor.refresh_recovery()
+            await drain_thread_call(self._apply_new_fills)
+            now = self._bundle.runtime.server_now()
+            risk = await drain_thread_call(
+                self._repository.load_latest_mock_automation_risk, self._bundle.account_ref,
+            )
+            if (risk is None
+                    or risk.execution_run_id != self._bundle.run_id
+                    or risk.account_ref != self._bundle.account_ref
+                    or risk.account_as_of != recovery.account.as_of
+                    or recovery.account.account_ref != self._bundle.account_ref
+                    or recovery.account.as_of > now
+                    or (now - recovery.account.as_of).total_seconds() > self._spec.maximum_data_gap_seconds
+                    or risk.observed_at > now
+                    or (now - risk.observed_at).total_seconds() > self._spec.maximum_data_gap_seconds):
+                raise ValueError("clock_cancel_recovery_unverified")
+            active = await drain_thread_call(
+                self._bundle.repository.active_intents,
+                "mock", self._bundle.account_ref, self._bundle.run_id,
+            )
+            confirmed = {order.broker_order_id: order for order in recovery.orders}
+            for record in active:
+                order = confirmed.get(record.broker_order_id)
+                if (record.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
+                        or (not all_orders and record.intent.side is not OrderSide.BUY)
+                        or record.intent.intent_id in self._session_clock["cancel_attempted_intent_ids"]
+                        or order is None or order.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
+                        or order.as_of > now or (now - order.as_of).total_seconds() > self._spec.maximum_data_gap_seconds):
+                    continue
+                latest = await drain_thread_call(
+                    self._repository.load_mock_automation_control, self._bundle.account_ref,
+                )
+                if (latest is None or latest.active_spec_id != self._spec.spec_id
+                        or latest.execution_run_id != self._bundle.run_id
+                        or (latest.desired_state.value != "RUNNING"
+                            and not latest.reason.startswith("session_clock:"))):
+                    raise ValueError("clock_cancel_control_changed")
+                # Persist before the one-shot transport. A crash/unknown response
+                # cannot cause a second cancellation on the next poll or restart.
+                self._session_clock["cancel_attempted_intent_ids"].append(record.intent.intent_id)
+                await drain_thread_call(self._save_session_clock)
+                await self._bundle.gateway.cancel(record.intent.intent_id)
+        except Exception as error:
+            self._session_clock["cancel_error"] = str(error)
+        active = await drain_thread_call(
+            self._bundle.repository.active_intents,
+            "mock", self._bundle.account_ref, self._bundle.run_id,
+        )
+        self._session_clock["unresolved_intent_ids"] = [record.intent.intent_id for record in active]
+        await drain_thread_call(self._save_session_clock)
 
     async def _consume(self, observation: Mapping[str, Any]) -> None:
         if observation.get("kind") == "top20_membership":
@@ -302,6 +584,15 @@ class MockAutomationRunner:
             self._repository, self._bundle.runtime, recovery, risk,
             account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id,
         )
+        if decision.final_action == "ENTER" and self._config.session_exit_policy:
+            reason = session_entry_time_rejection(self._config, self._bundle.runtime.server_now())
+            if reason:
+                self._status = {
+                    "state": "BLOCKED", "reason": "clock_entry:" + reason,
+                    "last_decision_id": decision.decision_id, "orders_enabled": False,
+                    "updated_at": self._bundle.runtime.server_now().isoformat(),
+                }
+                return
         gate, record, _ = await asyncio.to_thread(
             dispatch_mock_automation_decision_from_risk,
             self._repository, self._bundle.runtime, decision, recovery, risk,

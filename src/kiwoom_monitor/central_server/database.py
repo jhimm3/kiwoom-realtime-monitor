@@ -342,6 +342,9 @@ class QueryStore(QueryCacheStore, Protocol):
     def save_dataset_snapshots(self, values: list[DatasetSnapshotWrite]) -> None: ...
     def load_dataset_snapshots(self, kind: str, subject: str = "", limit: int = 100) -> list[dict[str, Any]]: ...
     def load_top20_statistics(self, start_date: str, end_date: str) -> dict[str, object]: ...
+    def load_top20_series(self, trading_date: str, *, basis: str = "display") -> dict[str, Any]: ...
+    def load_top20_reconciliation_inputs(self, trading_date: str) -> Any: ...
+    def load_top20_display_statistics(self, start_date: str, end_date: str) -> dict[str, Any]: ...
     def load_observation_revisions(
         self, kind: str, subject: str = "", limit: int = 100,
     ) -> list[dict[str, Any]]: ...
@@ -461,7 +464,11 @@ class QueryStore(QueryCacheStore, Protocol):
     def storage_breakdown(self) -> list[dict[str, object]]: ...
 
 
+from .database_top20_reconciliation import SQLiteTop20ReconciliationStoreMixin, PostgresTop20ReconciliationStoreMixin
+
+
 class SQLiteQueryStore(
+    SQLiteTop20ReconciliationStoreMixin,
     SQLiteHistoricalNewsStoreMixin,
     SQLiteNewsSourceStoreMixin,
     SQLiteNewsRevisionStoreMixin,
@@ -579,6 +586,7 @@ class SQLiteQueryStore(
 
 
 class PostgresQueryStore(
+    PostgresTop20ReconciliationStoreMixin,
     PostgresHistoricalNewsStoreMixin,
     PostgresNewsSourceStoreMixin,
     PostgresNewsRevisionStoreMixin,

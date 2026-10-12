@@ -74,6 +74,21 @@ def _directory() -> Path:
     return parent.parent / "diagnostic-traces"
 
 
+def _trace_storage_usage(directory: Path) -> tuple[int, int]:
+    """One stat per file; retain the same quota and no-symlink contract."""
+    total = count = 0
+    with os.scandir(directory) as sessions:
+        for session in sessions:
+            if not session.is_dir(follow_symlinks=False) or not _valid_id(session.name):
+                continue
+            count += 1
+            with os.scandir(session.path) as files:
+                for file in files:
+                    if file.is_file(follow_symlinks=False):
+                        total += file.stat(follow_symlinks=False).st_size
+    return count, total
+
+
 def _deferred_memory_check() -> dict:
     """Check real Linux headroom, including a container's independent limit."""
     try:
@@ -132,11 +147,12 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
         raise ValueError("diagnostic_trace_child_off")
     directory = _directory()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    sessions = [part for part in directory.iterdir()
-                if part.is_dir() and not part.is_symlink() and _valid_id(part.name)]
-    stored_bytes = sum(file.stat().st_size for part in sessions for file in part.iterdir()
-                       if file.is_file() and not file.is_symlink())
-    if (len(sessions) >= _MAX_SESSIONS or stored_bytes >= _MAX_STORED_BYTES
+    scan_started = time.monotonic()
+    session_count, stored_bytes = _trace_storage_usage(directory)
+    import logging
+    logging.getLogger(__name__).info('recorder_start_phase phase=storage_scan elapsed_ms=%.3f',
+                                    (time.monotonic() - scan_started) * 1000)
+    if (session_count >= _MAX_SESSIONS or stored_bytes >= _MAX_STORED_BYTES
             or shutil.disk_usage(directory).free < 256 * 1024 * 1024):
         raise ValueError("trace_storage_quota_exceeded")
     identifier = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid4().hex[:12]
@@ -148,7 +164,12 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
     source_release = source_root.name if source_root.parent.name == 'releases' else 'image_or_local'
     if account_inputs and account_context_store is not None:
         from .diagnostic_account_context import read_account_context
-        context = read_account_context(account_context_store, projection, source_release=source_release)
+        context_began = time.monotonic()
+        try:
+            context = read_account_context(account_context_store, projection, source_release=source_release)
+        finally:
+            logging.getLogger(__name__).info('recorder_start_phase phase=account_context elapsed_ms=%.3f',
+                                            (time.monotonic() - context_began) * 1000)
         from .diagnostic_replay_contract import freeze_payload, ACCOUNT_CONTEXT_COPY_BYTES
         frozen_context = freeze_payload(context, maximum_bytes=ACCOUNT_CONTEXT_COPY_BYTES)
         # Snapshot preparation must not consume the requested input duration or
@@ -581,7 +602,7 @@ def emit(trace_id: str | None, event_type: str, fields: dict) -> None:
         operation = fields.get('operation_id') if event_type == 'operation_end' else fields.get('input_operation_id')
         closing_receipt = (_owned_input_capture(session)
                            and operation in _ACTIVE_OPERATIONS
-                           and event_type in {'operation_end', 'call_start', 'call_end'}
+                           and event_type in {'operation_end', 'call_start', 'call_end', 'top20_display_environment'}
                            and session['state'] in {'stopping', 'awaiting_persistence'} and not _ABORT.is_set())
         if session['state'] != 'running' and not closing_receipt:
             return
@@ -1084,7 +1105,7 @@ def recorded_top20_window_frontier(trace_id: str, *, component: str,
         kind, at = row.get("event_type"), row.get("mono_ns")
         keep = ((kind == "top20_delivery" and row.get("producer_component") == component
                  and (row.get("delivery_id") in delivery_ids or type(at) is int and at < end_ns))
-                or (kind in {"operation_start", "operation_end"} and row.get("operation_id") in operation_ids)
+                or (kind in {"operation_start", "operation_end", "top20_display_environment"} and row.get("operation_id") in operation_ids)
                 or (kind == "collector_input" and (row.get("input_id") in parent_ids
                     or row.get("input_kind") == "initial_state" and row.get("producer_component") in source_components
                     and type(at) is int and at < end_ns))
@@ -1509,6 +1530,8 @@ def _recorded_store_window(trace_id, *, window_start_seconds, window_end_seconds
                 raise ValueError('recorded_operation_pair_invalid')
             ends.add(identifier)
             retain(row, size)
+        elif kind == 'top20_display_environment' and row.get('operation_id') in selected_ids:
+            retain(row, size)
         elif kind in {'call_start', 'call_end'} and row.get('input_operation_id') in selected_ids:
             call_id = row.get('call_id')
             if type(call_id) is not str or not call_id:
@@ -1765,10 +1788,12 @@ def _drain(session: dict, run_lock) -> None:
             if not _STOP.is_set() and not high_water and not pending and time.monotonic() < next_flush:
                 continue
             next_flush = time.monotonic() + 5
-            if not pending:
+            if not pending or session.get('persist_at') is not None:
                 if session.get('persist_at') is not None:
                     # Only this worker owns block cursors. Decode outside the admission lock.
-                    metadata_bytes = 0
+                    # Refill the uncommitted suffix before starting another chunk.
+                    # Its metadata still counts against the same bounded pending budget.
+                    metadata_bytes = sum(row.payload_offset - row.offset for row in pending)
                     for segment in _PACKED:
                         while len(pending) < 4096 and metadata_bytes < 8 * 1024 * 1024:
                             row = segment.take()
@@ -1901,6 +1926,12 @@ def _drain(session: dict, run_lock) -> None:
                     session["pending_events"] = len(pending)
                     session["written"] += count
                     session["bytes_written"] = chunk_bytes_written + blob_bytes
+                    drained = (_STOP.is_set() and not pending and not _QUEUE
+                               and not _PACKED and not session["copy_reserved_bytes"])
+                if session.get('persist_at') is not None and drained:
+                    # No next batch needs backoff/checkpointing. The final manifest
+                    # below must still synchronize before publishing completion.
+                    break
                 # During deferred persistence, avoid rewriting an ever-growing
                 # blob index for each small chunk. Only durable chunks are named.
                 if session.get('persist_at') is None or time.monotonic() >= next_manifest:

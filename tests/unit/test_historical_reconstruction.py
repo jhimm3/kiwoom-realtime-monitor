@@ -6,7 +6,9 @@ import tempfile
 import unittest
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from unittest.mock import patch, Mock
+from urllib.parse import urlsplit, unquote
 
 from kiwoom_monitor.infrastructure.historical_backfill import initialize_probe_database
 from kiwoom_monitor.infrastructure.historical_reconstruction import (
@@ -15,12 +17,85 @@ from kiwoom_monitor.infrastructure.historical_reconstruction import (
     export_historical_reconstruction,
     load_historical_reconstruction,
     write_historical_research_input,
+    _open_readonly,
 )
 from kiwoom_monitor.infrastructure.research_data_source import load_frozen_research_export
 from kiwoom_monitor.application.research_replay import replay_krx_minute_bars
 
 
 class HistoricalReconstructionTests(unittest.TestCase):
+    def test_unc_readonly_uri_has_no_remote_authority_and_preserves_immutable_choice(self):
+        path = PureWindowsPath(r"\\192.168.0.5\share\자료 #100%.sqlite3")
+        for immutable in (False, True):
+            connection = Mock()
+            with patch("kiwoom_monitor.infrastructure.historical_reconstruction.sqlite3.connect", return_value=connection) as connect:
+                self.assertIs(connection, _open_readonly(path, immutable=immutable))
+            uri = connect.call_args.args[0]
+            self.assertEqual("", urlsplit(uri).netloc)
+            self.assertEqual(path.as_posix(), unquote(urlsplit(uri).path))
+            self.assertIn("mode=ro", uri)
+            self.assertEqual(immutable, "immutable=1" in uri)
+            self.assertEqual({"uri": True, "timeout": 30}, connect.call_args.kwargs)
+            connection.execute.assert_called_once_with("PRAGMA query_only=ON")
+
+    def test_special_filename_reader_preserves_data_and_refuses_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "자료 #100%.sqlite3"
+            with closing(sqlite3.connect(path)) as writer:
+                writer.execute("CREATE TABLE evidence(value TEXT)")
+                writer.execute("INSERT INTO evidence VALUES ('original')")
+                writer.commit()
+            before = path.read_bytes()
+            with closing(_open_readonly(path, immutable=False)) as reader:
+                self.assertEqual(("original",), reader.execute("SELECT value FROM evidence").fetchone())
+                with self.assertRaises(sqlite3.OperationalError):
+                    reader.execute("INSERT INTO evidence VALUES ('changed')")
+            self.assertEqual(before, path.read_bytes())
+            self.assertEqual([path], list(Path(directory).iterdir()))
+
+    def test_published_wal_mode_snapshot_does_not_create_sidecars_with_immutable_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "published.sqlite3"
+            with closing(sqlite3.connect(path)) as writer:
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute("CREATE TABLE evidence(value TEXT)")
+                writer.execute("INSERT INTO evidence VALUES ('checkpointed')")
+                writer.commit()
+            self.assertEqual([path], list(Path(directory).iterdir()))
+            before = path.read_bytes()
+            with closing(_open_readonly(path, immutable=True)) as reader:
+                self.assertEqual(("checkpointed",), reader.execute("SELECT value FROM evidence").fetchone())
+                with self.assertRaises(sqlite3.OperationalError):
+                    reader.execute("DELETE FROM evidence")
+            self.assertEqual(before, path.read_bytes())
+            self.assertEqual([path], list(Path(directory).iterdir()))
+
+    def test_immutable_export_rejects_pending_sidecar_before_opening_either_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate, intelligence = root / "candidate.sqlite3", root / "intelligence.sqlite3"
+            candidate.touch()
+            intelligence.touch()
+            sidecar = Path(str(intelligence) + "-wal")
+            sidecar.write_bytes(b"pending data must be preserved")
+            with patch("kiwoom_monitor.infrastructure.historical_reconstruction._open_readonly", side_effect=AssertionError("no connection")):
+                with self.assertRaisesRegex(ValueError, "must not have WAL or SHM"):
+                    export_historical_reconstruction(candidate, intelligence, root / "output",
+                        dates=("2024-09-02",), intelligence_immutable=True)
+            self.assertEqual(b"pending data must be preserved", sidecar.read_bytes())
+            self.assertFalse((root / "output").exists())
+
+    def test_immutable_export_flag_requires_explicit_boolean(self):
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            export_historical_reconstruction(Path("missing"), Path("missing"), Path("output"),
+                dates=("2024-09-02",), intelligence_immutable="true")
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            export_historical_reconstruction(Path("missing"), Path("missing"), Path("output"),
+                dates=("2024-09-02",), strategy_outcomes_only="true")
+        with self.assertRaisesRegex(ValueError, "later outcome_end_date"):
+            export_historical_reconstruction(Path("missing"), Path("missing"), Path("output"),
+                dates=("2024-09-02",), strategy_outcomes_only=True)
+
     def test_delayed_session_1530_is_continuous_and_1630_is_auction(self) -> None:
         case_date = "2025-11-12"
         records = [{"kind": "historical_candidate", "revision_id": "candidate",
@@ -206,11 +281,36 @@ class HistoricalReconstructionTests(unittest.TestCase):
                     ("naver_historical_search", "001", "1", "005930", "2024-01-02",
                      "삼성전자", 1, 1, "2026-09-22T00:00:00+00:00"),
                 )
+                # A day with only an unsupported interval used to enter the date
+                # scan, but never contributed an exported bar.
+                connection.execute(
+                    "INSERT INTO market_bars VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    ("daishin_creon", "005930", "K", "regular", 900, "raw",
+                     "2024-01-03T09:15:00+09:00", "interval_end", 20240103, 915,
+                     200, 210, 190, 205, 1000, 200000,
+                     "2026-09-22T02:00:00+00:00", "2026-09-22T02:00:00+00:00"),
+                )
             output = root / "export"
             manifest = export_historical_reconstruction(
                 candidate, intelligence, output, dates=("2024-01-02",),
                 created_at=datetime(2026, 9, 22, 3, tzinfo=UTC),
+                outcome_end_date="2024-01-03",
             )
+            original_connect = sqlite3.connect
+            class LegacyDateConnection(sqlite3.Connection):
+                def execute(self, sql, parameters=()):
+                    if sql.startswith("SELECT DISTINCT substr(bar_time,1,10)"):
+                        sql = sql.replace("AND interval_seconds IN (60,300) ", "")
+                    return super().execute(sql, parameters)
+            def legacy_connect(*args, **kwargs):
+                return original_connect(*args, **kwargs, factory=LegacyDateConnection)
+            with patch("kiwoom_monitor.infrastructure.historical_reconstruction.sqlite3.connect", side_effect=legacy_connect):
+                legacy = export_historical_reconstruction(
+                    candidate, intelligence, root / "legacy-export", dates=("2024-01-02",),
+                    created_at=datetime(2026, 9, 22, 3, tzinfo=UTC), outcome_end_date="2024-01-03",
+                )
+            self.assertEqual(legacy, manifest)
+            self.assertEqual((root / "legacy-export" / "records.jsonl").read_bytes(), (output / "records.jsonl").read_bytes())
             dataset = load_historical_reconstruction(output)
 
             self.assertTrue(manifest["population"]["not_contemporaneous_top20"])
@@ -228,6 +328,39 @@ class HistoricalReconstructionTests(unittest.TestCase):
                 {"published_at_found": 1},
                 manifest["news_quality"]["article_fetch_status_counts"],
             )
+            # The bounded strategy export must preserve exactly the real outcome rows.
+            with closing(sqlite3.connect(intelligence)) as connection, connection:
+                for minute in (901, 902):
+                    connection.execute("INSERT INTO market_bars VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+                        "daishin_creon", "005930", "K", "regular", 60, "raw",
+                        f"2024-01-03T09:0{minute - 900}:00+09:00", "interval_end", 20240103, minute,
+                        100, 101, 99, 100, 100, 10000, "2026-09-22T02:00:00+00:00", "2026-09-22T02:00:00+00:00"))
+            before = (candidate.read_bytes(), intelligence.read_bytes())
+            full = root / "full-outcomes"
+            limited = root / "only-outcomes"
+            full_manifest = export_historical_reconstruction(candidate, intelligence, full,
+                dates=("2024-01-02",), outcome_end_date="2024-01-03", created_at=datetime(2026, 9, 22, 3, tzinfo=UTC))
+            class NoNewsConnection(sqlite3.Connection):
+                def execute(self, sql, parameters=()):
+                    if "news_search_observations" in sql or "news_articles" in sql:
+                        raise AssertionError("strategy export cannot query news")
+                    return super().execute(sql, parameters)
+            def no_news_connect(*args, **kwargs):
+                return original_connect(*args, **kwargs, factory=NoNewsConnection)
+            with patch("kiwoom_monitor.infrastructure.historical_reconstruction.sqlite3.connect", side_effect=no_news_connect):
+                limited_manifest = export_historical_reconstruction(candidate, intelligence, limited,
+                    dates=("2024-01-02",), outcome_end_date="2024-01-03",
+                    created_at=datetime(2026, 9, 22, 3, tzinfo=UTC), strategy_outcomes_only=True)
+            full_data, limited_data = load_historical_reconstruction(full), load_historical_reconstruction(limited)
+            expected = [row for row in full_data.records if row["kind"] == "historical_candidate" or
+                        row["kind"] == "historical_market_bar" and row["payload"]["phase"] == "outcome"]
+            clean = lambda rows: [{key: value for key, value in row.items() if key != "ordinal"} for row in rows]
+            self.assertEqual(clean(expected), clean(limited_data.records))
+            self.assertEqual(2, len(limited_data.records_of_kind("historical_market_bar")))
+            self.assertEqual((), limited_data.records_of_kind("historical_news_evidence"))
+            self.assertNotIn("export_scope", full_manifest)
+            self.assertEqual({"market_bars": "strictly_after_selection_date", "news_included": False}, limited_manifest["export_scope"])
+            self.assertEqual(before, (candidate.read_bytes(), intelligence.read_bytes()))
 
     def test_loader_rejects_modified_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

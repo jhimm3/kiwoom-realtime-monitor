@@ -231,15 +231,20 @@ class ParallelValidationClient:
     def load_stored_top20_index(self, trading_date: str):
         return self._stored_primary("load_stored_top20_index", trading_date)
 
-    def load_stored_top20_statistics(self, start_date: str, end_date: str):
-        return self._stored_primary("load_stored_top20_statistics", start_date, end_date)
+    def load_stored_top20_series(self, trading_date: str):
+        return self._stored_primary("load_stored_top20_series", trading_date)
+
+    def load_stored_top20_statistics(self, start_date: str, end_date: str, *, basis: str = "realtime"):
+        if basis == "realtime":
+            return self._stored_primary("load_stored_top20_statistics", start_date, end_date)
+        return self._stored_primary("load_stored_top20_statistics", start_date, end_date, basis=basis)
 
     def load_stored_market_caps(self, codes: tuple[str, ...]):
         return self._stored_primary("load_stored_market_caps", codes)
 
-    def _stored_primary(self, method: str, *args):
+    def _stored_primary(self, method: str, *args, **kwargs):
         try:
-            return getattr(self._primary, method)(*args)
+            return getattr(self._primary, method)(*args, **kwargs)
         except CentralServerUnavailable:
             if not self._fallback_on_unavailable:
                 raise

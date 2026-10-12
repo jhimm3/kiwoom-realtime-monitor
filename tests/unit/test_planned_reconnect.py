@@ -118,30 +118,45 @@ class PlannedReconnectCollectorTests(unittest.IsolatedAsyncioTestCase):
         assertion = self
 
         class Socket:
-            reads = 0
-            async def send(self, raw): pass
-            async def recv(self):
-                nonlocal finished
-                self.reads += 1
-                if self.reads == 1: return json.dumps({"return_code": 0})
-                if self.reads == 3:
-                    assertion.assertTrue(collector.credential_connection_status()["planned_reconnect"])
+            def __init__(self):
+                self.responses = asyncio.Queue()
+                self.registrations = 0
+
+            async def send(self, raw):
+                packet = json.loads(raw)
+                if packet['trnm'] == 'REG':
+                    self.registrations += 1
+                    assertion.assertTrue(collector.credential_connection_status()['planned_reconnect'])
                     assertion.assertFalse(hub.upstream_ready)
-                if self.reads in (2, 3): return json.dumps({"trnm": "REG", "return_code": 0})
-                assertion.assertTrue(hub.upstream_ready)
-                assertion.assertFalse(collector.credential_connection_status()["planned_reconnect"])
-                finished = True
-                return json.dumps({"trnm": "REAL", "data": [{"type": "0B", "item": "005930",
-                    "values": {"20": "100030", "10": "100", "13": "10000", "15": "3"}}]})
+                self.responses.put_nowait({'trnm': packet['trnm'], 'return_code': 0})
+                if self.registrations == 2:
+                    self.responses.put_nowait({'trnm': 'REAL', 'data': [{'type': '0B', 'item': '005930',
+                        'values': {'20': '100030', '10': '100', '13': '10000', '15': '3'}}]})
+
+            async def recv(self):
+                return json.dumps(await self.responses.get())
+
             async def __aenter__(self): return self
             async def __aexit__(self, *args): pass
+
+        native_publish = collector._publish_parsed
+
+        def publish(message):
+            nonlocal finished
+            if message.get('trnm') == 'REAL':
+                assertion.assertTrue(hub.upstream_ready)
+                assertion.assertFalse(collector.credential_connection_status()['planned_reconnect'])
+            native_publish(message)
+            if message.get('trnm') == 'REAL':
+                finished = True
 
         groups = {"1000": [{"item": ["005930"], "type": ["0B"]}],
                   "1001": [{"item": ["005930"], "type": ["0w"]}]}
         with patch("kiwoom_monitor.central_server.realtime_collector.connect", return_value=Socket()), \
-             patch.object(collector, "_send_subscription", new=AsyncMock(return_value=groups)), \
+             patch.object(collector, "_subscription_groups", return_value=groups), \
+             patch.object(collector, "_publish_parsed", side_effect=publish), \
              patch.object(collector, "_market_session", side_effect=lambda: None if finished else "KRX"):
-            await collector._receive("KRX")
+            await asyncio.wait_for(collector._receive("KRX"), timeout=5)
         document = collector.credential_connection_status()
         self.assertEqual("registered", document["outcome"])
         self.assertIsNotNone(document["first_trade_at"])

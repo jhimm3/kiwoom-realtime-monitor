@@ -498,6 +498,15 @@ class MinuteTradeValueAggregator:
             key: value for key, value in self._estimated_since_cumulative.items() if key[0] not in selected
         }
 
+    def reset_cumulative_sources(self, sources: tuple[tuple[str, str], ...]) -> None:
+        """재활성화된 venue만 기준점을 새로 잡고 유지 source는 보존한다."""
+        selected = set(sources)
+        for values in (self._last_cumulative_volume, self._last_cumulative_trade_value,
+                       self._estimated_since_cumulative):
+            for key in tuple(values):
+                if key in selected:
+                    values.pop(key, None)
+
 
 def _trade_minute(tick: TradeTick, observed_at: datetime) -> datetime:
     """수신 지연과 관계없이 0B 체결시각으로 1분봉을 구분한다."""

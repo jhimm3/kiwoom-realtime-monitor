@@ -238,7 +238,7 @@ encoded8,247,904bytes/8blocks/논리1건으로 복원했다. 최대 block1MiB, r
 원본 DB 변경0이다. 계좌 native 복구/스냅샷 결과·내용·revision/lease 거부는 SQLite에서
 비교했으며, PostgreSQL readonly MVCC/원자 rollback 및 full scheduler gate는 아직 남았다.
 NAS 배포·월요일 예약은 하지 않았다. 아래2~5단계는 계속 부분 구현/미완료다.
-사용자 모델 지정은 Luna 제외, Sol은 실제GPT-6.1 Sol이다.
+당시 사용자 모델 지정은 Luna 제외였고 실제 Sol은 GPT-6.1 Sol이었다. 후속 모델 선택은 2026-10-13 개정 [현행 정책](MODEL_HANDOFF_POLICY.md)을 따른다. 현재 Luna는 제한적 저위험 작업에만 허용하며 이 문서의 DB·계좌·Replay 구현/정합성 검증을 Luna 작업으로 분류하지 않는다.
 
 ### 확인한 경계와 선택
 

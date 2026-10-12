@@ -71,8 +71,6 @@ class CapturingCacheWriter(QObject):
     history_failed = Signal(str, str)
     history_quality_saved = Signal(str, object)
     gap_failed = Signal(object, str)
-    comparison_saved = Signal(int)
-    comparison_failed = Signal(str)
     daily_high_failed = Signal(str, str)
     fundamentals_failed = Signal(str, str)
 
@@ -81,7 +79,6 @@ class CapturingCacheWriter(QObject):
         self.enqueue_price_cache = Mock()
         self.enqueue_minute_bars = Mock()
         self.enqueue_gap_minutes = Mock()
-        self.enqueue_trade_comparisons = Mock()
         self.start = Mock()
 
     def isRunning(self):
@@ -178,8 +175,7 @@ class AppControllerTests(unittest.TestCase):
             flush_partial_top20=lambda: events.append("top20"),
             stop_auxiliaries=lambda: events.append("auxiliaries"),
         ))
-        for name, label in (("flush_price_cache", "prices"), ("flush_minute_cache", "minutes"),
-                            ("flush_comparisons", "comparisons")):
+        for name, label in (("flush_price_cache", "prices"), ("flush_minute_cache", "minutes")):
             original = getattr(controller, name)
             setattr(controller, name, lambda original=original, label=label: (events.append(label), original()))
         controller.shutdown_ready.connect(lambda: events.append("ready"))
@@ -229,11 +225,10 @@ class AppControllerTests(unittest.TestCase):
             controller = self.controller([], monitor_database_path=Path("unused.sqlite3"),
                                          minute_bar_repository=Mock(),
                                          ranking_loader=SimpleNamespace(server_now=lambda: now))
-        self.assertEqual((1000, 1000, 500), (
+        self.assertEqual((1000, 1000), (
             controller.price_cache_timer.interval(), controller.minute_cache_timer.interval(),
-            controller.comparison_timer.interval(),
         ))
-        for timer in (controller.price_cache_timer, controller.minute_cache_timer, controller.comparison_timer):
+        for timer in (controller.price_cache_timer, controller.minute_cache_timer):
             self.assertIs(controller, timer.parent())
             timer.setInterval(20)
         first = MinuteOhlcv(now, 100, 101, 99, 100, 1)
@@ -245,23 +240,17 @@ class AppControllerTests(unittest.TestCase):
         controller.queue_minute_bar("005930", latest)
         for value, trade in ((2500., 10.), (2510., 11.), (2495., 12.)):
             controller.queue_market_index("KOSPI", now, value, trade)
-        controller.queue_comparison("005930", (("20261006", 1.),))
-        controller.queue_comparison("005930", (("20261006", 2.),))
         self.assertFalse(writer.enqueue_price_cache.called)
         self.assertFalse(writer.enqueue_minute_bars.called)
-        self.wait_until(lambda: writer.enqueue_trade_comparisons.called
-                        and writer.enqueue_minute_bars.called and writer.enqueue_price_cache.called)
+        self.wait_until(lambda: writer.enqueue_minute_bars.called and writer.enqueue_price_cache.called)
         writer.enqueue_price_cache.assert_called_once_with(
             {"005930": 103, "000660": 90}, {"005930": 103}, {"005930": 202.}, now.date(),
         )
         writer.enqueue_minute_bars.assert_called_once_with(
             {("005930", now): latest}, {("KOSPI", now): (2500., 2510., 2495., 2495., 12.)},
         )
-        writer.enqueue_trade_comparisons.assert_called_once_with(
-            {"005930": (("20261006", 2.),)}, now.date(),
-        )
         self.assertFalse(controller.pending_prices or controller.pending_highs or controller.pending_market_caps)
-        self.assertFalse(controller.pending_minutes or controller.pending_market_minutes or controller.pending_comparisons)
+        self.assertFalse(controller.pending_minutes or controller.pending_market_minutes)
 
     def test_queued_writer_failures_preserve_newer_values_and_close_does_not_restart_retry(self):
         now = datetime(2026, 10, 6, 10, 0)
@@ -558,7 +547,7 @@ class AppControllerTests(unittest.TestCase):
             cache.return_value.start.assert_called_once()
             entry.return_value.start.assert_called_once()
 
-    def test_flush_comparison_before_drain_and_timeout_prevents_accept(self):
+    def test_flush_caches_before_drain_and_timeout_prevents_accept(self):
         events = []
         controller = self.controller(events)
         writer = FakeWriter(events, completes=False)
@@ -566,14 +555,15 @@ class AppControllerTests(unittest.TestCase):
         self.assertFalse(controller.request_close())
         self.assertFalse(controller.request_close())
         self.assertTrue(controller.closing)
-        self.assertLess(events.index("comparisons"), events.index("cache_drain"))
+        self.assertLess(events.index("prices"), events.index("cache_drain"))
+        self.assertLess(events.index("minutes"), events.index("cache_drain"))
         self.assertNotIn("auxiliaries", events)
         controller._advance_shutdown()
         self.assertNotIn("ready", events)
         writer.running = False
         self.wait_until(lambda: "ready" in events)
         self.assertTrue(controller.request_close())
-        for name in ("view", "backup", "comparisons", "cache_drain", "auxiliaries", "ready"):
+        for name in ("view", "backup", "prices", "minutes", "cache_drain", "auxiliaries", "ready"):
             self.assertEqual(1, events.count(name), name)
 
     def test_late_producer_result_is_delivered_before_writer_is_stopped(self):
@@ -611,7 +601,7 @@ class AppControllerTests(unittest.TestCase):
         thread.start()
         self.assertTrue(thread.started_run.wait(1))
         self.assertFalse(controller.request_close())
-        self.assertNotIn("comparisons", events)
+        self.assertNotIn("minutes", events)
         thread.release.set()
         self.wait_until(lambda: "ready" in events)
 
@@ -635,7 +625,7 @@ class AppControllerTests(unittest.TestCase):
         second.running = False
         self.wait_until(lambda: "ready" in events)
 
-    def test_main_window_close_saves_final_prices_and_comparison_before_real_writer_exit(self):
+    def test_main_window_close_saves_final_prices_before_real_writer_exit(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
             database = Database(path)
@@ -646,19 +636,14 @@ class AppControllerTests(unittest.TestCase):
             window = MainWindow(database.settings, monitor_database_path=path,
                                 minute_bar_repository=MinuteBarRepository(path))
             self.windows.append(window)
-            events = []
             window._app_controller.pending_prices = {"005930": 71200}
-            window._app_controller.pending_comparisons = {"005930": (("20261001", 1.),)}
             writer = window._market_cache_writer
-            writer.comparison_saved.connect(lambda count: events.append(count))
-            with patch("kiwoom_monitor.infrastructure.persistence.minute_bar_repository.MinuteBarRepository.update_comparison_reports", return_value=1) as save:
-                close = QCloseEvent()
-                window.closeEvent(close)
-                self.assertFalse(close.isAccepted())
-                self.wait_until(lambda: window._app_controller.request_close())
-                self.assertFalse(writer.isRunning())
-                save.assert_called_once()
-                self.assertEqual([1], events)
+            close = QCloseEvent()
+            window.closeEvent(close)
+            self.assertFalse(close.isAccepted())
+            self.wait_until(lambda: window._app_controller.request_close())
+            self.assertFalse(writer.isRunning())
+            self.assertFalse((path.parent / "logs" / "developer_checks").exists())
             with closing(sqlite3.connect(path)) as connection:
                 self.assertEqual(71200, connection.execute("SELECT last_price FROM stocks WHERE code='005930'").fetchone()[0])
             self.assertFalse(window._journal_news_timer.isActive())

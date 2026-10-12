@@ -44,28 +44,7 @@ def _top20_statistics_document(
             for index, amount in enumerate(amounts):
                 daily_values[day][index] += amount
 
-    market_values: dict[str, dict[str, float]] = defaultdict(dict)
-    for subject, raw_payload in market_rows:
-        subject_text = str(subject)
-        raw_day, separator, market = subject_text.partition(":")
-        if not separator or market not in {"kospi", "kosdaq"}:
-            continue
-        payload = raw_payload if isinstance(raw_payload, dict) else json.loads(str(raw_payload))
-        daily = payload.get("daily") if isinstance(payload, dict) else None
-        if not isinstance(daily, list):
-            continue
-        record = next(
-            (value for value in daily if isinstance(value, dict) and str(value.get("dt", "")) == raw_day),
-            None,
-        )
-        if record is None:
-            continue
-        try:
-            market_values[f"{raw_day[:4]}-{raw_day[4:6]}-{raw_day[6:8]}"][market] = (
-                abs(float(str(record.get("trde_prica", 0)).replace(",", ""))) / 100
-            )
-        except (TypeError, ValueError):
-            continue
+    market_values = _top20_market_values(market_rows)
 
     hourly = [
         {
@@ -90,8 +69,8 @@ def _top20_statistics_document(
     return {"hourly": hourly, "comparisons": comparisons}
 
 
-def _top20_statistics_days(start_date: str, end_date: str) -> list[str]:
-    first, last = date.fromisoformat(start_date), min(date.fromisoformat(end_date), _top20_today())
+def _top20_statistics_days(start_date: str, end_date: str, *, today: date | None = None) -> list[str]:
+    first, last = date.fromisoformat(start_date), min(date.fromisoformat(end_date), _top20_today() if today is None else today)
     if last < first:
         return []
     return [(first + timedelta(days=offset)).isoformat() for offset in range((last - first).days + 1)]
@@ -101,7 +80,8 @@ def _top20_today() -> date:
     return datetime.now(ZoneInfo("Asia/Seoul")).date()
 
 
-def _top20_statistics_merge(daily: dict[str, dict[str, object]], days: list[str]) -> dict[str, object]:
+def _top20_statistics_merge(daily: dict[str, dict[str, object]], days: list[str], *,
+                            include_sample_count: bool = False) -> dict[str, object]:
     sums: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
     comparisons: list[dict[str, object]] = []
     for day in days:
@@ -114,7 +94,8 @@ def _top20_statistics_merge(daily: dict[str, dict[str, object]], days: list[str]
         comparisons.extend(document.get("comparisons", []))
     return {
         "hourly": [
-            {"hour": hour, "average_eok": values[0] / values[1], "day_count": int(values[2])}
+            {"hour": hour, "average_eok": values[0] / values[1], "day_count": int(values[2]),
+             **({"sample_count": int(values[1])} if include_sample_count else {})}
             for hour, values in sorted(sums.items(), key=lambda item: item[1][0] / item[1][1], reverse=True)
             if values[1] > 0
         ],
@@ -141,6 +122,8 @@ def _top20_statistics_group_days(
 
 def _top20_statistics_cache_day(kind: str, subject: str) -> str:
     if kind == "top20_index":
+        return subject[:10]
+    if kind == "top20_index_reconciled":
         return subject[:10]
     if kind == "market_index_chart" and len(subject) >= 8:
         raw = subject[:8]
@@ -244,3 +227,30 @@ class PostgresTop20StatisticsStoreMixin:
                     [(day, day, time(), json.dumps(computed[day], ensure_ascii=False)) for day in missing],
                 )
         return _top20_statistics_merge(cached, days)
+
+
+def _top20_market_values(market_rows: list[tuple[object, object]]) -> dict[str, dict[str, float]]:
+    market_values: dict[str, dict[str, float]] = defaultdict(dict)
+    for subject, raw_payload in market_rows:
+        subject_text = str(subject)
+        raw_day, separator, market = subject_text.partition(":")
+        if not separator or market not in {"kospi", "kosdaq"}:
+            continue
+        payload = raw_payload if isinstance(raw_payload, dict) else json.loads(str(raw_payload))
+        daily = payload.get("daily") if isinstance(payload, dict) else None
+        if not isinstance(daily, list):
+            continue
+        record = next(
+            (value for value in daily if isinstance(value, dict) and str(value.get("dt", "")) == raw_day),
+            None,
+        )
+        if record is None:
+            continue
+        try:
+            market_values[f"{raw_day[:4]}-{raw_day[4:6]}-{raw_day[6:8]}"][market] = (
+                abs(float(str(record.get("trde_prica", 0)).replace(",", ""))) / 100
+            )
+        except (TypeError, ValueError):
+            continue
+
+    return market_values

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging.config
+from logging.handlers import TimedRotatingFileHandler
+import re
 from datetime import time as datetime_time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +19,34 @@ class KSTFormatter(logging.Formatter):
         timestamp = datetime.fromtimestamp(record.created, timezone.utc).astimezone(self._timezone)
         rendered = timestamp.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
         return f"{rendered},{int(record.msecs):03d} KST"
+
+
+class KSTDailyFileHandler(TimedRotatingFileHandler):
+    """Name midnight archives by KST date and preserve pre-existing archives."""
+
+    def rotation_filename(self, default_name: str) -> str:
+        completed_day = datetime.fromtimestamp(
+            self.rolloverAt - 1, timezone.utc,
+        ).astimezone(KSTFormatter._timezone).strftime("%Y-%m-%d")
+        base = f"{self.baseFilename}.{completed_day}"
+        candidate, part = Path(base), 0
+        while candidate.exists():
+            part += 1
+            candidate = Path(f"{base}.{part}")
+        return str(candidate)
+
+    def getFilesToDelete(self) -> list[str]:
+        if self.backupCount <= 0:
+            return []
+        base = Path(self.baseFilename)
+        pattern = re.compile(re.escape(base.name) + r"\.(\d{4}-\d{2}-\d{2})(?:\.\d+)?\Z")
+        archives: dict[str, list[str]] = {}
+        for path in base.parent.iterdir():
+            match = pattern.fullmatch(path.name)
+            if match and path.is_file():
+                archives.setdefault(match[1], []).append(str(path))
+        expired_days = sorted(archives)[:-self.backupCount]
+        return sorted(path for day in expired_days for path in archives[day])
 
 
 def configure_server_logging(log_dir: Path, *, retention_days: int = 14) -> Path:
@@ -40,10 +70,10 @@ def _logging_config(log_path: Path, *, retention_days: int) -> dict[str, Any]:
         },
         "handlers": {
             "daily_file": {
-                "class": "logging.handlers.TimedRotatingFileHandler",
+                "class": "kiwoom_monitor.central_server.server_logging.KSTDailyFileHandler",
                 "filename": str(log_path),
                 "when": "midnight",
-                # 15:00 UTC is midnight in Korea; suffixes remain the completed KST date.
+                # UTC scheduling is host-independent; the handler names archives in KST.
                 "atTime": datetime_time(15, 0),
                 "utc": True,
                 "interval": 1,

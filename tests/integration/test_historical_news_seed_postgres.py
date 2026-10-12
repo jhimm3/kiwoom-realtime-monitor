@@ -88,6 +88,26 @@ class HistoricalNewsSeedPostgresTests(unittest.TestCase):
         finally:
             destination.close()
 
+    def test_market_scope_and_nonhistorical_parent_are_preserved(self) -> None:
+        with self.admin.cursor() as cursor:
+            cursor.execute(f"INSERT INTO {self.schema}.central_news_article_revisions "
+                           "(article_revision_id,collection_scope,revision_of) VALUES "
+                           "('market','historical_market_pc_backfill','parent'),"
+                           "('parent','live_market',NULL)")
+        destination=sqlite3.connect(':memory:')
+        try:
+            destination.execute('CREATE TABLE seed_rows(table_name TEXT,row_key TEXT,payload_json TEXT,payload_hash TEXT,role TEXT,PRIMARY KEY(table_name,row_key))')
+            with psycopg.connect(self.url,connect_timeout=5,options=f'-c search_path={self.schema}') as source:
+                source.read_only=True
+                source.isolation_level=IsolationLevel.REPEATABLE_READ
+                result=SeedExport(source,destination,max_rows=100).run()
+            self.assertEqual(2,result['owned_articles'])
+            roles=dict(destination.execute("SELECT row_key,role FROM seed_rows WHERE table_name='central_news_article_revisions'"))
+            self.assertEqual('historical',roles['["market"]'])
+            self.assertEqual('support_only',roles['["parent"]'])
+        finally:
+            destination.close()
+
 
 if __name__ == "__main__":
     unittest.main()

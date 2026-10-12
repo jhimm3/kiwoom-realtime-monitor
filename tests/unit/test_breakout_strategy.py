@@ -3,6 +3,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 import hashlib
+import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -243,6 +245,59 @@ class BreakoutStrategyTests(unittest.TestCase):
             "posthoc_candidate_population_not_contemporaneous_top20",
             report["limitations"],
         )
+
+    def test_sparse_historical_days_keep_unfilled_exit_and_do_not_trade_new_cohort(self) -> None:
+        from datetime import date
+        from test_research_bundle_execution import rows_for
+        from scripts.summarize_historical_baseline_results import position_observation_summary
+        observations = []
+        for day, code, late in ((date(2026, 9, 14), "005930", True), (date(2026, 9, 15), "000660", False)):
+            rows = rows_for(day, 11 if late else 8)
+            for row in rows:
+                if row["kind"] == "top20_membership":
+                    row["kind"] = "historical_candidate_population"
+                    row["payload"]["codes"] = [code]
+                else:
+                    row["subject"] = code + ":KRX"
+                    row["payload"]["code"] = code
+                if late:
+                    offset = timedelta(minutes=370)
+                    for key in ("available_at", "observation_key"):
+                        row[key] = (datetime.fromisoformat(row[key]) + offset).isoformat()
+                    if row["kind"] == "minute_bar":
+                        for key in ("bar_start", "bar_end"):
+                            row["payload"][key] = (datetime.fromisoformat(row["payload"][key]) + offset).isoformat()
+                        if row["payload"]["bar_start"][11:16] == "15:20":
+                            row["payload"]["bar_end"] = "2026-09-14T15:30:00+09:00"
+                            row["available_at"] = "2026-09-14T15:30:02+09:00"
+                observations.append(row)
+        dataset = FrozenResearchDataset({
+            "runtime_input_version": "historical_reconstruction_strategy/v1",
+            "dataset_id": "sparse-cohort-fixture", "revision_count": len(observations),
+            "revision_ids_hash": "fixture-revisions", "schema_version": 3,
+            "not_contemporaneous_top20": True,
+        }, tuple(observations), ())
+        execution = _execution_config()
+        execution = replace(execution, cost_model=replace(execution.cost_model,
+                            valid_from="2026-09-14T00:00:00+09:00", valid_to="2026-09-16T00:00:00+09:00"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = ResearchRepository(root / "research.sqlite3")
+            result = execute_research(dataset, repository, root / "runs", _config(), execution,
+                                      session_profile="krx-regular/v1")
+            events = repository.load_execution_events(result.run_id)
+            decisions = repository.load_evaluations(result.run_id)
+            followup = [row for row in decisions if row["symbol"] == "000660"]
+            self.assertTrue(followup)
+            self.assertTrue(all(row["final_action"] == "HOLD" for row in followup))
+            self.assertTrue(all("different_symbol_position_managed_elsewhere" in row["reasons"] for row in followup))
+            summary = position_observation_summary(events)
+            self.assertEqual("005930", summary["symbol"])
+            self.assertEqual(1, summary["exit_request_count"])
+            self.assertEqual({"session_boundary_before_fill": 1}, summary["exit_censored_reasons"])
+            final = json.loads(result.output_manifest.read_text(encoding="utf-8"))
+            self.assertEqual("005930", final["final_portfolio"]["position"]["symbol"])
+            self.assertFalse(any(event["side"] == "SELL" and event["state"] == "FILLED" for event in events))
 
     def test_disabled_rank_parameters_do_not_change_run_identity(self) -> None:
         manifest = {"dataset_id": "empty", "revision_ids_hash": "zero", "revision_count": 0}

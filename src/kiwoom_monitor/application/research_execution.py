@@ -14,6 +14,9 @@ from kiwoom_monitor.application.breakout_strategy import (
     StrategyRuntimeConfig,
     StrategyDecision,
     StrategyState,
+    regular_session_fill_deadline,
+    regular_session_time_rejection,
+    session_entry_time_rejection,
 )
 from kiwoom_monitor.application.market_session_schedule import (
     KRX_REGULAR_RESEARCH_PROFILE,
@@ -227,7 +230,11 @@ class PaperExecutionEngine:
         if self.portfolio.position is not None and (
             self.portfolio.position.symbol == normalize_stock_code(bar.code)
         ):
-            if self.session_profile is not None and bar.market_phase != MarketPhase.CONTINUOUS.value:
+            deadline_unproven = (self.strategy.session_exit_policy
+                and (regular_session_time_rejection(_aware_datetime(bar.bar_start))
+                     or _aware_datetime(bar.bar_end) >= regular_session_fill_deadline(
+                         _aware_datetime(self.portfolio.position.opened_at))))
+            if deadline_unproven or self.session_profile is not None and bar.market_phase != MarketPhase.CONTINUOUS.value:
                 events.append(self._event(
                     intent_id=self.portfolio.position.entry_intent_id, decision_id="",
                     event_type="RISK_UNSUPPORTED", state="OPEN",
@@ -235,7 +242,8 @@ class PaperExecutionEngine:
                     received_at=bar.available_at, quantity=self.portfolio.position.quantity,
                     price=0, notional=0, commission=0, tax=0, realized=0,
                     source_revision_id=bar.revision_id, optimistic_exit_price=None,
-                    reason="minute_bar_phase_cannot_prove_intrabar_execution_order",
+                    reason=("regular_session_fill_deadline_unproven" if deadline_unproven
+                            else "minute_bar_phase_cannot_prove_intrabar_execution_order"),
                 ))
                 return tuple(events)
             risk_event = self._apply_intrabar_risk(bar)
@@ -259,6 +267,11 @@ class PaperExecutionEngine:
             return (self._notice(decision, side, "ORDER_REJECTED", "position_already_open"),)
         if side == "SELL" and self.portfolio.position is None:
             return (self._notice(decision, side, "ORDER_REJECTED", "position_missing"),)
+        if side == "BUY":
+            reason = session_entry_time_rejection(self.strategy, _aware_datetime(decision.decided_at))
+            if reason:
+                self.strategy_state = StrategyState(emitted_candidate_keys=resulting_state.emitted_candidate_keys)
+                return (self._notice(decision, side, "ORDER_REJECTED", reason),)
         quantity = (
             decision.quantity if side == "BUY" else self.portfolio.position.quantity
         )
@@ -311,6 +324,17 @@ class PaperExecutionEngine:
         ),)
 
     def _pending_bar_rejection(self, pending: PendingOrder, bar: KrxMinuteBarFrame) -> str:
+        if self.strategy.session_exit_policy:
+            bar_start = _aware_datetime(bar.bar_start)
+            if bar_start >= regular_session_fill_deadline(_aware_datetime(pending.submitted_at)):
+                return "regular_session_fill_deadline_passed"
+            reason = regular_session_time_rejection(bar_start)
+            if reason:
+                return reason
+            if pending.side == "BUY":
+                reason = session_entry_time_rejection(self.strategy, bar_start, include_signal_validity=False)
+                if reason:
+                    return reason
         if self.session_profile is None:
             return ""
         submitted = _aware_datetime(pending.submitted_at).astimezone(timezone.utc)

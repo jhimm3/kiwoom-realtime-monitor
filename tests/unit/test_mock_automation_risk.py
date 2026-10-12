@@ -40,7 +40,7 @@ def cost(day, side, gross, total):
 
 
 class MockAutomationRiskTests(unittest.TestCase):
-    def snapshot(self, events, costs, *, positions, observed):
+    def snapshot(self, events, costs, *, positions, observed, cost_query_complete=True):
         recovery = MockAccountRecovery(AccountSnapshot(
             ACCOUNT, 1_000_000, 0, positions, observed,
         ), ())
@@ -48,7 +48,24 @@ class MockAutomationRiskTests(unittest.TestCase):
             recovery, events, costs, (), execution_run_id="run-a", binding_revision=3,
             reconciliation_revision=1, observed_at=observed,
             broker_query_started_at=observed, broker_query_completed_at=observed,
+            cost_query_complete=cost_query_complete,
         )
+
+    def test_failed_cost_query_never_trusts_matching_cached_costs(self):
+        now = datetime(2026, 9, 21, 1, tzinfo=UTC)
+        values = (event(1, "buy", "BUY", 1, 100, now),
+                  event(2, "sell", "SELL", 1, 130, now))
+        cached = (cost(date(2026, 9, 21), "매수", 100, 1),
+                  cost(date(2026, 9, 21), "매도", 130, 2))
+        confirmed = self.snapshot(values, cached, positions={}, observed=now)
+        self.assertEqual(27, confirmed.daily_net_pnl_won)
+        unavailable = self.snapshot(values, cached, positions={}, observed=now,
+                                    cost_query_complete=False)
+        self.assertIsNone(unavailable.daily_net_pnl_won)
+        self.assertIsNone(unavailable.daily_net_pnl_source)
+        self.assertFalse(unavailable.cost_complete)
+        self.assertTrue(unavailable.reconciliation_complete)
+        self.assertEqual(("COST_QUERY_UNAVAILABLE",), unavailable.missing_cost_reasons)
 
     def test_prior_day_fifo_cost_is_carried_into_today_only(self):
         buy_time = datetime(2026, 9, 20, 1, tzinfo=UTC)

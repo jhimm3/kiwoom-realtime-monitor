@@ -433,6 +433,14 @@
       "count": 1,
       "category": "test_integration",
       "reason": "Read-only fixture identity probe after non-root, fixed loopback/port/database/role and 32-hex operator job validation. Context manager closes it; rejects any non-owned job before fixture bootstrap."
+    },
+    {
+      "file": "tests/integration/test_historical_news_seed_postgres.py",
+      "owner": "HistoricalNewsSeedPostgresTests.test_market_scope_and_nonhistorical_parent_are_preserved",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "Read-only repeatable-read seed export connection after setUp verifies the explicit diagnostic database and creates a random fixture schema. Uses only that schema, closes through its context manager, and verifies preservation of historical market rows and their live parent without accessing the operating database."
     }
   ]
 }

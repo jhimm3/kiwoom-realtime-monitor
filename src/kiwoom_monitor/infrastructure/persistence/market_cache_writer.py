@@ -26,8 +26,6 @@ class MarketCacheWriter(QThread):
     history_quality_saved = Signal(str, object)
     gap_failed = Signal(object, str)
     daily_high_failed = Signal(str, str)
-    comparison_saved = Signal(int)
-    comparison_failed = Signal(str)
     fundamentals_failed = Signal(str, str)
 
     def __init__(self, database_path: Path) -> None:
@@ -79,12 +77,6 @@ class MarketCacheWriter(QThread):
         self._queue.put(("fundamentals", code, market_cap_eok,
                          float_ratio_percent, float_shares, upper_limit_price))
 
-    def enqueue_trade_comparisons(
-        self, values: dict[str, tuple[tuple[str, float], ...]], trade_date: date,
-    ) -> None:
-        if values:
-            self._queue.put(("comparison", dict(values), trade_date))
-
     def stop_and_drain(self, timeout_ms: int = 7_000) -> bool:
         self.requestInterruption()
         return self.wait(timeout_ms)
@@ -118,8 +110,6 @@ class MarketCacheWriter(QThread):
                     self.history_quality_saved.emit(job[1], {"generation": job[3], "minutes": committed, "empty": True})
             elif job[0] == "daily_high":
                 self._save_daily_high(stock_repository, daily_repository, job[1], job[2], job[3], job[4])
-            elif job[0] == "comparison":
-                self._save_comparison(minute_repository, job[1], job[2])
             elif job[0] == "fundamentals":
                 self._save_fundamentals(stock_repository, job[1], job[2], job[3], job[4], job[5])
 
@@ -144,17 +134,6 @@ class MarketCacheWriter(QThread):
             daily_repository.upsert_targets(code, targets, trade_date, observed_at=observed_at)
         except Exception as error:
             self.daily_high_failed.emit(code, str(error))
-
-    def _save_comparison(self, repository: MinuteBarRepository,
-                         values: dict[str, tuple[tuple[str, float], ...]],
-                         trade_date: date) -> None:
-        try:
-            count = repository.update_comparison_reports(values, trade_date)
-        except Exception as error:
-            self.comparison_failed.emit(str(error))
-            return
-        if count:
-            self.comparison_saved.emit(count)
 
     def _save_minute(
         self,

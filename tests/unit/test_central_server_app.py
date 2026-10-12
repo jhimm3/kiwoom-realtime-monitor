@@ -54,6 +54,7 @@ DIAGNOSTIC_READ_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_c
 DIAGNOSTIC_CONTROL_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/diagnostic_control_http_v1.json"
 DIAGNOSTIC_RUN_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/diagnostic_runs_http_v1.json"
 REALTIME_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/realtime_asgi_v1.json"
+ADDITIVE_CONTRACT = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/additive_contract_20261013.json"
 LIFESPAN_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/server_lifespan_v1.json"
 LIFESPAN_CASES = (
     [("legacy", ""), ("external-disabled", ""), ("vault", "")]
@@ -2268,6 +2269,15 @@ class CentralServerAppTests(unittest.TestCase):
                 "large_inputs": {"type": "boolean", "title": "Large Inputs", "default": False},
                 "account_inputs": {"type": "boolean", "title": "Account Inputs", "default": False},
             })
+            additions = json.loads(ADDITIVE_CONTRACT.read_text(encoding="utf-8"))
+            case["schema"]["paths"].update(additions["reviewed_additive_paths"])
+            parameters = case["schema"]["paths"]["/api/v1/market/top20-statistics"]["get"]["parameters"]
+            parameters.insert(2, additions["top20_statistics_basis_parameter"])
+            position = case["route_order"].index("/api/v1/news/historical-archive/articles/{article_revision_id}") + 1
+            case["route_order"][position:position] = [
+                "/api/v1/news/historical-archive/v2/search", "/api/v1/news/historical-archive/v2/market"]
+            position = case["route_order"].index("/api/v1/market/top20-statistics")
+            case["route_order"].insert(position, "/api/v1/market/top20-series")
         actual = []
         for configured in (False, True):
             with tempfile.TemporaryDirectory() as directory:
@@ -2311,7 +2321,7 @@ class CentralServerAppTests(unittest.TestCase):
                 "input_version": "account-store-input/v1", "scope": "typed_native_db_arguments",
                 "authority_tokens": "session_hmac_aliases", "native_replay_ready": False,
                 "context_baseline_acceptance": "pending",
-                "context_capture": {"version": "account-context/v2", "copy_limit_bytes": 32 * 1024 * 1024,
+                "context_capture": {"version": "account-context/v4", "copy_limit_bytes": 32 * 1024 * 1024,
                                     "row_limit": 50_000, "source_state_equivalent": False,
                                     "postgres_snapshot": "repeatable_read_read_only"},
             },
@@ -2328,6 +2338,10 @@ class CentralServerAppTests(unittest.TestCase):
                     changed = True
                 if isinstance(body, dict) and "trace_input_capture" in body:
                     body["trace_input_capture"].update(capabilities)
+                    body["trace_input_capture"]["causal_input_versions"].update({
+                        "realtime_lifecycle":"top20-realtime-tape/v2",
+                        "realtime_lifecycle_legacy":"top20-realtime-tape/v1",
+                    })
                     body["server_build"] = create_app.__globals__["SERVER_BUILD"]
                     changed = True
                 if changed:
@@ -2344,6 +2358,22 @@ class CentralServerAppTests(unittest.TestCase):
 
     def test_diagnostic_read_responses_match_pre_extraction_baseline(self):
         expected = json.loads(DIAGNOSTIC_READ_BASELINE.read_text(encoding="utf-8"))["results"]
+        additions = json.loads(ADDITIVE_CONTRACT.read_text(encoding="utf-8"))
+        for cases in expected:
+            for case in cases:
+                body = case["body"]
+                if not isinstance(body, dict) or not isinstance(body.get("writers"), list):
+                    continue
+                writers = body["writers"]
+                for insertion in additions["writer_kind_insertions"]:
+                    writer = next(row for row in writers if row["writer_id"] == insertion["writer_id"])
+                    kinds = writer["common_db_observed_kinds"]
+                    kinds.insert(kinds.index(insertion["after"]) + 1, insertion["value"])
+                position = next(index for index, row in enumerate(writers)
+                                if row["writer_id"] == "dataset.statistics_cache") + 1
+                writers.insert(position, additions["new_writer"])
+                case["headers"]["content-length"] = str(len(json.dumps(
+                    body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")))
         actual = []
         for configured in (False, True):
             with tempfile.TemporaryDirectory() as directory:
@@ -3387,6 +3417,8 @@ class CentralServerAppTests(unittest.TestCase):
             ("POST", "/api/v1/news/stored-page"),
             ("GET", "/api/v1/news/historical-archive/search"),
             ("GET", "/api/v1/news/historical-archive/articles/{article_revision_id}"),
+            ("GET", "/api/v1/news/historical-archive/v2/search"),
+            ("GET", "/api/v1/news/historical-archive/v2/market"),
             ("POST", "/api/v1/news/analyze"),
             ("POST", "/api/v1/news/historical-jobs/claim"),
             ("POST", "/api/v1/news/historical-jobs/complete"),
@@ -3413,6 +3445,7 @@ class CentralServerAppTests(unittest.TestCase):
             ("POST", "/api/v1/mock-automation/stop"),
             ("POST", "/api/v1/mock-automation/resume"),
             ("GET", "/api/v1/market/top20-statistics"),
+            ("GET", "/api/v1/market/top20-series"),
             ("GET", "/api/v1/market/snapshots/{kind}"),
             ("GET", "/api/v1/content/{collection}"),
             ("POST", "/api/v1/content/{collection}"),

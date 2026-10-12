@@ -10,7 +10,7 @@
 | 미완료·운영 확인·사용자 보류 | [남은 작업](OPEN_ITEMS.md) |
 | 제품 방향과 개발 순서 | [개발 로드맵](../FUTURE_DEVELOPMENT_ROADMAP.md) |
 | 시스템 책임과 수정 진입점 | [현재 아키텍처](../ARCHITECTURE_CURRENT.md) · [모듈 지도](../MODULE_MAP.md) |
-| 작업 규칙 | [AGENTS](../AGENTS.md) · [개발 불변 규칙](../DEVELOPMENT_GUARDRAILS.md) · [모델 정책](MODEL_HANDOFF_POLICY.md) |
+| 작업 규칙 | 정본 [AGENTS](../AGENTS.md) · [개발 불변 규칙](../DEVELOPMENT_GUARDRAILS.md) · [모델 정책 요약](MODEL_HANDOFF_POLICY.md): GPT-6.1 Sol 기본, Luna는 네 조건을 모두 만족하는 저위험 작업만 허용, 실질적인 상위 판단에 Astra, Sol High 유지 선호 |
 
 ## 계약과 데이터
 
@@ -18,8 +18,11 @@
 |---|---|
 | 공개 API·저장·시간/출처 | [API 계약](../API_CONTRACT.md) · [DB 스키마](../DB_SCHEMA.md) · [과거 데이터 계약](../HISTORICAL_DATA_CONTRACT.md) |
 | 요청→저장→소비자 | [시장 데이터 흐름](MARKET_DATA_FLOW.md) · [DB 관계도·사전](database/README.md) · [선택형 지도](database/atlas.html) |
+| TOP20 장후 재계산 설계·구현 경계 | [장중 집계와 장후 분봉 재계산](TOP20_AFTER_CLOSE_RECONCILIATION.md) — 로컬 구현·과거일 읽기 대조, NAS·PG gate 대기 |
+| 실시간 기존 구독 유지 | [차등 구독·승인·녹화 계약](INCREMENTAL_REALTIME_SUBSCRIPTION_DESIGN.md) — 로컬 구현·관련 회귀, NAS 전용 검증/운영 반영 대기 |
 | 과거 자료와 테마/학습 입력 | [과거 자료 확보](HISTORICAL_BACKFILL_PLAN.md) · [PC 완성 과거뉴스 archive 계약](PREPARED_NEWS_ARCHIVE_DESIGN_REVIEW.md) |
 | 연구·평가·모의 실행 | [연구 요청 형식](RESEARCH_REQUEST_FORMAT.md) · [전진 평가](FORWARD_EVALUATION_CONTRACT.md) · [키움 모의 실행](KIWOOM_MOCK_EXECUTION_CONTRACT.md) |
+| 첫 모의 후보의 미채택 기준·final 범위 | [검토용 초안](MOCK_CANDIDATE_CRITERIA_PROPOSAL.md) — 실제 기준 파일·후보 승인과 구분 |
 | 백업·복원 | [Google Drive 엄격 복원](GOOGLE_DRIVE_RESTORE_DESIGN.md) |
 
 DB 관계도의 NAS 카탈로그는 **2026-10-01 실측 snapshot**이다. 최신 운영 스키마를 이번에 재조회한 자료가 아니며 코드 계약·실제 배포와 구분한다.

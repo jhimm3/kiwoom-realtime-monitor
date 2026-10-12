@@ -28,6 +28,10 @@ class CentralServerUnavailable(KiwoomApiError):
     """중앙 서버 자체에 연결할 수 없어 선택적 로컬 전환이 가능한 오류."""
 
 
+class CentralFeatureUnavailable(KiwoomApiError):
+    """A read endpoint is explicitly unsupported by an older server."""
+
+
 _CENTRAL_GATEWAY_UNAVAILABLE_STATUS = frozenset({502, 503, 504})
 
 
@@ -480,8 +484,24 @@ class RemoteKiwoomRestClient:
                 values.append(payload)
         return tuple(values)
 
-    def load_stored_top20_statistics(self, start_date: str, end_date: str) -> dict[str, Any]:
-        query = urlencode({"start_date": start_date[:10], "end_date": end_date[:10]})
+    def load_stored_top20_series(self, trading_date: str) -> dict[str, Any]:
+        from kiwoom_monitor.domain.top20_reconciliation import select_top20_series
+        day = trading_date[:10]
+        request = Request(f"{self._server_url}/api/v1/market/top20-series?" + urlencode({"trading_date": day, "basis": "display"}),
+                          headers={"Authorization": f"Bearer {self._access_token}"}, method="GET")
+        try:
+            result = self._read_central_document(request, "TOP20 분봉 재계산")
+        except CentralFeatureUnavailable:
+            return select_top20_series(day, list(self.load_stored_top20_index(day)), None)
+        if not isinstance(result.get("rows"), list) or not isinstance(result.get("coverage"), dict):
+            raise KiwoomApiError("TOP20 series 응답 형식이 올바르지 않습니다.")
+        return result
+
+    def load_stored_top20_statistics(self, start_date: str, end_date: str, *, basis: str = "realtime") -> dict[str, Any]:
+        values = {"start_date": start_date[:10], "end_date": end_date[:10]}
+        if basis == "display":
+            values["basis"] = basis
+        query = urlencode(values)
         request = Request(
             f"{self._server_url}/api/v1/market/top20-statistics?{query}",
             headers={"Authorization": f"Bearer {self._access_token}"}, method="GET",
@@ -489,6 +509,8 @@ class RemoteKiwoomRestClient:
         document = self._read_central_document(request, "TOP20 통계")
         if not isinstance(document.get("hourly"), list) or not isinstance(document.get("comparisons"), list):
             raise KiwoomApiError("개인 중앙 서버 TOP20 통계 응답 형식이 올바르지 않습니다.")
+        if basis == "display" and document.get("basis") != "display":
+            raise CentralFeatureUnavailable("중앙 서버 업데이트 후 TOP20 표시 통계를 사용할 수 있습니다.")
         return document
 
     def _load_market_snapshots(
@@ -510,6 +532,8 @@ class RemoteKiwoomRestClient:
             with self._opener(request, timeout=self._timeout if timeout_seconds is None else timeout_seconds, context=system_ssl_context()) as response:
                 document = json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
+            if error.code in {404, 405, 501} and "/api/v1/market/top20-series?" in request.full_url:
+                raise CentralFeatureUnavailable("중앙 서버가 TOP20 series를 지원하지 않습니다.") from error
             _raise_central_http_error(error, _http_error_detail(error))
         except (URLError, TimeoutError, ConnectionError, OSError) as error:
             raise CentralServerUnavailable("개인 중앙 서버에 연결할 수 없습니다.") from error

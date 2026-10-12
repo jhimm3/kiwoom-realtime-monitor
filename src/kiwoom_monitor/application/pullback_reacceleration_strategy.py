@@ -10,6 +10,7 @@ from kiwoom_monitor.application.breakout_strategy import (
     StrategyEvaluation,
     StrategyState,
     evaluate_factor_entry_bar,
+    validate_session_exit_policy,
 )
 from kiwoom_monitor.application.research_factors import (
     FACTOR_VERSION,
@@ -62,8 +63,11 @@ class PullbackReaccelerationConfig:
     capital_won: int
     signal_valid_seconds: int
     cooldown_seconds: int
+    session_exit_policy: str = ""
+    session_exit_buffer_seconds: int = 0
 
     def __post_init__(self) -> None:
+        validate_session_exit_policy(self.session_exit_policy, self.session_exit_buffer_seconds)
         if self.strategy_version != STRATEGY_VERSION:
             raise ValueError(f"unregistered strategy: {STRATEGY_ID}/{self.strategy_version}")
         get_factor_definition(PULLBACK_REACCELERATION_ID, self.pullback_factor_version)
@@ -95,6 +99,9 @@ class PullbackReaccelerationConfig:
 
     def to_dict(self) -> dict[str, Any]:
         document = asdict(self)
+        if not self.session_exit_policy:
+            document.pop("session_exit_policy")
+            document.pop("session_exit_buffer_seconds")
         if not self.rank_persistence_enabled:
             document.update({
                 "rank_persistence_required": False,

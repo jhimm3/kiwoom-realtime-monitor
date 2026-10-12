@@ -142,6 +142,7 @@ class DiagnosticAccountInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             store = SQLiteQueryStore(Path(root) / 'source.sqlite3')
             store.initialize()
+            store._execution_wall_now = lambda: NOW
             repository = ExecutionRepository(store)
             try:
                 with deferred_capture(account_inputs=True) as (identifier, _):
@@ -183,6 +184,7 @@ class DiagnosticAccountInputTests(unittest.TestCase):
             for enabled in (False, True):
                 store = SQLiteQueryStore(Path(root) / ('after.sqlite3' if enabled else 'before.sqlite3'))
                 store.initialize()
+                store._execution_wall_now = lambda: NOW
                 observed = []
                 connection = store._connection
 

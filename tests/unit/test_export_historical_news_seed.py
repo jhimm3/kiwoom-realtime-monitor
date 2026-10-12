@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
+from unittest.mock import MagicMock,patch
+from pathlib import Path
+import tempfile
 
 from scripts.export_historical_news_seed import SeedExport
 
@@ -91,6 +94,25 @@ class HistoricalSeedExportTests(unittest.TestCase):
     def test_closure_limit_fails_without_truncating(self):
         with self.assertRaisesRegex(ValueError, "max_rows"):
             FixtureExport(self.db, _fixture(), max_rows=2).run()
+
+    def test_query_failure_reports_stage_without_reference_ids(self):
+        source=MagicMock()
+        source.cursor.return_value.__enter__.return_value.fetchmany.side_effect=RuntimeError('timeout')
+        with self.assertRaisesRegex(RuntimeError,'central_news_jobs') as caught:
+            list(SeedExport(source,self.db,max_rows=100).query('central_news_jobs','article_revision_id',{'private-reference-id'}))
+        self.assertNotIn('private-reference-id',str(caught.exception))
+        self.assertIn('"keys": 1',str(caught.exception))
+
+    def test_export_timeout_is_connection_local_and_failed_partial_removed(self):
+        from scripts.export_historical_news_seed import export_seed
+        with tempfile.TemporaryDirectory() as root:
+            output=Path(root)/'seed.sqlite3'
+            with patch('psycopg.connect',side_effect=RuntimeError('connection unavailable')) as connect:
+                with self.assertRaisesRegex(RuntimeError,'unavailable'):
+                    export_seed('test-only',output,statement_timeout_ms=300000)
+            self.assertEqual('-c statement_timeout=300000',connect.call_args.kwargs['options'])
+            self.assertFalse(output.exists())
+            self.assertFalse(output.with_name(output.name+'.partial').exists())
 
 
 if __name__ == "__main__":

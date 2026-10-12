@@ -208,6 +208,8 @@ class ConditionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 value = json.loads(raw)
                 if value["trnm"] == "LOGIN":
                     self.responses.put_nowait({"trnm": "LOGIN", "return_code": 0})
+                elif value["trnm"] in {"REG","REMOVE"}:
+                    self.responses.put_nowait({"trnm":value["trnm"],"return_code":0})
                 elif value["trnm"] == "CNSRLST":
                     self.responses.put_nowait({"trnm": "CNSRLST", "data": PAIRS})
                 elif value["trnm"] == "CNSRREQ":
@@ -235,12 +237,14 @@ class ConditionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         collector = CentralRealtimeCollector(lambda: "fake", "real", service._hub,
             lambda: datetime(2026, 9, 15, 10), market_events=service)
         with patch("kiwoom_monitor.central_server.realtime_collector.connect", return_value=socket) as connect, \
-                patch.object(collector, "_send_subscription", new=AsyncMock(return_value={})) as subscribe:
+                patch("kiwoom_monitor.central_server.realtime_collector.REALTIME_REG_INTERVAL_SECONDS", .01):
             receiving = asyncio.create_task(collector._receive("KRX"))
             try:
                 await asyncio.wait_for(complete.wait(), 3)
                 self.assertEqual(1, connect.call_count)
-                self.assertEqual(1, subscribe.await_count)
+                static_rows = [row for packet in socket.messages if packet['trnm']=='REG'
+                               for row in packet['data'] if row['type']==['0s']]
+                self.assertEqual(1,len(static_rows))
                 self.assertEqual("ACTIVE", service.condition_status()["apply_status"])
             finally:
                 receiving.cancel()

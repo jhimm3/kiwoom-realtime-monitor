@@ -72,7 +72,7 @@ $env:PYTHONPATH = Join-Path $projectRoot 'src'
 $env:PYTHONIOENCODING = 'utf-8'
 
 function Write-State([string]$Status, [int]$Completed, [string]$ErrorText = '') {
-    [ordered]@{
+    $document = [ordered]@{
         schema = 'historical-news-collector-state/v1'
         pid = $PID
         status = $Status
@@ -83,7 +83,36 @@ function Write-State([string]$Status, [int]$Completed, [string]$ErrorText = '') 
         diagnostic_log = $diagnosticLog
         error = $ErrorText
         updated_at = [DateTimeOffset]::UtcNow.ToString('o')
-    } | ConvertTo-Json | Set-Content -LiteralPath $stateFile -Encoding utf8
+    } | ConvertTo-Json
+    $temporary = "$stateFile.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+    $backup = "$temporary.bak"
+    $lastError = $null
+    try {
+        [IO.File]::WriteAllText($temporary, $document, [System.Text.UTF8Encoding]::new($false))
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            try {
+                if ([IO.File]::Exists($stateFile)) {
+                    [IO.File]::Replace($temporary, $stateFile, $backup)
+                }
+                else {
+                    [IO.File]::Move($temporary, $stateFile)
+                }
+                return
+            }
+            catch {
+                $lastError = $_.Exception.Message
+                if ($attempt -lt 19) { Start-Sleep -Milliseconds 100 }
+            }
+        }
+    }
+    catch {
+        $lastError = $_.Exception.Message
+    }
+    finally {
+        try { [IO.File]::Delete($temporary) } catch { }
+        try { [IO.File]::Delete($backup) } catch { }
+    }
+    try { Write-Log "state update failed after retry: $lastError" } catch { }
 }
 
 function Write-Log([string]$Message) {
@@ -183,9 +212,19 @@ try {
         Write-Log "collector stopped completed=$completed"
         exit 0
     }
-    & $python scripts\report_historical_collection_status.py `
-        --database $Database --nas-project $NasProject --fast 2>&1 |
-        ForEach-Object { Write-Log ([string]$_) }
+    # Status publication is auxiliary; a NAS/report failure must not turn an exhausted queue into failure.
+    try {
+        $previousErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $statusOutput = & $python scripts\report_historical_collection_status.py `
+            --database $Database --nas-project $NasProject --fast 2>&1
+        $statusExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorAction
+        foreach ($line in $statusOutput) { Write-Log ([string]$line) }
+        if ($statusExitCode -ne 0) { Write-Log "final status publish failed: exit=$statusExitCode" }
+    }
+    catch { Write-Log "final status publish failed: $($_.Exception.Message)" }
+    finally { $ErrorActionPreference = 'Stop' }
     Write-State 'complete' $completed
     Write-Log "collector finished completed=$completed"
 }

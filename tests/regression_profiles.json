@@ -167,6 +167,8 @@
       "tests.unit.test_replay_content_comparison"
     ],
     "pc-lifecycle": [
+      "tests.unit.test_realtime_registration",
+      "tests.unit.test_incremental_realtime_receive",
       "tests.unit.test_app_controller",
       "tests.unit.test_main_window",
       "tests.unit.test_market_cache_writer",
@@ -174,6 +176,7 @@
       "tests.unit.test_run_test_app_with_data"
     ],
     "top20-lifecycle": [
+      "tests.unit.test_top20_reconciliation",
       "tests.unit.test_top20_program_shutdown",
       "tests.unit.test_top20_execution_boundaries"
     ],
@@ -225,6 +228,8 @@
       "tests.unit.test_diagnostic_trace_blocks",
       "tests.unit.test_diagnostic_account_input",
       "tests.unit.test_diagnostic_account_context",
+      "tests.unit.test_diagnostic_account_archive",
+      "tests.unit.test_diagnostic_display_capture",
       "tests.unit.test_audit_postgres_access",
       "tests.unit.test_audit_query_store_consumers",
       "tests.unit.test_research_final_preparation"
@@ -251,6 +256,7 @@
       "tests.unit.test_mock_automation_dialog",
       "tests.unit.test_mock_automation_risk",
       "tests.unit.test_mock_automation_runner",
+      "tests.unit.test_mock_automation_session_clock",
       "tests.unit.test_mock_automation_specification",
       "tests.unit.test_mock_automation_supervisor",
       "tests.unit.test_market_role_change",
@@ -368,10 +374,15 @@
       "tests.unit.test_historical_collection_monitor",
       "tests.unit.test_historical_high_service",
       "tests.unit.test_historical_learning_cases",
+      "tests.unit.test_expanded_training_diagnostics",
+      "tests.unit.test_historical_loss_review",
+      "tests.unit.test_strategy_session_exit",
       "tests.unit.test_historical_monthly_selection_coverage",
       "tests.unit.test_historical_news_archive_api",
       "tests.unit.test_historical_news_archive_dialog",
       "tests.unit.test_historical_news_archive_reader",
+      "tests.unit.test_prepared_historical_archive_v2",
+      "tests.unit.test_seed_news_jobs_from_nas_rankings",
       "tests.unit.test_historical_news_blind_validation"
     ],
     "dependency-audit-batch-03-historical-and-runtime-contracts": [

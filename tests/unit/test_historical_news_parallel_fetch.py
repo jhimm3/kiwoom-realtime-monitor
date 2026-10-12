@@ -27,6 +27,20 @@ from scripts.probe_historical_backfill import (
 
 
 class HistoricalNewsParallelFetchTests(unittest.TestCase):
+    def test_user_excluded_blocked_publishers_never_request_network(self) -> None:
+        for host in ("nbntv.co.kr", "www.ebn.co.kr", "www.thisisgame.com", "www.womentimes.co.kr",
+                     "www.kdpress.co.kr", "www.thelec.kr", "jmagazine.joins.com",
+                     "news.skbroadband.com", "viewers.heraldcorp.com", "www.rpm9.com"):
+            with self.subTest(host=host):
+                item = NaverHistoricalNewsItem("key", "001", "123", "office", "title", "summary",
+                                              f"https://{host}/a", f"https://{host}/a", "", 1)
+                with patch("kiwoom_monitor.infrastructure.historical_backfill.urlopen") as opener:
+                    with _ArticleFetchPool(workers=2, article_delay=60, primary_only=True) as pool:
+                        pool.submit(item)
+                        result = list(pool.drain(wait=True))[0][1]
+                    opener.assert_not_called()
+                self.assertEqual("source_excluded", result.status)
+
     def test_hankyung_original_is_excluded_without_network_or_worker_delay(self) -> None:
         item = NaverHistoricalNewsItem(
             "key", "015", "123", "한국경제", "title", "summary",

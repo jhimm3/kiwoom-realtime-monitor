@@ -142,36 +142,13 @@ class MarketDataIngestor:
 
     def _ingest_minutes(self, body: dict[str, Any], payload: dict[str, Any]) -> None:
         total_started = monotonic()
-        raw_code = str(body.get("stk_cd", "")).strip()
+        raw_code = str(body.get('stk_cd', '')).strip()
         code, market = _code_and_market(raw_code)
-        records = payload.get("stk_min_pole_chart_qry", [])
-        if not code or not isinstance(records, list):
+        if not code or not isinstance(payload.get('stk_min_pole_chart_qry', []), list):
             return
         prepare_started = monotonic()
         now = self._now()
-        base_date = _base_date(body.get("base_dt"), fallback=now)
-        values: list[dict[str, Any]] = []
-        for record in records:
-            if not isinstance(record, dict):
-                continue
-            moment = _minute(record.get("cntr_tm"), base_date)
-            open_price = _integer(record.get("open_pric"), positive=True)
-            high = _integer(record.get("high_pric"), positive=True)
-            low = _integer(record.get("low_pric"), positive=True)
-            close = _integer(record.get("cur_prc"), positive=True)
-            volume = _integer(record.get("trde_qty"), positive=True)
-            if moment is None or None in (open_price, high, low, close, volume):
-                continue
-            values.append({
-                "trading_date": moment.date().isoformat(), "minute": moment.strftime("%H:%M"),
-                "code": code, "market": market, "open": open_price, "high": high,
-                "low": low, "close": close, "volume": volume,
-                "trade_value_million_won": round(
-                    volume * (open_price + high + low + close) / 4 / 1_000_000
-                ),
-                "updated_at": now.timestamp(),
-                "session_finalized": _minute_session_finalized(moment, market, now),
-            })
+        values = parse_minute_response(body, payload, now)
         comparison_values = list(values)
         observations = []
         for value in values:
@@ -506,3 +483,35 @@ def _chart_completion_time(trading_date: date, market: str) -> clock_time | None
         if trading_date >= KRX_AFTER_MARKET_EFFECTIVE_DATE
         else clock_time(15, 30)
     )
+
+
+def parse_minute_response(body: dict[str, Any], payload: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    raw_code = str(body.get("stk_cd", "")).strip()
+    code, market = _code_and_market(raw_code)
+    records = payload.get("stk_min_pole_chart_qry", [])
+    if not code or not isinstance(records, list):
+        return []
+    base_date = _base_date(body.get("base_dt"), fallback=now)
+    values: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        moment = _minute(record.get("cntr_tm"), base_date)
+        open_price = _integer(record.get("open_pric"), positive=True)
+        high = _integer(record.get("high_pric"), positive=True)
+        low = _integer(record.get("low_pric"), positive=True)
+        close = _integer(record.get("cur_prc"), positive=True)
+        volume = _integer(record.get("trde_qty"), positive=True)
+        if moment is None or None in (open_price, high, low, close, volume):
+            continue
+        values.append({
+            "trading_date": moment.date().isoformat(), "minute": moment.strftime("%H:%M"),
+            "code": code, "market": market, "open": open_price, "high": high,
+            "low": low, "close": close, "volume": volume,
+            "trade_value_million_won": round(
+                volume * (open_price + high + low + close) / 4 / 1_000_000
+            ),
+            "updated_at": now.timestamp(),
+            "session_finalized": _minute_session_finalized(moment, market, now),
+        })
+    return values

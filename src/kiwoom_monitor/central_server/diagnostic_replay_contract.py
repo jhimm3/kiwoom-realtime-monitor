@@ -10,7 +10,7 @@ import hashlib
 import inspect
 import json
 import math
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, fields
 from datetime import date, datetime
@@ -25,6 +25,7 @@ from kiwoom_monitor.domain.market_data_contract import (
 )
 from .database_query_cache import StoredQuery
 from .diagnostic_account_input import METHODS as ACCOUNT_METHODS
+from .diagnostic_top20_display_input import METHODS as DISPLAY_METHODS, VERSION as DISPLAY_INPUT_VERSION
 from kiwoom_monitor.domain.order_contract import (
     AccountBinding, AccountEnvironment, AccountScope, AccountSnapshot,
     BrokerFill, BrokerOrderSnapshot, OrderState,
@@ -111,6 +112,7 @@ _METHOD_GROUPS = {
         "load_hot_cohort", "load_market_event_history", "load_theme_snapshots",
         "load_mock_automation_control", "storage_size_bytes", "storage_breakdown",
     ),
+    "top20": tuple(sorted(DISPLAY_METHODS)),
     "documents": ("upsert_documents", "replace_documents", "load_documents", "load_document"),
     "news": (
         "enqueue_news_ai_jobs", "claim_news_jobs", "finish_news_job", "retry_news_job",
@@ -152,7 +154,9 @@ _READ_DOCUMENT_COLLECTIONS = frozenset({
 _DATASET_KINDS = frozenset({
     "market_state", "new_high", "program_flow", "ranking", "top20_membership", "top20_index",
     "market_index_chart", "investor_flow", "stock_fundamentals", "nxt_eligibility", "top20_statistics_day",
+    "top20_index_reconciled", "top20_statistics_display_day",
 })
+ACCOUNT_CLOCK_COLLECTION = 'execution_mock_automation_clock_current'
 _COLLECTOR_SINKS = frozenset(_METHOD_GROUPS["realtime"])
 _SECRET_FIELDS = frozenset({
     "password", "passwd", "secret", "secret_key", "app_secret", "app_key", "authorization",
@@ -352,12 +356,55 @@ def thaw_operation_arguments(row: dict, *, owner_bindings=None) -> dict:
     return arguments
 
 
+def is_account_document_operation(method, arguments):
+    return (method in _METHOD_GROUPS['documents'] and type(arguments) is dict
+            and arguments.get('collection') == ACCOUNT_CLOCK_COLLECTION)
+
+
+def validate_account_clock_document(owner, key, document):
+    from .database_account_identity import _canonical_account_ref
+    try:
+        valid_owner = type(owner) is str and _canonical_account_ref(owner) == owner
+    except ValueError:
+        valid_owner = False
+    if (not valid_owner or key != 'current' or type(document) is not dict
+            or document.get('version') != 'mock_automation_session_clock/v1'
+            or document.get('account_ref') != owner
+            or type(document.get('control_revision')) is not int or document['control_revision'] <= 0
+            or any(type(document.get(name)) is not str or not document[name]
+                   for name in ('spec_id', 'execution_run_id', 'candidate_package_hash'))
+            or type(document.get('cancel_attempted_intent_ids')) is not list
+            or any(type(value) is not str or not value for value in document['cancel_attempted_intent_ids'])):
+        raise InputRejected('account_clock_document_invalid')
+    freeze_payload(document)
+
+
 def validate_operation(method: str, arguments: dict) -> str:
     if type(method) is not str or method not in OPERATIONS or type(arguments) is not dict:
         raise InputRejected("unsupported_operation")
     group = OPERATIONS[method]
     if group == "documents":
         collection = arguments.get("collection")
+        if is_account_document_operation(method, arguments):
+            if method in {'upsert_documents', 'replace_documents'}:
+                values = arguments.get('values')
+                if type(values) not in (list, tuple):
+                    raise InputRejected('account_clock_document_invalid')
+                for value in values:
+                    if type(value) is not dict or set(value) != {'owner', 'key', 'document'}:
+                        raise InputRejected('account_clock_document_invalid')
+                    validate_account_clock_document(value['owner'], value['key'], value['document'])
+            else:
+                from .database_account_identity import _canonical_account_ref
+                owner = arguments.get('owner')
+                try:
+                    valid_owner = owner == '' and method == 'load_documents' or (
+                        type(owner) is str and _canonical_account_ref(owner) == owner)
+                except ValueError:
+                    valid_owner = False
+                if not valid_owner or method == 'load_document' and arguments.get('key') != 'current':
+                    raise InputRejected('account_clock_document_invalid')
+            return 'account'
         if collection == "account_entry_symbols_daily" and method == "load_documents":
             # TOP20 reads a date-owned stock-code cohort, not account state.
             # Capture arguments/count only; writes and response documents stay
@@ -391,7 +438,8 @@ def validate_operation(method: str, arguments: dict) -> str:
             kinds = [arguments.get("kind")]
         if not kinds or any(not isinstance(kind, str) or kind not in _DATASET_KINDS for kind in kinds):
             raise InputRejected("unsupported_dataset_kind")
-        if all(kind in {"ranking", "top20_membership", "top20_index", "top20_statistics_day"} for kind in kinds):
+        if all(kind in {"ranking", "top20_membership", "top20_index", "top20_statistics_day",
+                        "top20_index_reconciled", "top20_statistics_display_day"} for kind in kinds):
             return "top20"
         return "rest_market"
     if method == "save_query" and arguments.get("api_id") not in {
@@ -516,6 +564,7 @@ def install_store_capture(store: Any) -> None:
                       "cause_input_id": owner.cause_input_id if owner else "",
                       "workload_id": owner.workload_id if owner else OPERATIONS.get(__name, "unsupported")}
             arguments = None
+            display_scope = None
             try:
                 fields["actor_sequence"] = _actor_sequence(trace_id, fields["actor_id"])
                 if (__name in EXCLUDED_METHODS or __name in ACCOUNT_METHODS
@@ -526,17 +575,26 @@ def install_store_capture(store: Any) -> None:
                 bound = __signature.bind(*args, **kwargs)
                 bound.apply_defaults()
                 arguments = dict(bound.arguments)
+                if is_account_document_operation(__name, arguments):
+                    fields['workload_id'] = 'account'
+                    if trace.input_token('account_inputs') != trace_id:
+                        raise InputRejected('excluded_operation')
                 if __name in {"load_documents", "load_document", "upsert_documents", "replace_documents"}:
                     collection = arguments.get("collection")
                     if type(collection) is str:
                         fields["collection"] = collection[:160]
                 group = validate_operation(__name, arguments)
-                fields["workload_id"] = owner.workload_id if owner else group
+                fields["workload_id"] = group if is_account_document_operation(__name, arguments) else owner.workload_id if owner else group
                 from .postgres_access import current_db_call_tags
                 fields.update(current_db_call_tags())
                 if __name in ACCOUNT_METHODS:
                     arguments, metadata = trace.project_account_input(trace_id, __name, arguments)
                     fields.update(metadata)
+                if __name in DISPLAY_METHODS:
+                    from .diagnostic_top20_display_input import DisplayCapture
+                    fields['display_input_version'] = DISPLAY_INPUT_VERSION
+                    fields['display_result_profile'] = LARGE_COPY_PROFILE if trace.input_token('large_inputs') == trace_id else CODEC_VERSION
+                    display_scope = DisplayCapture(trace_id, operation_id)
                 if __name == "replace_documents" and arguments.get("collection") == "stock_catalog":
                     fields["collection"] = "stock_catalog"
                     fields["payload_profile"] = CATALOG_COPY_PROFILE
@@ -553,11 +611,15 @@ def install_store_capture(store: Any) -> None:
                 except Exception:
                     pass  # Observation must never change the native store outcome.
             token = _OPERATION.set(operation_id)
+            from .diagnostic_top20_display_input import environment_scope
             try:
-                result = __original(*args, **kwargs)
+                with environment_scope(display_scope) if display_scope is not None else nullcontext():
+                    result = __original(*args, **kwargs)
             except BaseException as error:
                 try:
                     from .diagnostic_account_input import native_error_receipt
+                    if display_scope is not None:
+                        fields.update(display_scope.receipt())
                     trace.emit(trace_id, "operation_end", {**fields, "outcome": "failed",
                                "exception_type": type(error).__name__, "finished_mono_ns": time.monotonic_ns(),
                                **native_error_receipt(__name, error)})
@@ -565,11 +627,25 @@ def install_store_capture(store: Any) -> None:
                     pass
                 raise
             else:
+                if display_scope is not None:
+                    fields.update(display_scope.receipt())
+                    try:
+                        from .diagnostic_top20_display_input import result_digest
+                        fields['display_result_sha256'] = result_digest(result, profile=fields['display_result_profile'])
+                    except Exception:
+                        try:
+                            trace.reject_input(trace_id, {**fields, 'reason': 'top20_display_result_capture_failed'})
+                        except Exception:
+                            pass
                 try:
                     trace.emit(trace_id, "operation_end", {**fields, "outcome": "returned",
                                "finished_mono_ns": time.monotonic_ns(), **_result_summary(__name, result)})
                 except Exception:
-                    pass
+                    if display_scope is not None:
+                        try:
+                            trace.reject_input(trace_id, {**fields, 'reason': 'top20_display_result_capture_failed'})
+                        except Exception:
+                            pass
                 return result
             finally:
                 _OPERATION.reset(token)
@@ -667,6 +743,7 @@ def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
     if mode == "collector_with_background" and window_end_seconds > 900:
         raise ValueError("recorded_collector_prefix_exceeds_limit")
     starts, ends, inputs, rejected, market_inputs = {}, {}, [], [], []
+    display_environments = {}
     seen_sequences = set()
     for row in events:
         seq = row.get("seq")
@@ -686,6 +763,8 @@ def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
             market_inputs.append(row)
         elif kind == "input_rejected":
             rejected.append(row)
+        elif kind == 'top20_display_environment':
+            display_environments.setdefault(row.get('operation_id'), []).append(row)
     if _source_sequences_verified and [row["seq"] for row in events] != sorted(seen_sequences):
         raise ValueError("recorded_event_sequence_invalid")
     if not _source_sequences_verified and seen_sequences and seen_sequences != set(range(1, max(seen_sequences) + 1)):
@@ -774,6 +853,9 @@ def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
         if row.get("codec_version") != CODEC_VERSION or "payload" not in row:
             raise ValueError("recorded_payload_missing")
         arguments = thaw_operation_arguments(row)
+        if row['method'] in DISPLAY_METHODS:
+            from .diagnostic_top20_display_input import prepare_environment
+            prepare_environment(row, ending, display_environments.get(identifier, ()))
         replace = False
         if mode == "collector_with_background" and row.get("producer_component") in components:
             version = collector_versions[row["producer_component"]]

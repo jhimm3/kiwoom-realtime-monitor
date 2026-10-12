@@ -233,11 +233,16 @@ def validate_baseline_clock(manifest):
     if manifest['version'] == 3:
         context = manifest.get('account_context')
         require(manifest['source_state_equivalent'] is False and type(context) is dict and
-                context.get('version') in ('account-context/v1', 'account-context/v2') and
+                context.get('version') in ('account-context/v1', 'account-context/v2', 'account-context/v3', 'account-context/v4') and
                 type(context.get('trace_id')) is str and ID.fullmatch(context['trace_id']) and
                 all(type(context.get(key)) is str and HEX.fullmatch(context[key])
                     for key in ('sha256', 'owner_bindings_sha256')) and
                 context.get('source_state_equivalent') is False, 'invalid_baseline_account_context')
+        if context['version'] in ('account-context/v3', 'account-context/v4'):
+            require(all(type(context.get(key)) is str and HEX.fullmatch(context[key])
+                        for key in ('archive_seed_sha256', 'archive_frontier_sha256')) and
+                    context.get('archive_scope') == 'selected_native_input_keys_with_initial_identity_index',
+                    'invalid_baseline_account_archive_context')
 
 
 class Tree:

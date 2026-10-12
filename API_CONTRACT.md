@@ -586,6 +586,8 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 | `POST /api/v1/news/analyze` | 종목, provider/model, `events[1..20]`, `article_count` | 중앙 AI 서비스 분석 문서. 공급자 429/5xx는 상태 코드를 보존한다. |
 | `GET /api/v1/news/history/{kind}` | `kind=article/body/ai/event/membership`, 선택 `target`, `identity`, Unix 초 `as_of`, `limit` | `known`, `kind`, `revisions[]`. 서버 가용시각 역순의 불변 이력 |
 | `GET /api/v1/news/historical-archive/search` | Bearer 인증, 6자리 `stock_code`, `limit=1..200`, 선택 서명된 `cursor` | 봉인된 PC archive의 `dataset_id`, `items[]`, `next_cursor`. 현재 뉴스 목록과 분리. 미설정·미봉인·진단 일시정지 시 503, 잘못된 cursor는 400 |
+| `GET /api/v1/news/historical-archive/v2/search` | Bearer 인증, 6자리 `stock_code`, `limit=1..200`, 선택 서명된 `cursor` | v2 종목 목록. 본문은 목록에 포함하지 않으며 상세에서 정확 ID로 읽는다. v1 파일은 409 |
+| `GET /api/v1/news/historical-archive/v2/market` | Bearer 인증, 선택 `source=flash/world`, `limit=1..200`, 선택 서명된 `cursor` | v2 시황 목록. source 생략은 전체 목록이며 동일 identity는 한 번 표시한다. 실패 항목은 article/body ID가 null일 수 있다 |
 | `GET /api/v1/news/historical-archive/articles/{article_revision_id}` | Bearer 인증, 필수 `dataset_id`, 선택 정확한 `body_revision_id` | archive의 기사·본문·assessment 상태·정확한 사건 membership 이력. dataset 변경 409, ID 없음 404, 다른 기사의 BODY ID 400. 누락 판정 재계산 없음 |
 | `POST /api/v1/news/historical-jobs/claim?stage=BODY\|RULE` | Bearer 인증. 과거 기사 대기 작업 한 건 원자 선점. `scope=pc_market`은 신규 PC 시황, `pc_search`는 신규 PC 네이버 검색만 선점한다. `scope=pc`와 기본 `all`은 기존 NAS 적재분을 포함한 네 과거 범위를 선점한다. NAS 일반 작업기는 이 네 범위의 BODY/RULE을 선점하지 않는다. `excluded_codes`는 쉼표로 구분한 6자리 코드(최대 500개) | `job`·`article`, RULE이면 기존 저장 `body`; 없으면 `job=null`. 완료된 작업은 다시 선점하지 않고 시도 번호로 결과 소유권 검증 |
 | `POST /api/v1/news/historical-jobs/complete` | Bearer 인증. `job_key`, `attempts`, `stage`와 BODY 본문·원문시각 또는 RULE 평가·핵심문장·공급계약 결과; 실패 시 `error` | revision·작업 완료를 한 트랜잭션에 기록. 동일 시도 재전송은 `already_completed`; 만료·다른 시도는 409 |
@@ -600,7 +602,7 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 
 기사 이력의 `target`은 종목코드, `identity`는 기존 기사 identity다. 본문 이력의 `target`은 `article_revision_id`, AI 이력의 `target`은 분석 대상 종목코드다. `as_of`는 `available_at <= as_of`인 행만 반환하며 최초 원장 기록 전에는 `known=false`다. 이 API는 현재 화면용 `news_article/news_ai` projection을 변경하지 않는다.
 
-단발성 과거뉴스 archive는 **로컬 reader·API·조회 화면 구현, 운영 자료 게시 미완료** 상태다. `HISTORICAL_NEWS_ARCHIVE_PATH`가 비어 있으면 비활성이고, 절대경로의 `sealed` 파일과 완료된 검색 projection이 있어야 켜진다. 기존 `capabilities.news_archive`는 기존 PG 뉴스 기능으로 유지하고, 새 `capabilities.historical_news_archive_v1` 및 `historical_news_archive_dataset_id`로만 별도 지원을 알린다. cursor는 dataset·종목 필터에 묶이고, 해당 reader의 진단 pause는 진단 master 세션과 TTL 아래에서만 유효하다. 종목 뉴스 창의 별도 `HistoricalNewsArchiveDialog`가 `CentralNewsClient`를 통해 종목별 목록·다음 페이지·본문을 읽는다. 이 archive API에는 시황 목록과 `as_of` 조회가 없다. 화면 구현은 NAS에 운영 자료가 게시됐다는 증거가 아니다.
+단발성 과거뉴스 archive는 **v1/v2 로컬 reader·API·조회 화면 구현, 전체 운영 자료 게시 미완료** 상태다. `HISTORICAL_NEWS_ARCHIVE_PATH`가 비어 있으면 비활성이고, 절대경로의 `sealed` 파일과 완료된 projection이 있어야 켜진다. v2는 coverage 완료·봉인 검사 통과도 요구하며 용량 시험본은 거부한다. 기존 `capabilities.news_archive`는 PG 뉴스 기능으로 유지하고, 파일 schema에 따라 `historical_news_archive_v1` 또는 `historical_news_archive_v2`와 `historical_news_archive_dataset_id`를 공개한다. v1 목록을 v2 파일에 요청하면 409다. cursor는 dataset·목록 종류·종목/source 필터·정렬키에 묶인다. 상세의 기존 정확 ID 계약은 유지하며 v2는 저장된 대상별 판정과 입력 출처도 반환한다. 진단 pause는 진단 master 세션과 TTL 아래에서만 유효하고 목록·상세 모두 적용한다. PC 조회 창은 종목/시황 범위를 선택하며 NAS가 BODY/RULE/사건을 계산하거나 쓰기 작업을 예약하지 않는다. `as_of` 목록은 제공하지 않는다. 화면 구현과 작은 파일 검사는 전체 NAS 게시 증거가 아니다.
 
 사건 이력의 `target`은 종목코드, `identity`는 영속 `event_id`다. 소속 이력은 `target=event_id`, 선택 `identity=article_revision_id`로 조회한다. `event` 행은 정확한 article/body revision과 규칙·점수 산식 버전, 역할·범위·확실성·신규성, 근거 span, 금액/상대방, 대상별 방향·직접성, `ai_required` 이유를 가진다. URL은 event ID가 아니며 `possible_related_event_ids`는 후보 관계일 뿐 과거 행을 병합하지 않는다.
 
@@ -619,7 +621,8 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 | `GET /api/v1/market/coverage` | `kind`, `subject`, ISO `start/end`, 선택 `available_by`, 고정주기 자료만 `expected_seconds` | 상태·관측 수·가용 수·결측 구간·부재 의미 |
 | `GET /api/v1/market/external-bars` | `instrument`, `timeframe=5m/1d`, `limit` 1~10000 | 공급원·계약코드가 포함된 `bars[]` |
 | `GET /api/v1/market/snapshots/{kind}` | 선택 `subject`, `limit` 1~5000; 최신 TOP20 화면 조회만 `kind=top20_membership&limit=1&prefer_live=true` | `kind`, `subject`, `snapshots[]`; live TOP20에는 `persistence_state=pending|persisted` 포함 |
-| `GET /api/v1/market/top20-statistics` | `start_date/end_date=YYYY-MM-DD`, 최대 367일 | NAS TOP20 `hourly[]`, 정규장 일별 `comparisons[]`; 전체시장 거래대금은 `ka20006` 확정 일봉 |
+| `GET /api/v1/market/top20-statistics` | `start_date/end_date=YYYY-MM-DD`, 최대 367일, 선택 `basis=realtime/display` (기본 realtime) | NAS TOP20 `hourly[]`, 정규장 일별 `comparisons[]`; display는 품질·coverage·계산 기준 포함 |
+| `GET /api/v1/market/top20-series` | `trading_date=YYYY-MM-DD`, 선택 `basis=display/realtime` (기본 display) | 08:00~19:59의 720분 `rows[]`, basis·coverage·generation·available_at; 미확인 값은 null |
 | `GET /api/v1/research/observations` | offset 포함 ISO `start/end`, `kinds=ranking,top20_membership,minute_bar` 중 하나 이상, 선택 `subject`, `watermark`, `cursor`, `limit` 1~1000 | 고정 `manifest/watermark`, 순서가 붙은 `observations[]`, `next_cursor` |
 
 스냅샷 `kind`는 `ranking`, `top20_membership`, `top20_index`, `market_state`, `investor_flow`, `program_flow`, `new_high`, `stock_fundamentals`, `nxt_eligibility`를 허용한다. `stock_fundamentals`와 `nxt_eligibility`는 시점 이력과 별도로 범용 콘텐츠의 `stock_fundamentals`, `stock_nxt_eligibility` 컬렉션에서 종목별 최신값도 조회할 수 있다. 봉의 중앙 저장 단위는 거래대금 백만원(`trade_value_million_won`)이다.
@@ -629,6 +632,8 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 검증된 live projection을 게시할 때 동일한 메모리 종목 목록으로 KRX 0B 구독 요청도 즉시 갱신한다. `top20_membership`·당일 편입 원장·TOP20 지수의 DB 저장 완료를 기다리지 않는다. 구독 요청과 실제 수신 준비는 다르며, `subscription_ready`는 WebSocket `REG` 승인 뒤에만 공개한다.
 
 NAS 연결 중 TOP20 차트는 `top20_index` 중앙 스냅샷을 읽고, 통계는 서버의 날짜별 저장 집계 `top20_statistics_day`를 합쳐 읽는다. 과거일에 집계가 없으면 처음 한 번 계산해 저장하고, 원본 TOP20·시장 일봉이 보완되면 해당 날짜 집계를 무효화한다. 당일은 원본의 새 분을 반영해 조회한다. PC 직접 연결은 앱 실행 중에만 TOP20 자료를 자동 수집하며 로컬 `monitor.sqlite3`의 날짜별 집계를 재사용한다. 0원 TOP20 행은 관측 표본과 일별 비교에서 제외한다. 정규장 TOP20 합계는 09:00부터 15:30 종가 단일가 체결분까지 포함한다. 과거 전체시장 분모는 `ka20006` 일봉의 코스피·코스닥 거래대금을 사용하므로 장중 `0J/0U` 최종 수신 전에 끝난 값으로 과거 통계를 고정하지 않는다.
+
+새 NAS 표시 화면은 `top20-series?basis=display`와 `top20-statistics?basis=display`를 사용한다. 위의 기존 원장 통계와 0원 제외 규칙은 기본 `basis=realtime` 계약이다. display는 유효한 날짜별 `top20_index_reconciled`가 있으면 장후 계산본을 선택하고, 없으면 저장 실시간 원장의 품질을 판정한다. `ka10080` OHLCV 거래대금과 00/30초 구성 배분 모두 추정이므로 장후 확정값으로 표시하지 않는다. 미확인 분을 0원으로 채우지 않고 확인된 0원 분은 표본에 포함한다. 일별 합계는 정규장 391분이 모두 확인됐을 때 표시하고, 비율은 코스피·코스닥 분모도 모두 있을 때만 비교한다. 부분일은 확인 구간 합계와 coverage를 표시한다. 표시 통계는 별도 `top20_statistics_display_day` 캐시를 사용하며 원본·분모·계산본 쓰기와 같은 transaction에서 해당 날짜를 무효화한다. 연구 revision과 실시간 원장은 변경하지 않는다. 구 서버의 404/405/501만 저장 실시간 시계열로 호환하고 인증·서버 오류는 화면에 실패로 남긴다. 구 서버가 통계의 basis를 무시하면 업데이트 안내를 표시한다.
 
 거래대금 비교의 `summary.complete_count`와 차이 통계는 `query_scope=KRX+NXT`인 분만 대상으로 한다. `partial_count`와 `scope_counts`는 KRX 또는 NXT 한쪽만 보완된 중간 자료를 따로 보여준다. `total_difference_percent`는 완전 비교 합계의 `(SOR-조회)/조회`, `average_difference_percent`는 분별 차이율 평균이며 `mean_absolute_difference_percent`와 `max_absolute_difference_percent`는 방향을 제거한 오차 크기다.
 
@@ -795,6 +800,8 @@ recovery와 Decision gate는 current snapshot ID/revision이 일치할 때만 �
 서버 제어 응답은 `pong`, `subscribed`, `central_ready`, `connection_opened`다. `connection_opened.scope`는 해당 앱 요청의 준비 완료인 `client`와 NAS가 키움에 승인받은 전체 합집합인 `upstream`을 구분한다. 이전 서버처럼 `scope`가 없으면 클라이언트 요청 확인으로 호환한다. 데이터 이벤트는 중앙 수집기가 전달하는 `trade`, `order_execution`, `market_state`, `program_trade`, `stock_reference` 등이다. `stock_reference`는 `code`, `upper_limit_price`, `lower_limit_price`, `base_price`, `market`을 한 기준 묶음으로 전달한다. 인증 실패 close code는 `4401`이다.
 
 중앙 키움 등록은 한 WebSocket 안에서 `0B`, `0w`, `0g`를 독립된 타입 그룹으로 등록하며, 전송 `data` 행은 최대 100개 item씩 나눈다. 모든 요청 종목의 0B를 먼저 보장하고 남는 KRX/NXT 상세와 0w 대상은 TOP20, 실제 보유·매수 편입, 나머지 앱 요청 순으로 선택한다. `0g`는 같은 중복 제거 종목의 가격제한·기준가를 전달한다. 화면의 구독 종목 수는 거래소별 item 수가 아니라 중복 제거된 종목코드 수다.
+
+2026-10-12 로컬 구현의 일반 구독 변경은 유지 item/type/group을 재등록하지 않는다. 이번 변경의 REMOVE·REG 송신과 성공 응답이 모두 확인되면 `subscription_ready`에 선택적 `scope`와 `codes`를 전달한다. 최초 상류 승인·실제 재연결은 `connection_opened`를 유지하고, 같은 클라이언트 연결의 반복 구독 준비 완료는 `subscription_ready.scope=client`로 알린다. `central_ready`만으로 상류 승인이라고 판단하지 않는다. `codes_added`에는 선택적 `source_resets=[{"code":"005930","market":"NXT"}]`가 추가되며, venue만 재활성화되면 `codes=[]`일 수 있다. 유지 source의 기준점은 보존하고 활성화된 `(code, market)`만 초기화한다. 구형 서버의 기존 알림도 수신하지만 새 의미의 연속성 검증은 새 PC/NAS 조합에서 수행한다. 현재 로컬 검증과 운영 미반영은 [구독 계약](docs/INCREMENTAL_REALTIME_SUBSCRIPTION_DESIGN.md)을 따른다.
 
 ## 변경 규칙
 

@@ -24,11 +24,15 @@ from kiwoom_monitor.application.research_replay import (
     KrxMinuteBarFrame,
 )
 from kiwoom_monitor.domain.ranking import normalize_stock_code
+from kiwoom_monitor.application.market_session_schedule import (
+    KST, krx_regular_session_hours, krx_closing_auction_hours,
+)
 
 
 STRATEGY_ID = "krx_bar_close_breakout"
 STRATEGY_VERSION = "v1"
 STATE_NAMES = frozenset({"flat", "candidate", "open", "cooldown"})
+REGULAR_SESSION_EXIT_POLICY = "krx_regular_before_auction/v1"
 
 
 class StrategyRuntimeConfig(Protocol):
@@ -45,6 +49,51 @@ class StrategyRuntimeConfig(Protocol):
     quantity: int
     capital_won: int
     signal_valid_seconds: int
+    session_exit_policy: str
+    session_exit_buffer_seconds: int
+
+
+def validate_session_exit_policy(policy: str, buffer_seconds: int) -> None:
+    if type(buffer_seconds) is not int:
+        raise ValueError("session exit buffer must be integer seconds")
+    if policy == "" and buffer_seconds == 0:
+        return
+    if policy != REGULAR_SESSION_EXIT_POLICY or not 60 <= buffer_seconds <= 3600:
+        raise ValueError("registered regular session exit policy requires a 60-3600 second buffer")
+
+
+def regular_session_fill_deadline(at: datetime) -> datetime:
+    """정규장 연속 체결의 제외 경계. 이미 열린 포지션에는 진입 거래일을 전달한다."""
+    if at.tzinfo is None or at.utcoffset() is None:
+        raise ValueError("session deadline requires a timezone-aware instant")
+    local = at.astimezone(KST)
+    auction_start, _ = krx_closing_auction_hours(local.date())
+    return datetime.combine(local.date(), auction_start, KST)
+
+
+def regular_session_time_rejection(at: datetime) -> str:
+    deadline = regular_session_fill_deadline(at)
+    local = at.astimezone(KST)
+    opened, _ = krx_regular_session_hours(local.date())
+    if local.weekday() >= 5 or local < datetime.combine(local.date(), opened, KST) or local >= deadline:
+        return "outside_regular_continuous_session"
+    return ""
+
+
+def session_entry_time_rejection(config: StrategyRuntimeConfig, at: datetime, *,
+                                 include_signal_validity: bool = True) -> str:
+    if not config.session_exit_policy:
+        return ""
+    reason = regular_session_time_rejection(at)
+    if reason:
+        return reason
+    deadline = regular_session_fill_deadline(at)
+    local = at.astimezone(KST)
+    validity = config.signal_valid_seconds if include_signal_validity else 0
+    required = timedelta(minutes=config.max_hold_minutes, seconds=validity + config.session_exit_buffer_seconds)
+    if local + required >= deadline:
+        return "session_entry_budget_exhausted"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -67,8 +116,11 @@ class BreakoutStrategyConfig:
     capital_won: int
     signal_valid_seconds: int
     cooldown_seconds: int
+    session_exit_policy: str = ""
+    session_exit_buffer_seconds: int = 0
 
     def __post_init__(self) -> None:
+        validate_session_exit_policy(self.session_exit_policy, self.session_exit_buffer_seconds)
         if self.strategy_version != STRATEGY_VERSION:
             raise ValueError(f"unregistered strategy: {STRATEGY_ID}/{self.strategy_version}")
         get_factor_definition(ROLLING_HIGH_BREAKOUT_ID, self.rolling_factor_version)
@@ -98,6 +150,9 @@ class BreakoutStrategyConfig:
 
     def to_dict(self) -> dict[str, Any]:
         document = asdict(self)
+        if not self.session_exit_policy:
+            document.pop("session_exit_policy")
+            document.pop("session_exit_buffer_seconds")
         if not self.rank_persistence_enabled:
             document.update({
                 "rank_persistence_required": False,
@@ -305,7 +360,7 @@ def evaluate_factor_entry_bar(
         "input_revision_refs": input_refs,
         "strategy_id": strategy_id,
         "strategy_version": config.strategy_version,
-        "policy_version": "single_position_buy_then_sell/v1",
+        "policy_version": config.session_exit_policy or "single_position_buy_then_sell/v1",
         "state_before": before.to_dict(),
     }
     snapshot = FeatureSnapshot(
@@ -394,6 +449,10 @@ def _decide(
     if state.status == "candidate" and state.symbol != code:
         return "NO_TRADE", "NO_TRADE", ("portfolio_slot_reserved",), constraints, state, None
 
+    session_reason = session_entry_time_rejection(config, decision_time)
+    if session_reason:
+        return "NO_TRADE", "NO_TRADE", (session_reason,), constraints, _flat_preserving_seen(state), None
+
     entry_factor = factors[0]
     if entry_factor.status != "valid" or not isinstance(entry_factor.value, Mapping):
         return "NO_TRADE", "NO_TRADE", (f"required_factor_missing:{entry_factor.reason}",), constraints, state, None
@@ -461,6 +520,9 @@ def _decide_open(
     assert state.entry_price is not None
     opened_at = _aware_datetime(state.opened_at).astimezone(timezone.utc)
     reasons: list[str] = []
+    if (config.session_exit_policy and decision_time >= regular_session_fill_deadline(opened_at)
+            - timedelta(seconds=config.session_exit_buffer_seconds)):
+        reasons.append("session_exit_due")
     if bar.close * 10_000 <= state.entry_price * (10_000 - config.stop_loss_bps):
         reasons.append("stop_loss_reached")
     if bar.close * 10_000 >= state.entry_price * (10_000 + config.target_bps):

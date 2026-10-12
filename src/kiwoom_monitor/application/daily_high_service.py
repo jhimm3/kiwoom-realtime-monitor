@@ -31,7 +31,6 @@ class DailyHighTargets:
     high_250_price: int | None
     previous_day_trade_value_eok: float | None = None
     previous_day_close_price: int | None = None
-    daily_trade_values_eok: tuple[tuple[str, float], ...] = ()
     daily_bars: tuple[DailyBar, ...] = ()
     period_statuses: tuple[tuple[str, str], ...] = ()
     collection_verified: bool = False
@@ -84,9 +83,7 @@ class DailyHighTargets:
         previous_bar = ordered[previous_index] if len(ordered) > previous_index else None
         previous_value = previous_bar.trade_value_eok if previous_bar is not None else None
         previous_close = previous_bar.close_price if previous_bar is not None else None
-        # 개발 확인 CSV는 최근 30일만 사용하지만, 원본 일봉은 신고가 계산과
-        # 매매일지 재사용을 위해 최근 250거래일까지 보존한다.
-        values = tuple((bar.trade_date, bar.trade_value_eok) for bar in ordered[:30] if bar.trade_value_eok is not None)
+        # 원본 일봉은 신고가 계산과 매매일지 재사용을 위해 최근 250거래일까지 보존한다.
         # ka10001의 250일 최고가는 권리 조정 전 가격일 수 있다. 현재가·차트와
         # 같은 수정주가 기준은 ka10081 일봉의 최근 250개 고가로 계산한다.
         states = dict(period_statuses)
@@ -98,7 +95,7 @@ class DailyHighTargets:
         highs = [max(prices[:n]) if prices and (len(prices) >= n or source_exhausted)
                  and states.get(str(n)) in {"ready", "provisional"}
                  else None for n in PERIODS]
-        return cls(*highs, previous_value, previous_close, values, ordered[:250],
+        return cls(*highs, previous_value, previous_close, ordered[:250],
                    tuple((str(n), states.get(str(n), "unverified")) for n in PERIODS),
                    collection_verified and not conflicting, scope, query_basis_date, window_end,
                    cached_high_250_price, source_exhausted)

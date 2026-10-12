@@ -203,6 +203,25 @@ class TruncatedNewsContinuationTests(unittest.TestCase):
 
 
 class DeferredHistoricalNewsTests(unittest.TestCase):
+    def test_excluded_publisher_claim_bypasses_cooldown_without_clearing_other_hosts(self) -> None:
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "news.sqlite3"
+            page = _page("005930")
+            excluded = replace(page.items[0], original_url="https://www.ebn.co.kr/a")
+            store_naver_historical_search_page(db, replace(page, items=(excluded,)), deferred_job_key="excluded")
+            store_naver_historical_search_page(db, _page("000660", article="other"), deferred_job_key="other")
+            with closing(sqlite3.connect(db)) as c, c:
+                for host in ("www.ebn.co.kr", "publisher.test"):
+                    c.execute("INSERT INTO news_article_host_cooldowns(host,retry_after,reason,updated_at) VALUES(?,?,?,?)",
+                              (host, "2099-01-01T00:00:00+00:00", "three_consecutive_http_403", "2026-01-01"))
+            claimed = claim_news_article_pipeline(db, limit=10)
+            self.assertEqual(1, len(claimed))
+            self.assertEqual("https://www.ebn.co.kr/a", claimed[0].item.original_url)
+            with closing(sqlite3.connect(db)) as c:
+                self.assertEqual(2, c.execute("SELECT count(*) FROM news_article_host_cooldowns").fetchone()[0])
+                self.assertEqual(("summary",), c.execute("SELECT summary FROM news_articles WHERE article_id='one'").fetchone())
+
     def test_search_only_persists_work_without_starting_article_or_preparation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "news.sqlite3"

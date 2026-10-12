@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock
 
 from PySide6.QtCore import QObject, QThread
+
+from kiwoom_monitor.application.nxt_eligibility_service import NxtEligibilityService
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.nxt_eligibility_worker import (
     NxtEligibilityWorker,
@@ -29,6 +32,35 @@ class InvalidWorker(QObject):
 
 
 class NxtEligibilityWorkerControllerTests(unittest.TestCase):
+    def test_missing_nas_document_fails_without_caching_negative_and_retries(self) -> None:
+        client = Mock()
+        client.load_stored_nxt_eligibility.side_effect = [{}, {"nxtEnable": "Y"}]
+        worker = NxtEligibilityWorker(NxtEligibilityService(client), ("348370",))
+        received, failures = [], []
+        worker.received.connect(lambda code, enabled: received.append((code, enabled)))
+        worker.failed.connect(failures.append)
+        worker.run()
+        self.assertEqual([], received)
+        self.assertEqual(1, len(failures))
+        worker.run()
+        self.assertEqual([("348370", True)], received)
+        client.request.assert_not_called()
+
+    def test_explicit_y_and_n_are_the_only_completed_eligibility_values(self) -> None:
+        for raw, expected in (("Y", True), ("N", False), (" y ", True), ("n", False)):
+            with self.subTest(raw=raw):
+                client = Mock()
+                client.load_stored_nxt_eligibility.return_value = {"nxtEnable": raw}
+                self.assertEqual(expected, NxtEligibilityService(client).is_enabled("348370"))
+                client.request.assert_not_called()
+        for payload in ({}, {"nxtEnable": ""}, {"nxtEnable": None}, {"nxtEnable": "UNKNOWN"}):
+            with self.subTest(payload=payload):
+                client = Mock()
+                client.load_stored_nxt_eligibility.return_value = payload
+                with self.assertRaises(ValueError):
+                    NxtEligibilityService(client).is_enabled("348370")
+                client.request.assert_not_called()
+
     def test_start_forwards_result_failure_and_finished(self) -> None:
         worker = FakeNxtEligibilityWorker()
         controller = NxtEligibilityWorkerController(worker_factory=lambda _codes: worker)

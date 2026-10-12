@@ -54,7 +54,9 @@
     "tests.unit.test_research_partition_search",
     "tests.unit.test_research_symbol_partitions",
     "tests.unit.test_research_staging_cleanup",
-    "tests.unit.test_verify_prepared_historical_news_rules"
+    "tests.unit.test_verify_prepared_historical_news_rules",
+    "tests.unit.test_prepared_historical_archive_v2",
+    "tests.unit.test_seed_news_jobs_from_nas_rankings"
   ],
   "long_windows_modules": [
     "tests.unit.test_top20_replay_execution",
@@ -76,6 +78,7 @@
     "tests.integration.test_observation_sequence_fence_postgres",
     "tests.integration.test_replay_content_comparison_postgres",
     "tests.integration.test_top20_program_postgres",
+    "tests.integration.test_top20_reconciliation_postgres",
     "tests.integration.test_dataset_batch_postgres",
     "tests.integration.test_postgres_scope_locks"
   ],

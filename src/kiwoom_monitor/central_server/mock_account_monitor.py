@@ -456,18 +456,29 @@ class MockAccountMonitor:
         ]
         full_cost_refresh = not self._risk_costs_initialized or self._risk_cost_day != kst_today
         start = min(fill_days, default=kst_today) if full_cost_refresh else kst_today
-        if self._read_limiter is None:
-            cost_pages = await self._reader.read_trade_cost_pages(start, kst_today)
-        else:
-            async with self._read_limiter:
+        cost_query_complete = True
+        try:
+            if self._read_limiter is None:
                 cost_pages = await self._reader.read_trade_cost_pages(start, kst_today)
-        refreshed_costs = trade_costs_from_pages(cost_pages, start, kst_today, self._account_scope)
-        if full_cost_refresh:
-            self._risk_costs.clear()
-        for cost in refreshed_costs:
-            self._risk_costs[(cost.fill_date, cost.stock_code, cost.side)] = cost
-        self._risk_costs_initialized = True
-        self._risk_cost_day = kst_today
+            else:
+                async with self._read_limiter:
+                    cost_pages = await self._reader.read_trade_cost_pages(start, kst_today)
+        except (OSError, RuntimeError) as error:
+            # The four broker recovery reads already succeeded. Publish that
+            # evidence with unknown P&L: ENTER stays closed while the existing
+            # manage-only EXIT gate can verify the run's held quantity.
+            cost_query_complete = False
+            logger.warning("모의 자동운용 비용 조회 실패 · %s", type(error).__name__)
+        else:
+            # Invalid cost contents/scope must still fail; only request errors
+            # above are converted to explicitly unavailable cost evidence.
+            refreshed_costs = trade_costs_from_pages(cost_pages, start, kst_today, self._account_scope)
+            if full_cost_refresh:
+                self._risk_costs.clear()
+            for cost in refreshed_costs:
+                self._risk_costs[(cost.fill_date, cost.stock_code, cost.side)] = cost
+            self._risk_costs_initialized = True
+            self._risk_cost_day = kst_today
         costs = tuple(self._risk_costs.values())
         active = await asyncio.to_thread(
             self._repository.active_intents,
@@ -492,6 +503,7 @@ class MockAccountMonitor:
             broker_query_completed_at=now,
             reconnect_count=self._reconnect_count,
             balance_mismatch_count=self._balance_mismatch_count,
+            cost_query_complete=cost_query_complete,
         )
         self._balance_mismatch_count = snapshot.balance_mismatch_count
         await asyncio.to_thread(

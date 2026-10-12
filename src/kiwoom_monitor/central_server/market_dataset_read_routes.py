@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Protocol, TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,6 +16,8 @@ class MarketDatasetReadStore(Protocol):
     def load_dataset_snapshots(self, kind: str, subject: str = "", limit: int = 100) -> list[dict[str, Any]]: ...
 
     def load_top20_statistics(self, start_date: str, end_date: str) -> dict[str, object]: ...
+    def load_top20_series(self, trading_date: str, *, basis: str = "display") -> dict[str, Any]: ...
+    def load_top20_display_statistics(self, start_date: str, end_date: str) -> dict[str, Any]: ...
 
 
 def create_market_dataset_read_router(
@@ -45,8 +47,13 @@ def create_market_dataset_read_router(
         values = await asyncio.to_thread(store.load_dataset_snapshots, kind, subject, limit)
         return {"kind": kind, "subject": subject, "snapshots": values}
 
+    @router.get("/api/v1/market/top20-series", dependencies=[Depends(authorize)])
+    async def top20_series(trading_date: date, basis: str = Query(default="display", pattern="^(display|realtime)$")) -> dict[str, object]:
+        return await asyncio.to_thread(store.load_top20_series, trading_date.isoformat(), basis=basis)
+
     @router.get("/api/v1/market/top20-statistics", dependencies=[Depends(authorize)])
-    async def top20_statistics(start_date: str, end_date: str) -> dict[str, object]:
+    async def top20_statistics(start_date: str, end_date: str,
+                               basis: str = Query(default="realtime", pattern="^(display|realtime)$")) -> dict[str, object]:
         try:
             start = datetime.fromisoformat(start_date).date()
             end = datetime.fromisoformat(end_date).date()
@@ -55,7 +62,8 @@ def create_market_dataset_read_router(
         if end < start or (end - start).days > 366:
             raise HTTPException(status_code=422, detail="TOP20 통계 범위는 최대 367일입니다.")
         result = await asyncio.to_thread(
-            store.load_top20_statistics, start.isoformat(), end.isoformat(),
+            store.load_top20_display_statistics if basis == "display" else store.load_top20_statistics,
+            start.isoformat(), end.isoformat(),
         )
         return {"start_date": start.isoformat(), "end_date": end.isoformat(), **result}
 

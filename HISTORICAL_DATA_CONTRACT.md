@@ -45,6 +45,7 @@ CR1b 자원 경계는 입력 바이트×8 + 현재 RSS의 보수적 preflight와
 | --- | --- | --- | --- |
 | 실시간 종목조회순위 TOP20 | NAS 최신 projection `central_dataset_snapshots`와 D1 불변 원장 `central_observation_revisions`, `kind=ranking/top20_membership` | NAS가 24시간 30초 주기로 앱과 무관하게 조회한 원본 순위·실제 TOP20 구성 및 같은 시각의 정정 순서 | D1 최초 기록 전과 NAS 비가동·저장 실패 구간은 `legacy_unknown`/`recording_gap`으로 남음 |
 | TOP20 거래대금 지수 | 로컬 `top20_trade_value_index`, NAS `kind=top20_index`, 1분 | 합계·KOSPI/KOSDAQ/미확인 분해·구성 종목·30초 코호트·완성 상태 | 시장 구분을 확인하지 못한 종목은 미확인으로 유지 |
+| TOP20 장후 표시 계산본 | NAS `kind=top20_index_reconciled`, 날짜별 문서, 로컬 구현·미배포 | 저장된 해당 분 00/30초 구성과 마감 조회 봉의 100%/50% 배분. 억원·게시시각·입력 지문·720분/정규장 391분 coverage 보존 | OHLCV 거래대금과 30초 배분 모두 추정. 구성·봉·NXT 근거 부족은 null/미확인. 연구 observation/replay 원본에 편입하지 않음 |
 | 종목 1초 체결 집계 | NAS `central_second_trade_bars`, 1초 | TOP20 또는 hot cohort 0B 구독 뒤 종목·KRX/NXT별 OHLC·거래량·거래대금·체결 건수 | 두 후보군 진입 전과 NAS 비가동/비구독 구간은 복구 불가하며 공백 이력·조회 API는 아직 없음 |
 | VI | NAS `central_vi_event_revisions` | 1h 실시간과 ka10054 보완으로 수신한 발동/해제·정적/동적·가격·시각·방향·횟수·거래소 사실 | NAS 시작 전 전체 이력과 공급원이 주지 않은 필드는 unknown |
 | 15% hot cohort | NAS `central_hot_cohort_current/revisions` | 저장 조건식 INITIAL/I 편입부터 다음 실제 관측 KRX 세션 종료까지의 추적 집합 | 조건식 미선택·NAS 비가동 구간과 편입 전 상태는 unknown; KRX 조건검색 범위 |
@@ -190,3 +191,9 @@ NAS shadow는 중앙 관측 `accepted_sequence`를 앞으로만 소비한다. �
 다음 사례를 한 묶음으로 검증한다: 오래된 1행/250행, 3·20·249·250개, 두 페이지 이상의 정상 조회, 원천의 짧은 정상 종료, 빈 첫 응답, 잘못된/반복 continuation, 중복 날짜, 저장 실패·값 불일치·일부 삭제, 동일 자료 재사용, 자정/장전/휴장 추정 금지, 진행 봉과 장후 확정, KRX/NXT 부분 실패·짧은 NXT 이력, 불충분 고가의 기본정보 fallback 차단, 미확인 캐시의 당일 완료 차단, 수집과 장후 보완 동시 실행·취소, 기존 관측시각/transaction/순위 우선순위 회귀. PostgreSQL 동작은 전용 DB에서 같은 저장·재사용·실패 경로를 묶어 확인하며 운영 DB로 테스트하지 않는다.
 
 API의 추가 coverage만으로 구형 PC 계산기가 자동으로 안전해지는 것은 아니다. NAS와 PC 소비자 변경을 누적 검증한 뒤 함께 적용하고, 실행 빌드와 실제 response/화면을 확인한 시점에만 운영 완료로 기록한다. 구현 중 애플리케이션 전체 캐시 정리나 운영 일봉 삭제로 결과를 맞추지 않는다.
+
+## TRAIN 확대용 결과일 복원 범위
+
+`export_historical_reconstruction --strategy-outcomes-only`를 명시하면 기존 사후 후보와 선정일 뒤의 실제 공급자 봉만 불변 복원한다. 뉴스 SQL과 선정일 봉 조회를 생략하며 새 manifest의 `export_scope`로 범위를 표시한다. 후보일 자체의 자료·뉴스가 없다는 증거로 빈 집계를 해석하지 않는다. 일반 호출은 기존 범위와 manifest 계약을 유지한다.
+
+후속 입력은 기존 `individual_stocks_only`·`exclude_noncontinuous_minute_candidates` 투영과 source ID/revision/파일 SHA-256을 유지한다. 원본 DB의 현재 시장 구분·collector availability·봉 주기·완료 job 상태를 그대로 보존하며 5분봉을 1분봉으로 확대하거나 공백을 채우지 않는다. 전체 날짜를 사전 고정한 TRAIN 확대는 연속 2~20일의 불변 패키지로 나누며, 패키지별 최소 입력 READY가 종일 완전성·실시간 후보 재현·수익성 승인인 것은 아니다.

@@ -17,6 +17,7 @@ from kiwoom_monitor.application.mock_automation_specification import (
 from kiwoom_monitor.domain.execution_activation import ForwardCriteria
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
 from kiwoom_monitor.infrastructure.central_credentials_client import CentralCredentialsClient
+from kiwoom_monitor.presentation.mock_automation_candidate_dialog import MockAutomationCandidateDialog
 
 
 def available_mock_profiles(document: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -41,11 +42,35 @@ def available_mock_profiles(document: dict[str, Any]) -> tuple[dict[str, Any], .
     )))
 
 
+def account_preparation_reasons(context: dict[str, Any]) -> tuple[str, ...]:
+    selected = context.get("selected_profile")
+    settings = context.get("account_settings")
+    if not isinstance(selected, dict) or not isinstance(settings, dict):
+        return ("모의계좌 설정을 확인할 수 없습니다.",)
+    if (
+        not selected.get("account_ref") or not selected.get("profile_id")
+        or settings.get("scope") != {
+            "broker": "kiwoom", "environment": "mock", "account_ref": selected["account_ref"],
+        }
+        or settings.get("active_profile_id") != selected["profile_id"]
+        or type(settings.get("revision")) is not int or settings["revision"] < 0
+    ):
+        return ("선택한 모의계좌의 활성 프로필과 설정 버전을 다시 확인하세요.",)
+    reasons = []
+    if settings.get("monitor_enabled") is not True:
+        reasons.append("모의계좌 감시가 꺼져 있거나 확인되지 않았습니다.")
+    if settings.get("mock_order_enabled") is not True:
+        reasons.append("모의주문 허용이 꺼져 있습니다. 계좌 설정을 확인하세요.")
+    return tuple(reasons)
+
+
 def operation_availability(context: dict[str, Any]) -> dict[str, bool]:
     selected = context.get("selected_profile")
     status = context.get("status")
     specs = context.get("specs")
     if not isinstance(selected, dict) or not isinstance(status, dict) or not isinstance(specs, list):
+        return {"start": False, "stop": False, "resume": False}
+    if status.get("status_query_error"):
         return {"start": False, "stop": False, "resume": False}
     selected_spec = str(context.get("selected_spec_id", ""))
     ready = any(
@@ -58,11 +83,15 @@ def operation_availability(context: dict[str, Any]) -> dict[str, bool]:
     control = status.get("control")
     desired = control.get("desired_state") if isinstance(control, dict) else None
     active_spec = str(control.get("active_spec_id", "")) if isinstance(control, dict) else ""
-    automatic = status.get("runtime_mode") == "automatic"
+    automatic = status.get("runtime_mode") == "AUTOMATIC"
+    account_ready = not account_preparation_reasons(context)
     return {
-        "start": ready and status.get("runner") is None and desired is None,
+        "start": (
+            account_ready and ready and status.get("runner") is None and desired is None
+            and not status.get("restore_error")
+        ),
         "stop": automatic and desired == "RUNNING" and active_spec == selected_spec,
-        "resume": desired == "STOPPED" and active_spec == selected_spec,
+        "resume": account_ready and desired == "STOPPED" and active_spec == selected_spec,
     }
 
 
@@ -136,7 +165,7 @@ class MockAutomationWorker(QThread):
             )
         except RuntimeError as error:
             status = {"runtime_mode": None, "control": None, "runner": None,
-                      "restore_error": str(error)}
+                      "status_query_error": str(error)}
         control = status.get("control")
         active_spec = str(control.get("active_spec_id", "")) if isinstance(control, dict) else ""
         if active_spec and any(
@@ -292,6 +321,7 @@ class MockAutomationDialog(QDialog):
         self._content = content_client
         self._credentials = credentials_client
         self._worker: MockAutomationWorker | None = None
+        self._candidate_files_dialog: MockAutomationCandidateDialog | None = None
         self._context: dict[str, Any] = {}
 
         self._profile = QComboBox()
@@ -299,6 +329,8 @@ class MockAutomationDialog(QDialog):
         self._spec = QComboBox()
         self._spec.currentIndexChanged.connect(self._spec_changed)
         self._candidate = QComboBox()
+        self._candidate_files = QPushButton("후보 준비·게시")
+        self._candidate_files.clicked.connect(self._prepare_candidate_files)
         self._account = QLabel("-")
         self._readiness = QLabel("READY 명세를 확인하는 중입니다…")
         self._readiness.setWordWrap(True)
@@ -310,7 +342,10 @@ class MockAutomationDialog(QDialog):
         form = QFormLayout()
         form.addRow("모의계좌", self._profile)
         form.addRow("계좌 식별자", self._account)
-        form.addRow("게시 후보", self._candidate)
+        candidate_row = QHBoxLayout()
+        candidate_row.addWidget(self._candidate)
+        candidate_row.addWidget(self._candidate_files)
+        form.addRow("게시 후보", candidate_row)
         form.addRow("READY 명세", self._spec)
         form.addRow("명세 상태", self._readiness)
         form.addRow("운용 상태", self._runtime)
@@ -405,6 +440,22 @@ class MockAutomationDialog(QDialog):
         self._worker = worker
         worker.start()
 
+    def _prepare_candidate_files(self) -> None:
+        if self._worker is not None:
+            return
+        selected = self._selected_profile()
+        binding = self._context.get("candidate_binding")
+        if not isinstance(selected, dict) or not isinstance(binding, dict):
+            self._message.setText("연결된 모의계좌를 먼저 새로 확인하세요.")
+            return
+        if self._candidate_files_dialog is not None:
+            self._candidate_files_dialog.stop()
+            self._candidate_files_dialog.deleteLater()
+        dialog = MockAutomationCandidateDialog(self._content, selected, binding, self)
+        self._candidate_files_dialog = dialog
+        dialog.candidate_published.connect(lambda: self._request("refresh"))
+        dialog.exec()
+
     def _publish_selected_candidate(self) -> None:
         if self._worker is not None:
             return
@@ -451,9 +502,16 @@ class MockAutomationDialog(QDialog):
             "resume": "모의 자동운용 재개 요청이 반영됐습니다.",
             "publish_spec": "READY 모의운용 명세를 게시했습니다. 주문은 아직 시작되지 않았습니다.",
         }
-        self._message.setText(messages.get(operation, "완료"))
+        status = context.get("status")
+        if isinstance(status, dict) and status.get("status_query_error"):
+            self._message.setText("NAS 운용 상태를 확인하지 못했습니다. 새로 확인 후 제어하세요.")
+        else:
+            self._message.setText(messages.get(operation, "완료"))
 
     def _failed(self, _operation: str, message: str) -> None:
+        self._context["status"] = {"status_query_error": message or "상태 미확인"}
+        self._runtime.setText("상태를 확인할 수 없습니다. 새로 확인 후 제어할 수 있습니다.")
+        self._apply_button_state()
         self._message.setText(f"NAS 자동운용 요청 실패 · {message}")
 
     def _worker_finished(self, worker: MockAutomationWorker) -> None:
@@ -525,8 +583,13 @@ class MockAutomationDialog(QDialog):
             self._readiness.setText(str(selected_row.get("readiness", "BLOCKED")) + (
                 f" · {reasons}" if reasons else ""
             ))
+        account_reasons = account_preparation_reasons(self._context)
+        if account_reasons:
+            self._readiness.setText(self._readiness.text() + " · " + " ".join(account_reasons))
         status = self._context.get("status")
-        if isinstance(status, dict):
+        if isinstance(status, dict) and status.get("status_query_error"):
+            self._runtime.setText("상태 조회 실패 · " + str(status["status_query_error"]))
+        elif isinstance(status, dict):
             control = status.get("control")
             desired = control.get("desired_state") if isinstance(control, dict) else "미시작"
             runner = status.get("runner")
@@ -568,6 +631,10 @@ class MockAutomationDialog(QDialog):
         self._profile.setEnabled(not busy)
         self._spec.setEnabled(not busy)
         self._candidate.setEnabled(not busy)
+        self._candidate_files.setEnabled(
+            not busy and isinstance(self._context.get("selected_profile"), dict)
+            and isinstance(self._context.get("candidate_binding"), dict)
+        )
         self._publish.setEnabled(not busy and self._candidate.count() > 0)
         if busy:
             self._start.setEnabled(False)
@@ -578,6 +645,8 @@ class MockAutomationDialog(QDialog):
 
     def stop(self) -> None:
         self._window_settings.setValue("geometry", self.saveGeometry())
+        if self._candidate_files_dialog is not None:
+            self._candidate_files_dialog.stop()
         if self._worker is not None and self._worker.isRunning():
             self._worker.requestInterruption()
             self._worker.wait(12_000)

@@ -183,6 +183,26 @@ class CentralRealtimeWorkerTests(unittest.TestCase):
         worker.update_codes(("000660",), ("000660",))
         self.assertEqual((("000660",), ("000660",)), local.args)
 
+    def test_added_nas_symbol_resets_local_baselines_before_request_changes(self) -> None:
+        worker = CentralRealtimeWorker(
+            DataSourceSettings("personal_server", "https://nas.example", "token"), ("005930",))
+        observed = []
+        worker.sources_activated.connect(lambda sources: observed.append((worker._codes,sources)))
+        worker.update_codes(("005930","000660"),())
+        self.assertEqual([(("005930",),(("000660","KRX"),("000660","NXT"),("000660","SOR")))],observed)
+
+    def test_venue_only_activation_and_incremental_ready_do_not_emit_reconnect(self) -> None:
+        worker = CentralRealtimeWorker(
+            DataSourceSettings("personal_server", "https://nas.example", "token"), ("005930",))
+        resets, opened = [], []
+        worker.sources_activated.connect(resets.append)
+        worker.connection_opened.connect(opened.append)
+        worker._dispatch({'type':'codes_added','codes':[],
+            'source_resets':[{'code':'005930','market':'NXT'}]})
+        worker._dispatch({'type':'subscription_ready','scope':'upstream','codes':['005930']})
+        self.assertEqual([(('005930','NXT'),)],resets)
+        self.assertEqual([],opened)
+
     def test_server_upstream_failure_triggers_immediate_failover_path(self) -> None:
         worker = CentralRealtimeWorker(
             DataSourceSettings("personal_server", "https://nas.example", "token", True),

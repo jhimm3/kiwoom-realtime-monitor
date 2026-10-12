@@ -73,6 +73,7 @@ async def capture_native_top20_fixture(store, origin, *, capture_store=False, ca
         minute_backfill_enabled=False)
     ingestor._on_daily_change = service.notify_daily_bars_changed
     collector = CentralRealtimeCollector(lambda: '', 'real', hub, clock.now, store=store)
+    collector._realtime_tape_version = collector._hub._realtime_tape_version = "top20-realtime-tape/v1"
     runtime = ReplayRuntimeScope()
     enabled = {'top20_inputs', 'collector_inputs'} | ({'store_inputs'} if capture_store else set())
     with ExitStack() as stack:

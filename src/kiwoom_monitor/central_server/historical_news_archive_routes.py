@@ -33,6 +33,8 @@ def create_historical_news_archive_router(
         cursor: str | None = Query(default=None, max_length=2048),
     ) -> dict[str, object]:
         reader = archive_reader()
+        if reader.schema_version != 1:
+            raise HTTPException(status_code=409, detail="HISTORICAL_NEWS_ARCHIVE_V2_REQUIRED")
         try:
             return await asyncio.to_thread(reader.search_page, stock_code, limit=limit, cursor=cursor)
         except InvalidArchiveCursorError:
@@ -63,5 +65,32 @@ def create_historical_news_archive_router(
         if result is None:
             raise HTTPException(status_code=404, detail="HISTORICAL_NEWS_ARCHIVE_ARTICLE_NOT_FOUND")
         return result
+
+    @router.get("/api/v1/news/historical-archive/v2/search", dependencies=[Depends(authorize)])
+    async def historical_archive_v2_search(
+        stock_code: str = Query(pattern=r"^[0-9A-Z]{6}$"),
+        limit: int = Query(default=100, ge=1, le=200),
+        cursor: str | None = Query(default=None, max_length=2048),
+    ) -> dict[str, object]:
+        return await v2_page("search", stock_code=stock_code, limit=limit, cursor=cursor)
+
+    @router.get("/api/v1/news/historical-archive/v2/market", dependencies=[Depends(authorize)])
+    async def historical_archive_v2_market(
+        source: str | None = Query(default=None, pattern=r"^(flash|world)$"),
+        limit: int = Query(default=100, ge=1, le=200),
+        cursor: str | None = Query(default=None, max_length=2048),
+    ) -> dict[str, object]:
+        return await v2_page("market", source=source, limit=limit, cursor=cursor)
+
+    async def v2_page(kind: str, **kwargs: object) -> dict[str, object]:
+        reader = archive_reader()
+        if reader.schema_version != 2:
+            raise HTTPException(status_code=409, detail="HISTORICAL_NEWS_ARCHIVE_V2_UNAVAILABLE")
+        try:
+            return await asyncio.to_thread(reader.page_v2, kind, **kwargs)
+        except InvalidArchiveCursorError:
+            raise HTTPException(status_code=400, detail="HISTORICAL_NEWS_ARCHIVE_CURSOR_INVALID") from None
+        except (ArchiveUnavailableError, OSError, sqlite3.DatabaseError):
+            raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_UNAVAILABLE") from None
 
     return router

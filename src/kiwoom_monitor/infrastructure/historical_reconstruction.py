@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import quote
 
 from kiwoom_monitor.application.market_session_schedule import (
     KST, MarketPhase, MarketSession, krx_regular_session_hours, research_session_profile_document,
@@ -40,6 +41,8 @@ def export_historical_reconstruction(
     dates: Iterable[str],
     outcome_end_date: str = "",
     created_at: datetime | None = None,
+    intelligence_immutable: bool = False,
+    strategy_outcomes_only: bool = False,
 ) -> dict[str, Any]:
     """Freeze selected candidate days with the bars and news currently collected.
 
@@ -47,12 +50,18 @@ def export_historical_reconstruction(
     therefore the export time, never the historical session time.  Bar and news
     rows retain the time at which the collector actually observed them.
     """
+    if not isinstance(intelligence_immutable, bool):
+        raise ValueError("intelligence_immutable must be a boolean")
+    if not isinstance(strategy_outcomes_only, bool):
+        raise ValueError("strategy_outcomes_only must be a boolean")
     selected_dates = tuple(sorted({_iso_date(value) for value in dates}))
     if not selected_dates:
         raise ValueError("at least one reconstruction date is required")
     outcome_end = _iso_date(outcome_end_date) if outcome_end_date else selected_dates[-1]
     if outcome_end < selected_dates[-1]:
         raise ValueError("outcome_end_date must not precede a selected date")
+    if strategy_outcomes_only and outcome_end <= selected_dates[-1]:
+        raise ValueError("strategy outcomes require a later outcome_end_date")
     output = Path(output)
     if output.exists():
         raise ValueError("historical reconstruction export is immutable and cannot be overwritten")
@@ -64,11 +73,13 @@ def export_historical_reconstruction(
 
     candidate_path = Path(candidate_database).expanduser().resolve(strict=True)
     intelligence_path = Path(intelligence_database).expanduser().resolve(strict=True)
+    if intelligence_immutable and any(Path(str(intelligence_path) + suffix).exists() for suffix in ("-wal", "-shm")):
+        raise ValueError("immutable reconstruction snapshot must not have WAL or SHM sidecars")
     records: list[dict[str, Any]] = []
     resolution_counts = {"60": 0, "300": 0, "unavailable": 0}
 
     with closing(_open_readonly(candidate_path, immutable=True)) as candidates, closing(
-        _open_readonly(intelligence_path, immutable=False)
+        _open_readonly(intelligence_path, immutable=intelligence_immutable)
     ) as intelligence:
         candidates.row_factory = sqlite3.Row
         intelligence.row_factory = sqlite3.Row
@@ -125,12 +136,14 @@ def export_historical_reconstruction(
                 ))
 
                 source_job_state = _market_job_state(intelligence, code)
-                range_start = f"{selected_date}T00:00:00"
+                first_bar_date = (date.fromisoformat(selected_date) + timedelta(days=1)).isoformat() if strategy_outcomes_only else selected_date
+                range_start = f"{first_bar_date}T00:00:00"
                 range_end = f"{(date.fromisoformat(case_outcome_end) + timedelta(days=1)).isoformat()}T00:00:00"
                 case_dates = [str(value[0]) for value in intelligence.execute(
                     "SELECT DISTINCT substr(bar_time,1,10) FROM market_bars "
                     "WHERE provider='daishin_creon' AND code=? "
                     "AND venue IN ('K','KRX') AND session_scope='regular' "
+                    "AND interval_seconds IN (60,300) "
                     "AND adjustment_mode='raw' AND bar_time>=? AND bar_time<? ORDER BY 1",
                     (code, range_start, range_end),
                 )]
@@ -169,7 +182,7 @@ def export_historical_reconstruction(
                             str(bar["bar_time"]), str(bar["available_at"]), payload,
                         ))
 
-            news_rows = intelligence.execute(
+            news_rows = [] if strategy_outcomes_only else intelligence.execute(
                 """
                 SELECT o.provider, o.office_id, o.article_id, o.code, o.source_date,
                        o.query_text, o.start, o.position, o.observed_at,
@@ -287,6 +300,8 @@ def export_historical_reconstruction(
         "records_file": "records.jsonl",
         "records_file_hash": hashlib.sha256(encoded).hexdigest(),
     }
+    if strategy_outcomes_only:
+        manifest["export_scope"] = {"market_bars": "strictly_after_selection_date", "news_included": False}
     _write_immutable_export(output, encoded, manifest)
     return manifest
 
@@ -656,8 +671,12 @@ def _record(kind: str, subject: str, effective_at: str, available_at: str,
 
 def _open_readonly(path: Path, *, immutable: bool) -> sqlite3.Connection:
     suffix = "&immutable=1" if immutable else ""
+    encoded_path = quote(path.as_posix(), safe="/:")
+    if encoded_path.startswith("//"):
+        # A resolved Windows share is a filesystem UNC path, not a URI authority.
+        encoded_path = "%2F%2F" + encoded_path[2:]
     connection = sqlite3.connect(
-        f"file:{path.as_posix()}?mode=ro{suffix}", uri=True, timeout=30,
+        f"file:{encoded_path}?mode=ro{suffix}", uri=True, timeout=30,
     )
     connection.execute("PRAGMA query_only=ON")
     return connection

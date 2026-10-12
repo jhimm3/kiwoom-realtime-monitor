@@ -87,9 +87,9 @@ def inventory(root: Path) -> dict[str, object]:
                         if _literal(key) == "type" and isinstance(value, (ast.List, ast.Tuple)):
                             ws_types.update(item for element in value.elts if (item := _literal(element)))
     # Dynamic REG groups are constructed before the REG payload, so collect
-    # type lists from the registration method body as well.
+    # type lists from the sender and its native group builder as well.
     for node in ast.walk(realtime_tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_send_subscription":
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {"_send_subscription", "_subscription_groups"}:
             for child in ast.walk(node):
                 if isinstance(child, ast.Dict):
                     for key, value in zip(child.keys, child.values):

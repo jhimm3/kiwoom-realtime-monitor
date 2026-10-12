@@ -87,6 +87,11 @@ class RecordedAccountPostgresTests(unittest.TestCase):
         self.assertTrue(store.create_execution_intent(prior_intent))
         self.assertTrue(store.append_execution_event(prior_intent, prior_event))
         self.assertTrue(store.save_execution_account_snapshot(prior_snapshot))
+        # Native offline/import history accepts opaque ledger refs. Preserve
+        # five such pre-capture rows without registering them as identities.
+        for index in range(5):
+            self.assertTrue(store.save_execution_account_snapshot(dict(prior_snapshot,
+                snapshot_id='offline-prior-' + str(index), account_ref='offline-ledger-' + str(index))))
         store.save_real_account_recovery(binding, recovery, now, settings_revision=2)
         with baseline.ReplayDatabaseLease(url, token) as lease:
             with lease.connection.transaction(), lease.connection.cursor() as cursor:

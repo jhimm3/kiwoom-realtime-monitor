@@ -14,7 +14,8 @@ import json
 import os
 from pathlib import Path
 import sqlite3
-from typing import Any, Iterable
+import time
+from typing import Any, Callable, Iterable
 
 
 HISTORICAL_SCOPES = (
@@ -49,10 +50,12 @@ def _canonical(row: dict[str, Any]) -> str:
 
 
 class SeedExport:
-    def __init__(self, source: Any, destination: sqlite3.Connection, *, max_rows: int) -> None:
+    def __init__(self, source: Any, destination: sqlite3.Connection, *, max_rows: int,
+                 progress: Callable[[dict],None] | None=None) -> None:
         self.source = source
         self.destination = destination
         self.max_rows = max_rows
+        self.progress = progress
         self.count = 0
         self.query_number = 0
         self.owned_articles: set[str] = set()
@@ -81,14 +84,23 @@ class SeedExport:
             if table == "central_documents":
                 predicate += " AND collection = ANY(%s)"
                 parameters += (["news_assessment", "news_original_publication"],)
-            with self.source.cursor(name=f"news_seed_{self.query_number}") as cursor:
-                cursor.execute(
-                    f"SELECT row_to_json(t)::text FROM {table} AS t WHERE {predicate}",
-                    parameters,
-                )
-                while rows := cursor.fetchmany(BATCH_SIZE):
-                    for (raw,) in rows:
-                        yield json.loads(raw)
+            started=time.monotonic()
+            context={'table':table,'filter':column,'keys':len(batch),'query':self.query_number}
+            try:
+                with self.source.cursor(name=f"news_seed_{self.query_number}") as cursor:
+                    cursor.execute(
+                        f"SELECT row_to_json(t)::text FROM {table} AS t WHERE {predicate}",
+                        parameters,
+                    )
+                    while rows := cursor.fetchmany(BATCH_SIZE):
+                        for (raw,) in rows:
+                            yield json.loads(raw)
+            except Exception as exc:
+                context.update(state='failed',elapsed_ms=round((time.monotonic()-started)*1000),error_type=type(exc).__name__)
+                raise RuntimeError('seed read query failed: '+json.dumps(context)) from exc
+            elapsed=round((time.monotonic()-started)*1000)
+            if elapsed>=1000 and self.progress:
+                self.progress({**context,'state':'complete','elapsed_ms':elapsed})
 
     def save(self, table: str, row: dict[str, Any], *, owned: bool = False) -> bool:
         keys = TABLE_KEYS[table]
@@ -283,9 +295,14 @@ class SeedExport:
                 - len(self.owned_articles), "rows": self.count, "tables": counts, "roles": roles}
 
 
-def export_seed(database_url: str, output: Path, *, max_rows: int = 1_000_000) -> dict[str, Any]:
+def export_seed(database_url: str, output: Path, *, max_rows: int = 1_000_000,
+                statement_timeout_ms: int=30_000,
+                progress: Callable[[dict],None] | None=None) -> dict[str, Any]:
     import psycopg
     from psycopg import IsolationLevel
+
+    if not 1000<=statement_timeout_ms<=300_000:
+        raise ValueError('export statement timeout must be 1000..300000 milliseconds')
 
     output = output.resolve()
     partial = output.with_name(output.name + ".partial")
@@ -300,18 +317,19 @@ def export_seed(database_url: str, output: Path, *, max_rows: int = 1_000_000) -
                             "PRIMARY KEY(table_name,row_key))")
         destination.execute("CREATE TABLE seed_manifest (key TEXT PRIMARY KEY,value_json TEXT NOT NULL)")
         with psycopg.connect(database_url, connect_timeout=10,
-                             options="-c statement_timeout=30000") as source:
+                             options=f"-c statement_timeout={statement_timeout_ms}") as source:
             source.read_only = True
             source.isolation_level = IsolationLevel.REPEATABLE_READ
             with source.cursor() as cursor:
                 cursor.execute("SELECT current_database(),current_setting('server_version_num'),"
                                "transaction_timestamp()::text")
                 database_name, server_version, snapshot_started_at = cursor.fetchone()
-            exporter = SeedExport(source, destination, max_rows=max_rows)
+            exporter = SeedExport(source, destination, max_rows=max_rows,progress=progress)
             report = exporter.run()
             report.update({"schema": "historical-news-seed/v1", "database": database_name,
                            "postgres_server_version": server_version,
-                           "snapshot_started_at": snapshot_started_at})
+                           "snapshot_started_at": snapshot_started_at,
+                           "statement_timeout_ms":statement_timeout_ms})
         destination.execute("INSERT INTO seed_manifest VALUES(?,?)",
                             ("report", json.dumps(report, ensure_ascii=False, sort_keys=True)))
         destination.commit()
@@ -333,13 +351,16 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--database-url-env", default="KIWOOM_SERVER_DATABASE_URL")
     parser.add_argument("--max-rows", type=int, default=1_000_000)
+    parser.add_argument('--statement-timeout-ms',type=int,default=30_000)
     args = parser.parse_args()
     if args.max_rows < 1:
         parser.error("--max-rows must be positive")
     database_url = os.environ.get(args.database_url_env)
     if not database_url:
         parser.error("database URL environment variable is missing")
-    print(json.dumps(export_seed(database_url, args.output, max_rows=args.max_rows),
+    print(json.dumps(export_seed(database_url, args.output, max_rows=args.max_rows,
+                                statement_timeout_ms=args.statement_timeout_ms,
+                                progress=lambda value:print(json.dumps(value),flush=True)),
                      ensure_ascii=False, sort_keys=True))
 
 

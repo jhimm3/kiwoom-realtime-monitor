@@ -21,6 +21,7 @@ class RealtimeWorkerController(QObject):
     connection_failed = Signal(str)
     connection_opened = Signal(object)
     codes_added = Signal(object)
+    sources_activated = Signal(object)
     subscription_ready = Signal(object)
 
     def __init__(
@@ -77,6 +78,8 @@ class RealtimeWorkerController(QObject):
         worker.connection_failed.connect(self.connection_failed.emit)
         worker.connection_opened.connect(self.connection_opened.emit)
         worker.codes_added.connect(self.codes_added.emit)
+        if hasattr(worker, "sources_activated"):
+            worker.sources_activated.connect(self.sources_activated.emit)
         worker.subscription_ready.connect(
             lambda: self.subscription_ready.emit(followup_codes)
         )

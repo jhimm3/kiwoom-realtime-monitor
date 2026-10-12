@@ -113,7 +113,7 @@ Synology는 bind mount 원본 폴더가 없으면 이미지 빌드가 성공해�
 
 `postgres-data`에는 PostgreSQL 원본이, `server-data`에는 DART 캐시와 `logs/server.log` 상세 로그가 남는다. 컨테이너를 업데이트해도 두 폴더는 삭제하지 않는다. `.env`와 인증 저장소 `server-secrets`도 함께 보존한다.
 HTTP 요청별 access log는 Container Manager 출력에 쓰지 않고 `server-data/logs/server.log`에만 기록한다.
-파일은 자정에 날짜 suffix를 붙여 회전하며 기본 14일 보존한다. 보존 기간은
+파일은 **한국시간 00:00 이후 첫 로그**에서 전날의 한국 날짜 suffix를 붙여 회전하며 기본 14개 날짜를 보존한다. 같은 이름의 기존 파일이 있으면 `.1`, `.2`처럼 별도 파일에 보존하고 회전을 계속한다. 보존 기간은
 `CENTRAL_SERVER_LOG_RETENTION_DAYS`로 1~365일 안에서 조정한다. Container Manager에는 서버 시작·종료,
 운영 상태, 경고와 오류처럼 요청 한 건마다 반복되지 않는 로그가 남는다.
 같은 상세 파일의 `kiwoom_monitor.kiwoom_api` 줄은 캐시를 통과해 실제 NAS→키움 REST 전송까지 간

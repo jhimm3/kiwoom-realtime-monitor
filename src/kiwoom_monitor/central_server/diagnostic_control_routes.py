@@ -1,5 +1,7 @@
 """Diagnostic switch and trace HTTP policy; native control and capture own their work."""
 import asyncio
+import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -7,6 +9,16 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from fastapi import APIRouter
     from .diagnostic_runs import DiagnosticRuns
+
+
+def _trace_start_phase(phase, submitted, function, *args, **kwargs):
+    began = time.monotonic()
+    try:
+        return function(*args, **kwargs)
+    finally:
+        logging.getLogger(__name__).info(
+            'recorder_start_phase phase=%s executor_wait_ms=%.3f execution_ms=%.3f',
+            phase, (began - submitted) * 1000, (time.monotonic() - began) * 1000)
 
 
 def create_diagnostic_control_router(
@@ -74,7 +86,7 @@ def create_diagnostic_control_router(
                         "input_version": "account-store-input/v1", "scope": "typed_native_db_arguments",
                         "authority_tokens": "session_hmac_aliases", "native_replay_ready": False,
                         "context_baseline_acceptance": "pending",
-                        "context_capture": {"version": "account-context/v2", "copy_limit_bytes": 32 * 1024 * 1024,
+                        "context_capture": {"version": "account-context/v4", "copy_limit_bytes": 32 * 1024 * 1024,
                                             "row_limit": 50_000, "source_state_equivalent": False,
                                             "postgres_snapshot": "repeatable_read_read_only"},
                     },
@@ -85,7 +97,8 @@ def create_diagnostic_control_router(
                         "candidate_flow_scope": "candidate_flow_consumer_and_ingest",
                         "broker_queue_and_cache_scheduling_replayed": False},
                     "causal_input_versions": {"market_request": "market-request-tape/v1",
-                        "ranking": "top20-ranking-input/v1", "realtime_lifecycle": "top20-realtime-tape/v1",
+                        "ranking": "top20-ranking-input/v1", "realtime_lifecycle": "top20-realtime-tape/v2",
+                        "realtime_lifecycle_legacy": "top20-realtime-tape/v1",
                         "delivery": "top20-hub-delivery/v1"},
                     "causal_input_boundaries": ["REST", "catalog", "ranking", "subscription", "lifecycle", "delivery_receipt"],
                     "source_state_equivalence_verified": False,
@@ -171,9 +184,11 @@ def create_diagnostic_control_router(
         if trace_state().get("state") in busy_states:
             raise HTTPException(409, detail="trace_already_running")
         try:
-            await asyncio.to_thread(_set_trace, path, True, body.seconds,
+            await asyncio.to_thread(_trace_start_phase, 'control_enable', time.monotonic(),
+                                    _set_trace, path, True, body.seconds,
                                     expected_session=body.expected_session)
-            return await asyncio.to_thread(start_trace, seconds=body.seconds,
+            return await asyncio.to_thread(_trace_start_phase, 'capture_prepare', time.monotonic(),
+                                          start_trace, seconds=body.seconds,
                                           store_inputs=body.store_inputs,
                                           collector_inputs=body.collector_inputs,
                                           top20_inputs=body.top20_inputs,
@@ -183,7 +198,8 @@ def create_diagnostic_control_router(
                                           persist_at=body.persist_at)
         except ValueError as error:
             if trace_state().get("state") not in busy_states:
-                await asyncio.to_thread(_set_trace, path, False, body.seconds,
+                await asyncio.to_thread(_trace_start_phase, 'control_cleanup', time.monotonic(),
+                                        _set_trace, path, False, body.seconds,
                                         expected_session=body.expected_session)
             raise HTTPException(409, detail=str(error)) from error
 

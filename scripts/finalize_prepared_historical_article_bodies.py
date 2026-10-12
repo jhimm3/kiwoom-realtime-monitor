@@ -92,7 +92,9 @@ def _body_provenance(article: dict[str, Any], body: dict[str, Any],
 
 def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
                   scope: str, stock: str, identity: str, expected_hash: str,
-                  evidence: dict[tuple[str, str, str], set[tuple[str, str, float | None]]]) -> str:
+                  evidence: dict[tuple[str, str, str], set[tuple[str, str, float | None]]],
+                  *, manage_transaction: bool = True,
+                  provenance_out: dict[str, Any] | None = None) -> str:
     row = prepared.execute(
         "SELECT stock_code,identity,state,article_json,body_json,rules_json,error,updated_at "
         "FROM prepared_news WHERE scope=? AND stock_code=? AND identity=?",
@@ -103,11 +105,18 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
     article = json.loads(row[3])
     body = json.loads(row[4])
     document = article.get("document")
+    market = scope == "historical_market_backfill"
+    if scope not in (SCOPE, "historical_market_backfill"):
+        raise ValueError("unsupported archive input scope")
     if (not isinstance(document, dict) or str(article.get("stock_code")) != stock or
         str(article.get("identity")) != identity or
-        str(document.get("stock_code")) != stock or
-        str(document.get("identity")) != identity):
+        (market and stock != "GLOBAL") or
+        (not market and (str(document.get("stock_code")) != stock or
+                        str(document.get("identity")) != identity))):
         raise ValueError("prepared article identity does not match its source key")
+    if market:
+        from kiwoom_monitor.central_server.database_news_sources import _news_article_content_hash
+        document = {**document, "stock_code": stock, "identity": identity}
     body_text = body.get("body_text")
     if not isinstance(body_text, str) or not body_text.strip() or len(body_text) > 2_000_000:
         raise ValueError("prepared BODY is empty or exceeds the accepted size")
@@ -118,10 +127,17 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
     fetched_at = float(body.get("fetched_at"))
     if not math.isfinite(fetched_at) or fetched_at <= 0:
         raise ValueError("prepared BODY fetch time is invalid")
-    content_hash = stable_document_hash(document)
+    if provenance_out is not None:
+        provenance_out.update(raw_source_status=provenance,raw_extractor_version=source_version,
+                              provider=provider,office_id=office,source_article_id=source_article,
+                              raw_body_sha256=raw_hash,prepared_fetched_at=fetched_at)
+    content_hash = _news_article_content_hash(document) if market else stable_document_hash(document)
     body_hash = stable_document_hash({"body": body_text})
     now = time.time()
-    archive.execute("BEGIN IMMEDIATE")
+    if manage_transaction:
+        archive.execute("BEGIN IMMEDIATE")
+    elif not archive.in_transaction:
+        raise ValueError("caller must own the archive transaction")
     try:
         progress = archive.execute(
             "SELECT progress_state,input_hash FROM archive_input_progress "
@@ -136,11 +152,16 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
             (stock, identity),
         ).fetchone()
         existing = archive.execute(
-            "SELECT article_revision_id FROM central_news_article_revisions "
+            "SELECT article_revision_id,document_json FROM central_news_article_revisions "
             "WHERE stock_code=? AND identity=? AND content_hash=? "
             "ORDER BY accepted_sequence DESC LIMIT 1",
             (stock, identity, content_hash),
         ).fetchone()
+        if existing:
+            stored_document=json.loads(existing[1])
+            stored_hash=_news_article_content_hash(stored_document) if market else stable_document_hash(stored_document)
+            if stored_hash!=content_hash:
+                raise ValueError("seed article hash/payload conflict")
         article_id = str(existing[0]) if existing else uuid.uuid4().hex
         if not existing:
             archive.execute(
@@ -149,18 +170,21 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
                 "published_at,received_at,available_at,collection_scope,revision_of,document_json) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (article_id, stock, identity, content_hash, "naver_historical_web",
-                 document.get("published_at"), now, now, "historical_news_pc_backfill",
+                 document.get("published_at"), now, now,
+                 "historical_market_pc_backfill" if market else "historical_news_pc_backfill",
                  str(previous[0]) if previous else None,
                  json.dumps(document, ensure_ascii=False, separators=(",", ":"))),
             )
         existing_body = archive.execute(
-            "SELECT body_revision_id,extractor_version FROM central_news_body_revisions "
+            "SELECT body_revision_id,extractor_version,body_text FROM central_news_body_revisions "
             "WHERE article_revision_id=? AND content_hash=? AND status=? "
             "ORDER BY accepted_sequence DESC LIMIT 1",
             (article_id, body_hash, body_status),
         ).fetchone()
         body_id = str(existing_body[0]) if existing_body else uuid.uuid4().hex
         if existing_body:
+            if existing_body[2]!=body_text:
+                raise ValueError("seed BODY hash/payload conflict")
             source_version = str(existing_body[1])
             if provenance in ("version_unverified", "raw_hash_only"):
                 provenance = "seed_exact_body"
@@ -172,6 +196,8 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
                 (body_id, article_id, body_hash, source_version, fetched_at,
                  now, body_status, body_text, ""),
             )
+        if provenance_out is not None:
+            provenance_out['canonical_body_extractor_version']=source_version
         archive.execute(
             "INSERT INTO archive_body_provenance("
             "scope,stock_code,identity,article_revision_id,body_revision_id,"
@@ -191,9 +217,11 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
         ).rowcount
         if changed != 1:
             raise ValueError("article progress update lost its ownership")
-        archive.commit()
+        if manage_transaction:
+            archive.commit()
     except BaseException:
-        archive.rollback()
+        if manage_transaction:
+            archive.rollback()
         raise
     return provenance
 

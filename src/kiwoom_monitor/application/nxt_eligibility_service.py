@@ -17,4 +17,9 @@ class NxtEligibilityService:
         response = stored if isinstance(stored, dict) else self._client.request(
             "ka10100", "/api/dostk/stkinfo", {"stk_cd": code},
         )
-        return str(response.get("nxtEnable", "")).strip().upper() == "Y"
+        flag = str(response.get("nxtEnable", "")).strip().upper()
+        if flag not in {"Y", "N"}:
+            # An empty NAS document is preparation pending, not a negative result.
+            # Raising keeps the worker from emitting/caching False for this day.
+            raise ValueError(f"{code} NXT 가능 여부가 아직 확인되지 않았습니다.")
+        return flag == "Y"

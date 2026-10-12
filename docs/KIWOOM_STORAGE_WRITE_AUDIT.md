@@ -1,5 +1,11 @@
 # 키움 저장 경로 감사 — 첫 계측 범위
 
+## TOP20 장후 표시 계산본 (2026-10-12 로컬 구현)
+
+기존 `AutonomousTop20Service.backfill_day`가 분봉 보완 뒤 `top20_index_reconciled` 날짜 문서를 기존 범용 dataset writer로 원자 게시한다. 표시 통계 캐시 writer는 `dataset.display_statistics_cache`이며 `dataset:top20_statistics_display_day`로 구분해 측정한다. 두 저장 경로 모두 기존 per-call connection/transaction 소유권을 유지한다. 원본 TOP20·시장 분모·계산본 변경과 표시 캐시 무효화는 같은 transaction이다.
+
+`top20_after_close`와 `minute_backfill`의 admission 및 게시 직전 pause를 확인한다. 시작한 게시가 취소돼도 owner가 실제 DB thread 완료까지 join하며 종료가 이를 기다린다. 실패 시 이전 게시본을 보존한다. 표시 계산본과 표시 조회는 실시간 입력 recorder에서 제외하며 원본 capture 계약을 확장하지 않는다. 로컬 취소·실패·캐시 회귀는 검증했으나 실제 PostgreSQL gate는 기존 녹화 예약 잠금으로 실행되지 않았다. 실제 WAL·wait event 측정이나 전체 capture/replay acceptance까지 통과한 것으로 해석하지 않는다.
+
 2026-10-06 C1 후속: `autonomous_top20`의 0w pending 저장은 단일 owned save task가
 실제 DB thread의 완료/실패까지 소유한다. index-loop/종료 대기 취소가 save를 취소하지
 않으며 종료는 producer stop→실제 save drain→pending final flush 순서다. 실패분은

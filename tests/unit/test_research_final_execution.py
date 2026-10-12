@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
 import json
+import hashlib
 import sqlite3
 from threading import Barrier
 import unittest
@@ -12,11 +13,139 @@ from kiwoom_monitor import research_process as rp
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.research_data_source import FrozenResearchDataset
 from scripts import run_research as runner
+from scripts import prepare_mock_automation_candidate as candidate_cli
 from kiwoom_monitor.application.mock_automation_candidate import (
     CandidateEligibilityStatus,
     MockAutomationEligibilityPolicy,
 )
 from datetime import datetime, timedelta
+
+
+class CandidateFinalPreparationReviewTests(unittest.TestCase):
+    from tests.unit.test_historical_baseline_requests import DailyDevelopmentRequestTests
+    setUp = DailyDevelopmentRequestTests.setUp
+
+    def prepare(self):
+        from scripts.prepare_historical_baseline_requests import prepare_daily_requests
+        prepare_daily_requests(self.selection, self.source, self.output)
+        plan = json.loads((self.output / "daily-plan.json").read_text())
+        self.development_end = max(datetime.fromisoformat(fold["end"]) for fold in plan["evaluation"]["folds"])
+
+    def test_missing_choices_are_not_defaults_and_no_policy_source_or_ledger_is_written(self):
+        self.prepare()
+        before = {path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
+        with (patch.object(candidate_cli, "ResearchRepository", side_effect=AssertionError("no DB")),
+              patch.object(rp, "load_research_input", side_effect=AssertionError("no OOS"))):
+            report = candidate_cli.inspect_final_preparation(self.output)
+        self.assertEqual("REVIEW_REQUIRED", report["status"])
+        self.assertTrue(all(value is None for value in report["criteria"].values()))
+        self.assertIsNone(report["final_window"]["start"])
+        self.assertEqual(7, sum(reason.startswith("TBD:") for reason in report["reasons"]))
+        self.assertFalse(report["criteria_frozen"])
+        self.assertFalse(report["final_request_created"])
+        self.assertFalse(report["candidate_eligibility_evaluated"])
+        self.assertFalse(report["oos_queried"])
+        self.assertNotIn("policy_id", report)
+        self.assertEqual(before, {path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()})
+        self.assertIn("완료 거래 최소(건): 미정", candidate_cli.final_preparation_text(report))
+
+    def test_all_choices_and_adjacent_window_do_not_approve_final_or_costs(self):
+        self.prepare()
+        report = candidate_cli.inspect_final_preparation(self.output, strategy_ref=" breakout-1 ",
+            minimum_closed_trades=1, minimum_active_days=1, minimum_net_realized_pnl_won=0,
+            maximum_drawdown_ppm=10000, final_start=self.development_end.isoformat(),
+            final_end=(self.development_end + timedelta(days=1)).isoformat())
+        self.assertEqual("breakout-1", report["strategy_ref"])
+        self.assertTrue(report["final_window"]["after_development_checked"])
+        self.assertFalse(any(reason.startswith("TBD:") for reason in report["reasons"]))
+        self.assertIn("FINAL_INPUT_AND_UNUSED_WINDOW_UNCHECKED", report["reasons"])
+        self.assertIn("ACTUAL_BROKER_COSTS_UNVERIFIED", report["reasons"])
+        self.assertEqual("REVIEW_REQUIRED", report["status"])
+        self.assertFalse(report["orders_started"])
+
+    def test_overlap_naive_or_reversed_window_is_rejected_before_source_load(self):
+        self.prepare()
+        for start, end in (("2024-10-04T00:00:00+09:00", "2024-10-06T00:00:00+09:00"),
+                           (None, self.development_end.isoformat()),
+                           ("2024-10-06T00:00:00+09:00", "2024-10-05T00:00:00+09:00"),
+                           ("2024-10-06T00:00:00", None)):
+            with (self.subTest(start=start, end=end),
+                  patch.object(candidate_cli, "inspect_daily_development_inputs", side_effect=AssertionError("no input")),
+                  self.assertRaises(ValueError)):
+                candidate_cli.inspect_final_preparation(self.output, final_start=start, final_end=end)
+
+    def test_existing_criteria_validation_is_reused_before_source_load(self):
+        self.prepare()
+        for values in ({"minimum_active_days": True}, {"minimum_closed_trades": -1},
+                       {"minimum_net_realized_pnl_won": 0.1}, {"maximum_drawdown_ppm": 1000001}):
+            with (self.subTest(values=values),
+                  patch.object(candidate_cli, "inspect_daily_development_inputs", side_effect=AssertionError("no input")),
+                  self.assertRaises(ValueError)):
+                candidate_cli.inspect_final_preparation(self.output, **values)
+
+    def test_cost_validity_and_unsupported_shadow_family_remain_reasons(self):
+        self.prepare()
+        report = candidate_cli.inspect_final_preparation(self.output, family="pullback",
+            final_start="2028-01-01T00:00:00+09:00", final_end="2028-01-02T00:00:00+09:00")
+        self.assertIn("COST_VALIDITY_OUTSIDE_FINAL_WINDOW", report["reasons"])
+        self.assertIn("MOCK_SHADOW_FAMILY_NOT_SUPPORTED", report["reasons"])
+        self.assertIn("현재 모의 Shadow는 돌파 전략만 지원", candidate_cli.final_preparation_text(report))
+
+    def test_window_change_keeps_scientific_identity_but_is_never_a_batch_binding(self):
+        self.prepare()
+        first = candidate_cli.inspect_final_preparation(self.output, final_start="2024-10-06T00:00:00+09:00")
+        second = candidate_cli.inspect_final_preparation(self.output, final_start="2024-10-07T00:00:00+09:00")
+        self.assertEqual(first["candidate_spec_hash"], second["candidate_spec_hash"])
+        self.assertNotEqual(first["final_window"], second["final_window"])
+        self.assertFalse(second["final_window"]["after_development_checked"])
+        self.assertIn("TBD:final_end", second["reasons"])
+        self.assertNotIn("batch_id", second)
+
+    def test_cancellation_and_tampered_source_do_not_produce_a_partial_preview(self):
+        self.prepare()
+        def cancelled():
+            raise RuntimeError("cancelled")
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            candidate_cli.inspect_final_preparation(self.output, checkpoint=cancelled)
+        manifest = json.loads((self.source / "manifest.json").read_text())
+        path = self.source / manifest["observations_file"]
+        path.write_text(path.read_text() + "\n")
+        with self.assertRaises(ValueError):
+            candidate_cli.inspect_final_preparation(self.output)
+
+    def test_cli_readonly_preparation_prints_json_without_output_file(self):
+        import io
+        from contextlib import redirect_stdout
+        self.prepare()
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            result = candidate_cli.main(["inspect-preparation", "--development-root", str(self.output)])
+        self.assertEqual(0, result)
+        self.assertEqual("mock_candidate_final_preparation/v1", json.loads(captured.getvalue())["version"])
+        self.assertFalse((self.output / "research.sqlite3").exists())
+
+    def test_fixed_request_checks_identity_without_reading_its_final_input(self):
+        self.prepare()
+        document = json.loads((self.output / "requests/daily-breakout.json").read_text())["request"]
+        document["dataset"] = str(self.root / "unavailable-final-input")
+        (self.root / "unavailable-final-input").mkdir()
+        path = self.root / "fixed-request.json"
+        path.write_text(json.dumps(document))
+        with patch.object(rp, "load_research_input", side_effect=AssertionError("no final bytes")):
+            report = candidate_cli.inspect_final_preparation(self.output, request_path=path)
+        self.assertTrue(report["fixed_request"]["candidate_spec_matches"])
+        self.assertFalse(report["fixed_request"]["source_and_period_admitted"])
+        self.assertEqual([], list((self.root / "unavailable-final-input").iterdir()))
+
+    def test_other_request_strategy_is_rejected_before_loading_development_input(self):
+        self.prepare()
+        document = json.loads((self.output / "requests/daily-breakout.json").read_text())["request"]
+        document["strategy"]["buffer_bps"] += 1
+        path = self.root / "different-request.json"
+        path.write_text(json.dumps(document))
+        with (patch.object(candidate_cli, "inspect_daily_development_inputs", side_effect=AssertionError("no input")),
+              self.assertRaisesRegex(ValueError, "설정이 다릅니다")):
+            candidate_cli.inspect_final_preparation(self.output, request_path=path)
 
 
 class FinalExecutionTests(unittest.TestCase):
@@ -45,6 +174,159 @@ class FinalExecutionTests(unittest.TestCase):
 
     def execute(self, **kwargs):
         return rp.execute_final_holdout_evaluation(self.prepared, owner_token=self.owner, **kwargs)
+
+    def candidate_cli_paths(self):
+        root = self.fixture.root
+        document = json.loads((root / 'request.json').read_text(encoding='utf-8'))
+        document.pop('development_partition', None)
+        document.update(
+            family=self.request.family, strategy=self.request.strategy.to_dict(),
+            dataset=str(self.request.dataset), database=str(self.request.database),
+            runs_dir=str(self.request.runs_dir), evaluation=self.request.evaluation.to_dict(),
+            execution=self.request.execution.to_dict(), session_profile=self.request.session_profile,
+        )
+        request_path = root / 'candidate-request.json'
+        request_path.write_text(json.dumps(document), encoding='utf-8')
+        return request_path, root / 'candidate-policy.json', root / 'candidate-publication.json'
+
+    def test_candidate_cli_freezes_tbd_without_loading_input_or_creating_runs(self):
+        request_path, policy_path, _ = self.candidate_cli_paths()
+        with (patch.object(rp, 'load_research_input', side_effect=AssertionError('no OOS input read')),
+              patch.object(candidate_cli, 'ResearchRepository', side_effect=AssertionError('no database access'))):
+            policy = candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+        self.assertEqual(4, len(policy.tbd_fields))
+        self.assertEqual(rp.final_candidate_spec_hash(self.request, self.prepared.implementation_hash), policy.candidate_spec_hash)
+        before = policy_path.read_bytes()
+        with patch.object(candidate_cli, 'datetime') as clock:
+            clock.now.side_effect = AssertionError('must reuse original freeze time')
+            repeated = candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+        self.assertEqual(policy.policy_id, repeated.policy_id)
+        self.assertEqual(before, policy_path.read_bytes())
+        self.assertFalse(self.request.runs_dir.exists())
+
+    def test_candidate_cli_refuses_replacing_frozen_thresholds_or_strategy(self):
+        request_path, policy_path, _ = self.candidate_cli_paths()
+        candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+        before = policy_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, '기존 동결'):
+            candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1', minimum_closed_trades=1)
+        document = json.loads(request_path.read_text(encoding='utf-8'))
+        document['strategy']['buffer_bps'] += 1
+        request_path.write_text(json.dumps(document), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '기존 동결'):
+            candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+        self.assertEqual(before, policy_path.read_bytes())
+
+    def test_candidate_cli_completed_final_exports_blocked_evidence_readonly(self):
+        request_path, policy_path, output = self.candidate_cli_paths()
+        policy = candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+        result = self.execute()
+        row = result['candidates'][0]
+        before = hashlib.sha256(self.request.database.read_bytes()).hexdigest()
+        with patch.object(rp, 'load_research_input', side_effect=AssertionError('no OOS reread')):
+            documents = candidate_cli.prepare_publication(
+                request_path, policy_path, output, account_ref='account-ref-1',
+                final_batch_id=self.prepared.batch.batch_id, final_run_id=row['run_id'],
+            )
+        self.assertEqual(documents, json.loads(output.read_text(encoding='utf-8')))
+        self.assertEqual(before, hashlib.sha256(self.request.database.read_bytes()).hexdigest())
+        self.assertEqual(row['logical_result_hash'], documents['package']['source_final']['result_hash'])
+        self.assertEqual('BLOCKED', documents['eligibility_receipt']['status'])
+        self.assertTrue(set('TBD:' + name for name in policy.tbd_fields).issubset(documents['eligibility_receipt']['reasons']))
+        self.assertNotIn('POLICY_FROZEN_AFTER_FINAL_STARTED', documents['eligibility_receipt']['reasons'])
+
+    def test_candidate_cli_cannot_promote_development_without_final_ledger(self):
+        request_path, policy_path, output = self.candidate_cli_paths()
+        candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+        with self.assertRaisesRegex(ValueError, 'final holdout ledger'):
+            candidate_cli.prepare_publication(
+                request_path, policy_path, output, account_ref='account-ref-1',
+                final_batch_id=self.prepared.batch.batch_id, final_run_id='development-run',
+            )
+        self.assertFalse(output.exists())
+        self.assertEqual((), self.repo.load_final_holdout_executions(self.prepared.batch.batch_id))
+
+    def test_candidate_cli_late_policy_is_not_backdated(self):
+        result = self.execute()
+        row = result['candidates'][0]
+        run = self.repo.load_run(row['run_id'])
+        request_path, policy_path, output = self.candidate_cli_paths()
+        later = datetime.fromisoformat(run['started_at']) + timedelta(days=1)
+        policy = candidate_cli.freeze_policy(
+            request_path, policy_path, strategy_ref='strategy-1', now_provider=lambda: later,
+            minimum_closed_trades=0, minimum_active_days=0,
+            minimum_net_realized_pnl_won=0, maximum_drawdown_ppm=1_000_000,
+        )
+        documents = candidate_cli.prepare_publication(
+            request_path, policy_path, output, account_ref='account-ref-1',
+            final_batch_id=self.prepared.batch.batch_id, final_run_id=row['run_id'],
+        )
+        self.assertEqual(later, policy.frozen_at)
+        self.assertEqual('BLOCKED', documents['eligibility_receipt']['status'])
+        self.assertIn('POLICY_FROZEN_AFTER_FINAL_STARTED', documents['eligibility_receipt']['reasons'])
+
+    def test_candidate_cli_changed_code_is_rejected_before_reading_final(self):
+        request_path, policy_path, output = self.candidate_cli_paths()
+        candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+        with (patch.object(candidate_cli, 'research_implementation_hash', return_value='a' * 64),
+              patch.object(candidate_cli, 'ResearchRepository', side_effect=AssertionError('must fail before reads'))):
+            with self.assertRaisesRegex(ValueError, '현재 전략'):
+                candidate_cli.prepare_publication(request_path, policy_path, output,
+                    account_ref='account-ref-1', final_batch_id='batch', final_run_id='run')
+        self.assertFalse(output.exists())
+
+    def test_candidate_cli_output_cannot_modify_frozen_input(self):
+        request_path, _, _ = self.candidate_cli_paths()
+        target = self.request.dataset / 'policy.json'
+        with self.assertRaisesRegex(ValueError, '동결 연구 입력'):
+            candidate_cli.freeze_policy(request_path, target, strategy_ref='strategy-1')
+        self.assertFalse(target.exists())
+
+    def test_candidate_cli_atomic_publication_has_one_winner_and_no_partial_file(self):
+        output = self.fixture.root / 'publication.json'
+        barrier = Barrier(2)
+        def write(value):
+            barrier.wait(timeout=5)
+            try:
+                candidate_cli._write_immutable(output, {'value': value})
+                return 'written'
+            except ValueError:
+                return 'conflict'
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            self.assertEqual(['conflict', 'written'], sorted(executor.map(write, (1, 2))))
+        self.assertIn(json.loads(output.read_text(encoding='utf-8'))['value'], (1, 2))
+        self.assertEqual([], list(output.parent.glob('.candidate-*.tmp')))
+        before = output.read_bytes()
+        with self.assertRaisesRegex(ValueError, '동결 파일'):
+            candidate_cli._write_immutable(output, {'value': 3})
+        self.assertEqual(before, output.read_bytes())
+
+    def test_candidate_cli_failed_publication_leaves_no_partial_artifact(self):
+        output = self.fixture.root / 'publication.json'
+        with patch.object(candidate_cli.os, 'link', side_effect=PermissionError('fixture refusal')):
+            with self.assertRaises(PermissionError):
+                candidate_cli._write_immutable(output, {'value': 1})
+        self.assertFalse(output.exists())
+        self.assertEqual([], list(output.parent.glob('.candidate-*.tmp')))
+
+    def test_candidate_cli_main_reports_tbd_and_error_without_promoting_state(self):
+        from contextlib import redirect_stdout
+        import io
+        request_path, policy_path, output = self.candidate_cli_paths()
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            result = candidate_cli.main(['freeze-policy', '--request', str(request_path),
+                '--output', str(policy_path), '--strategy-ref', 'strategy-1'])
+        self.assertEqual(0, result)
+        self.assertEqual('BLOCKED', json.loads(stream.getvalue())['status'])
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            result = candidate_cli.main(['prepare-publication', '--request', str(request_path),
+                '--policy', str(policy_path), '--output', str(output), '--account-ref', 'account-ref-1',
+                '--final-batch-id', self.prepared.batch.batch_id, '--final-run-id', 'no-final'])
+        self.assertEqual(1, result)
+        self.assertEqual('ERROR', json.loads(stream.getvalue())['status'])
+        self.assertFalse(output.exists())
 
     def test_real_final_execution_uses_fresh_engine_and_completes_owned_candidate(self):
         initial = []

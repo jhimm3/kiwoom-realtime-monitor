@@ -101,6 +101,33 @@ class CentralNewsClient(CentralContentClient):
                 raise RuntimeError("과거 뉴스 archive 본문 ID가 다릅니다.")
         return result
 
+    def historical_archive_page_v2(self, kind: str, *, stock_code: str | None = None,
+                                   source: str | None = None, limit: int = 100,
+                                   cursor: str | None = None) -> dict[str, Any]:
+        if kind not in ("search", "market") or type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("과거 뉴스 조회 범위가 올바르지 않습니다.")
+        query: dict[str, str | int] = {"limit": limit}
+        if kind == "search":
+            if not stock_code or source is not None:
+                raise ValueError("종목뉴스에는 종목코드가 필요합니다.")
+            query["stock_code"] = stock_code
+        elif stock_code is not None or source not in (None, "flash", "world"):
+            raise ValueError("시황뉴스 조회 범위가 올바르지 않습니다.")
+        elif source:
+            query["source"] = source
+        if cursor is not None:
+            query["cursor"] = cursor
+        result = self._request("GET", f"/api/v1/news/historical-archive/v2/{kind}?{urlencode(query)}")
+        if (not isinstance(result.get("dataset_id"),str) or not result["dataset_id"]
+            or result.get("kind") != kind or not isinstance(result.get("items"),list)
+            or any(not isinstance(row,dict) or not isinstance(row.get("identity"),str)
+                   or not isinstance(row.get("display"),dict)
+                   or row.get("article_revision_id") is not None and not isinstance(row["article_revision_id"],str)
+                   for row in result["items"])
+            or result.get("next_cursor") is not None and not isinstance(result["next_cursor"],str)):
+            raise RuntimeError("과거 뉴스 v2 페이지 응답 형식이 올바르지 않습니다.")
+        return result
+
 
 def _deserialize(value: dict[str, Any]) -> StockNewsItem:
     published_at = None

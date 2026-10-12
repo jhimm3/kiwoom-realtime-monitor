@@ -688,7 +688,7 @@ raw 기준선 / observed+capture OFF / observed+capture ON(hook 비활성)을 �
 추후 서버 런타임 구현 시 app/Compose/Dockerfile marker를 함께 갱신하고 관련 PG 검증 뒤 배포한다.
 
 모델 라우팅: 본 검토는 저장소 전체 재설계가 아니라 DB 공통 경계 검토다. 후속 구현은
-드라이버 종료·실패·동시성 계약 때문에 **Sol High**가 적절하며, 반복 등록만 남으면 Luna Medium부터 재평가한다.
+드라이버 종료·실패·동시성 계약 때문에 **GPT-6.1 Sol High**가 적절하다. 반복 등록만 남아도 Sol을 유지하고, 추론 수준은 [현행 모델 정책](MODEL_HANDOFF_POLICY.md)의 High 유지 선호와 실제 지원 조합을 따른다.
 현재 실행 모델의 정확한 변형·추론 수준은 이 문서에서 확인하거나 변경했다고 주장하지 않는다.
 
 ## 14. 외부 계약 근거

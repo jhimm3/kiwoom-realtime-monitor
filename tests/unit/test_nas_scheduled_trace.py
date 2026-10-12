@@ -85,6 +85,41 @@ class ScheduledTraceTests(unittest.TestCase):
         self.assertTrue(all(writes[1][2][x] is True for x in scheduler.FLAGS))
         self.assertIsInstance(writes[1][2]["persist_at"], float)
 
+    def test_real_transport_has_separate_start_budget_and_records_request_phase(self):
+        (self.root / 'deploy/synology').mkdir(parents=True)
+        (self.root / 'deploy/synology/.env').write_text('MONITOR_SERVER_ACCESS_TOKEN=fixture-only')
+        api = scheduler.Api(self.root)
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return b'{"state":"off"}'
+        with patch.object(scheduler, 'urlopen', return_value=Response()) as opening:
+            api.request('/api/v1/diagnostics/trace', {}, 'POST')
+            self.assertEqual(60, opening.call_args.kwargs['timeout'])
+            api.request('/api/v1/diagnostics/trace')
+            self.assertEqual(10, opening.call_args.kwargs['timeout'])
+        with patch.object(scheduler, 'urlopen', side_effect=TimeoutError('private transport text')) as opening:
+            with self.assertRaises(TimeoutError):
+                api.request('/api/v1/diagnostics/trace', {}, 'POST')
+            self.assertEqual(1, opening.call_count)
+        self.assertEqual('POST', api.last_request['method'])
+        self.assertEqual('/api/v1/diagnostics/trace', api.last_request['path'])
+        self.assertGreaterEqual(api.last_request['elapsed_seconds'], 0)
+        self.assertNotIn('fixture-only', json.dumps(api.last_request))
+
+    def test_native_http_rejection_retains_only_controlled_reason(self):
+        import io
+        from urllib.error import HTTPError
+        (self.root / 'deploy/synology').mkdir(parents=True)
+        (self.root / 'deploy/synology/.env').write_text('MONITOR_SERVER_ACCESS_TOKEN=fixture-only')
+        api = scheduler.Api(self.root)
+        for detail, expected in [('account_context_byte_limit', 'API_HTTP_409_account_context_byte_limit'),
+                                 ('private payload with spaces', 'API_HTTP_409_/api/v1/diagnostics/trace')]:
+            error = HTTPError(api.base, 409, 'conflict', {}, io.BytesIO(json.dumps({'detail': detail}).encode()))
+            with patch.object(scheduler, 'urlopen', side_effect=error):
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    api.request('/api/v1/diagnostics/trace', {}, 'POST')
+
     def test_busy_controls_or_release_mismatch_fail_without_mutation(self):
         for kind in ("busy", "release", "limits", "schema"):
             with self.subTest(kind=kind):
@@ -171,7 +206,7 @@ class ScheduledTraceTests(unittest.TestCase):
             self.caps["trace_input_capture"][key] = {
                 "schema_version": 4, "request_field": flag, "default": False,
                 "requires": ["store_inputs", "persist_at"],
-                "context_capture": {"version": "account-context/v2"}}
+                "context_capture": {"version": "account-context/v3"}}
 
     def test_monday_account_large_plan_posts_five_flags_and_verifies_schema4(self):
         self.enable_account_large_plan()

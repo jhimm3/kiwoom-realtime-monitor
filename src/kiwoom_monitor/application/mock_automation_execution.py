@@ -724,6 +724,7 @@ def emergency_stop_mock_automation(
     spec_id: str,
     stopped_at: datetime,
     reason: str,
+    expected_control_revision: int | None = None,
 ) -> MockAutomationStopRevision:
     _require_aware(stopped_at, "stopped_at")
     if not reason.strip():
@@ -740,6 +741,14 @@ def emergency_stop_mock_automation(
     if control is None:
         runtime.set_new_orders_enabled(False)
         raise RuntimeError("mock automation control is missing")
+    if (
+        control.active_spec_id != spec.spec_id
+        or control.execution_run_id != admission.execution_run_id
+        or (expected_control_revision is not None
+            and control.control_revision != expected_control_revision)
+    ):
+        runtime.set_new_orders_enabled(False)
+        raise RuntimeError("mock automation control does not belong to this run or revision")
     stopped_control = MockAutomationControl(
         version=MOCK_AUTOMATION_CONTROL_VERSION,
         account_ref=account_ref,

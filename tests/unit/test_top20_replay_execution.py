@@ -25,6 +25,7 @@ from tests.top20_native_fixture import capture_native_top20_fixture
 
 
 ORIGIN = datetime.fromisoformat("2026-09-10T09:30:01+09:00")
+FIXTURE_SECONDS = 25  # Complete preparation plus a quiet tail, before the next ranking slot.
 
 
 class Top20ReplayExecutionTests(unittest.IsolatedAsyncioTestCase):
@@ -41,7 +42,8 @@ class Top20ReplayExecutionTests(unittest.IsolatedAsyncioTestCase):
         return store
 
     async def source_fixture(self):
-        return await capture_native_top20_fixture(self.store("source"), ORIGIN)
+        return await capture_native_top20_fixture(self.store("source"), ORIGIN,
+                                                  capture_seconds=FIXTURE_SECONDS)
 
     def inputs(self, fixture):
         values = []
@@ -66,14 +68,14 @@ class Top20ReplayExecutionTests(unittest.IsolatedAsyncioTestCase):
             # Distinct inputs reproduce newly generated native subscriptions;
             # they do not inject source ACK/READY controls into the hub.
             inputs = prepare_top20_source_inputs(self.inputs(fixture), clock=clock,
-                started_mono_ns=fixture["started"], end_seconds=20)
+                started_mono_ns=fixture["started"], end_seconds=FIXTURE_SECONDS)
             with patch.object(trace, "input_token", return_value=None), \
                     patch("kiwoom_monitor.central_server.realtime_collector.REALTIME_REG_INTERVAL_SECONDS", 0):
                 report = await execute_top20_session(service, broker, collector, clock=clock,
                     runtime=ReplayRuntimeScope(), bindings=bindings, subscription_tape=SubscriptionTape(
                         read_realtime_tape(fixture["events"])), source_hub_component=fixture["hub"],
                     source_component=fixture["component"], prepared_inputs=inputs,
-                    started_mono_ns=fixture["started"], end_seconds=20, include_top20=enabled, drain_timeout=30)
+                    started_mono_ns=fixture["started"], end_seconds=FIXTURE_SECONDS, include_top20=enabled, drain_timeout=30)
             self.assertTrue(report["execution_succeeded"], report)
             self.assertFalse(report["full_experiment_acceptance"])
             self.assertFalse(report["historical_outputs_injected"])
@@ -84,6 +86,8 @@ class Top20ReplayExecutionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(1, len(stored))
                 memberships.append(stored[0]["payload"])
                 stages.append(report["native_stage_ready"])
+                self.assertEqual(20, len(stages[-1]))
+                self.assertEqual([], report["rest"]["unused_external_inputs"])
                 self.assertTrue(any(item["native_ready"] for item in report["subscription"]["subscriptions"]))
             else:
                 self.assertEqual([], stored)

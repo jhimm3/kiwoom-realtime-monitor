@@ -77,6 +77,7 @@
   결정적 KRX LIMIT intent를 제출한 즉시 신규 주문을 다시 닫는다. 같은 Decision은 재전송하지 않는다.
 - 긴급 중지는 신규 주문을 닫고 stop revision을 저장한다. 기존 주문·포지션은 자동 취소·청산하지
   않으며 더 늦은 전체 broker recovery가 통과해야 새 Decision을 받을 수 있다.
+- 명시적인 정규장 단타 시간 정책의 runner 시계 관리에서는 별도 판단·가격 근거를 저장한 뒤 기존 O1 gate로 청산하며, clock 중지 이후 broker가 확인한 미체결만 기존 gateway로 취소한다. 사용자 긴급 중지와 UNKNOWN 보존 계약은 유지한다. 상세 순서·가격 신선도·취소 중복 방지는 [독립 시계 계약](FORWARD_EVALUATION_CONTRACT.md#독립-시계-청산미체결-관리--2026-10-12)을 따른다.
 
 ## 아직 운영값으로 확정하지 않은 사항
 

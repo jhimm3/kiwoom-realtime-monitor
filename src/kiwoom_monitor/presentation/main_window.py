@@ -590,12 +590,6 @@ class MainWindow(QMainWindow):
             self._market_cache_writer.daily_high_failed.connect(
                 lambda code, message: logger.warning("일봉 캐시 저장 실패 (%s): %s", code, message)
             )
-            self._market_cache_writer.comparison_saved.connect(
-                lambda count: logger.info("분봉·일봉 거래대금 비교 CSV 갱신: %s건", count)
-            )
-            self._market_cache_writer.comparison_failed.connect(
-                lambda message: logger.warning("분봉·일봉 거래대금 비교 CSV 저장 실패: %s", message)
-            )
             self._app_controller.start_market_cache_writer()
         self._candidate_dialog = (
             CandidateMonitorDialog(candidate_client, candidate_settings_client, self)
@@ -804,6 +798,9 @@ class MainWindow(QMainWindow):
         )
         self._realtime_worker_controller.codes_added.connect(
             lambda codes: self._minute_aggregator.reset_cumulative_baselines(codes)
+        )
+        self._realtime_worker_controller.sources_activated.connect(
+            self._minute_aggregator.reset_cumulative_sources
         )
         # 코호트·기준값·분 마감은 화면과 독립된 수집 객체가 소유한다.
         self._top20_collector = Top20TradeValueCollector()
@@ -3064,6 +3061,25 @@ class MainWindow(QMainWindow):
         if update.cohort_changed and self._row_by_code:
             self._app_controller.start_realtime_subscription(self._top20_realtime_codes(tuple(self._row_by_code)))
         completed_rows = list(self._top20_collector.completed)
+        if self._uses_nas_top20_source() and self._top20_trade_value_window.isVisible():
+            refresh_at = getattr(self, "_top20_nas_series_refresh_at", 0.0)
+            if time.monotonic() - refresh_at >= 30 and self._top20_view_mode != "daily":
+                self._top20_nas_series_refresh_at = time.monotonic()
+                target = self._top20_view_date
+                self._start_top20_nas_request(("date", target.isoformat()),
+                    lambda payload, target=target: self._display_top20_payload(target, payload),
+                    lambda message, target=target: self._top20_series_read_failed(target, message))
+        selected_series = getattr(self, "_top20_selected_series", None)
+        if (isinstance(selected_series, dict) and self._uses_nas_top20_source()
+                and selected_series.get("trading_date") == self._top20_view_date.isoformat()
+                and self._top20_view_mode in {"minute", "5m", "60m"}):
+            interval = 5 if self._top20_view_mode == "5m" else 60 if self._top20_view_mode == "60m" else 1
+            current = update.live_minute if update.collection_open and self._top20_collector.active_codes else None
+            display_series = dict(selected_series, read_error=getattr(self, "_top20_series_read_error", ""))
+            self._top20_trade_value_chart.set_series(display_series, interval,
+                current_minute=current if self._top20_view_date == now.date() else None,
+                current_values=update.live_values)
+            return
         if not update.collection_open:
             if self._top20_view_date == now.date() and self._top20_view_mode == "minute":
                 self._top20_trade_value_chart.set_data(
@@ -3156,6 +3172,10 @@ class MainWindow(QMainWindow):
         if self._market_data_client is None:
             if on_failed is not None:
                 on_failed("NAS 시장자료 연결이 없습니다.")
+            return
+        if request[0] == "date" and any(
+            worker._request == request and worker.isRunning() for worker in self._top20_nas_workers
+        ):
             return
         worker = Top20NasDataWorker(self._market_data_client, request)
         worker.setParent(self._app_controller)
@@ -3295,21 +3315,41 @@ class MainWindow(QMainWindow):
 
     def _show_top20_trade_value_date(self, selected_date: date) -> None:
         self._top20_view_date = selected_date
+        if (getattr(self, "_top20_selected_series", None) or {}).get("trading_date") != selected_date.isoformat():
+            self._top20_selected_series = None
         if self._uses_nas_top20_source():
             self._top20_trade_value_chart.set_data(
                 None, (0.0, 0.0, 0.0), [], f"{selected_date:%Y-%m-%d} · NAS 저장 기록을 불러오는 중입니다.",
             )
             self._start_top20_nas_request(
                 ("date", selected_date.isoformat()),
-                lambda payload, target=selected_date: self._display_top20_date_rows(
-                    target, self._nas_top20_rows(payload), "NAS",
-                ),
-                lambda message, target=selected_date: self._show_top20_local_date(
-                    target, f"NAS 조회 실패 · {message} · PC 로컬",
-                ),
+                lambda payload, target=selected_date: self._display_top20_payload(target, payload),
+                lambda message, target=selected_date: self._top20_series_read_failed(target, message),
             )
             return
         self._show_top20_local_date(selected_date, "PC 로컬")
+
+    def _display_top20_payload(self, selected_date: date, payload: object) -> None:
+        if selected_date != self._top20_view_date or self._top20_view_mode == "daily":
+            return
+        if isinstance(payload, dict) and isinstance(payload.get("rows"), list):
+            if payload.get("trading_date") != selected_date.isoformat():
+                return
+            self._top20_series_read_error = ""
+            self._top20_selected_series = payload
+            interval = 5 if self._top20_view_mode == "5m" else 60 if self._top20_view_mode == "60m" else 1
+            self._top20_trade_value_chart.set_series(payload, interval)
+        else:
+            self._top20_selected_series = None
+            self._display_top20_date_rows(selected_date, self._nas_top20_rows(payload), "NAS")
+
+    def _top20_series_read_failed(self, selected_date: date, message: str) -> None:
+        if selected_date != self._top20_view_date or self._top20_view_mode == "daily":
+            return
+        self._top20_series_read_error = message
+        selected = getattr(self, "_top20_selected_series", None)
+        if not isinstance(selected, dict) or selected.get("trading_date") != selected_date.isoformat():
+            self._top20_trade_value_chart.set_data(None, (0.0, 0.0, 0.0), [], f"NAS 조회 실패 · {message}")
 
     def _show_top20_local_date(self, selected_date: date, source: str) -> None:
         if self._minute_bar_repository is None:
@@ -3336,10 +3376,16 @@ class MainWindow(QMainWindow):
             self._start_top20_nas_request(
                 ("daily", (start.isoformat(), end.isoformat())),
                 self._show_top20_nas_daily,
-                lambda message: self._show_top20_local_daily(f"NAS 조회 실패 · {message} · PC 로컬"),
+                self._top20_daily_read_failed,
             )
             return
         self._show_top20_local_daily("PC 로컬")
+
+    def _top20_daily_read_failed(self, message: str) -> None:
+        if self._top20_view_mode == "daily":
+            self._top20_trade_value_chart.set_data(
+                None, (0.0, 0.0, 0.0), [], f"NAS 일별 통계 조회 실패 · {message}",
+            )
 
     def _show_top20_local_daily(self, source: str) -> None:
         if self._minute_bar_repository is None:
@@ -3357,21 +3403,29 @@ class MainWindow(QMainWindow):
         self._top20_trade_value_chart.set_data(None, (0.0, 0.0, 0.0), completed, status)
 
     def _show_top20_nas_daily(self, payload: object) -> None:
+        if self._top20_view_mode != "daily":
+            return
         comparisons = payload.get("comparisons") if isinstance(payload, dict) else None
         completed = []
+        missing = {}
         for value in comparisons if isinstance(comparisons, list) else []:
             market_values = value.get("top20_market_values") if isinstance(value, dict) else None
-            if not isinstance(market_values, list) or len(market_values) < 3:
-                continue
             try:
                 day = date.fromisoformat(str(value.get("trade_date", "")))
-                completed.append((datetime.combine(day, clock_time()), *(float(market_values[index] or 0.0) for index in range(3))))
+                moment = datetime.combine(day, clock_time())
+                if not isinstance(market_values, list) or len(market_values) < 3:
+                    completed.append((moment, 0.0, 0.0, 0.0))
+                    coverage = value.get("coverage", {})
+                    missing[moment] = f"정규장 집계 미확인 · 확인 {coverage.get('complete', 0)}/391분"
+                else:
+                    completed.append((moment, *(float(market_values[index] or 0.0) for index in range(3))))
             except (TypeError, ValueError):
                 continue
         self._top20_trade_value_chart.set_data(
             None, (0.0, 0.0, 0.0), completed,
             f"NAS 일봉 {len(completed)}개 · KRX 정규장 09:00~15:30 합계" if completed else "NAS에 저장된 일봉 기록이 없습니다.",
         )
+        self._top20_trade_value_chart._missing_labels = missing
 
     @staticmethod
     def _aggregate_top20_rows(
@@ -3419,9 +3473,7 @@ class MainWindow(QMainWindow):
                     lambda payload, selected=selected_days: self._render_top20_statistics(
                         content, selected, payload, "NAS",
                     ),
-                    lambda message, selected=selected_days: self._render_local_top20_statistics(
-                        content, selected, f"NAS 조회 실패 · {message} · PC 로컬",
-                    ),
+                    lambda message: content.setPlainText(f"NAS 통계 조회 실패 · {message}"),
                 )
                 return
             self._render_local_top20_statistics(content, selected_days, "PC 로컬")
@@ -3471,23 +3523,33 @@ class MainWindow(QMainWindow):
                 lines.append(
                     f"{rank}위  {value.get('hour', '')}  {Top20TradeValueChart._amount(float(value.get('average_eok', 0) or 0))}  "
                     f"(수집일 {int(value.get('day_count', 0) or 0)}일)"
+                    + (f" · 확인 표본 {int(value['sample_count'])}분" if "sample_count" in value else "")
                 )
             except (TypeError, ValueError):
                 continue
         lines.extend(("", "[정규장 09:00~15:30 · 일별 TOP20 / 코스피+코스닥 ka20006]"))
+        if isinstance(payload, dict) and payload.get("basis") == "display":
+            lines.append("장중 실시간 집계 / 장후 분봉 재계산 · 30초 배분 추정 · 미확인 분 제외")
         for value in comparisons:
             if not isinstance(value, dict):
                 continue
             try:
+                if value.get("top20_eok") is None and isinstance(value.get("coverage"), dict):
+                    coverage = value["coverage"]
+                    known = Top20TradeValueChart._amount(float(value.get("known_top20_eok", 0)))
+                    lines.append(f"{value.get('trade_date', '')}  TOP20 확인 구간 합계 {known} · "
+                                 f"{coverage.get('complete', 0)}/{coverage.get('expected', 391)}분 · 부분 자료")
+                    continue
                 top20 = float(value.get("top20_eok", 0) or 0)
                 market_total = float(value.get("kospi_eok", 0) or 0) + float(value.get("kosdaq_eok", 0) or 0)
             except (TypeError, ValueError):
                 continue
-            ratio = top20 / market_total * 100 if market_total > 0 else None
+            ratio = top20 / market_total * 100 if market_total > 0 and value.get("market_complete") is not False else None
             ratio_text = f"{ratio:.2f}%" if ratio is not None else "전체시장 자료 없음"
             lines.append(
                 f"{value.get('trade_date', '')}  TOP20 {Top20TradeValueChart._amount(top20)} / "
                 f"전체 {Top20TradeValueChart._amount(market_total)} · {ratio_text}"
+                + (" · 장후 분봉 재계산" if value.get("basis") == "after_close_estimate" else "")
             )
         if not hourly and not comparisons:
             lines.append("저장된 통계 자료가 없습니다.")
@@ -4161,8 +4223,6 @@ class MainWindow(QMainWindow):
                 self._previous_day_trade_values[code] = targets.previous_day_trade_value_eok
             if targets.previous_day_close_price is not None:
                 self._previous_day_close_prices[code] = targets.previous_day_close_price
-            if targets.daily_trade_values_eok:
-                self._app_controller.queue_comparison(code, targets.daily_trade_values_eok)
             if self._defer_table_update_while_modal():
                 return
             self._render_new_high_price(code)

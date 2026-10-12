@@ -22,6 +22,11 @@ from .diagnostic_replay_contract import (
     LEGACY_COLLECTOR_INPUT_VERSION,
     capture_owner, compile_recorded_plan, freeze_payload,
     replay_operation_identity, thaw_payload, thaw_operation_arguments, validate_collector_message,
+    is_account_document_operation,
+)
+from .diagnostic_top20_display_input import (
+    METHODS as DISPLAY_METHODS, DisplayReplay, environment_scope, prepare_environment,
+    result_digest as display_result_digest,
 )
 from .postgres_access import db_call_request_id, db_call_source
 from .diagnostic_trace_payload import BlockPayloadReference
@@ -46,7 +51,7 @@ _METHODS = frozenset({
     'save_shadow_monitor_state', 'load_shadow_monitor_state',
     'save_external_bars', 'load_external_bars',
     'save_query', 'load_query', 'append_vi_events',
-}) | ACCOUNT_METHODS
+}) | ACCOUNT_METHODS | DISPLAY_METHODS
 
 
 def run_owned_recorded_experiment(database_url, owner_token, baseline_id, events, *,
@@ -116,12 +121,12 @@ def run_owned_recorded_experiment(database_url, owner_token, baseline_id, events
             # Verify the sealed capsule and exact authority frontier before
             # resetting even this dedicated DB. A different selection must seal
             # its own baseline; source tokens are never copied from the source DB.
-            from .diagnostic_replay_baseline import _hash
             bindings = _account_bindings(account_context, events, plan)
-            expected = {'version': account_context['version'], 'trace_id': account_context['trace_id'],
-                        'sha256': account_context['sha256'], 'source_state_equivalent': False,
-                        'owner_bindings_sha256': _hash({domain + ':' + alias: value.token
-                            for (domain, alias), value in bindings.items()})}
+            from .diagnostic_account_context import sealed_context_contract
+            selected_ids = set(plan.operation_ids)
+            owner_rows = [row for row in events if row.get('event_type') == 'operation_start'
+                          and row.get('operation_id') in selected_ids and row.get('method') in ACCOUNT_METHODS]
+            expected = sealed_context_contract(account_context, owner_rows, bindings)
             with lease.connection.cursor() as cursor:
                 sealed_id, sealed = lease._baseline(cursor)
             if sealed_id != baseline_id or sealed.get('account_context') != expected:
@@ -229,6 +234,11 @@ def _prepare(store, events, plan, *, account_context=None):
             raise ValueError(f'recorded_execution_native_method_missing:{method}')
         arguments = (thaw_operation_arguments(row) if bindings is None
                      else thaw_operation_arguments(row, owner_bindings=bindings))
+        if is_account_document_operation(method, arguments):
+            if (account_context is None or account_context['version'] != 'account-context/v4'
+                    or getattr(getattr(store, '_lease', None), 'baseline_version', None) != 3
+                    or not callable(getattr(store, '_execution_wall_now', None))):
+                raise ValueError('recorded_execution_account_clock_requires_v4_context')
         if type(arguments) is not dict:
             raise ValueError('recorded_execution_arguments_invalid')
         if (method in {'upsert_documents', 'replace_documents'}
@@ -402,6 +412,13 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                        excluded_operation_ids=(*plan.excluded_operation_ids,
                            *(identifier for identifier in plan.operation_ids if identifier not in selected)))
     actors = _prepare(store, events, plan, account_context=account_context)
+    display_rows = defaultdict(list)
+    for row in events:
+        if row.get('event_type') == 'top20_display_environment':
+            display_rows[row.get('operation_id')].append(row)
+    display_values = {row['operation_id']: prepare_environment(row, ending,
+                        display_rows[row['operation_id']])
+        for values in actors.values() for row, ending, _, _ in values if row['method'] in DISPLAY_METHODS}
     bindings = _account_bindings(account_context, events, plan)
     inputs = _collector_inputs(events, plan)
     stop = stop if stop is not None else Event()
@@ -563,6 +580,7 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                             worker_started - record['submitted_seconds']) * 1000
                         record['started_seconds'] = worker_started
                         record['start_lag_ms'] = max(0, (worker_started - offset) * 1000)
+                        display = DisplayReplay(display_values[row['operation_id']]) if row['method'] in DISPLAY_METHODS else None
                         with (
                             capture_owner(row['workload_id'], row.get('producer_component', ''),
                                           row['actor_id'], cause_input_id=row.get('cause_input_id', '')),
@@ -571,7 +589,12 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                             db_call_request_id(record['replay_operation_id']),
                         ):
                             try:
-                                value = native(**invocation_arguments)
+                                with environment_scope(display) if display is not None else nullcontext():
+                                    try:
+                                        value = native(**invocation_arguments)
+                                    finally:
+                                        if display is not None:
+                                            display.finish()
                             except Exception as error:
                                 receipt = native_error_receipt(row['method'], error)
                                 matched = (row['method'] in ACCOUNT_METHODS and ending.get('outcome') == 'failed'
@@ -589,11 +612,20 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                             else:
                                 record['native_finished_seconds'] = elapsed()
                                 observation_started = time.monotonic()
-                                digest, unavailable = _result_digest(value)
+                                digest, unavailable = ((display_result_digest(value, profile=row['display_result_profile']), False)
+                                    if display is not None else _result_digest(value))
                                 record.update(state='returned', result_digest=digest,
                                               result_digest_unavailable=unavailable,
                                               result_observation_ms=(time.monotonic() - observation_started) * 1000)
-                                if row['method'] in ACCOUNT_METHODS or row['method'] == 'append_vi_events':
+                                if display is not None:
+                                    record['source_result_matched'] = (ending.get('outcome') == 'returned'
+                                        and digest == ending['display_result_sha256'])
+                                    if not record['source_result_matched']:
+                                        if _shared_runtime is not None:
+                                            _shared_runtime._failure('native_result', 'SourceResultMismatch')
+                                        stop.set()
+                                if (row['method'] in ACCOUNT_METHODS or row['method'] == 'append_vi_events'
+                                        or is_account_document_operation(row['method'], invocation_arguments)):
                                     from .diagnostic_replay_contract import _result_summary
                                     summary = _result_summary(row['method'], value)
                                     record['result_summary'] = summary

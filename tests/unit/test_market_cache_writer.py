@@ -63,7 +63,7 @@ class MarketCacheWriterTests(unittest.TestCase):
                 high = connection.execute("SELECT high_250_price FROM stocks WHERE code='005930'").fetchone()
             self.assertEqual((71000,), high)
 
-    def test_daily_high_and_comparison_are_saved_outside_caller(self) -> None:
+    def test_daily_high_and_minute_bars_are_saved_outside_caller(self) -> None:
         application = QCoreApplication.instance() or QCoreApplication([])
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "monitor.sqlite3"
@@ -72,8 +72,6 @@ class MarketCacheWriterTests(unittest.TestCase):
                 connection.execute("INSERT INTO stocks(code,name) VALUES (?,?)", ("005930", "삼성전자"))
                 connection.commit()
             writer = MarketCacheWriter(path)
-            saved: list[int] = []
-            writer.comparison_saved.connect(saved.append)
             writer.start()
             now = datetime(2026, 9, 15, 10, 31)
             targets = DailyHighTargets.from_daily_bars((
@@ -84,7 +82,6 @@ class MarketCacheWriterTests(unittest.TestCase):
                 ("005930", minute): MinuteOhlcv(minute, 70000, 71000, 69500, 70500, 1000, 100.0),
             }, {})
             writer.enqueue_daily_high("005930", targets, now.date(), now)
-            writer.enqueue_trade_comparisons({"005930": (("20260914", 100.0),)}, now.date())
             self.assertTrue(writer.stop_and_drain())
             application.processEvents()
             with closing(sqlite3.connect(path)) as connection:
@@ -92,7 +89,7 @@ class MarketCacheWriterTests(unittest.TestCase):
                 bar = connection.execute("SELECT high_price FROM daily_bars WHERE stock_code='005930'").fetchone()
             self.assertEqual((None,), stock)  # Unverified one-row cache must not replace adjusted high
             self.assertEqual((71000,), bar)
-            self.assertEqual([1], saved)
+            self.assertFalse((path.parent / "logs" / "developer_checks").exists())
 
     def test_history_batch_is_saved_before_success_signal(self) -> None:
         application = QCoreApplication.instance() or QCoreApplication([])

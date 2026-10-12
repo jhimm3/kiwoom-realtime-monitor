@@ -39,6 +39,7 @@ class CentralRealtimeWorker(QThread):
     subscription_ready = Signal()
     connection_opened = Signal(object)
     codes_added = Signal(object)
+    sources_activated = Signal(object)
     diagnostics_changed = Signal(object)
     realtime_gap = Signal(object)
 
@@ -67,6 +68,12 @@ class CentralRealtimeWorker(QThread):
         self._reported_gap_generation = -1
 
     def update_codes(self, codes: tuple[str, ...], nxt_codes: tuple[str, ...] = ()) -> None:
+        added = set(codes) - set(self._codes)
+        if added:
+            # A symbol already active on NAS can deliver immediately on subscribe.
+            # Reset its old local baselines before exposing the new request.
+            self.sources_activated.emit(tuple((code,market) for code in sorted(added)
+                                              for market in ('KRX','NXT','SOR')))
         self._codes = tuple(dict.fromkeys(code for code in codes if code))
         self._nxt_codes = tuple(dict.fromkeys(code for code in nxt_codes if code))
         if self._fallback_worker is not None:
@@ -126,7 +133,7 @@ class CentralRealtimeWorker(QThread):
         status = event.get("connection_status")
         if (isinstance(status, dict) and type(status.get("generation")) is int
                 and status["generation"] < self._planned_generation
-                and event_type in {"connection_failed", "connection_opened", "central_ready"}):
+                and event_type in {"connection_failed", "connection_opened", "central_ready", "subscription_ready", "codes_added"}):
             return
         self._accept_connection_status(status)
         if event_type == "connection_status":
@@ -187,7 +194,21 @@ class CentralRealtimeWorker(QThread):
             self._consecutive_failures = 0
         elif event_type == "codes_added":
             self.codes_added.emit(tuple(str(code) for code in event.get("codes", []) if code))
+            sources = event.get("source_resets", [])
+            if isinstance(sources, list):
+                selected = tuple((row["code"], row["market"]) for row in sources
+                                 if isinstance(row, dict) and type(row.get("code")) is str
+                                 and row["code"] and row.get("market") in {"KRX", "NXT", "SOR"})
+                if selected:
+                    self.sources_activated.emit(selected)
         elif event_type == "subscription_ready":
+            # Incremental completion is upstream approval without a reconnect signal.
+            codes = tuple(str(code) for code in event.get("codes", []) if code)
+            if event.get("scope") in {"upstream","client"} and self._central_subscription_covers_requested_codes(event, codes):
+                self._stop_local_fallback("나스 키움 실시간 구독 복구 확인")
+                self._planned_deadline = 0.0
+                self._planned_finished_generation = self._planned_generation
+                self.status_changed.emit(f"나스 실시간 체결 구독 중 · {len(codes)}종목")
             self.subscription_ready.emit()
 
     def _accept_connection_status(self, status: object) -> None:
@@ -268,12 +289,15 @@ class CentralRealtimeWorker(QThread):
             "trade_received", "order_executed", "market_state_received", "program_trade_received",
             "stock_reference_received",
             "connection_failed", "subscription_ready", "connection_opened", "codes_added", "diagnostics_changed",
+            "sources_activated",
         ):
             # 이 worker는 CentralRealtimeWorker.run() 안에서 생성되므로 Qt
             # 객체 affinity가 이벤트 루프 없는 중앙 작업 스레드에 속한다.
             # AutoConnection이면 신호가 그 큐에 갇혀 GUI까지 전달되지 않는다.
             # 중계 신호 emit만 송신 스레드에서 즉시 실행하고, 최종 GUI slot은
             # Qt가 수신 객체의 main thread로 다시 queue한다.
+            if name == "sources_activated" and not hasattr(worker, name):
+                continue
             getattr(worker, name).connect(
                 getattr(self, name).emit, Qt.ConnectionType.DirectConnection,
             )

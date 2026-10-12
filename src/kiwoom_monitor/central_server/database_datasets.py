@@ -35,7 +35,7 @@ ASYNC_COMMIT_DATASET_KINDS = frozenset({
 
 COMMON_OBSERVED_DATASET_KINDS = frozenset({
     "market_state", "new_high", "program_flow", "ranking", "top20_membership",
-    "top20_index", "market_index_chart",
+    "top20_index", "top20_index_reconciled", "market_index_chart",
     "investor_flow", "stock_fundamentals", "nxt_eligibility",
 })
 
@@ -66,6 +66,11 @@ class SQLiteDatasetStoreMixin:
                 )
                 cache_day = _top20_statistics_cache_day(kind, subject)
                 if cache_day:
+                    connection.execute(
+                        "DELETE FROM central_dataset_snapshots WHERE kind='top20_statistics_display_day' AND subject=?",
+                        (cache_day,),
+                    )
+                if cache_day and kind != "top20_index_reconciled":
                     connection.execute(
                         "DELETE FROM central_dataset_snapshots WHERE kind='top20_statistics_day' "
                         "AND subject=?", (cache_day,),
@@ -208,6 +213,11 @@ class PostgresDatasetStoreMixin:
                             (kind, subject, snapshot_key, saved_at, payload_json),
                         )
                         if cache_day:
+                            cursor.execute(
+                                "DELETE FROM central_dataset_snapshots WHERE kind='top20_statistics_display_day' AND subject=%s",
+                                (cache_day,),
+                            )
+                        if cache_day and kind != "top20_index_reconciled":
                             cursor.execute(
                                 "DELETE FROM central_dataset_snapshots WHERE kind='top20_statistics_day' "
                                 "AND subject=%s", (cache_day,),

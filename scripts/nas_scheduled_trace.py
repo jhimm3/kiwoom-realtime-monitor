@@ -62,16 +62,30 @@ class Api:
         self.base = "http://127.0.0.1:" + str(port)
 
     def request(self, path, body=None, method="GET"):
+        # Account preparation has its own 10-second snapshot budget, preceded
+        # by a durable control update. The HTTP budget must cover both phases.
+        timeout = 60 if method == 'POST' and path == '/api/v1/diagnostics/trace' else 10
+        began = time.monotonic()
+        self.last_request = {'method': method, 'path': path.split('?')[0],
+                             'timeout_seconds': timeout, 'started_at': time.time()}
         headers = {"Authorization": "Bearer " + self.token}
         data = None
         if body is not None:
             headers["Content-Type"] = "application/json"
             data = json.dumps(body).encode()
         try:
-            with urlopen(Request(self.base + path, data=data, headers=headers, method=method), timeout=10) as response:
+            with urlopen(Request(self.base + path, data=data, headers=headers, method=method), timeout=timeout) as response:
                 return json.load(response)
         except HTTPError as error:
+            try:
+                detail = json.loads(error.read(4096)).get('detail')
+            except (ValueError, TypeError, AttributeError):
+                detail = None
+            if type(detail) is str and re.fullmatch(r'[A-Za-z0-9_.-]{1,160}', detail):
+                raise RuntimeError('API_HTTP_%s_%s' % (error.code, detail)) from None
             raise RuntimeError("API_HTTP_%s_%s" % (error.code, path)) from None
+        finally:
+            self.last_request['elapsed_seconds'] = time.monotonic() - began
 
 
 def active_release(root):
@@ -122,7 +136,7 @@ def preflight(api, root, plan):
                 and option.get("requires") == ["store_inputs", "persist_at"],
                 "capture_opt_in_contract_mismatch")
         if flag == "account_inputs":
-            require(option.get("context_capture", {}).get("version") == "account-context/v2",
+            require(option.get("context_capture", {}).get("version") in ("account-context/v3", "account-context/v4"),
                     "account_context_contract_mismatch")
     require({"0B", "0w", "0J", "0U"}.issubset(capture["collector_event_types"]), "collector_types_missing")
     require(BOUNDARIES.issubset(capture["causal_input_boundaries"]), "causal_boundaries_missing")
@@ -225,6 +239,7 @@ def main():
             publish(args.status, {"state": "failed", "error_type": type(error).__name__,
                                   "reason": str(error) if isinstance(error, RuntimeError) else "inspect_local_execution",
                                   "failed_at": time.time(), "plan": plan,
+                                  "failed_request": getattr(api, 'last_request', None),
                                   "automatic_retry": False, "controls_cleanup": "not_attempted; master TTL bounds any partial start"})
             return 1
 

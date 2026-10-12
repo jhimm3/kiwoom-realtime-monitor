@@ -1,0 +1,273 @@
+{
+  "version": 1,
+  "reviewed_additive_paths": {
+    "/api/v1/news/historical-archive/v2/search": {
+      "get": {
+        "summary": "Historical Archive V2 Search",
+        "operationId": "historical_archive_v2_search_api_v1_news_historical_archive_v2_search_get",
+        "parameters": [
+          {
+            "name": "stock_code",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9A-Z]{6}$",
+              "title": "Stock Code"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Historical Archive V2 Search Api V1 News Historical Archive V2 Search Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/news/historical-archive/v2/market": {
+      "get": {
+        "summary": "Historical Archive V2 Market",
+        "operationId": "historical_archive_v2_market_api_v1_news_historical_archive_v2_market_get",
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(flash|world)$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Historical Archive V2 Market Api V1 News Historical Archive V2 Market Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/market/top20-series": {
+      "get": {
+        "summary": "Top20 Series",
+        "operationId": "top20_series_api_v1_market_top20_series_get",
+        "parameters": [
+          {
+            "name": "trading_date",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "title": "Trading Date"
+            }
+          },
+          {
+            "name": "basis",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(display|realtime)$",
+              "default": "display",
+              "title": "Basis"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Top20 Series Api V1 Market Top20 Series Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "top20_statistics_basis_parameter": {
+    "name": "basis",
+    "in": "query",
+    "required": false,
+    "schema": {
+      "type": "string",
+      "pattern": "^(display|realtime)$",
+      "default": "realtime",
+      "title": "Basis"
+    }
+  },
+  "new_writer": {
+    "writer_id": "dataset.display_statistics_cache",
+    "metric_kind": "dataset:top20_statistics_display_day",
+    "source": "opt-in TOP20 display statistics cache",
+    "storage": "postgres",
+    "tables": [
+      "central_dataset_snapshots"
+    ],
+    "durability": "derived_daily_cache",
+    "diagnostic_pause_supported": true,
+    "common_db_observed": true,
+    "measurement": "native cache transaction; top20_after_close pause retains reads and skips cache writes"
+  },
+  "writer_kind_insertions": [
+    {
+      "writer_id": "dataset.snapshot",
+      "after": "dataset:top20_index",
+      "value": "dataset:top20_index_reconciled"
+    },
+    {
+      "writer_id": "document.collection",
+      "after": "document:execution_mock_automation_runner_current",
+      "value": "document:execution_mock_automation_clock_current"
+    }
+  ]
+}

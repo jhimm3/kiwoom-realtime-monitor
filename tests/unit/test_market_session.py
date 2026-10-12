@@ -22,7 +22,7 @@ class MarketSessionTests(unittest.TestCase):
         self.assertEqual("KRX", market_session(datetime(2026, 9, 14, 16, 0), "real"))
         self.assertIsNone(market_session(datetime(2026, 8, 14, 20, 0), "real"))
 
-    def test_worker_refreshes_phase_boundary_while_messages_keep_arriving(self) -> None:
+    def test_worker_keeps_registration_when_phase_changes_with_identical_items(self) -> None:
         now = [datetime(2026, 9, 14, 15, 29, 59)]
 
         class Socket:
@@ -58,7 +58,7 @@ class MarketSessionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "test complete"):
                 asyncio.run(worker._receive("KRX"))
         registrations = [value for value in socket.sent if value.get("trnm") == "REG"]
-        self.assertEqual(2, len(registrations))
+        self.assertEqual(1, len(registrations))
 
     def test_worker_reports_ready_only_after_registration_ack(self) -> None:
         class Finished(Exception):

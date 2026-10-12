@@ -316,7 +316,7 @@ def verify_persisted_capture(trace, identifier, *, expected_large_calls=0, large
         raise RuntimeError('private_final_manifest_changed')
     if expected_large_calls:
         from kiwoom_monitor.central_server.diagnostic_account_context import read_recorded_account_context
-        if read_recorded_account_context(identifier)['version'] != 'account-context/v2':
+        if read_recorded_account_context(identifier)['version'] != 'account-context/v4':
             raise RuntimeError('capacity_account_context_version_mismatch')
     if pairs is not None:
         return dict(state=final['state'], events=seq, chunks=len(final['chunks']), jsonl_bytes=jsonl_bytes,

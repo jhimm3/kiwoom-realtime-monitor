@@ -95,7 +95,7 @@ class ScheduledTraceApiTests(unittest.TestCase):
                     self.assertTrue(any(r.get('input_kind') == 'message' for r in rows))
                     self.assertNotIn('private-authority', json.dumps(rows, default=str))
                     from kiwoom_monitor.central_server.diagnostic_account_context import read_recorded_account_context
-                    self.assertEqual('account-context/v2', read_recorded_account_context(started['trace_id'])['version'])
+                    self.assertEqual('account-context/v4', read_recorded_account_context(started['trace_id'])['version'])
                     fixture.signature()  # Content/revisions and released lease are checked by the native fixture.
                 finally:
                     trace.stop('server_shutdown', timeout=15)

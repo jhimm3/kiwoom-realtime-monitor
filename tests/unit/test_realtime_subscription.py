@@ -43,6 +43,23 @@ class RealtimeSubscriptionCoordinatorTests(unittest.TestCase):
         self.coordinator.commit(decision)
         self.assertEqual(("B", "C"), self.coordinator.current_codes)
 
+    def test_ranking_order_only_change_keeps_existing_subscription(self) -> None:
+        for moment in (datetime(2026, 10, 12, 8, 30), datetime(2026, 10, 12, 11, 10)):
+            with self.subTest(moment=moment):
+                coordinator = RealtimeSubscriptionCoordinator(lambda: moment)
+                first = coordinator.plan(
+                    ("A", "B"), {"A", "B"}, closing=False, worker_available=True,
+                    worker_exists=False, worker_running=False,
+                )
+                coordinator.commit(first)
+                reordered = coordinator.plan(
+                    ("B", "A"), {"A", "B"}, closing=False, worker_available=True,
+                    worker_exists=True, worker_running=True,
+                )
+                self.assertEqual(RealtimeSubscriptionAction.NONE, reordered.action)
+                coordinator.commit(reordered)
+                self.assertEqual(first.active_codes, coordinator.current_codes)
+
     def test_venue_only_change_refreshes_running_subscription(self) -> None:
         first = self.plan()
         self.coordinator.commit(first)

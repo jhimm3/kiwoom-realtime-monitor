@@ -420,3 +420,16 @@ spec, admission, runtime lease, execution intent를 만들지 않는다.
 ## 과거 시장 맥락 SQLite의 거래소 효력일
 
 `data/historical_market_context.sqlite3`는 운영 PostgreSQL과 분리된 연구 원장이다. `historical_exchange_document_fetch`는 DART 원문 접수번호별 수집 상태·원문 ZIP 경로·SHA-256을 보존한다. `historical_exchange_effective_events`는 후보 종목 코드와 접수번호별 `receipt_date`, 거래정지/재개/상폐의 `effective_date`·`effective_time`·`precision`, 원문 필드 근거를 보존한다. `historical_exchange_effective_daily_checks`는 같은 사건에 대한 키움 일봉 거래량·전후 거래일·접수일과 효력일의 날짜 차이, `review_status`, 대조한 원본 DB 식별자를 기록한다. 일봉 대조는 공식 효력일을 덮어쓰지 않는다. 정정 공시나 효력 날짜가 없는 공시는 근거와 상태를 남기고 자동 단일 사건으로 확정하지 않는다.
+
+
+## PC 완성 과거뉴스 archive v2 (로컬 구현·전체 파일/운영 게시 미완료)
+
+운영 PG migration과 분리된 새 SQLite 세대다. 기존 뉴스 테이블의 정확 ID·accepted_sequence·revision/참조와 seed role을 보존하며 v1을 자동 migration하지 않는다. `archive_build_manifest`는 schema=2/dataset/code digest/입력/검사/봉인 상태를 소유한다. `archive_builder_v2`는 OS 단일 writer 잠금과 함께 재개 소유권을 기록한다.
+
+`archive_input_progress`, `archive_sources_v2`, `archive_expected_targets_v2`는 scope+owner+identity 및 고정 준비본 hash를 소유한다. `archive_targets_v2`는 같은 입력의 target별 prepared/computed 결과·검증 fingerprint·판정 계보·정확 사건/membership ID를 보존한다. `archive_input_context_v2`, `archive_body_provenance`, `archive_clean_bodies_v2`는 저장된 부가정보/원본 획득근거/PC 정제본문을 유지한다. `archive_failures_v2`는 실패 입력을 성공으로 바꾸지 않고 별도로 보존한다.
+
+`archive_prepared_scope_origins_v2`는 명시 지원된 시황 준비 alias `historical_market`의 원래 scope와 입력 hash를 ready·failed·제외 행 모두에 보존한다. source의 `prepared_scope_origins`는 새 고정 사본에만 생성하며 원본 DB는 변경하지 않는다. canonical scope와 같은 owner/identity가 겹치면 정규화를 거절한다. staging batch와 같은 transaction으로 원장을 저장하고 source별 기대 수·input hash 관계를 봉인 전에 검사한다. 이 보완은 새 builder digest/새 세대에만 적용하고 이전 작업본을 자동 migration하지 않는다.
+
+`archive_source_coverage_v2`, `archive_source_history_v2`, `archive_failure_review_v2`는 실제 received key 대조와 페이지/본문/요청 오류 버전·hash·실패 설명을 소유한다. 연결 불명 원본은 근거로만 보존한다. `archive_market_sources_v2`는 FLASH/WORLD 관계를, `archive_projection_sources_v2`/`archive_projection_v2`는 종목 및 GLOBAL 시황의 compact 목록과 고정 정렬키를 소유한다. BODY 텍스트를 목록마다 복제하지 않는다. 이벤트/목록 작업 원장과 모든 입력 진도는 같은 bounded batch transaction으로 완료한다.
+
+봉인 전 입력/원본/seed·target/사건/본문 관계·내용 hash·무결성 전수 검사를 요구한다. 봉인 후 파일 밖 receipt에 전체 SHA를 기록하고 읽기 전용 파일만 NAS의 새 불변 버전에 복사한다. NAS 시작/조회는 테이블 생성·migration·인덱스·BODY/RULE·job 예약을 호출하지 않는다. schema 2 설정은 coverage 완료/봉인 검사 통과도 요구하며 profile-only 파일은 거부한다.

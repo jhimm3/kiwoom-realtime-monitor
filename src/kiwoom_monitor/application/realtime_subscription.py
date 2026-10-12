@@ -74,8 +74,8 @@ class RealtimeSubscriptionCoordinator:
             action = (
                 RealtimeSubscriptionAction.NONE
                 if (
-                    active_codes == self._current_codes
-                    and nxt_codes == self._current_nxt_codes
+                    set(active_codes) == set(self._current_codes)
+                    and set(nxt_codes) == set(self._current_nxt_codes)
                     and target.signature == self._current_signature
                 )
                 else RealtimeSubscriptionAction.UPDATE

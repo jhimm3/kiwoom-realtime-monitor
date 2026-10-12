@@ -4,11 +4,12 @@ import hashlib
 import json
 import tempfile
 import unittest
+from types import SimpleNamespace
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 from kiwoom_monitor.central_server.app import create_app
@@ -28,6 +29,7 @@ from kiwoom_monitor.application.mock_automation_admission import (
 from kiwoom_monitor.application.mock_automation_execution import (
     MockAutomationGateStatus,
     dispatch_mock_automation_decision_from_risk,
+    emergency_stop_mock_automation,
 )
 from kiwoom_monitor.application.mock_automation_recovery import (
     record_mock_automation_recovery_from_risk,
@@ -55,6 +57,9 @@ from kiwoom_monitor.application.research_families import (
 from kiwoom_monitor.application.research_splits import ResearchEvaluationSpec, ResearchFoldSpec
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.execution_runtime import ExecutionRuntime
+from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner
+from kiwoom_monitor.central_server.mock_account_monitor import MockAccountMonitor
+from kiwoom_monitor.central_server.database_observation_readers import ObservationRevisionPage
 from kiwoom_monitor.domain.execution_activation import (
     ForwardCriteria,
     ForwardEvaluationSpec,
@@ -73,6 +78,7 @@ from kiwoom_monitor.domain.order_contract import (
 from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
 from kiwoom_monitor.application.trade_cost_service import DailyTradeCost
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
+from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionUnknown
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
 from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
     ForwardEvaluationRepository,
@@ -666,6 +672,265 @@ class MockAutomationSpecificationTests(unittest.TestCase):
                 spec=self.spec, shadow_event=self.shadow_event, current_binding=self.binding,
             )
         self.assertEqual((conflicting,), self.repository.load_stage_revisions("strategy-1"))
+
+
+class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
+    """Actual breakout evaluator and order lifecycle, with isolated broker inputs."""
+
+    def setUp(self):
+        self.store = SQLiteQueryStore(Path(":memory:"))
+        self.store.initialize()
+        self.addCleanup(self.store.close)
+        inputs = mock_specification_inputs(self.store)
+        self.__dict__.update(vars(inputs))
+        publish_ready_mock_automation_spec(
+            self.repository, profile=self.profile, stage_revisions=self.stages,
+            spec=self.spec, shadow_event=self.shadow_event, current_binding=self.binding,
+        )
+        self.clock = self.profile.evaluation_start
+        self.execution = ExecutionRepository(self.store)
+        self.transport = _FakeBrokerTransport(lambda: self.clock)
+        self.run_id = execution_run_id_for_spec(self.spec.spec_id)
+        self.runtime = ExecutionRuntime(
+            OrderLifecycle(self.execution, self.transport, now_provider=lambda: self.clock),
+            self.execution, account_ref=ACCOUNT_REF, run_id=self.run_id,
+            owner_token="workflow-test-owner", now_provider=lambda: self.clock,
+        )
+        self.addCleanup(self.runtime.stop)
+        admit_mock_automation(
+            self.repository, self.repository, self.runtime,
+            account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+            requested_at=self.clock, lease_seconds=300,
+        )
+        self.positions = {}
+        self.cash = 10_000_000
+        self.costs = []
+        self.risk_revision = 0
+        self.observations = []
+        # Bootstrap has real complete bars and rank history, but must not order.
+        for minute in range(-5, 1):
+            self._rank(self.profile.evaluation_start + timedelta(minutes=minute, seconds=2))
+            if minute < 0:
+                self._bar(self.profile.evaluation_start + timedelta(minutes=minute), 69_000, 70_000)
+        seed = tuple(sorted(self.observations, key=lambda row: row["accepted_sequence"]))
+        bootstrap = patch.object(
+            self.store, "load_observation_bootstrap",
+            return_value=ObservationRevisionPage(rows=seed, safe_through=len(seed)),
+        )
+        bootstrap.start(); self.addCleanup(bootstrap.stop)
+        live = patch.object(
+            self.store, "load_observation_revisions_after",
+            side_effect=lambda cursor, kinds, limit: [
+                row for row in self.observations
+                if row["accepted_sequence"] > cursor and row["kind"] in kinds
+            ][:limit],
+        )
+        live.start(); self.addCleanup(live.stop)
+        self.bundle = SimpleNamespace(
+            account_ref=ACCOUNT_REF, run_id=self.run_id, repository=self.execution,
+            runtime=self.runtime, monitor=SimpleNamespace(refresh_recovery=self._refresh_recovery),
+            automation_context=SimpleNamespace(spec_id=self.spec.spec_id, execution_run_id=self.run_id),
+        )
+        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+
+    def _rank(self, available):
+        sequence = len(self.observations) + 1
+        self.observations.append({
+            "accepted_sequence": sequence, "revision_id": f"rank-{sequence}",
+            "kind": "top20_membership", "observation_key": f"rank-{sequence}",
+            "available_at": available.isoformat(),
+            "payload": {"codes": ["005930", *(f"{code:06d}" for code in range(1, 20))]},
+        })
+
+    def _bar(self, started_at, close, high):
+        sequence = len(self.observations) + 1
+        ended_at = started_at + timedelta(minutes=1)
+        self.observations.append({
+            "accepted_sequence": sequence, "revision_id": f"bar-{sequence}",
+            "kind": "minute_bar", "subject": "005930:KRX", "venue": "KRX",
+            "observation_key": started_at.isoformat(),
+            "available_at": (ended_at + timedelta(seconds=2)).isoformat(),
+            "completeness": "complete", "value_kind": "actual",
+            "payload": {
+                "market": "KRX", "code": "005930", "bar_start": started_at.isoformat(),
+                "bar_end": ended_at.isoformat(), "open": close - 50, "high": high,
+                "low": close - 100, "close": close, "volume": 100,
+                "trade_value_million_won": 7, "window_closed": True,
+                "capture_quality": "complete", "finalization_source": "timer",
+            },
+        })
+
+    async def _refresh_recovery(self):
+        recovery = MockAccountRecovery(
+            AccountSnapshot(ACCOUNT_REF, self.cash, 0, dict(self.positions), self.clock), (),
+        )
+        self.risk_revision += 1
+        risk = build_mock_automation_risk_snapshot(
+            recovery, self.execution.account_events("mock", ACCOUNT_REF, limit=1000).events,
+            tuple(self.costs), self.execution.active_intents("mock", ACCOUNT_REF, self.run_id),
+            execution_run_id=self.run_id, binding_revision=self.binding["binding_revision"],
+            reconciliation_revision=self.risk_revision, observed_at=self.clock,
+            broker_query_started_at=self.clock, broker_query_completed_at=self.clock,
+        )
+        self.repository.save_mock_automation_risk_snapshot(risk)
+        return recovery
+
+    async def _poll_bar(self, minute, close, high):
+        started_at = self.profile.evaluation_start + timedelta(minutes=minute)
+        self.clock = started_at + timedelta(minutes=1, seconds=2)
+        self.runtime.heartbeat()
+        self._rank(self.clock)
+        self._bar(started_at, close, high)
+        await self.runner.run_once()
+
+    def _fill_pending(self, side, price):
+        record = self.execution.load(self.runner.status["pending_intent_id"])
+        self.assertIsNotNone(record)
+        self.clock += timedelta(seconds=1)
+        self.runtime.reconcile(record.intent.intent_id, BrokerOrderSnapshot(
+            record.broker_order_id, ACCOUNT_REF, "005930", OrderState.FILLED, 1, 0, self.clock,
+            (BrokerFill(f"workflow-{side}-fill", 1, price, self.clock),),
+        ))
+        self.positions = {"005930": 1} if side == "BUY" else {}
+        self.cash += -price if side == "BUY" else price
+        self.costs.append(DailyTradeCost(
+            self.clock.astimezone(timezone(timedelta(hours=9))).date(), self.clock.date(),
+            "005930", "매수" if side == "BUY" else "매도", price, price, 0, 0, 0,
+            origin_scope=AccountScope("kiwoom", AccountEnvironment.MOCK, ACCOUNT_REF),
+        ))
+
+    def _cost_failing_monitor(self):
+        case = self
+
+        class Reader:
+            async def read(self):
+                return MockAccountRecovery(
+                    AccountSnapshot(ACCOUNT_REF, case.cash, 0, dict(case.positions), case.clock), (),
+                )
+
+            async def read_trade_cost_pages(self, *_args):
+                raise OSError("controlled cost query failure")
+
+        return MockAccountMonitor(
+            Reader(), self.runtime, self.execution, now_provider=lambda: self.clock,
+            automation_risk_repository=self.repository,
+            automation_account_scope=AccountScope("kiwoom", AccountEnvironment.MOCK, ACCOUNT_REF),
+            automation_binding_revision=self.binding["binding_revision"],
+        )
+
+    async def test_breakout_runner_round_trip_restart_and_journal(self):
+        self.assertEqual([], self.transport.calls, "bootstrap must not trade historical bars")
+        await self._poll_bar(0, 71_000, 71_200)
+        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
+        self.assertEqual("candidate", self.runner.status["strategy_state"])
+        self._fill_pending("BUY", 71_000)
+        # Restore the native checkpoint; the durable fill must create the position once.
+        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        await self._poll_bar(1, 75_000, 75_200)
+        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
+        self.assertEqual("open", self.runner.status["strategy_state"])
+        self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls])
+        self._fill_pending("SELL", 75_000)
+        await self.runner.run_once()
+        self.assertEqual("cooldown", self.runner.status["strategy_state"])
+        await self.runner.run_once()
+        self.assertEqual(2, len(self.transport.calls), "idle polling must not resubmit orders")
+        with tempfile.TemporaryDirectory() as directory:
+            journal = JournalRepository(Path(directory) / "journal.sqlite3")
+            projected = sync_journal_execution_projection(
+                _ExecutionPageSource(self.execution, ACCOUNT_REF), journal,
+                AccountScope("kiwoom", AccountEnvironment.MOCK, ACCOUNT_REF),
+                page_limit=1000, now=self.clock,
+            )
+            fills = journal.load_execution_fill_projections(
+                AccountScope("kiwoom", AccountEnvironment.MOCK, ACCOUNT_REF),
+            )
+        self.assertEqual(2, projected.detailed_fill_count)
+        self.assertEqual(("workflow-BUY-fill", "workflow-SELL-fill"),
+                         tuple(row["broker_execution_id"] for row in fills))
+
+    async def test_unfilled_entry_blocks_new_signal_without_creating_position(self):
+        await self._poll_bar(0, 71_000, 71_200)
+        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
+        await self._poll_bar(1, 75_000, 75_200)
+        self.assertEqual("WAITING_ORDER", self.runner.status["state"])
+        self.assertNotEqual("open", self.runner.status["strategy_state"])
+        self.assertEqual(1, len(self.transport.calls))
+
+    async def test_cost_query_failure_preserves_recovery_and_blocks_entry(self):
+        self.bundle.monitor = self._cost_failing_monitor()
+        await self._poll_bar(0, 71_000, 71_200)
+        self.assertEqual("BLOCKED", self.runner.status["state"], self.runner.status)
+        self.assertIn("DAILY_NET_PNL_UNKNOWN", self.runner.status["reason"])
+        risk = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
+        self.assertIsNone(risk.daily_net_pnl_won)
+        self.assertFalse(risk.cost_complete)
+        self.assertTrue(risk.reconciliation_complete)
+        self.assertIn("COST_QUERY_UNAVAILABLE", risk.missing_cost_reasons)
+        self.assertEqual([], self.transport.calls)
+
+    async def test_cost_query_failure_allows_exit_only_for_verified_held_quantity(self):
+        await self._poll_bar(0, 71_000, 71_200)
+        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
+        self._fill_pending("BUY", 71_000)
+        self.bundle.monitor = self._cost_failing_monitor()
+        await self._poll_bar(1, 75_000, 75_200)
+        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
+        self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls])
+        self.assertEqual(1, self.transport.calls[-1][3])
+        self.assertIsNone(self.repository.load_latest_mock_automation_risk(ACCOUNT_REF).daily_net_pnl_won)
+
+    async def test_cost_outage_downgrades_prior_zero_and_recovers_after_successful_query(self):
+        monitor = self._cost_failing_monitor()
+        with patch.object(monitor._reader, "read_trade_cost_pages", new=AsyncMock(return_value=())):
+            await monitor.refresh_recovery()
+        before = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
+        self.assertEqual(0, before.daily_net_pnl_won)
+        await monitor.refresh_recovery()
+        unavailable = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
+        self.assertIsNone(unavailable.daily_net_pnl_won)
+        self.assertFalse(unavailable.cost_complete)
+        self.assertGreater(unavailable.reconciliation_revision, before.reconciliation_revision)
+        with patch.object(monitor._reader, "read_trade_cost_pages", new=AsyncMock(return_value=())):
+            await monitor.refresh_recovery()
+        restored = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
+        self.assertEqual(0, restored.daily_net_pnl_won)
+        self.assertTrue(restored.cost_complete)
+        self.assertGreater(restored.reconciliation_revision, unavailable.reconciliation_revision)
+
+    async def test_failed_account_recovery_is_not_treated_as_only_a_cost_outage(self):
+        monitor = self._cost_failing_monitor()
+        with patch.object(monitor._reader, "read", new=AsyncMock(side_effect=OSError("balance unavailable"))):
+            with self.assertRaisesRegex(OSError, "balance unavailable"):
+                await monitor.refresh_recovery()
+        self.assertIsNone(self.repository.load_latest_mock_automation_risk(ACCOUNT_REF))
+        self.assertEqual([], self.transport.calls)
+
+    async def test_unknown_submission_is_not_retried_after_new_bars_or_restart(self):
+        with patch.object(self.transport, "submit", side_effect=SubmissionUnknown("response lost")) as submit:
+            await self._poll_bar(0, 71_000, 71_200)
+            pending = self.execution.load(self.runner.status["pending_intent_id"])
+            self.assertEqual(OrderState.SUBMISSION_UNKNOWN, pending.state)
+            self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+            await self._poll_bar(1, 75_000, 75_200)
+            await self.runner.run_once()
+            self.assertEqual("WAITING_ORDER", self.runner.status["state"])
+            self.assertEqual(1, submit.call_count)
+            self.assertNotEqual("open", self.runner.status["strategy_state"])
+
+    async def test_persisted_stop_survives_restart_without_submitting_or_cancelling(self):
+        await self._poll_bar(0, 71_000, 71_200)
+        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
+        self._fill_pending("BUY", 71_000)
+        emergency_stop_mock_automation(
+            self.repository, self.runtime, account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+            stopped_at=self.clock, reason="workflow stop",
+        )
+        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        await self._poll_bar(1, 75_000, 75_200)
+        self.assertEqual("STOPPED", self.runner.status["state"])
+        self.assertEqual("open", self.runner.status["strategy_state"])
+        self.assertEqual(1, len(self.transport.calls))
 
 
 if __name__ == "__main__":

@@ -14,6 +14,10 @@ from websockets.asyncio.client import connect
 
 from kiwoom_monitor.application.market_session_schedule import realtime_subscription_target
 
+from .realtime_registration import (
+    RegistrationProgress, all_atoms, filter_message, plan_registration, trade_sources,
+)
+
 from .realtime import (
     OrderExecution, TradeTick, parse_market_index_ticks, parse_order_executions,
     parse_program_trade_ticks, parse_stock_price_references, parse_trade_ticks,
@@ -28,6 +32,7 @@ WS_BASE_URLS = {
 
 logger = logging.getLogger(__name__)
 SUBSCRIPTION_ACK_TIMEOUT_SECONDS = 15.0
+REALTIME_REG_INTERVAL_SECONDS = 0.25
 
 
 def market_session(now: datetime, environment: str) -> str | None:
@@ -60,6 +65,7 @@ class RealtimeTradeWorker(QThread):
     subscription_ready = Signal()
     connection_opened = Signal(object)
     codes_added = Signal(object)
+    sources_activated = Signal(object)
     diagnostics_changed = Signal(object)
 
     def __init__(self, token_provider: Callable[[], str], environment: str, codes: tuple[str, ...], now_provider: Callable[[], datetime] | None = None, nxt_codes: tuple[str, ...] = ()) -> None:
@@ -68,6 +74,7 @@ class RealtimeTradeWorker(QThread):
         self._environment = environment
         self._codes = tuple(dict.fromkeys(code for code in codes if code))
         self._nxt_codes = tuple(dict.fromkeys(code for code in nxt_codes if code))
+        self._subscription_intent = (self._codes, self._nxt_codes)
         self._now_provider = now_provider or korea_now
         self._abnormal_disconnects = 0
         self._reconnects = 0
@@ -79,6 +86,7 @@ class RealtimeTradeWorker(QThread):
         """소켓을 끊지 않고 다음 수신 반복에서 구독 목록만 교체한다."""
         self._codes = tuple(dict.fromkeys(code for code in codes if code))
         self._nxt_codes = tuple(dict.fromkeys(code for code in nxt_codes if code))
+        self._subscription_intent = (self._codes, self._nxt_codes)
 
     def run(self) -> None:
         while not self.isInterruptionRequested():
@@ -106,9 +114,7 @@ class RealtimeTradeWorker(QThread):
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
     async def _receive(self, session: str) -> None:
-        initial_codes = self._codes
-        initial_nxt_codes = self._nxt_codes
-        if not initial_codes:
+        if not self._codes:
             return
         token = await asyncio.to_thread(self._token_provider)
         uri = f"{WS_BASE_URLS[self._environment]}/api/dostk/websocket"
@@ -117,107 +123,124 @@ class RealtimeTradeWorker(QThread):
             login = json.loads(await asyncio.wait_for(websocket.recv(), timeout=15))
             if login.get("return_code") not in (None, 0, "0"):
                 raise RuntimeError(f"WebSocket 로그인 실패: {login.get('return_msg', '')}")
-            logger.info("키움 로컬 실시간 로그인 성공: %s", session)
-            subscribed_codes = initial_codes
-            subscribed_nxt_codes = initial_nxt_codes
-            target = realtime_subscription_target(
-                subscribed_codes, set(subscribed_nxt_codes), self._now_provider(),
-                environment=self._environment,
-            )
-            policy_signature = target.signature
-            await self._send_subscription(
-                websocket, session, target.active_codes, target.nxt_codes, self._environment,
-            )
-            subscription_pending = True
-            subscription_deadline = time.monotonic() + SUBSCRIPTION_ACK_TIMEOUT_SECONDS
-            pending_added: tuple[str, ...] = ()
+            groups, approved, subscribed = {}, set(), ()
+            progress = None
+            batch_codes = ()
+            recv_task = asyncio.create_task(websocket.recv())
+            send_task = None
+            last_sent = float('-inf')
+            deadline = 0.0
             connection_approved = False
-            while not self.isInterruptionRequested():
-                desired_codes = self._codes
-                desired_nxt_codes = self._nxt_codes
-                target = realtime_subscription_target(
-                    desired_codes, set(desired_nxt_codes), self._now_provider(),
-                    environment=self._environment,
-                )
-                if (
-                    not subscription_pending
-                    and (
-                        desired_codes != subscribed_codes
-                        or desired_nxt_codes != subscribed_nxt_codes
-                        or target.signature != policy_signature
-                    )
-                ):
-                    if not desired_codes:
-                        return
-                    added_codes = tuple(code for code in desired_codes if code not in subscribed_codes)
+            try:
+                while not self.isInterruptionRequested():
+                    # One tuple snapshot: both lists describe the same GUI update.
+                    codes, nxt = self._subscription_intent
+                    target = realtime_subscription_target(
+                        codes, set(nxt), self._now_provider(), environment=self._environment)
                     if not target.active_codes:
                         return
                     session = "KRX" if target.krx_codes else "NXT"
-                    await self._send_subscription(
-                        websocket, session, target.active_codes, target.nxt_codes, self._environment,
-                    )
-                    subscribed_codes = desired_codes
-                    subscribed_nxt_codes = desired_nxt_codes
-                    policy_signature = target.signature
-                    pending_added = added_codes
-                    subscription_pending = True
-                    subscription_deadline = time.monotonic() + SUBSCRIPTION_ACK_TIMEOUT_SECONDS
-                try:
-                    raw = await asyncio.wait_for(websocket.recv(), timeout=1)
-                except TimeoutError:
-                    if subscription_pending and time.monotonic() >= subscription_deadline:
+                    desired = self._subscription_groups(
+                        session, target.active_codes, target.nxt_codes, self._environment)
+                    wanted = all_atoms(desired)
+                    if progress is None:
+                        plan = plan_registration(desired, groups)
+                        if plan.commands:
+                            progress = RegistrationProgress(plan)
+                            batch_codes = target.active_codes
+                            approved.intersection_update(plan.retained)
+                    # Admission follows latest intent even while an older batch finishes.
+                    approved.intersection_update(wanted)
+                    allowed = approved & wanted
+                    now = time.monotonic()
+                    if progress is not None and progress.started and now >= deadline:
                         raise RuntimeError("WebSocket 구독 승인 시간 초과")
-                    if not realtime_subscription_target(
-                        self._codes, set(self._nxt_codes), self._now_provider(),
-                        environment=self._environment,
-                    ).active_codes:
-                        return
-                    continue
-                message = json.loads(raw)
-                if str(message.get("trnm", "")).upper() == "PING":
-                    await websocket.send(json.dumps(message))
-                    continue
-                if str(message.get("trnm", "")).upper() == "REG":
-                    if message.get("return_code") not in (None, 0, "0"):
-                        detail = str(message.get("return_msg", "")).strip()
-                        raise RuntimeError(f"WebSocket 구독 실패: {detail}")
-                    if not subscription_pending:
-                        continue
-                    subscription_pending = False
-                    if self._connected_once and self._reconnect_pending:
-                        self._reconnects += 1
-                    self._connected_once = True
-                    self._reconnect_pending = False
-                    self._emit_diagnostics()
-                    initial_approval = not connection_approved
-                    if initial_approval:
-                        connection_approved = True
-                        self.connection_opened.emit(subscribed_codes)
-                    elif pending_added:
-                        self.codes_added.emit(pending_added)
-                    pending_added = ()
-                    logger.info(
-                        "키움 로컬 실시간 구독 승인: %s · %s종목",
-                        session, len(subscribed_codes),
-                    )
-                    self.status_changed.emit(
-                        f"실시간 체결 구독 중 · {session} · {len(subscribed_codes)}종목"
-                    )
-                    if initial_approval:
-                        # Initial approval starts deferred enrichment once. Later
-                        # code changes already have ranking-owned follow-ups.
-                        self.subscription_ready.emit()
-                    continue
-                for tick in parse_trade_ticks(message):
-                    self.trade_received.emit(tick)
-                for execution in parse_order_executions(message):
-                    self.order_executed.emit(execution)
-                for market_tick in parse_market_index_ticks(message):
-                    self.market_state_received.emit(market_tick)
-                for program_tick in parse_program_trade_ticks(message):
-                    self.program_trade_received.emit(program_tick)
-                for reference in parse_stock_price_references(message):
-                    self.stock_reference_received.emit(reference)
+                    if progress is not None and not progress.started and send_task is None:
+                        if now >= last_sent + REALTIME_REG_INTERVAL_SECONDS:
+                            command = progress.start()
+                            deadline = now + SUBSCRIPTION_ACK_TIMEOUT_SECONDS
+                            send_task = asyncio.create_task(websocket.send(json.dumps(command.packet())))
+                    tasks = {recv_task}
+                    if send_task is not None:
+                        tasks.add(send_task)
+                    wait = 0.1
+                    if progress is not None:
+                        due = deadline if progress.started else last_sent + REALTIME_REG_INTERVAL_SECONDS
+                        wait = min(wait, max(0.0, due - time.monotonic()))
+                    done, _ = await asyncio.wait(tasks, timeout=wait, return_when=asyncio.FIRST_COMPLETED)
+                    committed = False
+                    if send_task is not None and send_task in done:
+                        send_task.result()
+                        send_task = None
+                        last_sent = time.monotonic()
+                        committed = progress.mark_sent()
+                    if recv_task in done:
+                        message = json.loads(recv_task.result())
+                        recv_task = asyncio.create_task(websocket.recv())
+                        kind = str(message.get("trnm", "")).upper()
+                        if kind == "PING":
+                            await websocket.send(json.dumps(message))
+                        elif kind in {"REG", "REMOVE"}:
+                            if progress is None:
+                                raise RuntimeError("realtime_ack_without_command")
+                            try:
+                                committed = progress.accept_ack(message) or committed
+                            except RuntimeError as error:
+                                if str(error) == 'realtime_subscription_rejected':
+                                    raise RuntimeError(f"WebSocket 구독 실패: {message.get('return_msg', '')}") from error
+                                raise
+                        else:
+                            value = filter_message(message, allowed)
+                            for tick in parse_trade_ticks(value):
+                                self.trade_received.emit(tick)
+                            for execution in parse_order_executions(value):
+                                self.order_executed.emit(execution)
+                            for tick in parse_market_index_ticks(value):
+                                self.market_state_received.emit(tick)
+                            for tick in parse_program_trade_ticks(value):
+                                self.program_trade_received.emit(tick)
+                            for reference in parse_stock_price_references(value):
+                                self.stock_reference_received.emit(reference)
+                    if committed and progress.done:
+                        groups = progress.plan.groups
+                        current_codes, current_nxt = self._subscription_intent
+                        current_target = realtime_subscription_target(current_codes,set(current_nxt),
+                            self._now_provider(),environment=self._environment)
+                        current_session = 'KRX' if current_target.krx_codes else 'NXT'
+                        wanted = all_atoms(self._subscription_groups(current_session,current_target.active_codes,
+                            current_target.nxt_codes,self._environment))
+                        progress = None
+                        # Keep only old authority when an obsolete batch finishes.
+                        if all_atoms(groups) != wanted:
+                            continue
+                        resets = trade_sources(groups) - {
+                            (item.removesuffix('_NX').removesuffix('_AL'),
+                             'NXT' if item.endswith('_NX') else 'SOR' if item.endswith('_AL') else 'KRX')
+                            for key, item in approved if key == '0B' and item}
+                        approved = all_atoms(groups)
+                        initial = not connection_approved
+                        if initial:
+                            if self._connected_once and self._reconnect_pending:
+                                self._reconnects += 1
+                            self._connected_once = connection_approved = True
+                            self._reconnect_pending = False
+                            self._emit_diagnostics()
+                            self.connection_opened.emit(batch_codes)
+                        else:
+                            added = tuple(code for code in batch_codes if code not in subscribed)
+                            if added:
+                                self.codes_added.emit(added)
+                        if resets:
+                            self.sources_activated.emit(tuple(sorted(resets)))
+                        subscribed = batch_codes
+                        self.status_changed.emit(f"실시간 체결 구독 중 · {session} · {len(subscribed)}종목")
+                        if initial:
+                            self.subscription_ready.emit()
+            finally:
+                tasks = [task for task in (recv_task, send_task) if task is not None]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     def _record_abnormal_disconnect(self, reason: str) -> None:
         self._abnormal_disconnects += 1
@@ -234,33 +257,25 @@ class RealtimeTradeWorker(QThread):
         })
 
     @staticmethod
-    async def _send_subscription(websocket: object, session: str, codes: tuple[str, ...], nxt_codes: tuple[str, ...] = (), environment: str = "real") -> None:
-        items = (
-            tuple(f"{code}_NX" for code in codes)
-            if session == "NXT"
-            else codes + tuple(f"{code}_NX" for code in nxt_codes if code in codes)
-        )
+    def _subscription_groups(session, codes, nxt_codes=(), environment="real"):
+        items = (tuple(f"{code}_NX" for code in codes) if session == "NXT"
+                 else codes + tuple(f"{code}_NX" for code in nxt_codes if code in codes))
         program_items = tuple(f"{code}_AL" for code in codes) if environment == "real" else codes
-        # 모의투자는 KRX만 지원한다. 실전은 SOR(_AL) 누적 프로그램매매를
-        # 구독해 KRX/NXT를 따로 받은 뒤 서로 덮어쓰는 일을 피한다.
-        await websocket.send(
-            json.dumps(
-                {
-                    "trnm": "REG",
-                    "grp_no": "1",
-                    # 전체 희망 종목을 매번 다시 보내므로 기존 그룹은 교체한다.
-                    # 유지(1)하면 순위 교체 때 빠진 종목이 누적되어 200개 한도를 넘는다.
-                    "refresh": "0",
-                    "data": [
-                        {"item": list(items), "type": ["0B"]},
-                        {"item": list(codes), "type": ["0g"]},
-                        {"item": list(program_items), "type": ["0w"]},
-                        {"item": [""], "type": ["00"]},
-                        {"item": ["001", "101"], "type": ["0J", "0U"]},
-                    ],
-                }
-            )
-        )
+        return {"1": [
+            {"item": list(items), "type": ["0B"]},
+            {"item": list(codes), "type": ["0g"]},
+            {"item": list(program_items), "type": ["0w"]},
+            {"item": [""], "type": ["00"]},
+            {"item": ["001", "101"], "type": ["0J", "0U"]},
+        ]}
+
+    @staticmethod
+    async def _send_subscription(websocket, session, codes, nxt_codes=(), environment="real"):
+        # Packet-only entry for existing callers/tests. Live approval belongs to _receive.
+        plan = plan_registration(RealtimeTradeWorker._subscription_groups(
+            session, codes, nxt_codes, environment))
+        for command in plan.commands:
+            await websocket.send(json.dumps(command.packet()))
 
     def stop(self, timeout_ms: int = 3000) -> bool:
         self.requestInterruption()

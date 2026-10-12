@@ -138,6 +138,7 @@ def build_mock_automation_risk_snapshot(
     reconnect_count: int = 0,
     balance_mismatch_count: int = 0,
     data_path: str = "nas",
+    cost_query_complete: bool = True,
 ) -> MockAutomationRiskSnapshot:
     """Project immutable risk evidence without estimating missing broker costs."""
     account = recovery.account
@@ -151,7 +152,11 @@ def build_mock_automation_risk_snapshot(
     exact_fills = _exact_fills(events)
     lots: dict[str, list[list[Any]]] = {}
     realized = Fraction(0)
-    missing_costs: list[str] = []
+    # A failed query is not an empty, confirmed broker-cost response, even when
+    # the local fill ledger is empty or cached costs still match its rows.
+    if type(cost_query_complete) is not bool:
+        raise ValueError("cost_query_complete must be a boolean")
+    missing_costs: list[str] = [] if cost_query_complete else ["COST_QUERY_UNAVAILABLE"]
     costs_by_key = {(cost.fill_date, cost.stock_code, cost.side): cost for cost in costs}
     fills_by_key: dict[tuple[date, str, str], list[AccountExecutionEvent]] = {}
     for event in exact_fills:

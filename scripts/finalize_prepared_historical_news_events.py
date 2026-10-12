@@ -256,6 +256,79 @@ def _release_run_lease(archive: sqlite3.Connection, owner: str) -> None:
         raise
 
 
+def _resolve_event(archive: sqlite3.Connection, stock: str, identity: str,
+                   article_id: str, body_id: str, computed: dict[str, Any],
+                   rule_version: str) -> tuple[Any, ...]:
+    """Resolve one target inside the caller's transaction, without jobs or commit."""
+    if not archive.in_transaction:
+        raise ValueError("event resolution requires a caller-owned transaction")
+    result = computed["rule_result"]
+    outcome = reason = "no_event"
+    event_id = event_revision_id = membership_id = event_parent = membership_parent = None
+    candidate_event_ids: tuple[str, ...] = ()
+    if result is not None:
+        if not isinstance(result, dict) or result.get("rule_version") != rule_version:
+            raise ValueError("verified event result has an invalid rule version")
+        typed = SupplyContractRuleResult(**result)
+        if _json(typed.as_document()) != _json(result):
+            raise ValueError("verified event result is not the rule document")
+        rule_hash = rule_input_hash(article_id, body_id, typed)
+        exact = archive.execute(
+            "SELECT event_revision_id,event_id FROM central_news_event_revisions "
+            "WHERE article_revision_id=? AND body_revision_id=? AND rule_version=? "
+            "AND input_hash=? AND stock_code=?",
+            (article_id, body_id, rule_version, rule_hash, stock),
+        ).fetchone()
+        if exact:
+            outcome = reason = "exact_reuse"
+            event_revision_id, event_id = str(exact[0]), str(exact[1])
+        else:
+            reason, groups = _group_candidates(archive, stock, identity,
+                                                result.get("event_key"))
+            candidate_event_ids = tuple(sorted(groups))
+            if len(groups) > 1:
+                outcome, reason = "conflict", f"ambiguous_{reason}"
+            else:
+                article = archive.execute(
+                    "SELECT document_json FROM central_news_article_revisions "
+                    "WHERE article_revision_id=?", (article_id,),
+                ).fetchone()
+                if article is None:
+                    raise ValueError("verified event article disappeared")
+                recent = [dict(json.loads(item[0]), identity=item[1]) for item in archive.execute(
+                    "SELECT document_json,identity FROM central_news_article_revisions "
+                    "WHERE stock_code=? AND article_revision_id<>? "
+                    "ORDER BY accepted_sequence DESC LIMIT 100", (stock, article_id),
+                )]
+                hints = grouped_candidate_identities(
+                    dict(json.loads(article[0]), identity=identity), recent,
+                )
+                event_revision_id = _save_sqlite_news_event(archive, {
+                    "stock_code": stock, "article_revision_id": article_id,
+                    "body_revision_id": body_id, "rule_version": rule_version,
+                    "input_hash": rule_hash, "candidate_identities": hints,
+                    "result": result,
+                })
+                outcome = "new_group" if not groups else "connected"
+        if event_revision_id:
+            event = archive.execute(
+                "SELECT event_id,revision_of,available_at FROM central_news_event_revisions "
+                "WHERE event_revision_id=? AND article_revision_id=? AND body_revision_id=?",
+                (event_revision_id, article_id, body_id),
+            ).fetchone()
+            members = archive.execute(
+                "SELECT membership_revision_id,revision_of FROM central_news_event_membership_revisions "
+                "WHERE event_revision_id=? AND article_revision_id=? AND body_revision_id=?",
+                (event_revision_id, article_id, body_id),
+            ).fetchall()
+            if event is None or len(members) != 1 or (event_id and event_id != event[0]):
+                raise ValueError("event revision has no unique matching membership")
+            event_id, event_parent = event[0], event[1]
+            membership_id, membership_parent = members[0]
+    return (outcome, reason, event_id, event_revision_id, membership_id,
+            event_parent, membership_parent, candidate_event_ids)
+
+
 def _finish_one(archive: sqlite3.Connection, row: tuple[Any, ...], owner: str) -> str:
     ordinal, stock, identity, input_hash, fingerprint, article_id, body_id = row
     archive.execute("BEGIN IMMEDIATE")
@@ -279,69 +352,10 @@ def _finish_one(archive: sqlite3.Connection, row: tuple[Any, ...], owner: str) -
             verified is None or verified[0] != "verified" or verified[1] != fingerprint):
             raise ValueError("event input lost its verified progress owner")
         computed = json.loads(verified[2])
-        result = computed["rule_result"]
-        outcome = reason = "no_event"
-        event_id = event_revision_id = membership_id = event_parent = membership_parent = None
-        candidate_event_ids: tuple[str, ...] = ()
-        if result is not None:
-            if not isinstance(result, dict) or result.get("rule_version") != verified[3]:
-                raise ValueError("verified event result has an invalid rule version")
-            typed = SupplyContractRuleResult(**result)
-            if _json(typed.as_document()) != _json(result):
-                raise ValueError("verified event result is not the rule document")
-            rule_hash = rule_input_hash(article_id, body_id, typed)
-            exact = archive.execute(
-                "SELECT event_revision_id,event_id FROM central_news_event_revisions "
-                "WHERE article_revision_id=? AND body_revision_id=? AND rule_version=? "
-                "AND input_hash=? AND stock_code=?",
-                (article_id, body_id, verified[3], rule_hash, stock),
-            ).fetchone()
-            if exact:
-                outcome = reason = "exact_reuse"
-                event_revision_id, event_id = str(exact[0]), str(exact[1])
-            else:
-                reason, groups = _group_candidates(archive, stock, identity,
-                                                    result.get("event_key"))
-                candidate_event_ids = tuple(sorted(groups))
-                if len(groups) > 1:
-                    outcome, reason = "conflict", f"ambiguous_{reason}"
-                else:
-                    article = archive.execute(
-                        "SELECT document_json FROM central_news_article_revisions "
-                        "WHERE article_revision_id=?", (article_id,),
-                    ).fetchone()
-                    if article is None:
-                        raise ValueError("verified event article disappeared")
-                    recent = [dict(json.loads(item[0]), identity=item[1]) for item in archive.execute(
-                        "SELECT document_json,identity FROM central_news_article_revisions "
-                        "WHERE stock_code=? AND article_revision_id<>? "
-                        "ORDER BY accepted_sequence DESC LIMIT 100", (stock, article_id),
-                    )]
-                    hints = grouped_candidate_identities(
-                        dict(json.loads(article[0]), identity=identity), recent,
-                    )
-                    event_revision_id = _save_sqlite_news_event(archive, {
-                        "stock_code": stock, "article_revision_id": article_id,
-                        "body_revision_id": body_id, "rule_version": verified[3],
-                        "input_hash": rule_hash, "candidate_identities": hints,
-                        "result": result,
-                    })
-                    outcome = "new_group" if not groups else "connected"
-            if event_revision_id:
-                event = archive.execute(
-                    "SELECT event_id,revision_of,available_at FROM central_news_event_revisions "
-                    "WHERE event_revision_id=? AND article_revision_id=? AND body_revision_id=?",
-                    (event_revision_id, article_id, body_id),
-                ).fetchone()
-                members = archive.execute(
-                    "SELECT membership_revision_id,revision_of FROM central_news_event_membership_revisions "
-                    "WHERE event_revision_id=? AND article_revision_id=? AND body_revision_id=?",
-                    (event_revision_id, article_id, body_id),
-                ).fetchall()
-                if event is None or len(members) != 1 or (event_id and event_id != event[0]):
-                    raise ValueError("event revision has no unique matching membership")
-                event_id, event_parent = event[0], event[1]
-                membership_id, membership_parent = members[0]
+        (outcome, reason, event_id, event_revision_id, membership_id,
+         event_parent, membership_parent, candidate_event_ids) = _resolve_event(
+             archive, stock, identity, article_id, body_id, computed, verified[3],
+         )
         archive.execute(
             "INSERT INTO archive_event_resolution("
             "scope,stock_code,identity,ordinal,input_hash,verification_fingerprint,"

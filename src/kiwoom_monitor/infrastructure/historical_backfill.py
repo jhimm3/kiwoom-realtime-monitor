@@ -33,7 +33,19 @@ DAISHIN_PROVIDER = "daishin_creon"
 DATABASE_TIMEOUT_SECONDS = 60
 # User policy for historical original-article collection, retained across restarts.
 # Search observations and previously captured article bodies are kept.
-EXCLUDED_ORIGINAL_ARTICLE_HOSTS = frozenset({"hankyung.com", "www.hankyung.com"})
+# User exclusion on 2026-10-12: high-volume blocked publishers, then all remaining blocked hosts.
+# This is an explicit list, not automatic exclusion based on queue size.
+EXCLUDED_ORIGINAL_ARTICLE_HOSTS = frozenset(
+    host for domain in (
+        "hankyung.com", "nbntv.co.kr", "ebn.co.kr", "thisisgame.com", "seoulfn.com",
+        "asiaa.co.kr", "kado.net", "koit.co.kr", "startuptoday.co.kr", "nytimes.com",
+        "bizwork.co.kr", "womentimes.co.kr",
+        "kdpress.co.kr", "thelec.kr", "tgdaily.co.kr", "irobotnews.com",
+        "dailysportshankook.co.kr", "ttlnews.com", "thegames.co.kr", "it-b.co.kr",
+        "ekoreanews.co.kr", "gamevu.co.kr", "forbeskorea.co.kr", "agrinet.co.kr",
+        "newstof.com", "thegolftimes.co.kr", "rpm9.com",
+    ) for host in (domain, "www." + domain)
+) | frozenset({"jmagazine.joins.com", "news.skbroadband.com", "viewers.heraldcorp.com"})
 
 
 def candidate_non_stock_codes(reference: Path) -> set[str]:
@@ -1301,7 +1313,7 @@ def fetch_article_publication(
             last_url = source_url
             attempts.append(ArticleFetchAttempt(
                 url_role, source_url, source_url, last_status, None,
-                "not requested: user excluded Hankyung original articles", "", "", "", "",
+                "not requested: user excluded publisher original articles", "", "", "", "",
                 elapsed_ms=0, failure_phase="source_policy",
             ))
             continue
@@ -2080,9 +2092,12 @@ def claim_news_article_pipeline(path: Path, *, limit: int = 50) -> list[PendingN
                 "FROM news_article_pipeline q JOIN news_articles a ON "
                 "a.provider=q.provider AND a.office_id=q.office_id "
                 "AND a.article_id=q.article_id WHERE q.state='pending' "
-                "AND NOT EXISTS (SELECT 1 FROM news_article_host_cooldowns h "
-                "WHERE h.host=article_host(a.original_url) AND h.retry_after>?) "
-                "ORDER BY q.updated_at,q.queue_id LIMIT ?", (now.isoformat(), limit),
+                "AND (article_host(a.original_url) IN (" +
+                ",".join("?" for _ in EXCLUDED_ORIGINAL_ARTICLE_HOSTS) + ") "
+                "OR NOT EXISTS (SELECT 1 FROM news_article_host_cooldowns h "
+                "WHERE h.host=article_host(a.original_url) AND h.retry_after>?)) "
+                "ORDER BY q.updated_at,q.queue_id LIMIT ?",
+                (*sorted(EXCLUDED_ORIGINAL_ARTICLE_HOSTS), now.isoformat(), limit),
             ).fetchall()
             for row in rows:
                 token = uuid.uuid4().hex

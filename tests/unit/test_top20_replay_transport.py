@@ -130,6 +130,7 @@ class Top20ReplayTransportTests(unittest.IsolatedAsyncioTestCase):
             return scalar(token, kind, {**fields, "payload": freeze_payload(value).value})
         hub = RealtimeHub()
         collector = CentralRealtimeCollector(lambda: "", "real", hub, lambda: NOW)
+        collector._realtime_tape_version = collector._hub._realtime_tape_version = "top20-realtime-tape/v1"
         with ExitStack() as stack:
             stack.enter_context(patch.object(trace, "input_token", side_effect=lambda kind:
                 "transport-fixture" if kind == "top20_inputs" else None))

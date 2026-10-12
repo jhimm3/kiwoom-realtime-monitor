@@ -56,13 +56,13 @@ def _verify_real_account_write(cursor, binding, settings_revision, p):
     return scope
 
 
-def _save_real_account_recovery(cursor, binding, recovery, received_at, settings_revision, p, *, wall_time=None):
-    """REST evidence, never a mock execution-ledger reconciliation."""
+def _real_account_recovery_document(binding, recovery, received_at, settings_revision):
+    """Canonical evidence encoding shared by the writer and offline seed preparation."""
     from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import AccountRecovery
     if (not isinstance(recovery, AccountRecovery) or not isinstance(received_at, datetime)
             or received_at.utcoffset() is None):
         raise ValueError("REAL_ACCOUNT_RECOVERY_INVALID")
-    scope = _verify_real_account_write(cursor, binding, settings_revision, p)
+    scope = binding.scope.to_dict()
     observations = (recovery.account, *recovery.orders)
     if any(item.account_ref != scope["account_ref"] or item.as_of > received_at for item in observations):
         raise ValueError("REAL_ACCOUNT_RECOVERY_INVALID")
@@ -79,6 +79,17 @@ def _save_real_account_recovery(cursor, binding, recovery, received_at, settings
                 "source": "kiwoom_rest", "received_at": received_at.isoformat(),
                 "recovery": asdict(recovery)}
     serialized = json.dumps(document, default=encode, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return scope, serialized
+
+
+def _save_real_account_recovery(cursor, binding, recovery, received_at, settings_revision, p, *, wall_time=None):
+    """REST evidence, never a mock execution-ledger reconciliation."""
+    from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import AccountRecovery
+    if (not isinstance(recovery, AccountRecovery) or not isinstance(received_at, datetime)
+            or received_at.utcoffset() is None):
+        raise ValueError("REAL_ACCOUNT_RECOVERY_INVALID")
+    _verify_real_account_write(cursor, binding, settings_revision, p)
+    scope, serialized = _real_account_recovery_document(binding, recovery, received_at, settings_revision)
     key = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     cursor.execute("INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
                    f"VALUES({','.join([p] * 5)}) ON CONFLICT(collection,owner,document_key) DO NOTHING",
@@ -87,13 +98,13 @@ def _save_real_account_recovery(cursor, binding, recovery, received_at, settings
     return json.loads(serialized)
 
 
-def _save_real_account_event(cursor, binding, event_type, event, received_at, settings_revision, p, *, wall_time=None):
+def _real_account_event_document(binding, event_type, event, received_at, settings_revision):
     from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import AccountBalanceChange, OrderExecution
     expected = {"order_execution": OrderExecution, "account_balance": AccountBalanceChange}.get(event_type)
     if (expected is None or type(event) is not expected or not isinstance(received_at, datetime)
             or received_at.utcoffset() is None):
         raise ValueError("REAL_ACCOUNT_EVENT_INVALID")
-    scope = _verify_real_account_write(cursor, binding, settings_revision, p)
+    scope = binding.scope.to_dict()
     if event.origin_scope.to_dict() != scope:
         raise ValueError("ACCOUNT_CONTEXT_MISMATCH")
     payload = asdict(event)
@@ -103,12 +114,23 @@ def _save_real_account_event(cursor, binding, event_type, event, received_at, se
                 "source": "kiwoom_websocket", "event_type": event_type, "received_at": received_at.isoformat(),
                 "event": payload}
     serialized = json.dumps(document, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return scope, serialized
+
+
+def _save_real_account_event(cursor, binding, event_type, event, received_at, settings_revision, p, *, wall_time=None):
+    from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import AccountBalanceChange, OrderExecution
+    expected = {"order_execution": OrderExecution, "account_balance": AccountBalanceChange}.get(event_type)
+    if (expected is None or type(event) is not expected or not isinstance(received_at, datetime)
+            or received_at.utcoffset() is None):
+        raise ValueError("REAL_ACCOUNT_EVENT_INVALID")
+    _verify_real_account_write(cursor, binding, settings_revision, p)
+    scope, serialized = _real_account_event_document(binding, event_type, event, received_at, settings_revision)
     key = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     cursor.execute("INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
                    f"VALUES({','.join([p] * 5)}) ON CONFLICT(collection,owner,document_key) DO NOTHING",
                    ("real_account_event", _account_settings_owner(scope), key,
                     time() if wall_time is None else wall_time(), serialized))
-    return document
+    return json.loads(serialized)
 
 
 def _load_market_profile_settings(cursor: Any, p: str) -> dict[str, Any]:

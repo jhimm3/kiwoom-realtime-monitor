@@ -1,5 +1,7 @@
 # PC 완성 과거뉴스 DB 배치 검토
 
+> **현재 이관 판단(2026-10-13): v2 로컬 구현·관련 검사 완료, 전체 게시 준비는 미완료.** 두 scope·다중 target·원본/요청 실패 기록·봉인·읽기 API·중단 복사 재개의 구현과 작은 DB 검사를 마쳤다. 고정 준비본 생성에 착수했으며 최신 NAS seed 추출을 보완 중이다. 전체 archive 생성, NAS 파일 복사와 서버 활성화는 실행하지 않았다. [현재 실행 상태](#v2-구현과-실행-상태-2026-10-13)를 정본으로 보고 9월 기록은 당시 범위로 읽는다.
+
 > 문서 역할 정리(2026-10-11): 현행 archive의 출처·ID·봉인·조회·기존 자료 보존 계약을 유지한다. 코드에는 `historical_news_archive.py`, `historical_news_archive_routes.py`, `historical_news_archive_dialog.py` 연결이 있다. 아래 단계별 ‘클라이언트 미연결’ 등은 작성 당시 상태로 읽는다. 전체 실자료 봉인/게시/검증 완료 여부는 [현재 상태](CURRENT_STATUS.md)와 [OPEN_ITEMS](OPEN_ITEMS.md)를 따르며 이번에 새로 확인하지 않았다.
 
 2026-09-29 운영 범위 예외: 사용자의 명시적 요청에 따라 9월 27일 seed에 기록된 `PENDING` job_key와 정확히 같은 운영 PostgreSQL의 과거 BODY/RULE 작업 26,982행만 별도 백업 없이 삭제했다. PC seed의 당시 상태 증거와 기사·본문·완료 job은 유지한다. 아래의 “기존 자료 삭제 미완료”는 나머지 이관 기사·종속 자료의 정리 상태를 뜻하며, 이 26,982개 작업이 운영 큐에 계속 남아 있다는 뜻이 아니다.
@@ -168,7 +170,7 @@ manifest는 `build_state=building|sealed|failed`와 `coverage_state=complete|com
 
 A~D가 완료되기 전 운영 게시·전량 import·삭제를 수행하지 않는다. 첫 실자료 표본으로 PC 처리 단계별 속도/행 크기를 측정한 뒤에만 남은 시간과 NAS 전송량을 추정한다. 기존 25건 NAS importer 시간으로 새 최종화 시간을 계산하지 않는다. 현재 설계 검토만으로 B~F의 기능·성능이 검증됐다고 보고하지 않는다.
 
-다음 담당은 **GPT-6 Sol High**가 적절하다. 상세 방향은 결정됐지만 기존 ID seed·가변 projection 보존·재시작 transaction·여러 소비자 연결의 구현 회귀 위험이 남아 있다. 현재 다음 작업은 아래 B 단계의 검증 원장과 사건 최종화이며, 단순 반복 테스트/문서 단계가 되면 Luna로 다시 평가한다. 새 범용 저장소나 별도 판단 엔진을 만들지 않는다.
+후속 담당의 모델 선택은 [현행 모델 정책](MODEL_HANDOFF_POLICY.md)을 따른다. 상세 방향이 결정된 기존 ID seed·가변 projection 보존·재시작 transaction·여러 소비자 연결 구현은 **GPT-6.1 Sol High**가 적절하며, 단순 반복 테스트/문서 단계에서도 Sol을 유지하고 High 유지 선호를 적용한다. 아래 B 단계는 당시 검증 원장과 사건 최종화 범위의 기록이다. 새 범용 저장소나 별도 판단 엔진을 만들지 않는다.
 
 ## 2026-09-27 B 단계 사건 순서·규칙 출처 설계 결정
 
@@ -206,3 +208,103 @@ A~D가 완료되기 전 운영 게시·전량 import·삭제를 수행하지 않
 - 회귀: exact 재사용, 같은 identity 정정, 다른 기사 같은 key, 모호한 key 충돌, 늦은 과거기사, 부모가 입력 뒤에 오는 경우, 동일시각/시각 없음, 다종목, null/버전 불명, seed assessment 충돌, 실패 주입·재시작·두 builder, 중간→최종 세대 ID 보존, seed checksum/as-of 불변을 검증한다. NAS writer·job·BODY/RULE 호출을 금지하는 reader 검사는 C~D에서 별도로 필요하다.
 
 이번 단계는 읽기 전용 실자료 감사와 임시 SQLite 경계 재현, 설계 문서 갱신까지다. 위 검증 원장·사건 최종화·reader는 아직 구현/통과한 것으로 보고하지 않는다. 운영 NAS 변경·재빌드·삭제는 하지 않았다.
+
+## 전체 이관 구현 결정 (2026-10-13)
+
+### 현재 증거와 결정 범위
+
+사용자 요청은 지금까지 받은 종목·시황 뉴스를 PC에서 완성해 NAS에서는 읽기만 제공하는 것이다. 기존 단일 SQLite archive 방향을 유지하며 새로운 범용 저장 엔진이나 NAS 재처리 파이프라인을 만들지 않는다. 이 절은 앞의 검색 단일 target 구현 제약을 보완하는 설계이며 아래 항목의 구현 완료 보고가 아니다.
+
+| 항목 | 이번 읽기 확인 |
+| --- | --- |
+| 실행 소스 | main `941347e` 위 작업본. 여러 다른 작업의 미커밋 변경이 있어 전체 누적 소스를 일괄 배포하지 않는다. |
+| 검색 준비본 | `data/historical_collection/prepared_news.sqlite3`, 27,164,303,360 bytes. 유지 집계의 ready 4,629,368 / failed 1,706, fulltext 3,530,237 / summary_only 1,099,131. |
+| 시황 준비본 | `data/historical_collection/prepared-market-news.sqlite3`, 29,860,728,832 bytes. 유지 집계의 ready 4,867,932 / failed 715, fulltext 4,669,716 / summary_only 198,216. |
+| 수량의 한계 | 위 값은 `monitor_counts` 유지 집계이며 이번에 원본 전체를 재계수한 결과가 아니다. 종목별 동일 기사·검색/시황 중복을 포함하므로 합계를 고유 기사 수로 표현하지 않는다. 최종 입력 고정 뒤 실제 건수·키 대조가 필요하다. |
+| 실행 상태 | 검색·원문 상태 파일 complete. 사용자 권한의 프로세스 읽기에서 해당 수집·준비·최종화 명령줄은 발견되지 않았다. 준비본 두 파일 WAL 크기 0. 이 확인만으로 영구 불변 snapshot이라고 간주하지 않는다. |
+| 디스크 | C: 여유 약 97.4GB, 준비본 합계 약 57.0GB. 검색 raw 약 172.4GB, 시황 raw 약 14.8GB. 준비본 사본을 모두 C:에 만들면 출력·임시파일 전 여유 약 40.4GB다. 최종 archive 크기는 아직 측정하지 않았다. |
+| 다중 target 실자료 | 시황 준비본 identity순 512행 표본 중 68행이 다중 target, 최대 6개. 표본 source는 flash이므로 world 전체 분포로 일반화하지 않는다. |
+| 기존 building 파일 | `news-archive-20260927.building.sqlite3`은 9월 준비본 330,298행의 일부만 처리했다. 새로운 전체 세대의 재개 파일로 재사용하지 않는다. |
+
+### 실제 코드의 결손
+
+1. `stage_prepared_historical_news_archive.py:SCOPE`, assessment/RULE/event/projection의 필터와 manifest가 `historical_backfill`로 고정돼 있다. 같은 파일의 `archive_input_progress` 존재 검사는 scope별이 아니어서 두 번째 scope를 단순 추가할 수도 없다.
+2. `finalize_prepared_historical_article_bodies._complete_one`은 검색 document 안의 stock_code/identity를 요구하고 검색 hash·collector/scope를 쓴다. 시황 prepared document에는 이 필드가 없으며 기존 importer는 GLOBAL identity를 합친 `_news_article_content_hash`를 사용한다. 검색 저장 코드를 그대로 적용하면 seed ID 재사용 의미가 달라진다.
+3. `finalize_prepared_historical_assessments._finish_one`, `verify_prepared_historical_news_rules._verify_one`은 RULE 한 개를 요구한다. 입력·검증·사건 원장의 PK에 target이 없고 event `_ordered_worklist`도 article ID당 한 행만 허용한다. 시황의 GLOBAL+확인된 종목을 처리할 수 없다.
+4. `build_prepared_historical_search_projection._row`는 본문을 display JSON에도 복제한다. `historical_news_archive.article_by_id`는 최신 검색 projection을 통해서만 assessment를 찾으므로 과거 revision 또는 시황의 여러 target 판정을 온전히 조회하지 못한다.
+5. reader/router/client/dialog는 종목 검색 페이지와 기사 상세만 연결돼 있다. 시황 목록, 두 scope 전체 회계, 실제 실패/제외 승인 원장, 봉인 CLI·게시 검증은 남아 있다. readiness의 `market.state=complete` 표식 확인만으로 시황 건수·참조 검증이 끝났다고 할 수 없다.
+6. ARTICLE/BODY는 raw 본문 근거 전체를 Python dict로, 사건은 모든 입력을 list/heap으로 읽는다. 수백만 입력에서 기존 소형 표본 메모리·시간을 그대로 기대하지 않는다. 단계별 행당 COMMIT과 반복 전체 hash 읽기도 실행 계획에서 측정해야 한다.
+
+### 선택한 데이터 계약
+
+- **한 dataset에 두 scope를 포함한다.** 검색의 기사 소유자는 종목코드, 시황의 기사 소유자는 GLOBAL이다. URL이 같아도 기존 소유자·content hash가 다른 기사 revision을 강제로 합치지 않는다. 시황 한 기사/BODY를 target 수만큼 새로 복제하지 않는다. 기존 ID·sequence·시간과 support_only 보존은 앞의 seed 계약을 유지한다.
+- 입력 식별자는 `(scope, stock_code, identity, input_hash)`다. 별도의 target 작업 식별자는 여기에 `target_id`를 더한다. 기존 archive 내부의 prepared/verified RULE, event worklist/resolution을 target별로 확장하고 input progress는 **모든 기대 target**이 끝나야 완료된다. 기사 수와 판정/사건 처리 수의 equality 검사를 분리한다. 같은 target 중복 payload는 한 번 처리하되 연결 근거를 보존하고, 서로 다른 payload가 한 target에 중복되면 충돌로 중단한다.
+- 시황 target 집합은 prepared의 GLOBAL과 확인된 종목을 보존한다. `source_item.targets`의 불확실한 종목 연결도 관계 증거로 남기되 confirmed로 승격하거나 RULE 대상을 임의 추가하지 않는다. FLASH/WORLD 관측은 raw의 `(source, office_id, article_id)` 관계를 보존하며 prepared에 남은 단일 source만으로 다른 채널 관측을 지우지 않는다. 이전에 합의한 WORLD 서비스 이전 제외 범위는 coverage 정책으로 기록한다.
+- 시황 canonical 생성은 기존 historical market 입력의 document 정규화·hash 계약을 재사용한다. pure helper를 가져오되 job 생성·운영 writer를 호출하지 않는다. 검색은 기존 검색 계약을 유지한다. seed와 정확히 같은 결과이면 원래 ID를 재사용하며 충돌 시 새 ID로 숨기지 않는다.
+- 새 archive 계산은 `(article_revision_id, body_revision_id, target_id, processing_fingerprint)`에 대응하는 정확한 판정으로 보존한다. seed의 가변 `central_documents.news_assessment`와 다른 결과를 발견해도 seed를 덮어쓰지 않는다. prepared 원래 결과·새 계산 결과·실제 계산시각·출처를 별도 보존하고 상세가 해당 입력을 지정한다.
+- RULE 처리 버전 근거가 없는 기존 입력은 PC에서 저장 본문으로 재검증한다. 일치하면 `verified_equal`; 입력·출처가 유효하지만 고정한 현재 계산 결과가 다르면 차이를 남긴 `recomputed_posthoc` 결과로 새 세대에 보존한다. 이는 과거 판정의 정확한 재현이라고 표시하지 않는다. **입력 hash/target 불일치, seed 충돌, 손상은 이 상태로 통과시키지 않는다.** 기존 v1의 mismatch 결과를 이름만 바꿔 승인하지 않고 v2 고정 코드·입력으로 실제 계산한다. null도 target별 결과이며 BODY extractor 버전 불명을 지우지 않는다.
+- seed 사건을 재배열하지 않는 앞의 결정은 유지한다. 새 사건은 두 scope의 target별 검증 완료 후 하나의 고정 순서로 처리한다. article 부모의 대상 작업이 모두 선행하고 나머지는 기존 발행시각/tie-break 뒤에 scope와 target을 명시한다. 같은 article ID의 여러 target은 서로 다른 작업이며 기존 target별 event helper를 사용한다. 모호한 사건 연결은 계속 봉인을 막는다.
+- 모든 확보 자료의 회계가 필요하다. raw 기사/관측 키와 prepared 키를 비교해 준비본에 없는 목록·원문 실패·명시 제외를 원장화한다. 저장된 목록/본문으로 준비할 수 있는 누락은 PC의 기존 offline 준비 경로로 처리한다. 재수집은 자동 실행하지 않는다. 사용자 제외는 원문 요청 중지 정책이며 확보된 제목·요약·URL 삭제나 fulltext 성공을 뜻하지 않는다.
+- source_failed도 목록 정보와 원인·근거 키를 보존한다. 실패 이유가 설명되면 coverage를 `complete_with_source_failures`로 허용할 수 있지만 입력 미처리·관계 손상·판정 실패를 source failure로 숨기지 않는다. 중단·truncated/repeated-page 검색 범위는 별도 수집 공백 원장에 남기며 수집 전 기간의 무누락을 주장하지 않는다.
+- raw 페이지의 여러 버전과 본문 snapshot을 읽어 입증된 article/body 변경과 단순 응답 위치 변화를 구분한다. 대응 불명 본문은 증거로 남기고 가짜 revision을 만들지 않는다. prepared의 최신행만 보고 이력 보존 완료로 봉인하지 않는다.
+
+### 공간·실행·재개 결정
+
+1. 먼저 기존 seed·prepared 소형 임시 DB로 두 scope와 다중 target을 검증한다. 그다음 실제 입력의 scope/body 상태/target 수를 나눈 유한 표본으로 archive bytes/row, 처리시간, index·WAL·temp 최대 사용량을 측정한다. 표본은 별도 building 파일이며 게시하지 않는다. 임의의 전체 완료 ETA를 제시하지 않는다.
+2. 기본 입력 고정은 기존 SQLite backup 도구로 **새 파일**에 만든다. raw는 필요한 관측·본문 근거를 read transaction에서 범위를 고정해 스트리밍 추출하고 범위·캡처시각·hash를 기록할 수 있다. append rowid 경계만으로 가변 raw 기사 테이블을 snapshot이라고 취급하지 않는다. 전체 HTML 원본은 보존하며 NAS 전량 복제는 요구하지 않는다.
+3. 전체 실행 전 `frozen inputs + 예상 archive + index/temp/WAL 최대치 + 여유분`을 확보해야 한다. 현재 97.4GB만으로 충분하다고 승인하지 않는다. 필요한 작업 공간이 부족하면 용량 수치를 제시하고 별도 PC 디스크 또는 검증된 보관/정리를 결정한 뒤 시작한다. 원본을 자동 삭제하거나 NAS SMB 위에 쓰기 가능한 SQLite builder를 올려 해결하지 않는다.
+4. raw 근거와 사건 정렬은 인덱스가 있는 디스크 작업표·keyset/유한 배치로 처리한다. event 부모 의존성은 article별 완료 상태와 준비된 작업 인덱스로 풀고 work ordinal을 고정한다. 전체 기사·본문·target를 RAM에 적재하지 않는다. 동일 입력 재시작은 ID를 재발급하지 않는다.
+5. builder는 한 프로세스만 소유한다. 여러 건을 제한된 transaction으로 묶을 때 **각 기사 단계 결과와 progress, target 결과와 resolution**을 함께 commit한다. 내부 helper 자체 commit은 금지한다. 실패 시 batch 전체를 rollback하고 마지막 commit부터 재개한다. 실패 입력을 범위를 좁혀 기록하되 조용히 건너뛰지 않는다. 먼저 정합성 회귀 후 실제 표본으로 batch 크기를 정한다.
+6. 고정본 전체 hash는 freeze/단계 경계 검증에 사용한다. 명시한 입력 hash와 코드 fingerprint가 바뀌면 resume를 거부한다. 기존처럼 매 소형 batch마다 27~30GB 전체를 다시 hash하지 않는다. 입력을 실제로 고정하지 않은 상태에서 mtime만 믿는 최적화는 허용하지 않는다.
+7. display projection의 본문 중복은 v2에서 없앤다. PC 정제 본문은 body ID별로 저장하고 목록은 제목·요약·상태·정확 ID만 읽는다. 상세만 해당 본문과 target별 판정을 읽는다. 원래 body bytes/hash와 정제본은 구분한다. 이는 단일 archive 내부의 중복 완화이며 파일 분할/공유 blob 저장소 같은 별도 구조는 이번에 도입하지 않는다.
+
+### 조회·봉인·NAS 활성화 결정
+
+- 현행 search v1 계약은 유지한다. 새 **v2 capability/목록 응답**으로 compact 검색 목록과 시황 `FLASH/WORLD/전체` 목록을 제공한다. 동일 기사 여러 source의 중복은 전체 목록에서 identity 한 개로 표시하고 source 연결은 보존한다. cursor는 dataset·목록종류·필터·고정 정렬키를 모두 묶는다. 종목코드 필터가 필수인 search 경로에 GLOBAL을 억지로 넣지 않는다.
+- 상세는 정확한 article/body ID의 저장 이력과 target별 assessment/event를 조회한다. 최신 목록에 없는 과거 revision도 해당 판정에 접근할 수 있어야 한다. 기존 v1 reader/fixture와 새 v2를 명시적으로 구분하고 구형 파일을 자동 migration하지 않는다. 새 화면은 기존 과거자료 대화상자 안에서 종목/시황 범위를 선택한다. 현재 뉴스·일지 PG 조회는 기존 자료가 남아 있으므로 이번에 임의 통합하지 않는다.
+- v2 readiness는 검색과 시황의 실제 입력·기대 target·판정·사건 resolution·source relation·projection·실패 원장을 대조한다. `market.state=complete` 같은 표식만으로 통과하지 않는다. seed 전수 checksum, 부모/본문/target/event 참조, 명시 실패와 미처리 구별, full integrity/foreign-key 및 명시적 관계 검사가 필요하다.
+- 새 봉인 CLI만 `building → sealed`를 바꾼다. builder 종료·pending/conflict 없음·coverage 검증 뒤 인덱스/정제/단독 파일 준비를 PC에서 마치고, 모든 connection을 닫아 WAL 의존성이 없음을 확인한다. sealed 파일의 전체 SHA-256은 파일 밖 게시 manifest에 기록한다. 자기 자신을 포함한 hash를 DB 안에 넣는 순환 계약을 만들지 않는다. 해시가 바뀌는 봉인 후 VACUUM/인덱스 생성은 금지한다.
+- NAS에는 새 dataset 버전 경로로 파일을 복사하고 전체 hash와 게시 manifest를 검증한다. 확인 전 파일을 활성 경로에 연결하지 않는다. 같은 버전 파일 덮어쓰기·열린 파일 교체는 금지하며 이전 버전을 남긴다. 새 reader/schema 계약을 지원하는 고정 서버 후보를 현행 NAS 배포/gate 절차로 검증한 뒤 archive 설정을 연결한다. 다른 작업의 활성 release·녹화·잠금을 우회하지 않는다.
+- 서버는 manifest와 지원 schema/capability만 작게 검사하고 읽기 연결만 연다. 시작/조회가 migration·인덱스 생성·BODY/RULE·job enqueue·PG 대량 쓰기를 호출하지 않아야 한다. 진단 master 하위 pause/TTL 계약을 새 목록·상세에도 적용한다. NAS는 복사/해시/조회 I/O를 수행하며 CPU/I/O 0이라고 표현하지 않는다.
+- 기존 NAS seed는 오래됐으므로 실행 단계에서 현행 historical scope/관련 참조를 새 readonly 일관 export로 확인한다. schema 호환·기존 ID/내용 대조 후 PC seed로 사용한다. 이전 seed와 변경된 가변 행은 명시적으로 대조하고 옛 checksum을 현재 값인 것처럼 쓰지 않는다. 운영 기사·job·일지 연결 삭제는 이번 게시와 분리한다.
+
+### 구현 담당자가 이어갈 순서와 검사
+
+| 순서 | 기존 파일/책임 | 통과 조건 |
+| --- | --- | --- |
+| 1 | stage/finalize ARTICLE·assessment·verify RULE·events, archive 내부 v2 schema | 검색 1 target / 시황 GLOBAL+2종목 / 후보 관계 / 동일 URL 다른 scope / 정확 seed 재사용 / target 중복 / seed 판정 충돌 보존 / 입력 변경 차단 |
+| 2 | 기존 raw 페이지·본문 provenance 감사 + v2 coverage | raw-only, 준비 실패, 원문 제외, summary-only, 다중 페이지 버전, 연결 불명, FLASH/WORLD 겹침과 과거 서비스 제외를 실제 입력별 설명 |
+| 3 | search projection 확장 + market projection, reader/routes/client/dialog | 1/200/201행·같은 시각·시각 없음·필터 cursor 변경·정확 과거 ID·다중 target 상세·누락 상태, v1 호환과 v2 capability |
+| 4 | readiness 강화 + 봉인 CLI, PC 실행 도구 | 시황 가짜 complete/target 누락/관계 손상/미처리/진짜 checksum 불일치 차단. 중간 실패/두 builder/재개 결과·ID·transaction 보존 |
+| 5 | 격리 SQLite + 실제 PostgreSQL 전용 DB seed 검증 | seed PK/sequence/payload/as-of 불변. reader가 쓰기·계산 helper를 부르면 실패하는 검사, 파일 hash 불변. 실제 API는 지원되는 ASGI 경로 사용, httpx2 추가 금지 |
+| 6 | 실제 유한 표본 → 용량 gate → 입력 고정·전체 PC 실행 | 표본 처리율·크기·RSS·SQL 횟수/commit 수 기록. 충분한 공간 확보 뒤 전체 입력 회계·무결성 검사; 표본 성공을 전체 성공으로 보고하지 않음 |
+| 7 | NAS 비활성 파일 복사·검증 → 고정 후보/gate → 활성화 | dataset/capability·종목/시황/정확 ID 조회, idle/조회/재시작 후 파일 불변·archive job 생성 없음, 중단 복사/잘못된 hash 거부·이전 버전 복귀 |
+
+단발성 builder가 상태·소유권·transaction·다중 target·기존 ID를 연결하는 구현 단계는 **Sol High**로 이어간다. Astra의 이번 설계 결정은 여기서 끝나며 구현을 설계 모델로 계속하지 않는다. 이번 실자료 확인은 상태/크기/유지 집계와 512행 표본의 읽기 감사이고, 신규 회귀 실행·전체 준비본 검증·NAS 활성화는 미실행이다.
+
+
+## v2 구현과 실행 상태 (2026-10-13)
+
+사용자 요청으로 전체 생성 입력은 기존 PC 준비 DB를 직접 읽는다. 별도의 준비 DB 사본은 필수가 아니다. 수집·준비 writer가 없는지 확인하고 비어 있는 WAL 및 원본 SHA-256을 기록한 뒤 읽기 전용 transaction으로 처리한다. 각 단계 전후 전체 hash가 다르거나 WAL 내용이 생기면 같은 세대의 재개·봉인을 거절한다. 원본 `historical_market` alias는 연결의 TEMP view에서만 canonical scope로 대응하며, 겹치는 key를 거절하고 기존 scope/hash를 결과 원장에 보존한다. 원본 파일과 schema를 수정하지 않는다. 최종 NAS 아카이브 결과물과 작은 실행 코드 고정본은 별도로 유지한다. 이미 만든 입력 사본은 이번 실행에 사용하지 않으며 자동 삭제하지 않는다.
+
+검색/시황의 여러 대상은 기사/BODY를 공유하되 판정·사건 연결을 각각 보존한다. 기존 ARTICLE/BODY 및 사건 finalizer 정책을 호출하고 그 내부 commit은 caller-owned batch에서만 끈다. 원본 발행시각·BODY 수집 근거·기존 prepared 판정과 현재 규칙의 결과를 따로 보존한다. 현재 규칙 재계산 결과는 `recomputed_posthoc`이며 과거 당시 판정으로 표현하지 않는다. source page의 원문 응답은 PC 원본에 남고 모든 파싱 버전·응답 hash와 BODY 버전은 근거 원장에 보존한다. 연결 불명 원본은 canonical revision으로 만들지 않는다. WORLD 서비스 이전 제외는 한국시간 2021-01-01 경계를 따른다.
+
+`prepared_historical_archive_v2.py`가 두 scope의 입력/target/사건/projection을 소유한다. `capture_historical_archive_sources_v2.py`는 raw received key·페이지/본문 버전을 읽기 대조하고 설명되지 않은 미준비/실패를 차단한다. `audit_prepared_historical_archive_v2.py`가 실제 입력·원본·seed·관계·hash·무결성을 검증하고 `seal_prepared_historical_archive_v2.py`만 봉인한다. 고정 입력은 전체 hash로 검증하고 quiescent raw 입력은 경로/크기/mtime/rowid 경계 및 개별 근거 hash로 확인한다. raw 파일 전체 cryptographic hash나 서로 다른 원본 DB의 동시시점 보장을 주장하지 않는다. 원본 파일이 바뀌면 같은 세대의 재개를 거부한다.
+
+NAS 파일 복사는 `publish_historical_archive_file.py`로 새 `historical-news-archives/<dataset>/archive.sqlite3`에만 한다. prefix 검증 뒤 중단 사본을 재개하고 전체 SHA가 맞을 때 overwrite 없는 게시를 수행한다. 동일 버전의 다른 파일은 거부하며 파일 검증과 서버 활성화는 별도다. 활성화는 현행 NAS 고정 release/gate·운영 잠금 절차를 따른다. reader는 쓰기/계산/마이그레이션을 수행하지 않고 master 하위 `historical_news_archive` pause/TTL을 목록·상세에 적용한다. 단발성 PC builder 자체는 운영 생성 작업이며 NAS 진단 제어 파일로 자동 제어되는 기능은 아니다.
+
+관련 회귀에서 두 scope/다중 target, 정확 seed ID, 준비 판정 불일치 보존, 한 batch의 rollback, OS 잠금/프로세스 종료 뒤 재개, 입력 변경 거부, source 실패 기록, 누락 차단, 봉인 hash/읽기 불변, 잘못된 BODY ID·필터 cursor·인증·diagnostic pause, 중단 복사/동일 파일 재게시/손상 파일 덮어쓰기 거부를 검사했다. 최신 실제 PostgreSQL seed 경로 2건 검사는 NAS /tmp에 준비했으며 sudo 인증 뒤 실행 결과가 필요하다. 구형 시험본/v1 building 파일을 전체 archive로 승격하지 않는다.
+
+실자료 표본과 용량은 [준비본](../artifacts/news-archive-capacity-20261013-v2-verified/profile.json), [원본 이력](../artifacts/news-archive-capacity-20261013-v2-final/raw-capacity.json)에 분리 기록한다. 준비본 1,024행과 원본 320행은 유한 표본이다. 약 332GB+새 seed 추정은 전체 데이터 크기·최대 임시공간 보장이 아니며, 생성 중에는 transaction 시작 전 2GiB 미만 여유를 감지해 기존 완료 batch를 보존하고 중단한다. C: 공간 확보 후 검색 고정 사본 생성에 착수했다. 전체 파일의 완성/봉인/실자료 API/NAS 게시·재시작 확인은 여전히 남아 있다. 원본/기존 NAS 자료는 삭제하지 않았다.
+
+최종 로컬 검사 기록: 관련 40건 묶음 통과, canonical hash 검사 추가 후 v2 18건+입력 사본 2건=20건 통과, catalog unit=436/integration=26 통과 및 구문/범위 diff 검사 통과. 두 묶음은 중복을 포함하므로 합계 60건으로 보고하지 않는다. 확대 재검사는 60초 제한에서 기존 finalizer 회귀 도중 중단돼 미완료로 남긴다. NAS 실행 helper의 CRLF로 첫 사용자 실행이 `set -eu`에서 시작 전 실패했고 LF로 고쳐 NAS `sh -n` 구문 검사를 통과했다. PostgreSQL 실제 검사 결과는 사용자 실행 대기다.
+
+추가 최종 증거: v2·고정 사본·참조 추출 회귀 26건이 38.789초에 통과했다. 실제 PostgreSQL의 시장 scope/비과거 부모 closure 2건도 2.358초에 통과했다. 운영 seed 추출은 도구의 연결-local 30초 timeout으로 중단됐으며, SQL 종류를 추측해 인덱스를 바꾸지 않았다. 추출 세션만 명시적 최대 300초 timeout을 선택하고 실패 테이블/filter/keys/query/경과시간을 남기는 보완과 오류 부분 파일 제거 검사 6건을 통과했다. 조회 경과시간은 client yield 처리도 포함하며 개별 PostgreSQL 실행시간으로 해석하지 않는다. 보완한 실제 추출 결과는 대기 중이다.
+
+실제 raw에는 `news_article_fetch_attempts`도 있어 403·timeout·원문 제외 등의 저장된 요청 기록을 v2 근거 원장에 보존하도록 추가했다. 준비자료 누락을 자동 제외하는 근거로 쓰지 않는다. 이 테이블 64행 표본은 payload 약 4.22GB, 여유 포함 약 6.33GB를 추가 추정하며 [원장](../artifacts/news-archive-capacity-20261013-v2-final/fetch-attempt-capacity.json)에 기록한다. 따라서 현재 총 필요 추정은 약 **338GB+최신 seed**다. 앞의 332GB는 요청 실패 원장 추가 전 측정이며 실제 peak의 보장은 아니다. 전체 봉인 시 raw stat/WAL/요청 원장 존재도 재확인한다.
+
+대량 사건 처리 진도는 frozen target_count와 transaction 안의 next_ordinal로 갱신하며 매 batch의 pending 전수 COUNT를 제거했다. SQL trace와 주입 실패로 같은 batch rollback 뒤 재개 결과/남은 수가 실제 작업 원장과 일치하는지 검사한다. 이 변경은 처리 순서나 사건 판단 정책을 바꾸지 않는다.
+
+운영 seed 재추출 완료: 전용 PG 2건(2.037초) 통과 후 repeatable-read snapshot `2026-10-12 16:42:14.005301+00`, owned 기사 55,053개/support 13,670개/총 311,488행/732,139,520바이트를 확보했다. NAS와 PC의 SHA-256 `dc58ccee8c0c289b5374fd147427caf0cd424bbf53b9b8870cc21366c3d8beca` 및 PC full integrity `ok`를 확인했다. [추출/복사 근거](../data/historical_collection/archive-v2-20261013/seed-copy.json)는 완성 뉴스 파일이 아니라 기존 ID 보존 입력이다. 과거 BODY/RULE job 84,000행도 당시 상태 근거로 보존하며 실행하지 않는다.
+
+부모 저장 함수·DB schema·staging/hash·seed/목록 helper까지 construction digest에 포함했다. 다른 채팅의 작업본 수정과 긴 생성 작업을 분리하기 위해 실제 실행에 필요한 src/scripts 536파일(8,331,864바이트)을 PC 세대 안에 고정했다. source HEAD는 main `941347e`, dirty 작업본이며 [파일별 hash](../data/historical_collection/archive-v2-20261013/code/code-files.json)와 construction digest `58cc80ab29d0569721f43c7435130d3d184c4b8c820c513775a2518d7a916a1d`를 기록했다. 실행 import 경로도 이 세대 안임을 확인했다. 이 고정본으로 PG seed의 SQLite 물질화를 시작했고 검색 준비본 27.16GB의 복사 뒤 무결성 검사는 진행 중이다. 최신 진도 시험의 연결 정리를 명시한 최종 로컬 27건은 26.483초에 통과했다. 완성 전체 archive/봉인/실자료 NAS 읽기 검증은 남아 있다.

@@ -178,7 +178,6 @@ class AppController(QObject):
         self.pending_market_minutes: dict[
             tuple[str, datetime], tuple[float, float, float, float, float | None]
         ] = {}
-        self.pending_comparisons: dict[str, tuple[tuple[str, float], ...]] = {}
         self.price_cache_timer = QTimer(self)
         self.price_cache_timer.setSingleShot(True)
         self.price_cache_timer.setInterval(1_000)
@@ -187,10 +186,6 @@ class AppController(QObject):
         self.minute_cache_timer.setSingleShot(True)
         self.minute_cache_timer.setInterval(1_000)
         self.minute_cache_timer.timeout.connect(self.flush_minute_cache)
-        self.comparison_timer = QTimer(self)
-        self.comparison_timer.setSingleShot(True)
-        self.comparison_timer.setInterval(500)
-        self.comparison_timer.timeout.connect(self.flush_comparisons)
         if self.market_cache_writer is not None:
             self.market_cache_writer.minute_saved.connect(self.minute_cache_saved.emit)
             self.market_cache_writer.minute_failed.connect(self.on_minute_cache_failed)
@@ -693,21 +688,6 @@ class AppController(QObject):
             self.minute_cache_timer.start()
         logger.warning("분봉 누락 품질 저장 실패: %s", message)
 
-    def flush_comparisons(self) -> None:
-        """이미 받은 ka10081 일봉값을 재사용해 개발 확인용 CSV를 갱신한다."""
-        pending, self.pending_comparisons = self.pending_comparisons, {}
-        if not pending or self.minute_bar_repository is None:
-            return
-        if self.market_cache_writer is not None:
-            self.market_cache_writer.enqueue_trade_comparisons(pending, self.ranking_now().date())
-            return
-        try:
-            count = self.minute_bar_repository.update_comparison_reports(pending, self.ranking_now().date())
-            if count:
-                logger.info("분봉·일봉 거래대금 비교 CSV 갱신: %s건", count)
-        except Exception as error:
-            logger.warning("분봉·일봉 거래대금 비교 CSV 저장 실패: %s", error)
-
     def flush_price_cache(self) -> None:
         """체결마다 저장하지 않고 짧게 묶어 마지막 현재가만 보존한다."""
         if (
@@ -799,13 +779,8 @@ class AppController(QObject):
         if not self.closing and not self.minute_cache_timer.isActive():
             self.minute_cache_timer.start()
 
-    def queue_comparison(self, code: str, values: tuple[tuple[str, float], ...]) -> None:
-        self.pending_comparisons[code] = values
-        if not self.closing and not self.comparison_timer.isActive():
-            self.comparison_timer.start()
-
     def _stop_storage_timers(self) -> None:
-        for timer in (self.price_cache_timer, self.minute_cache_timer, self.comparison_timer):
+        for timer in (self.price_cache_timer, self.minute_cache_timer):
             timer.stop()
 
     def start_entry_snapshot_writer(self) -> None:
@@ -939,7 +914,6 @@ class AppController(QObject):
         }
         self.flush_price_cache()
         self.flush_minute_cache()
-        self.flush_comparisons()
         if self.entry_snapshot_writer is not None:
             self.entry_snapshot_writer.requestInterruption()
         if self.market_cache_writer is not None and not self.market_cache_writer.stop_and_drain():

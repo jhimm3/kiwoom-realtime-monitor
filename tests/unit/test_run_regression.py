@@ -156,7 +156,7 @@ class RunRegressionTests(unittest.TestCase):
         self.assertFalse(membership["nas-operator-owned"] & set().union(*(
             members for group, members in membership.items() if group != "nas-operator-owned"
         )))
-        self.assertEqual((287, 133, 2), tuple(len(membership[name]) for name in
+        self.assertEqual((295, 136, 2), tuple(len(membership[name]) for name in
                          run_regression.CI_WINDOWS_PROFILES))
         required = run_regression._planned_batches(manifest, "ci-required-windows")
         self.assertEqual(

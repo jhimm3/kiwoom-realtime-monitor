@@ -430,9 +430,14 @@ class ReplayDatabaseLease:
                 if owner_rows:
                     raise ValueError('replay_account_context_required_for_owner_rows')
                 context, owners = None, None
-            return self._seal(account_context=context, owner_bindings=owners)
+            from .diagnostic_account_context import prepare_archive_seed, sealed_context_contract
+            seed = prepare_archive_seed(context, owner_rows) if context is not None else []
+            contract = (sealed_context_contract(context, owner_rows, owners, archive_seed=seed)
+                        if context is not None else None)
+            return self._seal(account_context=context, owner_bindings=owners,
+                              archive_seed=seed, context_contract=contract)
 
-    def _seal(self, *, account_context=None, owner_bindings=None):
+    def _seal(self, *, account_context=None, owner_bindings=None, archive_seed=(), context_contract=None):
         with self.connection.transaction(), self.connection.cursor() as cursor:
             self._maintenance(cursor)
             self._lock_tables(cursor)
@@ -458,7 +463,7 @@ class ReplayDatabaseLease:
                                    sql.Identifier('replay_meta', self._metadata_table)))
             if account_context is not None:
                 from .diagnostic_account_context import _apply_account_context
-                _apply_account_context(cursor, account_context, bindings=owner_bindings)
+                _apply_account_context(cursor, account_context, bindings=owner_bindings, archive_seed=archive_seed)
             schema_hash = self._schema(cursor)
             for name in self.tables:
                 cursor.execute(sql.SQL('CREATE TABLE {} AS TABLE {}').format(
@@ -471,10 +476,7 @@ class ReplayDatabaseLease:
                 manifest.update(cache_clock=self._clock_contract, parent_baseline_id=parent_id)
             if account_context is not None:
                 manifest.update(origin='controlled_fixture_with_projected_account_context',
-                    account_context={'version': account_context['version'], 'trace_id': account_context['trace_id'],
-                        'sha256': account_context['sha256'], 'source_state_equivalent': False,
-                        'owner_bindings_sha256': _hash({domain + ':' + alias: value.token
-                                                       for (domain, alias), value in owner_bindings.items()})})
+                    account_context=context_contract)
             baseline_id = _hash(manifest)
             cursor.execute(sql.SQL('INSERT INTO {}(singleton,baseline_id,manifest) '
                                   'VALUES(true,%s,%s::jsonb)').format(

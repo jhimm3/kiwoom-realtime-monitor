@@ -3767,8 +3767,9 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         ]
         self.assertEqual(6, len(calls))
         legacy = summarize_market_bar_saves(started, time.time() + 1)
-        for kind, expected_sql in (("top20_index", [4, 4, 5]),
-                                   ("market_index_chart", [3, 3, 4])):
+        # Display-cache invalidation shares the same existing transaction.
+        for kind, expected_sql in (("top20_index", [5, 5, 6]),
+                                   ("market_index_chart", [4, 4, 5])):
             selected = [call for call in calls if call["writer_kind"] == f"dataset:{kind}"]
             self.assertEqual(["committed", "committed", "rolled_back"],
                              [call["outcome"] for call in selected])

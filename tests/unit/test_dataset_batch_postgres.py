@@ -96,7 +96,12 @@ class DatasetBatchPostgresTests(unittest.TestCase):
         self.store.save_dataset_snapshots(batch)
         sql = [row[0] for row in self.connection.probe.statements]
         self.assertEqual(1, sum('pg_advisory_xact_lock' in row for row in sql))
-        self.assertEqual(2, sum(row.startswith('DELETE ') for row in sql))
+        deletes = [row for row in self.connection.probe.statements if row[0].startswith('DELETE ')]
+        self.assertEqual([
+            ("display", ('2020-01-01',)), ("raw", ('2020-01-01',)),
+            ("display", ('2020-01-01',)), ("raw", ('2020-01-01',)),
+        ], [("display" if 'top20_statistics_display_day' in statement else "raw", parameters)
+            for statement, parameters in deletes])
 
     def test_large_text_falls_back_without_combining_bind_payloads(self):
         batch = [(kind, subject, key, {'text': 'x'*600_000}, None)

@@ -8,6 +8,7 @@ from kiwoom_monitor.application.breakout_strategy import (
     BreakoutStrategyConfig,
     StrategyDecision,
     StrategyState,
+    evaluate_breakout_bar,
 )
 from kiwoom_monitor.application.research_execution import (
     PaperExecutionEngine,
@@ -73,7 +74,63 @@ def _profile_bar(start: str, *, session: str, phase: str) -> KrxMinuteBarFrame:
     )
 
 
+def late_exit_trace(*, with_followup=False):
+    """늦은 진입→마감 청산 요청→다른 종목만 있는 다음 평가일을 재현한다."""
+    engine = PaperExecutionEngine("run-1", _execution(), _strategy(), session_profile=KRX_FULL_DAY_RESEARCH_PROFILE)
+    events = list(engine.process_decision(
+        _decision("2026-09-14T06:13:00+00:00"), StrategyState(status="candidate", symbol="005930"),
+    ))
+    fill = _profile_bar("2026-09-14T06:13:00+00:00", session="2026-09-14:KRX_REGULAR", phase="CONTINUOUS")
+    events.extend(engine.process_bar(fill))
+    last_continuous = _profile_bar("2026-09-14T06:19:00+00:00", session="2026-09-14:KRX_REGULAR", phase="CONTINUOUS")
+    events.extend(engine.process_bar(last_continuous))
+    close = replace(_profile_bar("2026-09-14T06:20:00+00:00", session="2026-09-14:KRX_REGULAR", phase="AUCTION_ORDER_ENTRY"),
+                    bar_end="2026-09-14T06:30:00+00:00", available_at="2026-09-14T06:30:00+00:00")
+    events.extend(engine.process_bar(close))
+    exit_evaluation = evaluate_breakout_bar(run_id="run-1", evaluation_bar=close,
+                                          bar_history=(fill, last_continuous, close), universe_frames=(),
+                                          config=_strategy(), state=engine.strategy_state)
+    events.extend(engine.process_decision(exit_evaluation.decision, exit_evaluation.state, source_bar=close))
+    other = replace(_profile_bar("2026-09-15T00:00:00+00:00", session="2026-09-15:KRX_REGULAR", phase="CONTINUOUS"), code="000660")
+    events.extend(engine.process_bar(other))
+    other_evaluation = evaluate_breakout_bar(run_id="run-1", evaluation_bar=other, bar_history=(other,),
+                                           universe_frames=(), config=_strategy(), state=engine.strategy_state)
+    events.extend(engine.process_decision(other_evaluation.decision, other_evaluation.state, source_bar=other))
+    if with_followup:
+        for minute in range(3):
+            bar = _profile_bar(f"2026-09-15T00:0{minute}:00+00:00", session="2026-09-15:KRX_REGULAR", phase="CONTINUOUS")
+            events.extend(engine.process_bar(bar))
+            evaluation = evaluate_breakout_bar(run_id="run-1", evaluation_bar=bar, bar_history=(bar,),
+                                              universe_frames=(), config=_strategy(), state=engine.strategy_state)
+            events.extend(engine.process_decision(evaluation.decision, evaluation.state, source_bar=bar))
+    events.extend(engine.finalize("2026-09-15T00:04:00+00:00"))
+    return engine, events, exit_evaluation, other_evaluation
+
+
 class ResearchExecutionTests(unittest.TestCase):
+    def test_late_exit_without_held_symbol_followup_keeps_position_and_blocks_other_symbol(self):
+        engine, events, exit_evaluation, other_evaluation = late_exit_trace()
+        self.assertEqual("EXIT", exit_evaluation.decision.final_action)
+        self.assertIn("max_hold_reached", exit_evaluation.decision.reasons)
+        self.assertEqual("HOLD", other_evaluation.decision.final_action)
+        self.assertIn("different_symbol_position_managed_elsewhere", other_evaluation.decision.reasons)
+        self.assertEqual("005930", engine.portfolio.position.symbol)
+        self.assertEqual("open", engine.strategy_state.status)
+        self.assertIsNone(engine.portfolio.pending_order)
+        self.assertFalse(any(event.side == "SELL" and event.state == "FILLED" for event in events))
+        self.assertTrue(any(event.side == "SELL" and event.reason == "session_boundary_before_fill" for event in events))
+        self.assertEqual("POSITION_CENSORED", events[-1].event_type)
+        self.assertEqual(0, engine.portfolio.realized_pnl_won)
+
+    def test_actual_held_symbol_followup_exits_only_on_proven_next_continuous_bar(self):
+        engine, events, _, _ = late_exit_trace(with_followup=True)
+        fills = [event for event in events if event.side == "SELL" and event.state == "FILLED"]
+        self.assertEqual(1, len(fills))
+        self.assertEqual("2026-09-15T00:02:00+00:00", fills[0].occurred_at)
+        self.assertTrue(fills[0].source_revision_id)
+        self.assertIsNone(engine.portfolio.position)
+        self.assertFalse(any(event.event_type == "POSITION_CENSORED" for event in events))
+
     def test_decimal_cost_contract_uses_agreed_fee_and_sell_tax(self) -> None:
         cost = SimulationCostModel("fixed_bps/v2", "1.5", "20", "0")
         self.assertEqual(SimulationCostModel(**cost.to_dict()), cost)

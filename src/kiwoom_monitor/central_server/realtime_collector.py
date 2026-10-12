@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_registration import (
+    RegistrationProgress, all_atoms, encode_groups, filter_message, group_atoms as group_atoms_for_live, plan_registration, ready_codes, trade_sources,
+)
+
 import asyncio
 from .diagnostic_replay_runtime import owned_create_task, owned_to_thread
 import json
@@ -54,6 +58,7 @@ WS_BASE_URLS = {
 REALTIME_ITEMS_PER_GROUP = 100
 REALTIME_ITEMS_PER_TYPE = 200
 REALTIME_REG_INTERVAL_SECONDS = 0.25
+SUBSCRIPTION_ACK_TIMEOUT_SECONDS = 15.0
 LATEST_CHECKPOINT_SECONDS = 300
 LATEST_CHECKPOINT_OFFSET_SECONDS = 10
 
@@ -163,6 +168,8 @@ class CentralRealtimeCollector:
         self._token_provider = token_provider
         self._environment = environment
         self._hub = hub
+        self._realtime_tape_version = hub._realtime_tape_version = "top20-realtime-tape/v2"
+        self._subscription_filter_active = False
         self._now_provider = now_provider
         self._store = store
         self._market_events = market_events
@@ -644,96 +651,188 @@ class CentralRealtimeCollector:
             if self._credential_paused or generation != self._connection_generation:
                 return
             self._credential_phase = "REGISTERING"
-            subscribed: tuple[str, ...] = ()
-            subscribed_nxt: tuple[str, ...] = ()
-            subscribed_program: tuple[str, ...] = ()
-            subscribed_priority: tuple[str, ...] = ()
-            subscription_sent = False
+            from . import diagnostic_top20_subscription_v2 as recording
+            groups, approved, subscribed = {}, set(), ()
+            self._subscription_filter_active = True
+            self._apply_trade_source_approval(set(), self._now_provider(), reset_all=False)
+            progress = None
+            batch = command_receipt = approval = None
+            batch_request = None
+            revision = 0
+            batch_closed = True
+            connection_approved = False
+            published_codes = ()
+            market_events_connected = False
             if self._connected_once:
                 self._reconnects += 1
             self._connected_once = True
             self._publish_diagnostics("")
-            market_events_connected = False
-            registered_groups: dict[str, list[dict[str, object]]] = {}
-            pending_registration_acks = 0
-            pending_added: tuple[str, ...] = ()
-            pending_trade_sources: set[tuple[str, str]] = set()
-            policy_signature: tuple[str, ...] = ()
-            connection_approved = False
-            while self._market_session() is not None:
+            recv_task = owned_create_task(websocket.recv(), name="realtime-owned-recv")
+            send_task = None
+            last_sent = float('-inf')
+            deadline = 0.0
+            try:
+                while self._market_session() is not None:
+                    if self._credential_paused or generation != self._connection_generation:
+                        return
+                    await self._notify_market_event_boundaries()
+                    codes, nxt_codes = self._hub.requested_codes()
+                    target = realtime_subscription_target(
+                        codes, set(nxt_codes), self._now_provider(), environment=self._environment)
+                    program = self._hub.requested_program_codes()
+                    priority = self._hub.requested_priority_codes()
+                    event_only = self._market_events is not None and self._market_session() == "KRX"
+                    session = "KRX" if target.krx_codes or event_only else "NXT"
+                    if not target.active_codes and not event_only:
+                        return
+                    if event_only and not market_events_connected:
+                        await self._market_events.on_ws_connected(websocket)
+                        market_events_connected = True
+                    elif market_events_connected:
+                        poll = getattr(self._market_events, "poll_condition_updates", None)
+                        if poll is not None:
+                            await poll(websocket)
+                    desired = self._subscription_groups(session, target.active_codes, target.nxt_codes, program, priority)
+                    wanted = all_atoms(desired)
+                    if progress is None:
+                        plan = plan_registration(desired, groups)
+                        if plan.commands:
+                            revision += 1
+                            batch_request = {"session":session, "codes":list(target.active_codes),
+                                "nxt_codes":list(target.nxt_codes), "program_codes":list(program),
+                                "priority_codes":list(priority)}
+                            batch = recording.begin_batch(self, batch_request, plan, revision)
+                            batch_closed = False
+                            progress = RegistrationProgress(plan)
+                            approved.intersection_update(plan.retained)
+                            retained_groups = encode_groups({group: atoms & approved
+                                for group, atoms in group_atoms_for_live(groups).items()})
+                            self._apply_trade_source_approval(trade_sources(retained_groups), self._now_provider(), reset_all=False)
+                            if connection_approved:
+                                covered = ready_codes(desired, approved, target.active_codes)
+                                projected = recording.projection(self, batch, retained_groups, covered,
+                                    desired=desired,previous=approval)
+                                self._hub.set_upstream_ready(covered, True, approval=projected)
+                                published_codes = covered
+                    if approved - wanted:
+                        approved.intersection_update(wanted)
+                        kept = encode_groups({group: atoms & approved
+                            for group, atoms in group_atoms_for_live(groups).items()})
+                        self._apply_trade_source_approval(trade_sources(kept),self._now_provider(),reset_all=False)
+                    allowed = approved & wanted
+                    if connection_approved and progress is not None:
+                        covered = ready_codes(desired,allowed,target.active_codes)
+                        if covered != published_codes:
+                            retained_groups = encode_groups({group:atoms & allowed
+                                for group,atoms in group_atoms_for_live(groups).items()})
+                            projected = recording.projection(self,batch,retained_groups,covered,
+                                desired=desired,previous=approval)
+                            self._hub.set_upstream_ready(covered,True,approval=projected)
+                            published_codes = covered
+                    # Keep the market/account parsers on their native path, but gate unapproved market rows.
+                    now = time.monotonic()
+                    if progress is not None and progress.started and now >= deadline:
+                        raise RuntimeError("WebSocket 구독 승인 시간 초과")
+                    if progress is not None and not progress.started and send_task is None:
+                        if now >= last_sent + REALTIME_REG_INTERVAL_SECONDS:
+                            command = progress.start()
+                            command_receipt = recording.command_event(
+                                self, 'command_start', batch, command, progress.index+1)
+                            deadline = now + SUBSCRIPTION_ACK_TIMEOUT_SECONDS
+                            send_task = owned_create_task(websocket.send(json.dumps(command.packet())),
+                                                          name="realtime-subscription-send")
+                    tasks = {recv_task}
+                    if send_task is not None:
+                        tasks.add(send_task)
+                    wait = .1
+                    if progress is not None:
+                        due = deadline if progress.started else last_sent + REALTIME_REG_INTERVAL_SECONDS
+                        wait = min(wait, max(0.0, due-time.monotonic()))
+                    done, _ = await asyncio.wait(tasks, timeout=wait, return_when=asyncio.FIRST_COMPLETED)
+                    committed = False
+                    if send_task is not None and send_task in done:
+                        send_task.result()
+                        send_task = None
+                        last_sent = time.monotonic()
+                        recording.command_event(self, 'command_sent', batch, progress.command,
+                                                progress.index+1, parent=command_receipt,
+                                                sent_mono_ns=int(last_sent*1e9))
+                        committed = progress.mark_sent()
+                    if recv_task in done:
+                        message = json.loads(recv_task.result())
+                        recv_task = owned_create_task(websocket.recv(), name="realtime-owned-recv")
+                        kind = str(message.get("trnm", "")).upper()
+                        if kind == "PING":
+                            await websocket.send(json.dumps(message))
+                        elif kind in {"REG", "REMOVE"}:
+                            if progress is None:
+                                raise RuntimeError('realtime_ack_without_command')
+                            recording.command_event(self, 'command_ack', batch, progress.command,
+                                                    progress.index+1, parent=command_receipt, message=message)
+                            committed = progress.accept_ack(message) or committed
+                        else:
+                            admitted = filter_message(message, allowed)
+                            if market_events_connected:
+                                await self._market_events.handle_ws_message(admitted, websocket)
+                                if kind == 'REAL' and contains_krx_observation(admitted):
+                                    self._market_events.mark_krx_session_observed(self._now_provider().date().isoformat())
+                            self._publish_parsed(admitted)
+                    if committed and progress.done:
+                        groups = progress.plan.groups
+                        latest_codes, latest_nxt = self._hub.requested_codes()
+                        latest_target = realtime_subscription_target(latest_codes,set(latest_nxt),
+                            self._now_provider(),environment=self._environment)
+                        latest_session = 'KRX' if latest_target.krx_codes or event_only else 'NXT'
+                        latest_groups = self._subscription_groups(latest_session,latest_target.active_codes,
+                            latest_target.nxt_codes,self._hub.requested_program_codes(),self._hub.requested_priority_codes())
+                        superseded = all_atoms(groups) != all_atoms(latest_groups)
+                        completed = recording.end_batch(self, batch, groups,
+                            outcome='superseded' if superseded else 'returned')
+                        batch_closed = True
+                        progress = None
+                        if superseded:
+                            continue
+                        approved = all_atoms(groups)
+                        initial = not connection_approved
+                        approval = completed
+                        self._approve_incremental_subscription(groups, target.active_codes, subscribed,
+                            initial=initial, approval=approval)
+                        connection_approved = True
+                        subscribed = target.active_codes
+                        published_codes = subscribed
                 await self._notify_market_event_boundaries()
-                codes, nxt_codes = self._hub.requested_codes()
-                target = realtime_subscription_target(
-                    codes, set(nxt_codes), self._now_provider(), environment=self._environment,
-                )
-                requested_program = self._hub.requested_program_codes()
-                priority_codes = self._hub.requested_priority_codes()
-                event_only = self._market_events is not None and self._market_session() == "KRX"
-                session = "KRX" if target.krx_codes or event_only else "NXT"
-                if not target.active_codes and not event_only:
-                    return
-                if event_only and not market_events_connected:
-                    await self._market_events.on_ws_connected(websocket)
-                    market_events_connected = True
-                elif market_events_connected:
-                    poll_conditions = getattr(self._market_events, "poll_condition_updates", None)
-                    if poll_conditions is not None:
-                        await poll_conditions(websocket)
-                if (
-                    not subscription_sent
-                    or target.active_codes != subscribed
-                    or target.nxt_codes != subscribed_nxt
-                    or requested_program != subscribed_program
-                    or priority_codes != subscribed_priority
-                    or target.signature != policy_signature
-                ):
-                    registered_groups = await self._send_subscription(
-                        websocket, session, target.active_codes, target.nxt_codes,
-                        requested_program, priority_codes,
-                        previous_groups=registered_groups,
-                    )
-                    pending_registration_acks = len(registered_groups)
-                    subscription_sent = True
-                    effective = target.active_codes
-                    previous_effective = subscribed_nxt if session == "NXT" else subscribed
-                    pending_added = tuple(code for code in effective if code not in previous_effective)
-                    pending_trade_sources = _registered_trade_sources(registered_groups)
-                    subscribed, subscribed_nxt = target.active_codes, target.nxt_codes
-                    subscribed_program = requested_program
-                    subscribed_priority = priority_codes
-                    policy_signature = target.signature
-                try:
-                    raw = await asyncio.wait_for(websocket.recv(), timeout=1)
-                except TimeoutError:
-                    continue
-                if self._credential_paused or generation != self._connection_generation:
-                    return
-                message = json.loads(raw)
-                if str(message.get("trnm", "")).upper() == "PING":
-                    await websocket.send(json.dumps(message))
-                    continue
-                if str(message.get("trnm", "")).upper() == "REG":
-                    from .diagnostic_top20_lifecycle_input import record_ack
-                    recorded_approval = record_ack(self, message)
-                    pending_registration_acks = self._accept_registration_ack(
-                        message, pending_registration_acks,
-                        session=session, subscribed=subscribed, sources=pending_trade_sources,
-                        added=pending_added, reset_all=not connection_approved,
-                        approval=recorded_approval,
-                    )
-                    if pending_registration_acks:
-                        continue
-                    connection_approved = True
-                    pending_trade_sources = set()
-                    pending_added = ()
-                    continue
-                if market_events_connected and self._market_events is not None:
-                    await self._market_events.handle_ws_message(message, websocket)
-                    if str(message.get("trnm", "")).upper() == "REAL":
-                        if contains_krx_observation(message):
-                            self._market_events.mark_krx_session_observed(self._now_provider().date().isoformat())
-                self._publish_parsed(message)
-            await self._notify_market_event_boundaries()
+            except BaseException as error:
+                if progress is not None:
+                    recording.end_batch(self, batch, encode_groups(progress.groups),
+                                        outcome='failed', error_type=type(error).__name__)
+                    batch_closed = True
+                raise
+            finally:
+                if progress is not None and not batch_closed:
+                    recording.end_batch(self,batch,encode_groups(progress.groups),
+                                        outcome='failed',error_type='SubscriptionInterrupted')
+                tasks = [task for task in (recv_task, send_task) if task is not None]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _approve_incremental_subscription(self, groups, codes, previous_codes, *, initial, approval=None):
+        sources = trade_sources(groups)
+        resets = sources - self._approved_trade_sources
+        self._apply_trade_source_approval(sources, self._now_provider(), reset_all=initial)
+        self._credential_phase = 'READY'
+        self._finish_planned_reconnect('registered')
+        self._hub.set_upstream_ready(codes, True, approval=approval)
+        if initial:
+            self._deliver_account_event('connected', self._environment)
+            self._hub.publish({'type':'connection_opened', 'scope':'upstream', 'codes':list(codes),
+                               'connection_status':self.credential_connection_status()})
+        added = tuple(code for code in codes if code not in previous_codes)
+        if added or resets:
+            self._hub.publish({'type':'codes_added', 'codes':list(added),
+                'source_resets':[{'code':code, 'market':market} for code,market in sorted(resets)]})
+        self._hub.publish({'type':'subscription_ready', 'scope':'upstream', 'codes':list(codes),
+                           'connection_status':self.credential_connection_status()})
 
     def _accept_registration_ack(
         self, message, pending, *, session, subscribed, sources, added, reset_all, approval=None,
@@ -898,7 +997,7 @@ class CentralRealtimeCollector:
         ):
             for ordinal, value in enumerate(parser(message)):
                 if (
-                    name == "trade" and self._approved_trade_sources
+                    name == "trade" and self._subscription_filter_active
                     and (str(value.code), str(value.market).upper())
                     not in self._approved_trade_sources
                 ):
@@ -1239,13 +1338,9 @@ class CentralRealtimeCollector:
         except TypeError:
             return False
 
-    @captured_subscription
-    async def _send_subscription(
-        self, websocket: Any, session: str, codes: tuple[str, ...], nxt_codes: tuple[str, ...],
-        program_codes: tuple[str, ...] | None = None,
-        priority_codes: tuple[str, ...] | None = None,
-        *, previous_groups: dict[str, list[dict[str, object]]] | None = None,
-    ) -> dict[str, list[dict[str, object]]]:
+    def _subscription_groups(
+        self, session, codes, nxt_codes, program_codes=None, priority_codes=None,
+    ):
         active = tuple(dict.fromkeys(codes))
         nxt = set(nxt_codes)
         requested_program = tuple(
@@ -1301,6 +1396,17 @@ class CentralRealtimeCollector:
             *([{"item": [], "type": ["1h"]}]
               if session == "KRX" and self._market_events is not None else []),
         ]
+        return groups
+
+    @captured_subscription
+    async def _send_subscription(
+        self, websocket: Any, session: str, codes: tuple[str, ...], nxt_codes: tuple[str, ...],
+        program_codes: tuple[str, ...] | None = None,
+        priority_codes: tuple[str, ...] | None = None,
+        *, previous_groups: dict[str, list[dict[str, object]]] | None = None,
+    ) -> dict[str, list[dict[str, object]]]:
+        # Explicit v1 historical policy; live _receive uses the incremental planner.
+        groups = self._subscription_groups(session, codes, nxt_codes, program_codes, priority_codes)
         previous_groups = previous_groups or {}
         for group_no in sorted(set(previous_groups) - set(groups)):
             await self._send_registration(websocket, json.dumps({
